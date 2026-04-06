@@ -207,6 +207,18 @@ Terminal output adds role attribution:
 10. **Review profiles** — named presets like `quick` (1 model, general), `thorough` (3 models, 3 roles), `security` (2 models, security-auditor role)
 11. **`rcl review --profile thorough`** shorthand
 
+## Resolved Decisions
+
+### CLI flag exclusivity
+`--role`, `--roles`, and `--reviewer` are **mutually exclusive**. Passing more than one is a hard error:
+```
+Error: --role, --roles, and --reviewer are mutually exclusive. Use one:
+  --role <name>              Same role for all configured models
+  --roles <a>,<b>            Expand roles × configured models  
+  --reviewer <model>:<role>   Explicit model:role pairs (repeatable)
+```
+No merging, no precedence rules. Pick one.
+
 ## Open Questions
 
 1. **Role temperature** — should different roles use different temperatures? Security auditor might want lower temp (more deterministic), dx-critic might want higher (more creative observations). Default: inherit from model config.
