@@ -36,9 +36,13 @@ rcl review owner/repo#123 \
   --reviewer claude-sonnet:api-design \
   --reviewer claude-sonnet:test-coverage
 
-# Shorthand: expand roles across all configured models
+# Shorthand: spread roles across configured models (round-robin, shuffled)
 rcl review owner/repo#123 --roles security-auditor,dx-critic
-# → runs each configured model once per role
+# 2 roles, 3 models → 2 runs (each role assigned to a random model)
+
+# All built-in roles, spread across models
+rcl review owner/repo#123 --roles all
+# 9 roles, 3 models → 9 runs (3 roles per model, randomly assigned)
 
 # List available built-in roles
 rcl roles list
@@ -139,12 +143,25 @@ Focuses on WCAG compliance, ARIA usage, keyboard navigation, screen reader compa
 **System prompt addition:**
 > You are an accessibility auditor. Focus on: WCAG 2.1 AA compliance, correct ARIA roles and attributes, keyboard navigation and focus management, screen reader compatibility, color contrast ratios, alt text for images, form label associations, semantic HTML usage. If the code is not UI-related, say so and skip.
 
+## Dispatch Model
+
+Total runs = number of roles, NOT roles × models. Roles are **spread** across available models via shuffled round-robin:
+
+```
+9 roles, 3 models → 9 runs:
+  claude  → [security-auditor, api-design, architecture]       (3 runs)
+  gpt     → [performance-engineer, bug-hunter, dx-critic]      (3 runs)
+  gemini  → [test-coverage, accessibility-auditor, general]     (3 runs)
+```
+
+Assignment is shuffled each run so you get different model-role pairings over time. With `--reviewer`, you override this and assign explicitly.
+
 ## How Roles Affect Consensus
 
 The consensus engine needs to understand roles:
 
 ### Same role, different models (cross-provider consensus)
-Two models with the `security-auditor` role both flag the same auth bypass → **strong consensus**. Same as today.
+Two models with the `security-auditor` role both flag the same auth bypass → **strong consensus**. Same as today. (Only happens with `--reviewer` explicit assignment.)
 
 ### Different roles, same finding
 A `security-auditor` and a `general` reviewer both flag the same issue → **cross-role consensus**. Even stronger signal — the finding is visible from multiple perspectives.
