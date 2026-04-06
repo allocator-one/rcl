@@ -21,11 +21,13 @@ export class AnthropicAdapter {
         const controller = new AbortController();
         const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
         let lastErr;
+        // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5")
+        const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
         for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
             try {
                 // Use tool use for reliable JSON extraction
                 const response = await this.client.messages.create({
-                    model,
+                    model: modelId,
                     max_tokens: 4096,
                     system: systemPrompt,
                     messages: [{ role: 'user', content: userPrompt }],

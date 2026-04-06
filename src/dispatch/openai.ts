@@ -34,12 +34,13 @@ export class OpenAIAdapter implements ReviewAdapter {
     const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
 
     let lastErr: unknown;
+    const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
 
     for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
       try {
         const response = await this.client.chat.completions.create(
           {
-            model,
+            model: modelId,
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt },

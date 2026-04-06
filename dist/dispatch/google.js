@@ -13,11 +13,12 @@ export class GoogleAdapter {
     async review(model, role, systemPrompt, userPrompt, options) {
         const start = Date.now();
         let lastErr;
+        const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
         for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
             try {
                 const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), options.timeoutMs));
                 const callPromise = this.client.models.generateContent({
-                    model,
+                    model: modelId,
                     contents: [
                         {
                             role: 'user',

@@ -27,6 +27,8 @@ export class GoogleAdapter implements ReviewAdapter {
     const start = Date.now();
     let lastErr: unknown;
 
+    const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
+
     for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
       try {
         const timeoutPromise = new Promise<never>((_, reject) =>
@@ -34,7 +36,7 @@ export class GoogleAdapter implements ReviewAdapter {
         );
 
         const callPromise = this.client.models.generateContent({
-          model,
+          model: modelId,
           contents: [
             {
               role: 'user',
