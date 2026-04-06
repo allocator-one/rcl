@@ -46,7 +46,7 @@ export class OpenAIAdapter implements ReviewAdapter {
               { role: 'user', content: userPrompt },
             ],
             response_format: { type: 'json_object' },
-            max_tokens: 4096,
+            max_completion_tokens: 4096,
           },
           { signal: controller.signal }
         );

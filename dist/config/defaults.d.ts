@@ -1,4 +1,4 @@
-export declare const DEFAULT_MODELS: readonly ["claude-opus-4-6", "gpt-4o", "gemini-1.5-pro"];
+export declare const DEFAULT_MODELS: readonly ["anthropic/claude-opus-4-6", "openai/gpt-5.4", "google/gemini-2.5-pro"];
 export declare const DEFAULT_THRESHOLDS: {
     readonly minConsensusScore: 0.4;
     readonly minConfidence: 0.2;

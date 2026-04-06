@@ -1,7 +1,7 @@
 export const DEFAULT_MODELS = [
-  'claude-opus-4-6',
-  'gpt-4o',
-  'gemini-1.5-pro',
+  'anthropic/claude-opus-4-6',
+  'openai/gpt-5.4',
+  'google/gemini-2.5-pro',
 ] as const;
 
 export const DEFAULT_THRESHOLDS = {
