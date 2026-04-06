@@ -1,5 +1,5 @@
 {
-  "name": "rcl",
+  "name": "review-council",
   "version": "1.0.0",
   "description": "Review Council — multi-model AI code review CLI",
   "main": "dist/index.js",
@@ -7,20 +7,40 @@
   "bin": {
     "rcl": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run lint"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/allocator-one/rcl.git"
   },
-  "keywords": ["code-review", "ai", "cli", "anthropic", "openai", "gemini"],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "code-review",
+    "ai",
+    "cli",
+    "anthropic",
+    "openai",
+    "gemini",
+    "llm",
+    "multi-model",
+    "consensus",
+    "static-analysis"
+  ],
+  "author": "Michael Ströck",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/allocator-one/rcl/issues"
   },
