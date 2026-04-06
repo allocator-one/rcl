@@ -8,6 +8,7 @@ export function detectProvider(model: string): ModelProvider {
   if (model.startsWith('anthropic/')) return 'anthropic';
   if (model.startsWith('openai/')) return 'openai';
   if (model.startsWith('google/')) return 'google';
+  if (model.startsWith('openai-compat/')) return 'openai-compat';
   // Detect by model name prefix
   if (model.startsWith('claude')) return 'anthropic';
   if (
