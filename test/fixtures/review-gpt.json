@@ -1,0 +1,59 @@
+{
+  "findings": [
+    {
+      "id": "g001",
+      "file": "src/auth/middleware.ts",
+      "startLine": 4,
+      "endLine": 4,
+      "severity": "critical",
+      "category": "security",
+      "title": "Hardcoded secret key in JWT verification",
+      "description": "A hardcoded secret 'hardcoded-secret-do-not-use' is used for JWT signing and verification. Secrets should never be hardcoded in source code and must be loaded from environment variables or a secrets manager.",
+      "suggestedFix": "const SECRET = process.env.JWT_SECRET ?? (() => { throw new Error('JWT_SECRET not set') })();"
+    },
+    {
+      "id": "g002",
+      "file": "src/auth/middleware.ts",
+      "startLine": 11,
+      "endLine": 11,
+      "severity": "minor",
+      "category": "security",
+      "title": "Using 'any' type cast for request user",
+      "description": "Casting req to 'any' to attach the user bypasses TypeScript's type system. Consider extending the Request type.",
+      "suggestedFix": "// Extend express Request type:\ndeclare global { namespace Express { interface Request { user?: JWTPayload } } }"
+    },
+    {
+      "id": "g003",
+      "file": "src/api/users.ts",
+      "startLine": 18,
+      "endLine": 20,
+      "severity": "critical",
+      "category": "security",
+      "title": "SQL injection vulnerability in DELETE endpoint",
+      "description": "The user ID from the URL parameter is interpolated directly into the SQL query. This allows SQL injection attacks.",
+      "suggestedFix": "await db.query('DELETE FROM users WHERE id = $1', [id]);"
+    },
+    {
+      "id": "g004",
+      "file": "src/api/users.ts",
+      "startLine": 14,
+      "endLine": 20,
+      "severity": "important",
+      "category": "security",
+      "title": "Missing authorization check allows any user to delete any account",
+      "description": "The DELETE /users/:id endpoint only validates authentication but not authorization. Any authenticated user can delete any account including other users' accounts.",
+      "suggestedFix": "// Check that user can only delete their own account or is an admin"
+    },
+    {
+      "id": "g005",
+      "file": "src/api/users.ts",
+      "startLine": 11,
+      "endLine": 13,
+      "severity": "important",
+      "category": "best-practices",
+      "title": "Unbounded query on users table",
+      "description": "SELECT * FROM users without a LIMIT clause will return all records. Add pagination to prevent memory exhaustion.",
+      "suggestedFix": "SELECT * FROM users LIMIT $1 OFFSET $2"
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+diff --git a/src/auth/middleware.ts b/src/auth/middleware.ts
+new file mode 100644
+--- /dev/null
++++ b/src/auth/middleware.ts
+@@ -0,0 +1,45 @@
++import { Request, Response, NextFunction } from 'express';
++import jwt from 'jsonwebtoken';
++
++const SECRET = 'hardcoded-secret-do-not-use';
++
++export function authMiddleware(req: Request, res: Response, next: NextFunction) {
++  const token = req.headers['authorization']?.split(' ')[1];
++
++  if (!token) {
++    return res.status(401).json({ error: 'No token provided' });
++  }
++
++  try {
++    const decoded = jwt.verify(token, SECRET);
++    (req as any).user = decoded;
++    next();
++  } catch (err) {
++    return res.status(401).json({ error: 'Invalid token' });
++  }
++}
++
++export function adminOnly(req: Request, res: Response, next: NextFunction) {
++  const user = (req as any).user;
++  if (!user) {
++    return res.status(401).json({ error: 'Unauthorized' });
++  }
++  // BUG: checks username instead of role
++  if (user.username !== 'admin') {
++    return res.status(403).json({ error: 'Forbidden' });
++  }
++  next();
++}
++
++export function getUserData(userId: string) {
++  // Missing input validation - SQL injection risk
++  const query = `SELECT * FROM users WHERE id = ${userId}`;
++  return db.query(query);
++}
+diff --git a/src/api/users.ts b/src/api/users.ts
+index abc123..def456 100644
+--- a/src/api/users.ts
++++ b/src/api/users.ts
+@@ -10,6 +10,20 @@ import { db } from '../db';
+
+ const router = Router();
+
++router.get('/users', async (req, res) => {
++  // Missing pagination - will load all users
++  const users = await db.query('SELECT * FROM users');
++  res.json(users);
++});
++
++router.delete('/users/:id', authMiddleware, async (req, res) => {
++  const { id } = req.params;
++  // Missing authorization check - any authenticated user can delete any user
++  await db.query(`DELETE FROM users WHERE id = ${id}`);
++  res.json({ success: true });
++});
++
+ export default router;

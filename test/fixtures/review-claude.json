@@ -1,0 +1,59 @@
+{
+  "findings": [
+    {
+      "id": "c001",
+      "file": "src/auth/middleware.ts",
+      "startLine": 4,
+      "endLine": 4,
+      "severity": "critical",
+      "category": "security",
+      "title": "Hardcoded JWT secret",
+      "description": "The JWT secret is hardcoded as a string literal. This should be loaded from environment variables to prevent secret exposure in source control.",
+      "suggestedFix": "const SECRET = process.env.JWT_SECRET;\nif (!SECRET) throw new Error('JWT_SECRET env var required');"
+    },
+    {
+      "id": "c002",
+      "file": "src/auth/middleware.ts",
+      "startLine": 35,
+      "endLine": 37,
+      "severity": "critical",
+      "category": "security",
+      "title": "SQL injection in getUserData",
+      "description": "User-controlled input is interpolated directly into a SQL query string. This is a classic SQL injection vulnerability.",
+      "suggestedFix": "const query = 'SELECT * FROM users WHERE id = $1';\nreturn db.query(query, [userId]);"
+    },
+    {
+      "id": "c003",
+      "file": "src/auth/middleware.ts",
+      "startLine": 26,
+      "endLine": 30,
+      "severity": "important",
+      "category": "correctness",
+      "title": "Admin check uses username instead of role",
+      "description": "The adminOnly middleware checks user.username === 'admin' instead of checking a proper role field. Any user named 'admin' would get admin access, and actual admins with different usernames would be denied.",
+      "suggestedFix": "if (!user.roles?.includes('admin')) {"
+    },
+    {
+      "id": "c004",
+      "file": "src/api/users.ts",
+      "startLine": 14,
+      "endLine": 17,
+      "severity": "important",
+      "category": "security",
+      "title": "IDOR: missing authorization on DELETE endpoint",
+      "description": "Any authenticated user can delete any other user's account. The endpoint only checks authentication but not authorization.",
+      "suggestedFix": "// Add check: if (req.user.id !== id && !req.user.roles.includes('admin')) return res.status(403)..."
+    },
+    {
+      "id": "c005",
+      "file": "src/api/users.ts",
+      "startLine": 11,
+      "endLine": 13,
+      "severity": "minor",
+      "category": "best-practices",
+      "title": "Missing pagination on user listing endpoint",
+      "description": "The GET /users endpoint fetches all users without pagination. This will cause performance issues and excessive memory usage at scale.",
+      "suggestedFix": "const { page = 1, limit = 20 } = req.query;\n// Add LIMIT and OFFSET to query"
+    }
+  ]
+}

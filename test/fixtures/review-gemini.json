@@ -1,0 +1,59 @@
+{
+  "findings": [
+    {
+      "id": "gem001",
+      "file": "src/auth/middleware.ts",
+      "startLine": 4,
+      "endLine": 4,
+      "severity": "critical",
+      "category": "security",
+      "title": "Hardcoded JWT secret exposes authentication to attack",
+      "description": "The JWT signing secret is a hardcoded string constant. Anyone who reads the source code can forge valid JWTs and impersonate any user. Use environment variables.",
+      "suggestedFix": "const SECRET = process.env.JWT_SECRET!;"
+    },
+    {
+      "id": "gem002",
+      "file": "src/auth/middleware.ts",
+      "startLine": 26,
+      "endLine": 30,
+      "severity": "important",
+      "category": "correctness",
+      "title": "Broken admin role check — compares username instead of role",
+      "description": "The adminOnly guard checks if user.username === 'admin' which is a broken security check. It should verify a roles array or an isAdmin flag.",
+      "suggestedFix": "if (!user.isAdmin && !user.roles?.includes('admin')) {"
+    },
+    {
+      "id": "gem003",
+      "file": "src/auth/middleware.ts",
+      "startLine": 35,
+      "endLine": 37,
+      "severity": "critical",
+      "category": "security",
+      "title": "SQL injection via string interpolation in getUserData",
+      "description": "The userId parameter is directly interpolated into a SQL string without sanitization or parameterization. This is a textbook SQL injection vulnerability.",
+      "suggestedFix": "return db.query('SELECT * FROM users WHERE id = ?', [userId]);"
+    },
+    {
+      "id": "gem004",
+      "file": "src/api/users.ts",
+      "startLine": 18,
+      "endLine": 20,
+      "severity": "critical",
+      "category": "security",
+      "title": "SQL injection in DELETE endpoint",
+      "description": "The req.params.id value is interpolated into a SQL DELETE statement without sanitization.",
+      "suggestedFix": "await db.query('DELETE FROM users WHERE id = $1', [id]);"
+    },
+    {
+      "id": "gem005",
+      "file": "src/api/users.ts",
+      "startLine": 14,
+      "endLine": 20,
+      "severity": "critical",
+      "category": "security",
+      "title": "IDOR vulnerability — missing ownership check on delete",
+      "description": "Any authenticated user can delete any other user's account by supplying a different user ID in the URL. There is no check that the requesting user owns the account being deleted.",
+      "suggestedFix": "if (decoded.sub !== id && !decoded.roles.includes('admin')) {\n  return res.status(403).json({ error: 'Forbidden' });\n}"
+    }
+  ]
+}
