@@ -165,16 +165,22 @@ If no rules file is found, this role is **silently skipped** (not an error — m
 
 ## Dispatch Model
 
-Total runs = number of roles, NOT roles × models. Roles are **spread** across available models via shuffled round-robin:
+`general` is special — it runs on **every** model (the baseline review). All other roles are **spread** across models via shuffled round-robin.
 
 ```
-9 roles, 3 models → 9 runs:
-  claude  → [security-auditor, api-design, architecture]       (3 runs)
-  gpt     → [performance-engineer, bug-hunter, dx-critic]      (3 runs)
-  gemini  → [test-coverage, accessibility-auditor, general]     (3 runs)
+--roles all with 3 models, 10 roles:
+
+  general runs on ALL models:                                     3 runs
+  9 specialized roles spread across models:                       9 runs
+                                                                 ──
+  Total:                                                         12 runs
+
+  claude  → general + [security-auditor, api-design, architecture]
+  gpt     → general + [performance-engineer, bug-hunter, dx-critic]
+  gemini  → general + [test-coverage, accessibility-auditor, project-rules]
 ```
 
-Assignment is shuffled each run so you get different model-role pairings over time. With `--reviewer`, you override this and assign explicitly.
+Specialized role assignment is shuffled each run so you get different model-role pairings over time. With `--reviewer`, you override this and assign explicitly.
 
 ## How Roles Affect Consensus
 
