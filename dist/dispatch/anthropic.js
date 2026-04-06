@@ -117,6 +117,7 @@ export class AnthropicAdapter {
             }
         }
         clearTimeout(timeoutHandle);
+        const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
         return {
             model,
             role,
@@ -124,7 +125,7 @@ export class AnthropicAdapter {
             findings: [],
             durationMs: Date.now() - start,
             status: 'error',
-            error: String(lastErr),
+            error: errMsg,
         };
     }
 }

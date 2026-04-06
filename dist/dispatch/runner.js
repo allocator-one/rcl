@@ -22,6 +22,9 @@ async function runBatch(calls, options) {
     const results = await Promise.allSettled(calls.map(async (call) => {
         const adapter = getAdapter(call.provider);
         const review = await adapter.review(call.model, call.role, call.systemPrompt, call.userPrompt, adapterOpts);
+        if (review.status === 'error') {
+            console.error(`[DEBUG] ${call.model}/${call.role}: ${review.error}`);
+        }
         options.onReviewComplete?.(review);
         return review;
     }));

@@ -62,6 +62,9 @@ async function runBatch(
         call.userPrompt,
         adapterOpts
       );
+      if (review.status === 'error') {
+        console.error(`[DEBUG] ${call.model}/${call.role}: ${review.error}`);
+      }
       options.onReviewComplete?.(review);
       return review;
     })

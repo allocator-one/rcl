@@ -1,4 +1,12 @@
 export function detectProvider(model) {
+    // Handle explicit provider prefix (e.g. "anthropic/claude-sonnet-4-5")
+    if (model.startsWith('anthropic/'))
+        return 'anthropic';
+    if (model.startsWith('openai/'))
+        return 'openai';
+    if (model.startsWith('google/'))
+        return 'google';
+    // Detect by model name prefix
     if (model.startsWith('claude'))
         return 'anthropic';
     if (model.startsWith('gpt') ||
