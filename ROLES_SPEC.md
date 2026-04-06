@@ -49,6 +49,13 @@ rcl roles list
 
 # Show role details
 rcl roles show security-auditor
+
+# Inject context into any review (spec, threat model, ADRs, etc.)
+rcl review owner/repo#123 --context threat-model.md
+rcl review owner/repo#123 --context docs/adr/ --role architecture
+
+# Shorthand for spec-compliance (equivalent to --reviewer <model>:spec-compliance)
+rcl review owner/repo#123 --spec PLAN.md
 ```
 
 ## Config
@@ -163,6 +170,26 @@ Enforces project-specific conventions and rules. Unlike other roles which carry 
 
 If no rules file is found, this role is **silently skipped** (not an error — many repos don't have one yet).
 
+### `spec-compliance`
+Checks whether the diff implements what the spec/plan says it should. Reads a plan or spec file and verifies the code matches. Catches: missing features, wrong behavior vs spec, incomplete implementations, deviations from the agreed design.
+
+This role completes the **pcl → build → rcl** pipeline: plan it, build it, review it against the plan.
+
+**System prompt addition:**
+> You are a spec-compliance reviewer. You have been given a specification or plan document (below). Your ONLY job is to check whether the diff correctly implements what the spec describes. Flag: missing features that the spec calls for, behavior that contradicts the spec, incomplete implementations, deviations from the agreed design. Do NOT review for general code quality — other reviewers handle that. If the diff implements something not mentioned in the spec, that's fine — only flag deviations and omissions.
+>
+> SPECIFICATION:
+> {{spec_content}}
+
+**Spec file discovery (in order, first match wins):**
+1. Explicit: `--spec <path>` CLI flag
+2. `PLAN.md` or `BUILD_PLAN.md`
+3. `spec/*.md` (concatenated)
+4. `specs/*.md` (concatenated)
+5. `.pcl/latest-plan.md` (pcl output cache)
+
+If no spec file is found, this role is **silently skipped**.
+
 ## Dispatch Model
 
 `general` is special — it runs on **every** model (the baseline review). All other roles are **spread** across models via shuffled round-robin.
@@ -263,6 +290,22 @@ Terminal output adds role attribution:
 11. **`rcl review --profile thorough`** shorthand
 
 ## Resolved Decisions
+
+### `--context` is universal
+`--context <path>` injects additional documents into the review prompt for ALL reviewers. Works with any role. Accepts files or directories (concatenated). Repeatable.
+
+```bash
+# Security reviewer with your threat model
+rcl review repo#123 --role security-auditor --context threat-model.md
+
+# Architecture reviewer with your ADR docs
+rcl review repo#123 --role architecture --context docs/adr/
+
+# Multiple context files
+rcl review repo#123 --context PLAN.md --context docs/api-spec.yaml
+```
+
+`--spec` is a shorthand: `--spec PLAN.md` is equivalent to adding `spec-compliance` to the reviewer list with that file as context. `--spec` can combine with other role flags.
 
 ### CLI flag exclusivity
 `--role`, `--roles`, and `--reviewer` are **mutually exclusive**. Passing more than one is a hard error:
