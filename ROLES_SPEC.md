@@ -143,6 +143,26 @@ Focuses on WCAG compliance, ARIA usage, keyboard navigation, screen reader compa
 **System prompt addition:**
 > You are an accessibility auditor. Focus on: WCAG 2.1 AA compliance, correct ARIA roles and attributes, keyboard navigation and focus management, screen reader compatibility, color contrast ratios, alt text for images, form label associations, semantic HTML usage. If the code is not UI-related, say so and skip.
 
+### `project-rules`
+Enforces project-specific conventions and rules. Unlike other roles which carry their own expertise, this one reads from the repo — `AGENTS.md`, `CLAUDE.md`, `CURSORRULES`, `.github/copilot-instructions.md`, `CONVENTIONS.md`, or a custom `rcl.rules` file. It checks whether the diff follows the team's own rules.
+
+**System prompt addition:**
+> You are a project rules enforcer. You have been given this project's conventions and rules (below). Your ONLY job is to check whether the diff violates any of these rules. Do not review for general quality, security, or performance — other reviewers handle that. Flag only rule violations. If no rules are violated, return zero findings.
+> 
+> PROJECT RULES:
+> {{project_rules}}
+
+**Rule file discovery (in order, first match wins):**
+1. `rcl.rules` or `rcl.rules.md`
+2. `AGENTS.md`
+3. `CLAUDE.md`
+4. `.cursorrules`
+5. `.github/copilot-instructions.md`
+6. `CONVENTIONS.md`
+7. Custom path via config: `roles.project-rules.rules_file: ./docs/team-rules.md`
+
+If no rules file is found, this role is **silently skipped** (not an error — many repos don't have one yet).
+
 ## Dispatch Model
 
 Total runs = number of roles, NOT roles × models. Roles are **spread** across available models via shuffled round-robin:
