@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions } from './adapter.js';
+import { stripKnownProviderPrefix } from './utils.js';
 
 const RETRY_DELAYS = [1000, 2000, 4000];
 
@@ -33,8 +34,10 @@ export class OpenAIAdapter implements ReviewAdapter {
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
 
-    let lastErr: unknown;
-    const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
+    let lastErr: unknown = new Error('no attempts made');
+    const modelId = stripKnownProviderPrefix(model);
+    // Use max_completion_tokens for gpt-5.x and o-series; max_tokens for everything else
+    const usesCompletionTokens = modelId.startsWith('gpt-5') || /^o[134]/.test(modelId);
 
     for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
       try {
@@ -46,7 +49,9 @@ export class OpenAIAdapter implements ReviewAdapter {
               { role: 'user', content: userPrompt },
             ],
             response_format: { type: 'json_object' },
-            max_completion_tokens: 4096,
+            ...(usesCompletionTokens
+              ? { max_completion_tokens: 4096 }
+              : { max_tokens: 4096 }),
           },
           { signal: controller.signal }
         );
@@ -93,6 +98,7 @@ export class OpenAIAdapter implements ReviewAdapter {
     }
 
     clearTimeout(timeoutHandle);
+    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
     return {
       model,
       role,
@@ -100,7 +106,7 @@ export class OpenAIAdapter implements ReviewAdapter {
       findings: [],
       durationMs: Date.now() - start,
       status: 'error',
-      error: String(lastErr),
+      error: errMsg,
     };
   }
 }

@@ -39,7 +39,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
 
-    let lastErr: unknown;
+    let lastErr: unknown = new Error('no attempts made');
 
     for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
       try {
@@ -104,6 +104,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     }
 
     clearTimeout(timeoutHandle);
+    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
     return {
       model,
       role,
@@ -111,7 +112,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
       findings: [],
       durationMs: Date.now() - start,
       status: 'error',
-      error: String(lastErr),
+      error: errMsg,
     };
   }
 }

@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions } from './adapter.js';
+import { stripKnownProviderPrefix } from './utils.js';
 
 const RETRY_DELAYS = [1000, 2000, 4000];
 
@@ -35,9 +36,8 @@ export class AnthropicAdapter implements ReviewAdapter {
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
 
-    let lastErr: unknown;
-    // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5")
-    const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
+    let lastErr: unknown = new Error('no attempts made');
+    const modelId = stripKnownProviderPrefix(model);
 
     for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
       try {

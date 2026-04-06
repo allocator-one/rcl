@@ -11,6 +11,7 @@ export interface RunnerOptions {
   timeoutMs: number;
   maxRetries: number;
   concurrency: number;
+  verbose?: boolean;
   onReviewComplete?: (review: ModelReview) => void;
 }
 
@@ -62,8 +63,8 @@ async function runBatch(
         call.userPrompt,
         adapterOpts
       );
-      if (review.status === 'error') {
-        console.error(`[DEBUG] ${call.model}/${call.role}: ${review.error}`);
+      if (review.status === 'error' && options.verbose) {
+        console.error(`${call.model}/${call.role}: ${review.error}`);
       }
       options.onReviewComplete?.(review);
       return review;

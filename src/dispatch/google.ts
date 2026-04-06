@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions } from './adapter.js';
+import { stripKnownProviderPrefix } from './utils.js';
 
 const RETRY_DELAYS = [1000, 2000, 4000];
 
@@ -25,9 +26,9 @@ export class GoogleAdapter implements ReviewAdapter {
     options: AdapterOptions
   ): Promise<ModelReview> {
     const start = Date.now();
-    let lastErr: unknown;
+    let lastErr: unknown = new Error('no attempts made');
 
-    const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : model;
+    const modelId = stripKnownProviderPrefix(model);
 
     for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
       try {
@@ -94,6 +95,7 @@ export class GoogleAdapter implements ReviewAdapter {
       }
     }
 
+    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
     return {
       model,
       role,
@@ -101,7 +103,7 @@ export class GoogleAdapter implements ReviewAdapter {
       findings: [],
       durationMs: Date.now() - start,
       status: 'error',
-      error: String(lastErr),
+      error: errMsg,
     };
   }
 }

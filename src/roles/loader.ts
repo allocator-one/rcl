@@ -105,8 +105,13 @@ export async function resolveRoles(
   // Determine which roles to use
   const requested = requestedRoles ?? (config.roles as string[] | undefined);
   if (requested && requested.length > 0) {
-    // "all" keyword expands to every role
-    if (requested.length === 1 && requested[0] === 'all') {
+    const hasAll = requested.some((r) => r.toLowerCase() === 'all');
+    if (hasAll) {
+      if (requested.length > 1) {
+        throw new Error(
+          `'all' cannot be combined with other roles. Got: ${requested.join(', ')}`
+        );
+      }
       return Array.from(roles.values());
     }
 
