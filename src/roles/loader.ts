@@ -105,6 +105,11 @@ export async function resolveRoles(
   // Determine which roles to use
   const requested = requestedRoles ?? (config.roles as string[] | undefined);
   if (requested && requested.length > 0) {
+    // "all" keyword expands to every role
+    if (requested.length === 1 && requested[0] === 'all') {
+      return Array.from(roles.values());
+    }
+
     const result: Role[] = [];
     for (const name of requested) {
       const role = roles.get(name);
