@@ -15,6 +15,7 @@ import { runReviews } from './dispatch/runner.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus } from './consensus/voter.js';
 import { printReviewSummary } from './output/terminal.js';
+import { formatEnvironmentHelp } from './help/environment.js';
 import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
 import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
@@ -28,6 +29,8 @@ program
   .name('rcl')
   .description('Review Council — multi-model AI code review')
   .version('1.0.0');
+
+program.addHelpText('afterAll', () => formatEnvironmentHelp());
 
 // review command
 program
