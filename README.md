@@ -189,8 +189,6 @@ When multiple models and roles review the same diff, their findings are:
 
 The result is a ranked list of findings that rewards agreement across independent reviewers and penalises noise from a single model.
 
-For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
-
 ---
 
 ## Environment Variables
