@@ -1,6 +1,6 @@
 {
   "name": "review-council",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Review Council — multi-model AI code review CLI",
   "main": "dist/index.js",
   "type": "module",

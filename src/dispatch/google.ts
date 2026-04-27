@@ -47,7 +47,7 @@ export class GoogleAdapter implements ReviewAdapter {
           config: {
             systemInstruction: systemPrompt,
             responseMimeType: 'application/json',
-            maxOutputTokens: 4096,
+            maxOutputTokens: 65536,
           },
         });
 

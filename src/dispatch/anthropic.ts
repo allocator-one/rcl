@@ -45,7 +45,7 @@ export class AnthropicAdapter implements ReviewAdapter {
         const response = await this.client.messages.create(
           {
             model: modelId,
-            max_tokens: 4096,
+            max_tokens: 16384,
             system: systemPrompt,
             messages: [{ role: 'user', content: userPrompt }],
             tools: [

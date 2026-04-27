@@ -50,8 +50,8 @@ export class OpenAIAdapter implements ReviewAdapter {
             ],
             response_format: { type: 'json_object' },
             ...(usesCompletionTokens
-              ? { max_completion_tokens: 4096 }
-              : { max_tokens: 4096 }),
+              ? { max_completion_tokens: 16384 }
+              : { max_tokens: 16384 }),
           },
           { signal: controller.signal }
         );
