@@ -3,6 +3,8 @@ import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { loadConfig } from './config/loader.js';
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
@@ -27,7 +29,11 @@ const program = new Command();
 program
   .name('rcl')
   .description('Review Council — multi-model AI code review')
-  .version('1.0.0');
+  .version(
+    JSON.parse(
+      await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
+    ).version
+  );
 
 // review command
 program
