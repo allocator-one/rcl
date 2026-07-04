@@ -23,6 +23,19 @@ A thorough review of `src/consensus/deduper.ts`, `src/consensus/voter.ts`, `src/
 
 **Deferred:** embedding-based contradiction detection, char-n-gram/DBSCAN clustering, category affinity matrix, corpus-based confidence-threshold recalibration, `alternativeDescriptions` in output (§5.1).
 
+### Follow-up: fixes from dogfooding (RCL reviewing this PR)
+
+Running RCL on this branch's own diff surfaced residual issues; the mechanical ones are fixed:
+
+- **Merge veto restricted to specific pairs.** Generic pairs (no/has, lacks/has, not/is, remove/keep) fired on genuinely duplicate findings and fragmented groups. They no longer veto merges; contradictions they detect surface as intra-group disputes instead.
+- **Cross-group dispute gate.** Conflict detection between groups now requires same category and combined similarity ≥ threshold — the dogfood run produced a live false dispute from stray "missing"/"present" wording in two unrelated findings on nearby lines.
+- **Dispute reasons are collected, not short-circuited** — severity dispersion no longer masks a coexisting semantic contradiction.
+- **Thresholds threaded through `computeConsensus`** — dispute detection previously hardcoded the default line window, ignoring user config.
+- **Empty-field renormalization in `combinedSimilarity`** — a field with no usable tokens on either side is excluded and weights renormalize, so empty descriptions neither grant 0.4 free similarity nor drag down a strong title match.
+- **`modeSeverity` hardening** — unrecognized severities can no longer resolve the mode to `critical` via the `-1` initial count.
+
+Still open (design decisions, not mechanical): single-outlier elevation to max severity, the `unanimous` elevation label misnomer, category-gate under-merging across roles, diversity scaling for large configurations.
+
 ---
 
 ## 1. Deduper: Algorithmic Correctness & Edge Cases

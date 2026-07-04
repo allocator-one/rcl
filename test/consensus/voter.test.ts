@@ -200,4 +200,93 @@ describe('computeConsensus — disputes', () => {
     expect(results[0]!.consensus.disputeDetails).toContain('Conflicting');
     expect(results[1]!.consensus.disputed).toBe(true);
   });
+
+  it('flags opposing conclusions between members of the same group', () => {
+    // Generic pairs (lacks/has) don't veto merging — the contradiction must
+    // surface as an intra-group dispute instead
+    const f1 = mkF({ id: 'f1', title: 'Function lacks error handling' });
+    const f2 = mkF({ id: 'f2', title: 'Function has error handling gaps' });
+    const reviews = [mkReview('m1', 'general', [f1]), mkReview('m2', 'general', [f2])];
+    const groups = [
+      mkGroup(f1, [
+        { finding: f1, model: 'm1', role: 'general' },
+        { finding: f2, model: 'm2', role: 'general' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.consensus.disputed).toBe(true);
+    expect(result!.consensus.disputeDetails).toContain('opposing conclusions');
+  });
+
+  it('does not flag unrelated groups whose text incidentally contains opposing terms', () => {
+    // Different issues on nearby lines: one description mentions "present",
+    // the other "missing" — without a same-thing gate this was a false dispute
+    const f1 = mkF({
+      id: 'f1',
+      title: 'Severity dispersion hides conflicts',
+      description: 'When both signals are present only one is reported',
+    });
+    const f2 = mkF({
+      id: 'f2',
+      title: 'Line window ignores configuration',
+      description: 'Custom thresholds lead to missing disputes downstream',
+      startLine: 12,
+      endLine: 12,
+    });
+    const reviews = [mkReview('m1', 'general', [f1]), mkReview('m2', 'general', [f2])];
+    const groups = [
+      mkGroup(f1, [{ finding: f1, model: 'm1', role: 'general' }]),
+      mkGroup(f2, [{ finding: f2, model: 'm2', role: 'general' }]),
+    ];
+
+    const results = computeConsensus(groups, reviews, ROLES);
+
+    expect(results[0]!.consensus.disputed).toBeUndefined();
+    expect(results[1]!.consensus.disputed).toBeUndefined();
+  });
+
+  it('honors a configured line window for cross-group dispute detection', () => {
+    const f1 = mkF({ id: 'f1', title: 'Missing input validation', startLine: 10, endLine: 10 });
+    const f2 = mkF({ id: 'f2', title: 'Input validation present', startLine: 25, endLine: 25 });
+    const reviews = [mkReview('m1', 'general', [f1]), mkReview('m2', 'general', [f2])];
+    const groups = [
+      mkGroup(f1, [{ finding: f1, model: 'm1', role: 'general' }]),
+      mkGroup(f2, [{ finding: f2, model: 'm2', role: 'general' }]),
+    ];
+
+    // 15 lines apart: outside the default window of 5...
+    const defaults = computeConsensus(groups, reviews, ROLES);
+    expect(defaults[0]!.consensus.disputed).toBeUndefined();
+
+    // ...but inside a configured window of 10 (10 + 10 ≥ 15)
+    const widened = computeConsensus(groups, reviews, ROLES, { lineWindow: 10 });
+    expect(widened[0]!.consensus.disputed).toBe(true);
+  });
+
+  it('collects multiple dispute reasons instead of short-circuiting', () => {
+    // Group with 2+ level severity dispersion AND a conflicting neighbor group
+    const f1 = mkF({ id: 'f1', title: 'Missing input validation', severity: 'critical' });
+    const f2 = mkF({ id: 'f2', title: 'Missing validation of input', severity: 'nitpick' });
+    const f3 = mkF({ id: 'f3', title: 'Input validation present', startLine: 11, endLine: 11 });
+    const reviews = [
+      mkReview('m1', 'general', [f1]),
+      mkReview('m2', 'general', [f2]),
+      mkReview('m3', 'general', [f3]),
+    ];
+    const groups = [
+      mkGroup(f1, [
+        { finding: f1, model: 'm1', role: 'general' },
+        { finding: f2, model: 'm2', role: 'general' },
+      ]),
+      mkGroup(f3, [{ finding: f3, model: 'm3', role: 'general' }]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.consensus.disputed).toBe(true);
+    expect(result!.consensus.disputeDetails).toContain('severity');
+    expect(result!.consensus.disputeDetails).toContain('Conflicting');
+  });
 });

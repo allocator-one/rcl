@@ -126,6 +126,30 @@ describe('combinedSimilarity', () => {
     );
     expect(sameDesc).toBeCloseTo(0.4);
   });
+
+  it('renormalizes to title-only when descriptions carry no tokens', () => {
+    // Empty descriptions must not grant 0.4 free similarity, nor drag a
+    // strong title match below threshold
+    const identicalTitles = combinedSimilarity(
+      mkF({ title: 'hardcoded secret', description: '' }),
+      mkF({ title: 'hardcoded secret', description: '' })
+    );
+    expect(identicalTitles).toBeCloseTo(1.0);
+
+    const disjointTitles = combinedSimilarity(
+      mkF({ title: 'alpha beta gamma', description: '' }),
+      mkF({ title: 'delta epsilon zeta', description: '' })
+    );
+    expect(disjointTitles).toBe(0);
+  });
+
+  it('returns 0 when no field has usable tokens on both sides', () => {
+    const empty = combinedSimilarity(
+      mkF({ title: 'is it a', description: 'the of' }),
+      mkF({ title: 'was there', description: '' })
+    );
+    expect(empty).toBe(0);
+  });
 });
 
 describe('hasOpposingSentiment', () => {
@@ -192,6 +216,24 @@ describe('deduplicateFindings — contradiction veto', () => {
     const groups = deduplicateFindings(reviews);
     // High word overlap + same location, but opposite conclusions → stay separate
     expect(groups).toHaveLength(2);
+  });
+
+  it('does not veto merges on generic pairs — those merge and dispute later', () => {
+    // lacks/has is a generic pair: too noisy to fragment a duplicate group.
+    // The voter surfaces the contradiction as an intra-group dispute instead.
+    const a = mkF({
+      title: 'Function lacks error handling',
+      description: 'Failures from the API call are unhandled',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'Function has error handling gaps',
+      description: 'Failures from the API call are unhandled',
+    });
+    const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
+    const groups = deduplicateFindings(reviews);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(2);
   });
 });
 

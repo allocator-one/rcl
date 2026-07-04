@@ -1,7 +1,13 @@
 import type { ModelReview, ConsensusFinding, ConsensusInfo, DeduplicatedGroup } from './types.js';
 import type { Role } from '../roles/types.js';
 import { CONFIDENCE_THRESHOLDS, DEFAULT_THRESHOLDS } from '../config/defaults.js';
-import { linesOverlap, hasOpposingSentiment } from './deduper.js';
+import { linesOverlap, hasOpposingSentiment, combinedSimilarity } from './deduper.js';
+
+/** Thresholds shared with the deduper so both layers use the same geometry. */
+export interface ConsensusThresholds {
+  lineWindow: number;
+  jaccardThreshold: number;
+}
 
 const SEVERITY_LEVELS = ['critical', 'important', 'minor', 'nitpick'] as const;
 type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
@@ -117,46 +123,63 @@ function computeIsolation(
 }
 
 /**
- * Layer 5: Detect disputed findings.
+ * Layer 5: Detect disputed findings. All applicable signals are collected —
+ * a severity disagreement must not mask a semantic contradiction.
  *
- * Two signals:
  * 1. Severity dispersion within the group — members that rate the same
  *    finding 2+ levels apart (e.g. critical vs minor) genuinely disagree.
- * 2. An opposing-conclusion group at the same location. The deduper refuses
- *    to merge contradicting findings, so they surface as separate groups
- *    that this check pairs back up and flags.
+ * 2. Opposing conclusions within the group — generic-pair contradictions
+ *    don't veto merging in the deduper, so they can share a group and are
+ *    surfaced here.
+ * 3. An opposing-conclusion group at the same location. Only groups that are
+ *    about the same thing (same category, similar text) can conflict —
+ *    without that gate, stray "missing"/"present" wording in unrelated
+ *    findings on nearby lines produces false disputes.
  */
 function detectDisputes(
   group: DeduplicatedGroup,
-  allGroups: DeduplicatedGroup[]
+  allGroups: DeduplicatedGroup[],
+  thresholds: ConsensusThresholds
 ): { disputed: boolean; disputeDetails?: string } {
   const rep = group.representative;
+  const reasons: string[] = [];
 
   const indices = group.members.map((m) => severityIndex(m.finding.severity as SeverityLevel));
   const spread = Math.max(...indices) - Math.min(...indices);
   if (spread >= 2) {
     const highest = indexToSeverity(Math.min(...indices));
     const lowest = indexToSeverity(Math.max(...indices));
-    return {
-      disputed: true,
-      disputeDetails: `Reviewers disagree on severity: rated from ${lowest} to ${highest}`,
-    };
+    reasons.push(`Reviewers disagree on severity: rated from ${lowest} to ${highest}`);
+  }
+
+  intraGroup: for (let i = 0; i < group.members.length; i++) {
+    for (let j = i + 1; j < group.members.length; j++) {
+      const a = group.members[i]!.finding;
+      const b = group.members[j]!.finding;
+      if (hasOpposingSentiment(a, b)) {
+        reasons.push(`Members reach opposing conclusions: "${a.title}" vs "${b.title}"`);
+        break intraGroup;
+      }
+    }
   }
 
   for (const other of allGroups) {
     if (other === group) continue;
     if (other.representative.file !== rep.file) continue;
-    if (!linesOverlap(rep, other.representative, DEFAULT_THRESHOLDS.dedupeLineWindow)) continue;
+    if (other.representative.category !== rep.category) continue;
+    if (!linesOverlap(rep, other.representative, thresholds.lineWindow)) continue;
+    if (combinedSimilarity(rep, other.representative) < thresholds.jaccardThreshold) continue;
 
     if (hasOpposingSentiment(rep, other.representative)) {
-      return {
-        disputed: true,
-        disputeDetails: `Conflicting finding at same location: "${rep.title}" vs "${other.representative.title}"`,
-      };
+      reasons.push(
+        `Conflicting finding at same location: "${rep.title}" vs "${other.representative.title}"`
+      );
+      break;
     }
   }
 
-  return { disputed: false };
+  if (reasons.length === 0) return { disputed: false };
+  return { disputed: true, disputeDetails: reasons.join('; ') };
 }
 
 /**
@@ -172,8 +195,10 @@ function modeSeverity(group: DeduplicatedGroup): SeverityLevel {
   }
 
   let best: SeverityLevel = group.representative.severity as SeverityLevel;
-  let bestCount = -1;
-  // Iterating critical → nitpick resolves ties toward the more severe level
+  let bestCount = 0;
+  // Iterating critical → nitpick resolves ties toward the more severe level.
+  // bestCount starts at 0 so a level nobody assigned can never win — if no
+  // member severity is recognized, the representative's severity stands.
   for (const level of SEVERITY_LEVELS) {
     const count = counts.get(level) ?? 0;
     if (count > bestCount) {
@@ -187,8 +212,13 @@ function modeSeverity(group: DeduplicatedGroup): SeverityLevel {
 export function computeConsensus(
   groups: DeduplicatedGroup[],
   reviews: ModelReview[],
-  roleMap: Map<string, Role>
+  roleMap: Map<string, Role>,
+  thresholds: Partial<ConsensusThresholds> = {}
 ): ConsensusFinding[] {
+  const resolvedThresholds: ConsensusThresholds = {
+    lineWindow: thresholds.lineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
+    jaccardThreshold: thresholds.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
+  };
   const allModels = [...new Set(reviews.filter((r) => r.status === 'success').map((r) => r.model))];
   const allRoles = [...new Set(reviews.filter((r) => r.status === 'success').map((r) => r.role))];
 
@@ -239,7 +269,7 @@ export function computeConsensus(
     const original_severity = elevated ? baseSeverity : undefined;
 
     // Layer 5: Dispute detection
-    const { disputed, disputeDetails } = detectDisputes(group, groups);
+    const { disputed, disputeDetails } = detectDisputes(group, groups, resolvedThresholds);
 
     const consensus: ConsensusInfo = {
       score: group.members.length,

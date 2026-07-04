@@ -1,8 +1,6 @@
 import type { Finding, ModelReview, DeduplicatedGroup } from './types.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 
-const LINE_WINDOW = 5;
-
 /** Title similarity carries more signal than description similarity. */
 const TITLE_WEIGHT = 0.6;
 const DESC_WEIGHT = 0.4;
@@ -19,25 +17,17 @@ const STOPWORDS = new Set([
   'via', 'when', 'which', 'their', 'there', 'than', 'then',
 ]);
 
-/**
- * Compute Jaccard similarity between two strings (word-level tokenization).
- * Single characters and stopwords are ignored; short signal tokens like
- * "xss", "id", or "no" are kept.
- */
-export function jaccardSimilarity(a: string, b: string): number {
-  const tokenize = (s: string): Set<string> => {
-    return new Set(
-      s
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]/g, ' ')
-        .split(/\s+/)
-        .filter((t) => t.length > 1 && !STOPWORDS.has(t))
-    );
-  };
+function tokenize(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length > 1 && !STOPWORDS.has(t))
+  );
+}
 
-  const setA = tokenize(a);
-  const setB = tokenize(b);
-
+function jaccardOfSets(setA: Set<string>, setB: Set<string>): number {
   if (setA.size === 0 && setB.size === 0) return 1.0;
   if (setA.size === 0 || setB.size === 0) return 0.0;
 
@@ -51,21 +41,47 @@ export function jaccardSimilarity(a: string, b: string): number {
 }
 
 /**
+ * Compute Jaccard similarity between two strings (word-level tokenization).
+ * Single characters and stopwords are ignored; short signal tokens like
+ * "xss", "id", or "no" are kept.
+ */
+export function jaccardSimilarity(a: string, b: string): number {
+  return jaccardOfSets(tokenize(a), tokenize(b));
+}
+
+/**
  * Weighted title+description similarity. Both fields contribute, so a short
  * generic title alone can no longer merge two unrelated findings, and a
  * verbose description alone can't either.
+ *
+ * A field where either side has no usable tokens carries no signal and is
+ * excluded, with weights renormalized over the remaining fields — empty
+ * descriptions neither grant free similarity nor penalize a strong title
+ * match. If no field has usable tokens on both sides, similarity is 0.
  */
 export function combinedSimilarity(a: Finding, b: Finding): number {
-  const titleSim = jaccardSimilarity(a.title, b.title);
-  const descSim = jaccardSimilarity(a.description, b.description);
-  return titleSim * TITLE_WEIGHT + descSim * DESC_WEIGHT;
+  const fields = [
+    { weight: TITLE_WEIGHT, a: tokenize(a.title), b: tokenize(b.title) },
+    { weight: DESC_WEIGHT, a: tokenize(a.description), b: tokenize(b.description) },
+  ].filter((f) => f.a.size > 0 && f.b.size > 0);
+
+  const totalWeight = fields.reduce((sum, f) => sum + f.weight, 0);
+  if (totalWeight === 0) return 0;
+
+  return fields.reduce((sum, f) => sum + jaccardOfSets(f.a, f.b) * f.weight, 0) / totalWeight;
 }
 
 interface OpposingPair {
   a: RegExp;
   b: RegExp;
-  /** Generic terms are checked in titles only; specific ones also in descriptions. */
-  checkDescription: boolean;
+  /**
+   * Specific pairs express a real contradiction about the same predicate and
+   * are checked in titles and descriptions, and are eligible to veto merges.
+   * Generic pairs (common verbs/particles like no/has, not/is) are too noisy
+   * for that — they are checked in titles only, and only used to flag
+   * disputes, never to block a merge.
+   */
+  specific: boolean;
 }
 
 function term(t: string): RegExp {
@@ -73,24 +89,30 @@ function term(t: string): RegExp {
 }
 
 const OPPOSING_PAIRS: OpposingPair[] = [
-  { a: term('missing'), b: term('present'), checkDescription: true },
-  { a: term('no'), b: term('has'), checkDescription: false },
-  { a: term('lacks'), b: term('has'), checkDescription: false },
-  { a: term('not'), b: term('is'), checkDescription: false },
-  { a: term('should add'), b: term('should remove'), checkDescription: true },
-  { a: term('too complex'), b: term('too simple'), checkDescription: true },
-  { a: term('over-engineered'), b: term('under-engineered'), checkDescription: true },
-  { a: term('unnecessary'), b: term('necessary'), checkDescription: true },
-  { a: term('remove'), b: term('keep'), checkDescription: false },
-  { a: term('redundant'), b: term('required'), checkDescription: true },
-  { a: term('unsafe'), b: term('safe'), checkDescription: true },
-  { a: term('deprecated'), b: term('recommended'), checkDescription: true },
-  { a: term('too permissive'), b: term('too restrictive'), checkDescription: true },
+  { a: term('missing'), b: term('present'), specific: true },
+  { a: term('no'), b: term('has'), specific: false },
+  { a: term('lacks'), b: term('has'), specific: false },
+  { a: term('not'), b: term('is'), specific: false },
+  { a: term('should add'), b: term('should remove'), specific: true },
+  { a: term('too complex'), b: term('too simple'), specific: true },
+  { a: term('over-engineered'), b: term('under-engineered'), specific: true },
+  { a: term('unnecessary'), b: term('necessary'), specific: true },
+  { a: term('remove'), b: term('keep'), specific: false },
+  { a: term('redundant'), b: term('required'), specific: true },
+  { a: term('unsafe'), b: term('safe'), specific: true },
+  { a: term('deprecated'), b: term('recommended'), specific: true },
+  { a: term('too permissive'), b: term('too restrictive'), specific: true },
 ];
 
-function textOpposes(textA: string, textB: string, inDescription: boolean): boolean {
+function textOpposes(
+  textA: string,
+  textB: string,
+  inDescription: boolean,
+  specificOnly: boolean
+): boolean {
   for (const pair of OPPOSING_PAIRS) {
-    if (inDescription && !pair.checkDescription) continue;
+    if (inDescription && !pair.specific) continue;
+    if (specificOnly && !pair.specific) continue;
     const aHasA = pair.a.test(textA);
     const aHasB = pair.b.test(textA);
     const bHasA = pair.a.test(textB);
@@ -108,10 +130,15 @@ function textOpposes(textA: string, textB: string, inDescription: boolean): bool
 /**
  * Detect findings that reach opposite conclusions. Word-boundary matching
  * prevents substring traps ("unsafe" does not match "safe").
+ *
+ * With `specificOnly`, only high-precision pairs count — used for the merge
+ * veto, where a false positive fragments a genuine duplicate group. The
+ * default (all pairs) is for dispute flagging, where a false positive just
+ * adds a warning.
  */
-export function hasOpposingSentiment(a: Finding, b: Finding): boolean {
-  if (textOpposes(a.title, b.title, false)) return true;
-  if (textOpposes(a.description, b.description, true)) return true;
+export function hasOpposingSentiment(a: Finding, b: Finding, specificOnly = false): boolean {
+  if (textOpposes(a.title, b.title, false, specificOnly)) return true;
+  if (textOpposes(a.description, b.description, true, specificOnly)) return true;
   return false;
 }
 
@@ -146,9 +173,11 @@ function areDuplicates(
   if (!areSameFile(a, b)) return false;
   if (!sameCategory(a, b)) return false;
   if (!linesOverlap(a, b, lineWindow)) return false;
-  // Never merge findings that reach opposite conclusions — they must surface
-  // as separate (disputed) groups rather than silently collapse into one.
-  if (hasOpposingSentiment(a, b)) return false;
+  // Never merge findings that clearly reach opposite conclusions — they must
+  // surface as separate (disputed) groups rather than silently collapse into
+  // one. Only specific pairs veto; generic-pair contradictions merge and are
+  // flagged as intra-group disputes by the voter instead.
+  if (hasOpposingSentiment(a, b, true)) return false;
 
   return combinedSimilarity(a, b) >= jaccardThreshold;
 }
@@ -259,7 +288,7 @@ function dedupeWithinReview(
 export function deduplicateFindings(
   reviews: ModelReview[],
   jaccardThreshold: number = DEFAULT_THRESHOLDS.jaccardThreshold,
-  lineWindow: number = LINE_WINDOW
+  lineWindow: number = DEFAULT_THRESHOLDS.dedupeLineWindow
 ): DeduplicatedGroup[] {
   // Flatten all findings with attribution, deduplicating within each review first
   const all: TaggedFinding[] = [];

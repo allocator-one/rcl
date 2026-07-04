@@ -292,7 +292,10 @@ async function runReview(target: string, opts: {
       config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow
     );
 
-    const consensusFindings = computeConsensus(groups, reviews, roleMap);
+    const consensusFindings = computeConsensus(groups, reviews, roleMap, {
+      lineWindow: config.thresholds?.dedupeLineWindow,
+      jaccardThreshold: config.thresholds?.jaccardThreshold,
+    });
 
     const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
     const result: ReviewResult = {
