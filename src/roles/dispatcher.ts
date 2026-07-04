@@ -51,19 +51,20 @@ export function buildExplicitAssignments(
 
 /**
  * Build assignments using the dispatch algorithm:
- * - general role: runs on ALL models
- * - specialized roles: spread across models via shuffled round-robin
+ * - general role: runs on primary (SOTA) models only
+ * - specialized roles: spread across ALL models (primary + secondary) via shuffled round-robin
  */
 export function buildRoleAssignments(
   models: string[],
-  roles: Role[]
+  roles: Role[],
+  secondaryModels: string[] = []
 ): ReviewAssignment[] {
   const assignments: ReviewAssignment[] = [];
 
   const generalRoles = roles.filter((r) => !r.isSpecialized);
   const specializedRoles = roles.filter((r) => r.isSpecialized);
 
-  // General roles: every model runs every general role
+  // General roles: only primary (SOTA) models
   for (const model of models) {
     for (const role of generalRoles) {
       assignments.push({
@@ -74,9 +75,10 @@ export function buildRoleAssignments(
     }
   }
 
-  // Specialized roles: shuffled round-robin across models
-  if (specializedRoles.length > 0 && models.length > 0) {
-    const shuffledModels = shuffle(models);
+  // Specialized roles: shuffled round-robin across ALL models (primary + secondary)
+  const allModels = [...models, ...secondaryModels];
+  if (specializedRoles.length > 0 && allModels.length > 0) {
+    const shuffledModels = shuffle(allModels);
     specializedRoles.forEach((role, index) => {
       const model = shuffledModels[index % shuffledModels.length]!;
       assignments.push({
@@ -96,11 +98,12 @@ export function buildRoleAssignments(
 export function buildAssignments(opts: {
   models: string[];
   roles: Role[];
+  secondaryModels?: string[];
   explicitReviewers?: ReviewerPair[];
   roleMap: Map<string, Role>;
 }): ReviewAssignment[] {
   if (opts.explicitReviewers && opts.explicitReviewers.length > 0) {
     return buildExplicitAssignments(opts.explicitReviewers, opts.roleMap);
   }
-  return buildRoleAssignments(opts.models, opts.roles);
+  return buildRoleAssignments(opts.models, opts.roles, opts.secondaryModels);
 }

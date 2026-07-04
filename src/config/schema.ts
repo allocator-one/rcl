@@ -39,6 +39,7 @@ export const OutputSchema = z.object({
 
 export const ConfigSchema = z.object({
   models: z.array(z.string()).optional(),
+  secondaryModels: z.array(z.string()).optional(),
   roles: z.array(z.string()).optional(),
   reviewers: z.array(ReviewerPairSchema).optional(),
   customRoles: z.array(RoleConfigSchema).optional(),

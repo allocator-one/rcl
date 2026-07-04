@@ -60,7 +60,8 @@ program
     [] as string[]
   )
   .option('--spec <path>', 'Specification file for spec-compliance role')
-  .option('--models <models>', 'Comma-separated list of models to use')
+  .option('--models <models>', 'Comma-separated list of primary (SOTA) models')
+  .option('--secondary-models <models>', 'Comma-separated list of secondary models (specialized roles only)')
   .option('--focus <areas>', 'Comma-separated focus areas')
   .option('--post', 'Post review as GitHub PR comment')
   .option('--json', 'Output JSON to stdout')
@@ -119,6 +120,7 @@ async function runReview(target: string, opts: {
   context?: string[];
   spec?: string;
   models?: string;
+  secondaryModels?: string;
   focus?: string;
   post?: boolean;
   json?: boolean;
@@ -143,6 +145,9 @@ async function runReview(target: string, opts: {
     // Override models from CLI
     if (opts.models) {
       config.models = opts.models.split(',').map((s) => s.trim());
+    }
+    if (opts.secondaryModels) {
+      config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim());
     }
 
     // Determine roles to use
@@ -201,9 +206,11 @@ async function runReview(target: string, opts: {
 
     // Build assignments
     const models = config.models ?? ['claude-opus-4-6'];
+    const secondaryModels = config.secondaryModels ?? [];
     const assignments = buildAssignments({
       models,
       roles,
+      secondaryModels,
       explicitReviewers,
       roleMap,
     });
