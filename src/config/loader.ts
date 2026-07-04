@@ -60,7 +60,7 @@ function buildDefaultConfig(): Config {
 function mergeWithDefaults(config: Config): Config {
   return {
     models: config.models ?? [...DEFAULT_MODELS],
-    secondaryModels: config.secondaryModels ?? [...DEFAULT_SECONDARY_MODELS],
+    secondaryModels: config.secondaryModels ?? (config.models ? [] : [...DEFAULT_SECONDARY_MODELS]),
     roles: config.roles,
     reviewers: config.reviewers,
     customRoles: config.customRoles,
