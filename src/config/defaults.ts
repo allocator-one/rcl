@@ -16,6 +16,15 @@ export const DEFAULT_THRESHOLDS = {
   minConsensusScore: 0.4,
   minConfidence: 0.2,
   dedupeLineWindow: 5,
+  /**
+   * Threshold for the weighted title+description similarity
+   * (0.6 * title + 0.4 * description). Calibrated against the fixture
+   * corpus: genuine cross-model duplicates score 0.29-0.55 (descriptions
+   * diverge heavily across models), so higher thresholds split real
+   * duplicates. The strictness gain over the old max(title, desc) check
+   * comes from the formula: a title-only match now needs 0.5+ title
+   * overlap to merge instead of 0.3.
+   */
   jaccardThreshold: 0.3,
 } as const;
 

@@ -4,6 +4,27 @@ A thorough review of `src/consensus/deduper.ts`, `src/consensus/voter.ts`, `src/
 
 ---
 
+## Implementation Status (this branch)
+
+**Implemented:**
+
+- §3.1 Relevance flipped — specialist confirmation now *raises* confidence (`any specialist flagged → 1.0`, non-specialist-only → 0.5)
+- §5.2 Diversity denominators floored at 2 — a solo surviving model can no longer score perfect diversity
+- §1.1/§1.2 Similarity is now a weighted title+description score (0.6/0.4) instead of `Math.max`; token filter keeps short signal tokens ("xss", "id", "no") and drops stopwords instead
+- §1.4 Intra-review dedup pre-pass — repeats within one review can't inflate consensus
+- §1.5 Post-union-find coherence split — every group member must be a duplicate of the representative
+- §3.5 Severity elevation reworked — base severity is the mode across members; elevation applies only on actual disagreement and never past the highest member rating
+- §4.1–4.5 Dispute detection: opposing-sentiment check now vetoes merges inside the deduper (word-boundary matching, expanded pair list, descriptions included for specific terms), between-group checks use `linesOverlap()`, and 2+ level severity dispersion is flagged as a dispute
+- §5.4 Exact `focus` matching, §2.1/2.2 path compression
+
+**Correction to §1.1:** the `length > 2` filter never dropped "xss"/"sql"/"rce"/"dos" — those are 3-char tokens and survived. Only ≤2-char tokens ("id", "no", "if") were dropped.
+
+**Correction to §1.2/Priority 4 (threshold 0.5):** calibrated against the fixture corpus, genuine cross-model duplicates score 0.29–0.55 under the weighted formula (descriptions diverge heavily between models). A 0.5 threshold splits real duplicates; the threshold stays at 0.3 and the strictness gain comes from the formula change (title-only merges now need 0.5+ title overlap instead of 0.3).
+
+**Deferred:** embedding-based contradiction detection, char-n-gram/DBSCAN clustering, category affinity matrix, corpus-based confidence-threshold recalibration, `alternativeDescriptions` in output (§5.1).
+
+---
+
 ## 1. Deduper: Algorithmic Correctness & Edge Cases
 
 ### 1.1 Jaccard Similarity Is the Wrong Tool Here

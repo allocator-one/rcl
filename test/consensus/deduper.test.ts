@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { jaccardSimilarity, deduplicateFindings } from '../../src/consensus/deduper.js';
-import type { ModelReview } from '../../src/consensus/types.js';
+import {
+  jaccardSimilarity,
+  combinedSimilarity,
+  hasOpposingSentiment,
+  deduplicateFindings,
+} from '../../src/consensus/deduper.js';
+import type { Finding, ModelReview } from '../../src/consensus/types.js';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
@@ -71,5 +76,159 @@ describe('deduplicateFindings', () => {
       const curr = severityOrder[groups[i]!.representative.severity];
       expect(curr).toBeGreaterThanOrEqual(prev);
     }
+  });
+});
+
+function mkF(over: Partial<Finding> = {}): Finding {
+  return {
+    id: 'f1',
+    file: 'src/a.ts',
+    startLine: 10,
+    endLine: 12,
+    severity: 'important',
+    category: 'security',
+    title: 'SQL injection in query builder',
+    description: 'User input is interpolated directly into the SQL query string',
+    ...over,
+  };
+}
+
+function mkReview(model: string, role: string, findings: Finding[]): ModelReview {
+  return { model, role, provider: 'test', findings, durationMs: 0, status: 'success' };
+}
+
+describe('jaccardSimilarity tokenization', () => {
+  it('keeps short signal tokens like "xss" and "id"', () => {
+    expect(jaccardSimilarity('xss risk', 'xss risk')).toBe(1.0);
+    expect(jaccardSimilarity('missing id check', 'missing id validation')).toBeGreaterThan(0.3);
+  });
+
+  it('ignores stopwords', () => {
+    expect(jaccardSimilarity('the input is validated', 'input validated')).toBe(1.0);
+  });
+
+  it('keeps negations as signal', () => {
+    expect(jaccardSimilarity('no validation here', 'validation here')).toBeLessThan(1.0);
+  });
+});
+
+describe('combinedSimilarity', () => {
+  it('weights title at 0.6 and description at 0.4', () => {
+    const sameTitle = combinedSimilarity(
+      mkF({ title: 'hardcoded secret', description: 'alpha beta gamma' }),
+      mkF({ title: 'hardcoded secret', description: 'delta epsilon zeta' })
+    );
+    expect(sameTitle).toBeCloseTo(0.6);
+
+    const sameDesc = combinedSimilarity(
+      mkF({ title: 'alpha beta gamma', description: 'hardcoded secret found' }),
+      mkF({ title: 'delta epsilon zeta', description: 'hardcoded secret found' })
+    );
+    expect(sameDesc).toBeCloseTo(0.4);
+  });
+});
+
+describe('hasOpposingSentiment', () => {
+  it('detects opposing title terms', () => {
+    const a = mkF({ title: 'Function lacks error handling' });
+    const b = mkF({ title: 'Function has error handling' });
+    expect(hasOpposingSentiment(a, b)).toBe(true);
+  });
+
+  it('detects missing vs present', () => {
+    const a = mkF({ title: 'Missing rate limiting on login endpoint' });
+    const b = mkF({ title: 'Rate limiting present on login endpoint' });
+    expect(hasOpposingSentiment(a, b)).toBe(true);
+  });
+
+  it('respects word boundaries: "unsafe" is not "safe"', () => {
+    const a = mkF({ title: 'Unsafe deserialization of user input', description: 'x' });
+    const b = mkF({ title: 'Unsafe deserialization risk here', description: 'y' });
+    expect(hasOpposingSentiment(a, b)).toBe(false);
+
+    const c = mkF({ title: 'Safe deserialization pattern used', description: 'z' });
+    expect(hasOpposingSentiment(a, c)).toBe(true);
+  });
+
+  it('treats a text containing both terms of a pair as taking no position', () => {
+    // "is not" contains both sides of the not/is pair — no stance either way
+    const a = mkF({ title: 'Input is not validated' });
+    const b = mkF({ title: 'Input is validated' });
+    expect(hasOpposingSentiment(a, b)).toBe(false);
+  });
+
+  it('returns false for unrelated titles', () => {
+    const a = mkF({ title: 'SQL injection in query builder' });
+    const b = mkF({ title: 'Race condition in cache invalidation' });
+    expect(hasOpposingSentiment(a, b)).toBe(false);
+  });
+});
+
+describe('deduplicateFindings — intra-review dedup', () => {
+  it('collapses repeats of the same finding within one review', () => {
+    const f = mkF({ title: 'Hardcoded secret in config', description: 'The secret is hardcoded in source' });
+    const reviews = [mkReview('m1', 'general', [f, { ...f, id: 'f2' }, { ...f, id: 'f3' }])];
+    const groups = deduplicateFindings(reviews);
+    expect(groups).toHaveLength(1);
+    // A stuttering model must not look like 3 independent confirmations
+    expect(groups[0]!.members).toHaveLength(1);
+  });
+});
+
+describe('deduplicateFindings — contradiction veto', () => {
+  it('refuses to merge findings with opposing conclusions', () => {
+    const a = mkF({
+      title: 'Missing rate limiting on login endpoint',
+      description: 'Login route allows unlimited attempts',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'Rate limiting present on login endpoint',
+      description: 'Login route throttles attempts correctly',
+      startLine: 11,
+      endLine: 11,
+    });
+    const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
+    const groups = deduplicateFindings(reviews);
+    // High word overlap + same location, but opposite conclusions → stay separate
+    expect(groups).toHaveLength(2);
+  });
+});
+
+describe('deduplicateFindings — weighted similarity', () => {
+  it('no longer merges on description similarity alone', () => {
+    const a = mkF({
+      title: 'SQL injection risk',
+      description: 'User input flows into database query without sanitization',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'Unvalidated query parameter',
+      description: 'User input flows into database query without escaping applied',
+    });
+    const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
+    // Old Math.max(titleSim, descSim) would merge these (descSim ≈ 0.67);
+    // weighted similarity requires the titles to carry signal too
+    const groups = deduplicateFindings(reviews);
+    expect(groups).toHaveLength(2);
+  });
+});
+
+describe('deduplicateFindings — group coherence', () => {
+  it('splits transitive chains whose ends are dissimilar', () => {
+    // Identical text, but lines 1 / 8 / 15 with window 5:
+    // A overlaps B, B overlaps C, A does not overlap C
+    const a = mkF({ id: 'a', startLine: 1, endLine: 1 });
+    const b = mkF({ id: 'b', startLine: 8, endLine: 8 });
+    const c = mkF({ id: 'c', startLine: 15, endLine: 15 });
+    const reviews = [
+      mkReview('m1', 'r1', [a]),
+      mkReview('m2', 'r2', [b]),
+      mkReview('m3', 'r3', [c]),
+    ];
+    const groups = deduplicateFindings(reviews);
+    // Union-find alone would chain all three into one group
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.members.length).sort()).toEqual([1, 2]);
   });
 });

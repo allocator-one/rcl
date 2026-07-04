@@ -1,9 +1,28 @@
 import type { Finding, ModelReview, DeduplicatedGroup } from './types.js';
+import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 
 const LINE_WINDOW = 5;
 
+/** Title similarity carries more signal than description similarity. */
+const TITLE_WEIGHT = 0.6;
+const DESC_WEIGHT = 0.4;
+
 /**
- * Compute Jaccard similarity between two strings (word-level tokenization)
+ * Common English function words that carry no similarity signal.
+ * Negations (no, not, never) are deliberately kept — they distinguish
+ * opposite findings.
+ */
+const STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'for',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'its',
+  'this', 'that', 'these', 'those', 'with', 'as', 'by', 'from', 'into',
+  'via', 'when', 'which', 'their', 'there', 'than', 'then',
+]);
+
+/**
+ * Compute Jaccard similarity between two strings (word-level tokenization).
+ * Single characters and stopwords are ignored; short signal tokens like
+ * "xss", "id", or "no" are kept.
  */
 export function jaccardSimilarity(a: string, b: string): number {
   const tokenize = (s: string): Set<string> => {
@@ -12,7 +31,7 @@ export function jaccardSimilarity(a: string, b: string): number {
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, ' ')
         .split(/\s+/)
-        .filter((t) => t.length > 2)
+        .filter((t) => t.length > 1 && !STOPWORDS.has(t))
     );
   };
 
@@ -31,13 +50,78 @@ export function jaccardSimilarity(a: string, b: string): number {
   return intersection / union;
 }
 
+/**
+ * Weighted title+description similarity. Both fields contribute, so a short
+ * generic title alone can no longer merge two unrelated findings, and a
+ * verbose description alone can't either.
+ */
+export function combinedSimilarity(a: Finding, b: Finding): number {
+  const titleSim = jaccardSimilarity(a.title, b.title);
+  const descSim = jaccardSimilarity(a.description, b.description);
+  return titleSim * TITLE_WEIGHT + descSim * DESC_WEIGHT;
+}
+
+interface OpposingPair {
+  a: RegExp;
+  b: RegExp;
+  /** Generic terms are checked in titles only; specific ones also in descriptions. */
+  checkDescription: boolean;
+}
+
+function term(t: string): RegExp {
+  return new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+}
+
+const OPPOSING_PAIRS: OpposingPair[] = [
+  { a: term('missing'), b: term('present'), checkDescription: true },
+  { a: term('no'), b: term('has'), checkDescription: false },
+  { a: term('lacks'), b: term('has'), checkDescription: false },
+  { a: term('not'), b: term('is'), checkDescription: false },
+  { a: term('should add'), b: term('should remove'), checkDescription: true },
+  { a: term('too complex'), b: term('too simple'), checkDescription: true },
+  { a: term('over-engineered'), b: term('under-engineered'), checkDescription: true },
+  { a: term('unnecessary'), b: term('necessary'), checkDescription: true },
+  { a: term('remove'), b: term('keep'), checkDescription: false },
+  { a: term('redundant'), b: term('required'), checkDescription: true },
+  { a: term('unsafe'), b: term('safe'), checkDescription: true },
+  { a: term('deprecated'), b: term('recommended'), checkDescription: true },
+  { a: term('too permissive'), b: term('too restrictive'), checkDescription: true },
+];
+
+function textOpposes(textA: string, textB: string, inDescription: boolean): boolean {
+  for (const pair of OPPOSING_PAIRS) {
+    if (inDescription && !pair.checkDescription) continue;
+    const aHasA = pair.a.test(textA);
+    const aHasB = pair.b.test(textA);
+    const bHasA = pair.a.test(textB);
+    const bHasB = pair.b.test(textB);
+    // Exclusive containment: each text must contain exactly one term of the
+    // pair, and opposite ones. A text containing both terms ("is not …")
+    // takes no position and never counts as opposing.
+    if ((aHasA && !aHasB && bHasB && !bHasA) || (aHasB && !aHasA && bHasA && !bHasB)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detect findings that reach opposite conclusions. Word-boundary matching
+ * prevents substring traps ("unsafe" does not match "safe").
+ */
+export function hasOpposingSentiment(a: Finding, b: Finding): boolean {
+  if (textOpposes(a.title, b.title, false)) return true;
+  if (textOpposes(a.description, b.description, true)) return true;
+  return false;
+}
+
 interface TaggedFinding {
   finding: Finding;
   model: string;
   role: string;
 }
 
-function linesOverlap(a: Finding, b: Finding, window: number): boolean {
+export function linesOverlap(a: Finding, b: Finding, window: number): boolean {
   const aStart = Math.max(0, a.startLine - window);
   const aEnd = a.endLine + window;
   const bStart = Math.max(0, b.startLine - window);
@@ -62,12 +146,11 @@ function areDuplicates(
   if (!areSameFile(a, b)) return false;
   if (!sameCategory(a, b)) return false;
   if (!linesOverlap(a, b, lineWindow)) return false;
+  // Never merge findings that reach opposite conclusions — they must surface
+  // as separate (disputed) groups rather than silently collapse into one.
+  if (hasOpposingSentiment(a, b)) return false;
 
-  const titleSim = jaccardSimilarity(a.title, b.title);
-  const descSim = jaccardSimilarity(a.description, b.description);
-  const maxSim = Math.max(titleSim, descSim);
-
-  return maxSim >= jaccardThreshold;
+  return combinedSimilarity(a, b) >= jaccardThreshold;
 }
 
 /**
@@ -75,7 +158,7 @@ function areDuplicates(
  * - Prefer higher severity
  * - Break ties by description length (more detail wins)
  */
-function chooseRepresentative(members: TaggedFinding[]): Finding {
+function chooseRepresentative(members: TaggedFinding[]): TaggedFinding {
   const severityOrder = { critical: 0, important: 1, minor: 2, nitpick: 3 };
 
   return members.reduce((best, curr) => {
@@ -85,62 +168,116 @@ function chooseRepresentative(members: TaggedFinding[]): Finding {
     if (currScore === bestScore && curr.finding.description.length > best.finding.description.length)
       return curr;
     return best;
-  }).finding;
+  });
 }
 
-export function deduplicateFindings(
-  reviews: ModelReview[],
-  jaccardThreshold = 0.3,
-  lineWindow = LINE_WINDOW
-): DeduplicatedGroup[] {
-  // Flatten all findings with attribution
-  const all: TaggedFinding[] = [];
-  for (const review of reviews) {
-    if (review.status !== 'success') continue;
-    for (const finding of review.findings) {
-      all.push({ finding, model: review.model, role: review.role });
-    }
+/**
+ * Union-Find grouping with path compression.
+ */
+function groupTagged(
+  items: TaggedFinding[],
+  jaccardThreshold: number,
+  lineWindow: number
+): TaggedFinding[][] {
+  const parent = items.map((_, i) => i);
+
+  function find(i: number): number {
+    if (parent[i] !== i) parent[i] = find(parent[i]!);
+    return parent[i]!;
   }
 
-  if (all.length === 0) return [];
-
-  // Union-Find style grouping
-  const groupOf = new Array<number>(all.length).fill(-1);
-
-  for (let i = 0; i < all.length; i++) {
-    for (let j = i + 1; j < all.length; j++) {
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
       if (
-        areDuplicates(all[i]!.finding, all[j]!.finding, jaccardThreshold, lineWindow)
+        areDuplicates(items[i]!.finding, items[j]!.finding, jaccardThreshold, lineWindow)
       ) {
-        // Merge groups: find root of i
-        let rootI = i;
-        while (groupOf[rootI] !== -1) rootI = groupOf[rootI]!;
-        let rootJ = j;
-        while (groupOf[rootJ] !== -1) rootJ = groupOf[rootJ]!;
-
-        if (rootI !== rootJ) {
-          groupOf[rootJ] = rootI;
-        }
+        const rootI = find(i);
+        const rootJ = find(j);
+        if (rootI !== rootJ) parent[rootJ] = rootI;
       }
     }
   }
 
-  // Collect groups
   const groups = new Map<number, TaggedFinding[]>();
-  for (let i = 0; i < all.length; i++) {
-    let root = i;
-    while (groupOf[root] !== -1) root = groupOf[root]!;
+  for (let i = 0; i < items.length; i++) {
+    const root = find(i);
     const existing = groups.get(root) ?? [];
-    existing.push(all[i]!);
+    existing.push(items[i]!);
     groups.set(root, existing);
   }
+  return [...groups.values()];
+}
+
+/**
+ * Union-Find is transitive: A≈B and B≈C put A and C in one group even when
+ * A and C are dissimilar. Split such chains by greedily re-clustering around
+ * representatives — every member of a final group is a duplicate of its
+ * representative, not just of some neighbor.
+ */
+function splitIncoherent(
+  members: TaggedFinding[],
+  jaccardThreshold: number,
+  lineWindow: number
+): TaggedFinding[][] {
+  const result: TaggedFinding[][] = [];
+  let remaining = members;
+  while (remaining.length > 0) {
+    const rep = chooseRepresentative(remaining);
+    const coherent: TaggedFinding[] = [];
+    const rest: TaggedFinding[] = [];
+    for (const m of remaining) {
+      if (m === rep || areDuplicates(rep.finding, m.finding, jaccardThreshold, lineWindow)) {
+        coherent.push(m);
+      } else {
+        rest.push(m);
+      }
+    }
+    result.push(coherent);
+    remaining = rest;
+  }
+  return result;
+}
+
+/**
+ * A single model sometimes emits the same finding more than once. Collapse
+ * those first so repeats can't masquerade as independent confirmations and
+ * inflate consensus scores.
+ */
+function dedupeWithinReview(
+  review: ModelReview,
+  jaccardThreshold: number,
+  lineWindow: number
+): TaggedFinding[] {
+  const tagged: TaggedFinding[] = review.findings.map((finding) => ({
+    finding,
+    model: review.model,
+    role: review.role,
+  }));
+  return groupTagged(tagged, jaccardThreshold, lineWindow).map((g) => chooseRepresentative(g));
+}
+
+export function deduplicateFindings(
+  reviews: ModelReview[],
+  jaccardThreshold: number = DEFAULT_THRESHOLDS.jaccardThreshold,
+  lineWindow: number = LINE_WINDOW
+): DeduplicatedGroup[] {
+  // Flatten all findings with attribution, deduplicating within each review first
+  const all: TaggedFinding[] = [];
+  for (const review of reviews) {
+    if (review.status !== 'success') continue;
+    all.push(...dedupeWithinReview(review, jaccardThreshold, lineWindow));
+  }
+
+  if (all.length === 0) return [];
 
   const result: DeduplicatedGroup[] = [];
-  for (const members of groups.values()) {
-    result.push({
-      representative: chooseRepresentative(members),
-      members,
-    });
+  for (const members of groupTagged(all, jaccardThreshold, lineWindow)) {
+    for (const coherent of splitIncoherent(members, jaccardThreshold, lineWindow)) {
+      result.push({
+        representative: chooseRepresentative(coherent).finding,
+        members: coherent,
+      });
+    }
   }
 
   // Sort by severity then file
