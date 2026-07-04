@@ -2,6 +2,7 @@ import { cosmiconfig } from 'cosmiconfig';
 import { ConfigSchema, type Config } from './schema.js';
 import {
   DEFAULT_MODELS,
+  DEFAULT_SECONDARY_MODELS,
   DEFAULT_THRESHOLDS,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
@@ -48,6 +49,7 @@ export async function loadConfig(configPath?: string): Promise<Config> {
 function buildDefaultConfig(): Config {
   return {
     models: [...DEFAULT_MODELS],
+    secondaryModels: [...DEFAULT_SECONDARY_MODELS],
     thresholds: { ...DEFAULT_THRESHOLDS },
     timeout: DEFAULT_TIMEOUT_MS,
     maxRetries: DEFAULT_MAX_RETRIES,
@@ -58,6 +60,7 @@ function buildDefaultConfig(): Config {
 function mergeWithDefaults(config: Config): Config {
   return {
     models: config.models ?? [...DEFAULT_MODELS],
+    secondaryModels: config.secondaryModels ?? (config.models ? [] : [...DEFAULT_SECONDARY_MODELS]),
     roles: config.roles,
     reviewers: config.reviewers,
     customRoles: config.customRoles,
