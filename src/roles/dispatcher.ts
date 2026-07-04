@@ -76,7 +76,7 @@ export function buildRoleAssignments(
   }
 
   // Specialized roles: shuffled round-robin across ALL models (primary + secondary)
-  const allModels = [...models, ...secondaryModels];
+  const allModels = [...new Set([...models, ...secondaryModels])];
   if (specializedRoles.length > 0 && allModels.length > 0) {
     const shuffledModels = shuffle(allModels);
     specializedRoles.forEach((role, index) => {

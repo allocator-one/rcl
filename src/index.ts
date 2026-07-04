@@ -6,6 +6,7 @@ import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { loadConfig } from './config/loader.js';
+import { DEFAULT_MODELS } from './config/defaults.js';
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { chunkDiff } from './prepare/chunker.js';
@@ -144,10 +145,14 @@ async function runReview(target: string, opts: {
 
     // Override models from CLI
     if (opts.models) {
-      config.models = opts.models.split(',').map((s) => s.trim());
+      config.models = opts.models.split(',').map((s) => s.trim()).filter(Boolean);
+      // Clear secondary models unless explicitly provided — don't leak code to default providers
+      if (opts.secondaryModels === undefined) {
+        config.secondaryModels = [];
+      }
     }
-    if (opts.secondaryModels) {
-      config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim());
+    if (opts.secondaryModels !== undefined) {
+      config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim()).filter(Boolean);
     }
 
     // Determine roles to use
@@ -205,7 +210,7 @@ async function runReview(target: string, opts: {
     }
 
     // Build assignments
-    const models = config.models ?? ['claude-opus-4-6'];
+    const models = config.models ?? [...DEFAULT_MODELS];
     const secondaryModels = config.secondaryModels ?? [];
     const assignments = buildAssignments({
       models,
