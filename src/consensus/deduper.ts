@@ -186,9 +186,11 @@ function areDuplicates(
   // flagged as intra-group disputes by the voter instead.
   if (hasOpposingSentiment(a, b, true)) return false;
 
+  // Cap at 1.0 so a high configured threshold can't silently make
+  // cross-category merges impossible (similarity never exceeds 1.0)
   const threshold = sameCategory(a, b)
     ? jaccardThreshold
-    : jaccardThreshold * CROSS_CATEGORY_FACTOR;
+    : Math.min(1, jaccardThreshold * CROSS_CATEGORY_FACTOR);
   return combinedSimilarity(a, b) >= threshold;
 }
 

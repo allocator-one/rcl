@@ -282,6 +282,15 @@ describe('deduplicateFindings — category soft gate', () => {
     ];
     expect(deduplicateFindings(sameCat)).toHaveLength(1);
   });
+
+  it('caps the cross-category threshold at 1.0', () => {
+    // A configured threshold of 0.7 would put the cross-category bar at
+    // 1.05 — identical findings must still be able to merge
+    const a = mkF({ category: 'correctness' });
+    const b = mkF({ id: 'b1', category: 'best-practices' });
+    const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
+    expect(deduplicateFindings(reviews, 0.7)).toHaveLength(1);
+  });
 });
 
 describe('deduplicateFindings — group coherence', () => {
