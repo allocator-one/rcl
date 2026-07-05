@@ -33,10 +33,13 @@ function confidenceLabel(
 
 /**
  * Layer 2: Diversity score
- * = (unique_models / total_models) * 0.5 + (unique_roles / total_roles) * 0.5
+ * = saturating(unique_models) * 0.5 + saturating(unique_roles) * 0.5
  *
- * Denominators are floored at 2 so a run where only one model succeeded
- * can't score perfect diversity from a single opinion.
+ * Each dimension saturates at half the fleet: agreement from ceil(total/2)
+ * reviewers earns full credit, so confidence stays comparable across
+ * configuration sizes (3 of 6 models agreeing is not weaker evidence than
+ * 2 of 2). The denominator is floored at 2 so a run where only one model
+ * succeeded can't score perfect diversity from a single opinion.
  */
 function computeDiversity(
   group: DeduplicatedGroup,
@@ -46,10 +49,11 @@ function computeDiversity(
   const uniqueModels = new Set(group.members.map((m) => m.model));
   const uniqueRoles = new Set(group.members.map((m) => m.role));
 
-  const modelDiversity = uniqueModels.size / Math.max(allModels.length, 2);
-  const roleDiversity = uniqueRoles.size / Math.max(allRoles.length, 2);
+  const saturating = (unique: number, total: number): number =>
+    Math.min(1, unique / Math.max(2, Math.ceil(total / 2)));
 
-  return Math.min(1, modelDiversity * 0.5 + roleDiversity * 0.5);
+  return saturating(uniqueModels.size, allModels.length) * 0.5 +
+    saturating(uniqueRoles.size, allRoles.length) * 0.5;
 }
 
 /**
@@ -182,17 +186,22 @@ function detectDisputes(
   return { disputed: true, disputeDetails: reasons.join('; ') };
 }
 
+function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
+  const counts = new Map<SeverityLevel, number>();
+  for (const m of group.members) {
+    const s = m.finding.severity as SeverityLevel;
+    counts.set(s, (counts.get(s) ?? 0) + 1);
+  }
+  return counts;
+}
+
 /**
  * Base severity = the most common severity among members (ties go to the
  * more severe). Agreement speaks to confidence, not severity — a unanimous
  * nitpick stays a nitpick.
  */
 function modeSeverity(group: DeduplicatedGroup): SeverityLevel {
-  const counts = new Map<SeverityLevel, number>();
-  for (const m of group.members) {
-    const s = m.finding.severity as SeverityLevel;
-    counts.set(s, (counts.get(s) ?? 0) + 1);
-  }
+  const counts = severityCounts(group);
 
   let best: SeverityLevel = group.representative.severity as SeverityLevel;
   let bestCount = 0;
@@ -207,6 +216,22 @@ function modeSeverity(group: DeduplicatedGroup): SeverityLevel {
     }
   }
   return best;
+}
+
+/**
+ * The most severe level that at least `minSupport` members assigned, or null.
+ * Used as the elevation ceiling: a single outlier rating never drives the
+ * final severity — it is surfaced as a severity-dispersion dispute instead.
+ */
+function mostSevereWithSupport(
+  group: DeduplicatedGroup,
+  minSupport: number
+): SeverityLevel | null {
+  const counts = severityCounts(group);
+  for (const level of SEVERITY_LEVELS) {
+    if ((counts.get(level) ?? 0) >= minSupport) return level;
+  }
+  return null;
 }
 
 export function computeConsensus(
@@ -238,29 +263,29 @@ export function computeConsensus(
     const label = confidenceLabel(clampedConfidence);
 
     // Layer 4: Severity elevation.
-    // Only applies when members actually disagree on severity, and never
-    // elevates past the highest severity any member assigned. High-confidence
-    // agreement resolves the disagreement upward; it never invents severity.
+    // Only applies when members actually disagree on severity, and only up
+    // to the most severe level that at least TWO members assigned — a lone
+    // outlier rating never drives the final severity (it still shows up as
+    // a severity-dispersion dispute). High-confidence agreement resolves a
+    // real disagreement upward; it never invents severity.
     const baseSeverity = modeSeverity(group);
-    const maxSeverity = indexToSeverity(
-      Math.min(...group.members.map((m) => severityIndex(m.finding.severity as SeverityLevel)))
-    );
+    const supportedMax = mostSevereWithSupport(group, 2);
 
     let elevation: ConsensusInfo['elevation'] = 'none';
     let finalSeverity = baseSeverity;
-    if (maxSeverity !== baseSeverity) {
+    if (supportedMax !== null && severityIndex(supportedMax) < severityIndex(baseSeverity)) {
       if (label === 'Very High' && group.members.length >= 3) {
-        finalSeverity = maxSeverity;
-        elevation = 'unanimous';
+        finalSeverity = supportedMax;
+        elevation = 'strong-consensus';
       } else if (
         (label === 'High' || label === 'Very High') &&
         uniqueModels.length >= 2 &&
         uniqueRoles.length >= 2
       ) {
-        finalSeverity = maxSeverity;
+        finalSeverity = supportedMax;
         elevation = 'cross-model';
       } else if ((label === 'High' || label === 'Very High') && uniqueRoles.length >= 2) {
-        finalSeverity = maxSeverity;
+        finalSeverity = supportedMax;
         elevation = 'cross-role';
       }
     }

@@ -256,6 +256,34 @@ describe('deduplicateFindings — weighted similarity', () => {
   });
 });
 
+describe('deduplicateFindings — category soft gate', () => {
+  it('merges near-identical findings across categories', () => {
+    // Models disagree on category boundaries constantly; identical text at
+    // the same location is the same finding regardless of the label
+    const a = mkF({ category: 'correctness' });
+    const b = mkF({ id: 'b1', category: 'best-practices' });
+    const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
+    const groups = deduplicateFindings(reviews);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(2);
+  });
+
+  it('requires stronger similarity for cross-category merges', () => {
+    // Combined similarity 0.3: enough within a category, not across (0.45)
+    const a = mkF({ title: 'missing null check', description: 'alpha beta gamma', category: 'correctness' });
+    const b = mkF({ id: 'b1', title: 'missing bounds check', description: 'delta epsilon zeta', category: 'best-practices' });
+    const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
+    expect(deduplicateFindings(reviews)).toHaveLength(2);
+
+    // The same pair within one category merges
+    const sameCat = [
+      mkReview('m1', 'general', [a]),
+      mkReview('m2', 'general', [{ ...b, category: 'correctness' as const }]),
+    ];
+    expect(deduplicateFindings(sameCat)).toHaveLength(1);
+  });
+});
+
 describe('deduplicateFindings — group coherence', () => {
   it('splits transitive chains whose ends are dissimilar', () => {
     // Identical text, but lines 1 / 8 / 15 with window 5:

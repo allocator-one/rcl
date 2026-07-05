@@ -29,7 +29,7 @@ export interface ConsensusInfo {
   crossModel: boolean;
   elevated: boolean;
   original_severity?: string;
-  elevation: 'none' | 'cross-role' | 'cross-model' | 'unanimous';
+  elevation: 'none' | 'cross-role' | 'cross-model' | 'strong-consensus';
   confidence: number;
   confidenceLabel: 'Very High' | 'High' | 'Medium' | 'Low' | 'Minimal';
   disputed?: boolean;

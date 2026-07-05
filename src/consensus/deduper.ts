@@ -164,6 +164,14 @@ function sameCategory(a: Finding, b: Finding): boolean {
   return a.category === b.category;
 }
 
+/**
+ * Models routinely disagree on category boundaries (correctness vs
+ * best-practices, security vs correctness), so a category mismatch is
+ * evidence that findings differ — not proof. Cross-category pairs may still
+ * merge, but only on stronger text similarity.
+ */
+const CROSS_CATEGORY_FACTOR = 1.5;
+
 function areDuplicates(
   a: Finding,
   b: Finding,
@@ -171,7 +179,6 @@ function areDuplicates(
   lineWindow: number
 ): boolean {
   if (!areSameFile(a, b)) return false;
-  if (!sameCategory(a, b)) return false;
   if (!linesOverlap(a, b, lineWindow)) return false;
   // Never merge findings that clearly reach opposite conclusions — they must
   // surface as separate (disputed) groups rather than silently collapse into
@@ -179,7 +186,10 @@ function areDuplicates(
   // flagged as intra-group disputes by the voter instead.
   if (hasOpposingSentiment(a, b, true)) return false;
 
-  return combinedSimilarity(a, b) >= jaccardThreshold;
+  const threshold = sameCategory(a, b)
+    ? jaccardThreshold
+    : jaccardThreshold * CROSS_CATEGORY_FACTOR;
+  return combinedSimilarity(a, b) >= threshold;
 }
 
 /**

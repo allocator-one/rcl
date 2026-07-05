@@ -34,7 +34,12 @@ Running RCL on this branch's own diff surfaced residual issues; the mechanical o
 - **Empty-field renormalization in `combinedSimilarity`** — a field with no usable tokens on either side is excluded and weights renormalize, so empty descriptions neither grant 0.4 free similarity nor drag down a strong title match.
 - **`modeSeverity` hardening** — unrecognized severities can no longer resolve the mode to `critical` via the `-1` initial count.
 
-Still open (design decisions, not mechanical): single-outlier elevation to max severity, the `unanimous` elevation label misnomer, category-gate under-merging across roles, diversity scaling for large configurations.
+### Follow-up 2: the four design decisions, resolved
+
+- **Single-outlier elevation (§3.5 residual):** elevation now targets the most severe level **at least two members assigned**. `[critical, minor, minor]` stays `minor` (the outlier surfaces as a severity-dispersion dispute); `[critical, critical, minor, minor, minor]` elevates `minor → critical` under high confidence. Severity is never invented and never driven by one reviewer.
+- **`unanimous` label:** renamed to `strong-consensus`. The old name was actively wrong — elevation fires precisely when members *disagree* on severity.
+- **Category gate (§1.3):** softened. Cross-category pairs merge at 1.5× the similarity threshold — a category mismatch is evidence of difference, not proof. Fixes the dogfood run's 4–5 duplicate reports of the same issue categorized differently by different roles.
+- **Diversity scaling (§3.3):** each dimension now saturates at half the fleet (`min(1, unique / max(2, ceil(total / 2)))`). 3-of-6 models scores the same as 2-of-2; below half it still discriminates; the solo-model cap at 0.5 is preserved.
 
 ---
 

@@ -43,6 +43,8 @@ const ROLES = new Map<string, Role>([
   ['bp-1', mkRole('bp-1', ['best-practices'])],
   ['bp-2', mkRole('bp-2', ['best-practices'])],
   ['bp-3', mkRole('bp-3', ['best-practices'])],
+  ['bp-4', mkRole('bp-4', ['best-practices'])],
+  ['bp-5', mkRole('bp-5', ['best-practices'])],
 ]);
 
 describe('computeConsensus — relevance', () => {
@@ -96,33 +98,54 @@ describe('computeConsensus — diversity', () => {
     expect(result!.consensus.confidence).toBeCloseTo(0.5);
     expect(result!.consensus.confidenceLabel).toBe('Medium');
   });
+
+  it('saturates at half the fleet: 3-of-6 models scores like 2-of-2', () => {
+    const f = mkF();
+    const setup = (totalModels: number, flagging: number) => {
+      const reviews = Array.from({ length: totalModels }, (_, i) =>
+        mkReview(`m${i + 1}`, 'general', i < flagging ? [f] : [])
+      );
+      const groups = [
+        mkGroup(
+          f,
+          Array.from({ length: flagging }, (_, i) => ({
+            finding: f,
+            model: `m${i + 1}`,
+            role: 'general',
+          }))
+        ),
+      ];
+      return computeConsensus(groups, reviews, ROLES)[0]!;
+    };
+
+    // Larger fleets must not systematically depress confidence: half the
+    // fleet agreeing earns full model-diversity credit either way
+    expect(setup(6, 3).consensus.confidence).toBeCloseTo(setup(2, 2).consensus.confidence);
+    // ...while below half it still discriminates
+    expect(setup(6, 1).consensus.confidence).toBeLessThan(setup(6, 3).consensus.confidence);
+  });
 });
 
 describe('computeConsensus — severity', () => {
-  function threeReviewerSetup(severities: [Finding['severity'], Finding['severity'], Finding['severity']]) {
+  function reviewerSetup(severities: Array<Finding['severity']>) {
     const findings = severities.map((severity, i) =>
       mkF({ id: `f${i}`, severity, category: 'best-practices' })
     );
-    const reviews = [
-      mkReview('m1', 'bp-1', [findings[0]!]),
-      mkReview('m2', 'bp-2', [findings[1]!]),
-      mkReview('m3', 'bp-3', [findings[2]!]),
-    ];
+    const reviews = findings.map((f, i) => mkReview(`m${i + 1}`, `bp-${i + 1}`, [f]));
     // Representative is the highest-severity member, matching the deduper's choice
     const severityOrder = { critical: 0, important: 1, minor: 2, nitpick: 3 };
     const rep = [...findings].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity])[0]!;
     const groups = [
-      mkGroup(rep, [
-        { finding: findings[0]!, model: 'm1', role: 'bp-1' },
-        { finding: findings[1]!, model: 'm2', role: 'bp-2' },
-        { finding: findings[2]!, model: 'm3', role: 'bp-3' },
-      ]),
+      mkGroup(
+        rep,
+        findings.map((finding, i) => ({ finding, model: `m${i + 1}`, role: `bp-${i + 1}` }))
+      ),
     ];
     return computeConsensus(groups, reviews, ROLES)[0]!;
   }
 
   it('a unanimous nitpick stays a nitpick', () => {
-    const result = threeReviewerSetup(['nitpick', 'nitpick', 'nitpick']);
+    const result = reviewerSetup(['nitpick', 'nitpick', 'nitpick']);
 
     expect(result.consensus.confidenceLabel).toBe('Very High');
     expect(result.severity).toBe('nitpick');
@@ -130,17 +153,28 @@ describe('computeConsensus — severity', () => {
     expect(result.consensus.elevation).toBe('none');
   });
 
-  it('elevates a disputed severity to the max any member assigned, from the mode', () => {
-    const result = threeReviewerSetup(['critical', 'minor', 'minor']);
+  it('a single outlier rating never drives the final severity', () => {
+    const result = reviewerSetup(['critical', 'minor', 'minor']);
 
-    // mode = minor, max = critical; Very High confidence resolves upward
+    // Only one member said critical — the mode (minor) stands, and the
+    // disagreement is surfaced as a dispute instead of an elevation
+    expect(result.severity).toBe('minor');
+    expect(result.consensus.elevated).toBe(false);
+    expect(result.consensus.elevation).toBe('none');
+    expect(result.consensus.disputed).toBe(true);
+    expect(result.consensus.disputeDetails).toContain('severity');
+  });
+
+  it('elevates to the most severe level at least two members assigned', () => {
+    const result = reviewerSetup(['critical', 'critical', 'minor', 'minor', 'minor']);
+
+    // mode = minor (3 votes), but critical has 2 independent supporters;
+    // Very High confidence resolves the disagreement upward
     expect(result.severity).toBe('critical');
     expect(result.consensus.elevated).toBe(true);
     expect(result.consensus.original_severity).toBe('minor');
-    expect(result.consensus.elevation).toBe('unanimous');
-    // A 2+ level severity spread is also surfaced as a dispute
+    expect(result.consensus.elevation).toBe('strong-consensus');
     expect(result.consensus.disputed).toBe(true);
-    expect(result.consensus.disputeDetails).toContain('severity');
   });
 
   it('never elevates past the highest member severity', () => {
