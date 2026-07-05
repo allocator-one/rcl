@@ -21,7 +21,10 @@ function tokenize(s: string): Set<string> {
   return new Set(
     s
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
+      // Unicode-aware: keep letters/numbers in all scripts — an ASCII-only
+      // filter would tokenize non-English findings to empty sets, which
+      // read as identical (similarity 1.0) and merge unrelated findings
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
       .split(/\s+/)
       .filter((t) => t.length > 1 && !STOPWORDS.has(t))
   );
@@ -186,11 +189,12 @@ function areDuplicates(
   // flagged as intra-group disputes by the voter instead.
   if (hasOpposingSentiment(a, b, true)) return false;
 
-  // Cap at 1.0 so a high configured threshold can't silently make
-  // cross-category merges impossible (similarity never exceeds 1.0)
+  // Cap at 0.9 so a high configured threshold can't silently make
+  // cross-category merges (near-)impossible — a bar of 1.0 would only ever
+  // match token-identical findings
   const threshold = sameCategory(a, b)
     ? jaccardThreshold
-    : Math.min(1, jaccardThreshold * CROSS_CATEGORY_FACTOR);
+    : Math.min(0.9, jaccardThreshold * CROSS_CATEGORY_FACTOR);
   return combinedSimilarity(a, b) >= threshold;
 }
 

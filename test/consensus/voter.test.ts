@@ -200,6 +200,25 @@ describe('computeConsensus — severity', () => {
 });
 
 describe('computeConsensus — disputes', () => {
+  it('treats unrecognized severities as least severe, not phantom-critical', () => {
+    // severityIndex(-1) fed into Math.min used to read an unknown severity
+    // as MORE severe than critical, fabricating a dispute nobody voiced
+    const f1 = mkF({ id: 'f1', severity: 'blocker' as Finding['severity'] });
+    const f2 = mkF({ id: 'f2', severity: 'nitpick' });
+    const reviews = [mkReview('m1', 'general', [f1]), mkReview('m2', 'general', [f2])];
+    const groups = [
+      mkGroup(f2, [
+        { finding: f1, model: 'm1', role: 'general' },
+        { finding: f2, model: 'm2', role: 'general' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.consensus.disputed).toBeUndefined();
+    expect(result!.severity).toBe('nitpick');
+  });
+
   it('flags severity dispersion of 2+ levels within a group', () => {
     const f1 = mkF({ id: 'f1', severity: 'critical' });
     const f2 = mkF({ id: 'f2', severity: 'nitpick' });

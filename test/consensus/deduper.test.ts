@@ -110,6 +110,13 @@ describe('jaccardSimilarity tokenization', () => {
   it('keeps negations as signal', () => {
     expect(jaccardSimilarity('no validation here', 'validation here')).toBeLessThan(1.0);
   });
+
+  it('preserves non-ASCII tokens', () => {
+    // ASCII-only tokenization emptied both sets, scoring unrelated
+    // non-English findings as identical (1.0)
+    expect(jaccardSimilarity('验证缺失', '验证缺失')).toBe(1.0);
+    expect(jaccardSimilarity('验证缺失', 'проверка отсутствует')).toBe(0.0);
+  });
 });
 
 describe('combinedSimilarity', () => {
@@ -283,11 +290,19 @@ describe('deduplicateFindings — category soft gate', () => {
     expect(deduplicateFindings(sameCat)).toHaveLength(1);
   });
 
-  it('caps the cross-category threshold at 1.0', () => {
+  it('caps the cross-category threshold at 0.9', () => {
     // A configured threshold of 0.7 would put the cross-category bar at
-    // 1.05 — identical findings must still be able to merge
-    const a = mkF({ category: 'correctness' });
-    const b = mkF({ id: 'b1', category: 'best-practices' });
+    // 1.05 — near-identical (not just token-identical) findings must still
+    // be able to merge
+    const a = mkF({
+      title: 'missing null check on user data values in parser',
+      category: 'correctness',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'missing null check on user data values',
+      category: 'best-practices',
+    });
     const reviews = [mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])];
     expect(deduplicateFindings(reviews, 0.7)).toHaveLength(1);
   });

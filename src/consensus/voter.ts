@@ -13,7 +13,11 @@ const SEVERITY_LEVELS = ['critical', 'important', 'minor', 'nitpick'] as const;
 type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
 
 function severityIndex(s: SeverityLevel): number {
-  return SEVERITY_LEVELS.indexOf(s);
+  const idx = SEVERITY_LEVELS.indexOf(s);
+  // Severities are zod-validated at the parse boundary, but never let an
+  // unrecognized value read as MORE severe than critical (-1 sorts above 0
+  // in Math.min) — treat it as least severe instead.
+  return idx === -1 ? SEVERITY_LEVELS.length - 1 : idx;
 }
 
 function indexToSeverity(i: number): SeverityLevel {
