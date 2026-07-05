@@ -1,22 +1,28 @@
-import type { Finding, ModelReview, ConsensusFinding, ConsensusInfo, DeduplicatedGroup } from './types.js';
+import type { ModelReview, ConsensusFinding, ConsensusInfo, DeduplicatedGroup } from './types.js';
 import type { Role } from '../roles/types.js';
-import { CONFIDENCE_THRESHOLDS } from '../config/defaults.js';
+import { CONFIDENCE_THRESHOLDS, DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import { linesOverlap, hasOpposingSentiment, combinedSimilarity } from './deduper.js';
+
+/** Thresholds shared with the deduper so both layers use the same geometry. */
+export interface ConsensusThresholds {
+  lineWindow: number;
+  jaccardThreshold: number;
+}
 
 const SEVERITY_LEVELS = ['critical', 'important', 'minor', 'nitpick'] as const;
 type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
 
 function severityIndex(s: SeverityLevel): number {
-  return SEVERITY_LEVELS.indexOf(s);
+  const idx = SEVERITY_LEVELS.indexOf(s);
+  // Severities are zod-validated at the parse boundary, but never let an
+  // unrecognized value read as MORE severe than critical (-1 sorts above 0
+  // in Math.min) — treat it as least severe instead.
+  return idx === -1 ? SEVERITY_LEVELS.length - 1 : idx;
 }
 
 function indexToSeverity(i: number): SeverityLevel {
   const clamped = Math.max(0, Math.min(SEVERITY_LEVELS.length - 1, i));
   return SEVERITY_LEVELS[clamped]!;
-}
-
-function bumpSeverity(severity: SeverityLevel, bumps: number): SeverityLevel {
-  const idx = severityIndex(severity);
-  return indexToSeverity(idx - bumps); // lower index = higher severity
 }
 
 function confidenceLabel(
@@ -31,7 +37,13 @@ function confidenceLabel(
 
 /**
  * Layer 2: Diversity score
- * = (unique_models / total_models) * 0.5 + (unique_roles / total_roles) * 0.5
+ * = saturating(unique_models) * 0.5 + saturating(unique_roles) * 0.5
+ *
+ * Each dimension saturates at half the fleet: agreement from ceil(total/2)
+ * reviewers earns full credit, so confidence stays comparable across
+ * configuration sizes (3 of 6 models agreeing is not weaker evidence than
+ * 2 of 2). The denominator is floored at 2 so a run where only one model
+ * succeeded can't score perfect diversity from a single opinion.
  */
 function computeDiversity(
   group: DeduplicatedGroup,
@@ -41,16 +53,20 @@ function computeDiversity(
   const uniqueModels = new Set(group.members.map((m) => m.model));
   const uniqueRoles = new Set(group.members.map((m) => m.role));
 
-  const modelDiversity = allModels.length > 0 ? uniqueModels.size / allModels.length : 0;
-  const roleDiversity = allRoles.length > 0 ? uniqueRoles.size / allRoles.length : 0;
+  const saturating = (unique: number, total: number): number =>
+    Math.min(1, unique / Math.max(2, Math.ceil(total / 2)));
 
-  return modelDiversity * 0.5 + roleDiversity * 0.5;
+  return saturating(uniqueModels.size, allModels.length) * 0.5 +
+    saturating(uniqueRoles.size, allRoles.length) * 0.5;
 }
 
 /**
  * Layer 2: Relevance score
- * For each reporter's role, check if this category is in their focus area.
- * Expected finding from focused role = 0.5, unexpected = 1.0; take mean.
+ * Specialist confirmation raises confidence: if any reporter's role focuses
+ * on this category, the finding is validated by someone whose job it is to
+ * catch it (1.0). A finding flagged only by non-specialists is weaker
+ * evidence (0.5) — if it were real and obvious, the specialist should have
+ * seen it too.
  */
 function computeRelevance(
   group: DeduplicatedGroup,
@@ -58,19 +74,14 @@ function computeRelevance(
 ): number {
   if (group.members.length === 0) return 0.5;
 
-  const scores = group.members.map(({ role: roleName }) => {
+  const category = group.representative.category;
+  const anySpecialist = group.members.some(({ role: roleName }) => {
     const role = roleMap.get(roleName);
-    if (!role) return 1.0; // unknown role — treat as unexpected = high signal
-
-    const category = group.representative.category;
-    const isExpected =
-      role.focus.includes(category) ||
-      role.focus.some((f) => f.includes(category) || category.includes(f));
-
-    return isExpected ? 0.5 : 1.0;
+    if (!role) return false; // unknown role — can't claim specialist confirmation
+    return role.focus.includes(category);
   });
 
-  return scores.reduce((sum, s) => sum + s, 0) / scores.length;
+  return anySpecialist ? 1.0 : 0.5;
 }
 
 /**
@@ -88,15 +99,13 @@ function computeIsolation(
 ): number {
   const category = group.representative.category;
 
-  // Find all reviewers whose role is focused on this category
+  // Find all reviewers whose role is focused on this category (exact match —
+  // substring matching invites false positives as categories grow)
   const relevantReviewers = reviews.filter((r) => {
     if (r.status !== 'success') return false;
     const role = roleMap.get(r.role);
     if (!role) return false;
-    return (
-      role.focus.includes(category) ||
-      role.focus.some((f) => f.includes(category) || category.includes(f))
-    );
+    return role.focus.includes(category);
   });
 
   if (relevantReviewers.length === 0) {
@@ -122,61 +131,130 @@ function computeIsolation(
 }
 
 /**
- * Layer 5: Detect opposing/disputed findings at the same location
+ * Layer 5: Detect disputed findings. All applicable signals are collected —
+ * a severity disagreement must not mask a semantic contradiction.
+ *
+ * 1. Severity dispersion within the group — members that rate the same
+ *    finding 2+ levels apart (e.g. critical vs minor) genuinely disagree.
+ * 2. Opposing conclusions within the group — generic-pair contradictions
+ *    don't veto merging in the deduper, so they can share a group and are
+ *    surfaced here.
+ * 3. An opposing-conclusion group at the same location. Only groups that are
+ *    about the same thing (same category, similar text) can conflict —
+ *    without that gate, stray "missing"/"present" wording in unrelated
+ *    findings on nearby lines produces false disputes.
  */
 function detectDisputes(
   group: DeduplicatedGroup,
-  allGroups: DeduplicatedGroup[]
+  allGroups: DeduplicatedGroup[],
+  thresholds: ConsensusThresholds
 ): { disputed: boolean; disputeDetails?: string } {
   const rep = group.representative;
+  const reasons: string[] = [];
 
-  // Look for another group at the same location with a contradicting title/description
-  for (const other of allGroups) {
-    if (other === group) continue;
-    if (other.representative.file !== rep.file) continue;
+  const indices = group.members.map((m) => severityIndex(m.finding.severity as SeverityLevel));
+  const spread = Math.max(...indices) - Math.min(...indices);
+  if (spread >= 2) {
+    const highest = indexToSeverity(Math.min(...indices));
+    const lowest = indexToSeverity(Math.max(...indices));
+    reasons.push(`Reviewers disagree on severity: rated from ${lowest} to ${highest}`);
+  }
 
-    // Check if they're at the same location
-    const lineDiff = Math.abs(other.representative.startLine - rep.startLine);
-    if (lineDiff > 5) continue;
-
-    // Check for opposing sentiment in titles
-    const aTitle = rep.title.toLowerCase();
-    const bTitle = other.representative.title.toLowerCase();
-
-    const opposingPairs = [
-      ['missing', 'present'],
-      ['no ', 'has '],
-      ['lacks', 'has'],
-      ['not ', 'is '],
-      ['should add', 'should remove'],
-    ];
-
-    for (const [posA, posB] of opposingPairs) {
-      if (
-        (aTitle.includes(posA) && bTitle.includes(posB)) ||
-        (aTitle.includes(posB) && bTitle.includes(posA))
-      ) {
-        return {
-          disputed: true,
-          disputeDetails: `Conflicting finding at same location: "${rep.title}" vs "${other.representative.title}"`,
-        };
+  intraGroup: for (let i = 0; i < group.members.length; i++) {
+    for (let j = i + 1; j < group.members.length; j++) {
+      const a = group.members[i]!.finding;
+      const b = group.members[j]!.finding;
+      if (hasOpposingSentiment(a, b)) {
+        reasons.push(`Members reach opposing conclusions: "${a.title}" vs "${b.title}"`);
+        break intraGroup;
       }
     }
   }
 
-  return { disputed: false };
+  for (const other of allGroups) {
+    if (other === group) continue;
+    if (other.representative.file !== rep.file) continue;
+    if (other.representative.category !== rep.category) continue;
+    if (!linesOverlap(rep, other.representative, thresholds.lineWindow)) continue;
+    if (combinedSimilarity(rep, other.representative) < thresholds.jaccardThreshold) continue;
+
+    if (hasOpposingSentiment(rep, other.representative)) {
+      reasons.push(
+        `Conflicting finding at same location: "${rep.title}" vs "${other.representative.title}"`
+      );
+      break;
+    }
+  }
+
+  if (reasons.length === 0) return { disputed: false };
+  return { disputed: true, disputeDetails: reasons.join('; ') };
+}
+
+function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
+  const counts = new Map<SeverityLevel, number>();
+  for (const m of group.members) {
+    const s = m.finding.severity as SeverityLevel;
+    counts.set(s, (counts.get(s) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Base severity = the most common severity among members (ties go to the
+ * more severe). Agreement speaks to confidence, not severity — a unanimous
+ * nitpick stays a nitpick.
+ */
+function modeSeverity(group: DeduplicatedGroup): SeverityLevel {
+  const counts = severityCounts(group);
+
+  let best: SeverityLevel = group.representative.severity as SeverityLevel;
+  let bestCount = 0;
+  // Iterating critical → nitpick resolves ties toward the more severe level.
+  // bestCount starts at 0 so a level nobody assigned can never win — if no
+  // member severity is recognized, the representative's severity stands.
+  for (const level of SEVERITY_LEVELS) {
+    const count = counts.get(level) ?? 0;
+    if (count > bestCount) {
+      best = level;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/**
+ * The most severe level that at least `minSupport` members assigned, or null.
+ * Used as the elevation ceiling: a single outlier rating never drives the
+ * final severity — it is surfaced as a severity-dispersion dispute instead.
+ */
+function mostSevereWithSupport(
+  group: DeduplicatedGroup,
+  minSupport: number
+): SeverityLevel | null {
+  const counts = severityCounts(group);
+  for (const level of SEVERITY_LEVELS) {
+    if ((counts.get(level) ?? 0) >= minSupport) return level;
+  }
+  return null;
 }
 
 export function computeConsensus(
   groups: DeduplicatedGroup[],
   reviews: ModelReview[],
-  roleMap: Map<string, Role>
+  roleMap: Map<string, Role>,
+  thresholds: Partial<ConsensusThresholds> = {}
 ): ConsensusFinding[] {
+  const resolvedThresholds: ConsensusThresholds = {
+    lineWindow: thresholds.lineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
+    jaccardThreshold: thresholds.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
+  };
   const allModels = [...new Set(reviews.filter((r) => r.status === 'success').map((r) => r.model))];
   const allRoles = [...new Set(reviews.filter((r) => r.status === 'success').map((r) => r.role))];
 
   return groups.map((group): ConsensusFinding => {
     const rep = group.representative;
+    const uniqueModels = [...new Set(group.members.map((m) => m.model))];
+    const uniqueRoles = [...new Set(group.members.map((m) => m.role))];
 
     // Layer 2: Signal scoring
     const diversity = computeDiversity(group, allModels, allRoles);
@@ -188,45 +266,39 @@ export function computeConsensus(
     const clampedConfidence = Math.min(1, Math.max(0, rawConfidence));
     const label = confidenceLabel(clampedConfidence);
 
-    // Layer 4: Severity elevation
-    let elevatedSeverity = rep.severity as SeverityLevel;
-    let bumps = 0;
-    const elevation: ConsensusInfo['elevation'] = (() => {
-      const uniqueModels = new Set(group.members.map((m) => m.model));
-      const uniqueRoles = new Set(group.members.map((m) => m.role));
+    // Layer 4: Severity elevation.
+    // Only applies when members actually disagree on severity, and only up
+    // to the most severe level that at least TWO members assigned — a lone
+    // outlier rating never drives the final severity (it still shows up as
+    // a severity-dispersion dispute). High-confidence agreement resolves a
+    // real disagreement upward; it never invents severity.
+    const baseSeverity = modeSeverity(group);
+    const supportedMax = mostSevereWithSupport(group, 2);
 
-      if (
-        label === 'Very High' &&
-        group.members.length >= 3
+    let elevation: ConsensusInfo['elevation'] = 'none';
+    let finalSeverity = baseSeverity;
+    if (supportedMax !== null && severityIndex(supportedMax) < severityIndex(baseSeverity)) {
+      if (label === 'Very High' && group.members.length >= 3) {
+        finalSeverity = supportedMax;
+        elevation = 'strong-consensus';
+      } else if (
+        (label === 'High' || label === 'Very High') &&
+        uniqueModels.length >= 2 &&
+        uniqueRoles.length >= 2
       ) {
-        bumps = 2;
-        return 'unanimous';
+        finalSeverity = supportedMax;
+        elevation = 'cross-model';
+      } else if ((label === 'High' || label === 'Very High') && uniqueRoles.length >= 2) {
+        finalSeverity = supportedMax;
+        elevation = 'cross-role';
       }
-      if (label === 'High' || label === 'Very High') {
-        if (uniqueModels.size >= 2 && uniqueRoles.size >= 2) {
-          bumps = 1;
-          return 'cross-model';
-        }
-        if (uniqueRoles.size >= 2) {
-          bumps = 1;
-          return 'cross-role';
-        }
-      }
-      return 'none';
-    })();
-
-    if (bumps > 0) {
-      elevatedSeverity = bumpSeverity(rep.severity as SeverityLevel, bumps);
     }
 
-    const elevated = elevatedSeverity !== rep.severity;
-    const original_severity = elevated ? rep.severity : undefined;
+    const elevated = finalSeverity !== baseSeverity;
+    const original_severity = elevated ? baseSeverity : undefined;
 
     // Layer 5: Dispute detection
-    const { disputed, disputeDetails } = detectDisputes(group, groups);
-
-    const uniqueModels = [...new Set(group.members.map((m) => m.model))];
-    const uniqueRoles = [...new Set(group.members.map((m) => m.role))];
+    const { disputed, disputeDetails } = detectDisputes(group, groups, resolvedThresholds);
 
     const consensus: ConsensusInfo = {
       score: group.members.length,
@@ -246,7 +318,7 @@ export function computeConsensus(
 
     return {
       ...rep,
-      severity: elevatedSeverity,
+      severity: finalSeverity,
       consensus,
     };
   });

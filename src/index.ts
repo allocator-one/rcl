@@ -6,7 +6,7 @@ import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { loadConfig } from './config/loader.js';
-import { DEFAULT_MODELS } from './config/defaults.js';
+import { DEFAULT_MODELS, DEFAULT_THRESHOLDS } from './config/defaults.js';
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { chunkDiff } from './prepare/chunker.js';
@@ -288,11 +288,14 @@ async function runReview(target: string, opts: {
     // Deduplicate and compute consensus
     const groups = deduplicateFindings(
       reviews,
-      config.thresholds?.jaccardThreshold ?? 0.3,
-      config.thresholds?.dedupeLineWindow ?? 5
+      config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
+      config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow
     );
 
-    const consensusFindings = computeConsensus(groups, reviews, roleMap);
+    const consensusFindings = computeConsensus(groups, reviews, roleMap, {
+      lineWindow: config.thresholds?.dedupeLineWindow,
+      jaccardThreshold: config.thresholds?.jaccardThreshold,
+    });
 
     const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
     const result: ReviewResult = {

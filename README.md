@@ -150,7 +150,7 @@ thresholds:
   minConsensusScore: 0.4   # 0–1; findings below this are dropped
   minConfidence: 0.2
   dedupeLineWindow: 5      # lines within which findings are merged
-  jaccardThreshold: 0.3    # token-overlap threshold for deduplication
+  jaccardThreshold: 0.3    # weighted title+description similarity threshold for dedup
 
 # Output defaults
 output:
@@ -182,9 +182,9 @@ Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.re
 
 When multiple models and roles review the same diff, their findings are:
 
-1. **Deduplicated** — findings on the same file, overlapping line range, and similar category are grouped together using Jaccard token overlap.
-2. **Scored** — each group receives a consensus score based on three dimensions: reviewer diversity (how many distinct models and roles flagged it), role relevance (whether the reporting role specialises in that finding type), and isolation (what fraction of relevant reviewers flagged it).
-3. **Classified** — groups are assigned a confidence band (Very High → Minimal) and a final severity, with upward elevation when multiple high-relevance roles agree.
+1. **Deduplicated** — findings on the same file and overlapping line range are grouped by weighted title+description token similarity; findings in different categories can still merge, but need stronger similarity (models disagree on category boundaries constantly). Repeats within a single review are collapsed first. Findings that clearly reach opposite conclusions are kept as separate, disputed findings; subtler contradictions merge but are flagged as disputed.
+2. **Scored** — each group receives a consensus score based on three dimensions: reviewer diversity (how many distinct models and roles flagged it, saturating at half the fleet so large configurations aren't penalized), role relevance (whether a role specialised in that finding type confirmed it), and isolation (what fraction of relevant reviewers flagged it).
+3. **Classified** — groups are assigned a confidence band (Very High → Minimal) and a final severity. Severity is the most common rating across reviewers; when reviewers disagree, high-confidence agreement elevates it, but only to a severity at least two reviewers independently assigned — a lone outlier rating is surfaced as a dispute instead.
 4. **Filtered** — groups below `minConsensusScore` or `minConfidence` are dropped.
 
 The result is a ranked list of findings that rewards agreement across independent reviewers and penalises noise from a single model.
