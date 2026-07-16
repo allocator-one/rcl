@@ -343,7 +343,7 @@ async function runReview(target: string, opts: {
     if (opts.post && diff.metadata) {
       const postSpinner = ora('Posting review to GitHub...').start();
       try {
-        await postGitHubReview(result, diff.metadata, config.githubToken);
+        await postGitHubReview(result, diff.metadata, config.githubToken, diff.files);
         postSpinner.succeed('Review posted to GitHub');
       } catch (err) {
         postSpinner.fail(`Failed to post to GitHub: ${String(err)}`);
