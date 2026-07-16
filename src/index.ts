@@ -16,6 +16,7 @@ import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
+import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { printReviewSummary } from './output/terminal.js';
@@ -360,16 +361,12 @@ async function runReview(target: string, opts: {
       }
     }
 
-    // CI mode: exit non-zero if critical/important findings
+    // CI mode: fail on a fully-failed run or on blocking findings
     if (opts.ci) {
-      const blocking = result.findings.filter(
-        (f) => f.severity === 'critical' || f.severity === 'important'
-      );
-      if (blocking.length > 0) {
-        console.error(
-          chalk.red(`\nCI: ${blocking.length} blocking finding(s) found. Exiting with code 1.`)
-        );
-        process.exit(1);
+      const verdict = evaluateCiGate(result);
+      if (verdict.exitCode !== 0) {
+        console.error(chalk.red(`\n${verdict.message}`));
+        process.exit(verdict.exitCode);
       }
     }
   } catch (err) {
