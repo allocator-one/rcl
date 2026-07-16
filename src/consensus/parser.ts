@@ -2,7 +2,10 @@ import { z } from 'zod';
 import type { Finding } from './types.js';
 
 const FindingSchema = z.object({
-  id: z.string(),
+  // Optional with a default: models routinely omit ids, and a required id
+  // used to fail the whole response (and every salvage attempt), silently
+  // dropping the reviewer's entire output. Empty ids are regenerated below.
+  id: z.string().optional().default(''),
   file: z.string(),
   startLine: z.number().int().nonnegative(),
   endLine: z.number().int().nonnegative(),
@@ -23,29 +26,51 @@ export interface ParseResult {
 }
 
 /**
- * Extract JSON from a string that may have prose around it
+ * Candidate JSON extractions from a string that may have prose around it,
+ * in decreasing order of trust: the trimmed text itself, each fenced code
+ * block, then brace/bracket slices. The first candidate that parses wins —
+ * an early return here used to block the fallbacks whenever output merely
+ * STARTED with '{' but had trailing prose.
  */
-function extractJson(text: string): string | null {
-  // Try direct parse first
+function extractJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+
   const trimmed = text.trim();
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    return trimmed;
+    candidates.push(trimmed);
   }
 
-  // Try to find JSON block in markdown code fences
-  const fenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
-  if (fenceMatch) {
-    return fenceMatch[1]!.trim();
+  for (const match of text.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n```/g)) {
+    candidates.push(match[1]!.trim());
   }
 
-  // Try to find the first { ... } block
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start >= 0 && end > start) {
-    return text.slice(start, end + 1);
+  const braceStart = text.indexOf('{');
+  const braceEnd = text.lastIndexOf('}');
+  if (braceStart >= 0 && braceEnd > braceStart) {
+    candidates.push(text.slice(braceStart, braceEnd + 1));
   }
 
-  return null;
+  const bracketStart = text.indexOf('[');
+  const bracketEnd = text.lastIndexOf(']');
+  if (bracketStart >= 0 && bracketEnd > bracketStart) {
+    candidates.push(text.slice(bracketStart, bracketEnd + 1));
+  }
+
+  return candidates;
+}
+
+/** Assign stable, unique ids: empty or colliding ids are regenerated. */
+function normalizeIds(findings: Finding[], model: string, role: string): Finding[] {
+  const modelSlug = model.replace(/[^a-z0-9]/gi, '');
+  const seen = new Set<string>();
+  return findings.map((f, i) => {
+    let id = f.id;
+    if (!id || seen.has(id)) {
+      id = `${modelSlug}_${role}_${i}`;
+    }
+    seen.add(id);
+    return { ...f, id };
+  });
 }
 
 export function parseReviewOutput(
@@ -60,18 +85,32 @@ export function parseReviewOutput(
     return { findings: [], warnings };
   }
 
-  const jsonText = extractJson(rawOutput);
-  if (!jsonText) {
+  const candidates = extractJsonCandidates(rawOutput);
+  if (candidates.length === 0) {
     warnings.push(`${model}/${role}: could not extract JSON from output`);
     return { findings: [], warnings };
   }
 
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch (err) {
-    warnings.push(`${model}/${role}: JSON parse error: ${String(err)}`);
+  let parsedOk = false;
+  let lastParseError: unknown;
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate);
+      parsedOk = true;
+      break;
+    } catch (err) {
+      lastParseError = err;
+    }
+  }
+  if (!parsedOk) {
+    warnings.push(`${model}/${role}: JSON parse error: ${String(lastParseError)}`);
     return { findings: [], warnings };
+  }
+
+  // Some models emit the findings array without the wrapping object.
+  if (Array.isArray(parsed)) {
+    parsed = { findings: parsed };
   }
 
   const result = ReviewOutputSchema.safeParse(parsed);
@@ -97,7 +136,7 @@ export function parseReviewOutput(
 
       if (salvaged.length > 0) {
         warnings.push(`${model}/${role}: schema validation errors (salvaged ${salvaged.length} findings)`);
-        return { findings: salvaged, warnings };
+        return { findings: normalizeIds(salvaged, model, role), warnings };
       }
     }
 
@@ -107,11 +146,8 @@ export function parseReviewOutput(
     return { findings: [], warnings };
   }
 
-  // Assign stable IDs if missing or colliding
-  const findings = result.data.findings.map((f, i) => ({
-    ...f,
-    id: f.id || `${model.replace(/[^a-z0-9]/gi, '')}_${role}_${i}`,
-  })) as Finding[];
-
-  return { findings, warnings };
+  return {
+    findings: normalizeIds(result.data.findings as Finding[], model, role),
+    warnings,
+  };
 }
