@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { computeConsensus } from '../../src/consensus/voter.js';
+import { getRoleByName } from '../../src/roles/builtin.js';
 import type { Finding, ModelReview, DeduplicatedGroup } from '../../src/consensus/types.js';
 import type { Role } from '../../src/roles/types.js';
 
@@ -39,7 +40,10 @@ function mkGroup(
 
 const ROLES = new Map<string, Role>([
   ['security-auditor', mkRole('security-auditor', ['security'])],
-  ['general', mkRole('general', [])],
+  // The REAL builtin general role: isSpecialized false, but its focus lists
+  // every category. A stub with focus [] hid the all-focus gating bug — the
+  // fixture must stay honest (rcl-7mw.9).
+  ['general', getRoleByName('general')!],
   ['bp-1', mkRole('bp-1', ['best-practices'])],
   ['bp-2', mkRole('bp-2', ['best-practices'])],
   ['bp-3', mkRole('bp-3', ['best-practices'])],
@@ -67,6 +71,24 @@ describe('computeConsensus — relevance', () => {
     // diversity 0.5, relevance 0.5, isolation 0/1 (the specialist missed it)
     expect(gen!.consensus.confidence).toBeCloseTo(0.35);
     expect(spec!.consensus.confidence).toBeGreaterThan(gen!.consensus.confidence);
+  });
+
+  it('general reviewers never count as specialists despite their all-category focus', () => {
+    const f = mkF();
+    const reviews = [mkReview('m1', 'general', [f]), mkReview('m2', 'general', [f])];
+    const groups = [
+      mkGroup(f, [
+        { finding: f, model: 'm1', role: 'general' },
+        { finding: f, model: 'm2', role: 'general' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    // diversity 0.75 (2/2 models, 1 role), relevance 0.5 (no specialist
+    // confirmation), isolation 0.5 (no specialized security reviewer ran).
+    // Counting generals as specialists would score this 0.9.
+    expect(result!.consensus.confidence).toBeCloseTo(0.6);
   });
 
   it('uses exact focus matching, not substring matching', () => {

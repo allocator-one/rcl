@@ -62,11 +62,14 @@ function computeDiversity(
 
 /**
  * Layer 2: Relevance score
- * Specialist confirmation raises confidence: if any reporter's role focuses
- * on this category, the finding is validated by someone whose job it is to
- * catch it (1.0). A finding flagged only by non-specialists is weaker
- * evidence (0.5) — if it were real and obvious, the specialist should have
- * seen it too.
+ * Specialist confirmation raises confidence: if any reporter's role is a
+ * specialist focused on this category, the finding is validated by someone
+ * whose job it is to catch it (1.0). A finding flagged only by
+ * non-specialists is weaker evidence (0.5) — if it were real and obvious,
+ * the specialist should have seen it too.
+ *
+ * Gated on isSpecialized: the builtin general role lists every category in
+ * its focus, so focus membership alone would make every group score 1.0.
  */
 function computeRelevance(
   group: DeduplicatedGroup,
@@ -78,7 +81,7 @@ function computeRelevance(
   const anySpecialist = group.members.some(({ role: roleName }) => {
     const role = roleMap.get(roleName);
     if (!role) return false; // unknown role — can't claim specialist confirmation
-    return role.focus.includes(category);
+    return role.isSpecialized && role.focus.includes(category);
   });
 
   return anySpecialist ? 1.0 : 0.5;
@@ -99,13 +102,15 @@ function computeIsolation(
 ): number {
   const category = group.representative.category;
 
-  // Find all reviewers whose role is focused on this category (exact match —
-  // substring matching invites false positives as categories grow)
+  // Find all SPECIALIST reviewers focused on this category (exact match —
+  // substring matching invites false positives as categories grow; the
+  // isSpecialized gate keeps all-focus general reviewers from diluting the
+  // signal on every finding)
   const relevantReviewers = reviews.filter((r) => {
     if (r.status !== 'success') return false;
     const role = roleMap.get(r.role);
     if (!role) return false;
-    return role.focus.includes(category);
+    return role.isSpecialized && role.focus.includes(category);
   });
 
   if (relevantReviewers.length === 0) {
