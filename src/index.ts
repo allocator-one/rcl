@@ -15,6 +15,7 @@ import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
+import { mergeChunkReviews } from './dispatch/merge.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { printReviewSummary } from './output/terminal.js';
@@ -253,37 +254,46 @@ async function runReview(target: string, opts: {
       ...(config.context ?? []),
     ];
 
-    // Build prompts for each assignment × chunk (using first chunk for simplicity, multi-chunk support TBD)
-    const primaryChunk = chunks[0]!;
-    // The spec is NOT passed as a context doc: resolveRoles already embeds
-    // it in the spec-compliance role's system prompt, and duplicating it
-    // doubled that reviewer's token cost.
+    // Fan out every assignment across every chunk so the whole diff is
+    // reviewed, not just the first ~2000 lines. The spec is NOT passed as a
+    // context doc: resolveRoles already embeds it in the spec-compliance
+    // role's system prompt, and duplicating it doubled that reviewer's cost.
+    const chunkAssignments = chunks.flatMap((chunk) =>
+      assignments.map((assignment) => ({ assignment, chunk }))
+    );
     const prompts = await Promise.all(
-      assignments.map((assignment) =>
-        buildPrompt(primaryChunk, assignment.role, {
+      chunkAssignments.map(({ assignment, chunk }) =>
+        buildPrompt(chunk, assignment.role, {
           contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
         })
       )
     );
 
-    spinner.text = `Running ${assignments.length} reviews...`;
+    spinner.text = `Running ${chunkAssignments.length} reviews (${assignments.length} reviewers × ${chunks.length} chunk(s))...`;
     spinner.start();
 
     const startTime = Date.now();
     const completedReviews: ModelReview[] = [];
+    const totalCalls = chunkAssignments.length;
 
-    const reviews = await runReviews(assignments, prompts, {
-      timeoutMs: config.timeout ?? 120_000,
-      maxRetries: config.maxRetries ?? 3,
-      concurrency: config.concurrency ?? 6,
-      onReviewComplete: (review) => {
-        completedReviews.push(review);
-        const done = completedReviews.length;
-        const total = assignments.length;
-        const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
-        spinner.text = `Reviews: ${done}/${total} [${icon} ${review.model}/${review.role}]`;
-      },
-    });
+    const chunkReviews = await runReviews(
+      chunkAssignments.map((ca) => ca.assignment),
+      prompts,
+      {
+        timeoutMs: config.timeout ?? 120_000,
+        maxRetries: config.maxRetries ?? 3,
+        concurrency: config.concurrency ?? 6,
+        onReviewComplete: (review) => {
+          completedReviews.push(review);
+          const done = completedReviews.length;
+          const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
+          spinner.text = `Reviews: ${done}/${totalCalls} [${icon} ${review.model}/${review.role}]`;
+        },
+      }
+    );
+
+    // Collapse per-chunk reviews back to one per (model, role) reviewer.
+    const reviews = mergeChunkReviews(chunkReviews);
 
     spinner.text = 'Computing consensus...';
 
