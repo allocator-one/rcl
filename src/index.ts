@@ -255,11 +255,13 @@ async function runReview(target: string, opts: {
 
     // Build prompts for each assignment × chunk (using first chunk for simplicity, multi-chunk support TBD)
     const primaryChunk = chunks[0]!;
+    // The spec is NOT passed as a context doc: resolveRoles already embeds
+    // it in the spec-compliance role's system prompt, and duplicating it
+    // doubled that reviewer's token cost.
     const prompts = await Promise.all(
       assignments.map((assignment) =>
         buildPrompt(primaryChunk, assignment.role, {
           contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
-          specFile: specPath,
         })
       )
     );

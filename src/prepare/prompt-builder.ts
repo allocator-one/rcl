@@ -27,7 +27,6 @@ function getLanguageAdditions(languages: Set<string>): string {
 
 export interface PromptContext {
   contextFiles?: string[];
-  specFile?: string;
 }
 
 export interface BuiltPrompt {
@@ -91,13 +90,6 @@ export async function buildPrompt(
       if (content) {
         contextDocs.push({ label: filePath, content });
       }
-    }
-  }
-
-  if (context?.specFile) {
-    const content = await loadFile(context.specFile);
-    if (content) {
-      contextDocs.push({ label: `spec: ${context.specFile}`, content });
     }
   }
 

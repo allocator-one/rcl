@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { detectProvider, buildRoleAssignments, buildAssignments } from '../../src/roles/dispatcher.js';
+import { describe, it, expect, vi } from 'vitest';
+import { detectProvider, buildRoleAssignments, buildAssignments, buildExplicitAssignments } from '../../src/roles/dispatcher.js';
 import type { Role } from '../../src/roles/types.js';
 
 describe('detectProvider', () => {
@@ -71,6 +71,32 @@ const specializedC: Role = {
   focus: ['correctness'],
   systemPrompt: 'Check performance.',
 };
+
+describe('buildExplicitAssignments — failure modes', () => {
+  it('throws when every reviewer pair has an unknown role', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() =>
+      buildExplicitAssignments(
+        [
+          { model: 'claude-fable-5', role: 'typo-role' },
+          { model: 'gpt-5.5', role: 'another-typo' },
+        ],
+        new Map([['general', generalRole]])
+      )
+    ).toThrow(/No valid --reviewer pairs/);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
+  it('resolves reviewer-pair role names case-insensitively', () => {
+    const assignments = buildExplicitAssignments(
+      [{ model: 'claude-fable-5', role: 'General' }],
+      new Map([['general', generalRole]])
+    );
+    expect(assignments).toHaveLength(1);
+    expect(assignments[0]!.role.name).toBe('general');
+  });
+});
 
 describe('buildRoleAssignments', () => {
   const primaryModels = ['anthropic/claude-fable-5', 'openai/gpt-5.5'];
