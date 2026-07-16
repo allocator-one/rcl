@@ -2,15 +2,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions } from './adapter.js';
-import { stripKnownProviderPrefix } from './utils.js';
-
-const RETRY_DELAYS = [1000, 2000, 4000];
+import { stripKnownProviderPrefix, isRetryableStatus, retryDelay, sleep } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
-  if (err instanceof Anthropic.APIError) {
-    return err.status === 429 || err.status === 500 || err.status === 503;
-  }
-  return false;
+  return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
 export class AnthropicAdapter implements ReviewAdapter {
@@ -22,6 +17,9 @@ export class AnthropicAdapter implements ReviewAdapter {
   constructor(apiKey?: string) {
     this.client = new Anthropic({
       apiKey: apiKey ?? process.env['ANTHROPIC_API_KEY'],
+      // The adapter's retry loop owns all retries; SDK-internal retries
+      // would multiply wire attempts inside one timeout budget.
+      maxRetries: 0,
     });
   }
 
@@ -39,106 +37,117 @@ export class AnthropicAdapter implements ReviewAdapter {
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
 
-    for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
-      try {
-        // Use tool use for reliable JSON extraction
-        const response = await this.client.messages.create(
-          {
-            model: modelId,
-            max_tokens: 16384,
-            system: systemPrompt,
-            messages: [{ role: 'user', content: userPrompt }],
-            tools: [
-              {
-                name: 'report_findings',
-                description: 'Report code review findings as structured JSON',
-                input_schema: {
-                  type: 'object' as const,
-                  properties: {
-                    findings: {
-                      type: 'array',
-                      items: {
-                        type: 'object',
-                        properties: {
-                          id: { type: 'string' },
-                          file: { type: 'string' },
-                          startLine: { type: 'number' },
-                          endLine: { type: 'number' },
-                          severity: {
-                            type: 'string',
-                            enum: ['critical', 'important', 'minor', 'nitpick'],
+    try {
+      for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
+        try {
+          // Use tool use for reliable JSON extraction
+          const response = await this.client.messages.create(
+            {
+              model: modelId,
+              max_tokens: 16384,
+              system: systemPrompt,
+              messages: [{ role: 'user', content: userPrompt }],
+              tools: [
+                {
+                  name: 'report_findings',
+                  description: 'Report code review findings as structured JSON',
+                  input_schema: {
+                    type: 'object' as const,
+                    properties: {
+                      findings: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          properties: {
+                            id: { type: 'string' },
+                            file: { type: 'string' },
+                            startLine: { type: 'number' },
+                            endLine: { type: 'number' },
+                            severity: {
+                              type: 'string',
+                              enum: ['critical', 'important', 'minor', 'nitpick'],
+                            },
+                            category: {
+                              type: 'string',
+                              enum: ['security', 'correctness', 'best-practices', 'tests', 'api-design'],
+                            },
+                            title: { type: 'string' },
+                            description: { type: 'string' },
+                            suggestedFix: { type: 'string' },
                           },
-                          category: {
-                            type: 'string',
-                            enum: ['security', 'correctness', 'best-practices', 'tests', 'api-design'],
-                          },
-                          title: { type: 'string' },
-                          description: { type: 'string' },
-                          suggestedFix: { type: 'string' },
+                          required: ['id', 'file', 'startLine', 'endLine', 'severity', 'category', 'title', 'description'],
                         },
-                        required: ['id', 'file', 'startLine', 'endLine', 'severity', 'category', 'title', 'description'],
                       },
                     },
+                    required: ['findings'],
                   },
-                  required: ['findings'],
                 },
-              },
-            ],
-            tool_choice: { type: 'any' as const },
-          },
-          { signal: controller.signal }
-        );
+              ],
+              tool_choice: { type: 'any' as const },
+            },
+            { signal: controller.signal }
+          );
 
-        clearTimeout(timeoutHandle);
-
-        // Extract from tool use
-        let rawOutput = '';
-        for (const block of response.content) {
-          if (block.type === 'tool_use' && block.name === 'report_findings') {
-            rawOutput = JSON.stringify(block.input);
-            break;
+          if (response.stop_reason === 'max_tokens') {
+            return {
+              model,
+              role,
+              provider: 'anthropic',
+              findings: [],
+              durationMs: Date.now() - start,
+              status: 'error',
+              error: 'Response truncated at max_tokens; findings would be incomplete',
+            };
           }
-          if (block.type === 'text') {
-            rawOutput += block.text;
+
+          // Extract from tool use
+          let rawOutput = '';
+          for (const block of response.content) {
+            if (block.type === 'tool_use' && block.name === 'report_findings') {
+              rawOutput = JSON.stringify(block.input);
+              break;
+            }
+            if (block.type === 'text') {
+              rawOutput += block.text;
+            }
           }
-        }
 
-        // If tool wasn't used, parse text output
-        const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
-        for (const w of warnings) console.warn(w);
+          // If tool wasn't used, parse text output
+          const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
+          for (const w of warnings) console.warn(w);
 
-        return {
-          model,
-          role,
-          provider: 'anthropic',
-          findings,
-          durationMs: Date.now() - start,
-          status: 'success',
-        };
-      } catch (err) {
-        lastErr = err;
-        if (err instanceof Error && err.name === 'AbortError') {
-          clearTimeout(timeoutHandle);
           return {
             model,
             role,
             provider: 'anthropic',
-            findings: [],
+            findings,
             durationMs: Date.now() - start,
-            status: 'timeout',
-            error: 'Request timed out',
+            status: 'success',
           };
+        } catch (err) {
+          lastErr = err;
+          if (controller.signal.aborted) {
+            return {
+              model,
+              role,
+              provider: 'anthropic',
+              findings: [],
+              durationMs: Date.now() - start,
+              status: 'timeout',
+              error: 'Request timed out',
+            };
+          }
+          if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
+            await sleep(retryDelay(attempt));
+            continue;
+          }
+          break;
         }
-        if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
-          const delay = RETRY_DELAYS[attempt] ?? 4000;
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-        break;
       }
+    } finally {
+      clearTimeout(timeoutHandle);
     }
 
-    clearTimeout(timeoutHandle);
     const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
     return {
       model,

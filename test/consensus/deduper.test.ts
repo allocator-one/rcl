@@ -308,13 +308,56 @@ describe('deduplicateFindings — category soft gate', () => {
   });
 });
 
+describe('deduplicateFindings — line window semantics', () => {
+  it('merges findings exactly window lines apart', () => {
+    // gap of exactly 5 lines with the default window of 5
+    const a = mkF({ id: 'a', startLine: 10, endLine: 10 });
+    const b = mkF({ id: 'b', startLine: 15, endLine: 15 });
+    const reviews = [mkReview('m1', 'r1', [a]), mkReview('m2', 'r2', [b])];
+    expect(deduplicateFindings(reviews)).toHaveLength(1);
+  });
+
+  it('does not merge findings beyond the window — the window is not applied to both sides', () => {
+    // gap of 6 lines: outside window 5. Expanding BOTH ranges by the window
+    // (the old behavior) would have merged anything up to 10 lines apart.
+    const a = mkF({ id: 'a', startLine: 10, endLine: 10 });
+    const b = mkF({ id: 'b', startLine: 16, endLine: 16 });
+    const reviews = [mkReview('m1', 'r1', [a]), mkReview('m2', 'r2', [b])];
+    expect(deduplicateFindings(reviews)).toHaveLength(2);
+  });
+});
+
+describe('deduplicateFindings — same-reviewer collapse', () => {
+  it('collapses same-reviewer variants that a bridge finding pulls into one group', () => {
+    // a1 and a2 (same review) are pairwise dissimilar, but b bridges both.
+    // The final group must count m1/r1 once, or one model's repeated
+    // finding masquerades as independent confirmation.
+    const a1 = mkF({ id: 'a1', title: 'alpha beta gamma three', description: '', severity: 'minor' });
+    const a2 = mkF({ id: 'a2', title: 'delta epsilon zeta three', description: '', severity: 'minor' });
+    const b = mkF({
+      id: 'b',
+      title: 'alpha beta gamma delta epsilon zeta three',
+      description: '',
+      severity: 'critical',
+    });
+    const reviews = [mkReview('m1', 'r1', [a1, a2]), mkReview('m2', 'r2', [b])];
+
+    const groups = deduplicateFindings(reviews);
+
+    expect(groups).toHaveLength(1);
+    const keys = groups[0]!.members.map((m) => `${m.model}::${m.role}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(groups[0]!.members).toHaveLength(2);
+  });
+});
+
 describe('deduplicateFindings — group coherence', () => {
   it('splits transitive chains whose ends are dissimilar', () => {
-    // Identical text, but lines 1 / 8 / 15 with window 5:
+    // Identical text, but lines 1 / 6 / 11 with window 5:
     // A overlaps B, B overlaps C, A does not overlap C
     const a = mkF({ id: 'a', startLine: 1, endLine: 1 });
-    const b = mkF({ id: 'b', startLine: 8, endLine: 8 });
-    const c = mkF({ id: 'c', startLine: 15, endLine: 15 });
+    const b = mkF({ id: 'b', startLine: 6, endLine: 6 });
+    const c = mkF({ id: 'c', startLine: 11, endLine: 11 });
     const reviews = [
       mkReview('m1', 'r1', [a]),
       mkReview('m2', 'r2', [b]),

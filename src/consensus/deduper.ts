@@ -152,11 +152,10 @@ interface TaggedFinding {
 }
 
 export function linesOverlap(a: Finding, b: Finding, window: number): boolean {
-  const aStart = Math.max(0, a.startLine - window);
-  const aEnd = a.endLine + window;
-  const bStart = Math.max(0, b.startLine - window);
-  const bEnd = b.endLine + window;
-  return aStart <= bEnd && bStart <= aEnd;
+  // Ranges overlap when the gap between them is at most `window` lines.
+  // Expanding BOTH ranges by the window would double the configured
+  // distance (a window of 5 merging findings 10 lines apart).
+  return a.startLine - window <= b.endLine && b.startLine - window <= a.endLine;
 }
 
 function areSameFile(a: Finding, b: Finding): boolean {
@@ -284,6 +283,25 @@ function splitIncoherent(
 }
 
 /**
+ * Intra-review dedup is pairwise, so two dissimilar variants from one review
+ * can still land in the same final group via a bridge finding from another
+ * review. Collapse same-(model, role) members so a single reviewer never
+ * counts twice in consensus scores or the elevation support guard.
+ */
+function collapseSameReviewer(members: TaggedFinding[]): TaggedFinding[] {
+  const byReviewer = new Map<string, TaggedFinding[]>();
+  for (const m of members) {
+    const key = `${m.model}::${m.role}`;
+    const existing = byReviewer.get(key) ?? [];
+    existing.push(m);
+    byReviewer.set(key, existing);
+  }
+  return [...byReviewer.values()].map((group) =>
+    group.length === 1 ? group[0]! : chooseRepresentative(group)
+  );
+}
+
+/**
  * A single model sometimes emits the same finding more than once. Collapse
  * those first so repeats can't masquerade as independent confirmations and
  * inflate consensus scores.
@@ -318,9 +336,10 @@ export function deduplicateFindings(
   const result: DeduplicatedGroup[] = [];
   for (const members of groupTagged(all, jaccardThreshold, lineWindow)) {
     for (const coherent of splitIncoherent(members, jaccardThreshold, lineWindow)) {
+      const collapsed = collapseSameReviewer(coherent);
       result.push({
-        representative: chooseRepresentative(coherent).finding,
-        members: coherent,
+        representative: chooseRepresentative(collapsed).finding,
+        members: collapsed,
       });
     }
   }

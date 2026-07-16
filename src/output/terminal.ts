@@ -62,7 +62,10 @@ export function printReviewSummary(result: ReviewResult): void {
   console.log(
     chalk.bold('Raw findings: ') +
       stats.totalRawFindings +
-      chalk.dim(` → deduped to ${stats.totalDeduped}`)
+      chalk.dim(` → deduped to ${stats.totalDeduped}`) +
+      (stats.belowThreshold > 0
+        ? chalk.dim(` (${stats.belowThreshold} below confidence thresholds)`)
+        : '')
   );
   console.log('');
 

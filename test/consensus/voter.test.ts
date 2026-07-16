@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeConsensus } from '../../src/consensus/voter.js';
+import { computeConsensus, applyReportThresholds } from '../../src/consensus/voter.js';
+import { getRoleByName } from '../../src/roles/builtin.js';
 import type { Finding, ModelReview, DeduplicatedGroup } from '../../src/consensus/types.js';
 import type { Role } from '../../src/roles/types.js';
 
@@ -39,7 +40,10 @@ function mkGroup(
 
 const ROLES = new Map<string, Role>([
   ['security-auditor', mkRole('security-auditor', ['security'])],
-  ['general', mkRole('general', [])],
+  // The REAL builtin general role: isSpecialized false, but its focus lists
+  // every category. A stub with focus [] hid the all-focus gating bug — the
+  // fixture must stay honest (rcl-7mw.9).
+  ['general', getRoleByName('general')!],
   ['bp-1', mkRole('bp-1', ['best-practices'])],
   ['bp-2', mkRole('bp-2', ['best-practices'])],
   ['bp-3', mkRole('bp-3', ['best-practices'])],
@@ -67,6 +71,24 @@ describe('computeConsensus — relevance', () => {
     // diversity 0.5, relevance 0.5, isolation 0/1 (the specialist missed it)
     expect(gen!.consensus.confidence).toBeCloseTo(0.35);
     expect(spec!.consensus.confidence).toBeGreaterThan(gen!.consensus.confidence);
+  });
+
+  it('general reviewers never count as specialists despite their all-category focus', () => {
+    const f = mkF();
+    const reviews = [mkReview('m1', 'general', [f]), mkReview('m2', 'general', [f])];
+    const groups = [
+      mkGroup(f, [
+        { finding: f, model: 'm1', role: 'general' },
+        { finding: f, model: 'm2', role: 'general' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    // diversity 0.75 (2/2 models, 1 role), relevance 0.5 (no specialist
+    // confirmation), isolation 0.5 (no specialized security reviewer ran).
+    // Counting generals as specialists would score this 0.9.
+    expect(result!.consensus.confidence).toBeCloseTo(0.6);
   });
 
   it('uses exact focus matching, not substring matching', () => {
@@ -199,6 +221,56 @@ describe('computeConsensus — severity', () => {
   });
 });
 
+describe('computeConsensus — reviewer vote uniqueness', () => {
+  it('counts severity votes per (model, role) reviewer, not per member', () => {
+    // m1 rated the same issue critical twice (bridged variants); m2 and m3
+    // each said minor. Per-member counting would give critical a 2-2 tie
+    // (resolved toward critical); per-reviewer it is 1 critical vs 2 minor.
+    const f1 = mkF({ id: 'x1', severity: 'critical', category: 'best-practices' });
+    const f2 = mkF({ id: 'x2', severity: 'critical', category: 'best-practices' });
+    const f3 = mkF({ id: 'x3', severity: 'minor', category: 'best-practices' });
+    const f4 = mkF({ id: 'x4', severity: 'minor', category: 'best-practices' });
+    const reviews = [
+      mkReview('m1', 'bp-1', [f1, f2]),
+      mkReview('m2', 'bp-2', [f3]),
+      mkReview('m3', 'bp-3', [f4]),
+    ];
+    const groups = [
+      mkGroup(f1, [
+        { finding: f1, model: 'm1', role: 'bp-1' },
+        { finding: f2, model: 'm1', role: 'bp-1' },
+        { finding: f3, model: 'm2', role: 'bp-2' },
+        { finding: f4, model: 'm3', role: 'bp-3' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.severity).toBe('minor');
+    expect(result!.consensus.score).toBe(3);
+    expect(result!.consensus.disputed).toBe(true);
+  });
+
+  it('does not report a single reviewer as "reviewers disagree" over its own variants', () => {
+    // One reviewer emitting bridged critical + nitpick variants of the same
+    // finding: score 1, no plural-disagreement dispute.
+    const f1 = mkF({ id: 'v1', severity: 'critical', category: 'best-practices' });
+    const f2 = mkF({ id: 'v2', severity: 'nitpick', category: 'best-practices' });
+    const reviews = [mkReview('m1', 'bp-1', [f1, f2])];
+    const groups = [
+      mkGroup(f1, [
+        { finding: f1, model: 'm1', role: 'bp-1' },
+        { finding: f2, model: 'm1', role: 'bp-1' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.consensus.score).toBe(1);
+    expect(result!.consensus.disputed).toBeUndefined();
+  });
+});
+
 describe('computeConsensus — disputes', () => {
   it('treats unrecognized severities as least severe, not phantom-critical', () => {
     // severityIndex(-1) fed into Math.min used to read an unknown severity
@@ -313,8 +385,13 @@ describe('computeConsensus — disputes', () => {
     const defaults = computeConsensus(groups, reviews, ROLES);
     expect(defaults[0]!.consensus.disputed).toBeUndefined();
 
-    // ...but inside a configured window of 10 (10 + 10 ≥ 15)
-    const widened = computeConsensus(groups, reviews, ROLES, { lineWindow: 10 });
+    // ...and still outside a window of 10 — the window must not be applied
+    // to both sides (10 + 10 ≥ 15 was the old doubled behavior)
+    const stillOutside = computeConsensus(groups, reviews, ROLES, { lineWindow: 10 });
+    expect(stillOutside[0]!.consensus.disputed).toBeUndefined();
+
+    // ...but inside a configured window of 15
+    const widened = computeConsensus(groups, reviews, ROLES, { lineWindow: 15 });
     expect(widened[0]!.consensus.disputed).toBe(true);
   });
 
@@ -341,5 +418,73 @@ describe('computeConsensus — disputes', () => {
     expect(result!.consensus.disputed).toBe(true);
     expect(result!.consensus.disputeDetails).toContain('severity');
     expect(result!.consensus.disputeDetails).toContain('Conflicting');
+  });
+});
+
+describe('applyReportThresholds', () => {
+  function findingWith(confidence: number, score: number, total: number) {
+    // Minor by default: blocking severities are exempt from threshold drops,
+    // so the base filter tests must use a droppable severity.
+    const f = mkF({ severity: 'minor' });
+    return {
+      ...f,
+      consensus: {
+        score,
+        total,
+        models: ['m1'],
+        roles: ['general'],
+        crossRole: false,
+        crossModel: false,
+        elevated: false,
+        elevation: 'none' as const,
+        confidence,
+        confidenceLabel: 'Medium' as const,
+      },
+    };
+  }
+
+  it('drops findings below the confidence floor', () => {
+    const findings = [findingWith(0.1, 2, 4), findingWith(0.5, 2, 4)];
+    const { kept, dropped } = applyReportThresholds(findings, { minConfidence: 0.2 });
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.consensus.confidence).toBe(0.5);
+    expect(dropped).toBe(1);
+  });
+
+  it('drops findings below the agreement ratio', () => {
+    const findings = [findingWith(0.5, 1, 6), findingWith(0.5, 3, 6)];
+    const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.4 });
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.consensus.score).toBe(3);
+    expect(dropped).toBe(1);
+  });
+
+  it('keeps everything when no thresholds are configured', () => {
+    const findings = [findingWith(0.01, 1, 10)];
+    const { kept, dropped } = applyReportThresholds(findings, {});
+    expect(kept).toHaveLength(1);
+    expect(dropped).toBe(0);
+  });
+
+  it('never drops a blocking finding, even below both thresholds', () => {
+    // A lone-specialist critical (ratio 1/6, low confidence) must survive so
+    // the CI gate can see it — dropping it would greenlight a real critical.
+    const crit = { ...findingWith(0.1, 1, 6), severity: 'critical' as const };
+    const imp = { ...findingWith(0.1, 1, 6), severity: 'important' as const };
+    const { kept } = applyReportThresholds([crit, imp], {
+      minConfidence: 0.2,
+      minConsensusScore: 0.4,
+    });
+    expect(kept).toHaveLength(2);
+  });
+
+  it('still prunes low-signal minor/nitpick findings', () => {
+    const minor = { ...findingWith(0.1, 1, 6), severity: 'minor' as const };
+    const { kept, dropped } = applyReportThresholds([minor], {
+      minConfidence: 0.2,
+      minConsensusScore: 0.4,
+    });
+    expect(kept).toHaveLength(0);
+    expect(dropped).toBe(1);
   });
 });

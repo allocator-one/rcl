@@ -39,14 +39,24 @@ export function buildExplicitAssignments(
   reviewerPairs: ReviewerPair[],
   roleMap: Map<string, Role>
 ): ReviewAssignment[] {
-  return reviewerPairs.flatMap(({ model, role: roleName }) => {
-    const role = roleMap.get(roleName);
+  const assignments = reviewerPairs.flatMap(({ model, role: roleName }) => {
+    const role = roleMap.get(roleName) ?? roleMap.get(roleName.toLowerCase());
     if (!role) {
       console.warn(`Warning: unknown role "${roleName}" in reviewer pair, skipping`);
       return [];
     }
     return [{ model, role, provider: detectProvider(model) }];
   });
+
+  // All pairs invalid must fail loudly — proceeding would run zero reviews
+  // and emit an empty (green-looking) report.
+  if (reviewerPairs.length > 0 && assignments.length === 0) {
+    throw new Error(
+      'No valid --reviewer pairs: every role was unknown. Run `rcl roles list` to see available roles.'
+    );
+  }
+
+  return assignments;
 }
 
 /**

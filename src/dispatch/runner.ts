@@ -1,7 +1,7 @@
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAssignment } from '../roles/types.js';
 import type { BuiltPrompt } from '../prepare/prompt-builder.js';
-import type { AdapterOptions } from './adapter.js';
+import type { AdapterOptions, ReviewAdapter } from './adapter.js';
 import { AnthropicAdapter } from './anthropic.js';
 import { OpenAIAdapter } from './openai.js';
 import { GoogleAdapter } from './google.js';
@@ -13,6 +13,8 @@ export interface RunnerOptions {
   concurrency: number;
   verbose?: boolean;
   onReviewComplete?: (review: ModelReview) => void;
+  /** Test seam / future config-key wiring; defaults to the builtin providers. */
+  adapterFactory?: (provider: string) => ReviewAdapter;
 }
 
 type AdapterCall = {
@@ -23,15 +25,7 @@ type AdapterCall = {
   userPrompt: string;
 };
 
-function getAdapter(provider: string): {
-  review: (
-    model: string,
-    role: string,
-    system: string,
-    user: string,
-    opts: AdapterOptions
-  ) => Promise<ModelReview>;
-} {
+function defaultAdapterFactory(provider: string): ReviewAdapter {
   switch (provider) {
     case 'anthropic':
       return new AnthropicAdapter();
@@ -42,48 +36,6 @@ function getAdapter(provider: string): {
     default:
       return new OpenAICompatAdapter();
   }
-}
-
-async function runBatch(
-  calls: AdapterCall[],
-  options: RunnerOptions
-): Promise<ModelReview[]> {
-  const adapterOpts: AdapterOptions = {
-    timeoutMs: options.timeoutMs,
-    maxRetries: options.maxRetries,
-  };
-
-  const results = await Promise.allSettled(
-    calls.map(async (call) => {
-      const adapter = getAdapter(call.provider);
-      const review = await adapter.review(
-        call.model,
-        call.role,
-        call.systemPrompt,
-        call.userPrompt,
-        adapterOpts
-      );
-      if (review.status === 'error' && options.verbose) {
-        console.error(`${call.model}/${call.role}: ${review.error}`);
-      }
-      options.onReviewComplete?.(review);
-      return review;
-    })
-  );
-
-  return results.map((r, i): ModelReview => {
-    if (r.status === 'fulfilled') return r.value;
-    const call = calls[i]!;
-    return {
-      model: call.model,
-      role: call.role,
-      provider: call.provider,
-      findings: [],
-      durationMs: 0,
-      status: 'error',
-      error: String(r.reason),
-    };
-  });
 }
 
 export async function runReviews(
@@ -103,15 +55,63 @@ export async function runReviews(
     userPrompt: prompts[i]!.userPrompt,
   }));
 
-  // Process in batches of concurrency size
-  const { concurrency } = options;
-  const allResults: ModelReview[] = [];
+  const adapterOpts: AdapterOptions = {
+    timeoutMs: options.timeoutMs,
+    maxRetries: options.maxRetries,
+  };
+  const factory = options.adapterFactory ?? defaultAdapterFactory;
+  // One adapter (and HTTP client) per provider per run; a throwing
+  // constructor is handled per call below so one bad provider doesn't
+  // take down the pool.
+  const adapters = new Map<string, ReviewAdapter>();
 
-  for (let i = 0; i < calls.length; i += concurrency) {
-    const batch = calls.slice(i, i + concurrency);
-    const batchResults = await runBatch(batch, options);
-    allResults.push(...batchResults);
+  const results: ModelReview[] = new Array(calls.length);
+  let nextIndex = 0;
+
+  async function runOne(index: number): Promise<void> {
+    const call = calls[index]!;
+    let review: ModelReview;
+    try {
+      let adapter = adapters.get(call.provider);
+      if (!adapter) {
+        adapter = factory(call.provider);
+        adapters.set(call.provider, adapter);
+      }
+      review = await adapter.review(
+        call.model,
+        call.role,
+        call.systemPrompt,
+        call.userPrompt,
+        adapterOpts
+      );
+    } catch (err) {
+      review = {
+        model: call.model,
+        role: call.role,
+        provider: call.provider,
+        findings: [],
+        durationMs: 0,
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (review.status === 'error' && options.verbose) {
+      console.error(`${call.model}/${call.role}: ${review.error}`);
+    }
+    options.onReviewComplete?.(review);
+    results[index] = review;
   }
 
-  return allResults;
+  // Index-stealing worker pool: each worker pulls the next unclaimed call,
+  // so one slow provider never stalls the rest of the queue.
+  const width = Math.max(1, Math.min(options.concurrency, calls.length));
+  const workers = Array.from({ length: width }, async () => {
+    while (nextIndex < calls.length) {
+      const index = nextIndex++;
+      await runOne(index);
+    }
+  });
+  await Promise.all(workers);
+
+  return results;
 }

@@ -9,41 +9,62 @@ import {
   DEFAULT_CONCURRENCY,
 } from './defaults.js';
 
-const explorer = cosmiconfig('review-council', {
-  searchPlaces: [
-    '.review-council.yml',
-    '.review-council.yaml',
-    '.review-council.json',
-    '.review-council.js',
-    '.review-council.cjs',
-    'review-council.config.js',
-    'review-council.config.cjs',
-  ],
-});
+/**
+ * A config file was found but could not be used. Never silently recover
+ * from this: falling back to defaults would send code to cloud providers
+ * the user may have explicitly configured away from.
+ */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
 
-export async function loadConfig(configPath?: string): Promise<Config> {
+// Declarative formats only. Executable config (.js/.cjs) is deliberately
+// unsupported for discovery: rcl is routinely run inside untrusted
+// checkouts, and search-loading attacker-controlled JS would execute it
+// with the user's API keys in env.
+const SEARCH_PLACES = [
+  '.review-council.yml',
+  '.review-council.yaml',
+  '.review-council.json',
+];
+
+export async function loadConfig(configPath?: string, searchFrom?: string): Promise<Config> {
+  const cwd = searchFrom ?? process.cwd();
+  const explorer = cosmiconfig('review-council', {
+    searchPlaces: SEARCH_PLACES,
+    // 'none' searches only the starting directory — no parent-directory walk
+    // and no global (~/.config) dir, which would otherwise be probed with
+    // cosmiconfig's default executable-config loaders. (stopDir is rejected
+    // alongside a non-'global' strategy, and is unnecessary here.)
+    searchStrategy: 'none',
+  });
+
+  let result;
   try {
-    const result = configPath
+    result = configPath
       ? await explorer.load(configPath)
-      : await explorer.search();
-
-    if (!result || result.isEmpty) {
-      return buildDefaultConfig();
-    }
-
-    const parsed = ConfigSchema.safeParse(result.config);
-    if (!parsed.success) {
-      console.warn('Warning: config validation errors:', parsed.error.format());
-      return buildDefaultConfig();
-    }
-
-    return mergeWithDefaults(parsed.data);
+      : await explorer.search(cwd);
   } catch (err) {
-    if (configPath) {
-      throw new Error(`Failed to load config from ${configPath}: ${String(err)}`);
-    }
+    const source = configPath ?? 'discovered config';
+    throw new ConfigError(`Failed to load config from ${source}: ${String(err)}`);
+  }
+
+  if (!result || result.isEmpty) {
     return buildDefaultConfig();
   }
+
+  const parsed = ConfigSchema.safeParse(result.config);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .join('\n');
+    throw new ConfigError(`Invalid config at ${result.filepath}:\n${issues}`);
+  }
+
+  return mergeWithDefaults(parsed.data);
 }
 
 function buildDefaultConfig(): Config {

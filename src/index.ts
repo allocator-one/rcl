@@ -15,8 +15,10 @@ import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
+import { mergeChunkReviews } from './dispatch/merge.js';
+import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
-import { computeConsensus } from './consensus/voter.js';
+import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
@@ -253,35 +255,46 @@ async function runReview(target: string, opts: {
       ...(config.context ?? []),
     ];
 
-    // Build prompts for each assignment × chunk (using first chunk for simplicity, multi-chunk support TBD)
-    const primaryChunk = chunks[0]!;
+    // Fan out every assignment across every chunk so the whole diff is
+    // reviewed, not just the first ~2000 lines. The spec is NOT passed as a
+    // context doc: resolveRoles already embeds it in the spec-compliance
+    // role's system prompt, and duplicating it doubled that reviewer's cost.
+    const chunkAssignments = chunks.flatMap((chunk) =>
+      assignments.map((assignment) => ({ assignment, chunk }))
+    );
     const prompts = await Promise.all(
-      assignments.map((assignment) =>
-        buildPrompt(primaryChunk, assignment.role, {
+      chunkAssignments.map(({ assignment, chunk }) =>
+        buildPrompt(chunk, assignment.role, {
           contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
-          specFile: specPath,
         })
       )
     );
 
-    spinner.text = `Running ${assignments.length} reviews...`;
+    spinner.text = `Running ${chunkAssignments.length} reviews (${assignments.length} reviewers × ${chunks.length} chunk(s))...`;
     spinner.start();
 
     const startTime = Date.now();
     const completedReviews: ModelReview[] = [];
+    const totalCalls = chunkAssignments.length;
 
-    const reviews = await runReviews(assignments, prompts, {
-      timeoutMs: config.timeout ?? 120_000,
-      maxRetries: config.maxRetries ?? 3,
-      concurrency: config.concurrency ?? 6,
-      onReviewComplete: (review) => {
-        completedReviews.push(review);
-        const done = completedReviews.length;
-        const total = assignments.length;
-        const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
-        spinner.text = `Reviews: ${done}/${total} [${icon} ${review.model}/${review.role}]`;
-      },
-    });
+    const chunkReviews = await runReviews(
+      chunkAssignments.map((ca) => ca.assignment),
+      prompts,
+      {
+        timeoutMs: config.timeout ?? 120_000,
+        maxRetries: config.maxRetries ?? 3,
+        concurrency: config.concurrency ?? 6,
+        onReviewComplete: (review) => {
+          completedReviews.push(review);
+          const done = completedReviews.length;
+          const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
+          spinner.text = `Reviews: ${done}/${totalCalls} [${icon} ${review.model}/${review.role}]`;
+        },
+      }
+    );
+
+    // Collapse per-chunk reviews back to one per (model, role) reviewer.
+    const reviews = mergeChunkReviews(chunkReviews);
 
     spinner.text = 'Computing consensus...';
 
@@ -297,15 +310,24 @@ async function runReview(target: string, opts: {
       jaccardThreshold: config.thresholds?.jaccardThreshold,
     });
 
+    const { kept: reportFindings, dropped: belowThreshold } = applyReportThresholds(
+      consensusFindings,
+      {
+        minConfidence: config.thresholds?.minConfidence,
+        minConsensusScore: config.thresholds?.minConsensusScore,
+      }
+    );
+
     const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
     const result: ReviewResult = {
       reviews,
-      findings: consensusFindings,
+      findings: reportFindings,
       stats: {
         totalReviews: reviews.length,
         successfulReviews: reviews.filter((r) => r.status === 'success').length,
         totalRawFindings,
         totalDeduped: consensusFindings.length,
+        belowThreshold,
         durationMs: Date.now() - startTime,
       },
     };
@@ -332,23 +354,19 @@ async function runReview(target: string, opts: {
     if (opts.post && diff.metadata) {
       const postSpinner = ora('Posting review to GitHub...').start();
       try {
-        await postGitHubReview(result, diff.metadata, config.githubToken);
+        await postGitHubReview(result, diff.metadata, config.githubToken, diff.files);
         postSpinner.succeed('Review posted to GitHub');
       } catch (err) {
         postSpinner.fail(`Failed to post to GitHub: ${String(err)}`);
       }
     }
 
-    // CI mode: exit non-zero if critical/important findings
+    // CI mode: fail on a fully-failed run or on blocking findings
     if (opts.ci) {
-      const blocking = result.findings.filter(
-        (f) => f.severity === 'critical' || f.severity === 'important'
-      );
-      if (blocking.length > 0) {
-        console.error(
-          chalk.red(`\nCI: ${blocking.length} blocking finding(s) found. Exiting with code 1.`)
-        );
-        process.exit(1);
+      const verdict = evaluateCiGate(result);
+      if (verdict.exitCode !== 0) {
+        console.error(chalk.red(`\n${verdict.message}`));
+        process.exit(verdict.exitCode);
       }
     }
   } catch (err) {

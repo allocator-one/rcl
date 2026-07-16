@@ -37,19 +37,24 @@ export function parseGitHubTarget(target: string): GitHubTarget {
 
 export async function fetchPRDiff(
   target: GitHubTarget,
-  token?: string
+  token?: string,
+  octokitClient?: Octokit
 ): Promise<Diff> {
-  const octokit = new Octokit({
-    auth: token ?? process.env['GITHUB_TOKEN'],
-  });
+  const octokit =
+    octokitClient ??
+    new Octokit({
+      auth: token ?? process.env['GITHUB_TOKEN'],
+    });
 
-  const [prResponse, filesResponse] = await Promise.all([
+  const [prResponse, files] = await Promise.all([
     octokit.pulls.get({
       owner: target.owner,
       repo: target.repo,
       pull_number: target.number,
     }),
-    octokit.pulls.listFiles({
+    // paginate: PRs can exceed 100 changed files; a single page would
+    // silently drop the rest of the diff.
+    octokit.paginate(octokit.pulls.listFiles, {
       owner: target.owner,
       repo: target.repo,
       pull_number: target.number,
@@ -58,7 +63,6 @@ export async function fetchPRDiff(
   ]);
 
   const pr = prResponse.data;
-  const files = filesResponse.data;
 
   const metadata: PRMetadata = {
     owner: target.owner,

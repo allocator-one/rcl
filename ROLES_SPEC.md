@@ -326,3 +326,31 @@ No merging, no precedence rules. Pick one.
 3. **Max reviewers** — with N models × M roles, costs scale fast. Should we cap at 6 reviewers by default? Or let the user footgun themselves? Leaning toward warning at >6, hard cap at 12.
 
 4. **Role inheritance** — should custom roles extend built-in ones? e.g., `elixir-security` extends `security-auditor` + adds Elixir-specific checks. Nice-to-have, not MVP.
+
+---
+
+## As-built addendum (v1.4.0)
+
+**Default roles.** The flagless invocation resolves *all* builtin roles
+(general + every specialist), not general alone. Content-dependent roles are
+the exception (below).
+
+**Content-dependent roles are skipped, not silently.** `project-rules` and
+`spec-compliance` are dropped from default/`all` resolution when no rules or
+spec content is found — running them without content wastes a model call and
+invites hallucinated violations. If either is requested by name without its
+content, it still runs but emits a warning (it is not silently skipped).
+
+**Elevation.** See the CONSENSUS_V2_SPEC as-built addendum. Elevation
+resolves disagreements up to the most severe level supported by ≥2 distinct
+`(model, role)` reviewers, at High/Very High confidence; it does not
+"double elevate". The `elevation` field is one of `none`, `cross-role`,
+`cross-model`, or `strong-consensus`.
+
+**Custom role inheritance.** Custom roles that override a builtin inherit
+its `isSpecialized` flag and `description` unless overridden — overriding
+`general` no longer silently demotes it from the primary-model general pass.
+
+**severity_bias.** Declared per-category biases become severity-calibration
+guidance appended to the reviewer's system prompt; they do not alter scoring
+numerically.

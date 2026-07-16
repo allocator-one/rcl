@@ -24,14 +24,23 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
   for (const file of files) {
     const fileLines = countDiffLines(file.patch);
 
-    // If a single file is huge, it gets its own chunk
+    // If a single file is huge, it gets its own chunk — capped, so a
+    // generated 100k-line patch can't blow the model context window.
     if (fileLines > MAX_CHUNK_LINES) {
       if (currentChunk.length > 0) {
         chunks.push(currentChunk);
         currentChunk = [];
         currentLines = 0;
       }
-      chunks.push([file]);
+      const omitted = fileLines - MAX_CHUNK_LINES;
+      console.warn(
+        `Warning: ${file.filename} has a ${fileLines}-line patch; truncating to ${MAX_CHUNK_LINES} lines (${omitted} omitted)`
+      );
+      const truncatedPatch = [
+        ...file.patch.split('\n').slice(0, MAX_CHUNK_LINES),
+        `[rcl: patch truncated after ${MAX_CHUNK_LINES} lines — ${omitted} lines omitted]`,
+      ].join('\n');
+      chunks.push([{ ...file, patch: truncatedPatch }]);
       continue;
     }
 

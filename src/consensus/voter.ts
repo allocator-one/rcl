@@ -62,11 +62,14 @@ function computeDiversity(
 
 /**
  * Layer 2: Relevance score
- * Specialist confirmation raises confidence: if any reporter's role focuses
- * on this category, the finding is validated by someone whose job it is to
- * catch it (1.0). A finding flagged only by non-specialists is weaker
- * evidence (0.5) — if it were real and obvious, the specialist should have
- * seen it too.
+ * Specialist confirmation raises confidence: if any reporter's role is a
+ * specialist focused on this category, the finding is validated by someone
+ * whose job it is to catch it (1.0). A finding flagged only by
+ * non-specialists is weaker evidence (0.5) — if it were real and obvious,
+ * the specialist should have seen it too.
+ *
+ * Gated on isSpecialized: the builtin general role lists every category in
+ * its focus, so focus membership alone would make every group score 1.0.
  */
 function computeRelevance(
   group: DeduplicatedGroup,
@@ -78,7 +81,7 @@ function computeRelevance(
   const anySpecialist = group.members.some(({ role: roleName }) => {
     const role = roleMap.get(roleName);
     if (!role) return false; // unknown role — can't claim specialist confirmation
-    return role.focus.includes(category);
+    return role.isSpecialized && role.focus.includes(category);
   });
 
   return anySpecialist ? 1.0 : 0.5;
@@ -99,13 +102,15 @@ function computeIsolation(
 ): number {
   const category = group.representative.category;
 
-  // Find all reviewers whose role is focused on this category (exact match —
-  // substring matching invites false positives as categories grow)
+  // Find all SPECIALIST reviewers focused on this category (exact match —
+  // substring matching invites false positives as categories grow; the
+  // isSpecialized gate keeps all-focus general reviewers from diluting the
+  // signal on every finding)
   const relevantReviewers = reviews.filter((r) => {
     if (r.status !== 'success') return false;
     const role = roleMap.get(r.role);
     if (!role) return false;
-    return role.focus.includes(category);
+    return role.isSpecialized && role.focus.includes(category);
   });
 
   if (relevantReviewers.length === 0) {
@@ -152,8 +157,10 @@ function detectDisputes(
   const rep = group.representative;
   const reasons: string[] = [];
 
-  const indices = group.members.map((m) => severityIndex(m.finding.severity as SeverityLevel));
-  const spread = Math.max(...indices) - Math.min(...indices);
+  // Dispersion is measured per reviewer (same basis as the vote counts), so
+  // one reviewer's own bridged variants never read as "reviewers disagree".
+  const indices = reviewerSeverities(group).map((s) => severityIndex(s));
+  const spread = indices.length > 0 ? Math.max(...indices) - Math.min(...indices) : 0;
   if (spread >= 2) {
     const highest = indexToSeverity(Math.min(...indices));
     const lowest = indexToSeverity(Math.max(...indices));
@@ -190,10 +197,28 @@ function detectDisputes(
   return { disputed: true, disputeDetails: reasons.join('; ') };
 }
 
+/**
+ * One severity vote per (model, role) reviewer — the deduper collapses
+ * bridged same-reviewer variants, but groups built elsewhere must not let
+ * one reviewer's repeats count as independent support. If a reviewer's
+ * variants disagree, their most severe rating is the vote.
+ */
+function reviewerSeverities(group: DeduplicatedGroup): SeverityLevel[] {
+  const byReviewer = new Map<string, SeverityLevel>();
+  for (const m of group.members) {
+    const key = `${m.model}::${m.role}`;
+    const s = m.finding.severity as SeverityLevel;
+    const existing = byReviewer.get(key);
+    if (existing === undefined || severityIndex(s) < severityIndex(existing)) {
+      byReviewer.set(key, s);
+    }
+  }
+  return [...byReviewer.values()];
+}
+
 function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
   const counts = new Map<SeverityLevel, number>();
-  for (const m of group.members) {
-    const s = m.finding.severity as SeverityLevel;
+  for (const s of reviewerSeverities(group)) {
     counts.set(s, (counts.get(s) ?? 0) + 1);
   }
   return counts;
@@ -238,6 +263,38 @@ function mostSevereWithSupport(
   return null;
 }
 
+/** Report-level filters from config thresholds. */
+export interface ReportThresholds {
+  minConfidence?: number;
+  minConsensusScore?: number;
+}
+
+/**
+ * Drop low-signal findings below the configured confidence floor or
+ * agreement ratio (consensus score over successful reviews). Returns the
+ * kept findings and how many were dropped so reports can say so instead of
+ * silently narrowing.
+ *
+ * Blocking severities (critical/important) are NEVER dropped: a single
+ * specialist flagging a critical is exactly what those roles exist for, and
+ * the CI gate reads the kept list — hiding a blocking finding here would
+ * greenlight it. Thresholds only prune minor/nitpick noise.
+ */
+export function applyReportThresholds(
+  findings: ConsensusFinding[],
+  thresholds: ReportThresholds
+): { kept: ConsensusFinding[]; dropped: number } {
+  const minConfidence = thresholds.minConfidence ?? 0;
+  const minScore = thresholds.minConsensusScore ?? 0;
+  const kept = findings.filter((f) => {
+    if (f.severity === 'critical' || f.severity === 'important') return true;
+    if (f.consensus.confidence < minConfidence) return false;
+    const agreementRatio = f.consensus.total > 0 ? f.consensus.score / f.consensus.total : 1;
+    return agreementRatio >= minScore;
+  });
+  return { kept, dropped: findings.length - kept.length };
+}
+
 export function computeConsensus(
   groups: DeduplicatedGroup[],
   reviews: ModelReview[],
@@ -255,6 +312,7 @@ export function computeConsensus(
     const rep = group.representative;
     const uniqueModels = [...new Set(group.members.map((m) => m.model))];
     const uniqueRoles = [...new Set(group.members.map((m) => m.role))];
+    const uniqueReviewers = new Set(group.members.map((m) => `${m.model}::${m.role}`)).size;
 
     // Layer 2: Signal scoring
     const diversity = computeDiversity(group, allModels, allRoles);
@@ -278,7 +336,7 @@ export function computeConsensus(
     let elevation: ConsensusInfo['elevation'] = 'none';
     let finalSeverity = baseSeverity;
     if (supportedMax !== null && severityIndex(supportedMax) < severityIndex(baseSeverity)) {
-      if (label === 'Very High' && group.members.length >= 3) {
+      if (label === 'Very High' && uniqueReviewers >= 3) {
         finalSeverity = supportedMax;
         elevation = 'strong-consensus';
       } else if (
@@ -301,7 +359,7 @@ export function computeConsensus(
     const { disputed, disputeDetails } = detectDisputes(group, groups, resolvedThresholds);
 
     const consensus: ConsensusInfo = {
-      score: group.members.length,
+      score: uniqueReviewers,
       total: reviews.filter((r) => r.status === 'success').length,
       models: uniqueModels,
       roles: uniqueRoles,
