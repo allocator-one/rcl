@@ -335,8 +335,13 @@ describe('computeConsensus — disputes', () => {
     const defaults = computeConsensus(groups, reviews, ROLES);
     expect(defaults[0]!.consensus.disputed).toBeUndefined();
 
-    // ...but inside a configured window of 10 (10 + 10 ≥ 15)
-    const widened = computeConsensus(groups, reviews, ROLES, { lineWindow: 10 });
+    // ...and still outside a window of 10 — the window must not be applied
+    // to both sides (10 + 10 ≥ 15 was the old doubled behavior)
+    const stillOutside = computeConsensus(groups, reviews, ROLES, { lineWindow: 10 });
+    expect(stillOutside[0]!.consensus.disputed).toBeUndefined();
+
+    // ...but inside a configured window of 15
+    const widened = computeConsensus(groups, reviews, ROLES, { lineWindow: 15 });
     expect(widened[0]!.consensus.disputed).toBe(true);
   });
 

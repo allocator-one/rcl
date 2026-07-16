@@ -152,11 +152,10 @@ interface TaggedFinding {
 }
 
 export function linesOverlap(a: Finding, b: Finding, window: number): boolean {
-  const aStart = Math.max(0, a.startLine - window);
-  const aEnd = a.endLine + window;
-  const bStart = Math.max(0, b.startLine - window);
-  const bEnd = b.endLine + window;
-  return aStart <= bEnd && bStart <= aEnd;
+  // Ranges overlap when the gap between them is at most `window` lines.
+  // Expanding BOTH ranges by the window would double the configured
+  // distance (a window of 5 merging findings 10 lines apart).
+  return a.startLine - window <= b.endLine && b.startLine - window <= a.endLine;
 }
 
 function areSameFile(a: Finding, b: Finding): boolean {
