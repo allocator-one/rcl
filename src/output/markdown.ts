@@ -1,5 +1,6 @@
 import { writeFile } from 'fs/promises';
 import type { ConsensusFinding, ReviewResult } from '../consensus/types.js';
+import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
 
 function severityEmoji(severity: ConsensusFinding['severity']): string {
   return { critical: '🔴', important: '🟡', minor: '🔵', nitpick: '⚪' }[severity];
@@ -8,17 +9,17 @@ function severityEmoji(severity: ConsensusFinding['severity']): string {
 function buildFindingSection(finding: ConsensusFinding, index: number): string {
   const { consensus } = finding;
   const lines: string[] = [
-    `### ${index + 1}. ${severityEmoji(finding.severity)} [${finding.severity.toUpperCase()}] ${finding.title}`,
+    `### ${index + 1}. ${severityEmoji(finding.severity)} [${finding.severity.toUpperCase()}] ${sanitizeInline(finding.title)}`,
     '',
     `**File:** \`${finding.file}\` (lines ${finding.startLine}–${finding.endLine})`,
     `**Category:** ${finding.category}`,
     `**Confidence:** ${consensus.confidenceLabel} (${(consensus.confidence * 100).toFixed(0)}%)`,
     '',
-    finding.description,
+    sanitizeBlock(finding.description),
   ];
 
   if (finding.suggestedFix) {
-    lines.push('', '**Suggested Fix:**', '', '```', finding.suggestedFix, '```');
+    lines.push('', '**Suggested Fix:**', '', fencedCodeBlock(finding.suggestedFix));
   }
 
   lines.push(

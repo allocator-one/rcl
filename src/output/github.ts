@@ -1,6 +1,7 @@
 import { Octokit } from '@octokit/rest';
 import type { ConsensusFinding, ReviewResult } from '../consensus/types.js';
 import type { PRMetadata } from '../resolver/types.js';
+import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
 
 function buildCommentBody(finding: ConsensusFinding): string {
   const { consensus } = finding;
@@ -12,13 +13,13 @@ function buildCommentBody(finding: ConsensusFinding): string {
   }[finding.severity];
 
   const lines: string[] = [
-    `### ${severityEmoji} ${finding.severity.toUpperCase()}: ${finding.title}`,
+    `### ${severityEmoji} ${finding.severity.toUpperCase()}: ${sanitizeInline(finding.title)}`,
     '',
-    finding.description,
+    sanitizeBlock(finding.description),
   ];
 
   if (finding.suggestedFix) {
-    lines.push('', '**Suggested Fix:**', finding.suggestedFix);
+    lines.push('', '**Suggested Fix:**', fencedCodeBlock(finding.suggestedFix));
   }
 
   lines.push(
@@ -71,7 +72,7 @@ function buildSummaryComment(result: ReviewResult): string {
       `- ${icon} **${review.model}** / ${review.role}: ` +
         (review.status === 'success'
           ? `${review.findings.length} findings`
-          : review.error ?? review.status)
+          : sanitizeInline(review.error ?? review.status))
     );
   }
 
