@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripKnownProviderPrefix } from '../../src/dispatch/utils.js';
+import { stripKnownProviderPrefix, isRetryableStatus } from '../../src/dispatch/utils.js';
 
 describe('stripKnownProviderPrefix', () => {
   it('strips anthropic/ prefix', () => {
@@ -32,5 +32,23 @@ describe('stripKnownProviderPrefix', () => {
 
   it('strips anthropic/ prefix leaving empty string', () => {
     expect(stripKnownProviderPrefix('anthropic/')).toBe('');
+  });
+
+  it('strips openai-compat/ prefix', () => {
+    expect(stripKnownProviderPrefix('openai-compat/llama3.2')).toBe('llama3.2');
+  });
+});
+
+describe('isRetryableStatus', () => {
+  it.each([429, 500, 502, 503, 504, 529])('retries %i', (status) => {
+    expect(isRetryableStatus(status)).toBe(true);
+  });
+
+  it.each([400, 401, 403, 404, 422])('does not retry %i', (status) => {
+    expect(isRetryableStatus(status)).toBe(false);
+  });
+
+  it('does not retry undefined status', () => {
+    expect(isRetryableStatus(undefined)).toBe(false);
   });
 });

@@ -2,8 +2,11 @@ import OpenAI from 'openai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions } from './adapter.js';
+import { stripKnownProviderPrefix, isRetryableStatus, retryDelay, sleep } from './utils.js';
 
-const RETRY_DELAYS = [1000, 2000, 4000];
+function isRetryable(err: unknown): boolean {
+  return err instanceof OpenAI.APIError && isRetryableStatus(err.status);
+}
 
 /**
  * Generic OpenAI-compatible adapter for local models (Ollama, LM Studio, etc.)
@@ -24,6 +27,9 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     this.client = new OpenAI({
       apiKey: opts?.apiKey ?? process.env['OPENAI_COMPAT_API_KEY'] ?? 'local',
       baseURL: opts?.baseUrl ?? process.env['OPENAI_COMPAT_BASE_URL'] ?? 'http://localhost:11434/v1',
+      // The adapter's retry loop owns all retries; SDK-internal retries
+      // would multiply wire attempts inside one timeout budget.
+      maxRetries: 0,
     });
     this.useJsonMode = opts?.useJsonMode ?? true;
   }
@@ -40,70 +46,78 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
 
     let lastErr: unknown = new Error('no attempts made');
+    const modelId = stripKnownProviderPrefix(model);
 
-    for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
-      try {
-        const createParams: Parameters<typeof this.client.chat.completions.create>[0] = {
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          max_tokens: 4096,
-        };
+    try {
+      for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
+        try {
+          const createParams: Parameters<typeof this.client.chat.completions.create>[0] = {
+            model: modelId,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            max_tokens: 16384,
+          };
 
-        if (this.useJsonMode) {
-          createParams.response_format = { type: 'json_object' };
-        }
+          if (this.useJsonMode) {
+            createParams.response_format = { type: 'json_object' };
+          }
 
-        const response = await this.client.chat.completions.create(
-          createParams,
-          { signal: controller.signal }
-        ) as OpenAI.ChatCompletion;
+          const response = await this.client.chat.completions.create(
+            createParams,
+            { signal: controller.signal }
+          ) as OpenAI.ChatCompletion;
 
-        clearTimeout(timeoutHandle);
+          const choice = response.choices[0];
+          if (choice?.finish_reason === 'length') {
+            return {
+              model,
+              role,
+              provider: 'openai-compat',
+              findings: [],
+              durationMs: Date.now() - start,
+              status: 'error',
+              error: 'Response truncated at token limit; findings would be incomplete',
+            };
+          }
 
-        const rawOutput = response.choices[0]?.message?.content ?? '';
-        const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
-        for (const w of warnings) console.warn(w);
+          const rawOutput = choice?.message?.content ?? '';
+          const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
+          for (const w of warnings) console.warn(w);
 
-        return {
-          model,
-          role,
-          provider: 'openai-compat',
-          findings,
-          durationMs: Date.now() - start,
-          status: 'success',
-        };
-      } catch (err) {
-        lastErr = err;
-        if (err instanceof Error && err.name === 'AbortError') {
-          clearTimeout(timeoutHandle);
           return {
             model,
             role,
             provider: 'openai-compat',
-            findings: [],
+            findings,
             durationMs: Date.now() - start,
-            status: 'timeout',
-            error: 'Request timed out',
+            status: 'success',
           };
+        } catch (err) {
+          lastErr = err;
+          if (controller.signal.aborted) {
+            return {
+              model,
+              role,
+              provider: 'openai-compat',
+              findings: [],
+              durationMs: Date.now() - start,
+              status: 'timeout',
+              error: 'Request timed out',
+            };
+          }
+          if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
+            await sleep(retryDelay(attempt));
+            continue;
+          }
+          break;
         }
-
-        if (
-          err instanceof OpenAI.APIError &&
-          (err.status === 429 || err.status === 500 || err.status === 503) &&
-          attempt < (options.maxRetries ?? 3)
-        ) {
-          const delay = RETRY_DELAYS[attempt] ?? 4000;
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-        break;
       }
+    } finally {
+      clearTimeout(timeoutHandle);
     }
 
-    clearTimeout(timeoutHandle);
     const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
     return {
       model,
