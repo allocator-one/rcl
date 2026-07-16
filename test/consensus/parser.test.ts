@@ -89,6 +89,21 @@ describe('parseReviewOutput — untrusted output robustness', () => {
     expect(new Set(result.findings.map((f) => f.id)).size).toBe(2);
   });
 
+  it('regenerates a unique id even when the model spoofs rcl\'s own id scheme', () => {
+    // First finding literally carries the id the second would be assigned;
+    // the regenerated id must skip past the collision.
+    const raw = JSON.stringify({
+      findings: [
+        { ...VALID_FINDING, id: 'modelx_general_1' },
+        { ...VALID_FINDING, id: '', title: 'Second issue' },
+      ],
+    });
+    const result = parseReviewOutput(raw, 'model-x', 'general');
+
+    expect(result.findings).toHaveLength(2);
+    expect(new Set(result.findings.map((f) => f.id)).size).toBe(2);
+  });
+
   it('recovers a JSON object followed by trailing prose', () => {
     const raw = `{"findings": [${JSON.stringify({ ...VALID_FINDING, id: 'a' })}]}\n\nNote: I also noticed the file could use refactoring.`;
     const result = parseReviewOutput(raw, 'model', 'role');

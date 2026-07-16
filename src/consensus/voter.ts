@@ -157,8 +157,10 @@ function detectDisputes(
   const rep = group.representative;
   const reasons: string[] = [];
 
-  const indices = group.members.map((m) => severityIndex(m.finding.severity as SeverityLevel));
-  const spread = Math.max(...indices) - Math.min(...indices);
+  // Dispersion is measured per reviewer (same basis as the vote counts), so
+  // one reviewer's own bridged variants never read as "reviewers disagree".
+  const indices = reviewerSeverities(group).map((s) => severityIndex(s));
+  const spread = indices.length > 0 ? Math.max(...indices) - Math.min(...indices) : 0;
   if (spread >= 2) {
     const highest = indexToSeverity(Math.min(...indices));
     const lowest = indexToSeverity(Math.max(...indices));
@@ -195,11 +197,13 @@ function detectDisputes(
   return { disputed: true, disputeDetails: reasons.join('; ') };
 }
 
-function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
-  // One vote per (model, role) reviewer — the deduper collapses bridged
-  // same-reviewer variants, but groups built elsewhere must not let one
-  // reviewer's repeats count as independent support. If a reviewer's
-  // variants disagree, their most severe rating is the vote.
+/**
+ * One severity vote per (model, role) reviewer — the deduper collapses
+ * bridged same-reviewer variants, but groups built elsewhere must not let
+ * one reviewer's repeats count as independent support. If a reviewer's
+ * variants disagree, their most severe rating is the vote.
+ */
+function reviewerSeverities(group: DeduplicatedGroup): SeverityLevel[] {
   const byReviewer = new Map<string, SeverityLevel>();
   for (const m of group.members) {
     const key = `${m.model}::${m.role}`;
@@ -209,8 +213,12 @@ function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
       byReviewer.set(key, s);
     }
   }
+  return [...byReviewer.values()];
+}
+
+function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
   const counts = new Map<SeverityLevel, number>();
-  for (const s of byReviewer.values()) {
+  for (const s of reviewerSeverities(group)) {
     counts.set(s, (counts.get(s) ?? 0) + 1);
   }
   return counts;
@@ -262,10 +270,15 @@ export interface ReportThresholds {
 }
 
 /**
- * Drop findings below the configured confidence floor or below the
- * configured agreement ratio (consensus score over successful reviews).
- * Returns the kept findings and how many were dropped so reports can say
- * so instead of silently narrowing.
+ * Drop low-signal findings below the configured confidence floor or
+ * agreement ratio (consensus score over successful reviews). Returns the
+ * kept findings and how many were dropped so reports can say so instead of
+ * silently narrowing.
+ *
+ * Blocking severities (critical/important) are NEVER dropped: a single
+ * specialist flagging a critical is exactly what those roles exist for, and
+ * the CI gate reads the kept list — hiding a blocking finding here would
+ * greenlight it. Thresholds only prune minor/nitpick noise.
  */
 export function applyReportThresholds(
   findings: ConsensusFinding[],
@@ -274,6 +287,7 @@ export function applyReportThresholds(
   const minConfidence = thresholds.minConfidence ?? 0;
   const minScore = thresholds.minConsensusScore ?? 0;
   const kept = findings.filter((f) => {
+    if (f.severity === 'critical' || f.severity === 'important') return true;
     if (f.consensus.confidence < minConfidence) return false;
     const agreementRatio = f.consensus.total > 0 ? f.consensus.score / f.consensus.total : 1;
     return agreementRatio >= minScore;

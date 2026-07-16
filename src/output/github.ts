@@ -52,6 +52,10 @@ export function commentableLines(patch: string): Set<number> {
       newLine = parseInt(header[1]!, 10);
       continue;
     }
+    if (row.startsWith('\\')) {
+      // "\ No newline at end of file" — a marker, not a real line
+      continue;
+    }
     if (row.startsWith('+')) {
       lines.add(newLine);
       newLine++;

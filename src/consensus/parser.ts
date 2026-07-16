@@ -66,7 +66,13 @@ function normalizeIds(findings: Finding[], model: string, role: string): Finding
   return findings.map((f, i) => {
     let id = f.id;
     if (!id || seen.has(id)) {
-      id = `${modelSlug}_${role}_${i}`;
+      // Regenerate until unique — a model could emit a literal id that
+      // collides with our own `${slug}_${role}_${i}` scheme.
+      let suffix = i;
+      do {
+        id = `${modelSlug}_${role}_${suffix}`;
+        suffix++;
+      } while (seen.has(id));
     }
     seen.add(id);
     return { ...f, id };

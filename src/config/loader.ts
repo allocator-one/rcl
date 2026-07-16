@@ -35,8 +35,11 @@ export async function loadConfig(configPath?: string, searchFrom?: string): Prom
   const cwd = searchFrom ?? process.cwd();
   const explorer = cosmiconfig('review-council', {
     searchPlaces: SEARCH_PLACES,
-    // No parent-directory walk: only the directory rcl runs from.
-    stopDir: cwd,
+    // 'none' searches only the starting directory — no parent-directory walk
+    // and no global (~/.config) dir, which would otherwise be probed with
+    // cosmiconfig's default executable-config loaders. (stopDir is rejected
+    // alongside a non-'global' strategy, and is unnecessary here.)
+    searchStrategy: 'none',
   });
 
   let result;

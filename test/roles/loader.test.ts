@@ -100,4 +100,25 @@ describe('buildCustomRole', () => {
     expect(role.isSpecialized).toBe(true);
     expect(role.description).toBe('Custom role: perf-hawk');
   });
+
+  it('inherits from a builtin matched case-insensitively and takes its canonical name', () => {
+    const role = buildCustomRole({ name: 'Security-Auditor', systemPrompt: 'custom' });
+    expect(role.name).toBe('security-auditor');
+    expect(role.isSpecialized).toBe(true);
+  });
+});
+
+describe('resolveRoles — case-variant custom override', () => {
+  it('replaces the builtin instead of coexisting with it', async () => {
+    const config: Config = {
+      customRoles: [{ name: 'Security-Auditor', systemPrompt: 'my custom security prompt' }],
+    };
+    const roles = await resolveRoles(config, ['all'], RULES, SPEC);
+
+    const securityRoles = roles.filter((r) => r.name === 'security-auditor');
+    expect(securityRoles).toHaveLength(1);
+    expect(securityRoles[0]!.systemPrompt).toBe('my custom security prompt');
+    // no duplicate under the mixed-case key
+    expect(roles.filter((r) => r.name === 'Security-Auditor')).toHaveLength(0);
+  });
 });

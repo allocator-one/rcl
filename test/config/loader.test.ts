@@ -52,6 +52,17 @@ describe('loadConfig', () => {
     expect(config.models).toEqual([...DEFAULT_MODELS]);
   });
 
+  it('ignores an executable config even at the search root', async () => {
+    // searchStrategy 'none' must not fall back to cosmiconfig's global
+    // (~/.config) executable-config probing either.
+    await writeFile(
+      join(dir, 'review-council.config.js'),
+      'module.exports = { models: ["evil/model"] };'
+    );
+    const config = await loadConfig(undefined, dir);
+    expect(config.models).toEqual([...DEFAULT_MODELS]);
+  });
+
   it('rejects invalid config instead of falling back to cloud defaults', async () => {
     await writeFile(
       join(dir, '.review-council.json'),

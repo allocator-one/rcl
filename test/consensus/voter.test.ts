@@ -250,6 +250,25 @@ describe('computeConsensus — reviewer vote uniqueness', () => {
     expect(result!.consensus.score).toBe(3);
     expect(result!.consensus.disputed).toBe(true);
   });
+
+  it('does not report a single reviewer as "reviewers disagree" over its own variants', () => {
+    // One reviewer emitting bridged critical + nitpick variants of the same
+    // finding: score 1, no plural-disagreement dispute.
+    const f1 = mkF({ id: 'v1', severity: 'critical', category: 'best-practices' });
+    const f2 = mkF({ id: 'v2', severity: 'nitpick', category: 'best-practices' });
+    const reviews = [mkReview('m1', 'bp-1', [f1, f2])];
+    const groups = [
+      mkGroup(f1, [
+        { finding: f1, model: 'm1', role: 'bp-1' },
+        { finding: f2, model: 'm1', role: 'bp-1' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.consensus.score).toBe(1);
+    expect(result!.consensus.disputed).toBeUndefined();
+  });
 });
 
 describe('computeConsensus — disputes', () => {
@@ -404,7 +423,9 @@ describe('computeConsensus — disputes', () => {
 
 describe('applyReportThresholds', () => {
   function findingWith(confidence: number, score: number, total: number) {
-    const f = mkF();
+    // Minor by default: blocking severities are exempt from threshold drops,
+    // so the base filter tests must use a droppable severity.
+    const f = mkF({ severity: 'minor' });
     return {
       ...f,
       consensus: {
@@ -443,5 +464,27 @@ describe('applyReportThresholds', () => {
     const { kept, dropped } = applyReportThresholds(findings, {});
     expect(kept).toHaveLength(1);
     expect(dropped).toBe(0);
+  });
+
+  it('never drops a blocking finding, even below both thresholds', () => {
+    // A lone-specialist critical (ratio 1/6, low confidence) must survive so
+    // the CI gate can see it — dropping it would greenlight a real critical.
+    const crit = { ...findingWith(0.1, 1, 6), severity: 'critical' as const };
+    const imp = { ...findingWith(0.1, 1, 6), severity: 'important' as const };
+    const { kept } = applyReportThresholds([crit, imp], {
+      minConfidence: 0.2,
+      minConsensusScore: 0.4,
+    });
+    expect(kept).toHaveLength(2);
+  });
+
+  it('still prunes low-signal minor/nitpick findings', () => {
+    const minor = { ...findingWith(0.1, 1, 6), severity: 'minor' as const };
+    const { kept, dropped } = applyReportThresholds([minor], {
+      minConfidence: 0.2,
+      minConsensusScore: 0.4,
+    });
+    expect(kept).toHaveLength(0);
+    expect(dropped).toBe(1);
   });
 });

@@ -44,11 +44,15 @@ export function buildCustomRole(config: {
 }): Role {
   // If it extends a builtin, start from that base. Dispatch-relevant fields
   // inherit from the base: forcing isSpecialized on an override of `general`
-  // would silently remove the baseline pass from all primary models.
-  const base = getRoleByName(config.name);
+  // would silently remove the baseline pass from all primary models. Matched
+  // case-insensitively so "Security-Auditor" overrides the builtin rather
+  // than coexisting with it as a duplicate reviewer.
+  const base = getRoleByName(config.name) ?? getRoleByName(config.name.toLowerCase());
 
   return {
-    name: config.name,
+    // Canonical builtin name when overriding, so the override replaces the
+    // builtin under one map key instead of coexisting as a duplicate.
+    name: base?.name ?? config.name,
     description: base?.description ?? `Custom role: ${config.name}`,
     isSpecialized: base?.isSpecialized ?? true,
     focus: config.focus ?? base?.focus ?? ['best-practices'],
@@ -73,10 +77,12 @@ export async function resolveRoles(
     roles.set(role.name, role);
   }
 
-  // Add custom roles from config (override builtins if same name)
+  // Add custom roles from config (override builtins of the same name,
+  // case-insensitively — key by the built role's canonical name)
   if (config.customRoles) {
     for (const customConfig of config.customRoles) {
-      roles.set(customConfig.name, buildCustomRole(customConfig));
+      const role = buildCustomRole(customConfig);
+      roles.set(role.name, role);
     }
   }
 

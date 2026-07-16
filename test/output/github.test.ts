@@ -22,6 +22,19 @@ describe('commentableLines', () => {
     const patch = '@@ -1 +1 @@\n+one\n@@ -10,0 +10,2 @@\n+ten\n+eleven';
     expect([...commentableLines(patch)].sort((a, b) => a - b)).toEqual([1, 10, 11]);
   });
+
+  it('ignores the "\\ No newline at end of file" marker', () => {
+    const patch = [
+      '@@ -1,3 +1,3 @@',
+      ' function f() {',
+      '-  return 1',
+      '+  return 2',
+      ' }',
+      '\\ No newline at end of file',
+    ].join('\n');
+    // must be {1,2,3}, not {1,2,3,4} — line 4 does not exist in the new file
+    expect([...commentableLines(patch)].sort((a, b) => a - b)).toEqual([1, 2, 3]);
+  });
 });
 
 function finding(over: Partial<ConsensusFinding> = {}): ConsensusFinding {
