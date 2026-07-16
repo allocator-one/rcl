@@ -169,3 +169,56 @@ This requires the review prompt to allow reviewers to emit "no issue" annotation
 | Security + bug-hunter disagree | 2/12 = 17% | DISPUTED (flagged for human review) |
 
 The v1 denominator problem (dividing by total reviewers) made specialist findings look weak. v2 scores by diversity + relevance + isolation, which naturally handles the N-reviewer scaling problem.
+
+---
+
+## As-built addendum (v1.4.0)
+
+The shipped implementation diverges from the design above on several
+load-bearing points. Where the two disagree, the code is authoritative;
+this section records the deviations (rationale in `DEDUP_CRITIQUE.md`).
+
+**Line range overlap.** Findings merge when the *gap* between their line
+ranges is at most `dedupeLineWindow` (default 5). The window is applied
+once, not to both ranges — an earlier build expanded both sides, so a
+configured window of 5 behaved as 10.
+
+**Diversity.** Each dimension saturates at half the fleet with a floor of 2:
+`min(1, unique / max(2, ceil(total/2)))`, averaged over models and roles.
+Agreement from half the fleet earns full credit (3-of-6 models scores like
+2-of-2), and a single successful reviewer can never score full diversity.
+This replaces the plain `unique/total` formula.
+
+**Relevance.** Specialist confirmation is gated on `role.isSpecialized`,
+not on focus membership alone: the builtin `general` role lists every
+category in its focus, so focus-only matching made every group score 1.0.
+A group confirmed by a specialist focused on its category scores 1.0;
+otherwise 0.5.
+
+**Isolation.** "Relevant reviewers" are specialist reviewers focused on the
+category (same `isSpecialized` gate), so all-focus general reviewers no
+longer dilute the signal on every finding.
+
+**Severity elevation.** Elevation only *resolves an existing disagreement*
+upward — it never invents severity. Base severity is the mode of member
+severities (ties to the more severe); elevation raises it at most to the
+most severe level that ≥2 *distinct (model, role) reviewers* assigned, and
+only at High/Very High confidence. A lone outlier rating never drives the
+final severity — it surfaces as a severity-dispersion dispute. Contrary to
+the original "severity NEVER bumps down", the mode can sit below a single
+member's higher rating (that member's rating becomes the dispute, not the
+result).
+
+**Vote uniqueness.** Consensus score, severity counts, and the elevation
+support guard all count unique `(model, role)` reviewers. The deduper
+collapses same-reviewer variants that a bridge finding pulls into one group,
+so a single model's repeats can't masquerade as independent confirmation.
+
+**Layer 5 disputes.** "Reviewed and approved" annotations were not
+implemented; disputes are inferred from severity dispersion (≥2 levels) and
+opposing-sentiment heuristics (intra-group, and across same-location groups
+gated on same category + text similarity).
+
+**Report thresholds.** `minConfidence` and `minConsensusScore` filter the
+reported findings (findings below the confidence floor or agreement ratio
+are dropped; the count is surfaced in stats and the terminal summary).
