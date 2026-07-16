@@ -47,6 +47,24 @@ async function loadFile(path: string): Promise<string | null> {
   }
 }
 
+/**
+ * Roles can declare a severity bias per category (e.g. security 1.2).
+ * The scoring pipeline is deliberately bias-free — the bias becomes
+ * calibration guidance in the reviewer's prompt instead.
+ */
+function buildSeverityBiasNote(bias?: Record<string, number>): string | null {
+  if (!bias) return null;
+  const parts = Object.entries(bias)
+    .filter(([, factor]) => factor !== 1)
+    .map(([category, factor]) =>
+      factor > 1
+        ? `err toward the MORE severe rating for ${category} findings`
+        : `err toward the LESS severe rating for ${category} findings`
+    );
+  if (parts.length === 0) return null;
+  return `Severity calibration: when torn between two adjacent severity levels, ${parts.join('; ')}.`;
+}
+
 export async function buildPrompt(
   chunk: Chunk,
   role: Role,
@@ -57,7 +75,12 @@ export async function buildPrompt(
   const languageAdditions = getLanguageAdditions(languages);
 
   // Build system prompt from role
-  const systemPrompt = role.systemPrompt + '\n\n' + languageAdditions;
+  const severityBiasNote = buildSeverityBiasNote(role.severityBias);
+  const systemPrompt =
+    role.systemPrompt +
+    '\n\n' +
+    languageAdditions +
+    (severityBiasNote ? '\n\n' + severityBiasNote : '');
 
   // Load context files
   const contextDocs: Array<{ label: string; content: string }> = [];

@@ -53,6 +53,7 @@ export interface ReviewResult {
     successfulReviews: number;
     totalRawFindings: number;
     totalDeduped: number;
+    belowThreshold: number;
     durationMs: number;
   };
 }

@@ -255,6 +255,32 @@ function mostSevereWithSupport(
   return null;
 }
 
+/** Report-level filters from config thresholds. */
+export interface ReportThresholds {
+  minConfidence?: number;
+  minConsensusScore?: number;
+}
+
+/**
+ * Drop findings below the configured confidence floor or below the
+ * configured agreement ratio (consensus score over successful reviews).
+ * Returns the kept findings and how many were dropped so reports can say
+ * so instead of silently narrowing.
+ */
+export function applyReportThresholds(
+  findings: ConsensusFinding[],
+  thresholds: ReportThresholds
+): { kept: ConsensusFinding[]; dropped: number } {
+  const minConfidence = thresholds.minConfidence ?? 0;
+  const minScore = thresholds.minConsensusScore ?? 0;
+  const kept = findings.filter((f) => {
+    if (f.consensus.confidence < minConfidence) return false;
+    const agreementRatio = f.consensus.total > 0 ? f.consensus.score / f.consensus.total : 1;
+    return agreementRatio >= minScore;
+  });
+  return { kept, dropped: findings.length - kept.length };
+}
+
 export function computeConsensus(
   groups: DeduplicatedGroup[],
   reviews: ModelReview[],

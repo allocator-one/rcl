@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeConsensus } from '../../src/consensus/voter.js';
+import { computeConsensus, applyReportThresholds } from '../../src/consensus/voter.js';
 import { getRoleByName } from '../../src/roles/builtin.js';
 import type { Finding, ModelReview, DeduplicatedGroup } from '../../src/consensus/types.js';
 import type { Role } from '../../src/roles/types.js';
@@ -399,5 +399,49 @@ describe('computeConsensus — disputes', () => {
     expect(result!.consensus.disputed).toBe(true);
     expect(result!.consensus.disputeDetails).toContain('severity');
     expect(result!.consensus.disputeDetails).toContain('Conflicting');
+  });
+});
+
+describe('applyReportThresholds', () => {
+  function findingWith(confidence: number, score: number, total: number) {
+    const f = mkF();
+    return {
+      ...f,
+      consensus: {
+        score,
+        total,
+        models: ['m1'],
+        roles: ['general'],
+        crossRole: false,
+        crossModel: false,
+        elevated: false,
+        elevation: 'none' as const,
+        confidence,
+        confidenceLabel: 'Medium' as const,
+      },
+    };
+  }
+
+  it('drops findings below the confidence floor', () => {
+    const findings = [findingWith(0.1, 2, 4), findingWith(0.5, 2, 4)];
+    const { kept, dropped } = applyReportThresholds(findings, { minConfidence: 0.2 });
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.consensus.confidence).toBe(0.5);
+    expect(dropped).toBe(1);
+  });
+
+  it('drops findings below the agreement ratio', () => {
+    const findings = [findingWith(0.5, 1, 6), findingWith(0.5, 3, 6)];
+    const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.4 });
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.consensus.score).toBe(3);
+    expect(dropped).toBe(1);
+  });
+
+  it('keeps everything when no thresholds are configured', () => {
+    const findings = [findingWith(0.01, 1, 10)];
+    const { kept, dropped } = applyReportThresholds(findings, {});
+    expect(kept).toHaveLength(1);
+    expect(dropped).toBe(0);
   });
 });

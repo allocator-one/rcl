@@ -16,7 +16,7 @@ import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
 import { deduplicateFindings } from './consensus/deduper.js';
-import { computeConsensus } from './consensus/voter.js';
+import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
@@ -297,15 +297,24 @@ async function runReview(target: string, opts: {
       jaccardThreshold: config.thresholds?.jaccardThreshold,
     });
 
+    const { kept: reportFindings, dropped: belowThreshold } = applyReportThresholds(
+      consensusFindings,
+      {
+        minConfidence: config.thresholds?.minConfidence,
+        minConsensusScore: config.thresholds?.minConsensusScore,
+      }
+    );
+
     const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
     const result: ReviewResult = {
       reviews,
-      findings: consensusFindings,
+      findings: reportFindings,
       stats: {
         totalReviews: reviews.length,
         successfulReviews: reviews.filter((r) => r.status === 'success').length,
         totalRawFindings,
         totalDeduped: consensusFindings.length,
+        belowThreshold,
         durationMs: Date.now() - startTime,
       },
     };
