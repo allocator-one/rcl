@@ -221,6 +221,37 @@ describe('computeConsensus — severity', () => {
   });
 });
 
+describe('computeConsensus — reviewer vote uniqueness', () => {
+  it('counts severity votes per (model, role) reviewer, not per member', () => {
+    // m1 rated the same issue critical twice (bridged variants); m2 and m3
+    // each said minor. Per-member counting would give critical a 2-2 tie
+    // (resolved toward critical); per-reviewer it is 1 critical vs 2 minor.
+    const f1 = mkF({ id: 'x1', severity: 'critical', category: 'best-practices' });
+    const f2 = mkF({ id: 'x2', severity: 'critical', category: 'best-practices' });
+    const f3 = mkF({ id: 'x3', severity: 'minor', category: 'best-practices' });
+    const f4 = mkF({ id: 'x4', severity: 'minor', category: 'best-practices' });
+    const reviews = [
+      mkReview('m1', 'bp-1', [f1, f2]),
+      mkReview('m2', 'bp-2', [f3]),
+      mkReview('m3', 'bp-3', [f4]),
+    ];
+    const groups = [
+      mkGroup(f1, [
+        { finding: f1, model: 'm1', role: 'bp-1' },
+        { finding: f2, model: 'm1', role: 'bp-1' },
+        { finding: f3, model: 'm2', role: 'bp-2' },
+        { finding: f4, model: 'm3', role: 'bp-3' },
+      ]),
+    ];
+
+    const [result] = computeConsensus(groups, reviews, ROLES);
+
+    expect(result!.severity).toBe('minor');
+    expect(result!.consensus.score).toBe(3);
+    expect(result!.consensus.disputed).toBe(true);
+  });
+});
+
 describe('computeConsensus — disputes', () => {
   it('treats unrecognized severities as least severe, not phantom-critical', () => {
     // severityIndex(-1) fed into Math.min used to read an unknown severity

@@ -327,6 +327,30 @@ describe('deduplicateFindings — line window semantics', () => {
   });
 });
 
+describe('deduplicateFindings — same-reviewer collapse', () => {
+  it('collapses same-reviewer variants that a bridge finding pulls into one group', () => {
+    // a1 and a2 (same review) are pairwise dissimilar, but b bridges both.
+    // The final group must count m1/r1 once, or one model's repeated
+    // finding masquerades as independent confirmation.
+    const a1 = mkF({ id: 'a1', title: 'alpha beta gamma three', description: '', severity: 'minor' });
+    const a2 = mkF({ id: 'a2', title: 'delta epsilon zeta three', description: '', severity: 'minor' });
+    const b = mkF({
+      id: 'b',
+      title: 'alpha beta gamma delta epsilon zeta three',
+      description: '',
+      severity: 'critical',
+    });
+    const reviews = [mkReview('m1', 'r1', [a1, a2]), mkReview('m2', 'r2', [b])];
+
+    const groups = deduplicateFindings(reviews);
+
+    expect(groups).toHaveLength(1);
+    const keys = groups[0]!.members.map((m) => `${m.model}::${m.role}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(groups[0]!.members).toHaveLength(2);
+  });
+});
+
 describe('deduplicateFindings — group coherence', () => {
   it('splits transitive chains whose ends are dissimilar', () => {
     // Identical text, but lines 1 / 6 / 11 with window 5:

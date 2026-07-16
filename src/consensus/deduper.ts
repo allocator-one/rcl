@@ -283,6 +283,25 @@ function splitIncoherent(
 }
 
 /**
+ * Intra-review dedup is pairwise, so two dissimilar variants from one review
+ * can still land in the same final group via a bridge finding from another
+ * review. Collapse same-(model, role) members so a single reviewer never
+ * counts twice in consensus scores or the elevation support guard.
+ */
+function collapseSameReviewer(members: TaggedFinding[]): TaggedFinding[] {
+  const byReviewer = new Map<string, TaggedFinding[]>();
+  for (const m of members) {
+    const key = `${m.model}::${m.role}`;
+    const existing = byReviewer.get(key) ?? [];
+    existing.push(m);
+    byReviewer.set(key, existing);
+  }
+  return [...byReviewer.values()].map((group) =>
+    group.length === 1 ? group[0]! : chooseRepresentative(group)
+  );
+}
+
+/**
  * A single model sometimes emits the same finding more than once. Collapse
  * those first so repeats can't masquerade as independent confirmations and
  * inflate consensus scores.
@@ -317,9 +336,10 @@ export function deduplicateFindings(
   const result: DeduplicatedGroup[] = [];
   for (const members of groupTagged(all, jaccardThreshold, lineWindow)) {
     for (const coherent of splitIncoherent(members, jaccardThreshold, lineWindow)) {
+      const collapsed = collapseSameReviewer(coherent);
       result.push({
-        representative: chooseRepresentative(coherent).finding,
-        members: coherent,
+        representative: chooseRepresentative(collapsed).finding,
+        members: collapsed,
       });
     }
   }

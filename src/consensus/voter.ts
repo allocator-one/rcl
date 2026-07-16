@@ -196,9 +196,21 @@ function detectDisputes(
 }
 
 function severityCounts(group: DeduplicatedGroup): Map<SeverityLevel, number> {
-  const counts = new Map<SeverityLevel, number>();
+  // One vote per (model, role) reviewer — the deduper collapses bridged
+  // same-reviewer variants, but groups built elsewhere must not let one
+  // reviewer's repeats count as independent support. If a reviewer's
+  // variants disagree, their most severe rating is the vote.
+  const byReviewer = new Map<string, SeverityLevel>();
   for (const m of group.members) {
+    const key = `${m.model}::${m.role}`;
     const s = m.finding.severity as SeverityLevel;
+    const existing = byReviewer.get(key);
+    if (existing === undefined || severityIndex(s) < severityIndex(existing)) {
+      byReviewer.set(key, s);
+    }
+  }
+  const counts = new Map<SeverityLevel, number>();
+  for (const s of byReviewer.values()) {
     counts.set(s, (counts.get(s) ?? 0) + 1);
   }
   return counts;
@@ -260,6 +272,7 @@ export function computeConsensus(
     const rep = group.representative;
     const uniqueModels = [...new Set(group.members.map((m) => m.model))];
     const uniqueRoles = [...new Set(group.members.map((m) => m.role))];
+    const uniqueReviewers = new Set(group.members.map((m) => `${m.model}::${m.role}`)).size;
 
     // Layer 2: Signal scoring
     const diversity = computeDiversity(group, allModels, allRoles);
@@ -283,7 +296,7 @@ export function computeConsensus(
     let elevation: ConsensusInfo['elevation'] = 'none';
     let finalSeverity = baseSeverity;
     if (supportedMax !== null && severityIndex(supportedMax) < severityIndex(baseSeverity)) {
-      if (label === 'Very High' && group.members.length >= 3) {
+      if (label === 'Very High' && uniqueReviewers >= 3) {
         finalSeverity = supportedMax;
         elevation = 'strong-consensus';
       } else if (
@@ -306,7 +319,7 @@ export function computeConsensus(
     const { disputed, disputeDetails } = detectDisputes(group, groups, resolvedThresholds);
 
     const consensus: ConsensusInfo = {
-      score: group.members.length,
+      score: uniqueReviewers,
       total: reviews.filter((r) => r.status === 'success').length,
       models: uniqueModels,
       roles: uniqueRoles,
