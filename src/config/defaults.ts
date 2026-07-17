@@ -1,7 +1,7 @@
 /** SOTA models — run the general role + participate in specialized round-robin */
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5',
-  'openai/gpt-5.5',
+  'openai/gpt-5.6-sol',
   'google/gemini-3.5-flash',
 ] as const;
 
