@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1
+
+- Bump the default OpenAI SOTA model from `gpt-5.5` to `gpt-5.6-sol` in
+  `DEFAULT_MODELS`. No other behavior changes; `gpt-5.6-sol` routes through
+  `max_completion_tokens` automatically (gpt-5.x family).
+
 ## 1.4.0
 
 A correctness and reliability pass fixing every finding from a full multi-track
