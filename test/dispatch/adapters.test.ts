@@ -292,11 +292,13 @@ describe('openai-compat request parameters', () => {
   it('strips the openai-compat/ prefix and uses the full token budget', async () => {
     const adapter = new OpenAICompatAdapter({ apiKey: 'test-key' });
     let captured: { model?: string; max_tokens?: number } = {};
+    let capturedOpts: { timeout?: number } = {};
     setClient(adapter, {
       chat: {
         completions: {
-          create: (params: { model: string; max_tokens: number }) => {
+          create: (params: { model: string; max_tokens: number }, opts: { timeout?: number }) => {
             captured = params;
+            capturedOpts = opts;
             return Promise.resolve(openaiResponse());
           },
         },
@@ -313,6 +315,10 @@ describe('openai-compat request parameters', () => {
     expect(review.status).toBe('success');
     expect(captured.model).toBe('llama3.2');
     expect(captured.max_tokens).toBe(16384);
+    // The SDK request timeout must sit above the adapter's own timeout so the
+    // AbortController owns timeout classification (SDK default is 600s and
+    // would otherwise tie or undercut large configured timeouts).
+    expect(capturedOpts.timeout).toBe(OPTS.timeoutMs + 30_000);
   });
 
   it('openrouter: strips only the openrouter/ prefix and reports the openrouter provider', async () => {

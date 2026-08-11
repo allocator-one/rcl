@@ -34,7 +34,7 @@ function defaultAdapterFactory(provider: string): ReviewAdapter {
     case 'google':
       return new GoogleAdapter();
     case 'openrouter': {
-      const apiKey = process.env['OPENROUTER_API_KEY'];
+      const apiKey = process.env['OPENROUTER_API_KEY']?.trim();
       // Fail loudly instead of letting the OpenAI SDK silently fall back to
       // OPENAI_API_KEY, which would send the wrong key to openrouter.ai.
       if (!apiKey) {

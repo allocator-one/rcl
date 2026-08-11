@@ -70,7 +70,10 @@ export class OpenAICompatAdapter implements ReviewAdapter {
 
           const response = await this.client.chat.completions.create(
             createParams,
-            { signal: controller.signal }
+            // SDK timeout sits above ours (default 600s would tie or undercut
+            // large configured timeouts); the buffer keeps our AbortController
+            // as the sole owner of timeout classification.
+            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
           ) as OpenAI.ChatCompletion;
 
           const choice = response.choices[0];

@@ -36,7 +36,8 @@ allowed-tools:
   - Glob
   - Read(/tmp/rcl-*/**)
   - Write(/tmp/rcl-*/**)
-  - Bash(mkdir -p -m 0700 /tmp/rcl-*)
+  - Bash(mkdir -p /tmp/rcl-*)
+  - Bash(chmod 0700 /tmp/rcl-*)
   - Read(/tmp/rcl-report-*.md)
   - Read(/tmp/rcl-report-*.json)
   - Read(/tmp/rcl-converge-*.md)
@@ -67,7 +68,7 @@ Authorization: invoking this skill IS the explicit request for the loop's fix co
 All temporary artifacts below (patches, specs, reports, logs, PID files) live under `<RCL_TMP>` = `/tmp/rcl-<uid>` (your numeric `id -u`) — never directly in world-writable `/tmp`, where another local user could pre-create, symlink, or tamper with predictable filenames. Create and verify it once per session:
 
 ```bash
-RCL_TMP=/tmp/rcl-$(id -u); mkdir -p -m 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
+RCL_TMP=/tmp/rcl-$(id -u); mkdir -p "$RCL_TMP" && chmod 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
 ```
 
 If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. Shell-quote every dynamic value that enters a generated command. A tampered report would steer real commits in this loop, so the directory check is load-bearing. The converge ledger is the exception: it lives in the repository's git dir (step 1.5) for durability across sessions.
@@ -88,7 +89,8 @@ For each round `<R>` (numbering continues from a resumed ledger) until the ledge
 
 1. **Refresh the target.** PR mode: re-check that the PR head still equals local HEAD and that the PR is still OPEN (an external push mid-loop means someone else is driving the branch, and a merged or closed PR must not be converged — stop and report). Otherwise nothing to do — the PR already contains last round's pushed fixes. Local diff mode: regenerate the patch so the round reviews the fixed code:
    ```bash
-   BASE=$(git merge-base HEAD origin/main)
+   DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
+BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
    git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```
 2. **Run the review detached.** The run takes 10–15 minutes — never run it as a plain foreground shell call (the tool timeout kills it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch detached with `nohup … &`, a log file, and a PID file:
@@ -144,7 +146,7 @@ Consequences:
 ## Hard rules
 
 - Never `--post`/`--inline` mid-loop; the only posting is the `--post-final` summary comment after convergence.
-- Never arm auto-merge; disarm it at the start if armed.
+- Never arm auto-merge; disarm it at the start if armed. Never run `gh pr merge` in any form other than `--disable-auto` — that allowlist entry exists solely for disarming; merging is out of scope for this skill.
 - Never amend or force-push — fixes are always new commits.
 - Never exceed `--max-rounds` silently, and never run more than 7 total rounds for a target — the count is cumulative across sessions and resumes. Past 7, the answer is human review, not more council runs.
 - Read reports from files, never console scrollback; every round gets its own report files.

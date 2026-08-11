@@ -80,7 +80,7 @@ function dropOpenRouterDefaultsWithoutKey(
   models: readonly string[],
   listName: string
 ): string[] {
-  if (process.env['OPENROUTER_API_KEY']) return [...models];
+  if (process.env['OPENROUTER_API_KEY']?.trim()) return [...models];
   const kept = models.filter((m) => !m.startsWith('openrouter/'));
   const dropped = models.length - kept.length;
   if (dropped > 0) {

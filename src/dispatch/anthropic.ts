@@ -85,7 +85,10 @@ export class AnthropicAdapter implements ReviewAdapter {
               ],
               tool_choice: { type: 'any' as const },
             },
-            { signal: controller.signal }
+            // Buffer above our own timeout so the SDK's request timeout
+            // (600s default) never wins the race and misclassifies a
+            // timeout as a generic error.
+            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
           );
 
           if (response.stop_reason === 'max_tokens') {

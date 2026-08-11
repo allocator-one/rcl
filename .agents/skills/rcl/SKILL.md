@@ -9,6 +9,7 @@ allowed-tools:
   - Bash(rcl review:*)
   - Bash(rcl roles:*)
   - Bash(git merge-base:*)
+  - Bash(git rev-parse:*)
   - Bash(git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
@@ -24,7 +25,8 @@ allowed-tools:
   - Glob
   - Read(/tmp/rcl-*/**)
   - Write(/tmp/rcl-*/**)
-  - Bash(mkdir -p -m 0700 /tmp/rcl-*)
+  - Bash(mkdir -p /tmp/rcl-*)
+  - Bash(chmod 0700 /tmp/rcl-*)
   - Read(/tmp/rcl-report-*.md)
   - Read(/tmp/rcl-report-*.json)
 ---
@@ -42,7 +44,7 @@ Run a multi-model AI code review on the current branch's PR. By default, keep th
 All temporary artifacts below (patches, specs, reports, logs, PID files) live under `<RCL_TMP>` = `/tmp/rcl-<uid>` (your numeric `id -u`) — never directly in world-writable `/tmp`, where another local user could pre-create, symlink, or tamper with predictable filenames. Create and verify it once per session:
 
 ```bash
-RCL_TMP=/tmp/rcl-$(id -u); mkdir -p -m 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
+RCL_TMP=/tmp/rcl-$(id -u); mkdir -p "$RCL_TMP" && chmod 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
 ```
 
 If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. Shell-quote every dynamic value that enters a generated command.
@@ -70,10 +72,11 @@ Use `<REPO>#<PR_NUMBER>` as the review target.
 
 #### 1b. Local diff review (no PR)
 
-Generate a patch from the current branch against its merge-base with `origin/main`. Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command):
+Generate a patch from the current branch against its merge-base with the remote default branch (`origin/HEAD`, falling back to `origin/main`). Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command):
 
 ```bash
-BASE=$(git merge-base HEAD origin/main)
+DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
+BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
 git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
 ```
 

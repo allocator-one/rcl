@@ -55,7 +55,10 @@ export class OpenAIAdapter implements ReviewAdapter {
                 ? { max_completion_tokens: 16384 }
                 : { max_tokens: 16384 }),
             },
-            { signal: controller.signal }
+            // Buffer above our own timeout so the SDK's request timeout
+            // (600s default) never wins the race and misclassifies a
+            // timeout as a generic error.
+            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
           );
 
           const choice = response.choices[0];
