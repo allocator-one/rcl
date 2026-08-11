@@ -25,7 +25,7 @@ type AdapterCall = {
   userPrompt: string;
 };
 
-function defaultAdapterFactory(provider: string): ReviewAdapter {
+export function defaultAdapterFactory(provider: string): ReviewAdapter {
   switch (provider) {
     case 'anthropic':
       return new AnthropicAdapter();

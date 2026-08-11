@@ -5,7 +5,7 @@ argument-hint: "[PR#N] [--max-rounds N] [--roles <roles>] [--spec <path>] [--pos
 allowed-tools:
   - Bash(gh pr view:*)
   - Bash(gh pr comment:*)
-  - Bash(gh pr merge:*)
+  - Bash(gh pr merge --disable-auto:*)
   - Bash(gh auth token:*)
   - Bash(gh repo view:*)
   - Bash(rcl review:*)
@@ -65,7 +65,7 @@ All temporary artifacts below (patches, specs, reports, logs, PID files) live un
 RCL_TMP=/tmp/rcl-$(id -u); mkdir -p "$RCL_TMP" && chmod 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
 ```
 
-If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. Shell-quote every dynamic value that enters a generated command. A tampered report would steer real commits in this loop, so the directory check is load-bearing. The converge ledger is the exception: it lives in the repository's git dir (step 1.5) for durability across sessions.
+If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. `<RCL_TMP>` below is a **textual placeholder**: substitute the resolved path (e.g. `/tmp/rcl-501`) when writing each command, rather than relying on `$RCL_TMP` surviving into a detached or single-quoted shell. Shell-quote every dynamic value that enters a generated command. A tampered report would steer real commits in this loop, so the directory check is load-bearing. The converge ledger is the exception: it lives in the repository's git dir (step 1.5) for durability across sessions.
 
 ### 1. Preconditions
 
@@ -84,6 +84,7 @@ For each round `<R>` (numbering continues from a resumed ledger) until the ledge
 1. **Refresh the target.** PR mode: re-check that the PR head still equals local HEAD and that the PR is still OPEN (an external push mid-loop means someone else is driving the branch, and a merged or closed PR must not be converged — stop and report). Otherwise nothing to do — the PR already contains last round's pushed fixes. Local diff mode: regenerate the patch so the round reviews the fixed code:
    ```bash
    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
+git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch: $DEFAULT_BRANCH"; exit 1; }
    BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
    git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```

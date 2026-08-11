@@ -84,8 +84,12 @@ function dropOpenRouterDefaultsWithoutKey(
   const kept = models.filter((m) => !m.startsWith('openrouter/'));
   const dropped = models.length - kept.length;
   if (dropped > 0) {
+    // Name the resulting fleet, not just the count: the default secondary
+    // list is entirely openrouter/, so without the key it degrades to
+    // empty and every specialist role falls back to the primary models.
+    const remaining = kept.length > 0 ? kept.join(', ') : '(none)';
     console.warn(
-      `OPENROUTER_API_KEY is not set — dropping ${dropped} openrouter/ model(s) from the default ${listName}. Set the key to run the full default fleet.`
+      `OPENROUTER_API_KEY is not set — dropping ${dropped} openrouter/ model(s) from the default ${listName}; remaining: ${remaining}. Set the key to run the full default fleet.`
     );
   }
   return kept;

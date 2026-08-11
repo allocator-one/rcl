@@ -41,7 +41,7 @@ All temporary artifacts below (patches, specs, reports, logs, PID files) live un
 RCL_TMP=/tmp/rcl-$(id -u); mkdir -p "$RCL_TMP" && chmod 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
 ```
 
-If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. Shell-quote every dynamic value that enters a generated command.
+If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. `<RCL_TMP>` below is a **textual placeholder**: substitute the resolved path (e.g. `/tmp/rcl-501`) when writing each command, rather than relying on `$RCL_TMP` surviving into a detached or single-quoted shell. Shell-quote every dynamic value that enters a generated command.
 
 ### 1. Resolve the review target
 
@@ -70,11 +70,14 @@ Generate a patch from the current branch against its merge-base with the remote 
 
 ```bash
 DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
+git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch: $DEFAULT_BRANCH"; exit 1; }
 BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
 git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
 ```
 
-If the diff is empty (no changes vs main), tell the user and stop.
+If the diff is empty (no changes vs the default branch), tell the user and stop.
+
+This reviews **committed work only** — `git diff <BASE>..HEAD` excludes staged, unstaged, and untracked changes. If `git status --porcelain` is non-empty, say which files are uncommitted and therefore unreviewed before running, so an empty or partial diff is never mistaken for a clean review of the current edits.
 
 Use `<RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch` as the review target.
 

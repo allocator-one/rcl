@@ -24,7 +24,12 @@
   dropped from the *default* lists with a warning instead of erroring on
   every run. Explicitly configured openrouter models still fail loudly.
   Note the flip side: with the key set, default reviews also send code to
-  OpenRouter (see README).
+  OpenRouter (see README). Because the default *secondary* list is now
+  entirely OpenRouter-hosted, running without the key leaves it empty and
+  every specialist role is dispatched across the three remaining SOTA
+  models — reviews still work, but with less reviewer diversity than
+  1.4.x, which shipped three non-OpenRouter secondaries. The startup
+  warning names the surviving fleet.
 - **OpenRouter reviews run with bounded reasoning (`effort: medium`).**
   Unbounded, the fleet's reasoning models (kimi-k3, qwen3.8-max,
   deepseek-v4, grok-4.5) think for 5–10 minutes and/or exhaust the 16k

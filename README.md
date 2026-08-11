@@ -207,8 +207,11 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
 
 The default model fleet includes OpenRouter-hosted models. If `OPENROUTER_API_KEY`
-is not set, those entries are dropped from the defaults with a warning (models you
-configure explicitly still fail loudly instead). Note that when the key is set,
+is not set, those entries are dropped from the defaults with a warning naming the
+surviving fleet (models you configure explicitly still fail loudly instead). The
+default secondary list is entirely OpenRouter-hosted, so without the key it is
+empty and specialist roles are spread across the primary models only — set
+`secondaryModels:` explicitly if you want a secondary tier without OpenRouter. Note that when the key is set,
 default reviews send diff and context content to OpenRouter — an aggregator and
 an additional data processor beyond the direct model providers — as well as to
 Anthropic, OpenAI, and Google. Configure `models:` explicitly if that matters
