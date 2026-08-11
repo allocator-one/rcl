@@ -2,7 +2,7 @@
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5',
   'openai/gpt-5.6-sol',
-  'google/gemini-3.5-flash',
+  'google/gemini-3.6-flash',
   'openrouter/moonshotai/kimi-k3',
 ] as const;
 

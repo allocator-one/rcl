@@ -13,6 +13,9 @@
   previous-gen defaults — `openai/gpt-5.4` and `google/gemini-2.5-pro` — are
   dropped from `DEFAULT_SECONDARY_MODELS`, leaving `anthropic/claude-opus-4-8`
   as the only secondary model.
+- **Gemini bump.** Default Google SOTA model moves from `gemini-3.5-flash`
+  to `gemini-3.6-flash` (verified served under that id by the native
+  Gemini API, which the Google adapter targets).
 
 ## 1.4.1
 
