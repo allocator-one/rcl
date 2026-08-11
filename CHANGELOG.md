@@ -25,9 +25,10 @@
   every run. Explicitly configured openrouter models still fail loudly.
   Note the flip side: with the key set, default reviews also send code to
   OpenRouter (see README).
-- **Default per-call timeout raised 120s → 300s.** Reasoning-heavy models
+- **Default per-call timeout raised 120s → 600s.** Reasoning-heavy models
   (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5) time out wholesale at 120s
-  on real diffs — found by dogfooding this release on its own diff.
+  on real diffs, and mostly still at 300s (successful calls measured
+  217–291s) — found by dogfooding this release on its own diff.
 
 ## 1.4.1
 

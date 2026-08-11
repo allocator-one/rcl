@@ -12,7 +12,7 @@ allowed-tools:
   - Bash(git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@1.4.1)
+  - Bash(npm install -g review-council@1.5.0)
   - Bash(which rcl)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -20,6 +20,11 @@ allowed-tools:
   - Bash(kill:*)
   - Bash(cat /tmp/rcl-*)
   - Read(/tmp/rcl-*.log)
+  - Read
+  - Glob
+  - Read(/tmp/rcl-*/**)
+  - Write(/tmp/rcl-*/**)
+  - Bash(mkdir -p -m 0700 /tmp/rcl-*)
   - Read(/tmp/rcl-report-*.md)
   - Read(/tmp/rcl-report-*.json)
 ---
@@ -31,6 +36,16 @@ Invoke as `$rcl` in a Codex session.
 Run a multi-model AI code review on the current branch's PR. By default, keep the review in-session and do not post to GitHub unless the caller explicitly asks for `--post` or `--inline`.
 
 ## Steps
+
+### 0. Private artifact directory
+
+All temporary artifacts below (patches, specs, reports, logs, PID files) live under `<RCL_TMP>` = `/tmp/rcl-<uid>` (your numeric `id -u`) — never directly in world-writable `/tmp`, where another local user could pre-create, symlink, or tamper with predictable filenames. Create and verify it once per session:
+
+```bash
+RCL_TMP=/tmp/rcl-$(id -u); mkdir -p -m 0700 "$RCL_TMP" && [ -d "$RCL_TMP" ] && [ -O "$RCL_TMP" ] && [ ! -L "$RCL_TMP" ]
+```
+
+If the owned-plain-directory check fails, stop — never write artifacts to a directory you do not exclusively own. Shell-quote every dynamic value that enters a generated command.
 
 ### 1. Resolve the review target
 
@@ -55,22 +70,22 @@ Use `<REPO>#<PR_NUMBER>` as the review target.
 
 #### 1b. Local diff review (no PR)
 
-Generate a patch from the current branch against its merge-base with `origin/main`. Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<BRANCH>` be the branch name with every character outside `[A-Za-z0-9._-]` replaced by `-`:
+Generate a patch from the current branch against its merge-base with `origin/main`. Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<REPO>` be the repository directory name and `<BRANCH>` the branch name, each with every character outside `[A-Za-z0-9._-]` replaced by `-` (git allows shell metacharacters like `$`, `;`, and quotes in branch names — never interpolate an unsanitized name into a path or command):
 
 ```bash
 BASE=$(git merge-base HEAD origin/main)
-git diff "$BASE"..HEAD > /tmp/rcl-branch-review-<BRANCH>.patch
+git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
 ```
 
 If the diff is empty (no changes vs main), tell the user and stop.
 
-Use `/tmp/rcl-branch-review-<BRANCH>.patch` as the review target.
+Use `<RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch` as the review target.
 
 Note: `--post` and `--inline` are ignored in local diff mode (there is no PR to post to). Inform the user if they passed those flags.
 
 ### 2. Resolve the spec (automatic)
 
-The `spec-compliance` role reviews the diff against a specification. This step determines whether a spec is available and, if so, writes it to a target-scoped file for use with `--spec`. Let `<SPEC>` be `/tmp/rcl-spec-<TARGET>.md` (`<TARGET>` as defined in step 5) — never a shared, unscoped path: concurrent sessions would overwrite each other's spec and review against the wrong requirements.
+The `spec-compliance` role reviews the diff against a specification. This step determines whether a spec is available and, if so, writes it to a target-scoped file for use with `--spec`. Let `<SPEC>` be `<RCL_TMP>/rcl-spec-<TARGET>.md` (`<TARGET>` as defined in step 5) — never a shared, unscoped path: concurrent sessions would overwrite each other's spec and review against the wrong requirements.
 
 Check these sources **in order** and use the first one that produces content:
 
@@ -109,12 +124,12 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 ### 3. Check rcl is available
 
 ```bash
-which rcl
+which rcl && rcl --version
 ```
 
-If not found, install the pinned published version (bump this pin deliberately on each release — an unpinned `@latest` would hand whatever gets published next execution access to your source and GITHUB_TOKEN):
+If not found — or the installed version is older than the pin below — install the pinned published version (bump this pin deliberately on each release — an unpinned `@latest` would hand whatever gets published next execution access to your source and GITHUB_TOKEN):
 ```bash
-npm install -g review-council@1.4.1
+npm install -g review-council@1.5.0
 ```
 
 Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself).
@@ -131,19 +146,19 @@ Note: this repo is review-council's own source. Reviews default to the published
 
 **Always write the full report to files** with `--markdown` and `--json-file`. The console output is long and the critical/important findings print at the top, so reading it off stdout — especially piped through `head`/`tail` — silently drops the most important findings. The files are the source of truth; the console is throwaway.
 
-Scope the report filenames to the review target so parallel runs (multiple worktrees or parallel agent sessions reviewing different PRs at once) never clobber each other's report. Let `<TARGET>` be the PR number in PR mode, or the branch name with `/` replaced by `-` in local diff mode — e.g. `/tmp/rcl-report-7.md` or `/tmp/rcl-report-feat-openrouter-kimi-k3.md`.
+Scope the report filenames to the review target so parallel runs (multiple worktrees or parallel agent sessions reviewing different PRs at once) never clobber each other's report. Let `<TARGET>` be `<REPO>-<PR number>` in PR mode, or `<REPO>-<BRANCH>` in local diff mode (components sanitized as in step 1b — identical PR numbers or branch names in different repositories must not collide) — e.g. `<RCL_TMP>/rcl-report-rcl-7.md` or `<RCL_TMP>/rcl-report-rcl-feat-openrouter-kimi-k3.md`.
 
 For PR-based review:
 ```bash
 GITHUB_TOKEN=$(gh auth token) rcl review <REPO>#<PR_NUMBER> \
-  --markdown /tmp/rcl-report-<TARGET>.md --json-file /tmp/rcl-report-<TARGET>.json \
+  --markdown <RCL_TMP>/rcl-report-<TARGET>.md --json-file <RCL_TMP>/rcl-report-<TARGET>.json \
   [--post] [--spec <SPEC>] [--roles <roles>]
 ```
 
 For local diff review:
 ```bash
-GITHUB_TOKEN=$(gh auth token) rcl review /tmp/rcl-branch-review-<BRANCH>.patch \
-  --markdown /tmp/rcl-report-<TARGET>.md --json-file /tmp/rcl-report-<TARGET>.json \
+GITHUB_TOKEN=$(gh auth token) rcl review <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch \
+  --markdown <RCL_TMP>/rcl-report-<TARGET>.md --json-file <RCL_TMP>/rcl-report-<TARGET>.json \
   [--spec <SPEC>] [--roles <roles>]
 ```
 
@@ -151,13 +166,13 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 
 **Never** pipe the `rcl review` command through `head`, `tail`, `| head -n`, or similar — the report is captured in the files above no matter what scrolls past in the console.
 
-**Always launch the run detached** — wrap the command blocks above in `nohup sh -c '…' > /tmp/rcl-run-<TARGET>.log 2>&1 &` (the blocks show the review arguments, not the launch mode) and record the PID with `echo $! > /tmp/rcl-run-<TARGET>.pid`, after deleting any leftover `/tmp/rcl-report-<TARGET>.*` files from earlier runs. Poll `kill -0 $(cat /tmp/rcl-run-<TARGET>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop, which hits the same tool timeout (the nohup'd review survives a killed poll; just poll again) — and only then confirm the JSON report file exists and is non-empty — a stale or half-written file must never be parsed, and the report file (not the unrecoverable exit status of a backgrounded process) is the success signal. The full council takes 10–15 minutes; a plain foreground shell call is killed at the tool timeout with no report files written and the whole model spend wasted.
+**Always launch the run detached** — wrap the command blocks above in `nohup sh -c '…' > <RCL_TMP>/rcl-run-<TARGET>.log 2>&1 &` (the blocks show the review arguments, not the launch mode) and record the PID with `echo $! > <RCL_TMP>/rcl-run-<TARGET>.pid`, after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs. Poll `kill -0 $(cat <RCL_TMP>/rcl-run-<TARGET>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop, which hits the same tool timeout (the nohup'd review survives a killed poll; just poll again) — and only then confirm the JSON report file exists and is non-empty — a stale or half-written file must never be parsed, and the report file (not the unrecoverable exit status of a backgrounded process) is the success signal. The full council takes 10–15 minutes; a plain foreground shell call is killed at the tool timeout with no report files written and the whole model spend wasted.
 
 ### 6. Report back
 
 Read the full report **from the files**, never from console scrollback:
-- `/tmp/rcl-report-<TARGET>.md` — the findings (paginate as needed; nothing is lost to truncation).
-- `/tmp/rcl-report-<TARGET>.json` — the exact severity counts; parse these rather than eyeballing the markdown.
+- `<RCL_TMP>/rcl-report-<TARGET>.md` — the findings (paginate as needed; nothing is lost to truncation).
+- `<RCL_TMP>/rcl-report-<TARGET>.json` — the exact severity counts; parse these rather than eyeballing the markdown.
 
 Then tell the user:
 - Whether this was a PR review or a local diff review

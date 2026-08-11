@@ -36,10 +36,12 @@ export const DEFAULT_THRESHOLDS = {
 
 /**
  * Reasoning-heavy models (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5)
- * routinely need well over 120s to review a real diff — at 120s the entire
- * OpenRouter wing of the default fleet times out and contributes nothing.
+ * routinely need several minutes to review a real diff: at 120s the entire
+ * OpenRouter wing of the default fleet timed out, and at 300s most
+ * specialist runs still did (successful calls measured 217–291s, with no
+ * headroom). Dogfooded on this repo's own diffs.
  */
-export const DEFAULT_TIMEOUT_MS = 300_000;
+export const DEFAULT_TIMEOUT_MS = 600_000;
 export const DEFAULT_MAX_RETRIES = 3;
 export const DEFAULT_CONCURRENCY = 6;
 
