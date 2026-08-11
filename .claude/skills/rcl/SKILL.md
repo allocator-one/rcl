@@ -1,0 +1,170 @@
+---
+name: rcl
+description: Run Review Council (multi-model AI code review) on the current PR or branch diff
+argument-hint: "[--post] [--inline] [--spec <path>] [--roles <roles>] [PR#N]"
+allowed-tools:
+  - Bash(gh pr view:*)
+  - Bash(gh auth token:*)
+  - Bash(gh repo view:*)
+  - Bash(rcl review:*)
+  - Bash(rcl roles:*)
+  - Bash(git merge-base:*)
+  - Bash(git diff:*)
+  - Bash(harness show:*)
+  - Bash(harness list:*)
+  - Bash(npm install -g review-council@latest)
+  - Read(/tmp/rcl-report-*.md)
+  - Read(/tmp/rcl-report-*.json)
+---
+
+# Review Council (rcl)
+
+Run a multi-model AI code review on the current branch's PR. By default, keep the review in-session and do not post to GitHub unless the caller explicitly asks for `--post` or `--inline`.
+
+## Steps
+
+### 1. Resolve the review target
+
+If `$ARGUMENTS` contains a number (e.g. `#7` or `7`), use that as the PR number and proceed to step 1a.
+Otherwise, detect the current branch's PR:
+
+```bash
+gh pr view --json number -q .number 2>/dev/null
+```
+
+If a PR exists, proceed to step 1a. If no PR exists, fall back to step 1b (local diff review).
+
+#### 1a. PR-based review
+
+Resolve the repository:
+
+```bash
+gh repo view --json nameWithOwner -q .nameWithOwner
+```
+
+Use `<REPO>#<PR_NUMBER>` as the review target.
+
+#### 1b. Local diff review (no PR)
+
+Generate a patch from the current branch against its merge-base with `origin/main`:
+
+```bash
+BASE=$(git merge-base HEAD origin/main)
+git diff "$BASE"..HEAD > /tmp/rcl-branch-review.patch
+```
+
+If the diff is empty (no changes vs main), tell the user and stop.
+
+Use `/tmp/rcl-branch-review.patch` as the review target.
+
+Note: `--post` and `--inline` are ignored in local diff mode (there is no PR to post to). Inform the user if they passed those flags.
+
+### 2. Resolve the spec (automatic)
+
+The `spec-compliance` role reviews the diff against a specification. This step determines whether a spec is available and, if so, writes it to `/tmp/rcl-spec.md` for use with `--spec`.
+
+Check these sources **in order** and use the first one that produces content:
+
+1. **Explicit `--spec <path>` flag in `$ARGUMENTS`** — use that file directly, skip the rest of this step.
+
+2. **Harness issue for the current work** — check for in-progress issues tied to this branch:
+   ```bash
+   harness list --status in_progress --assignee me
+   ```
+   If there is an in-progress issue (task or epic), dump its details:
+   ```bash
+   harness show <identifier>
+   ```
+   If the issue has a meaningful description and/or acceptance criteria, write them to `/tmp/rcl-spec.md`:
+   ```
+   # Spec: <issue title>
+   
+   ## Description
+   <description from the issue>
+   
+   ## Acceptance criteria
+   <acceptance criteria from the issue>
+   
+   ## Design notes
+   <design/notes fields if present>
+   ```
+
+3. **Spec file in the repo** — look for a spec or design doc related to the current branch:
+   - Check for files matching the branch name or feature area in `docs/` or the repo root (e.g. `CONSENSUS_V2_SPEC.md` for a consensus-scoring branch).
+   - Only use if the file clearly describes the feature being reviewed.
+
+4. **No spec found** — proceed without `--spec`. The `spec-compliance` role will be skipped or run without a spec (it will note that no spec was provided).
+
+If a spec was resolved (sources 1–3), inform the user which source was used.
+
+### 3. Check rcl is available
+
+```bash
+which rcl
+```
+
+If not found, install the published package:
+```bash
+npm install -g review-council@latest
+```
+
+Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself).
+
+### 4. Parse flags
+
+- `--post` → add `--post` to the rcl command and post a summary review to the PR (PR mode only)
+- `--inline` → add `--post` to the rcl command and request inline line comments where possible (PR mode only)
+- `--spec <path>` → use the given file as the spec (overrides automatic detection from step 2)
+- `--roles <list>` → pass through (e.g. `--roles security-auditor,bug-hunter`)
+- default (no flags) → run the review locally and report the findings back in the session without posting to GitHub
+
+### 5. Run the review
+
+**Always write the full report to files** with `--markdown` and `--json-file`. The console output is long and the critical/important findings print at the top, so reading it off stdout — especially piped through `head`/`tail` — silently drops the most important findings. The files are the source of truth; the console is throwaway.
+
+Scope the report filenames to the review target so parallel runs (multiple worktrees or parallel agent sessions reviewing different PRs at once) never clobber each other's report. Let `<TARGET>` be the PR number in PR mode, or the branch name with `/` replaced by `-` in local diff mode — e.g. `/tmp/rcl-report-7.md` or `/tmp/rcl-report-feat-openrouter-kimi-k3.md`.
+
+For PR-based review:
+```bash
+GITHUB_TOKEN=$(gh auth token) rcl review <REPO>#<PR_NUMBER> \
+  --markdown /tmp/rcl-report-<TARGET>.md --json-file /tmp/rcl-report-<TARGET>.json \
+  [--post] [--spec /tmp/rcl-spec.md] [--roles <roles>]
+```
+
+For local diff review:
+```bash
+GITHUB_TOKEN=$(gh auth token) rcl review /tmp/rcl-branch-review.patch \
+  --markdown /tmp/rcl-report-<TARGET>.md --json-file /tmp/rcl-report-<TARGET>.json \
+  [--spec /tmp/rcl-spec.md] [--roles <roles>]
+```
+
+Only include `--spec` if a spec was resolved in step 2.
+
+**Never** pipe the `rcl review` command through `head`, `tail`, `| head -n`, or similar — the report is captured in the files above no matter what scrolls past in the console.
+
+**Always launch the run in the background** (`run_in_background: true`) after deleting any leftover `/tmp/rcl-report-<TARGET>.*` files from earlier runs, and continue when the task-completion notification arrives — never block on a foreground wait or sleep loop. Then confirm the JSON report file exists and is non-empty before parsing it. The full council takes 10–15 minutes; a plain foreground Bash call is killed at the 600-second tool cap with no report files written and the whole model spend wasted.
+
+### 6. Report back
+
+Read the full report **from the files**, never from console scrollback:
+- `/tmp/rcl-report-<TARGET>.md` — the findings, via the Read tool (it paginates, so nothing is lost to truncation).
+- `/tmp/rcl-report-<TARGET>.json` — the exact severity counts; parse these rather than eyeballing the markdown.
+
+Then tell the user:
+- Whether this was a PR review or a local diff review
+- Which PR was reviewed (if PR mode), or which branch and merge-base range (if diff mode)
+- Which spec was used (if any) and where it came from (Harness issue, file, explicit flag)
+- Which models ran and how many findings each returned
+- Link to the posted review comment (from rcl output) only if `--post` or `--inline` was used in PR mode
+- Brief summary: N critical, N important, N minor
+
+## Examples
+
+- `/rcl` — review current PR locally, or fall back to branch diff if no PR exists; auto-detect spec from Harness
+- `/rcl --post` — review current PR and post a summary comment to GitHub
+- `/rcl --inline` — post with inline line comments where anchoring is possible
+- `/rcl --spec CONSENSUS_V2_SPEC.md` — review with a specific spec file
+- `/rcl #7` — review a specific PR by number
+- `/rcl --roles security-auditor,bug-hunter` — run only specific reviewer roles
+
+For a review → fix → re-review loop that drives the PR or branch to a clean council verdict, use `/rcl-converge` instead (separate skill; it composes this one per round).
