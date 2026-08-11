@@ -8,14 +8,17 @@
   vendor segment: `openrouter/moonshotai/kimi-k3` sends `moonshotai/kimi-k3`
   on the wire. A missing key fails that model's reviews loudly instead of
   silently falling back to `OPENAI_API_KEY`.
-- **Default fleet reshuffle.** `openrouter/moonshotai/kimi-k3` joins
-  `DEFAULT_MODELS`, adding a fourth SOTA general-role run. The two weakest
-  previous-gen defaults — `openai/gpt-5.4` and `google/gemini-2.5-pro` — are
-  dropped from `DEFAULT_SECONDARY_MODELS`, leaving `anthropic/claude-opus-4-8`
-  as the only secondary model.
-- **Gemini bump.** Default Google SOTA model moves from `gemini-3.5-flash`
-  to `gemini-3.6-flash` (verified served under that id by the native
-  Gemini API, which the Google adapter targets).
+- **Default fleet reshuffle: six models, six labs, one seat each.**
+  `DEFAULT_MODELS` (general role + specialist round-robin) is now
+  claude-fable-5, gpt-5.6-sol, gemini-3.6-flash (bumped from 3.5-flash,
+  verified served under that id by the native Gemini API), and
+  `openrouter/moonshotai/kimi-k3`. `DEFAULT_SECONDARY_MODELS` (specialist
+  round-robin only) replaces the previous-gen trio (claude-opus-4-8,
+  gpt-5.4, gemini-2.5-pro) with `openrouter/qwen/qwen3.8-max` and
+  `openrouter/deepseek/deepseek-v4-flash-0731`. Every default voter now
+  comes from a distinct training lineage, so consensus agreement always
+  reflects independent confirmation, and 12 specialist roles divide evenly
+  at 2 per model.
 
 ## 1.4.1
 

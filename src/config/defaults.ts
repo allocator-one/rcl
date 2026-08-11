@@ -6,9 +6,15 @@ export const DEFAULT_MODELS = [
   'openrouter/moonshotai/kimi-k3',
 ] as const;
 
-/** Previous-gen models — specialized round-robin only, no general role */
+/**
+ * Secondary models — specialized round-robin only, no general role.
+ * Chosen for training-lineage diversity: with the four SOTA models above,
+ * every default voter comes from a different lab, so cross-model consensus
+ * always reflects independent confirmation.
+ */
 export const DEFAULT_SECONDARY_MODELS = [
-  'anthropic/claude-opus-4-8',
+  'openrouter/qwen/qwen3.8-max',
+  'openrouter/deepseek/deepseek-v4-flash-0731',
 ] as const;
 
 export const DEFAULT_THRESHOLDS = {
