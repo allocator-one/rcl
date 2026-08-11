@@ -15,6 +15,7 @@ export const DEFAULT_MODELS = [
 export const DEFAULT_SECONDARY_MODELS = [
   'openrouter/qwen/qwen3.8-max',
   'openrouter/deepseek/deepseek-v4-flash-0731',
+  'openrouter/x-ai/grok-4.5',
 ] as const;
 
 export const DEFAULT_THRESHOLDS = {

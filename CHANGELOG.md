@@ -8,17 +8,17 @@
   vendor segment: `openrouter/moonshotai/kimi-k3` sends `moonshotai/kimi-k3`
   on the wire. A missing key fails that model's reviews loudly instead of
   silently falling back to `OPENAI_API_KEY`.
-- **Default fleet reshuffle: six models, six labs, one seat each.**
+- **Default fleet reshuffle: seven models, seven labs, one seat each.**
   `DEFAULT_MODELS` (general role + specialist round-robin) is now
   claude-fable-5, gpt-5.6-sol, gemini-3.6-flash (bumped from 3.5-flash,
   verified served under that id by the native Gemini API), and
   `openrouter/moonshotai/kimi-k3`. `DEFAULT_SECONDARY_MODELS` (specialist
   round-robin only) replaces the previous-gen trio (claude-opus-4-8,
-  gpt-5.4, gemini-2.5-pro) with `openrouter/qwen/qwen3.8-max` and
-  `openrouter/deepseek/deepseek-v4-flash-0731`. Every default voter now
-  comes from a distinct training lineage, so consensus agreement always
-  reflects independent confirmation, and 12 specialist roles divide evenly
-  at 2 per model.
+  gpt-5.4, gemini-2.5-pro) with `openrouter/qwen/qwen3.8-max`,
+  `openrouter/deepseek/deepseek-v4-flash-0731`, and
+  `openrouter/x-ai/grok-4.5`. Every default voter now comes from a
+  distinct training lineage, so consensus agreement always reflects
+  independent confirmation.
 
 ## 1.4.1
 
