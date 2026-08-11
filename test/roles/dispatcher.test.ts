@@ -19,6 +19,10 @@ describe('detectProvider', () => {
     expect(detectProvider('openai-compat/local-model')).toBe('openai-compat');
   });
 
+  it('detects openrouter from explicit prefix', () => {
+    expect(detectProvider('openrouter/moonshotai/kimi-k3')).toBe('openrouter');
+  });
+
   it('detects anthropic by model name (legacy)', () => {
     expect(detectProvider('claude-sonnet-4-5')).toBe('anthropic');
   });

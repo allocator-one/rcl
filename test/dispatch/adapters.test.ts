@@ -314,4 +314,30 @@ describe('openai-compat request parameters', () => {
     expect(captured.model).toBe('llama3.2');
     expect(captured.max_tokens).toBe(16384);
   });
+
+  it('openrouter: strips only the openrouter/ prefix and reports the openrouter provider', async () => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    let captured: { model?: string } = {};
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: (params: { model: string }) => {
+            captured = params;
+            return Promise.resolve(openaiResponse());
+          },
+        },
+      },
+    });
+
+    const review = await adapter.review(
+      'openrouter/moonshotai/kimi-k3',
+      'general',
+      's',
+      'u',
+      OPTS
+    );
+    expect(review.status).toBe('success');
+    expect(review.provider).toBe('openrouter');
+    expect(captured.model).toBe('moonshotai/kimi-k3');
+  });
 });

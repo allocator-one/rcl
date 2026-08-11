@@ -1,13 +1,14 @@
 import type { Role, ReviewAssignment } from './types.js';
 import type { ReviewerPair } from '../config/schema.js';
 
-export type ModelProvider = 'anthropic' | 'openai' | 'google' | 'openai-compat';
+export type ModelProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'openai-compat';
 
 export function detectProvider(model: string): ModelProvider {
   // Handle explicit provider prefix (e.g. "anthropic/claude-sonnet-4-5")
   if (model.startsWith('anthropic/')) return 'anthropic';
   if (model.startsWith('openai/')) return 'openai';
   if (model.startsWith('google/')) return 'google';
+  if (model.startsWith('openrouter/')) return 'openrouter';
   if (model.startsWith('openai-compat/')) return 'openai-compat';
   // Detect by model name prefix
   if (model.startsWith('claude')) return 'anthropic';

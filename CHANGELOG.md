@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.5.0
+
+- **OpenRouter provider.** Models prefixed `openrouter/` route through the
+  OpenAI-compatible adapter against `https://openrouter.ai/api/v1`,
+  authenticated via `OPENROUTER_API_KEY`. The prefix keeps OpenRouter's
+  vendor segment: `openrouter/moonshotai/kimi-k3` sends `moonshotai/kimi-k3`
+  on the wire. A missing key fails that model's reviews loudly instead of
+  silently falling back to `OPENAI_API_KEY`.
+- **Default fleet reshuffle.** `openrouter/moonshotai/kimi-k3` joins
+  `DEFAULT_MODELS`, adding a fourth SOTA general-role run. The two weakest
+  previous-gen defaults — `openai/gpt-5.4` and `google/gemini-2.5-pro` — are
+  dropped from `DEFAULT_SECONDARY_MODELS`, leaving `anthropic/claude-opus-4-8`
+  as the only secondary model.
+
 ## 1.4.1
 
 - Bump the default OpenAI SOTA model from `gpt-5.5` to `gpt-5.6-sol` in

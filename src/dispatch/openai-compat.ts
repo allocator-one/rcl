@@ -9,12 +9,12 @@ function isRetryable(err: unknown): boolean {
 }
 
 /**
- * Generic OpenAI-compatible adapter for local models (Ollama, LM Studio, etc.)
- * and other OpenAI-compatible APIs.
+ * Generic OpenAI-compatible adapter for local models (Ollama, LM Studio, etc.),
+ * hosted aggregators like OpenRouter, and other OpenAI-compatible APIs.
  */
 export class OpenAICompatAdapter implements ReviewAdapter {
-  name = 'openai-compat';
-  provider = 'openai-compat';
+  name: string;
+  provider: string;
 
   private client: OpenAI;
   private useJsonMode: boolean;
@@ -23,7 +23,11 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     apiKey?: string;
     baseUrl?: string;
     useJsonMode?: boolean;
+    /** Provider label reported on reviews (e.g. "openrouter"); defaults to "openai-compat". */
+    provider?: string;
   }) {
+    this.name = opts?.provider ?? 'openai-compat';
+    this.provider = opts?.provider ?? 'openai-compat';
     this.client = new OpenAI({
       apiKey: opts?.apiKey ?? process.env['OPENAI_COMPAT_API_KEY'] ?? 'local',
       baseURL: opts?.baseUrl ?? process.env['OPENAI_COMPAT_BASE_URL'] ?? 'http://localhost:11434/v1',
@@ -74,7 +78,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             return {
               model,
               role,
-              provider: 'openai-compat',
+              provider: this.provider,
               findings: [],
               durationMs: Date.now() - start,
               status: 'error',
@@ -89,7 +93,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
           return {
             model,
             role,
-            provider: 'openai-compat',
+            provider: this.provider,
             findings,
             durationMs: Date.now() - start,
             status: 'success',
@@ -100,7 +104,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             return {
               model,
               role,
-              provider: 'openai-compat',
+              provider: this.provider,
               findings: [],
               durationMs: Date.now() - start,
               status: 'timeout',
@@ -122,7 +126,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     return {
       model,
       role,
-      provider: 'openai-compat',
+      provider: this.provider,
       findings: [],
       durationMs: Date.now() - start,
       status: 'error',

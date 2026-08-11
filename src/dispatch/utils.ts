@@ -1,9 +1,18 @@
-const KNOWN_PROVIDER_PREFIXES = ['anthropic/', 'openai/', 'google/', 'openai-compat/'] as const;
+const KNOWN_PROVIDER_PREFIXES = [
+  'anthropic/',
+  'openai/',
+  'google/',
+  'openrouter/',
+  'openai-compat/',
+] as const;
 
 /**
  * Strip a known provider prefix from a model name.
- * Only removes anthropic/, openai/, google/, or openai-compat/ prefixes.
- * Returns the model name unchanged if no known prefix is found.
+ * Only removes anthropic/, openai/, google/, openrouter/, or openai-compat/
+ * prefixes. Returns the model name unchanged if no known prefix is found.
+ * Note: openrouter/ models keep their vendor segment — stripping
+ * "openrouter/moonshotai/kimi-k3" yields "moonshotai/kimi-k3", which is the
+ * model id OpenRouter expects on the wire.
  */
 export function stripKnownProviderPrefix(model: string): string {
   for (const prefix of KNOWN_PROVIDER_PREFIXES) {

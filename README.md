@@ -123,6 +123,8 @@ models:
   - anthropic/claude-opus-4-6
   - openai/gpt-5.4
   - google/gemini-2.5-pro
+  # Any model on https://openrouter.ai — keep the vendor segment after the prefix
+  - openrouter/moonshotai/kimi-k3
 
 # Default roles to run
 roles:
@@ -200,6 +202,7 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `ANTHROPIC_API_KEY` | API key for Claude models |
 | `OPENAI_API_KEY` | API key for OpenAI models |
 | `GEMINI_API_KEY` | API key for Google Gemini models |
+| `OPENROUTER_API_KEY` | API key for [OpenRouter](https://openrouter.ai) models (`openrouter/…` prefix) |
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
 

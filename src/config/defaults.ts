@@ -3,13 +3,12 @@ export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5',
   'openai/gpt-5.6-sol',
   'google/gemini-3.5-flash',
+  'openrouter/moonshotai/kimi-k3',
 ] as const;
 
 /** Previous-gen models — specialized round-robin only, no general role */
 export const DEFAULT_SECONDARY_MODELS = [
   'anthropic/claude-opus-4-8',
-  'openai/gpt-5.4',
-  'google/gemini-2.5-pro',
 ] as const;
 
 export const DEFAULT_THRESHOLDS = {

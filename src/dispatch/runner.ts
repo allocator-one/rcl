@@ -33,6 +33,19 @@ function defaultAdapterFactory(provider: string): ReviewAdapter {
       return new OpenAIAdapter();
     case 'google':
       return new GoogleAdapter();
+    case 'openrouter': {
+      const apiKey = process.env['OPENROUTER_API_KEY'];
+      // Fail loudly instead of letting the OpenAI SDK silently fall back to
+      // OPENAI_API_KEY, which would send the wrong key to openrouter.ai.
+      if (!apiKey) {
+        throw new Error('OPENROUTER_API_KEY is not set (required for openrouter/ models)');
+      }
+      return new OpenAICompatAdapter({
+        apiKey,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        provider: 'openrouter',
+      });
+    }
     default:
       return new OpenAICompatAdapter();
   }

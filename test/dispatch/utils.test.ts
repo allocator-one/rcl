@@ -37,6 +37,10 @@ describe('stripKnownProviderPrefix', () => {
   it('strips openai-compat/ prefix', () => {
     expect(stripKnownProviderPrefix('openai-compat/llama3.2')).toBe('llama3.2');
   });
+
+  it('strips openrouter/ prefix but keeps the vendor segment', () => {
+    expect(stripKnownProviderPrefix('openrouter/moonshotai/kimi-k3')).toBe('moonshotai/kimi-k3');
+  });
 });
 
 describe('isRetryableStatus', () => {

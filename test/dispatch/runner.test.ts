@@ -117,4 +117,20 @@ describe('runReviews worker pool', () => {
       })
     ).rejects.toThrow(/same length/);
   });
+
+  it('openrouter without OPENROUTER_API_KEY surfaces a per-review error', async () => {
+    const prev = process.env['OPENROUTER_API_KEY'];
+    delete process.env['OPENROUTER_API_KEY'];
+    try {
+      const reviews = await runReviews(
+        [makeAssignment('openrouter/moonshotai/kimi-k3', 'openrouter')],
+        [makePrompt()],
+        { timeoutMs: 1000, maxRetries: 0, concurrency: 1 }
+      );
+      expect(reviews[0]!.status).toBe('error');
+      expect(reviews[0]!.error).toContain('OPENROUTER_API_KEY');
+    } finally {
+      if (prev !== undefined) process.env['OPENROUTER_API_KEY'] = prev;
+    }
+  });
 });
