@@ -44,6 +44,10 @@ function defaultAdapterFactory(provider: string): ReviewAdapter {
         apiKey,
         baseUrl: 'https://openrouter.ai/api/v1',
         provider: 'openrouter',
+        // Without this, reasoning models think for 5-10 minutes and/or
+        // exhaust max_tokens before emitting findings (dogfood: 4 of 7
+        // OpenRouter seats completed zero reviews across three rounds).
+        reasoningEffort: 'medium',
       });
     }
     default:

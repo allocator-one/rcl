@@ -25,6 +25,12 @@
   every run. Explicitly configured openrouter models still fail loudly.
   Note the flip side: with the key set, default reviews also send code to
   OpenRouter (see README).
+- **OpenRouter reviews run with bounded reasoning (`effort: medium`).**
+  Unbounded, the fleet's reasoning models (kimi-k3, qwen3.8-max,
+  deepseek-v4, grok-4.5) think for 5–10 minutes and/or exhaust the 16k
+  completion budget before emitting findings — across three dogfood
+  council rounds, 4 of 7 OpenRouter seats completed zero reviews.
+  Bounding effort bounds both reasoning tokens and wall-clock.
 - **Default per-call timeout raised 120s → 600s.** Reasoning-heavy models
   (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5) time out wholesale at 120s
   on real diffs, and mostly still at 300s (successful calls measured
