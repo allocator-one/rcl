@@ -50,14 +50,14 @@ Invoke as `$rcl-converge` in a Codex session.
 
 Drive the current PR (or branch diff) to a clean Review Council verdict: loop review → triage → fix → push until a round produces no new actionable findings. This skill composes the `rcl` skill — each round runs the same review; this skill owns the loop, the triage ledger, and the safety interlocks.
 
-Cost awareness: every round is a full multi-model council run (10–15 minutes of model spend). The default cap is 3 rounds; never exceed the cap silently.
+Cost awareness: every round is a full multi-model council run (10–15 minutes of model spend). The cap is 7 rounds; never exceed it silently.
 
 Authorization: invoking this skill IS the explicit request for the loop's fix commits (and pushes, in PR mode) — no additional mid-loop approval is sought, and this satisfies repository profiles that otherwise require asking before committing. A standing "do not commit" or "do not push" instruction still wins: do not start the loop while one is active.
 
 ## Flags
 
 - `PR#N` / `#N` / `N` — converge a specific PR (default: current branch's PR, else local diff mode)
-- `--max-rounds <N>` — total-round cap for the target, counted from the ledger (default 3, absolute maximum 7); resuming never resets the count
+- `--max-rounds <N>` — total-round cap for the target, counted from the ledger (default and absolute maximum 7); resuming never resets the count
 - `--roles <list>`, `--spec <path>` — passed through to every round's review
 - `--post-final` — after convergence, post a summary comment to the PR (never posts mid-loop)
 
@@ -153,6 +153,6 @@ Consequences:
 
 ## Examples
 
-- `$rcl-converge` — converge the current branch's PR, max 3 rounds
+- `$rcl-converge` — converge the current branch's PR, up to 7 rounds
 - `$rcl-converge #7 --max-rounds 2` — converge a specific PR with a tighter cap
 - `$rcl-converge --roles security-auditor,bug-hunter --post-final` — converge on two roles, post the summary once clean
