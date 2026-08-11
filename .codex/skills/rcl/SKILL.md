@@ -11,6 +11,7 @@ allowed-tools:
   - Bash(git merge-base:*)
   - Bash(git status:*)
   - Bash(git rev-parse:*)
+  - Bash(rcl --version)
   - Bash(git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
