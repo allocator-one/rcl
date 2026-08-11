@@ -3,16 +3,25 @@ import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, ConfigError } from '../../src/config/loader.js';
-import { DEFAULT_MODELS } from '../../src/config/defaults.js';
+import { DEFAULT_MODELS, DEFAULT_SECONDARY_MODELS } from '../../src/config/defaults.js';
 
 let dir: string;
+let savedOpenRouterKey: string | undefined;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'rcl-loader-'));
+  // Default-fleet assertions assume the full fleet is usable.
+  savedOpenRouterKey = process.env['OPENROUTER_API_KEY'];
+  process.env['OPENROUTER_API_KEY'] = 'test-key';
 });
 
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
+  if (savedOpenRouterKey === undefined) {
+    delete process.env['OPENROUTER_API_KEY'];
+  } else {
+    process.env['OPENROUTER_API_KEY'] = savedOpenRouterKey;
+  }
 });
 
 describe('loadConfig', () => {
@@ -75,5 +84,35 @@ describe('loadConfig', () => {
   it('rejects malformed yaml instead of falling back to cloud defaults', async () => {
     await writeFile(join(dir, '.review-council.yml'), 'models: [unclosed\n:bad');
     await expect(loadConfig(undefined, dir)).rejects.toThrow(ConfigError);
+  });
+});
+
+describe('OpenRouter default degradation', () => {
+  it('drops openrouter/ models from both default lists when OPENROUTER_API_KEY is unset', async () => {
+    delete process.env['OPENROUTER_API_KEY'];
+    const config = await loadConfig(undefined, dir);
+    expect(config.models).toEqual(
+      [...DEFAULT_MODELS].filter((m) => !m.startsWith('openrouter/'))
+    );
+    expect(config.models!.length).toBeGreaterThan(0);
+    expect(config.secondaryModels).toEqual(
+      [...DEFAULT_SECONDARY_MODELS].filter((m) => !m.startsWith('openrouter/'))
+    );
+  });
+
+  it('keeps the full default fleet when OPENROUTER_API_KEY is set', async () => {
+    const config = await loadConfig(undefined, dir);
+    expect(config.models).toEqual([...DEFAULT_MODELS]);
+    expect(config.secondaryModels).toEqual([...DEFAULT_SECONDARY_MODELS]);
+  });
+
+  it('never filters explicitly configured openrouter models', async () => {
+    delete process.env['OPENROUTER_API_KEY'];
+    await writeFile(
+      join(dir, '.review-council.yml'),
+      'models:\n  - openrouter/moonshotai/kimi-k3\n'
+    );
+    const config = await loadConfig(undefined, dir);
+    expect(config.models).toEqual(['openrouter/moonshotai/kimi-k3']);
   });
 });

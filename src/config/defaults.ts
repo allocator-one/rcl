@@ -34,7 +34,12 @@ export const DEFAULT_THRESHOLDS = {
   jaccardThreshold: 0.3,
 } as const;
 
-export const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * Reasoning-heavy models (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5)
+ * routinely need well over 120s to review a real diff — at 120s the entire
+ * OpenRouter wing of the default fleet times out and contributes nothing.
+ */
+export const DEFAULT_TIMEOUT_MS = 300_000;
 export const DEFAULT_MAX_RETRIES = 3;
 export const DEFAULT_CONCURRENCY = 6;
 

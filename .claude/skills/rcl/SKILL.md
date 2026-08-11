@@ -12,7 +12,10 @@ allowed-tools:
   - Bash(git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@latest)
+  - Bash(npm install -g review-council@1.4.1)
+  - Bash(which rcl)
+  - Bash(rm -f /tmp/rcl-*)
+  - Write(/tmp/rcl-spec-*.md)
   - Read(/tmp/rcl-report-*.md)
   - Read(/tmp/rcl-report-*.json)
 ---
@@ -25,7 +28,7 @@ Run a multi-model AI code review on the current branch's PR. By default, keep th
 
 ### 1. Resolve the review target
 
-If `$ARGUMENTS` contains a number (e.g. `#7` or `7`), use that as the PR number and proceed to step 1a.
+If `$ARGUMENTS` contains a standalone positional PR token — `PR#N`, `#N`, or an all-digit token — use that as the PR number and proceed to step 1a. Consume named flags and their values first: the `2` in `--max-rounds 2` or in `--spec specs/v2.md` is a flag value, never a PR number.
 Otherwise, detect the current branch's PR:
 
 ```bash
@@ -46,26 +49,26 @@ Use `<REPO>#<PR_NUMBER>` as the review target.
 
 #### 1b. Local diff review (no PR)
 
-Generate a patch from the current branch against its merge-base with `origin/main`:
+Generate a patch from the current branch against its merge-base with `origin/main`. Scope the patch path by branch so a parallel session in another repository or worktree can never overwrite this review's input between generation and the review run. Let `<BRANCH>` be the branch name with every character outside `[A-Za-z0-9._-]` replaced by `-`:
 
 ```bash
 BASE=$(git merge-base HEAD origin/main)
-git diff "$BASE"..HEAD > /tmp/rcl-branch-review.patch
+git diff "$BASE"..HEAD > /tmp/rcl-branch-review-<BRANCH>.patch
 ```
 
 If the diff is empty (no changes vs main), tell the user and stop.
 
-Use `/tmp/rcl-branch-review.patch` as the review target.
+Use `/tmp/rcl-branch-review-<BRANCH>.patch` as the review target.
 
 Note: `--post` and `--inline` are ignored in local diff mode (there is no PR to post to). Inform the user if they passed those flags.
 
 ### 2. Resolve the spec (automatic)
 
-The `spec-compliance` role reviews the diff against a specification. This step determines whether a spec is available and, if so, writes it to `/tmp/rcl-spec.md` for use with `--spec`.
+The `spec-compliance` role reviews the diff against a specification. This step determines whether a spec is available and, if so, writes it to a target-scoped file for use with `--spec`. Let `<SPEC>` be `/tmp/rcl-spec-<TARGET>.md` (`<TARGET>` as defined in step 5) — never a shared, unscoped path: concurrent sessions would overwrite each other's spec and review against the wrong requirements.
 
 Check these sources **in order** and use the first one that produces content:
 
-1. **Explicit `--spec <path>` flag in `$ARGUMENTS`** — use that file directly, skip the rest of this step.
+1. **Explicit `--spec <path>` flag in `$ARGUMENTS`** — use that file directly as `<SPEC>`, skip the rest of this step.
 
 2. **Harness issue for the current work** — check for in-progress issues tied to this branch:
    ```bash
@@ -75,7 +78,7 @@ Check these sources **in order** and use the first one that produces content:
    ```bash
    harness show <identifier>
    ```
-   If the issue has a meaningful description and/or acceptance criteria, write them to `/tmp/rcl-spec.md`:
+   If the issue has a meaningful description and/or acceptance criteria, write them to `<SPEC>`:
    ```
    # Spec: <issue title>
    
@@ -103,9 +106,9 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 which rcl
 ```
 
-If not found, install the published package:
+If not found, install the pinned published version (bump this pin deliberately on each release — an unpinned `@latest` would hand whatever gets published next execution access to your source and GITHUB_TOKEN):
 ```bash
-npm install -g review-council@latest
+npm install -g review-council@1.4.1
 ```
 
 Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself).
@@ -113,7 +116,7 @@ Note: this repo is review-council's own source. Reviews default to the published
 ### 4. Parse flags
 
 - `--post` → add `--post` to the rcl command and post a summary review to the PR (PR mode only)
-- `--inline` → add `--post` to the rcl command and request inline line comments where possible (PR mode only)
+- `--inline` → add `--post` to the rcl command (PR mode only). The rcl CLI has no separate inline flag: a posted review already anchors each finding as an inline line comment wherever it maps onto the diff (unmappable findings demote to the summary), so `--post` and `--inline` build the same command.
 - `--spec <path>` → use the given file as the spec (overrides automatic detection from step 2)
 - `--roles <list>` → pass through (e.g. `--roles security-auditor,bug-hunter`)
 - default (no flags) → run the review locally and report the findings back in the session without posting to GitHub
@@ -128,17 +131,17 @@ For PR-based review:
 ```bash
 GITHUB_TOKEN=$(gh auth token) rcl review <REPO>#<PR_NUMBER> \
   --markdown /tmp/rcl-report-<TARGET>.md --json-file /tmp/rcl-report-<TARGET>.json \
-  [--post] [--spec /tmp/rcl-spec.md] [--roles <roles>]
+  [--post] [--spec <SPEC>] [--roles <roles>]
 ```
 
 For local diff review:
 ```bash
-GITHUB_TOKEN=$(gh auth token) rcl review /tmp/rcl-branch-review.patch \
+GITHUB_TOKEN=$(gh auth token) rcl review /tmp/rcl-branch-review-<BRANCH>.patch \
   --markdown /tmp/rcl-report-<TARGET>.md --json-file /tmp/rcl-report-<TARGET>.json \
-  [--spec /tmp/rcl-spec.md] [--roles <roles>]
+  [--spec <SPEC>] [--roles <roles>]
 ```
 
-Only include `--spec` if a spec was resolved in step 2.
+Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact path resolved there — the explicit flag value, or the target-scoped generated file).
 
 **Never** pipe the `rcl review` command through `head`, `tail`, `| head -n`, or similar — the report is captured in the files above no matter what scrolls past in the console.
 

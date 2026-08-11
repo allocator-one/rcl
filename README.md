@@ -161,7 +161,7 @@ output:
 
 # Concurrency and reliability
 concurrency: 6
-timeout: 120000       # ms per model call
+timeout: 300000       # ms per model call (reasoning models need headroom on real diffs)
 maxRetries: 3
 
 # Context files to attach to every review
@@ -203,6 +203,14 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `OPENAI_API_KEY` | API key for OpenAI models |
 | `GEMINI_API_KEY` | API key for Google Gemini models |
 | `OPENROUTER_API_KEY` | API key for [OpenRouter](https://openrouter.ai) models (`openrouter/…` prefix) |
+
+The default model fleet includes OpenRouter-hosted models. If `OPENROUTER_API_KEY`
+is not set, those entries are dropped from the defaults with a warning (models you
+configure explicitly still fail loudly instead). Note that when the key is set,
+default reviews send diff and context content to OpenRouter — an aggregator and
+an additional data processor beyond the direct model providers — as well as to
+Anthropic, OpenAI, and Google. Configure `models:` explicitly if that matters
+for your repository.
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
 

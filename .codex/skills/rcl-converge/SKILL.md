@@ -20,9 +20,18 @@ allowed-tools:
   - Bash(git push:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@latest)
+  - Bash(npm install -g review-council@1.4.1)
   - Bash(npm test:*)
   - Bash(npm run lint:*)
+  - Bash(which rcl)
+  - Bash(rm -f /tmp/rcl-*)
+  - Write(/tmp/rcl-spec-*.md)
+  - Read
+  - Edit
+  - Bash(nohup:*)
+  - Bash(kill:*)
+  - Bash(cat /tmp/rcl-*)
+  - Read(/tmp/rcl-*.log)
   - Read(/tmp/rcl-report-*.md)
   - Read(/tmp/rcl-report-*.json)
   - Read(/tmp/rcl-converge-*.md)
@@ -52,7 +61,7 @@ Cost awareness: every round is a full multi-model council run (10–15 minutes o
 2. Resolve the review target, spec, and `rcl` availability exactly as the `rcl` skill does — read `.codex/skills/rcl/SKILL.md` and follow its steps 1–3. Conventions that differ here:
    - `<TARGET>` is `<repo>-<PR number>` (e.g. `rcl-7`), or `<repo>-<branch>` with `/` replaced by `-` in local diff mode — the repo name scopes ledgers and reports so identical PR numbers or branch names in different repositories never collide.
    - Report files are round-scoped: `/tmp/rcl-report-<TARGET>-r<R>.md` / `.json` for round `<R>`, so rounds never clobber each other.
-3. **Verify the checkout matches the PR** (PR mode): the loop commits to the current branch, so the PR's head branch (`gh pr view <PR> --json headRefName -q .headRefName`) must equal `git rev-parse --abbrev-ref HEAD`. On mismatch — typical when an explicit `PR#N` was passed — stop and ask the user to check out the PR's branch first; never fix a PR from a different checkout. The PR must also live in this repository: `gh pr view <PR> --json isCrossRepository` must be false — converge does not drive fork PRs. (A detached HEAD reads as `HEAD` and simply fails the match; that stop is correct.)
+3. **Verify the checkout matches the PR** (PR mode): the loop commits to the current branch, so the PR's head branch (`gh pr view <PR> --json headRefName -q .headRefName`) must equal `git rev-parse --abbrev-ref HEAD`. On mismatch — typical when an explicit `PR#N` was passed — stop and ask the user to check out the PR's branch first; never fix a PR from a different checkout. The PR must also live in this repository: `gh pr view <PR> --json isCrossRepository` must be false — converge does not drive fork PRs. (A detached HEAD reads as `HEAD` and simply fails the match; that stop is correct.) Also verify local HEAD equals the PR head commit (`gh pr view <PR> --json headRefOid -q .headRefOid` vs `git rev-parse HEAD`): a clean tree can still be ahead of the PR by unpushed commits, and the council would then review — and possibly converge on — code the PR does not contain. If local is ahead, push first; if the histories diverge, stop and ask.
 4. **Disarm auto-merge** (PR mode): check `gh pr view <PR> --json autoMergeRequest`. If armed, run `gh pr merge <PR> --disable-auto` and tell the user why: CI can go green mid-loop, merge a partial squash, auto-delete the branch, and strand later fix pushes on an already-merged PR. Do not re-arm during the loop.
 5. Open the ledger `/tmp/rcl-converge-<TARGET>-ledger.md`. If one exists from an earlier session, resume it (continue the round numbering); otherwise create it — format below.
 
@@ -60,17 +69,17 @@ Cost awareness: every round is a full multi-model council run (10–15 minutes o
 
 For each round `<R>` (numbering continues from a resumed ledger) until the ledger holds `--max-rounds` rounds — and never more than 7 rounds for a target, regardless of flags or resumes:
 
-1. **Refresh the target.** PR mode: nothing to do — the PR already contains last round's pushed fixes. Local diff mode: regenerate the patch so the round reviews the fixed code:
+1. **Refresh the target.** PR mode: re-check that the PR head still equals local HEAD (an external push mid-loop means someone else is driving the branch — stop and report). Otherwise nothing to do — the PR already contains last round's pushed fixes. Local diff mode: regenerate the patch so the round reviews the fixed code:
    ```bash
    BASE=$(git merge-base HEAD origin/main)
-   git diff "$BASE"..HEAD > /tmp/rcl-branch-review.patch
+   git diff "$BASE"..HEAD > /tmp/rcl-branch-review-<TARGET>.patch
    ```
 2. **Run the review detached.** The run takes 10–15 minutes — never run it as a plain foreground shell call (the tool timeout kills it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f /tmp/rcl-report-<TARGET>-r<R>.md /tmp/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch detached with `nohup … &`, a log file, and a PID file:
    ```bash
    nohup sh -c 'GITHUB_TOKEN=$(gh auth token) rcl review <target> \
      --markdown /tmp/rcl-report-<TARGET>-r<R>.md \
      --json-file /tmp/rcl-report-<TARGET>-r<R>.json \
-     [--spec /tmp/rcl-spec.md] [--roles <roles>]' \
+     [--spec <SPEC>] [--roles <roles>]' \
      > /tmp/rcl-converge-<TARGET>-r<R>.log 2>&1 &
    echo $! > /tmp/rcl-converge-<TARGET>-r<R>.pid
    ```

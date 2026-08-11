@@ -19,6 +19,15 @@
   `openrouter/x-ai/grok-4.5`. Every default voter now comes from a
   distinct training lineage, so consensus agreement always reflects
   independent confirmation.
+- **Defaults degrade gracefully without OPENROUTER_API_KEY.** Upgrading from
+  1.4.x with only the big-three keys keeps working: openrouter/ entries are
+  dropped from the *default* lists with a warning instead of erroring on
+  every run. Explicitly configured openrouter models still fail loudly.
+  Note the flip side: with the key set, default reviews also send code to
+  OpenRouter (see README).
+- **Default per-call timeout raised 120s → 300s.** Reasoning-heavy models
+  (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5) time out wholesale at 120s
+  on real diffs — found by dogfooding this release on its own diff.
 
 ## 1.4.1
 
