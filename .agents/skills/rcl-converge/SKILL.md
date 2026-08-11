@@ -90,7 +90,7 @@ For each round `<R>` (numbering continues from a resumed ledger) until the ledge
 1. **Refresh the target.** PR mode: re-check that the PR head still equals local HEAD and that the PR is still OPEN (an external push mid-loop means someone else is driving the branch, and a merged or closed PR must not be converged — stop and report). Otherwise nothing to do — the PR already contains last round's pushed fixes. Local diff mode: regenerate the patch so the round reviews the fixed code:
    ```bash
    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
-BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
+   BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
    git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```
 2. **Run the review detached.** The run takes 10–15 minutes — never run it as a plain foreground shell call (the tool timeout kills it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch detached with `nohup … &`, a log file, and a PID file:
