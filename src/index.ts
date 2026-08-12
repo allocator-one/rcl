@@ -16,6 +16,7 @@ import {
 } from './config/defaults.js';
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
+import { loadGitDiff } from './resolver/git.js';
 import { chunkDiff } from './prepare/chunker.js';
 import { buildPrompt } from './prepare/prompt-builder.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
@@ -47,8 +48,12 @@ program
 
 // review command
 program
-  .command('review <target>')
-  .description('Review a PR or local diff. Target: owner/repo#N, GitHub PR URL, or path to .patch file')
+  .command('review [target]')
+  .description(
+    'Review a PR, local diff, or uncommitted work. Target: owner/repo#N, GitHub PR URL, or path to .patch file; or use --staged/--working-tree'
+  )
+  .option('--staged', 'Review staged changes (git diff --cached) instead of a target')
+  .option('--working-tree', 'Review all uncommitted changes (git diff HEAD) instead of a target')
   .option('--role <name>', 'Use a single named role')
   .option('--roles <names>', 'Comma-separated list of roles')
   .option(
@@ -79,7 +84,7 @@ program
   .option('--markdown <path>', 'Write Markdown report to file')
   .option('--ci', 'CI mode: exit non-zero if critical/important findings')
   .option('--config <path>', 'Path to config file')
-  .action(async (target: string, opts) => {
+  .action(async (target: string | undefined, opts) => {
     await runReview(target, opts);
   });
 
@@ -123,7 +128,9 @@ rolesCmd
     console.log('');
   });
 
-async function runReview(target: string, opts: {
+async function runReview(target: string | undefined, opts: {
+  staged?: boolean;
+  workingTree?: boolean;
   role?: string;
   roles?: string;
   reviewer?: string[];
@@ -142,6 +149,17 @@ async function runReview(target: string, opts: {
   const spinner = ora('Loading configuration...').start();
 
   try {
+    // Exactly one review source: a positional target, --staged, or --working-tree
+    const sourceCount = [target, opts.staged, opts.workingTree].filter(Boolean).length;
+    if (sourceCount === 0) {
+      spinner.fail('Missing review target. Provide owner/repo#N, a patch file, --staged, or --working-tree.');
+      process.exit(1);
+    }
+    if (sourceCount > 1) {
+      spinner.fail('A positional target, --staged, and --working-tree are mutually exclusive');
+      process.exit(1);
+    }
+
     // Load config
     const config = await loadConfig(opts.config);
 
@@ -229,25 +247,33 @@ async function runReview(target: string, opts: {
       roleMap,
     });
 
-    spinner.text = `Resolving diff for: ${target}`;
+    const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
+    spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
     // Resolve diff
     let diff;
-    const isLocalFile =
-      target.endsWith('.patch') ||
-      target.endsWith('.diff') ||
-      target.startsWith('./') ||
-      target.startsWith('/');
-
-    if (isLocalFile) {
-      diff = await loadLocalDiff(target);
+    if (gitMode) {
+      diff = await loadGitDiff(gitMode);
+    } else if (
+      target!.endsWith('.patch') ||
+      target!.endsWith('.diff') ||
+      target!.startsWith('./') ||
+      target!.startsWith('/')
+    ) {
+      diff = await loadLocalDiff(target!);
     } else {
-      const prTarget = parseGitHubTarget(target);
+      const prTarget = parseGitHubTarget(target!);
       diff = await fetchPRDiff(prTarget, config.githubToken);
     }
 
     if (diff.files.length === 0) {
-      spinner.warn('No files found in diff. Nothing to review.');
+      spinner.warn(
+        gitMode === 'staged'
+          ? 'No staged changes to review.'
+          : gitMode === 'working-tree'
+            ? 'No uncommitted changes to review.'
+            : 'No files found in diff. Nothing to review.'
+      );
       process.exit(0);
     }
 
@@ -362,6 +388,9 @@ async function runReview(target: string, opts: {
       console.log(chalk.dim(`Markdown written to: ${opts.markdown}`));
     }
 
+    if (opts.post && !diff.metadata) {
+      console.log(chalk.yellow('--post ignored: no PR to post to for a local diff.'));
+    }
     if (opts.post && diff.metadata) {
       const postSpinner = ora('Posting review to GitHub...').start();
       try {

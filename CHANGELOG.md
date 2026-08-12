@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Review uncommitted work: `rcl review --staged` / `--working-tree`.**
+  `--staged` reviews `git diff --cached`, `--working-tree` reviews
+  `git diff HEAD` (staged + unstaged) — no more `git diff > file` dance.
+  The flags replace the positional target and are mutually exclusive with
+  it. Untracked files are not included (invisible to `git diff`).
+  `--post` on a non-PR source now warns instead of silently doing nothing.
+
 - **`reasoningEffort` is configurable** (`low` | `medium` | `high`, default
   `medium`) instead of hardcoded, threaded from config through the runner to
   the OpenRouter adapter.

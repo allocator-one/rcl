@@ -88,7 +88,7 @@ git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
 
 If the diff is empty (no changes vs the default branch), tell the user and stop.
 
-This reviews **committed work only** — `git diff <BASE>..HEAD` excludes staged, unstaged, and untracked changes. If `git status --porcelain` is non-empty, say which files are uncommitted and therefore unreviewed before running, so an empty or partial diff is never mistaken for a clean review of the current edits.
+This reviews **committed work only** — `git diff <BASE>..HEAD` excludes staged, unstaged, and untracked changes. If `git status --porcelain` is non-empty, say which files are uncommitted and therefore unreviewed before running — and offer to review them instead: with rcl ≥ 1.6.0, `rcl review --staged` reviews staged changes and `rcl review --working-tree` reviews all uncommitted changes (staged + unstaged; untracked files are invisible to `git diff` in both modes). These flags replace the patch file as the review target — everything else (reports, spec, roles) works the same. Never mix them with a positional target, and never let an empty or partial diff be mistaken for a clean review of the current edits.
 
 Use `<RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch` as the review target.
 

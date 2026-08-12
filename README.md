@@ -58,19 +58,22 @@ rcl roles show security-auditor
 
 ## CLI Reference
 
-### `rcl review <target>`
+### `rcl review [target]`
 
-Review a PR or local diff.
+Review a PR, a local diff, or uncommitted work.
 
 **Target formats:**
 - `owner/repo#N` — GitHub PR number
 - GitHub PR URL
 - Path to a `.patch` or `.diff` file
+- No target with `--staged` or `--working-tree` — review uncommitted changes in the current repository
 
 **Options:**
 
 | Flag | Description |
 |------|-------------|
+| `--staged` | Review staged changes (`git diff --cached`) |
+| `--working-tree` | Review all uncommitted changes (`git diff HEAD`, staged + unstaged) |
 | `--role <name>` | Use a single named role |
 | `--roles <names>` | Comma-separated list of roles |
 | `--reviewer <model:role>` | Explicit model:role pair (repeatable) |
@@ -85,7 +88,7 @@ Review a PR or local diff.
 | `--ci` | Exit non-zero if critical/important findings exist |
 | `--config <path>` | Path to a config file |
 
-`--role`, `--roles`, and `--reviewer` are mutually exclusive.
+`--role`, `--roles`, and `--reviewer` are mutually exclusive. So are a positional target, `--staged`, and `--working-tree` — pick exactly one review source. Untracked files are invisible to `git diff` and therefore not reviewed.
 
 **Examples:**
 
@@ -100,6 +103,10 @@ rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/
 
 # Output JSON for downstream processing
 rcl review owner/repo#99 --json > findings.json
+
+# Review your uncommitted work before committing
+rcl review --staged
+rcl review --working-tree --roles security-auditor,bug-hunter
 ```
 
 ---
