@@ -198,7 +198,13 @@ const CONCEPT_MATCHERS = Object.entries(ISSUE_CONCEPTS).map(([concept, phrases])
     if (!/^[\p{L}\p{N}].*[\p{L}\p{N}]$/u.test(p)) {
       throw new Error(`ISSUE_CONCEPTS phrase must start and end with a word character: "${p}"`);
     }
-    return new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+    // Spaces match any whitespace run so "cross-site\n  scripting" still
+    // hits — a missed match only means falling back to token similarity
+    // (under-merge), but there's no reason to be brittle about line wraps.
+    return new RegExp(
+      `\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')}\\b`,
+      'i'
+    );
   }),
 }));
 

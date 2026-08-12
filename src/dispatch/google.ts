@@ -1,8 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
-import type { ReviewAdapter, AdapterOptions } from './adapter.js';
-import { stripKnownProviderPrefix, retryDelay, sleep } from './utils.js';
+import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
+import { stripKnownProviderPrefix, retryDelay, sleep, attemptWithRetries } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
   const errStr = String(err);
@@ -124,5 +124,46 @@ export class GoogleAdapter implements ReviewAdapter {
       status: 'error',
       error: errMsg,
     };
+  }
+
+  async ask(
+    model: string,
+    systemPrompt: string,
+    userPrompt: string,
+    options: AdapterOptions
+  ): Promise<ModelAnswer> {
+    const start = Date.now();
+    const modelId = stripKnownProviderPrefix(model);
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      isRetryable,
+      attempt: async (signal) => {
+        const response = await this.client.models.generateContent({
+          model: modelId,
+          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+          config: {
+            systemInstruction: systemPrompt,
+            maxOutputTokens: 8192,
+            abortSignal: signal,
+            httpOptions: { timeout: options.timeoutMs + 30_000 },
+          },
+        });
+        return (response.text ?? '').trim();
+      },
+    });
+
+    const durationMs = Date.now() - start;
+    return outcome.ok
+      ? { model, provider: 'google', text: outcome.value, durationMs, status: 'success' }
+      : {
+          model,
+          provider: 'google',
+          text: '',
+          durationMs,
+          status: outcome.timedOut ? 'timeout' : 'error',
+          error: outcome.error,
+        };
   }
 }
