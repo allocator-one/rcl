@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0
 
 - **`rcl discuss` — one-shot council discussion of a finding.** Ask the
   models that flagged a finding a follow-up question, with context
