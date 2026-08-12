@@ -8,6 +8,8 @@ import {
   retryDelay,
   sleep,
   attemptWithRetries,
+  failedReview,
+  isBlankOutput,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -98,15 +100,30 @@ export class AnthropicAdapter implements ReviewAdapter {
           );
 
           if (response.stop_reason === 'max_tokens') {
-            return {
+            return failedReview({
               model,
               role,
               provider: 'anthropic',
-              findings: [],
-              durationMs: Date.now() - start,
-              status: 'error',
+              startedAt: start,
               error: 'Response truncated at max_tokens; findings would be incomplete',
-            };
+            });
+          }
+
+          // Safety classifiers decline in-band: HTTP 200, no content. Left
+          // unhandled this reads as a clean review of code nobody looked at.
+          if (response.stop_reason === 'refusal') {
+            const details = response.stop_details;
+            const category =
+              details !== null && details !== undefined && 'category' in details
+                ? (details.category as string | null)
+                : null;
+            return failedReview({
+              model,
+              role,
+              provider: 'anthropic',
+              startedAt: start,
+              error: `Model refused this review${category ? ` (${category})` : ''} — the diff was not reviewed`,
+            });
           }
 
           // Extract from tool use
@@ -119,6 +136,16 @@ export class AnthropicAdapter implements ReviewAdapter {
             if (block.type === 'text') {
               rawOutput += block.text;
             }
+          }
+
+          if (isBlankOutput(rawOutput)) {
+            return failedReview({
+              model,
+              role,
+              provider: 'anthropic',
+              startedAt: start,
+              error: 'Model returned an empty response; the diff was not reviewed',
+            });
           }
 
           // If tool wasn't used, parse text output
