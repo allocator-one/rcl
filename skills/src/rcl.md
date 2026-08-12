@@ -15,7 +15,7 @@ allowed-tools:
   - Bash(git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@1.7.0)
+  - Bash(npm install -g review-council@latest)
   - Bash(which rcl)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -139,10 +139,12 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 which rcl && rcl --version
 ```
 
-If not found — or the installed version is older than the pin below — install the pinned published version (bump this pin deliberately on each release — an unpinned `@latest` would hand whatever gets published next execution access to your source and GITHUB_TOKEN):
+If not found, or if the installed version is behind the published one, install the latest:
 ```bash
-npm install -g review-council@1.7.0
+npm install -g review-council@latest
 ```
+
+`@latest` rather than a pinned version, deliberately: a pin has to be bumped by hand in every copy of this skill on every release, and in practice it doesn't happen — copies have sat on versions that were several releases stale, or (worse) on a version that was never published at all, which makes this install step fail outright. For a reproducible run against a specific version, install that version yourself before invoking the skill.
 
 Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself).
 
