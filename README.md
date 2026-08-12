@@ -111,6 +111,22 @@ rcl review --working-tree --roles security-auditor,bug-hunter
 
 ---
 
+### `rcl review-plan <file>`
+
+Council-review an implementation plan document (PRD, BUILD_PLAN.md, design doc) **before any code exists** — the cheapest bugs to fix are the ones caught in the plan.
+
+```bash
+rcl review-plan docs/plan.md
+rcl review-plan docs/plan.md --focus risks       # feasibility | completeness | risks | timeline
+rcl review-plan docs/plan.md --spec PRD.md       # also check the plan against a spec
+```
+
+The plan flows through the normal pipeline — multi-model dispatch, dedup, consensus, agreement-tier report — with plan-adapted prompts. Finding line numbers refer to the plan document's own lines. Categories are reinterpreted for plans (`correctness` = infeasible/contradictory steps, `tests` = missing validation strategy, `best-practices` = process gaps like rollback/migration, …).
+
+Default roles are a plan-suited subset (`general`, `architecture`, `edge-case-hunter`, plus `spec-compliance` when a spec is given); `--role`/`--roles`/`--reviewer` and config `roles` override as usual. Shares `--context`, `--models`, `--json`, `--json-file`, `--markdown`, and `--config` with `rcl review`. `--post` and `--ci` are not offered (no PR to post to; plan findings are judgment calls, not gates).
+
+---
+
 ### `rcl roles`
 
 ```bash

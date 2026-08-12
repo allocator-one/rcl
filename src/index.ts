@@ -17,6 +17,8 @@ import {
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff } from './resolver/git.js';
+import { loadPlanAsDiff } from './resolver/plan.js';
+import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
 import { chunkDiff } from './prepare/chunker.js';
 import { buildPrompt } from './prepare/prompt-builder.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
@@ -34,6 +36,7 @@ import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
 import type { ModelReview, ReviewResult } from './consensus/types.js';
 import type { Config } from './config/schema.js';
 import type { Role } from './roles/types.js';
+import type { Diff } from './resolver/types.js';
 
 const program = new Command();
 
@@ -88,6 +91,42 @@ program
     await runReview(target, opts);
   });
 
+// review-plan command
+program
+  .command('review-plan <file>')
+  .description('Council-review an implementation plan document before code exists')
+  .option('--focus <mode>', `Focus the review: ${PLAN_FOCUS_MODES.join(' | ')} (default: comprehensive)`)
+  .option('--role <name>', 'Use a single named role')
+  .option('--roles <names>', 'Comma-separated list of roles')
+  .option(
+    '--reviewer <pair>',
+    'Explicit model:role pair (repeatable)',
+    (val: string, prev: string[]) => {
+      prev.push(val);
+      return prev;
+    },
+    [] as string[]
+  )
+  .option(
+    '--context <path>',
+    'Context file or directory to include (repeatable)',
+    (val: string, prev: string[]) => {
+      prev.push(val);
+      return prev;
+    },
+    [] as string[]
+  )
+  .option('--spec <path>', 'Specification the plan should satisfy (enables spec-compliance role)')
+  .option('--models <models>', 'Comma-separated list of primary (SOTA) models')
+  .option('--secondary-models <models>', 'Comma-separated list of secondary models (specialized roles only)')
+  .option('--json', 'Output JSON to stdout')
+  .option('--json-file <path>', 'Write JSON output to file')
+  .option('--markdown <path>', 'Write Markdown report to file')
+  .option('--config <path>', 'Path to config file')
+  .action(async (file: string, opts) => {
+    await runPlanReview(file, opts);
+  });
+
 // roles subcommand
 const rolesCmd = program.command('roles').description('Manage and inspect roles');
 
@@ -128,9 +167,10 @@ rolesCmd
     console.log('');
   });
 
-async function runReview(target: string | undefined, opts: {
-  staged?: boolean;
-  workingTree?: boolean;
+type Spinner = ReturnType<typeof ora>;
+
+/** CLI options shared by every council-running command. */
+interface CouncilCliOpts {
   role?: string;
   roles?: string;
   reviewer?: string[];
@@ -138,13 +178,133 @@ async function runReview(target: string | undefined, opts: {
   spec?: string;
   models?: string;
   secondaryModels?: string;
-  focus?: string;
   post?: boolean;
   json?: boolean;
   jsonFile?: string;
   markdown?: string;
   ci?: boolean;
   config?: string;
+}
+
+interface PreparedCouncil {
+  config: Config;
+  roleMap: Map<string, Role>;
+  assignments: ReturnType<typeof buildAssignments>;
+  contextFiles: string[];
+}
+
+/**
+ * Shared front half of every council command: config, role resolution,
+ * assignments. `fallbackRoles` is used only when neither CLI flags nor
+ * config request roles (plan review defaults to a plan-suited subset).
+ */
+async function prepareCouncil(
+  spinner: Spinner,
+  opts: CouncilCliOpts,
+  fallbackRoles?: string[]
+): Promise<PreparedCouncil> {
+  const config = await loadConfig(opts.config);
+
+  // Validate mutually exclusive role options
+  const roleOptionCount = [opts.role, opts.roles, opts.reviewer?.length].filter(Boolean).length;
+  if (roleOptionCount > 1) {
+    spinner.fail('--role, --roles, and --reviewer are mutually exclusive');
+    process.exit(1);
+  }
+
+  // Override models from CLI
+  if (opts.models) {
+    config.models = opts.models.split(',').map((s) => s.trim()).filter(Boolean);
+    // Clear secondary models unless explicitly provided — don't leak code to default providers
+    if (opts.secondaryModels === undefined) {
+      config.secondaryModels = [];
+    }
+  }
+  if (opts.secondaryModels !== undefined) {
+    config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  // Determine roles to use
+  let requestedRoles: string[] | undefined;
+  let explicitReviewers: Array<{ model: string; role: string }> | undefined;
+
+  if (opts.role) {
+    requestedRoles = [opts.role];
+  } else if (opts.roles) {
+    requestedRoles = opts.roles.split(',').map((s) => s.trim());
+  } else if (opts.reviewer && opts.reviewer.length > 0) {
+    explicitReviewers = opts.reviewer.map((pair) => {
+      const colonIdx = pair.indexOf(':');
+      if (colonIdx < 0) {
+        throw new InvalidArgumentError(`Invalid reviewer pair "${pair}". Use model:role format.`);
+      }
+      return {
+        model: pair.slice(0, colonIdx),
+        role: pair.slice(colonIdx + 1),
+      };
+    });
+  } else if (fallbackRoles && !config.roles?.length) {
+    requestedRoles = fallbackRoles;
+  }
+
+  // Load spec file
+  let specContent: string | undefined;
+  const specPath = opts.spec ?? config.spec;
+  if (specPath) {
+    try {
+      specContent = await readFile(specPath, 'utf-8');
+    } catch {
+      spinner.warn(`Could not read spec file: ${specPath}`);
+    }
+  }
+
+  // A resolved spec makes the spec-compliance role useful for plan review
+  // too — the plan gets checked against the higher-level spec.
+  if (requestedRoles === fallbackRoles && requestedRoles && specContent) {
+    requestedRoles = [...requestedRoles, 'spec-compliance'];
+  }
+
+  // Load project rules
+  const projectRulesContent = await loadProjectRulesContent();
+
+  // Resolve roles
+  const roles = await resolveRoles(
+    config,
+    requestedRoles,
+    projectRulesContent ?? undefined,
+    specContent
+  );
+
+  if (roles.length === 0) {
+    spinner.fail('No roles resolved. Check your --role/--roles flags.');
+    process.exit(1);
+  }
+
+  // Build role map for voter
+  const roleMap = new Map<string, Role>();
+  for (const role of roles) {
+    roleMap.set(role.name, role);
+  }
+
+  const models = config.models ?? [...DEFAULT_MODELS];
+  const secondaryModels = config.secondaryModels ?? [];
+  const assignments = buildAssignments({
+    models,
+    roles,
+    secondaryModels,
+    explicitReviewers,
+    roleMap,
+  });
+
+  const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
+
+  return { config, roleMap, assignments, contextFiles };
+}
+
+async function runReview(target: string | undefined, opts: CouncilCliOpts & {
+  staged?: boolean;
+  workingTree?: boolean;
+  focus?: string;
 }): Promise<void> {
   const spinner = ora('Loading configuration...').start();
 
@@ -160,92 +320,7 @@ async function runReview(target: string | undefined, opts: {
       process.exit(1);
     }
 
-    // Load config
-    const config = await loadConfig(opts.config);
-
-    // Validate mutually exclusive role options
-    const roleOptionCount = [opts.role, opts.roles, opts.reviewer?.length].filter(Boolean).length;
-    if (roleOptionCount > 1) {
-      spinner.fail('--role, --roles, and --reviewer are mutually exclusive');
-      process.exit(1);
-    }
-
-    // Override models from CLI
-    if (opts.models) {
-      config.models = opts.models.split(',').map((s) => s.trim()).filter(Boolean);
-      // Clear secondary models unless explicitly provided — don't leak code to default providers
-      if (opts.secondaryModels === undefined) {
-        config.secondaryModels = [];
-      }
-    }
-    if (opts.secondaryModels !== undefined) {
-      config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim()).filter(Boolean);
-    }
-
-    // Determine roles to use
-    let requestedRoles: string[] | undefined;
-    let explicitReviewers: Array<{ model: string; role: string }> | undefined;
-
-    if (opts.role) {
-      requestedRoles = [opts.role];
-    } else if (opts.roles) {
-      requestedRoles = opts.roles.split(',').map((s) => s.trim());
-    } else if (opts.reviewer && opts.reviewer.length > 0) {
-      explicitReviewers = opts.reviewer.map((pair) => {
-        const colonIdx = pair.indexOf(':');
-        if (colonIdx < 0) {
-          throw new InvalidArgumentError(`Invalid reviewer pair "${pair}". Use model:role format.`);
-        }
-        return {
-          model: pair.slice(0, colonIdx),
-          role: pair.slice(colonIdx + 1),
-        };
-      });
-    }
-
-    // Load spec file
-    let specContent: string | undefined;
-    const specPath = opts.spec ?? config.spec;
-    if (specPath) {
-      try {
-        specContent = await readFile(specPath, 'utf-8');
-      } catch {
-        spinner.warn(`Could not read spec file: ${specPath}`);
-      }
-    }
-
-    // Load project rules
-    const projectRulesContent = await loadProjectRulesContent();
-
-    // Resolve roles
-    const roles = await resolveRoles(
-      config,
-      requestedRoles,
-      projectRulesContent ?? undefined,
-      specContent
-    );
-
-    if (roles.length === 0) {
-      spinner.fail('No roles resolved. Check your --role/--roles flags.');
-      process.exit(1);
-    }
-
-    // Build role map for voter
-    const roleMap = new Map<string, Role>();
-    for (const role of roles) {
-      roleMap.set(role.name, role);
-    }
-
-    // Build assignments
-    const models = config.models ?? [...DEFAULT_MODELS];
-    const secondaryModels = config.secondaryModels ?? [];
-    const assignments = buildAssignments({
-      models,
-      roles,
-      secondaryModels,
-      explicitReviewers,
-      roleMap,
-    });
+    const { config, roleMap, assignments, contextFiles } = await prepareCouncil(spinner, opts);
 
     const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
@@ -277,142 +352,193 @@ async function runReview(target: string | undefined, opts: {
       process.exit(0);
     }
 
-    // Chunk the diff
-    const chunks = chunkDiff(diff.files);
+    await executeCouncil(spinner, { config, roleMap, assignments, contextFiles }, diff, opts);
+  } catch (err) {
+    spinner.fail(String(err));
+    if (process.env['RCL_DEBUG']) {
+      console.error(err);
+    }
+    process.exit(1);
+  }
+}
 
-    spinner.text = `Building prompts (${chunks.length} chunk(s), ${assignments.length} reviewer(s))...`;
+/**
+ * Shared back half of every council command: chunking, prompt building,
+ * dispatch, consensus, and every output surface.
+ */
+async function executeCouncil(
+  spinner: Spinner,
+  prepared: PreparedCouncil,
+  diff: Diff,
+  opts: CouncilCliOpts,
+  planContext?: { focus?: PlanFocus }
+): Promise<void> {
+  const { config, roleMap, assignments, contextFiles } = prepared;
 
-    // Build context options
-    const contextFiles = [
-      ...(opts.context ?? []),
-      ...(config.context ?? []),
-    ];
+  // Chunk the diff
+  const chunks = chunkDiff(diff.files);
 
-    // Fan out every assignment across every chunk so the whole diff is
-    // reviewed, not just the first ~2000 lines. The spec is NOT passed as a
-    // context doc: resolveRoles already embeds it in the spec-compliance
-    // role's system prompt, and duplicating it doubled that reviewer's cost.
-    const chunkAssignments = chunks.flatMap((chunk) =>
-      assignments.map((assignment) => ({ assignment, chunk }))
-    );
-    const prompts = await Promise.all(
-      chunkAssignments.map(({ assignment, chunk }) =>
-        buildPrompt(chunk, assignment.role, {
-          contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
-        })
-      )
-    );
+  spinner.text = `Building prompts (${chunks.length} chunk(s), ${assignments.length} reviewer(s))...`;
 
-    spinner.text = `Running ${chunkAssignments.length} reviews (${assignments.length} reviewers × ${chunks.length} chunk(s))...`;
-    spinner.start();
+  // Fan out every assignment across every chunk so the whole diff is
+  // reviewed, not just the first ~2000 lines. The spec is NOT passed as a
+  // context doc: resolveRoles already embeds it in the spec-compliance
+  // role's system prompt, and duplicating it doubled that reviewer's cost.
+  const chunkAssignments = chunks.flatMap((chunk) =>
+    assignments.map((assignment) => ({ assignment, chunk }))
+  );
+  const prompts = await Promise.all(
+    chunkAssignments.map(({ assignment, chunk }) =>
+      buildPrompt(chunk, assignment.role, {
+        contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
+        plan: planContext,
+      })
+    )
+  );
 
-    const startTime = Date.now();
-    const completedReviews: ModelReview[] = [];
-    const totalCalls = chunkAssignments.length;
+  spinner.text = `Running ${chunkAssignments.length} reviews (${assignments.length} reviewers × ${chunks.length} chunk(s))...`;
+  spinner.start();
 
-    const chunkReviews = await runReviews(
-      chunkAssignments.map((ca) => ca.assignment),
-      prompts,
-      {
-        // Fall back to the shared constants, never to inline literals:
-        // duplicated defaults drift (this read 120_000 after the default
-        // moved to 600_000).
-        timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS,
-        maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-        concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
-        reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
-        onReviewComplete: (review) => {
-          completedReviews.push(review);
-          const done = completedReviews.length;
-          const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
-          spinner.text = `Reviews: ${done}/${totalCalls} [${icon} ${review.model}/${review.role}]`;
-        },
-      }
-    );
+  const startTime = Date.now();
+  const completedReviews: ModelReview[] = [];
+  const totalCalls = chunkAssignments.length;
 
-    // Collapse per-chunk reviews back to one per (model, role) reviewer.
-    const reviews = mergeChunkReviews(chunkReviews);
-
-    spinner.text = 'Computing consensus...';
-
-    // Deduplicate and compute consensus
-    const groups = deduplicateFindings(
-      reviews,
-      config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
-      config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow
-    );
-
-    const consensusFindings = computeConsensus(groups, reviews, roleMap, {
-      lineWindow: config.thresholds?.dedupeLineWindow,
-      jaccardThreshold: config.thresholds?.jaccardThreshold,
-    });
-
-    const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
-      consensusFindings,
-      {
-        minConfidence: config.thresholds?.minConfidence,
-        minConsensusScore: config.thresholds?.minConsensusScore,
-      }
-    );
-
-    const keepAppendix = config.output?.belowThresholdAppendix ?? true;
-    const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
-    const result: ReviewResult = {
-      reviews,
-      findings: reportFindings,
-      ...(keepAppendix && droppedFindings.length > 0
-        ? { belowThresholdFindings: droppedFindings }
-        : {}),
-      stats: {
-        totalReviews: reviews.length,
-        successfulReviews: reviews.filter((r) => r.status === 'success').length,
-        totalRawFindings,
-        totalDeduped: consensusFindings.length,
-        belowThreshold: droppedFindings.length,
-        durationMs: Date.now() - startTime,
+  const chunkReviews = await runReviews(
+    chunkAssignments.map((ca) => ca.assignment),
+    prompts,
+    {
+      // Fall back to the shared constants, never to inline literals:
+      // duplicated defaults drift (this read 120_000 after the default
+      // moved to 600_000).
+      timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS,
+      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+      concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+      reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+      onReviewComplete: (review) => {
+        completedReviews.push(review);
+        const done = completedReviews.length;
+        const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
+        spinner.text = `Reviews: ${done}/${totalCalls} [${icon} ${review.model}/${review.role}]`;
       },
-    };
-
-    spinner.succeed('Review complete');
-
-    // Output
-    if (opts.json) {
-      console.log(toJson(result));
-    } else {
-      printReviewSummary(result);
     }
+  );
 
-    if (opts.jsonFile) {
-      await writeJsonOutput(result, opts.jsonFile);
-      console.log(chalk.dim(`JSON written to: ${opts.jsonFile}`));
-    }
+  // Collapse per-chunk reviews back to one per (model, role) reviewer.
+  const reviews = mergeChunkReviews(chunkReviews);
 
-    if (opts.markdown) {
-      await writeMarkdownOutput(result, opts.markdown);
-      console.log(chalk.dim(`Markdown written to: ${opts.markdown}`));
-    }
+  spinner.text = 'Computing consensus...';
 
-    if (opts.post && !diff.metadata) {
-      console.log(chalk.yellow('--post ignored: no PR to post to for a local diff.'));
+  // Deduplicate and compute consensus
+  const groups = deduplicateFindings(
+    reviews,
+    config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
+    config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow
+  );
+
+  const consensusFindings = computeConsensus(groups, reviews, roleMap, {
+    lineWindow: config.thresholds?.dedupeLineWindow,
+    jaccardThreshold: config.thresholds?.jaccardThreshold,
+  });
+
+  const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
+    consensusFindings,
+    {
+      minConfidence: config.thresholds?.minConfidence,
+      minConsensusScore: config.thresholds?.minConsensusScore,
     }
-    if (opts.post && diff.metadata) {
-      const postSpinner = ora('Posting review to GitHub...').start();
-      try {
-        await postGitHubReview(result, diff.metadata, config.githubToken, diff.files);
-        postSpinner.succeed('Review posted to GitHub');
-      } catch (err) {
-        postSpinner.fail(`Failed to post to GitHub: ${String(err)}`);
+  );
+
+  const keepAppendix = config.output?.belowThresholdAppendix ?? true;
+  const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
+  const result: ReviewResult = {
+    reviews,
+    findings: reportFindings,
+    ...(keepAppendix && droppedFindings.length > 0
+      ? { belowThresholdFindings: droppedFindings }
+      : {}),
+    stats: {
+      totalReviews: reviews.length,
+      successfulReviews: reviews.filter((r) => r.status === 'success').length,
+      totalRawFindings,
+      totalDeduped: consensusFindings.length,
+      belowThreshold: droppedFindings.length,
+      durationMs: Date.now() - startTime,
+    },
+  };
+
+  spinner.succeed('Review complete');
+
+  // Output
+  if (opts.json) {
+    console.log(toJson(result));
+  } else {
+    printReviewSummary(result);
+  }
+
+  if (opts.jsonFile) {
+    await writeJsonOutput(result, opts.jsonFile);
+    console.log(chalk.dim(`JSON written to: ${opts.jsonFile}`));
+  }
+
+  if (opts.markdown) {
+    await writeMarkdownOutput(result, opts.markdown);
+    console.log(chalk.dim(`Markdown written to: ${opts.markdown}`));
+  }
+
+  if (opts.post && !diff.metadata) {
+    console.log(chalk.yellow('--post ignored: no PR to post to for a local diff.'));
+  }
+  if (opts.post && diff.metadata) {
+    const postSpinner = ora('Posting review to GitHub...').start();
+    try {
+      await postGitHubReview(result, diff.metadata, config.githubToken, diff.files);
+      postSpinner.succeed('Review posted to GitHub');
+    } catch (err) {
+      postSpinner.fail(`Failed to post to GitHub: ${String(err)}`);
+    }
+  }
+
+  // CI mode: fail on a fully-failed run or on blocking findings
+  if (opts.ci) {
+    const verdict = evaluateCiGate(result);
+    if (verdict.exitCode !== 0) {
+      console.error(chalk.red(`\n${verdict.message}`));
+      process.exit(verdict.exitCode);
+    }
+    }
+}
+
+/**
+ * Roles whose instincts transfer to reviewing a design document. Used only
+ * when neither CLI flags nor config request roles; spec-compliance joins
+ * when a spec is resolved (see prepareCouncil).
+ */
+const PLAN_DEFAULT_ROLES = ['general', 'architecture', 'edge-case-hunter'];
+
+async function runPlanReview(
+  file: string,
+  opts: CouncilCliOpts & { focus?: string }
+): Promise<void> {
+  const spinner = ora('Loading configuration...').start();
+
+  try {
+    let focus: PlanFocus | undefined;
+    if (opts.focus) {
+      if (!isPlanFocus(opts.focus)) {
+        spinner.fail(
+          `Invalid --focus "${opts.focus}". Use one of: ${PLAN_FOCUS_MODES.join(', ')}.`
+        );
+        process.exit(1);
       }
+      focus = opts.focus;
     }
 
-    // CI mode: fail on a fully-failed run or on blocking findings
-    if (opts.ci) {
-      const verdict = evaluateCiGate(result);
-      if (verdict.exitCode !== 0) {
-        console.error(chalk.red(`\n${verdict.message}`));
-        process.exit(verdict.exitCode);
-      }
-    }
+    const prepared = await prepareCouncil(spinner, opts, PLAN_DEFAULT_ROLES);
+
+    spinner.text = `Loading plan: ${file}`;
+    const diff = await loadPlanAsDiff(file);
+
+    await executeCouncil(spinner, prepared, diff, opts, { focus });
   } catch (err) {
     spinner.fail(String(err));
     if (process.env['RCL_DEBUG']) {
