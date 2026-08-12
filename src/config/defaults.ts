@@ -2,14 +2,20 @@
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5',
   'openai/gpt-5.6-sol',
-  'google/gemini-3.5-flash',
+  'google/gemini-3.6-flash',
+  'openrouter/moonshotai/kimi-k3',
 ] as const;
 
-/** Previous-gen models — specialized round-robin only, no general role */
+/**
+ * Secondary models — specialized round-robin only, no general role.
+ * Chosen for training-lineage diversity: with the four SOTA models above,
+ * every default voter comes from a different lab, so cross-model consensus
+ * always reflects independent confirmation.
+ */
 export const DEFAULT_SECONDARY_MODELS = [
-  'anthropic/claude-opus-4-8',
-  'openai/gpt-5.4',
-  'google/gemini-2.5-pro',
+  'openrouter/qwen/qwen3.8-max',
+  'openrouter/deepseek/deepseek-v4-flash-0731',
+  'openrouter/x-ai/grok-4.5',
 ] as const;
 
 export const DEFAULT_THRESHOLDS = {
@@ -28,7 +34,14 @@ export const DEFAULT_THRESHOLDS = {
   jaccardThreshold: 0.3,
 } as const;
 
-export const DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * Reasoning-heavy models (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5)
+ * routinely need several minutes to review a real diff: at 120s the entire
+ * OpenRouter wing of the default fleet timed out, and at 300s most
+ * specialist runs still did (successful calls measured 217–291s, with no
+ * headroom). Dogfooded on this repo's own diffs.
+ */
+export const DEFAULT_TIMEOUT_MS = 600_000;
 export const DEFAULT_MAX_RETRIES = 3;
 export const DEFAULT_CONCURRENCY = 6;
 

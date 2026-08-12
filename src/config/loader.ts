@@ -67,10 +67,38 @@ export async function loadConfig(configPath?: string, searchFrom?: string): Prom
   return mergeWithDefaults(parsed.data);
 }
 
+/**
+ * The default fleet includes openrouter/ models. When OPENROUTER_API_KEY is
+ * absent those voters would fail on every run (the runner refuses to fall
+ * back to OPENAI_API_KEY), silently breaking upgrades from pre-OpenRouter
+ * versions whose users only hold the big-three keys. Defaults therefore
+ * degrade gracefully: openrouter/ entries are dropped with a warning.
+ * Models the user configured explicitly are never filtered — those still
+ * fail loudly per review.
+ */
+function dropOpenRouterDefaultsWithoutKey(
+  models: readonly string[],
+  listName: string
+): string[] {
+  if (process.env['OPENROUTER_API_KEY']?.trim()) return [...models];
+  const kept = models.filter((m) => !m.startsWith('openrouter/'));
+  const dropped = models.length - kept.length;
+  if (dropped > 0) {
+    // Name the resulting fleet, not just the count: the default secondary
+    // list is entirely openrouter/, so without the key it degrades to
+    // empty and every specialist role falls back to the primary models.
+    const remaining = kept.length > 0 ? kept.join(', ') : '(none)';
+    console.warn(
+      `OPENROUTER_API_KEY is not set — dropping ${dropped} openrouter/ model(s) from the default ${listName}; remaining: ${remaining}. Set the key to run the full default fleet.`
+    );
+  }
+  return kept;
+}
+
 function buildDefaultConfig(): Config {
   return {
-    models: [...DEFAULT_MODELS],
-    secondaryModels: [...DEFAULT_SECONDARY_MODELS],
+    models: dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models'),
+    secondaryModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models'),
     thresholds: { ...DEFAULT_THRESHOLDS },
     timeout: DEFAULT_TIMEOUT_MS,
     maxRetries: DEFAULT_MAX_RETRIES,
@@ -80,8 +108,12 @@ function buildDefaultConfig(): Config {
 
 function mergeWithDefaults(config: Config): Config {
   return {
-    models: config.models ?? [...DEFAULT_MODELS],
-    secondaryModels: config.secondaryModels ?? (config.models ? [] : [...DEFAULT_SECONDARY_MODELS]),
+    models: config.models ?? dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models'),
+    secondaryModels:
+      config.secondaryModels ??
+      (config.models
+        ? []
+        : dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models')),
     roles: config.roles,
     reviewers: config.reviewers,
     customRoles: config.customRoles,

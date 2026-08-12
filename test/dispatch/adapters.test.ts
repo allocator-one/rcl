@@ -292,11 +292,13 @@ describe('openai-compat request parameters', () => {
   it('strips the openai-compat/ prefix and uses the full token budget', async () => {
     const adapter = new OpenAICompatAdapter({ apiKey: 'test-key' });
     let captured: { model?: string; max_tokens?: number } = {};
+    let capturedOpts: { timeout?: number } = {};
     setClient(adapter, {
       chat: {
         completions: {
-          create: (params: { model: string; max_tokens: number }) => {
+          create: (params: { model: string; max_tokens: number }, opts: { timeout?: number }) => {
             captured = params;
+            capturedOpts = opts;
             return Promise.resolve(openaiResponse());
           },
         },
@@ -313,5 +315,58 @@ describe('openai-compat request parameters', () => {
     expect(review.status).toBe('success');
     expect(captured.model).toBe('llama3.2');
     expect(captured.max_tokens).toBe(16384);
+    // The SDK request timeout must sit above the adapter's own timeout so the
+    // AbortController owns timeout classification (SDK default is 600s and
+    // would otherwise tie or undercut large configured timeouts).
+    expect(capturedOpts.timeout).toBe(OPTS.timeoutMs + 30_000);
+  });
+
+  it('passes reasoning effort through when configured, omits it otherwise', async () => {
+    const withEffort = new OpenAICompatAdapter({ apiKey: 'k', reasoningEffort: 'medium' });
+    const without = new OpenAICompatAdapter({ apiKey: 'k' });
+    for (const [adapter, expected] of [
+      [withEffort, { effort: 'medium' }],
+      [without, undefined],
+    ] as const) {
+      let captured: Record<string, unknown> = {};
+      setClient(adapter, {
+        chat: {
+          completions: {
+            create: (params: Record<string, unknown>) => {
+              captured = params;
+              return Promise.resolve(openaiResponse());
+            },
+          },
+        },
+      });
+      await adapter.review('m', 'general', 's', 'u', OPTS);
+      expect(captured['reasoning']).toEqual(expected);
+    }
+  });
+
+  it('openrouter: strips only the openrouter/ prefix and reports the openrouter provider', async () => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    let captured: { model?: string } = {};
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: (params: { model: string }) => {
+            captured = params;
+            return Promise.resolve(openaiResponse());
+          },
+        },
+      },
+    });
+
+    const review = await adapter.review(
+      'openrouter/moonshotai/kimi-k3',
+      'general',
+      's',
+      'u',
+      OPTS
+    );
+    expect(review.status).toBe('success');
+    expect(review.provider).toBe('openrouter');
+    expect(captured.model).toBe('moonshotai/kimi-k3');
   });
 });

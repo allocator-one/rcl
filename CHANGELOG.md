@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.5.0
+
+- **OpenRouter provider.** Models prefixed `openrouter/` route through the
+  OpenAI-compatible adapter against `https://openrouter.ai/api/v1`,
+  authenticated via `OPENROUTER_API_KEY`. The prefix keeps OpenRouter's
+  vendor segment: `openrouter/moonshotai/kimi-k3` sends `moonshotai/kimi-k3`
+  on the wire. A missing key fails that model's reviews loudly instead of
+  silently falling back to `OPENAI_API_KEY`.
+- **Default fleet reshuffle: seven models, seven labs, one seat each.**
+  `DEFAULT_MODELS` (general role + specialist round-robin) is now
+  claude-fable-5, gpt-5.6-sol, gemini-3.6-flash (bumped from 3.5-flash,
+  verified served under that id by the native Gemini API), and
+  `openrouter/moonshotai/kimi-k3`. `DEFAULT_SECONDARY_MODELS` (specialist
+  round-robin only) replaces the previous-gen trio (claude-opus-4-8,
+  gpt-5.4, gemini-2.5-pro) with `openrouter/qwen/qwen3.8-max`,
+  `openrouter/deepseek/deepseek-v4-flash-0731`, and
+  `openrouter/x-ai/grok-4.5`. Every default voter now comes from a
+  distinct training lineage, so consensus agreement always reflects
+  independent confirmation.
+- **Defaults degrade gracefully without OPENROUTER_API_KEY.** Upgrading from
+  1.4.x with only the big-three keys keeps working: openrouter/ entries are
+  dropped from the *default* lists with a warning instead of erroring on
+  every run. Explicitly configured openrouter models still fail loudly.
+  Note the flip side: with the key set, default reviews also send code to
+  OpenRouter (see README). Because the default *secondary* list is now
+  entirely OpenRouter-hosted, running without the key leaves it empty and
+  every specialist role is dispatched across the three remaining SOTA
+  models — reviews still work, but with less reviewer diversity than
+  1.4.x, which shipped three non-OpenRouter secondaries. The startup
+  warning names the surviving fleet.
+- **OpenRouter reviews run with bounded reasoning (`effort: medium`).**
+  Unbounded, the fleet's reasoning models (kimi-k3, qwen3.8-max,
+  deepseek-v4, grok-4.5) think for 5–10 minutes and/or exhaust the 16k
+  completion budget before emitting findings — across three dogfood
+  council rounds, 4 of 7 OpenRouter seats completed zero reviews.
+  Bounding effort bounds both reasoning tokens and wall-clock.
+- **Default per-call timeout raised 120s → 600s.** Reasoning-heavy models
+  (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5) time out wholesale at 120s
+  on real diffs, and mostly still at 300s (successful calls measured
+  217–291s) — found by dogfooding this release on its own diff.
+
 ## 1.4.1
 
 - Bump the default OpenAI SOTA model from `gpt-5.5` to `gpt-5.6-sol` in

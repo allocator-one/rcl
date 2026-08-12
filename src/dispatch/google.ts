@@ -58,6 +58,10 @@ export class GoogleAdapter implements ReviewAdapter {
               responseMimeType: 'application/json',
               maxOutputTokens: 65536,
               abortSignal: controller.signal,
+              // Same buffer as the other adapters: keep the SDK's own
+              // request timeout above ours so the AbortController stays
+              // the sole owner of timeout classification.
+              httpOptions: { timeout: options.timeoutMs + 30_000 },
             },
           });
 

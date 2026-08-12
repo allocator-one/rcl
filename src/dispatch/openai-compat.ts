@@ -9,21 +9,36 @@ function isRetryable(err: unknown): boolean {
 }
 
 /**
- * Generic OpenAI-compatible adapter for local models (Ollama, LM Studio, etc.)
- * and other OpenAI-compatible APIs.
+ * Generic OpenAI-compatible adapter for local models (Ollama, LM Studio, etc.),
+ * hosted aggregators like OpenRouter, and other OpenAI-compatible APIs.
  */
 export class OpenAICompatAdapter implements ReviewAdapter {
-  name = 'openai-compat';
-  provider = 'openai-compat';
+  name: string;
+  provider: string;
 
   private client: OpenAI;
   private useJsonMode: boolean;
+
+  private reasoningEffort: 'low' | 'medium' | 'high' | undefined;
 
   constructor(opts?: {
     apiKey?: string;
     baseUrl?: string;
     useJsonMode?: boolean;
+    /** Provider label reported on reviews (e.g. "openrouter"); defaults to "openai-compat". */
+    provider?: string;
+    /**
+     * OpenRouter's unified reasoning-effort control. Unbounded reasoning
+     * makes reasoning models spend the whole completion budget (and many
+     * minutes) thinking before they write any findings; effort maps to a
+     * fraction of max_tokens (low ~20%, medium ~50%, high ~80%). Ignored
+     * by endpoints that don't support it.
+     */
+    reasoningEffort?: 'low' | 'medium' | 'high';
   }) {
+    this.name = opts?.provider ?? 'openai-compat';
+    this.provider = opts?.provider ?? 'openai-compat';
+    this.reasoningEffort = opts?.reasoningEffort;
     this.client = new OpenAI({
       apiKey: opts?.apiKey ?? process.env['OPENAI_COMPAT_API_KEY'] ?? 'local',
       baseURL: opts?.baseUrl ?? process.env['OPENAI_COMPAT_BASE_URL'] ?? 'http://localhost:11434/v1',
@@ -64,9 +79,19 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             createParams.response_format = { type: 'json_object' };
           }
 
+          if (this.reasoningEffort) {
+            // OpenRouter extension; not in the OpenAI SDK's param types.
+            (createParams as unknown as Record<string, unknown>)['reasoning'] = {
+              effort: this.reasoningEffort,
+            };
+          }
+
           const response = await this.client.chat.completions.create(
             createParams,
-            { signal: controller.signal }
+            // SDK timeout sits above ours (default 600s would tie or undercut
+            // large configured timeouts); the buffer keeps our AbortController
+            // as the sole owner of timeout classification.
+            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
           ) as OpenAI.ChatCompletion;
 
           const choice = response.choices[0];
@@ -74,7 +99,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             return {
               model,
               role,
-              provider: 'openai-compat',
+              provider: this.provider,
               findings: [],
               durationMs: Date.now() - start,
               status: 'error',
@@ -89,7 +114,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
           return {
             model,
             role,
-            provider: 'openai-compat',
+            provider: this.provider,
             findings,
             durationMs: Date.now() - start,
             status: 'success',
@@ -100,7 +125,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             return {
               model,
               role,
-              provider: 'openai-compat',
+              provider: this.provider,
               findings: [],
               durationMs: Date.now() - start,
               status: 'timeout',
@@ -122,7 +147,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     return {
       model,
       role,
-      provider: 'openai-compat',
+      provider: this.provider,
       findings: [],
       durationMs: Date.now() - start,
       status: 'error',

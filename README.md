@@ -123,6 +123,8 @@ models:
   - anthropic/claude-opus-4-6
   - openai/gpt-5.4
   - google/gemini-2.5-pro
+  # Any model on https://openrouter.ai — keep the vendor segment after the prefix
+  - openrouter/moonshotai/kimi-k3
 
 # Default roles to run
 roles:
@@ -159,7 +161,7 @@ output:
 
 # Concurrency and reliability
 concurrency: 6
-timeout: 120000       # ms per model call
+timeout: 600000       # ms per model call (reasoning models need headroom on real diffs)
 maxRetries: 3
 
 # Context files to attach to every review
@@ -200,8 +202,20 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `ANTHROPIC_API_KEY` | API key for Claude models |
 | `OPENAI_API_KEY` | API key for OpenAI models |
 | `GEMINI_API_KEY` | API key for Google Gemini models |
+| `OPENROUTER_API_KEY` | API key for [OpenRouter](https://openrouter.ai) models (`openrouter/…` prefix) |
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
+
+The default model fleet includes OpenRouter-hosted models. If `OPENROUTER_API_KEY`
+is not set, those entries are dropped from the defaults with a warning naming the
+surviving fleet (models you configure explicitly still fail loudly instead). The
+default secondary list is entirely OpenRouter-hosted, so without the key it is
+empty and specialist roles are spread across the primary models only — set
+`secondaryModels:` explicitly if you want a secondary tier without OpenRouter. Note that when the key is set,
+default reviews send diff and context content to OpenRouter — an aggregator and
+an additional data processor beyond the direct model providers — as well as to
+Anthropic, OpenAI, and Google. Configure `models:` explicitly if that matters
+for your repository.
 
 ---
 

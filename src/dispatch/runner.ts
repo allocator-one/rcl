@@ -25,7 +25,7 @@ type AdapterCall = {
   userPrompt: string;
 };
 
-function defaultAdapterFactory(provider: string): ReviewAdapter {
+export function defaultAdapterFactory(provider: string): ReviewAdapter {
   switch (provider) {
     case 'anthropic':
       return new AnthropicAdapter();
@@ -33,6 +33,23 @@ function defaultAdapterFactory(provider: string): ReviewAdapter {
       return new OpenAIAdapter();
     case 'google':
       return new GoogleAdapter();
+    case 'openrouter': {
+      const apiKey = process.env['OPENROUTER_API_KEY']?.trim();
+      // Fail loudly instead of letting the OpenAI SDK silently fall back to
+      // OPENAI_API_KEY, which would send the wrong key to openrouter.ai.
+      if (!apiKey) {
+        throw new Error('OPENROUTER_API_KEY is not set (required for openrouter/ models)');
+      }
+      return new OpenAICompatAdapter({
+        apiKey,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        provider: 'openrouter',
+        // Without this, reasoning models think for 5-10 minutes and/or
+        // exhaust max_tokens before emitting findings (dogfood: 4 of 7
+        // OpenRouter seats completed zero reviews across three rounds).
+        reasoningEffort: 'medium',
+      });
+    }
     default:
       return new OpenAICompatAdapter();
   }
