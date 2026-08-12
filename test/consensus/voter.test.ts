@@ -439,6 +439,7 @@ describe('applyReportThresholds', () => {
         elevation: 'none' as const,
         confidence,
         confidenceLabel: 'Medium' as const,
+        tier: 'single' as const,
       },
     };
   }
@@ -448,7 +449,8 @@ describe('applyReportThresholds', () => {
     const { kept, dropped } = applyReportThresholds(findings, { minConfidence: 0.2 });
     expect(kept).toHaveLength(1);
     expect(kept[0]!.consensus.confidence).toBe(0.5);
-    expect(dropped).toBe(1);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.consensus.confidence).toBe(0.1);
   });
 
   it('drops findings below the agreement ratio', () => {
@@ -456,14 +458,29 @@ describe('applyReportThresholds', () => {
     const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.4 });
     expect(kept).toHaveLength(1);
     expect(kept[0]!.consensus.score).toBe(3);
-    expect(dropped).toBe(1);
+    expect(dropped).toHaveLength(1);
   });
 
   it('keeps everything when no thresholds are configured', () => {
     const findings = [findingWith(0.01, 1, 10)];
     const { kept, dropped } = applyReportThresholds(findings, {});
     expect(kept).toHaveLength(1);
-    expect(dropped).toBe(0);
+    expect(dropped).toHaveLength(0);
+  });
+
+  it('sorts dropped findings by severity then confidence for the appendix', () => {
+    const a = { ...findingWith(0.1, 1, 6), severity: 'nitpick' as const };
+    const b = { ...findingWith(0.15, 1, 6), severity: 'minor' as const };
+    const c = { ...findingWith(0.05, 1, 6), severity: 'minor' as const };
+    const { dropped } = applyReportThresholds([a, b, c], {
+      minConfidence: 0.2,
+      minConsensusScore: 0.4,
+    });
+    expect(dropped.map((f) => [f.severity, f.consensus.confidence])).toEqual([
+      ['minor', 0.15],
+      ['minor', 0.05],
+      ['nitpick', 0.1],
+    ]);
   });
 
   it('never drops a blocking finding, even below both thresholds', () => {
@@ -485,6 +502,132 @@ describe('applyReportThresholds', () => {
       minConsensusScore: 0.4,
     });
     expect(kept).toHaveLength(0);
-    expect(dropped).toBe(1);
+    expect(dropped).toHaveLength(1);
+  });
+});
+
+describe('computeConsensus — agreement tier', () => {
+  function tierFor(flaggingModels: string[], allModels: string[]): string {
+    const f = mkF();
+    const reviews = allModels.map((m) =>
+      mkReview(m, 'general', flaggingModels.includes(m) ? [f] : [])
+    );
+    const group = mkGroup(
+      f,
+      flaggingModels.map((m) => ({ finding: f, model: m, role: 'general' }))
+    );
+    const [result] = computeConsensus([group], reviews, ROLES);
+    return result!.consensus.tier;
+  }
+
+  it('all models flagging → unanimous', () => {
+    expect(tierFor(['m1', 'm2', 'm3'], ['m1', 'm2', 'm3'])).toBe('unanimous');
+  });
+
+  it('at least half flagging → majority', () => {
+    expect(tierFor(['m1', 'm2'], ['m1', 'm2', 'm3', 'm4'])).toBe('majority');
+    expect(tierFor(['m1', 'm2', 'm3', 'm4'], ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'])).toBe(
+      'majority'
+    );
+  });
+
+  it('2+ models under half → minority', () => {
+    expect(tierFor(['m1', 'm2'], ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'])).toBe('minority');
+  });
+
+  it('one model → single, even in a one-model council', () => {
+    expect(tierFor(['m1'], ['m1', 'm2', 'm3'])).toBe('single');
+    // A 1-of-1 council can never be "unanimous" — no independent confirmation
+    expect(tierFor(['m1'], ['m1'])).toBe('single');
+  });
+
+  it('same model flagging via two roles is still single-model evidence', () => {
+    const f = mkF();
+    const reviews = [
+      mkReview('m1', 'general', [f]),
+      mkReview('m1', 'security-auditor', [f]),
+      mkReview('m2', 'general', []),
+    ];
+    const group = mkGroup(f, [
+      { finding: f, model: 'm1', role: 'general' },
+      { finding: f, model: 'm1', role: 'security-auditor' },
+    ]);
+    const [result] = computeConsensus([group], reviews, ROLES);
+    expect(result!.consensus.tier).toBe('single');
+  });
+});
+
+describe('computeConsensus — dispute positions', () => {
+  it('populates per-reviewer positions only for disputed findings', () => {
+    const severe = mkF({ severity: 'critical', description: 'This is exploitable.' });
+    const mild = mkF({ id: 'f2', severity: 'minor', description: 'Probably fine honestly.' });
+    const reviews = [
+      mkReview('m1', 'security-auditor', [severe]),
+      mkReview('m2', 'general', [mild]),
+    ];
+    const group = mkGroup(severe, [
+      { finding: severe, model: 'm1', role: 'security-auditor' },
+      { finding: mild, model: 'm2', role: 'general' },
+    ]);
+    const [result] = computeConsensus([group], reviews, ROLES);
+
+    // severity spread critical↔minor >= 2 → disputed
+    expect(result!.consensus.disputed).toBe(true);
+    expect(result!.consensus.positions).toHaveLength(2);
+    // sorted most severe first
+    expect(result!.consensus.positions![0]).toMatchObject({
+      model: 'm1',
+      role: 'security-auditor',
+      severity: 'critical',
+      excerpt: 'This is exploitable.',
+    });
+    expect(result!.consensus.positions![1]).toMatchObject({ model: 'm2', severity: 'minor' });
+  });
+
+  it('collapses one reviewer\'s variants to a single position at their most severe rating', () => {
+    const v1 = mkF({ severity: 'critical' });
+    const v2 = mkF({ id: 'f2', severity: 'minor' });
+    const other = mkF({ id: 'f3', severity: 'minor' });
+    const reviews = [mkReview('m1', 'general', [v1, v2]), mkReview('m2', 'general', [other])];
+    const group = mkGroup(v1, [
+      { finding: v1, model: 'm1', role: 'general' },
+      { finding: v2, model: 'm1', role: 'general' },
+      { finding: other, model: 'm2', role: 'general' },
+    ]);
+    const [result] = computeConsensus([group], reviews, ROLES);
+    expect(result!.consensus.disputed).toBe(true);
+    const m1Positions = result!.consensus.positions!.filter((p) => p.model === 'm1');
+    expect(m1Positions).toHaveLength(1);
+    expect(m1Positions[0]!.severity).toBe('critical');
+  });
+
+  it('leaves positions undefined for undisputed findings', () => {
+    const f = mkF();
+    const reviews = [mkReview('m1', 'general', [f]), mkReview('m2', 'general', [f])];
+    const group = mkGroup(f, [
+      { finding: f, model: 'm1', role: 'general' },
+      { finding: f, model: 'm2', role: 'general' },
+    ]);
+    const [result] = computeConsensus([group], reviews, ROLES);
+    expect(result!.consensus.disputed).toBeUndefined();
+    expect(result!.consensus.positions).toBeUndefined();
+  });
+
+  it('truncates long descriptions to a single-line excerpt', () => {
+    const long = mkF({
+      severity: 'critical',
+      description: 'line one\nline two ' + 'x'.repeat(300),
+    });
+    const mild = mkF({ id: 'f2', severity: 'minor' });
+    const reviews = [mkReview('m1', 'general', [long]), mkReview('m2', 'general', [mild])];
+    const group = mkGroup(long, [
+      { finding: long, model: 'm1', role: 'general' },
+      { finding: mild, model: 'm2', role: 'general' },
+    ]);
+    const [result] = computeConsensus([group], reviews, ROLES);
+    const excerpt = result!.consensus.positions![0]!.excerpt;
+    expect(excerpt).not.toContain('\n');
+    expect(excerpt.length).toBeLessThanOrEqual(201); // 200 + ellipsis
+    expect(excerpt.endsWith('…')).toBe(true);
   });
 });

@@ -64,9 +64,28 @@ export function printReviewSummary(result: ReviewResult): void {
       stats.totalRawFindings +
       chalk.dim(` → deduped to ${stats.totalDeduped}`) +
       (stats.belowThreshold > 0
-        ? chalk.dim(` (${stats.belowThreshold} below confidence thresholds)`)
+        ? chalk.dim(
+            ` (${stats.belowThreshold} below confidence thresholds` +
+              (result.belowThresholdFindings?.length ? ' — kept in the report appendix' : '') +
+              ')'
+          )
         : '')
   );
+
+  const tierCounts = new Map<string, number>();
+  for (const f of result.findings) {
+    const tier = f.consensus.disputed ? 'disputed' : f.consensus.tier;
+    tierCounts.set(tier, (tierCounts.get(tier) ?? 0) + 1);
+  }
+  if (result.findings.length > 0) {
+    console.log(
+      chalk.bold('Agreement: ') +
+        ['unanimous', 'majority', 'minority', 'disputed', 'single']
+          .filter((t) => (tierCounts.get(t) ?? 0) > 0)
+          .map((t) => `${tierCounts.get(t)} ${t}`)
+          .join(chalk.dim(' · '))
+    );
+  }
   console.log('');
 
   // Group by severity
@@ -150,6 +169,11 @@ function printFinding(finding: ConsensusFinding): void {
         chalk.dim(`[${consensus.elevation}]`)
     );
   }
+
+  console.log(
+    `    ${chalk.dim('Agreement:')} ${consensus.tier} ` +
+      chalk.dim(`(${consensus.models.length} model${consensus.models.length === 1 ? '' : 's'})`)
+  );
 
   console.log(
     `    ${chalk.dim('Flagged by:')} ${consensus.roles.map((r) => chalk.cyan(r)).join(', ')}`

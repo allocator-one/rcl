@@ -347,7 +347,7 @@ async function runReview(target: string | undefined, opts: {
       jaccardThreshold: config.thresholds?.jaccardThreshold,
     });
 
-    const { kept: reportFindings, dropped: belowThreshold } = applyReportThresholds(
+    const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
       consensusFindings,
       {
         minConfidence: config.thresholds?.minConfidence,
@@ -355,16 +355,20 @@ async function runReview(target: string | undefined, opts: {
       }
     );
 
+    const keepAppendix = config.output?.belowThresholdAppendix ?? true;
     const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
     const result: ReviewResult = {
       reviews,
       findings: reportFindings,
+      ...(keepAppendix && droppedFindings.length > 0
+        ? { belowThresholdFindings: droppedFindings }
+        : {}),
       stats: {
         totalReviews: reviews.length,
         successfulReviews: reviews.filter((r) => r.status === 'success').length,
         totalRawFindings,
         totalDeduped: consensusFindings.length,
-        belowThreshold,
+        belowThreshold: droppedFindings.length,
         durationMs: Date.now() - startTime,
       },
     };

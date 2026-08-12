@@ -1,10 +1,62 @@
 import { writeFile } from 'fs/promises';
-import type { ConsensusFinding, ReviewResult } from '../consensus/types.js';
+import type { AgreementTier, ConsensusFinding, ReviewResult } from '../consensus/types.js';
 import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
 
 function severityEmoji(severity: ConsensusFinding['severity']): string {
   return { critical: '🔴', important: '🟡', minor: '🔵', nitpick: '⚪' }[severity];
 }
+
+const SEVERITY_ORDER: Record<ConsensusFinding['severity'], number> = {
+  critical: 0,
+  important: 1,
+  minor: 2,
+  nitpick: 3,
+};
+
+/** Strongest evidence first inside every section: severity, then confidence. */
+function bySeverityThenConfidence(a: ConsensusFinding, b: ConsensusFinding): number {
+  return (
+    SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||
+    b.consensus.confidence - a.consensus.confidence
+  );
+}
+
+/**
+ * The report's organizing principle: agreement tier. Disputed findings are
+ * pulled out of their count-based tier into their own section — they are the
+ * ones where the reader's judgment is needed, regardless of how many models
+ * weighed in.
+ */
+type ReportSection = AgreementTier | 'disputed';
+
+function sectionOf(f: ConsensusFinding): ReportSection {
+  return f.consensus.disputed ? 'disputed' : f.consensus.tier;
+}
+
+const SECTION_META: Record<ReportSection, { title: (totalModels: number) => string; intro: string }> = {
+  unanimous: {
+    title: (n) => `✅ Unanimous — all ${n} models`,
+    intro: 'Every successful model independently flagged these. The strongest signal the council produces.',
+  },
+  majority: {
+    title: () => '🤝 Majority — at least half of the models',
+    intro: 'Independently confirmed across model families.',
+  },
+  minority: {
+    title: () => '👥 Cross-model — 2+ models, under half',
+    intro: 'Multiple models agree, but most of the fleet stayed silent.',
+  },
+  disputed: {
+    title: () => '⚔️ Disputed — your judgment needed',
+    intro: 'Reviewers reached materially different conclusions. Positions are shown per model; the council cannot settle these for you.',
+  },
+  single: {
+    title: (n) => `👤 Single model — 1 of ${n} models`,
+    intro: 'Seen by exactly one model. Weaker evidence — but sometimes one model is the only one that looked in the right place.',
+  },
+};
+
+const SECTION_ORDER: ReportSection[] = ['unanimous', 'majority', 'minority', 'disputed', 'single'];
 
 function buildFindingSection(finding: ConsensusFinding, index: number): string {
   const { consensus } = finding;
@@ -22,6 +74,19 @@ function buildFindingSection(finding: ConsensusFinding, index: number): string {
     lines.push('', '**Suggested Fix:**', '', fencedCodeBlock(finding.suggestedFix));
   }
 
+  if (consensus.disputed && consensus.positions && consensus.positions.length > 0) {
+    lines.push('', '**Positions:**', '');
+    for (const pos of consensus.positions) {
+      lines.push(
+        `- **${sanitizeInline(pos.model)}** (${sanitizeInline(pos.role)}) rated **${pos.severity}**: ` +
+          `${sanitizeInline(pos.title)} — ${sanitizeInline(pos.excerpt)}`
+      );
+    }
+    if (consensus.disputeDetails) {
+      lines.push('', `> ⚠ ${sanitizeInline(consensus.disputeDetails)}`);
+    }
+  }
+
   lines.push(
     '',
     `> Flagged by: ${consensus.roles.join(', ')} on ${consensus.models.join(', ')}` +
@@ -34,8 +99,47 @@ function buildFindingSection(finding: ConsensusFinding, index: number): string {
   return lines.join('\n');
 }
 
+/** Cap the rendered appendix; the JSON output always carries the full list. */
+const APPENDIX_MAX_ENTRIES = 20;
+
+function buildAppendix(dropped: ConsensusFinding[]): string[] {
+  const lines: string[] = [
+    `## 🕵️ Worth checking — below report thresholds (${dropped.length})`,
+    '',
+    'Findings that did not clear the confidence/consensus thresholds. Not counted',
+    'in the summary above and never gate CI — but occasionally one model saw',
+    'something real that the rest of the council missed.',
+    '',
+    '<details>',
+    `<summary>Show ${Math.min(dropped.length, APPENDIX_MAX_ENTRIES)} of ${dropped.length}</summary>`,
+    '',
+  ];
+
+  for (const f of dropped.slice(0, APPENDIX_MAX_ENTRIES)) {
+    lines.push(
+      `- ${severityEmoji(f.severity)} **[${f.severity}]** ${sanitizeInline(f.title)} — ` +
+        `\`${f.file}:${f.startLine}\` · ${f.consensus.models.join(', ')} · ` +
+        `confidence ${(f.consensus.confidence * 100).toFixed(0)}%`
+    );
+  }
+
+  if (dropped.length > APPENDIX_MAX_ENTRIES) {
+    lines.push(
+      '',
+      `…and ${dropped.length - APPENDIX_MAX_ENTRIES} more — see the JSON output (\`belowThresholdFindings\`) for the full list.`
+    );
+  }
+
+  lines.push('', '</details>', '');
+  return lines;
+}
+
 export function toMarkdown(result: ReviewResult): string {
   const { stats } = result;
+  const totalModels = new Set(
+    result.reviews.filter((r) => r.status === 'success').map((r) => r.model)
+  ).size;
+
   const sections: string[] = [
     '# Review Council Report',
     '',
@@ -52,8 +156,12 @@ export function toMarkdown(result: ReviewResult): string {
     minor: [],
     nitpick: [],
   };
+  const bySection = new Map<ReportSection, ConsensusFinding[]>(
+    SECTION_ORDER.map((s) => [s, []])
+  );
   for (const f of result.findings) {
     bySeverity[f.severity]?.push(f);
+    bySection.get(sectionOf(f))!.push(f);
   }
 
   sections.push('## Summary', '');
@@ -62,6 +170,14 @@ export function toMarkdown(result: ReviewResult): string {
   for (const [sev, findings] of Object.entries(bySeverity)) {
     sections.push(`| ${severityEmoji(sev as ConsensusFinding['severity'])} ${sev} | ${findings.length} |`);
   }
+  sections.push('');
+  sections.push(
+    '**Agreement:** ' +
+      SECTION_ORDER.map((s) => `${bySection.get(s)!.length} ${s}`).join(' · ') +
+      (result.belowThresholdFindings?.length
+        ? ` · ${result.belowThresholdFindings.length} below thresholds`
+        : '')
+  );
   sections.push('');
 
   // Reviewers table
@@ -76,17 +192,18 @@ export function toMarkdown(result: ReviewResult): string {
   }
   sections.push('');
 
-  // Findings by severity
-  for (const severity of ['critical', 'important', 'minor', 'nitpick'] as const) {
-    const findings = bySeverity[severity]!;
+  // Findings by agreement tier — the report's organizing principle: the
+  // reader triages strongest-consensus findings first, spends judgment on
+  // disputes, and skims single-model catches last.
+  for (const section of SECTION_ORDER) {
+    const findings = bySection.get(section)!;
     if (findings.length === 0) continue;
 
-    sections.push(
-      `## ${severityEmoji(severity)} ${severity.charAt(0).toUpperCase() + severity.slice(1)} (${findings.length})`,
-      ''
-    );
+    const meta = SECTION_META[section];
+    sections.push(`## ${meta.title(totalModels)} (${findings.length})`, '');
+    sections.push(`_${meta.intro}_`, '');
 
-    findings.forEach((f, i) => {
+    findings.sort(bySeverityThenConfidence).forEach((f, i) => {
       sections.push(buildFindingSection(f, i));
       sections.push('');
     });
@@ -94,6 +211,11 @@ export function toMarkdown(result: ReviewResult): string {
 
   if (result.findings.length === 0) {
     sections.push('## ✅ No Issues Found', '', 'All reviewers returned clean results.');
+    sections.push('');
+  }
+
+  if (result.belowThresholdFindings && result.belowThresholdFindings.length > 0) {
+    sections.push(...buildAppendix(result.belowThresholdFindings));
   }
 
   return sections.join('\n');
