@@ -6,7 +6,14 @@ import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { loadConfig } from './config/loader.js';
-import { DEFAULT_MODELS, DEFAULT_THRESHOLDS } from './config/defaults.js';
+import {
+  DEFAULT_MODELS,
+  DEFAULT_THRESHOLDS,
+  DEFAULT_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_CONCURRENCY,
+  DEFAULT_REASONING_EFFORT,
+} from './config/defaults.js';
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { chunkDiff } from './prepare/chunker.js';
@@ -281,9 +288,13 @@ async function runReview(target: string, opts: {
       chunkAssignments.map((ca) => ca.assignment),
       prompts,
       {
-        timeoutMs: config.timeout ?? 120_000,
-        maxRetries: config.maxRetries ?? 3,
-        concurrency: config.concurrency ?? 6,
+        // Fall back to the shared constants, never to inline literals:
+        // duplicated defaults drift (this read 120_000 after the default
+        // moved to 600_000).
+        timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS,
+        maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+        concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+        reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
         onReviewComplete: (review) => {
           completedReviews.push(review);
           const done = completedReviews.length;

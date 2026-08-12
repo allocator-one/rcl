@@ -46,6 +46,9 @@ allowed-tools:
   - Write(/tmp/rcl-converge-*.md)
 ---
 
+<!-- GENERATED FILE — do not edit. Source: skills/src/rcl-converge.md
+     Edit the source, then run `npm run build:skills`. `npm test` enforces this. -->
+
 # Review Council converge (rcl-converge)
 
 Invoke as `$rcl-converge` in a Codex session.

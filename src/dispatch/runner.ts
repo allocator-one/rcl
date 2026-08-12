@@ -6,6 +6,8 @@ import { AnthropicAdapter } from './anthropic.js';
 import { OpenAIAdapter } from './openai.js';
 import { GoogleAdapter } from './google.js';
 import { OpenAICompatAdapter } from './openai-compat.js';
+import { DEFAULT_REASONING_EFFORT } from '../config/defaults.js';
+import type { ReasoningEffort } from '../config/schema.js';
 
 export interface RunnerOptions {
   timeoutMs: number;
@@ -13,7 +15,9 @@ export interface RunnerOptions {
   concurrency: number;
   verbose?: boolean;
   onReviewComplete?: (review: ModelReview) => void;
-  /** Test seam / future config-key wiring; defaults to the builtin providers. */
+  /** Reasoning budget for providers that support it; defaults to 'medium'. */
+  reasoningEffort?: ReasoningEffort;
+  /** Test seam / config-key wiring; defaults to the builtin providers. */
   adapterFactory?: (provider: string) => ReviewAdapter;
 }
 
@@ -25,7 +29,10 @@ type AdapterCall = {
   userPrompt: string;
 };
 
-export function defaultAdapterFactory(provider: string): ReviewAdapter {
+export function defaultAdapterFactory(
+  provider: string,
+  reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT
+): ReviewAdapter {
   switch (provider) {
     case 'anthropic':
       return new AnthropicAdapter();
@@ -44,10 +51,10 @@ export function defaultAdapterFactory(provider: string): ReviewAdapter {
         apiKey,
         baseUrl: 'https://openrouter.ai/api/v1',
         provider: 'openrouter',
-        // Without this, reasoning models think for 5-10 minutes and/or
+        // Without a bound, reasoning models think for 5-10 minutes and/or
         // exhaust max_tokens before emitting findings (dogfood: 4 of 7
         // OpenRouter seats completed zero reviews across three rounds).
-        reasoningEffort: 'medium',
+        reasoningEffort,
       });
     }
     default:
@@ -76,7 +83,9 @@ export async function runReviews(
     timeoutMs: options.timeoutMs,
     maxRetries: options.maxRetries,
   };
-  const factory = options.adapterFactory ?? defaultAdapterFactory;
+  const factory =
+    options.adapterFactory ??
+    ((provider: string) => defaultAdapterFactory(provider, options.reasoningEffort));
   // One adapter (and HTTP client) per provider per run; a throwing
   // constructor is handled per call below so one bad provider doesn't
   // take down the pool.

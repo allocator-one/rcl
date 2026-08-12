@@ -7,6 +7,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
   DEFAULT_CONCURRENCY,
+  DEFAULT_REASONING_EFFORT,
 } from './defaults.js';
 
 /**
@@ -103,6 +104,7 @@ function buildDefaultConfig(): Config {
     timeout: DEFAULT_TIMEOUT_MS,
     maxRetries: DEFAULT_MAX_RETRIES,
     concurrency: DEFAULT_CONCURRENCY,
+    reasoningEffort: DEFAULT_REASONING_EFFORT,
   };
 }
 
@@ -125,6 +127,7 @@ function mergeWithDefaults(config: Config): Config {
     timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+    reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
     githubToken: config.githubToken ?? process.env['GITHUB_TOKEN'],
     context: config.context,
     spec: config.spec,

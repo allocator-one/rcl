@@ -37,6 +37,8 @@ export const OutputSchema = z.object({
   markdownPath: z.string().optional(),
 });
 
+export const ReasoningEffortSchema = z.enum(['low', 'medium', 'high']);
+
 export const ConfigSchema = z.object({
   models: z.array(z.string()).optional(),
   secondaryModels: z.array(z.string()).optional(),
@@ -48,6 +50,8 @@ export const ConfigSchema = z.object({
   timeout: z.number().positive().optional(),
   maxRetries: z.number().int().nonnegative().optional(),
   concurrency: z.number().int().positive().optional(),
+  /** Reasoning budget for providers that support it (currently OpenRouter). */
+  reasoningEffort: ReasoningEffortSchema.optional(),
   githubToken: z.string().optional(),
   context: z.array(z.string()).optional(),
   spec: z.string().optional(),
@@ -59,4 +63,5 @@ export type ReviewerPair = z.infer<typeof ReviewerPairSchema>;
 export type RoleConfig = z.infer<typeof RoleConfigSchema>;
 export type Thresholds = z.infer<typeof ThresholdsSchema>;
 export type Severity = z.infer<typeof SeveritySchema>;
+export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
 export type Category = z.infer<typeof CategorySchema>;

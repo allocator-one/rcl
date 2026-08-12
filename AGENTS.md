@@ -144,3 +144,14 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Skill definitions are generated
+
+The six `SKILL.md` files under `.claude/`, `.agents/`, and `.codex/` are
+generated from `skills/src/*.md` — do not edit them directly. Edit the source
+and run `npm run build:skills`; `npm test` fails if they drift.
+
+They are not symlinks because the variants differ on purpose: Claude Code uses
+`/rcl` and `run_in_background`, while Codex uses `$rcl` and nohup/PID polling.
+The template expresses that with `{{PREFIX}}`, `{{DIR}}`, and
+`{{#claude}}` / `{{#codex}}` blocks.

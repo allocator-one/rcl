@@ -19,10 +19,12 @@ allowed-tools:
   - Bash(which rcl)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
+{{#codex}}
   - Bash(nohup:*)
   - Bash(kill:*)
   - Bash(cat /tmp/rcl-*)
   - Read(/tmp/rcl-*.log)
+{{/codex}}
   - Read
   - Glob
   - Read(/tmp/rcl-*/**)
@@ -33,12 +35,11 @@ allowed-tools:
   - Read(/tmp/rcl-report-*.json)
 ---
 
-<!-- GENERATED FILE — do not edit. Source: skills/src/rcl.md
-     Edit the source, then run `npm run build:skills`. `npm test` enforces this. -->
-
 # Review Council (rcl)
+{{#codex}}
 
-Invoke as `$rcl` in a Codex session.
+Invoke as `{{PREFIX}}rcl` in a Codex session.
+{{/codex}}
 
 Run a multi-model AI code review on the current branch's PR. By default, keep the review in-session and do not post to GitHub unless the caller explicitly asks for `--post` or `--inline`.
 
@@ -151,7 +152,12 @@ Note: this repo is review-council's own source. Reviews default to the published
 - `--inline` → add `--post` to the rcl command (PR mode only). The rcl CLI has no separate inline flag: a posted review already anchors each finding as an inline line comment wherever it maps onto the diff (unmappable findings demote to the summary), so `--post` and `--inline` build the same command.
 - `--spec <path>` → use the given file as the spec (overrides automatic detection from step 2)
 - `--roles <list>` → pass through (e.g. `--roles security-auditor,bug-hunter`)
+{{#claude}}
+- default (no flags) → run the review locally and report the findings back in the session without posting to GitHub
+{{/claude}}
+{{#codex}}
 - default (no flags) → run the review locally and report the findings back in the Codex session without posting to GitHub
+{{/codex}}
 
 ### 5. Run the review
 
@@ -177,12 +183,22 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 
 **Never** pipe the `rcl review` command through `head`, `tail`, `| head -n`, or similar — the report is captured in the files above no matter what scrolls past in the console.
 
+{{#claude}}
+**Always launch the run in the background** (`run_in_background: true`) after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs, and continue when the task-completion notification arrives — never block on a foreground wait or sleep loop. Then confirm the JSON report file exists and is non-empty before parsing it. The full council takes 10–15 minutes; a plain foreground Bash call is killed at the 600-second tool cap with no report files written and the whole model spend wasted.
+{{/claude}}
+{{#codex}}
 **Always launch the run detached** — wrap the command blocks above in `nohup sh -c '…' > <RCL_TMP>/rcl-run-<TARGET>.log 2>&1 &` (the blocks show the review arguments, not the launch mode) and record the PID with `echo $! > <RCL_TMP>/rcl-run-<TARGET>.pid`, after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs. Poll `kill -0 $(cat <RCL_TMP>/rcl-run-<TARGET>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop, which hits the same tool timeout (the nohup'd review survives a killed poll; just poll again) — and only then confirm the JSON report file exists and is non-empty — a stale or half-written file must never be parsed, and the report file (not the unrecoverable exit status of a backgrounded process) is the success signal. The full council takes 10–15 minutes; a plain foreground shell call is killed at the tool timeout with no report files written and the whole model spend wasted.
+{{/codex}}
 
 ### 6. Report back
 
 Read the full report **from the files**, never from console scrollback:
+{{#claude}}
+- `<RCL_TMP>/rcl-report-<TARGET>.md` — the findings, via the Read tool (it paginates, so nothing is lost to truncation).
+{{/claude}}
+{{#codex}}
 - `<RCL_TMP>/rcl-report-<TARGET>.md` — the findings (paginate as needed; nothing is lost to truncation).
+{{/codex}}
 - `<RCL_TMP>/rcl-report-<TARGET>.json` — the exact severity counts; parse these rather than eyeballing the markdown.
 
 Then tell the user:
@@ -195,11 +211,11 @@ Then tell the user:
 
 ## Examples
 
-- `$rcl` — review current PR locally, or fall back to branch diff if no PR exists; auto-detect spec from Harness
-- `$rcl --post` — review current PR and post a summary comment to GitHub
-- `$rcl --inline` — post with inline line comments where anchoring is possible
-- `$rcl --spec CONSENSUS_V2_SPEC.md` — review with a specific spec file
-- `$rcl #7` — review a specific PR by number
-- `$rcl --roles security-auditor,bug-hunter` — run only specific reviewer roles
+- `{{PREFIX}}rcl` — review current PR locally, or fall back to branch diff if no PR exists; auto-detect spec from Harness
+- `{{PREFIX}}rcl --post` — review current PR and post a summary comment to GitHub
+- `{{PREFIX}}rcl --inline` — post with inline line comments where anchoring is possible
+- `{{PREFIX}}rcl --spec CONSENSUS_V2_SPEC.md` — review with a specific spec file
+- `{{PREFIX}}rcl #7` — review a specific PR by number
+- `{{PREFIX}}rcl --roles security-auditor,bug-hunter` — run only specific reviewer roles
 
-For a review → fix → re-review loop that drives the PR or branch to a clean council verdict, use `$rcl-converge` instead (separate skill; it composes this one per round).
+For a review → fix → re-review loop that drives the PR or branch to a clean council verdict, use `{{PREFIX}}rcl-converge` instead (separate skill; it composes this one per round).

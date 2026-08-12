@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **`reasoningEffort` is configurable** (`low` | `medium` | `high`, default
+  `medium`) instead of hardcoded, threaded from config through the runner to
+  the OpenRouter adapter.
+- **Skill definitions are generated from one source.** `skills/src/*.md`
+  plus `npm run build:skills` produce all six `SKILL.md` files; `npm test`
+  fails if the committed files drift from the source.
+- Fixed: `src/index.ts` fell back to inline `120_000` / `3` / `6` literals
+  when config values were absent, so the timeout default no longer matched
+  `DEFAULT_TIMEOUT_MS` (600s). It now falls back to the shared constants.
+
 ## 1.5.0
 
 - **OpenRouter provider.** Models prefixed `openrouter/` route through the

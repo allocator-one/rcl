@@ -164,6 +164,12 @@ concurrency: 6
 timeout: 600000       # ms per model call (reasoning models need headroom on real diffs)
 maxRetries: 3
 
+# Reasoning budget for providers that support it (currently OpenRouter).
+# low | medium | high — default medium. Unbounded reasoning makes these
+# models spend the whole completion budget thinking before they answer;
+# raise to 'high' for deeper review at the cost of latency and tokens.
+reasoningEffort: medium
+
 # Context files to attach to every review
 context:
   - ARCHITECTURE.md

@@ -28,6 +28,12 @@ allowed-tools:
   - Write(/tmp/rcl-spec-*.md)
   - Read
   - Edit
+{{#codex}}
+  - Bash(nohup:*)
+  - Bash(kill:*)
+  - Bash(cat /tmp/rcl-*)
+  - Read(/tmp/rcl-*.log)
+{{/codex}}
   - Write
   - Glob
   - Read(/tmp/rcl-*/**)
@@ -42,10 +48,11 @@ allowed-tools:
   - Write(/tmp/rcl-converge-*.md)
 ---
 
-<!-- GENERATED FILE — do not edit. Source: skills/src/rcl-converge.md
-     Edit the source, then run `npm run build:skills`. `npm test` enforces this. -->
-
 # Review Council converge (rcl-converge)
+{{#codex}}
+
+Invoke as `{{PREFIX}}rcl-converge` in a Codex session.
+{{/codex}}
 
 Drive the current PR (or branch diff) to a clean Review Council verdict: loop review → triage → fix → push until a round produces no new actionable findings. This skill composes the `rcl` skill — each round runs the same review; this skill owns the loop, the triage ledger, and the safety interlocks.
 
@@ -75,7 +82,7 @@ Order matters: the symlink and ownership checks run **before** `chmod`, because 
 ### 1. Preconditions
 
 1. The working tree must be clean (`git status --porcelain`) — the loop makes commits. If dirty, stop and ask the user to commit or stash first.
-2. Resolve the review target, spec, and `rcl` availability exactly as the `rcl` skill does — read `.claude/skills/rcl/SKILL.md` and follow its steps 1–3. Conventions that differ here:
+2. Resolve the review target, spec, and `rcl` availability exactly as the `rcl` skill does — read `{{DIR}}/skills/rcl/SKILL.md` and follow its steps 1–3. Conventions that differ here:
    - `<TARGET>` is `<repo>-<PR number>` (e.g. `rcl-7`), or `<repo>-<branch>` in local diff mode, with every character outside `[A-Za-z0-9._-]` in either component replaced by `-` — git allows shell metacharacters in branch names, so an unsanitized name interpolated into paths, `rm`, or the detached launch command is an injection vector, and the repo component keeps identical PR numbers or branch names in different repositories from colliding.
    - Report files are round-scoped: `<RCL_TMP>/rcl-report-<TARGET>-r<R>.md` / `.json` for round `<R>`, so rounds never clobber each other.
 3. **Verify the checkout matches the PR** (PR mode): the loop commits to the current branch, so the PR's head branch (`gh pr view <PR> --json headRefName -q .headRefName`) must equal `git rev-parse --abbrev-ref HEAD`. On mismatch — typical when an explicit `PR#N` was passed — stop and ask the user to check out the PR's branch first; never fix a PR from a different checkout. The PR must also live in this repository: `gh pr view <PR> --json isCrossRepository` must be false — converge does not drive fork PRs. (A detached HEAD reads as `HEAD` and simply fails the match; that stop is correct.) Also verify local HEAD equals the PR head commit (`gh pr view <PR> --json headRefOid -q .headRefOid` vs `git rev-parse HEAD`): a clean tree can still be ahead of the PR by unpushed commits, and the council would then review — and possibly converge on — code the PR does not contain. If local is ahead, push first; if the histories diverge, stop and ask. The PR must also be OPEN (`gh pr view <PR> --json state -q .state`) — never converge a merged or closed PR.
@@ -94,14 +101,36 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
    git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```
+{{#claude}}
 2. **Run the review detached.** The run takes 10–15 minutes — never run it as a plain foreground Bash call (the 600-second tool cap kills it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch with `run_in_background: true` and continue when the task-completion notification arrives — never block on it with a foreground wait or sleep loop. Confirm the JSON report exists and is non-empty before parsing.
+{{/claude}}
+{{#codex}}
+2. **Run the review detached.** The run takes 10–15 minutes — never run it as a plain foreground shell call (the tool timeout kills it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch detached with `nohup … &`, a log file, and a PID file:
+{{/codex}}
    ```bash
+{{#claude}}
    GITHUB_TOKEN=$(gh auth token) rcl review <target> \
+{{/claude}}
+{{#codex}}
+   nohup sh -c 'GITHUB_TOKEN=$(gh auth token) rcl review <target> \
+{{/codex}}
      --markdown <RCL_TMP>/rcl-report-<TARGET>-r<R>.md \
      --json-file <RCL_TMP>/rcl-report-<TARGET>-r<R>.json \
+{{#claude}}
      [--spec <SPEC>] [--roles <roles>]
+{{/claude}}
+{{#codex}}
+     [--spec <SPEC>] [--roles <roles>]' \
+     > <RCL_TMP>/rcl-converge-<TARGET>-r<R>.log 2>&1 &
+   echo $! > <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid
+{{/codex}}
    ```
+{{#claude}}
    Never pass `--post` or `--inline` mid-loop. If the run exits non-zero or the JSON report is missing or empty, read the run output, report the failure, and stop — a failed run does not count as a round.
+{{/claude}}
+{{#codex}}
+   Poll `kill -0 $(cat <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop (which hits the same tool timeout; the nohup'd review survives a killed poll, so just poll again), and never by process name, which collides with concurrent rcl runs — and only then confirm the JSON report exists and is non-empty; a half-written file must never be parsed. The report file is the success signal: the exit status of a backgrounded process is not recoverable across tool calls. Never pass `--post` or `--inline` mid-loop. If the process is gone but the JSON report is missing or empty, read the log, report the failure, and stop — a failed run does not count as a round.
+{{/codex}}
 3. **Check reviewer health first, then parse findings from the JSON file**, never from console scrollback. `stats.successfulReviews` / `stats.totalReviews` gates the whole round: a report is produced even when most model calls time out or error, so a near-empty finding list can mean 'nothing found' or 'nobody looked'. If fewer than two of the reviewers succeeded, or fewer than two thirds of them did, the round is **inconclusive** — never counted as converged. Report the failure pattern (which models, timeout vs error), fix the cause if it is under your control (timeouts, missing keys, reasoning budget), and re-run the round. Re-runs are budgeted: at most two per round number, and every review attempt — conclusive or not — counts toward the absolute 7-round ceiling, so a permanently broken fleet ends the loop instead of spinning on it. Split by severity: critical/important findings gate convergence; minor findings are opportunistic.
 4. **Dedup against the ledger.** Models rephrase across rounds — match by file plus the substance of the issue, not exact wording. Findings already dismissed get a quick re-check that the dismissal reason still holds against the current code — a later fix can invalidate it (for example by removing the guard that made the issue harmless). If the reason holds, mark them `[recurring]` without full re-triage; if not, treat them as new. A recurring finding previously marked **fixed** gets a quick re-verification that the fix actually landed and addresses it — if it does, mark it `[recurring]`; if not, treat it as new.
 5. **Triage every new finding against the actual code before touching anything.** Council findings skew heavily false-positive (historically roughly 1 in 10 is actionable). Classify each as `fix` (real, worth fixing) or `dismiss` (false positive, not actionable, or out of scope) — every dismissal gets a one-line reason in the ledger.
@@ -152,6 +181,6 @@ Consequences:
 
 ## Examples
 
-- `/rcl-converge` — converge the current branch's PR, up to 7 rounds
-- `/rcl-converge #7 --max-rounds 2` — converge a specific PR with a tighter cap
-- `/rcl-converge --roles security-auditor,bug-hunter --post-final` — converge on two roles, post the summary once clean
+- `{{PREFIX}}rcl-converge` — converge the current branch's PR, up to 7 rounds
+- `{{PREFIX}}rcl-converge #7 --max-rounds 2` — converge a specific PR with a tighter cap
+- `{{PREFIX}}rcl-converge --roles security-auditor,bug-hunter --post-final` — converge on two roles, post the summary once clean
