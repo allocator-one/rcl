@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0
 
 - **A model refusal is no longer reported as a clean review.** Providers
   decline in-band — Claude answers HTTP 200 with `stop_reason: "refusal"`,
