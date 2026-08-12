@@ -145,6 +145,90 @@ export function hasOpposingSentiment(a: Finding, b: Finding, specificOnly = fals
   return false;
 }
 
+/**
+ * Concept taxonomy for cross-model dedup. Models phrase the same issue so
+ * differently that genuine duplicates score only 0.29–0.55 on token
+ * similarity (see jaccardThreshold calibration note in config/defaults.ts).
+ * When two findings at the SAME location both name the same issue concept,
+ * that is stronger evidence of duplication than their wording overlap.
+ *
+ * Phrases are matched at word boundaries — single generic words ("query",
+ * "input", "auth") are deliberately absent because substring taxonomies
+ * merge strangers. Calibrated against the fixture corpus in test/fixtures.
+ */
+const ISSUE_CONCEPTS: Record<string, string[]> = {
+  sql_injection: ['sql injection', 'sqli', 'cwe-89'],
+  xss: ['xss', 'cross-site scripting', 'cwe-79'],
+  command_injection: ['command injection', 'shell injection', 'cwe-78', 'rce'],
+  hardcoded_secrets: [
+    'hardcoded secret',
+    'hardcoded credential',
+    'hardcoded password',
+    'hardcoded jwt',
+    'secret key',
+    'api key',
+    'cwe-798',
+  ],
+  auth_bypass: [
+    'idor',
+    'authorization check',
+    'ownership check',
+    'auth bypass',
+    'authentication bypass',
+    'privilege escalation',
+  ],
+  weak_crypto: ['weak random', 'math.random', 'weak crypto', 'insecure random', 'cwe-338'],
+  race_condition: ['race condition', 'toctou', 'pid reuse'],
+  memory_leak: ['memory leak', 'unbounded cache', 'unbounded growth'],
+  token_exposure: [
+    'token exposure',
+    'token leak',
+    'key exposure',
+    'exposed in command line',
+    'exfiltration',
+  ],
+  missing_pagination: ['pagination', 'unbounded query', 'unbounded listing'],
+};
+
+const CONCEPT_MATCHERS = Object.entries(ISSUE_CONCEPTS).map(([concept, phrases]) => ({
+  concept,
+  patterns: phrases.map(
+    (p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+  ),
+}));
+
+function extractConcepts(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const { concept, patterns } of CONCEPT_MATCHERS) {
+    if (patterns.some((re) => re.test(text))) out.add(concept);
+  }
+  return out;
+}
+
+const CONCEPT_BOOST_BASE = 0.8;
+const CONCEPT_BOOST_PER_EXTRA = 0.05;
+
+/**
+ * Concept-level similarity: 0.8+ when both findings name the same issue
+ * concept AND their line ranges strictly overlap. Proximity within the
+ * dedup window is deliberately NOT enough — two different SQL injections a
+ * few lines apart share the concept but are different findings, and the
+ * fixture corpus shows genuine cross-model duplicates point at overlapping
+ * ranges. Benchmarked in the RCL-9 PR: fixture recall 0.70 → 1.00 at
+ * precision 1.00, no new false merges on adversarial same-concept pairs
+ * (the ungated code-council version added one).
+ */
+export function conceptSimilarity(a: Finding, b: Finding): number {
+  if (!linesOverlap(a, b, 0)) return 0;
+  const conceptsA = extractConcepts(`${a.title} ${a.description}`);
+  if (conceptsA.size === 0) return 0;
+  const conceptsB = extractConcepts(`${b.title} ${b.description}`);
+  let overlap = 0;
+  for (const c of conceptsA) if (conceptsB.has(c)) overlap++;
+  if (overlap === 0) return 0;
+  return Math.min(1.0, CONCEPT_BOOST_BASE + (overlap - 1) * CONCEPT_BOOST_PER_EXTRA);
+}
+
 interface TaggedFinding {
   finding: Finding;
   model: string;
@@ -194,7 +278,9 @@ function areDuplicates(
   const threshold = sameCategory(a, b)
     ? jaccardThreshold
     : Math.min(0.9, jaccardThreshold * CROSS_CATEGORY_FACTOR);
-  return combinedSimilarity(a, b) >= threshold;
+  // max(): the concept boost can add merges token similarity misses, but
+  // must never take one away that tokens alone would have made.
+  return Math.max(combinedSimilarity(a, b), conceptSimilarity(a, b)) >= threshold;
 }
 
 /**
