@@ -156,7 +156,7 @@ customRoles:
 
 # Consensus and deduplication thresholds
 thresholds:
-  minConsensusScore: 0.4   # 0–1; findings below this are dropped
+  minConsensusScore: 0.4   # 0–1; findings below this are demoted to the appendix
   minConfidence: 0.2
   dedupeLineWindow: 5      # lines within which findings are merged
   jaccardThreshold: 0.3    # weighted title+description similarity threshold for dedup
@@ -165,6 +165,7 @@ thresholds:
 output:
   markdown: true
   markdownPath: review-report.md
+  belowThresholdAppendix: true  # false drops below-threshold findings outright
 
 # Concurrency and reliability
 concurrency: 6
@@ -199,10 +200,10 @@ When multiple models and roles review the same diff, their findings are:
 
 1. **Deduplicated** — findings on the same file and overlapping line range are grouped by weighted title+description token similarity; findings in different categories can still merge, but need stronger similarity (models disagree on category boundaries constantly). Repeats within a single review are collapsed first. Findings that clearly reach opposite conclusions are kept as separate, disputed findings; subtler contradictions merge but are flagged as disputed.
 2. **Scored** — each group receives a consensus score based on three dimensions: reviewer diversity (how many distinct models and roles flagged it, saturating at half the fleet so large configurations aren't penalized), role relevance (whether a role specialised in that finding type confirmed it), and isolation (what fraction of relevant reviewers flagged it).
-3. **Classified** — groups are assigned a confidence band (Very High → Minimal) and a final severity. Severity is the most common rating across reviewers; when reviewers disagree, high-confidence agreement elevates it, but only to a severity at least two reviewers independently assigned — a lone outlier rating is surfaced as a dispute instead.
-4. **Filtered** — groups below `minConsensusScore` or `minConfidence` are dropped.
+3. **Classified** — groups are assigned a confidence band (Very High → Minimal) and a final severity. Severity is the most common rating across reviewers; when reviewers disagree, high-confidence agreement elevates it, but only to a severity at least two reviewers independently assigned — a lone outlier rating is surfaced as a dispute instead. Each group also gets an **agreement tier** measured over distinct models — `unanimous` (every successful model), `majority` (at least half), `minority` (2+, under half), `single` (one model) — because roles share a model's blind spots, so model count is the evidence axis.
+4. **Filtered** — groups below `minConsensusScore` or `minConfidence` are demoted (blocking severities are never dropped). Demoted findings land in a collapsed "worth checking" appendix at the bottom of the report and in the JSON `belowThresholdFindings` field — never in severity totals or CI gating. Set `output.belowThresholdAppendix: false` to drop them outright instead.
 
-The result is a ranked list of findings that rewards agreement across independent reviewers and penalises noise from a single model.
+The report is organized by agreement tier — unanimous first, then majority, minority, **disputed** (reviewers reached materially different conclusions; rendered as per-model positions so you can judge), and single-model last. Within each tier, findings sort by severity. The tier structure is the point of a multi-model council: it tells you which findings are independently confirmed and where to spend your own judgment.
 
 For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 

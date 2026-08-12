@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Report restructured by agreement tier.** Markdown reports (and the
+  GitHub summary comment) now organize findings by how broadly the fleet
+  agrees — unanimous / majority / minority (2+ models) / disputed /
+  single-model — instead of one severity-ranked list, so the reader triages
+  independently-confirmed findings first and spends judgment where the
+  council disagrees. Disputed findings render per-model positions ("who
+  rated what, and why"). JSON consumers: `consensus.tier` and
+  `consensus.positions` (disputed only) are new additive fields; existing
+  fields are unchanged.
+- **Below-threshold findings are demoted, not deleted.** Findings that fail
+  `minConsensusScore`/`minConfidence` now land in a collapsed
+  "worth checking" appendix (capped at 20 entries in markdown; the JSON
+  `belowThresholdFindings` field carries all of them) instead of vanishing —
+  in one dogfood round 73 of 96 deduped findings were silently dropped,
+  including a genuine single-model catch. They are never counted in
+  severity totals or CI gating. Disable with
+  `output.belowThresholdAppendix: false`. Programmatic consumers of
+  `applyReportThresholds` note: its `dropped` return field changed from a
+  count to the dropped `ConsensusFinding[]` (use `dropped.length` for the
+  old value).
+
 - **Review uncommitted work: `rcl review --staged` / `--working-tree`.**
   `--staged` reviews `git diff --cached`, `--working-tree` reviews
   `git diff HEAD` (staged + unstaged) — no more `git diff > file` dance.

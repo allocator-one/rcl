@@ -26,6 +26,7 @@ function buildCommentBody(finding: ConsensusFinding): string {
     '',
     '---',
     `*Confidence: **${consensus.confidenceLabel}** (${(consensus.confidence * 100).toFixed(0)}%) · ` +
+      `Agreement: ${consensus.disputed ? 'disputed' : consensus.tier} · ` +
       `Flagged by: ${consensus.roles.join(', ')}` +
       (consensus.elevated
         ? ` · Elevated from \`${consensus.original_severity}\` [${consensus.elevation}]`
@@ -118,6 +119,22 @@ function buildSummaryComment(result: ReviewResult, demoted: ConsensusFinding[]):
     if (count > 0) {
       lines.push(`| ${sev} | ${count} |`);
     }
+  }
+
+  const tierCounts = new Map<string, number>();
+  for (const f of result.findings) {
+    const tier = f.consensus.disputed ? 'disputed' : f.consensus.tier;
+    tierCounts.set(tier, (tierCounts.get(tier) ?? 0) + 1);
+  }
+  if (result.findings.length > 0) {
+    lines.push(
+      '',
+      '**Agreement:** ' +
+        ['unanimous', 'majority', 'minority', 'disputed', 'single']
+          .filter((t) => (tierCounts.get(t) ?? 0) > 0)
+          .map((t) => `${tierCounts.get(t)} ${t}`)
+          .join(' · ')
+    );
   }
 
   lines.push('', '### Reviewers');

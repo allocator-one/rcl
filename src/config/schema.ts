@@ -35,6 +35,12 @@ export const OutputSchema = z.object({
   github: z.boolean().optional(),
   jsonPath: z.string().optional(),
   markdownPath: z.string().optional(),
+  /**
+   * Carry below-threshold findings into the report's demoted "worth
+   * checking" appendix (and the JSON `belowThresholdFindings` field).
+   * Default true; set false to drop them outright as before 1.6.0.
+   */
+  belowThresholdAppendix: z.boolean().optional(),
 });
 
 export const ReasoningEffortSchema = z.enum(['low', 'medium', 'high']);

@@ -1,4 +1,11 @@
-import type { ModelReview, ConsensusFinding, ConsensusInfo, DeduplicatedGroup } from './types.js';
+import type {
+  ModelReview,
+  ConsensusFinding,
+  ConsensusInfo,
+  DeduplicatedGroup,
+  AgreementTier,
+  DisputePosition,
+} from './types.js';
 import type { Role } from '../roles/types.js';
 import { CONFIDENCE_THRESHOLDS, DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import { linesOverlap, hasOpposingSentiment, combinedSimilarity } from './deduper.js';
@@ -263,6 +270,60 @@ function mostSevereWithSupport(
   return null;
 }
 
+/**
+ * Agreement tier over distinct models. Single is checked first so a
+ * one-model council never reads as "unanimous" — unanimity requires at
+ * least two independent models saying the same thing.
+ */
+function agreementTier(modelCount: number, totalModels: number): AgreementTier {
+  if (modelCount <= 1) return 'single';
+  if (modelCount >= totalModels) return 'unanimous';
+  if (modelCount >= Math.ceil(totalModels / 2)) return 'majority';
+  return 'minority';
+}
+
+const POSITION_EXCERPT_LENGTH = 200;
+
+/**
+ * One stance per (model, role) reviewer for disputed findings, so the report
+ * can show WHO said WHAT instead of a flattened summary. Same collapsing rule
+ * as reviewerSeverities: a reviewer's own bridged variants yield one position,
+ * at their most severe rating.
+ */
+function buildPositions(group: DeduplicatedGroup): DisputePosition[] {
+  const byReviewer = new Map<string, { finding: DeduplicatedGroup['members'][number]['finding']; model: string; role: string }>();
+  for (const m of group.members) {
+    const key = `${m.model}::${m.role}`;
+    const existing = byReviewer.get(key);
+    if (
+      existing === undefined ||
+      severityIndex(m.finding.severity as SeverityLevel) <
+        severityIndex(existing.finding.severity as SeverityLevel)
+    ) {
+      byReviewer.set(key, m);
+    }
+  }
+
+  return [...byReviewer.values()]
+    .map((m) => {
+      const oneLine = m.finding.description.replace(/\s+/g, ' ').trim();
+      return {
+        model: m.model,
+        role: m.role,
+        severity: m.finding.severity,
+        title: m.finding.title,
+        excerpt:
+          oneLine.length > POSITION_EXCERPT_LENGTH
+            ? `${oneLine.slice(0, POSITION_EXCERPT_LENGTH)}…`
+            : oneLine,
+      };
+    })
+    .sort(
+      (a, b) =>
+        severityIndex(a.severity as SeverityLevel) - severityIndex(b.severity as SeverityLevel)
+    );
+}
+
 /** Report-level filters from config thresholds. */
 export interface ReportThresholds {
   minConfidence?: number;
@@ -270,10 +331,11 @@ export interface ReportThresholds {
 }
 
 /**
- * Drop low-signal findings below the configured confidence floor or
- * agreement ratio (consensus score over successful reviews). Returns the
- * kept findings and how many were dropped so reports can say so instead of
- * silently narrowing.
+ * Split findings into those above the configured confidence floor and
+ * agreement ratio (consensus score over successful reviews) and those below.
+ * Dropped findings are returned, not discarded: single-model catches are
+ * sometimes the one model that saw something real, so the report keeps them
+ * in a demoted "worth checking" appendix instead of the void.
  *
  * Blocking severities (critical/important) are NEVER dropped: a single
  * specialist flagging a critical is exactly what those roles exist for, and
@@ -283,16 +345,26 @@ export interface ReportThresholds {
 export function applyReportThresholds(
   findings: ConsensusFinding[],
   thresholds: ReportThresholds
-): { kept: ConsensusFinding[]; dropped: number } {
+): { kept: ConsensusFinding[]; dropped: ConsensusFinding[] } {
   const minConfidence = thresholds.minConfidence ?? 0;
   const minScore = thresholds.minConsensusScore ?? 0;
-  const kept = findings.filter((f) => {
-    if (f.severity === 'critical' || f.severity === 'important') return true;
-    if (f.consensus.confidence < minConfidence) return false;
+  const kept: ConsensusFinding[] = [];
+  const dropped: ConsensusFinding[] = [];
+  for (const f of findings) {
     const agreementRatio = f.consensus.total > 0 ? f.consensus.score / f.consensus.total : 1;
-    return agreementRatio >= minScore;
-  });
-  return { kept, dropped: findings.length - kept.length };
+    const keep =
+      f.severity === 'critical' ||
+      f.severity === 'important' ||
+      (f.consensus.confidence >= minConfidence && agreementRatio >= minScore);
+    (keep ? kept : dropped).push(f);
+  }
+  // Appendix reads best strongest-first: severity, then confidence.
+  dropped.sort(
+    (a, b) =>
+      severityIndex(a.severity as SeverityLevel) - severityIndex(b.severity as SeverityLevel) ||
+      b.consensus.confidence - a.consensus.confidence
+  );
+  return { kept, dropped };
 }
 
 export function computeConsensus(
@@ -370,8 +442,10 @@ export function computeConsensus(
       elevation,
       confidence: clampedConfidence,
       confidenceLabel: label,
+      tier: agreementTier(uniqueModels.length, allModels.length),
       disputed: disputed || undefined,
       disputeDetails,
+      positions: disputed ? buildPositions(group) : undefined,
     };
 
     return {
