@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Taxonomy-boosted dedup.** When two findings at the same location (strictly
+  overlapping line ranges) both name the same issue concept — sql injection,
+  IDOR, hardcoded secret, race condition, … — they now merge regardless of
+  wording (concept similarity 0.8+, taken as `max()` with token similarity so
+  it can only add merges, never remove them). Closes the calibration gap
+  where genuine cross-model duplicates scored 0.29–0.55 on token overlap.
+  Benchmarked on the fixture corpus: merge recall 0.70 → 1.00 at precision
+  1.00; the boost is location-gated so two *different* same-concept findings
+  in nearby lines stay separate (the ungated code-council variant merged
+  them). Concept phrases match at word boundaries — no substring taxonomy.
 - **Plan review: `rcl review-plan <file>`.** Council a plan document (PRD,
   design doc) before code exists, with optional `--focus feasibility |
   completeness | risks | timeline`. The plan is loaded as a synthetic
