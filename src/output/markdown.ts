@@ -118,7 +118,8 @@ function buildAppendix(dropped: ConsensusFinding[]): string[] {
   for (const f of dropped.slice(0, APPENDIX_MAX_ENTRIES)) {
     lines.push(
       `- ${severityEmoji(f.severity)} **[${f.severity}]** ${sanitizeInline(f.title)} — ` +
-        `\`${f.file}:${f.startLine}\` · ${f.consensus.models.join(', ')} · ` +
+        `\`${sanitizeInline(f.file).replace(/`/g, '')}:${f.startLine}\` · ` +
+        `${sanitizeInline(f.consensus.models.join(', '))} · ` +
         `confidence ${(f.consensus.confidence * 100).toFixed(0)}%`
     );
   }
@@ -210,7 +211,15 @@ export function toMarkdown(result: ReviewResult): string {
   }
 
   if (result.findings.length === 0) {
-    sections.push('## ✅ No Issues Found', '', 'All reviewers returned clean results.');
+    if (result.belowThresholdFindings?.length) {
+      sections.push(
+        '## ✅ No Findings Above Report Thresholds',
+        '',
+        'Nothing cleared the confidence/consensus bar; the appendix below lists what fell under it.'
+      );
+    } else {
+      sections.push('## ✅ No Issues Found', '', 'All reviewers returned clean results.');
+    }
     sections.push('');
   }
 

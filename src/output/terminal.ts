@@ -171,7 +171,7 @@ function printFinding(finding: ConsensusFinding): void {
   }
 
   console.log(
-    `    ${chalk.dim('Agreement:')} ${consensus.tier} ` +
+    `    ${chalk.dim('Agreement:')} ${consensus.disputed ? 'disputed' : consensus.tier} ` +
       chalk.dim(`(${consensus.models.length} model${consensus.models.length === 1 ? '' : 's'})`)
   );
 

@@ -179,8 +179,20 @@ describe('toMarkdown — below-threshold appendix', () => {
       mkResult([], [mkFinding({ tier: 'single', severity: 'minor' })])
     );
     expect(md).toContain('| 🔵 minor | 0 |');
-    expect(md).toContain('## ✅ No Issues Found');
+    // The empty state must not claim "clean" while the appendix disagrees
+    expect(md).toContain('## ✅ No Findings Above Report Thresholds');
+    expect(md).not.toContain('All reviewers returned clean results');
     expect(md).toContain('## 🕵️ Worth checking');
+  });
+
+  it('sanitizes file paths and model names in appendix lines', () => {
+    const evil = mkFinding({ tier: 'single', title: 'x' });
+    evil.file = 'src/`pwn`.ts<script>';
+    evil.consensus.models = ['@attacker/model'];
+    const md = toMarkdown(mkResult([], [evil]));
+    expect(md).not.toContain('<script>');
+    expect(md).not.toContain('`pwn`');
+    expect(md).toContain('`@attacker/model`'); // mention neutralized in backticks
   });
 
   it('caps the rendered appendix at 20 entries and points at the JSON for the rest', () => {

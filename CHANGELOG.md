@@ -18,7 +18,10 @@
   in one dogfood round 73 of 96 deduped findings were silently dropped,
   including a genuine single-model catch. They are never counted in
   severity totals or CI gating. Disable with
-  `output.belowThresholdAppendix: false`.
+  `output.belowThresholdAppendix: false`. Programmatic consumers of
+  `applyReportThresholds` note: its `dropped` return field changed from a
+  count to the dropped `ConsensusFinding[]` (use `dropped.length` for the
+  old value).
 
 - **Review uncommitted work: `rcl review --staged` / `--working-tree`.**
   `--staged` reviews `git diff --cached`, `--working-tree` reviews
