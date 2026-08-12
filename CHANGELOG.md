@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Plan review: `rcl review-plan <file>`.** Council a plan document (PRD,
+  design doc) before code exists, with optional `--focus feasibility |
+  completeness | risks | timeline`. The plan is loaded as a synthetic
+  single-file diff so chunking, dedup, consensus, and the agreement-tier
+  report work unchanged; prompts are plan-adapted (roles get a plan
+  preamble, the base prompt reinterprets categories for design documents,
+  code-language checklists are skipped). Defaults to a plan-suited role
+  subset (general, architecture, edge-case-hunter, + spec-compliance with
+  `--spec`); explicit role flags and config `roles` override.
+
 - **Report restructured by agreement tier.** Markdown reports (and the
   GitHub summary comment) now organize findings by how broadly the fleet
   agrees — unanimous / majority / minority (2+ models) / disputed /

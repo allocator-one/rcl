@@ -1,6 +1,7 @@
 import { readFile } from 'fs/promises';
 import { stat } from 'fs/promises';
 import { buildBasePrompt } from '../prompts/base.js';
+import { buildPlanPrompt, PLAN_ROLE_PREAMBLE, type PlanFocus } from '../prompts/plan.js';
 import { buildSecureDiffSection } from '../prompts/hardening.js';
 import { TYPESCRIPT_PROMPT_ADDITION } from '../prompts/languages/typescript.js';
 import { ELIXIR_PROMPT_ADDITION } from '../prompts/languages/elixir.js';
@@ -27,6 +28,8 @@ function getLanguageAdditions(languages: Set<string>): string {
 
 export interface PromptContext {
   contextFiles?: string[];
+  /** Plan-review mode: the "diff" is a plan document, not code. */
+  plan?: { focus?: PlanFocus };
 }
 
 export interface BuiltPrompt {
@@ -69,16 +72,17 @@ export async function buildPrompt(
   role: Role,
   context?: PromptContext
 ): Promise<BuiltPrompt> {
-  // Detect languages in this chunk
+  // Detect languages in this chunk. Plan mode skips language additions —
+  // code idiom checklists don't apply to a design document.
   const languages = new Set(chunk.files.map((f) => f.language));
-  const languageAdditions = getLanguageAdditions(languages);
+  const languageAdditions = context?.plan ? '' : getLanguageAdditions(languages);
 
   // Build system prompt from role
   const severityBiasNote = buildSeverityBiasNote(role.severityBias);
   const systemPrompt =
+    (context?.plan ? PLAN_ROLE_PREAMBLE : '') +
     role.systemPrompt +
-    '\n\n' +
-    languageAdditions +
+    (languageAdditions ? '\n\n' + languageAdditions : '') +
     (severityBiasNote ? '\n\n' + severityBiasNote : '');
 
   // Load context files
@@ -94,7 +98,7 @@ export async function buildPrompt(
   }
 
   // Build user prompt
-  const basePrompt = buildBasePrompt();
+  const basePrompt = context?.plan ? buildPlanPrompt(context.plan.focus) : buildBasePrompt();
   const diffText = formatChunkForPrompt(chunk);
   const secureSection = buildSecureDiffSection(diffText, contextDocs);
 
