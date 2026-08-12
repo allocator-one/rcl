@@ -192,16 +192,31 @@ const ISSUE_CONCEPTS: Record<string, string[]> = {
 
 const CONCEPT_MATCHERS = Object.entries(ISSUE_CONCEPTS).map(([concept, phrases]) => ({
   concept,
-  patterns: phrases.map(
-    (p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-  ),
+  patterns: phrases.map((p) => {
+    // \b only works when the phrase starts and ends on word characters —
+    // reject taxonomy entries that would silently never (or wrongly) match.
+    if (!/^[\p{L}\p{N}].*[\p{L}\p{N}]$/u.test(p)) {
+      throw new Error(`ISSUE_CONCEPTS phrase must start and end with a word character: "${p}"`);
+    }
+    return new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+  }),
 }));
 
-function extractConcepts(text: string): Set<string> {
+/**
+ * Concepts per finding are memoized: the deduper compares every pair, so
+ * uncached extraction would run the full taxonomy regex scan O(n²·k) times.
+ */
+const conceptCache = new WeakMap<Finding, Set<string>>();
+
+function extractConcepts(finding: Finding): Set<string> {
+  const cached = conceptCache.get(finding);
+  if (cached) return cached;
+  const text = `${finding.title} ${finding.description}`;
   const out = new Set<string>();
   for (const { concept, patterns } of CONCEPT_MATCHERS) {
     if (patterns.some((re) => re.test(text))) out.add(concept);
   }
+  conceptCache.set(finding, out);
   return out;
 }
 
@@ -220,9 +235,9 @@ const CONCEPT_BOOST_PER_EXTRA = 0.05;
  */
 export function conceptSimilarity(a: Finding, b: Finding): number {
   if (!linesOverlap(a, b, 0)) return 0;
-  const conceptsA = extractConcepts(`${a.title} ${a.description}`);
+  const conceptsA = extractConcepts(a);
   if (conceptsA.size === 0) return 0;
-  const conceptsB = extractConcepts(`${b.title} ${b.description}`);
+  const conceptsB = extractConcepts(b);
   let overlap = 0;
   for (const c of conceptsA) if (conceptsB.has(c)) overlap++;
   if (overlap === 0) return 0;

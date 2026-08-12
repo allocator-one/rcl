@@ -395,6 +395,16 @@ describe('conceptSimilarity — taxonomy boost', () => {
     expect(conceptSimilarity(sqli, idor)).toBe(0);
   });
 
+  it('matches punctuation-adjacent phrases like CWE ids', () => {
+    // Raised (and disputed) by the dogfood council: \b must still match
+    // when the phrase sits against parentheses/punctuation in the text.
+    // (A build-time guard rejects taxonomy phrases that don't start/end on
+    // word characters, where \b would misbehave.)
+    const a = mkF({ title: 'Query concatenation (CWE-89) in handler', description: 'x' });
+    const b = mkF({ id: 'b1', title: 'String interpolation into SQL, CWE-89.', description: 'y' });
+    expect(conceptSimilarity(a, b)).toBeGreaterThanOrEqual(0.8);
+  });
+
   it('matches phrases at word boundaries, not substrings', () => {
     // "unsafe" must not trigger via "safe"; "authorization check" must not
     // fire on the bare word "auth" the way substring taxonomies do
