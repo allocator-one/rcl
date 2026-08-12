@@ -1,8 +1,14 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
-import type { ReviewAdapter, AdapterOptions } from './adapter.js';
-import { stripKnownProviderPrefix, isRetryableStatus, retryDelay, sleep } from './utils.js';
+import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
+import {
+  stripKnownProviderPrefix,
+  isRetryableStatus,
+  retryDelay,
+  sleep,
+  attemptWithRetries,
+} from './utils.js';
 
 function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
@@ -161,5 +167,49 @@ export class AnthropicAdapter implements ReviewAdapter {
       status: 'error',
       error: errMsg,
     };
+  }
+
+  async ask(
+    model: string,
+    systemPrompt: string,
+    userPrompt: string,
+    options: AdapterOptions
+  ): Promise<ModelAnswer> {
+    const start = Date.now();
+    const modelId = stripKnownProviderPrefix(model);
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      isRetryable,
+      attempt: async (signal) => {
+        const response = await this.client.messages.create(
+          {
+            model: modelId,
+            max_tokens: 4096,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: userPrompt }],
+          },
+          { signal, timeout: options.timeoutMs + 30_000 }
+        );
+        return response.content
+          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n')
+          .trim();
+      },
+    });
+
+    const durationMs = Date.now() - start;
+    return outcome.ok
+      ? { model, provider: 'anthropic', text: outcome.value, durationMs, status: 'success' }
+      : {
+          model,
+          provider: 'anthropic',
+          text: '',
+          durationMs,
+          status: outcome.timedOut ? 'timeout' : 'error',
+          error: outcome.error,
+        };
   }
 }
