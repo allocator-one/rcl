@@ -1,3 +1,5 @@
+import type { ModelReview } from '../consensus/types.js';
+
 const KNOWN_PROVIDER_PREFIXES = [
   'anthropic/',
   'openai/',
@@ -21,6 +23,47 @@ export function stripKnownProviderPrefix(model: string): string {
     }
   }
   return model;
+}
+
+/**
+ * A completed HTTP call that produced no reviewable output is a FAILED
+ * review, not a clean one. Providers decline requests in-band — Claude
+ * answers 200 with `stop_reason: "refusal"`, OpenAI-compatible endpoints
+ * with `finish_reason: "content_filter"` — and refusals cluster on exactly
+ * the security-relevant diffs a council is most valuable for.
+ *
+ * Reporting those as `success` with zero findings is worse than losing the
+ * reviewer: the run still counts it toward `successfulReviews` (so the CI
+ * "nothing was reviewed" guard stays quiet), and consensus counts it as a
+ * relevant reviewer that looked and found nothing — which *lowers* the
+ * confidence of a real finding the other models did catch.
+ */
+export function failedReview(opts: {
+  model: string;
+  role: string;
+  provider: string;
+  startedAt: number;
+  error: string;
+  status?: 'error' | 'timeout';
+}): ModelReview {
+  return {
+    model: opts.model,
+    role: opts.role,
+    provider: opts.provider,
+    findings: [],
+    durationMs: Date.now() - opts.startedAt,
+    status: opts.status ?? 'error',
+    error: opts.error,
+  };
+}
+
+/**
+ * The provider-agnostic backstop: a 200 with an empty body reviewed nothing.
+ * Catches refusal shapes we don't yet enumerate, and plain provider hiccups,
+ * without each adapter having to guess why the body was empty.
+ */
+export function isBlankOutput(rawOutput: string): boolean {
+  return rawOutput.trim().length === 0;
 }
 
 export const RETRY_DELAYS = [1000, 2000, 4000] as const;

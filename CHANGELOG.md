@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A model refusal is no longer reported as a clean review.** Providers
+  decline in-band — Claude answers HTTP 200 with `stop_reason: "refusal"`,
+  OpenRouter reports the same upstream refusal as
+  `finish_reason: "content_filter"`, Gemini as a `SAFETY` finish reason —
+  and rcl recorded all of them as a *successful review with zero findings*.
+  That was worst exactly where it mattered most: refusals cluster on
+  security-relevant diffs, the reviewer still counted toward
+  `successfulReviews` (so the CI "nothing was reviewed" guard stayed quiet),
+  and consensus treated it as a relevant reviewer that looked and found
+  nothing — which *lowered* the confidence of real findings other models
+  caught. All four adapters now classify refusals as `error` with the
+  provider's category/explanation, so they render `✗` in the reviewer table
+  and drop out of consensus. Backstop: any empty response body after a 200
+  is an error too, since a reviewer that returned nothing reviewed nothing.
+
 - **Key distribution via Harness.** In repos with a committed
   `.harness-cli/config.json`, provider keys missing from the environment are
   fetched from the Harness backend (`GET /api/v1/model-keys`, staff-gated)

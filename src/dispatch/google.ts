@@ -2,7 +2,28 @@ import { GoogleGenAI } from '@google/genai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
-import { stripKnownProviderPrefix, retryDelay, sleep, attemptWithRetries } from './utils.js';
+import {
+  stripKnownProviderPrefix,
+  retryDelay,
+  sleep,
+  attemptWithRetries,
+  failedReview,
+  isBlankOutput,
+} from './utils.js';
+
+/**
+ * Gemini finish reasons that mean "this was not reviewed". Distinct from
+ * MAX_TOKENS (truncation, handled separately) — these produce a candidate
+ * with no usable text.
+ */
+const BLOCKED_FINISH_REASONS = new Set([
+  'SAFETY',
+  'PROHIBITED_CONTENT',
+  'BLOCKLIST',
+  'SPII',
+  'IMAGE_SAFETY',
+  'RECITATION',
+]);
 
 function isRetryable(err: unknown): boolean {
   const errStr = String(err);
@@ -65,19 +86,40 @@ export class GoogleAdapter implements ReviewAdapter {
             },
           });
 
-          if (response.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
-            return {
+          const finishReason = response.candidates?.[0]?.finishReason;
+          if (finishReason === 'MAX_TOKENS') {
+            return failedReview({
               model,
               role,
               provider: 'google',
-              findings: [],
-              durationMs: Date.now() - start,
-              status: 'error',
+              startedAt: start,
               error: 'Response truncated at maxOutputTokens; findings would be incomplete',
-            };
+            });
+          }
+
+          // Gemini blocks in-band too: a safety stop yields a candidate with
+          // no usable text rather than an API error.
+          if (finishReason !== undefined && BLOCKED_FINISH_REASONS.has(finishReason)) {
+            return failedReview({
+              model,
+              role,
+              provider: 'google',
+              startedAt: start,
+              error: `Model refused this review (${finishReason}) — the diff was not reviewed`,
+            });
           }
 
           const rawOutput = response.text ?? '';
+          if (isBlankOutput(rawOutput)) {
+            return failedReview({
+              model,
+              role,
+              provider: 'google',
+              startedAt: start,
+              error: 'Model returned an empty response; the diff was not reviewed',
+            });
+          }
+
           const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
           for (const w of warnings) console.warn(w);
 

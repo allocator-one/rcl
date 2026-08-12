@@ -370,3 +370,164 @@ describe('openai-compat request parameters', () => {
     expect(captured.model).toBe('moonshotai/kimi-k3');
   });
 });
+
+// A provider that declines does so IN-BAND: HTTP 200, no content. Recording
+// that as a clean review is the dangerous failure mode — the run reports a
+// green check for code nobody looked at, `successfulReviews` keeps the CI
+// "nothing was reviewed" guard quiet, and consensus counts the refuser as a
+// relevant reviewer that found nothing (RCL-13).
+describe('refusal detection', () => {
+  it('anthropic: stop_reason refusal is an error carrying the category', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: () =>
+          Promise.resolve({
+            content: [],
+            stop_reason: 'refusal',
+            stop_details: { type: 'refusal', category: 'cyber', explanation: 'blocked' },
+          }),
+      },
+    });
+
+    const review = await adapter.review('claude-fable-5', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/refused/i);
+    expect(review.error).toMatch(/cyber/);
+    expect(review.findings).toEqual([]);
+  });
+
+  it('anthropic: a refusal without stop_details still errors', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: { create: () => Promise.resolve({ content: [], stop_reason: 'refusal' }) },
+    });
+
+    const review = await adapter.review('claude-fable-5', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/refused/i);
+  });
+
+  it('openai: finish_reason content_filter is an error', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () =>
+            Promise.resolve({ choices: [{ message: { content: '' }, finish_reason: 'content_filter' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review('gpt-5.6-sol', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/refused/i);
+  });
+
+  it('openai-compat: OpenRouter surfaces an upstream refusal on message.refusal', async () => {
+    // The shape observed from openrouter/anthropic/claude-fable-5 on a diff
+    // containing a SQL injection: content_filter + the provider's explanation.
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () =>
+            Promise.resolve({
+              choices: [
+                {
+                  message: { content: '', refusal: 'blocked under the Usage Policy' },
+                  finish_reason: 'content_filter',
+                },
+              ],
+            }),
+        },
+      },
+    });
+
+    const review = await adapter.review('openrouter/anthropic/claude-fable-5', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/refused/i);
+    expect(review.error).toMatch(/Usage Policy/);
+  });
+
+  it('google: a SAFETY finish reason is an error', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, {
+      models: {
+        generateContent: () => Promise.resolve({ text: '', candidates: [{ finishReason: 'SAFETY' }] }),
+      },
+    });
+
+    const review = await adapter.review('gemini-3.6-flash', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/refused/i);
+    expect(review.error).toMatch(/SAFETY/);
+  });
+});
+
+// The backstop: whatever the provider's reason, a 200 with no body reviewed
+// nothing. This catches refusal shapes not yet enumerated.
+describe('empty output is a failed review, not a clean one', () => {
+  it('anthropic', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: { create: () => Promise.resolve({ content: [], stop_reason: 'end_turn' }) },
+    });
+
+    const review = await adapter.review('claude-fable-5', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/empty response/i);
+  });
+
+  it('openai', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () => Promise.resolve({ choices: [{ message: { content: '' }, finish_reason: 'stop' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review('gpt-5.6-sol', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/empty response/i);
+  });
+
+  it('openai-compat', async () => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () => Promise.resolve({ choices: [{ message: { content: '   ' }, finish_reason: 'stop' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review('openrouter/x/y', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/empty response/i);
+  });
+
+  it('google', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, {
+      models: { generateContent: () => Promise.resolve({ text: '', candidates: [{ finishReason: 'STOP' }] }) },
+    });
+
+    const review = await adapter.review('gemini-3.6-flash', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.error).toMatch(/empty response/i);
+  });
+
+  it('a genuinely clean review — findings: [] with a real body — still succeeds', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: { completions: { create: () => Promise.resolve(openaiResponse()) } },
+    });
+
+    const review = await adapter.review('gpt-5.6-sol', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('success');
+    expect(review.findings).toEqual([]);
+  });
+});

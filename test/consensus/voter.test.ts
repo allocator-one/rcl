@@ -631,3 +631,47 @@ describe('computeConsensus — dispute positions', () => {
     expect(excerpt.endsWith('…')).toBe(true);
   });
 });
+
+// RCL-13: a reviewer that refused (status 'error') must not count as a
+// relevant reviewer that "looked and found nothing". Before the adapters
+// classified refusals as errors, a refusing specialist was indistinguishable
+// from a silent one and actively lowered the confidence of a real finding.
+describe('computeConsensus — a failed reviewer does not dilute confidence', () => {
+  it('a refusing specialist does not lower isolation for a finding others caught', () => {
+    const f = mkF({ category: 'security' });
+
+    // Two security specialists: one flags the issue, the other refused.
+    const withRefusal = [
+      mkReview('m1', 'security-auditor', [f]),
+      mkReview('m2', 'security-auditor', [], 'error'),
+    ];
+    // The same run if the second reviewer had simply not been configured.
+    const withoutReviewer = [mkReview('m1', 'security-auditor', [f])];
+
+    const group = mkGroup(f, [{ finding: f, model: 'm1', role: 'security-auditor' }]);
+
+    const [refused] = computeConsensus([group], withRefusal, ROLES);
+    const [absent] = computeConsensus([group], withoutReviewer, ROLES);
+
+    expect(refused!.consensus.confidence).toBeCloseTo(absent!.consensus.confidence);
+    // Isolation stays 1/1: the refusal is not evidence of absence.
+    expect(refused!.consensus.confidence).toBeCloseTo(0.8);
+  });
+
+  it('the refusing reviewer is not counted in the consensus total', () => {
+    const f = mkF();
+    const reviews = [
+      mkReview('m1', 'general', [f]),
+      mkReview('m2', 'general', [], 'error'),
+      mkReview('m3', 'general', [], 'timeout'),
+    ];
+    const group = mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }]);
+
+    const [result] = computeConsensus([group], reviews, ROLES);
+
+    // total is successful reviewers only — the agreement ratio the report
+    // thresholds on must not be diluted by reviewers that never answered.
+    expect(result!.consensus.total).toBe(1);
+    expect(result!.consensus.tier).toBe('single');
+  });
+});

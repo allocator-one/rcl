@@ -8,6 +8,8 @@ import {
   retryDelay,
   sleep,
   attemptWithRetries,
+  failedReview,
+  isBlankOutput,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -69,18 +71,39 @@ export class OpenAIAdapter implements ReviewAdapter {
 
           const choice = response.choices[0];
           if (choice?.finish_reason === 'length') {
-            return {
+            return failedReview({
               model,
               role,
               provider: 'openai',
-              findings: [],
-              durationMs: Date.now() - start,
-              status: 'error',
+              startedAt: start,
               error: 'Response truncated at token limit; findings would be incomplete',
-            };
+            });
+          }
+
+          // A content filter declines in-band with HTTP 200 and no content.
+          if (choice?.finish_reason === 'content_filter' || choice?.message?.refusal) {
+            return failedReview({
+              model,
+              role,
+              provider: 'openai',
+              startedAt: start,
+              error: `Model refused this review — the diff was not reviewed${
+                choice.message?.refusal ? `: ${choice.message.refusal}` : ''
+              }`,
+            });
           }
 
           const rawOutput = choice?.message?.content ?? '';
+          if (isBlankOutput(rawOutput)) {
+            return failedReview({
+              model,
+              role,
+              provider: 'openai',
+              startedAt: start,
+              error: 'Model returned an empty response; the diff was not reviewed',
+            });
+          }
+
           const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
           for (const w of warnings) console.warn(w);
 
