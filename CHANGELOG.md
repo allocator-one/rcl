@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **`rcl discuss` — one-shot council discussion of a finding.** Ask the
+  models that flagged a finding a follow-up question, with context
+  reconstructed from a saved report (`--report report.json --finding <id>
+  "question"`, `<id>:<n>` disambiguates colliding model-generated ids,
+  appendix findings addressable, `--context` attaches code). Answers run in
+  parallel through the normal adapter timeout/retry machinery via a new
+  free-text `ask()` on every provider adapter. No session state — each
+  discuss is one independent round. Below-threshold and disputed findings
+  (which carry per-model positions since this release) are the intended
+  targets.
+- Taxonomy phrases now match across arbitrary whitespace (line-wrapped
+  "cross-site scripting" still fires) — surfaced by dogfooding `rcl
+  discuss` against the taxonomy's own review findings.
+
 - **Taxonomy-boosted dedup.** When two findings at the same location (strictly
   overlapping line ranges) both name the same issue concept — sql injection,
   IDOR, hardcoded secret, race condition, … — they now merge regardless of

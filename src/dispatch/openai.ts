@@ -1,8 +1,14 @@
 import OpenAI from 'openai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
-import type { ReviewAdapter, AdapterOptions } from './adapter.js';
-import { stripKnownProviderPrefix, isRetryableStatus, retryDelay, sleep } from './utils.js';
+import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
+import {
+  stripKnownProviderPrefix,
+  isRetryableStatus,
+  retryDelay,
+  sleep,
+  attemptWithRetries,
+} from './utils.js';
 
 function isRetryable(err: unknown): boolean {
   return err instanceof OpenAI.APIError && isRetryableStatus(err.status);
@@ -120,5 +126,48 @@ export class OpenAIAdapter implements ReviewAdapter {
       status: 'error',
       error: errMsg,
     };
+  }
+
+  async ask(
+    model: string,
+    systemPrompt: string,
+    userPrompt: string,
+    options: AdapterOptions
+  ): Promise<ModelAnswer> {
+    const start = Date.now();
+    const modelId = stripKnownProviderPrefix(model);
+    const usesCompletionTokens = modelId.startsWith('gpt-5') || /^o[134]/.test(modelId);
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      isRetryable,
+      attempt: async (signal) => {
+        const response = await this.client.chat.completions.create(
+          {
+            model: modelId,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            ...(usesCompletionTokens ? { max_completion_tokens: 4096 } : { max_tokens: 4096 }),
+          },
+          { signal, timeout: options.timeoutMs + 30_000 }
+        );
+        return (response.choices[0]?.message?.content ?? '').trim();
+      },
+    });
+
+    const durationMs = Date.now() - start;
+    return outcome.ok
+      ? { model, provider: 'openai', text: outcome.value, durationMs, status: 'success' }
+      : {
+          model,
+          provider: 'openai',
+          text: '',
+          durationMs,
+          status: outcome.timedOut ? 'timeout' : 'error',
+          error: outcome.error,
+        };
   }
 }

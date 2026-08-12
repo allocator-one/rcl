@@ -33,6 +33,12 @@ import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
 import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
+import {
+  resolveFinding,
+  buildDiscussPrompts,
+  runDiscussion,
+  loadContextDocs,
+} from './discuss.js';
 import type { ModelReview, ReviewResult } from './consensus/types.js';
 import type { Config } from './config/schema.js';
 import type { Role } from './roles/types.js';
@@ -125,6 +131,28 @@ program
   .option('--config <path>', 'Path to config file')
   .action(async (file: string, opts) => {
     await runPlanReview(file, opts);
+  });
+
+// discuss command
+program
+  .command('discuss <question>')
+  .description('Ask the models that flagged a finding a follow-up question (one round, from a saved report)')
+  .requiredOption('--report <path>', 'Report JSON from a previous review (--json-file)')
+  .requiredOption('--finding <id>', 'Finding id from the report; use <id>:<n> if the id is ambiguous')
+  .option('--models <models>', 'Override which models answer (comma-separated)')
+  .option(
+    '--context <path>',
+    'Code or doc file to attach as context (repeatable)',
+    (val: string, prev: string[]) => {
+      prev.push(val);
+      return prev;
+    },
+    [] as string[]
+  )
+  .option('--json', 'Output JSON to stdout')
+  .option('--config <path>', 'Path to config file')
+  .action(async (question: string, opts) => {
+    await runDiscuss(question, opts);
   });
 
 // roles subcommand
@@ -506,6 +534,88 @@ async function executeCouncil(
       process.exit(verdict.exitCode);
     }
     }
+}
+
+async function runDiscuss(
+  question: string,
+  opts: {
+    report: string;
+    finding: string;
+    models?: string;
+    context?: string[];
+    json?: boolean;
+    config?: string;
+  }
+): Promise<void> {
+  const spinner = ora('Loading report...').start();
+
+  try {
+    const config = await loadConfig(opts.config);
+
+    let result: ReviewResult;
+    try {
+      result = JSON.parse(await readFile(opts.report, 'utf-8')) as ReviewResult;
+    } catch {
+      throw new Error(`Could not read report JSON: ${opts.report}`);
+    }
+    if (!Array.isArray(result.findings)) {
+      throw new Error(`Not an rcl report (no findings array): ${opts.report}`);
+    }
+
+    const finding = resolveFinding(result, opts.finding);
+    const models = opts.models
+      ? opts.models.split(',').map((s) => s.trim()).filter(Boolean)
+      : finding.consensus.models;
+    if (models.length === 0) {
+      throw new Error('No models to ask: the finding lists none and --models was not given.');
+    }
+
+    const contextDocs = await loadContextDocs(opts.context ?? []);
+    const prompts = buildDiscussPrompts({ finding, question, contextDocs });
+
+    spinner.text = `Asking ${models.length} model(s) about "${finding.title.slice(0, 60)}"...`;
+
+    const answers = await runDiscussion(models, prompts, {
+      timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS,
+      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+      reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+    });
+
+    spinner.succeed(`Discussion complete (${answers.filter((a) => a.status === 'success').length}/${answers.length} answered)`);
+
+    if (opts.json) {
+      console.log(JSON.stringify({ finding: { id: finding.id, file: finding.file, title: finding.title }, question, answers }, null, 2));
+      return;
+    }
+
+    console.log('');
+    console.log(chalk.bold(`Finding: `) + `${finding.title}`);
+    console.log(chalk.dim(`${finding.file}:${finding.startLine}–${finding.endLine} · ${finding.severity} · ${finding.consensus.disputed ? 'disputed' : finding.consensus.tier}`));
+    console.log(chalk.bold(`Question: `) + question);
+
+    for (const answer of answers) {
+      console.log('');
+      console.log(chalk.dim('─'.repeat(80)));
+      if (answer.status === 'success') {
+        console.log(chalk.cyan.bold(answer.model) + chalk.dim(` (${(answer.durationMs / 1000).toFixed(1)}s)`));
+        console.log('');
+        console.log(answer.text);
+      } else {
+        console.log(
+          chalk.cyan.bold(answer.model) +
+            ' ' +
+            chalk.red(answer.status === 'timeout' ? '⏱ timed out' : `✗ ${answer.error ?? 'error'}`)
+        );
+      }
+    }
+    console.log('');
+  } catch (err) {
+    spinner.fail(String(err));
+    if (process.env['RCL_DEBUG']) {
+      console.error(err);
+    }
+    process.exit(1);
+  }
 }
 
 /**

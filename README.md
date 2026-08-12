@@ -127,6 +127,23 @@ Default roles are a plan-suited subset (`general`, `architecture`, `edge-case-hu
 
 ---
 
+### `rcl discuss`
+
+Ask the models that flagged a finding a follow-up question — one round, reconstructed from a saved report. Useful when triaging: "is this actually exploitable given the sanitizer at line 40?" goes to the reviewers who raised it (especially valuable for **disputed** findings, where the report shows each model's position).
+
+```bash
+rcl review --staged --json-file report.json
+rcl discuss --report report.json --finding f003 "Is this exploitable given the sanitizer at line 40?"
+
+# Attach code as context, or ask different models
+rcl discuss --report report.json --finding f003 --context src/auth.ts "Does the middleware at line 12 not already cover this?"
+rcl discuss --report report.json --finding f003 --models anthropic/claude-fable-5 "Summarize the strongest counterargument."
+```
+
+Model-generated finding ids can collide; when `--finding <id>` is ambiguous the error lists `<id>:<n>` disambiguators. Findings in the below-threshold appendix are addressable too. Answers come back in parallel, respecting the configured `timeout`, `maxRetries`, and `reasoningEffort`. There is no session state: each `discuss` is one independent round built from the report file.
+
+---
+
 ### `rcl roles`
 
 ```bash

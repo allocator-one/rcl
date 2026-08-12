@@ -405,6 +405,14 @@ describe('conceptSimilarity — taxonomy boost', () => {
     expect(conceptSimilarity(a, b)).toBeGreaterThanOrEqual(0.8);
   });
 
+  it('matches multi-word phrases across line wraps and extra whitespace', () => {
+    // Surfaced by `rcl discuss` with the models that flagged the taxonomy
+    // regexes: literal single-space phrases missed wrapped occurrences.
+    const a = mkF({ title: 'Unescaped output', description: 'Classic cross-site\n   scripting vector.' });
+    const b = mkF({ id: 'b1', title: 'XSS in template', description: 'y' });
+    expect(conceptSimilarity(a, b)).toBeGreaterThanOrEqual(0.8);
+  });
+
   it('matches phrases at word boundaries, not substrings', () => {
     // "unsafe" must not trigger via "safe"; "authorization check" must not
     // fire on the bare word "auth" the way substring taxonomies do

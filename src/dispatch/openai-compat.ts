@@ -1,8 +1,14 @@
 import OpenAI from 'openai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
-import type { ReviewAdapter, AdapterOptions } from './adapter.js';
-import { stripKnownProviderPrefix, isRetryableStatus, retryDelay, sleep } from './utils.js';
+import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
+import {
+  stripKnownProviderPrefix,
+  isRetryableStatus,
+  retryDelay,
+  sleep,
+  attemptWithRetries,
+} from './utils.js';
 
 function isRetryable(err: unknown): boolean {
   return err instanceof OpenAI.APIError && isRetryableStatus(err.status);
@@ -153,5 +159,54 @@ export class OpenAICompatAdapter implements ReviewAdapter {
       status: 'error',
       error: errMsg,
     };
+  }
+
+  async ask(
+    model: string,
+    systemPrompt: string,
+    userPrompt: string,
+    options: AdapterOptions
+  ): Promise<ModelAnswer> {
+    const start = Date.now();
+    const modelId = stripKnownProviderPrefix(model);
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      isRetryable,
+      attempt: async (signal) => {
+        const createParams: Parameters<typeof this.client.chat.completions.create>[0] = {
+          model: modelId,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: 4096,
+        };
+        if (this.reasoningEffort) {
+          // OpenRouter extension; not in the OpenAI SDK's param types.
+          (createParams as unknown as Record<string, unknown>)['reasoning'] = {
+            effort: this.reasoningEffort,
+          };
+        }
+        const response = (await this.client.chat.completions.create(createParams, {
+          signal,
+          timeout: options.timeoutMs + 30_000,
+        })) as OpenAI.ChatCompletion;
+        return (response.choices[0]?.message?.content ?? '').trim();
+      },
+    });
+
+    const durationMs = Date.now() - start;
+    return outcome.ok
+      ? { model, provider: this.provider, text: outcome.value, durationMs, status: 'success' }
+      : {
+          model,
+          provider: this.provider,
+          text: '',
+          durationMs,
+          status: outcome.timedOut ? 'timeout' : 'error',
+          error: outcome.error,
+        };
   }
 }
