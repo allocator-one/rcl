@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Key distribution via Harness.** In repos with a committed
+  `.harness-cli/config.json`, provider keys missing from the environment are
+  fetched from the Harness backend (`GET /api/v1/model-keys`, staff-gated)
+  using the `harness login` credential, and injected for the run. Env always
+  wins; the token is only sent to the host that minted it; every failure
+  degrades silently to plain-env behavior (3s timeout, nothing written to
+  disk or logs). Disable with `RCL_NO_HARNESS_KEYS`.
+
 ## 1.6.0
 
 - **`rcl discuss` — one-shot council discussion of a finding.** Ask the

@@ -252,6 +252,7 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `OPENROUTER_API_KEY` | API key for [OpenRouter](https://openrouter.ai) models (`openrouter/…` prefix) |
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
+| `RCL_NO_HARNESS_KEYS` | Set to any value to disable Harness key distribution (below) |
 
 The default model fleet includes OpenRouter-hosted models. If `OPENROUTER_API_KEY`
 is not set, those entries are dropped from the defaults with a warning naming the
@@ -263,6 +264,25 @@ default reviews send diff and context content to OpenRouter — an aggregator an
 an additional data processor beyond the direct model providers — as well as to
 Anthropic, OpenAI, and Google. Configure `models:` explicitly if that matters
 for your repository.
+
+### Key distribution via Harness
+
+Repos that carry a committed `.harness-cli/config.json` (discovered git-style,
+walking up from the working directory) can get their provider keys from a
+[Harness](https://harness.infra.one) backend instead of every teammate managing
+them by hand: run `harness login` once, and any provider key **missing from the
+environment** is fetched from `GET /api/v1/model-keys` on the host that minted
+the stored login token, and injected for the run.
+
+- Environment variables always win — only missing keys are injected.
+- The stored credential is only ever sent to the host it was minted for, never
+  to a URL named by the repo's own config (untrusted input in a cloned repo).
+- Any failure — not logged in, offline, older backend without the endpoint —
+  falls back silently to the plain-environment behavior above. The fetch runs
+  under a 3-second timeout and keys are never written to disk or logs.
+- Which providers the backend serves is server configuration
+  (`HARNESS_MODEL_KEYS` on the backend); `RCL_NO_HARNESS_KEYS` disables the
+  whole mechanism client-side.
 
 ---
 
