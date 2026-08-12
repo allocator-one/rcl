@@ -6,6 +6,7 @@ import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { loadConfig } from './config/loader.js';
+import { applyHarnessModelKeys } from './config/harness.js';
 import {
   DEFAULT_MODELS,
   DEFAULT_THRESHOLDS,
@@ -226,11 +227,25 @@ interface PreparedCouncil {
  * assignments. `fallbackRoles` is used only when neither CLI flags nor
  * config request roles (plan review defaults to a plan-suited subset).
  */
+/**
+ * Harness key distribution runs BEFORE loadConfig: the loader's default-fleet
+ * degradation (dropping openrouter models without OPENROUTER_API_KEY) must
+ * see any injected keys.
+ */
+async function fetchHarnessKeys(spinner: Spinner): Promise<void> {
+  const { note } = await applyHarnessModelKeys();
+  if (note) {
+    spinner.info(note);
+    spinner.start('Loading configuration...');
+  }
+}
+
 async function prepareCouncil(
   spinner: Spinner,
   opts: CouncilCliOpts,
   fallbackRoles?: string[]
 ): Promise<PreparedCouncil> {
+  await fetchHarnessKeys(spinner);
   const config = await loadConfig(opts.config);
 
   // Validate mutually exclusive role options
@@ -550,6 +565,7 @@ async function runDiscuss(
   const spinner = ora('Loading report...').start();
 
   try {
+    await fetchHarnessKeys(spinner);
     const config = await loadConfig(opts.config);
 
     let result: ReviewResult;
