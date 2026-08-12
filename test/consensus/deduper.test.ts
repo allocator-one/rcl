@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   jaccardSimilarity,
   combinedSimilarity,
+  conceptSimilarity,
   hasOpposingSentiment,
   deduplicateFindings,
 } from '../../src/consensus/deduper.js';
@@ -348,6 +349,182 @@ describe('deduplicateFindings — same-reviewer collapse', () => {
     const keys = groups[0]!.members.map((m) => `${m.model}::${m.role}`);
     expect(new Set(keys).size).toBe(keys.length);
     expect(groups[0]!.members).toHaveLength(2);
+  });
+});
+
+describe('conceptSimilarity — taxonomy boost', () => {
+  it('boosts same-concept findings at the same location regardless of wording', () => {
+    const a = mkF({
+      title: 'IDOR: missing authorization on DELETE endpoint',
+      description: 'Any authenticated user can delete arbitrary accounts.',
+      startLine: 14,
+      endLine: 17,
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'Missing authorization check allows any user to delete any account',
+      description: 'The handler never verifies ownership before deleting.',
+      startLine: 14,
+      endLine: 20,
+    });
+    expect(conceptSimilarity(a, b)).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it('is location-gated: same concept in nearby but non-overlapping ranges gets no boost', () => {
+    // Two DIFFERENT sql injections 2 lines apart must not be asserted
+    // same-instance by concept alone
+    const a = mkF({
+      title: 'SQL injection in buildUserQuery',
+      description: 'Username concatenated into the SELECT statement.',
+      startLine: 10,
+      endLine: 12,
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'SQL injection in buildOrderQuery',
+      description: 'OrderId interpolated into the SQL string.',
+      startLine: 14,
+      endLine: 16,
+    });
+    expect(conceptSimilarity(a, b)).toBe(0);
+  });
+
+  it('returns 0 when concepts differ', () => {
+    const sqli = mkF({ title: 'SQL injection in DELETE endpoint', description: 'x' });
+    const idor = mkF({ id: 'b1', title: 'IDOR on DELETE endpoint', description: 'y' });
+    expect(conceptSimilarity(sqli, idor)).toBe(0);
+  });
+
+  it('matches punctuation-adjacent phrases like CWE ids', () => {
+    // Raised (and disputed) by the dogfood council: \b must still match
+    // when the phrase sits against parentheses/punctuation in the text.
+    // (A build-time guard rejects taxonomy phrases that don't start/end on
+    // word characters, where \b would misbehave.)
+    const a = mkF({ title: 'Query concatenation (CWE-89) in handler', description: 'x' });
+    const b = mkF({ id: 'b1', title: 'String interpolation into SQL, CWE-89.', description: 'y' });
+    expect(conceptSimilarity(a, b)).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it('matches phrases at word boundaries, not substrings', () => {
+    // "unsafe" must not trigger via "safe"; "authorization check" must not
+    // fire on the bare word "auth" the way substring taxonomies do
+    const a = mkF({ title: 'OAuth flow refactor', description: 'Moves the oauthor module.' });
+    const b = mkF({ id: 'b1', title: 'Authentication tidy-up', description: 'Renames helpers.' });
+    expect(conceptSimilarity(a, b)).toBe(0);
+  });
+
+  it('grows with additional shared concepts, capped at 1.0', () => {
+    const a = mkF({
+      title: 'SQL injection and XSS in render path',
+      description: 'Unescaped user input reaches both the query and the DOM.',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'XSS and SQL injection in the same handler',
+      description: 'Template and query both take raw input.',
+    });
+    const one = conceptSimilarity(
+      mkF({ title: 'SQL injection here', description: 'x' }),
+      mkF({ id: 'c1', title: 'SQL injection there', description: 'y' })
+    );
+    expect(one).toBeCloseTo(0.8);
+    expect(conceptSimilarity(a, b)).toBeCloseTo(0.85);
+  });
+});
+
+describe('deduplicateFindings — taxonomy boost integration', () => {
+  it('merges differently-worded same-concept duplicates that token similarity splits', () => {
+    const a = mkF({
+      title: 'IDOR: missing authorization on DELETE endpoint',
+      description: 'Any authenticated user can delete arbitrary accounts by id.',
+      startLine: 14,
+      endLine: 17,
+      severity: 'important',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'Missing ownership check allows account takeover via delete',
+      description: 'The route handler trusts the request user id.',
+      startLine: 14,
+      endLine: 20,
+      severity: 'critical',
+    });
+    // Token similarity alone splits this pair (that is the calibration gap
+    // this feature closes); the concept boost merges it
+    expect(combinedSimilarity(a, b)).toBeLessThan(0.3);
+    const groups = deduplicateFindings([mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(2);
+  });
+
+  it('opposing conclusions still veto a concept-boosted merge', () => {
+    const a = mkF({
+      title: 'SQL injection risk is missing input escaping',
+      description: 'Query is vulnerable to sql injection.',
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'SQL injection protection present via input escaping',
+      description: 'Escaping makes sql injection impossible here.',
+    });
+    const groups = deduplicateFindings([mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it('keeps two different same-concept findings in nearby lines separate', () => {
+    const a = mkF({
+      title: 'Hardcoded password for postgres',
+      description: 'Connection string embeds a hardcoded password.',
+      file: 'src/config.ts',
+      startLine: 5,
+      endLine: 5,
+    });
+    const b = mkF({
+      id: 'b1',
+      title: 'Hardcoded API key for payment provider',
+      description: 'A live key sits next to the database settings.',
+      file: 'src/config.ts',
+      startLine: 8,
+      endLine: 8,
+    });
+    const groups = deduplicateFindings([mkReview('m1', 'general', [a]), mkReview('m2', 'general', [b])]);
+    expect(groups).toHaveLength(2);
+  });
+});
+
+describe('deduplicateFindings — fixture corpus ground truth', () => {
+  // The corpus is the judge (RCL-9): these are the human-labeled duplicate
+  // clusters across the three fixture reviews. Baseline token similarity
+  // reached recall 0.70 here (missing c004|g004, g004|gem005, c005|g005);
+  // the taxonomy boost reaches 1.00 at precision 1.00.
+  const TRUTH: string[][] = [
+    ['c001', 'gem001', 'g001'], // hardcoded JWT secret
+    ['c002', 'gem003'], // SQLi in getUserData
+    ['c003', 'gem002'], // admin check uses username instead of role
+    ['c004', 'gem005', 'g004'], // IDOR / missing authz on DELETE
+    ['gem004', 'g003'], // SQLi in DELETE endpoint
+    ['c005', 'g005'], // pagination / unbounded query
+    ['g002'], // any-cast singleton
+  ];
+
+  function loadFixture(file: string, model: string): ModelReview {
+    const raw = JSON.parse(readFileSync(join(fixturesDir, file), 'utf-8')) as {
+      findings: Finding[];
+    };
+    return { model, role: 'general', provider: 'test', findings: raw.findings, durationMs: 0, status: 'success' };
+  }
+
+  it('reproduces the ground-truth clustering exactly (precision 1.0, recall 1.0)', () => {
+    const groups = deduplicateFindings([
+      loadFixture('review-claude.json', 'claude'),
+      loadFixture('review-gemini.json', 'gemini'),
+      loadFixture('review-gpt.json', 'gpt'),
+    ]);
+    const predicted = groups
+      .map((g) => g.members.map((m) => m.finding.id).sort())
+      .sort((x, y) => x[0]!.localeCompare(y[0]!));
+    const expected = TRUTH.map((c) => [...c].sort()).sort((x, y) => x[0]!.localeCompare(y[0]!));
+    expect(predicted).toEqual(expected);
   });
 });
 
