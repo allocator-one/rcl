@@ -29,6 +29,9 @@ allowed-tools:
   - Read(/tmp/rcl-report-*.json)
 ---
 
+<!-- GENERATED FILE — do not edit. Source: skills/src/rcl.md
+     Edit the source, then run `npm run build:skills`. `npm test` enforces this. -->
+
 # Review Council (rcl)
 
 Run a multi-model AI code review on the current branch's PR. By default, keep the review in-session and do not post to GitHub unless the caller explicitly asks for `--post` or `--inline`.

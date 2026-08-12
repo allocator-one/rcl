@@ -33,6 +33,9 @@ allowed-tools:
   - Read(/tmp/rcl-report-*.json)
 ---
 
+<!-- GENERATED FILE — do not edit. Source: skills/src/rcl.md
+     Edit the source, then run `npm run build:skills`. `npm test` enforces this. -->
+
 # Review Council (rcl)
 
 Invoke as `$rcl` in a Codex session.

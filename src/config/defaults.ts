@@ -43,6 +43,14 @@ export const DEFAULT_THRESHOLDS = {
  */
 export const DEFAULT_TIMEOUT_MS = 600_000;
 export const DEFAULT_MAX_RETRIES = 3;
+
+/**
+ * Reasoning budget for OpenRouter-hosted models. Unbounded, they spend the
+ * whole completion budget (and many minutes) thinking before emitting any
+ * findings; 'medium' is calibrated against this repo's own diffs, where it
+ * took the council from 10/17 to 17/17 completed reviews.
+ */
+export const DEFAULT_REASONING_EFFORT = 'medium';
 export const DEFAULT_CONCURRENCY = 6;
 
 export const DEFAULT_SEVERITY_ORDER = [

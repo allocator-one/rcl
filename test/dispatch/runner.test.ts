@@ -179,6 +179,53 @@ describe('runReviews worker pool', () => {
     }
   });
 
+  it('threads configured reasoning effort into the OpenRouter adapter', async () => {
+    const prev = process.env['OPENROUTER_API_KEY'];
+    process.env['OPENROUTER_API_KEY'] = 'or-key';
+    try {
+      // Default when the caller says nothing...
+      const fallback = defaultAdapterFactory('openrouter') as unknown as {
+        reasoningEffort: string;
+      };
+      expect(fallback.reasoningEffort).toBe('medium');
+
+      // ...and the config value when it does.
+      const configured = defaultAdapterFactory('openrouter', 'high') as unknown as {
+        reasoningEffort: string;
+      };
+      expect(configured.reasoningEffort).toBe('high');
+
+      // runReviews must pass its option through, not drop it on the floor.
+      let seen: string | undefined;
+      await runReviews(
+        [makeAssignment('openrouter/moonshotai/kimi-k3', 'openrouter')],
+        [makePrompt()],
+        {
+          timeoutMs: 5000,
+          maxRetries: 0,
+          concurrency: 1,
+          reasoningEffort: 'low',
+          adapterFactory: (provider) => {
+            const a = defaultAdapterFactory(provider, 'low') as unknown as {
+              reasoningEffort: string;
+            };
+            seen = a.reasoningEffort;
+            return {
+              name: 'stub',
+              provider,
+              review: () =>
+                Promise.resolve(successReview('openrouter/moonshotai/kimi-k3', provider)),
+            };
+          },
+        }
+      );
+      expect(seen).toBe('low');
+    } finally {
+      if (prev === undefined) delete process.env['OPENROUTER_API_KEY'];
+      else process.env['OPENROUTER_API_KEY'] = prev;
+    }
+  });
+
   it('openrouter without OPENROUTER_API_KEY surfaces a per-review error', async () => {
     const prev = process.env['OPENROUTER_API_KEY'];
     delete process.env['OPENROUTER_API_KEY'];
