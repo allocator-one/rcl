@@ -20,7 +20,7 @@ allowed-tools:
   - Bash(git push:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@1.5.0)
+  - Bash(npm install -g review-council@1.7.0)
   - Bash(npm test:*)
   - Bash(npm run lint:*)
   - Bash(which rcl)

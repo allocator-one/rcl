@@ -15,7 +15,7 @@ allowed-tools:
   - Bash(git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@1.5.0)
+  - Bash(npm install -g review-council@1.7.0)
   - Bash(which rcl)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -140,7 +140,7 @@ which rcl && rcl --version
 
 If not found — or the installed version is older than the pin below — install the pinned published version (bump this pin deliberately on each release — an unpinned `@latest` would hand whatever gets published next execution access to your source and GITHUB_TOKEN):
 ```bash
-npm install -g review-council@1.5.0
+npm install -g review-council@1.7.0
 ```
 
 Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself).
