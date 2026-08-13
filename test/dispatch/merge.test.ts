@@ -70,3 +70,43 @@ describe('mergeChunkReviews', () => {
     expect(mergeChunkReviews(one)).toEqual(one);
   });
 });
+
+// RCL-14: chunked reviews are merged before consensus, so the merge is the
+// last place that can still say "this reviewer's coverage was degraded".
+describe('mergeChunkReviews — degraded coverage', () => {
+  it('sums dropped counts across chunks, including ones that wholly failed', () => {
+    const [merged] = mergeChunkReviews([
+      review({ findings: [finding('a')], droppedFindings: 1, warnings: ['w1'] }),
+      review({ status: 'parse_failed', droppedFindings: 3, warnings: ['w2'], error: 'lost' }),
+    ]);
+
+    // One chunk parsed, so the reviewer still contributed — but four findings
+    // were lost and the report must be able to say so.
+    expect(merged!.status).toBe('success');
+    expect(merged!.findings).toHaveLength(1);
+    expect(merged!.droppedFindings).toBe(4);
+    expect(merged!.warnings).toEqual(['w1', 'w2']);
+  });
+
+  it('keeps parse_failed when no chunk parsed', () => {
+    const [merged] = mergeChunkReviews([
+      review({ status: 'parse_failed', droppedFindings: 2, error: 'lost' }),
+      review({ status: 'parse_failed', droppedFindings: 1, error: 'lost' }),
+    ]);
+
+    expect(merged!.status).toBe('parse_failed');
+    expect(merged!.droppedFindings).toBe(3);
+  });
+
+  it('leaves a clean multi-chunk review unannotated', () => {
+    const [merged] = mergeChunkReviews([
+      review({ findings: [finding('a')] }),
+      review({ findings: [finding('b')] }),
+    ]);
+
+    expect(merged!.status).toBe('success');
+    expect(merged!.findings).toHaveLength(2);
+    expect(merged!.droppedFindings).toBeUndefined();
+    expect(merged!.warnings).toBeUndefined();
+  });
+});

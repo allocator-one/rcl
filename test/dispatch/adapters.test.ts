@@ -531,3 +531,108 @@ describe('empty output is a failed review, not a clean one', () => {
     expect(review.findings).toEqual([]);
   });
 });
+
+// RCL-14: the model answered, but every finding failed schema validation.
+// `status: success, findings: []` is indistinguishable from "reviewed and
+// found nothing" — a council can lose an entire role while the report says
+// the round was complete.
+describe('a wholly unparseable response is not a clean review', () => {
+  const MALFORMED = JSON.stringify({
+    findings: [
+      { file: 'a.ts', startLine: 'x', endLine: 'y', severity: 'important', category: 'tests', title: 't', description: 'd' },
+    ],
+  });
+
+  const SALVAGEABLE = JSON.stringify({
+    findings: [
+      { file: 'a.ts', startLine: 1, endLine: 2, severity: 'important', category: 'tests', title: 'ok', description: 'd' },
+      { file: 'a.ts', startLine: 'x', endLine: 2, severity: 'important', category: 'tests', title: 'bad', description: 'd' },
+    ],
+  });
+
+  it('openai-compat: all findings dropped yields parse_failed, not success', async () => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () => Promise.resolve({ choices: [{ message: { content: MALFORMED }, finish_reason: 'stop' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review('openrouter/x-ai/grok-4.5', 'test-coverage', 's', 'u', OPTS);
+    expect(review.status).toBe('parse_failed');
+    expect(review.findings).toEqual([]);
+    expect(review.droppedFindings).toBe(1);
+    expect(review.error).toMatch(/schema validation/i);
+    expect(review.warnings?.length).toBeGreaterThan(0);
+  });
+
+  it('anthropic: same classification via the tool-use path', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: () =>
+          Promise.resolve({
+            content: [{ type: 'text', text: MALFORMED }],
+            stop_reason: 'end_turn',
+          }),
+      },
+    });
+
+    const review = await adapter.review('claude-fable-5', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('parse_failed');
+    expect(review.droppedFindings).toBe(1);
+  });
+
+  it('a partially salvaged review stays successful but reports the loss', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () => Promise.resolve({ choices: [{ message: { content: SALVAGEABLE }, finish_reason: 'stop' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review('gpt-5.6-sol', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('success');
+    expect(review.findings).toHaveLength(1);
+    expect(review.droppedFindings).toBe(1);
+  });
+
+  it('string line numbers now parse instead of being dropped', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, {
+      models: {
+        generateContent: () =>
+          Promise.resolve({
+            text: JSON.stringify({
+              findings: [
+                { file: 'a.ts', startLine: '59', endLine: '61', severity: 'minor', category: 'tests', title: 't', description: 'd' },
+              ],
+            }),
+            candidates: [{ finishReason: 'STOP' }],
+          }),
+      },
+    });
+
+    const review = await adapter.review('gemini-3.6-flash', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('success');
+    expect(review.findings).toHaveLength(1);
+    expect(review.findings[0]!.startLine).toBe(59);
+    expect(review.droppedFindings).toBeUndefined();
+  });
+
+  it('a genuine clean review carries no drop count', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: { completions: { create: () => Promise.resolve(openaiResponse()) } },
+    });
+
+    const review = await adapter.review('gpt-5.6-sol', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('success');
+    expect(review.droppedFindings).toBeUndefined();
+    expect(review.warnings).toBeUndefined();
+  });
+});

@@ -212,3 +212,66 @@ describe('toMarkdown — below-threshold appendix', () => {
     expect(md).not.toContain('<details>');
   });
 });
+
+// RCL-14: the skills tell people to read reports from files, never from
+// console scrollback — so degraded coverage has to be IN the report.
+describe('toMarkdown — degraded coverage', () => {
+  function reviewerResult(reviews: ReviewResult['reviews']): ReviewResult {
+    return {
+      reviews,
+      findings: [],
+      stats: {
+        totalReviews: reviews.length,
+        successfulReviews: reviews.filter((r) => r.status === 'success').length,
+        totalRawFindings: 0,
+        totalDeduped: 0,
+        belowThreshold: 0,
+        durationMs: 1000,
+      },
+    };
+  }
+
+  const clean = {
+    model: 'm1',
+    role: 'general',
+    provider: 'test',
+    findings: [],
+    durationMs: 1000,
+    status: 'success' as const,
+  };
+
+  it('warns above the reviewer table when a reviewer was wholly lost', () => {
+    const md = toMarkdown(
+      reviewerResult([
+        clean,
+        {
+          ...clean,
+          model: 'openrouter/x-ai/grok-4.5',
+          role: 'test-coverage',
+          status: 'parse_failed',
+          droppedFindings: 6,
+          error: 'All 6 finding(s) failed schema validation',
+        },
+      ])
+    );
+
+    expect(md).toContain('Degraded coverage');
+    expect(md).toContain('6 finding(s) could not be parsed');
+    expect(md).toContain('openrouter/x-ai/grok-4.5/test-coverage');
+    expect(md.indexOf('Degraded coverage')).toBeLessThan(md.indexOf('## Reviewers'));
+  });
+
+  it('shows the dropped count beside the findings count', () => {
+    const md = toMarkdown(reviewerResult([{ ...clean, droppedFindings: 2 }]));
+
+    expect(md).toContain('0 (2 dropped)');
+    expect(md).toContain('⚠️'); // banner marker
+  });
+
+  it('says nothing about degradation on a clean run', () => {
+    const md = toMarkdown(reviewerResult([clean]));
+
+    expect(md).not.toContain('Degraded coverage');
+    expect(md).not.toContain('dropped)');
+  });
+});

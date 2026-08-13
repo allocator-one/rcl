@@ -9,6 +9,11 @@ import type { ModelReview } from '../consensus/types.js';
  * A reviewer counts as successful if it succeeded on at least one chunk;
  * findings from every successful chunk are concatenated. When no chunk
  * succeeded, the first non-success status and error are preserved.
+ *
+ * Dropped-finding counts and parser warnings are summed across ALL chunks,
+ * including the ones that failed: a reviewer that parsed cleanly on chunk 1
+ * and lost everything on chunk 2 is only partially covered, and the merged
+ * review is the last place that can still say so.
  */
 export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
   const byReviewer = new Map<string, ModelReview[]>();
@@ -31,6 +36,12 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
     const first = parts[0]!;
     const successes = parts.filter((p) => p.status === 'success');
     const durationMs = parts.reduce((sum, p) => sum + p.durationMs, 0);
+    const dropped = parts.reduce((sum, p) => sum + (p.droppedFindings ?? 0), 0);
+    const warnings = parts.flatMap((p) => p.warnings ?? []);
+    const degraded = {
+      ...(dropped > 0 ? { droppedFindings: dropped } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
 
     if (successes.length > 0) {
       return {
@@ -40,6 +51,7 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
         findings: successes.flatMap((p) => p.findings),
         durationMs,
         status: 'success',
+        ...degraded,
       };
     }
 
@@ -52,6 +64,7 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
       durationMs,
       status: failed.status,
       error: failed.error,
+      ...degraded,
     };
   });
 }
