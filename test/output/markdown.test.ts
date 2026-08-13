@@ -275,3 +275,57 @@ describe('toMarkdown — degraded coverage', () => {
     expect(md).not.toContain('dropped)');
   });
 });
+
+// RCL-15: a total loss with no malformed-finding count must still warn.
+describe('toMarkdown — degraded coverage with a zero drop count', () => {
+  const clean = {
+    model: 'm1',
+    role: 'general',
+    provider: 'test',
+    findings: [],
+    durationMs: 1000,
+    status: 'success' as const,
+  };
+
+  function reviewerResult(reviews: ReviewResult['reviews']): ReviewResult {
+    return {
+      reviews,
+      findings: [],
+      stats: {
+        totalReviews: reviews.length,
+        successfulReviews: reviews.filter((r) => r.status === 'success').length,
+        totalRawFindings: 0,
+        totalDeduped: 0,
+        belowThreshold: 0,
+        durationMs: 1000,
+      },
+    };
+  }
+
+  it('warns when a reviewer returned nothing usable, even with no dropped findings', () => {
+    const md = toMarkdown(
+      reviewerResult([
+        clean,
+        {
+          ...clean,
+          model: 'openrouter/deepseek/deepseek-v4-flash-0731',
+          role: 'regression-hunter',
+          status: 'parse_failed',
+          error: 'Response was not a usable review',
+        },
+      ])
+    );
+
+    expect(md).toContain('Degraded coverage');
+    expect(md).toContain('returned nothing usable');
+    expect(md).toContain('openrouter/deepseek/deepseek-v4-flash-0731/regression-hunter');
+    // No malformed findings, so the drop sentence must not appear
+    expect(md).not.toContain('could not be parsed and were discarded');
+  });
+
+  it('still says nothing on a fully clean run', () => {
+    const md = toMarkdown(reviewerResult([clean]));
+
+    expect(md).not.toContain('Degraded coverage');
+  });
+});

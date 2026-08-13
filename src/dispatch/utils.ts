@@ -86,7 +86,7 @@ export function reviewFromParse(opts: {
   startedAt: number;
   parsed: ParseResult;
 }): ModelReview {
-  const { findings, warnings, dropped } = opts.parsed;
+  const { findings, warnings, dropped, unusable } = opts.parsed;
   const base = {
     model: opts.model,
     role: opts.role,
@@ -97,11 +97,18 @@ export function reviewFromParse(opts: {
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  if (findings.length === 0 && dropped > 0) {
+  // Gate on the parser's explicit verdict, not on the dropped counter: the
+  // counter only moves inside the salvage loop, which never runs when the
+  // response has no findings array at all — so a truncated or prose-only
+  // answer used to fall through to `success` (RCL-15).
+  if (unusable) {
     return {
       ...base,
       status: 'parse_failed',
-      error: `All ${dropped} finding(s) failed schema validation; this reviewer's output was lost`,
+      error:
+        dropped > 0
+          ? `All ${dropped} finding(s) failed schema validation; this reviewer's output was lost`
+          : "Response was not a usable review; this reviewer's output was lost",
     };
   }
 

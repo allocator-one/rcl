@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **A reviewer that returns no findings array is no longer reported as
+  successful.** Follow-up to the 1.8.0 parse-failure work, which gated the
+  new `parse_failed` status on the dropped-findings counter — and that
+  counter only moves inside the salvage loop, which never runs when the
+  response has no `findings` array at all. So a truncated, refused, or
+  prose-only answer still came out as `success` with zero findings:
+  arguably the more common total loss than "every individual finding was
+  malformed", which was the case 1.8.0 did fix. The parser now returns an
+  explicit `unusable` verdict and the status gates on that. The markdown
+  degraded-coverage banner fires on either signal, so a lost reviewer with
+  no malformed-finding count is still named.
+
 ## 1.8.0
 
 - **String line numbers no longer discard findings.** Models routinely emit

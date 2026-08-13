@@ -50,6 +50,16 @@ export interface ParseResult {
    * which must never be reported as a clean review.
    */
   dropped: number;
+  /**
+   * The response was not a usable review at all: unparseable, or parsed but
+   * carrying no findings array. Distinct from `dropped`, which only counts
+   * individually-malformed findings — a truncated or prose-only answer never
+   * reaches the salvage loop, so a counter alone cannot detect it (RCL-15).
+   *
+   * `findings: [], unusable: false` is the ONLY shape that means "reviewed
+   * and found nothing".
+   */
+  unusable: boolean;
 }
 
 /**
@@ -115,13 +125,13 @@ export function parseReviewOutput(
 
   if (!rawOutput || rawOutput.trim().length === 0) {
     warnings.push(`${model}/${role}: empty output`);
-    return { findings: [], warnings, dropped: 0 };
+    return { findings: [], warnings, dropped: 0, unusable: true };
   }
 
   const candidates = extractJsonCandidates(rawOutput);
   if (candidates.length === 0) {
     warnings.push(`${model}/${role}: could not extract JSON from output`);
-    return { findings: [], warnings, dropped: 0 };
+    return { findings: [], warnings, dropped: 0, unusable: true };
   }
 
   let parsed: unknown;
@@ -138,7 +148,7 @@ export function parseReviewOutput(
   }
   if (!parsedOk) {
     warnings.push(`${model}/${role}: JSON parse error: ${String(lastParseError)}`);
-    return { findings: [], warnings, dropped: 0 };
+    return { findings: [], warnings, dropped: 0, unusable: true };
   }
 
   // Some models emit the findings array without the wrapping object.
@@ -173,7 +183,7 @@ export function parseReviewOutput(
         warnings.push(
           `${model}/${role}: schema validation errors (salvaged ${salvaged.length}, dropped ${dropped})`
         );
-        return { findings: normalizeIds(salvaged, model, role), warnings, dropped };
+        return { findings: normalizeIds(salvaged, model, role), warnings, dropped, unusable: false };
       }
 
       // Every finding failed validation. The reviewer DID produce output, so
@@ -181,19 +191,23 @@ export function parseReviewOutput(
       // the caller apart from a genuine empty result.
       if (dropped > 0) {
         warnings.push(`${model}/${role}: all ${dropped} finding(s) failed schema validation`);
-        return { findings: [], warnings, dropped };
+        return { findings: [], warnings, dropped, unusable: true };
       }
     }
 
     warnings.push(
       `${model}/${role}: schema validation failed: ${result.error.issues.map((e) => e.message).join(', ')}`
     );
-    return { findings: [], warnings, dropped: 0 };
+    // Schema validation failed and nothing was salvageable — including the
+    // case the salvage loop never ran because there was no findings array
+    // (a truncated or prose-only answer). Not a clean review.
+    return { findings: [], warnings, dropped: 0, unusable: true };
   }
 
   return {
     findings: normalizeIds(result.data.findings as Finding[], model, role),
     warnings,
     dropped: 0,
+    unusable: false,
   };
 }

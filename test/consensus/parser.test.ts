@@ -224,3 +224,59 @@ describe('tolerant field parsing', () => {
     expect(out.dropped).toBe(0);
   });
 });
+
+// RCL-15: the sibling of the all-findings-malformed case. A response with no
+// findings array never reaches the salvage loop, so the dropped counter stays
+// zero — the parser has to say "unusable" explicitly or the caller cannot
+// tell this apart from a clean review.
+describe('unusable responses', () => {
+  it.each([
+    ['an empty object', '{}'],
+    ['prose with no JSON', 'Sorry, I cannot help with that.'],
+    ['findings that is not an array', '{"findings":"none"}'],
+    ['a findings key holding an object', '{"findings":{"a":1}}'],
+    ['truncated JSON', '{"findings":[{"file":"a.ts"'],
+    ['an empty body', ''],
+  ])('%s is unusable, not a clean review', (_label, body) => {
+    const out = parseReviewOutput(body, 'm', 'r');
+
+    expect(out.findings).toEqual([]);
+    expect(out.unusable).toBe(true);
+  });
+
+  it('a genuine empty findings array is usable', () => {
+    const out = parseReviewOutput(JSON.stringify({ findings: [] }), 'm', 'r');
+
+    expect(out.findings).toEqual([]);
+    expect(out.unusable).toBe(false);
+    expect(out.dropped).toBe(0);
+  });
+
+  it('a wholly malformed findings array is unusable and still counts drops', () => {
+    const out = parseReviewOutput(
+      JSON.stringify({ findings: [{ file: 'a.ts' }, { file: 'b.ts' }] }),
+      'm',
+      'r'
+    );
+
+    expect(out.unusable).toBe(true);
+    expect(out.dropped).toBe(2);
+  });
+
+  it('a partially salvaged response is usable', () => {
+    const good = {
+      file: 'a.ts',
+      startLine: 1,
+      endLine: 2,
+      severity: 'minor',
+      category: 'tests',
+      title: 't',
+      description: 'd',
+    };
+    const out = parseReviewOutput(JSON.stringify({ findings: [good, { file: 'b.ts' }] }), 'm', 'r');
+
+    expect(out.findings).toHaveLength(1);
+    expect(out.dropped).toBe(1);
+    expect(out.unusable).toBe(false);
+  });
+});
