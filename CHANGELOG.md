@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.1
 
 - **A reviewer that returns no findings array is no longer reported as
   successful.** Follow-up to the 1.8.0 parse-failure work, which gated the
