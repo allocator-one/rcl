@@ -636,3 +636,54 @@ describe('a wholly unparseable response is not a clean review', () => {
     expect(review.warnings).toBeUndefined();
   });
 });
+
+// RCL-15: the shape observed in the wild on 1.8.0 — a reviewer answering
+// without a findings array. The dropped counter stays zero, so the earlier
+// gate let it through as `success` with an empty findings list.
+describe('a response that is not a review at all', () => {
+  it.each([
+    ['no findings key', '{}'],
+    ['prose only', 'I was unable to analyse this diff.'],
+    ['findings not an array', '{"findings":null}'],
+  ])('openai-compat: %s yields parse_failed with no drop count', async (_label, body) => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () => Promise.resolve({ choices: [{ message: { content: body }, finish_reason: 'stop' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review(
+      'openrouter/deepseek/deepseek-v4-flash-0731',
+      'regression-hunter',
+      's',
+      'u',
+      OPTS
+    );
+
+    expect(review.status).toBe('parse_failed');
+    expect(review.findings).toEqual([]);
+    expect(review.droppedFindings).toBeUndefined();
+    expect(review.error).toMatch(/not a usable review/i);
+    expect(review.warnings?.length).toBeGreaterThan(0);
+  });
+
+  it('a genuine zero-finding review is still success', async () => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'test-key', provider: 'openrouter' });
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () =>
+            Promise.resolve({ choices: [{ message: { content: '{"findings":[]}' }, finish_reason: 'stop' }] }),
+        },
+      },
+    });
+
+    const review = await adapter.review('openrouter/x/y', 'general', 's', 'u', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(review.findings).toEqual([]);
+  });
+});

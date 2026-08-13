@@ -186,13 +186,23 @@ export function toMarkdown(result: ReviewResult): string {
   // incomplete in a way no severity total can show.
   const parseFailed = result.reviews.filter((r) => r.status === 'parse_failed');
   const totalDropped = result.reviews.reduce((sum, r) => sum + (r.droppedFindings ?? 0), 0);
-  if (totalDropped > 0) {
+  // Either signal alone means degraded coverage. A reviewer whose response
+  // carried no findings array at all is a total loss with a dropped count of
+  // zero, so gating on the count would hide exactly that case (RCL-15).
+  if (totalDropped > 0 || parseFailed.length > 0) {
     const lostRoles = parseFailed.map((r) => `${r.model}/${r.role}`).join(', ');
     sections.push(
-      `> ⚠️ **Degraded coverage:** ${totalDropped} finding(s) could not be parsed and were discarded.` +
-        (parseFailed.length > 0
-          ? ` ${parseFailed.length} reviewer(s) lost their entire output: ${lostRoles}.`
-          : '') +
+      '> ⚠️ **Degraded coverage:** ' +
+        [
+          totalDropped > 0
+            ? `${totalDropped} finding(s) could not be parsed and were discarded.`
+            : null,
+          parseFailed.length > 0
+            ? `${parseFailed.length} reviewer(s) returned nothing usable and contributed no findings: ${lostRoles}.`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(' ') +
         ' Treat the results below as incomplete.',
       ''
     );
