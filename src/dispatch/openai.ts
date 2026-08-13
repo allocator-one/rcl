@@ -10,6 +10,7 @@ import {
   attemptWithRetries,
   failedReview,
   isBlankOutput,
+  reviewFromParse,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -104,17 +105,16 @@ export class OpenAIAdapter implements ReviewAdapter {
             });
           }
 
-          const { findings, warnings } = parseReviewOutput(rawOutput, model, role);
-          for (const w of warnings) console.warn(w);
+          const parsed = parseReviewOutput(rawOutput, model, role);
+          for (const w of parsed.warnings) console.warn(w);
 
-          return {
+          return reviewFromParse({
             model,
             role,
             provider: 'openai',
-            findings,
-            durationMs: Date.now() - start,
-            status: 'success',
-          };
+            startedAt: start,
+            parsed,
+          });
         } catch (err) {
           lastErr = err;
           if (controller.signal.aborted) {

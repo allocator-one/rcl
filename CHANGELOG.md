@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **String line numbers no longer discard findings.** Models routinely emit
+  `"startLine": "59"`, and the strict `z.number()` rejected it. When every
+  finding in a response was affected the whole reviewer was lost — in an
+  observed run, an entire `test-coverage` role vanished, and it was the only
+  reviewer across three rounds to catch a real test gap. Line numbers are
+  coerced now, and severity/category tolerate stray casing and whitespace.
+- **A reviewer whose output was wholly unparseable is no longer reported as
+  successful.** It gets the new `parse_failed` status, so — like a refusal —
+  it renders as failed, is excluded from `successfulReviews`, and drops out
+  of consensus rather than counting as a reviewer that "found nothing".
+- **Degraded coverage reaches the report.** `ModelReview` now carries
+  `droppedFindings` and `warnings`, summed across chunks; the markdown report
+  gets a banner above the reviewer table naming the lost reviewers, and the
+  terminal, GitHub, and JSON surfaces show per-reviewer drop counts. The
+  skills tell people to read reports from files rather than console
+  scrollback, so warnings that only ever reached `console.warn` were
+  invisible exactly when the documented workflow was followed correctly.
+
 ## 1.7.0
 
 - **A model refusal is no longer reported as a clean review.** Providers

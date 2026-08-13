@@ -200,11 +200,15 @@ function printReviewerSummary(result: ReviewResult): void {
         ? chalk.green('✓')
         : review.status === 'timeout'
         ? chalk.yellow('⏱')
+        : review.status === 'parse_failed'
+        ? chalk.yellow('⚠')
         : chalk.red('✗');
 
+    const dropped = review.droppedFindings ?? 0;
     const findingsStr =
       review.status === 'success'
-        ? chalk.dim(`${review.findings.length} findings`)
+        ? chalk.dim(`${review.findings.length} findings`) +
+          (dropped > 0 ? chalk.yellow(` (${dropped} dropped as unparseable)`) : '')
         : chalk.red(review.error ?? review.status);
 
     console.log(

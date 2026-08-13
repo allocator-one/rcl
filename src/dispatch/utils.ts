@@ -1,3 +1,4 @@
+import type { ParseResult } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 
 const KNOWN_PROVIDER_PREFIXES = [
@@ -64,6 +65,47 @@ export function failedReview(opts: {
  */
 export function isBlankOutput(rawOutput: string): boolean {
   return rawOutput.trim().length === 0;
+}
+
+/**
+ * Turn a parsed response into a ModelReview, shared by every adapter so the
+ * degraded cases are classified the same way everywhere.
+ *
+ * The case that matters: the model answered, but every finding it produced
+ * failed schema validation. `findings: []` with `dropped > 0` is NOT a clean
+ * review — reporting it as one silently drops a whole reviewer (and, in a
+ * council, a whole role) while the report claims the round was complete.
+ * Warnings ride along so a consumer reading the JSON can see degraded
+ * coverage without scraping stdout, which the skills explicitly tell people
+ * not to read.
+ */
+export function reviewFromParse(opts: {
+  model: string;
+  role: string;
+  provider: string;
+  startedAt: number;
+  parsed: ParseResult;
+}): ModelReview {
+  const { findings, warnings, dropped } = opts.parsed;
+  const base = {
+    model: opts.model,
+    role: opts.role,
+    provider: opts.provider,
+    findings,
+    durationMs: Date.now() - opts.startedAt,
+    ...(dropped > 0 ? { droppedFindings: dropped } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+
+  if (findings.length === 0 && dropped > 0) {
+    return {
+      ...base,
+      status: 'parse_failed',
+      error: `All ${dropped} finding(s) failed schema validation; this reviewer's output was lost`,
+    };
+  }
+
+  return { ...base, status: 'success' };
 }
 
 export const RETRY_DELAYS = [1000, 2000, 4000] as const;

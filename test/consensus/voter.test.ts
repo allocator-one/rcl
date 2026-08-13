@@ -675,3 +675,36 @@ describe('computeConsensus — a failed reviewer does not dilute confidence', ()
     expect(result!.consensus.tier).toBe('single');
   });
 });
+
+// RCL-14: a reviewer whose output was lost to parse failures must not count
+// as a reviewer that looked and found nothing — the same rule RCL-13
+// established for refusals.
+describe('computeConsensus — parse_failed reviewers are excluded', () => {
+  it('a parse_failed specialist does not lower isolation', () => {
+    const f = mkF({ category: 'security' });
+    const withLost = [
+      mkReview('m1', 'security-auditor', [f]),
+      mkReview('m2', 'security-auditor', [], 'parse_failed'),
+    ];
+    const withoutReviewer = [mkReview('m1', 'security-auditor', [f])];
+    const group = mkGroup(f, [{ finding: f, model: 'm1', role: 'security-auditor' }]);
+
+    const [lost] = computeConsensus([group], withLost, ROLES);
+    const [absent] = computeConsensus([group], withoutReviewer, ROLES);
+
+    expect(lost!.consensus.confidence).toBeCloseTo(absent!.consensus.confidence);
+  });
+
+  it('is not counted in the consensus total', () => {
+    const f = mkF();
+    const reviews = [
+      mkReview('m1', 'general', [f]),
+      mkReview('m2', 'general', [], 'parse_failed'),
+    ];
+    const group = mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }]);
+
+    const [result] = computeConsensus([group], reviews, ROLES);
+
+    expect(result!.consensus.total).toBe(1);
+  });
+});

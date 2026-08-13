@@ -139,11 +139,19 @@ function buildSummaryComment(result: ReviewResult, demoted: ConsensusFinding[]):
 
   lines.push('', '### Reviewers');
   for (const review of result.reviews) {
-    const icon = review.status === 'success' ? '✅' : review.status === 'timeout' ? '⏱️' : '❌';
+    const icon =
+      review.status === 'success'
+        ? '✅'
+        : review.status === 'timeout'
+          ? '⏱️'
+          : review.status === 'parse_failed'
+            ? '⚠️'
+            : '❌';
+    const dropped = review.droppedFindings ?? 0;
     lines.push(
       `- ${icon} **${review.model}** / ${review.role}: ` +
         (review.status === 'success'
-          ? `${review.findings.length} findings`
+          ? `${review.findings.length} findings${dropped > 0 ? ` (${dropped} dropped as unparseable)` : ''}`
           : sanitizeInline(review.error ?? review.status))
     );
   }

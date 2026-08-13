@@ -460,7 +460,14 @@ async function executeCouncil(
       onReviewComplete: (review) => {
         completedReviews.push(review);
         const done = completedReviews.length;
-        const icon = review.status === 'success' ? '✓' : review.status === 'timeout' ? '⏱' : '✗';
+        const icon =
+          review.status === 'success'
+            ? '✓'
+            : review.status === 'timeout'
+              ? '⏱'
+              : review.status === 'parse_failed'
+                ? '⚠'
+                : '✗';
         spinner.text = `Reviews: ${done}/${totalCalls} [${icon} ${review.model}/${review.role}]`;
       },
     }

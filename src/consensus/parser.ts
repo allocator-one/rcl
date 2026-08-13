@@ -1,16 +1,37 @@
 import { z } from 'zod';
 import type { Finding } from './types.js';
 
+/**
+ * Models emit line numbers as JSON strings often enough ("startLine": "59")
+ * that a strict `z.number()` silently discards otherwise-perfect findings —
+ * and when EVERY finding in a response is affected, the whole reviewer is
+ * lost. Coerce instead, then enforce the integer/non-negative shape, so a
+ * genuinely nonsensical value is still rejected.
+ */
+const LineNumber = z.coerce.number().int().nonnegative();
+
+/**
+ * Enum-ish fields arrive with stray casing or whitespace ("Critical",
+ * " security"). Normalizing before validation costs nothing and is the same
+ * lesson as the line numbers: reject meaning, not formatting.
+ */
+function normalizedEnum<T extends readonly [string, ...string[]]>(values: T) {
+  return z.preprocess(
+    (value) => (typeof value === 'string' ? value.trim().toLowerCase() : value),
+    z.enum(values)
+  );
+}
+
 const FindingSchema = z.object({
   // Optional with a default: models routinely omit ids, and a required id
   // used to fail the whole response (and every salvage attempt), silently
   // dropping the reviewer's entire output. Empty ids are regenerated below.
   id: z.string().optional().default(''),
   file: z.string(),
-  startLine: z.number().int().nonnegative(),
-  endLine: z.number().int().nonnegative(),
-  severity: z.enum(['critical', 'important', 'minor', 'nitpick']),
-  category: z.enum(['security', 'correctness', 'best-practices', 'tests', 'api-design']),
+  startLine: LineNumber,
+  endLine: LineNumber,
+  severity: normalizedEnum(['critical', 'important', 'minor', 'nitpick']),
+  category: normalizedEnum(['security', 'correctness', 'best-practices', 'tests', 'api-design']),
   title: z.string().max(200),
   description: z.string(),
   suggestedFix: z.string().optional(),
@@ -23,6 +44,12 @@ const ReviewOutputSchema = z.object({
 export interface ParseResult {
   findings: Finding[];
   warnings: string[];
+  /**
+   * Findings the parser discarded as malformed. Non-zero with an empty
+   * `findings` means the reviewer produced output that was wholly lost —
+   * which must never be reported as a clean review.
+   */
+  dropped: number;
 }
 
 /**
@@ -88,13 +115,13 @@ export function parseReviewOutput(
 
   if (!rawOutput || rawOutput.trim().length === 0) {
     warnings.push(`${model}/${role}: empty output`);
-    return { findings: [], warnings };
+    return { findings: [], warnings, dropped: 0 };
   }
 
   const candidates = extractJsonCandidates(rawOutput);
   if (candidates.length === 0) {
     warnings.push(`${model}/${role}: could not extract JSON from output`);
-    return { findings: [], warnings };
+    return { findings: [], warnings, dropped: 0 };
   }
 
   let parsed: unknown;
@@ -111,7 +138,7 @@ export function parseReviewOutput(
   }
   if (!parsedOk) {
     warnings.push(`${model}/${role}: JSON parse error: ${String(lastParseError)}`);
-    return { findings: [], warnings };
+    return { findings: [], warnings, dropped: 0 };
   }
 
   // Some models emit the findings array without the wrapping object.
@@ -130,30 +157,43 @@ export function parseReviewOutput(
     ) {
       const rawFindings = (parsed as { findings: unknown[] }).findings;
       const salvaged: Finding[] = [];
+      let dropped = 0;
 
       for (const item of rawFindings) {
         const itemResult = FindingSchema.safeParse(item);
         if (itemResult.success) {
           salvaged.push(itemResult.data as Finding);
         } else {
+          dropped++;
           warnings.push(`${model}/${role}: dropped malformed finding: ${JSON.stringify(item).slice(0, 100)}`);
         }
       }
 
       if (salvaged.length > 0) {
-        warnings.push(`${model}/${role}: schema validation errors (salvaged ${salvaged.length} findings)`);
-        return { findings: normalizeIds(salvaged, model, role), warnings };
+        warnings.push(
+          `${model}/${role}: schema validation errors (salvaged ${salvaged.length}, dropped ${dropped})`
+        );
+        return { findings: normalizeIds(salvaged, model, role), warnings, dropped };
+      }
+
+      // Every finding failed validation. The reviewer DID produce output, so
+      // this is a parse failure, not a clean review — `dropped` is what tells
+      // the caller apart from a genuine empty result.
+      if (dropped > 0) {
+        warnings.push(`${model}/${role}: all ${dropped} finding(s) failed schema validation`);
+        return { findings: [], warnings, dropped };
       }
     }
 
     warnings.push(
       `${model}/${role}: schema validation failed: ${result.error.issues.map((e) => e.message).join(', ')}`
     );
-    return { findings: [], warnings };
+    return { findings: [], warnings, dropped: 0 };
   }
 
   return {
     findings: normalizeIds(result.data.findings as Finding[], model, role),
     warnings,
+    dropped: 0,
   };
 }

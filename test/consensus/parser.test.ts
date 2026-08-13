@@ -130,3 +130,97 @@ describe('parseReviewOutput — untrusted output robustness', () => {
     expect(result.warnings.length).toBeGreaterThan(0);
   });
 });
+
+// RCL-14: models routinely emit line numbers as JSON strings. A strict
+// z.number() discarded those findings, and when EVERY finding in a response
+// was affected the whole reviewer was lost while the report said "success".
+describe('tolerant field parsing', () => {
+  const base = {
+    file: 'src/a.ts',
+    severity: 'important',
+    category: 'correctness',
+    title: 'Off-by-one',
+    description: 'Loop runs one iteration too far.',
+  };
+
+  it('accepts string line numbers', () => {
+    const out = parseReviewOutput(
+      JSON.stringify({ findings: [{ ...base, startLine: '59', endLine: '61' }] }),
+      'm',
+      'r'
+    );
+
+    expect(out.findings).toHaveLength(1);
+    expect(out.findings[0]!.startLine).toBe(59);
+    expect(out.findings[0]!.endLine).toBe(61);
+    expect(out.dropped).toBe(0);
+  });
+
+  it('accepts stray casing and whitespace on severity and category', () => {
+    const out = parseReviewOutput(
+      JSON.stringify({
+        findings: [{ ...base, severity: 'Critical', category: ' Security ', startLine: 1, endLine: 2 }],
+      }),
+      'm',
+      'r'
+    );
+
+    expect(out.findings).toHaveLength(1);
+    expect(out.findings[0]!.severity).toBe('critical');
+    expect(out.findings[0]!.category).toBe('security');
+  });
+
+  it('still rejects values that are not line numbers at all', () => {
+    const out = parseReviewOutput(
+      JSON.stringify({ findings: [{ ...base, startLine: 'somewhere', endLine: 2 }] }),
+      'm',
+      'r'
+    );
+
+    expect(out.findings).toEqual([]);
+    expect(out.dropped).toBe(1);
+  });
+
+  it('reports how many findings were dropped when some survive', () => {
+    const out = parseReviewOutput(
+      JSON.stringify({
+        findings: [
+          { ...base, startLine: 1, endLine: 2 },
+          { ...base, startLine: 'nope', endLine: 2 },
+        ],
+      }),
+      'm',
+      'r'
+    );
+
+    expect(out.findings).toHaveLength(1);
+    expect(out.dropped).toBe(1);
+    expect(out.warnings.some((w) => w.includes('dropped 1'))).toBe(true);
+  });
+
+  it('reports a wholly-unparseable response as dropped, not as empty', () => {
+    // The RCL-14 case: every finding malformed. `dropped > 0` with no
+    // findings is what lets the adapter tell this apart from a clean review.
+    const out = parseReviewOutput(
+      JSON.stringify({
+        findings: [
+          { ...base, startLine: 'a', endLine: 2 },
+          { ...base, startLine: 'b', endLine: 2 },
+        ],
+      }),
+      'm',
+      'r'
+    );
+
+    expect(out.findings).toEqual([]);
+    expect(out.dropped).toBe(2);
+    expect(out.warnings.some((w) => w.includes('all 2 finding(s) failed'))).toBe(true);
+  });
+
+  it('a genuinely empty findings array is not a drop', () => {
+    const out = parseReviewOutput(JSON.stringify({ findings: [] }), 'm', 'r');
+
+    expect(out.findings).toEqual([]);
+    expect(out.dropped).toBe(0);
+  });
+});

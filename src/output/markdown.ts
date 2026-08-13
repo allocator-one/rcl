@@ -181,14 +181,43 @@ export function toMarkdown(result: ReviewResult): string {
   );
   sections.push('');
 
+  // Degraded coverage belongs next to the headline counts, not only in the
+  // reviewers table: a lost reviewer means the finding lists below are
+  // incomplete in a way no severity total can show.
+  const parseFailed = result.reviews.filter((r) => r.status === 'parse_failed');
+  const totalDropped = result.reviews.reduce((sum, r) => sum + (r.droppedFindings ?? 0), 0);
+  if (totalDropped > 0) {
+    const lostRoles = parseFailed.map((r) => `${r.model}/${r.role}`).join(', ');
+    sections.push(
+      `> ⚠️ **Degraded coverage:** ${totalDropped} finding(s) could not be parsed and were discarded.` +
+        (parseFailed.length > 0
+          ? ` ${parseFailed.length} reviewer(s) lost their entire output: ${lostRoles}.`
+          : '') +
+        ' Treat the results below as incomplete.',
+      ''
+    );
+  }
+
   // Reviewers table
   sections.push('## Reviewers', '');
   sections.push('| Model | Role | Status | Findings | Duration |');
   sections.push('|-------|------|--------|----------|----------|');
   for (const review of result.reviews) {
-    const status = review.status === 'success' ? '✅' : review.status === 'timeout' ? '⏱️' : '❌';
+    const status =
+      review.status === 'success'
+        ? '✅'
+        : review.status === 'timeout'
+          ? '⏱️'
+          : review.status === 'parse_failed'
+            ? '⚠️'
+            : '❌';
+    // A dropped count beside the findings count is what tells a reader that
+    // "3 findings" might have been 5 — degraded coverage, not a clean run.
+    const dropped = review.droppedFindings ?? 0;
+    const findingsCell =
+      dropped > 0 ? `${review.findings.length} (${dropped} dropped)` : `${review.findings.length}`;
     sections.push(
-      `| ${review.model} | ${review.role} | ${status} | ${review.findings.length} | ${(review.durationMs / 1000).toFixed(1)}s |`
+      `| ${review.model} | ${review.role} | ${status} | ${findingsCell} | ${(review.durationMs / 1000).toFixed(1)}s |`
     );
   }
   sections.push('');

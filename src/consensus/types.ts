@@ -16,8 +16,23 @@ export interface ModelReview {
   provider: string;
   findings: Finding[];
   durationMs: number;
-  status: 'success' | 'timeout' | 'error';
+  /**
+   * `parse_failed` is distinct from `error`: the model answered, but its
+   * output could not be turned into findings. Both are excluded from
+   * consensus and from `successfulReviews` — a reviewer whose output was
+   * lost must never read as "reviewed and found nothing" — but keeping them
+   * apart tells an operator whether to look at the network or the prompt.
+   */
+  status: 'success' | 'timeout' | 'error' | 'parse_failed';
   error?: string;
+  /**
+   * Findings the parser discarded as malformed. Present (and non-zero) on a
+   * partially-salvaged review too, so degraded coverage is visible in the
+   * report rather than only in stdout.
+   */
+  droppedFindings?: number;
+  /** Parser warnings, carried into the report instead of only console.warn. */
+  warnings?: string[];
 }
 
 /**
