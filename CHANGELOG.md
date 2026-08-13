@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0
 
 - **String line numbers no longer discard findings.** Models routinely emit
   `"startLine": "59"`, and the strict `z.number()` rejected it. When every
