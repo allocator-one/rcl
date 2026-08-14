@@ -468,6 +468,19 @@ describe('deduplicateFindings — agreement neighborhoods', () => {
 
     expect(groups.length).toBeGreaterThan(1);
   });
+
+  it('does not let a transitive chain span beyond the line window', () => {
+    const reviews = neighborhoodReviews();
+    for (let index = 0; index < 6; index++) {
+      const groupIndex = index < 2 ? 0 : index < 4 ? 1 : index - 2;
+      reviews[index]!.findings[0]!.startLine = 10 + groupIndex * 49;
+      reviews[index]!.findings[0]!.endLine = 59 + groupIndex * 49;
+    }
+
+    const groups = deduplicateFindings(reviews, 0.6, 5, 0.4);
+
+    expect(groups).toHaveLength(4);
+  });
 });
 
 describe('conceptSimilarity — taxonomy boost', () => {

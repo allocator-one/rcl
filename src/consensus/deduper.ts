@@ -414,7 +414,7 @@ const CORROBORATED_SINGLE_ANCHOR_SUPPORT = 3; // extra support for one-token bri
 const CORROBORATED_MAX_ATTACHMENT_ROUNDS = 2; // bound transitive fringe growth
 const CORROBORATED_NEIGHBORHOOD_THRESHOLD = 0.11; // loose combined lexical partition
 const CORROBORATED_NEIGHBORHOOD_DENSITY = 0.5; // observed / possible weak edges
-const CORROBORATED_MAX_NEIGHBORHOOD_SPAN = 50; // broad file-level findings cannot bridge
+const CORROBORATED_MAX_NEIGHBORHOOD_SPAN = 50; // broad findings/components cannot bridge
 // A location-only rescue must contain at least two lexical confirmations
 // already collapsed by the strict pass. Requiring that redundancy keeps an
 // all-singleton neighborhood from manufacturing consensus from proximity.
@@ -1029,6 +1029,11 @@ function mergeAgreementNeighborhoods(
     let similarity = 0;
     for (const left of a) {
       for (const right of b) {
+        // One reviewer can emit multiple wording variants. Its own variants
+        // must not manufacture the edge that turns proximity into agreement.
+        if (`${left.model}::${left.role}` === `${right.model}::${right.role}`) {
+          continue;
+        }
         similarity = Math.max(
           similarity,
           combinedSimilarity(left.finding, right.finding)
@@ -1118,6 +1123,11 @@ function mergeAgreementNeighborhoods(
     ) {
       continue;
     }
+    const componentMembers = component.flat();
+    const componentSpan =
+      Math.max(...componentMembers.map((member) => member.finding.endLine)) -
+      Math.min(...componentMembers.map((member) => member.finding.startLine));
+    if (componentSpan > CORROBORATED_MAX_NEIGHBORHOOD_SPAN) continue;
     // Union-find connectivity is transitive, but compatibility is not. A
     // neutral bridge must not join findings that make opposing claims.
     if (
