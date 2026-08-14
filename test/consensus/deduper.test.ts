@@ -379,6 +379,46 @@ describe('deduplicateFindings — corroborated location clusters', () => {
 
     expect(groups).toHaveLength(2);
   });
+
+  it('keeps a runtime nil defect separate from a neighboring typespec defect', () => {
+    const runtime = [
+      mkF({ id: 'r1', title: 'nil terms fall through to custom behavior', description: 'A nil value selects the wrong runtime branch.', suggestedFix: 'Handle nil before custom terms.', category: 'correctness' }),
+      mkF({ id: 'r2', title: 'custom branch incorrectly handles nil terms', description: 'The nil input reaches incorrect runtime behavior.', suggestedFix: 'Add an explicit nil branch.', category: 'correctness' }),
+      mkF({ id: 'r3', title: 'nil input takes the wrong behavior path', description: 'Runtime handling sends nil through the custom path.', suggestedFix: 'Treat nil as the default case.', category: 'correctness' }),
+    ];
+    const contracts = [
+      mkF({ id: 's1', title: '@spec omits the reachable nil return', description: 'The return type excludes nil.', suggestedFix: 'Add nil to the @spec.', category: 'correctness' }),
+      mkF({ id: 's2', title: 'Typespec excludes a possible nil result', description: 'The declared return type cannot represent nil.', suggestedFix: 'Widen the typespec with nil.', category: 'correctness' }),
+      mkF({ id: 's3', title: 'Return type should include nil', description: 'The @spec is narrower than the nil result.', suggestedFix: 'Declare the nil return type.', category: 'correctness' }),
+    ];
+    const groups = deduplicateFindings([
+      ...runtime.map((finding, index) => mkReview(`runtime-${index}`, 'general', [finding])),
+      ...contracts.map((finding, index) => mkReview(`contract-${index}`, 'general', [finding])),
+    ]);
+
+    const runtimeGroup = groups.find((group) =>
+      group.members.some((member) => member.finding.id === 'r1')
+    );
+    const contractGroup = groups.find((group) =>
+      group.members.some((member) => member.finding.id === 's1')
+    );
+    expect(runtimeGroup).toBeDefined();
+    expect(contractGroup).toBeDefined();
+    expect(runtimeGroup).not.toBe(contractGroup);
+  });
+
+  it('is deterministic when review order changes', () => {
+    const reviews = [
+      mkReview('m1', 'general', [variants[0]!]),
+      mkReview('m2', 'tests', [variants[1]!]),
+      mkReview('m3', 'edge-cases', [variants[2]!]),
+    ];
+    const signature = (ordered: ModelReview[]) => deduplicateFindings(ordered).map((group) =>
+      group.members.map((member) => member.finding.id).sort().join(',')
+    ).sort();
+
+    expect(signature(reviews)).toEqual(signature([...reviews].reverse()));
+  });
 });
 
 describe('conceptSimilarity — taxonomy boost', () => {

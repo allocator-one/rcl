@@ -437,15 +437,14 @@ function corroborationFieldSimilar(a: string | undefined, b: string | undefined)
   // At least one shared semantic token must remain after generic language is
   // removed. A shared code identifier alone is only evidence that findings
   // discuss the same function, not the same defect within that function.
-  for (const token of tokensA) {
-    if (tokensB.has(token) && !token.includes('_')) return true;
-  }
-  return false;
+  const shared = [...tokensA].filter((token) => tokensB.has(token));
+  return shared.some((token) => !token.includes('_')) || shared.length >= 2;
 }
 
 const TYPE_CONTRACT_PATTERN = /(?:@spec\b|\btypespecs?\b|\breturn type\b)/i;
 const PERFORMANCE_CONTRACT_PATTERN = /(?:\bmissing\b.*\bindex\b|\bn\s*\+\s*1\b|\bunbounded query\b)/i;
 const DATA_TYPE_CONTRACT_PATTERN = /(?:\btype mismatch\b|\btype conversion\b|\bcast(?:ing)?\b)/i;
+const GLOBAL_LOG_CAPTURE_PATTERN = /(?:\bglobal log capture\b|\bcapture_log\b|\blog-capture\b)/i;
 
 function nonEmptyFieldSimilarity(a: string | undefined, b: string | undefined): number {
   const tokensA = tokenize(a ?? '');
@@ -462,6 +461,9 @@ function compatibleClaimKinds(a: Finding, b: Finding): boolean {
     return false;
   }
   if (DATA_TYPE_CONTRACT_PATTERN.test(a.title) !== DATA_TYPE_CONTRACT_PATTERN.test(b.title)) {
+    return false;
+  }
+  if (GLOBAL_LOG_CAPTURE_PATTERN.test(a.title) !== GLOBAL_LOG_CAPTURE_PATTERN.test(b.title)) {
     return false;
   }
   const conceptsA = extractConcepts(a);
@@ -531,14 +533,52 @@ function groupsShareLocation(
   );
 }
 
-function splitLocationChains(
+function clustersClaimsAreCompatible(
+  a: TaggedFinding[][],
+  b: TaggedFinding[][]
+): boolean {
+  return a.every((left) =>
+    b.every((right) =>
+      left.every((leftMember) =>
+        right.every((rightMember) =>
+          compatibleClaimKinds(leftMember.finding, rightMember.finding)
+        )
+      )
+    )
+  );
+}
+
+function clustersAreCompatible(
+  a: TaggedFinding[][],
+  b: TaggedFinding[][],
+  lineWindow: number
+): boolean {
+  return a.every((left) =>
+    b.every((right) => groupsShareLocation(left, right, lineWindow))
+  ) && clustersClaimsAreCompatible(a, b);
+}
+
+function clustersShareFile(a: TaggedFinding[][], b: TaggedFinding[][]): boolean {
+  const files = new Set(a.flat().map((member) => member.finding.file));
+  return b.flat().every((member) => files.has(member.finding.file));
+}
+
+function splitCompatibleChains(
   component: TaggedFinding[][],
   lineWindow: number
 ): TaggedFinding[][][] {
   const clusters: TaggedFinding[][][] = [];
-  for (const group of component) {
+  const ordered = [...component].sort((a, b) => {
+    const left = chooseRepresentative(a).finding;
+    const right = chooseRepresentative(b).finding;
+    return left.file.localeCompare(right.file) ||
+      left.startLine - right.startLine ||
+      left.endLine - right.endLine ||
+      left.title.localeCompare(right.title);
+  });
+  for (const group of ordered) {
     const compatible = clusters.find((cluster) =>
-      cluster.every((memberGroup) => groupsShareLocation(group, memberGroup, lineWindow))
+      clustersAreCompatible([group], cluster, lineWindow)
     );
     if (compatible) compatible.push(group);
     else clusters.push([group]);
@@ -571,44 +611,40 @@ function relaxedEdgeDensity(groups: TaggedFinding[][], lineWindow: number): numb
  * boundary: several independently corroborated defects can occupy the same
  * hunk, and a few shared diff tokens must not bridge those concepts together.
  */
-function relaxedCommunities(weights: number[][]): number[] {
+function relaxedCommunities(weights: Array<Map<number, number>>): number[] {
   const count = weights.length;
   const labels = Array.from({ length: count }, (_, index) => index);
-  const degrees = weights.map((row) => row.reduce((sum, weight) => sum + weight, 0));
+  const degrees = weights.map((row) =>
+    [...row.values()].reduce((sum, weight) => sum + weight, 0)
+  );
   const totalWeight = degrees.reduce((sum, degree) => sum + degree, 0) / 2;
   if (totalWeight === 0) return labels;
 
   const communityDegrees = [...degrees];
-  for (let pass = 0; pass < count * 2; pass++) {
+  for (let pass = 0; pass < Math.min(count * 2, 20); pass++) {
     let moved = false;
     for (let index = 0; index < count; index++) {
+      if (degrees[index] === 0) continue;
       const current = labels[index]!;
-      const candidates = new Set<number>();
-      for (let neighbor = 0; neighbor < count; neighbor++) {
-        if (weights[index]![neighbor]! > 0) candidates.add(labels[neighbor]!);
-      }
-
       const weightByCommunity = new Map<number, number>();
-      for (let neighbor = 0; neighbor < count; neighbor++) {
-        const weight = weights[index]![neighbor]!;
-        if (weight === 0) continue;
+      for (const [neighbor, weight] of weights[index]!) {
         const label = labels[neighbor]!;
         weightByCommunity.set(label, (weightByCommunity.get(label) ?? 0) + weight);
       }
 
+      // Remove the node before evaluating insertion into each neighboring
+      // community. This is the standard first phase of weighted Louvain; the
+      // previous implementation compared against stale community totals.
+      communityDegrees[current] -= degrees[index]!;
+      const candidates = new Set([...weightByCommunity.keys(), current]);
       let best = current;
-      let bestGain = 0;
+      let bestGain =
+        (weightByCommunity.get(current) ?? 0) -
+        (communityDegrees[current]! * degrees[index]!) / (2 * totalWeight);
       for (const candidate of candidates) {
-        if (candidate === current) continue;
         const gain =
-          ((weightByCommunity.get(candidate) ?? 0) -
-            (weightByCommunity.get(current) ?? 0)) /
-            totalWeight +
-          (degrees[index]! *
-            (communityDegrees[current]! -
-              communityDegrees[candidate]! -
-              degrees[index]!)) /
-            (2 * totalWeight * totalWeight);
+          (weightByCommunity.get(candidate) ?? 0) -
+          (communityDegrees[candidate]! * degrees[index]!) / (2 * totalWeight);
         if (gain > bestGain + Number.EPSILON ||
             (Math.abs(gain - bestGain) <= Number.EPSILON && candidate < best)) {
           best = candidate;
@@ -616,11 +652,9 @@ function relaxedCommunities(weights: number[][]): number[] {
         }
       }
 
-      if (best === current) continue;
-      communityDegrees[current] -= degrees[index]!;
       communityDegrees[best] += degrees[index]!;
       labels[index] = best;
-      moved = true;
+      if (best !== current) moved = true;
     }
     if (!moved) break;
   }
@@ -648,6 +682,23 @@ function conceptAnchors(groups: TaggedFinding[][]): Set<string> {
   );
 }
 
+function detailedConceptAnchors(groups: TaggedFinding[][]): Set<string> {
+  const members = groups.flat();
+  const counts = new Map<string, number>();
+  for (const member of members) {
+    const text = `${member.finding.title} ${member.finding.description} ${member.finding.suggestedFix ?? ''}`;
+    for (const token of corroborationTokens(text)) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+  }
+  const support = Math.max(2, Math.ceil(members.length * 0.4));
+  return new Set(
+    [...counts]
+      .filter(([, count]) => count >= support)
+      .map(([token]) => token)
+  );
+}
+
 function sharedAnchorCount(a: Set<string>, b: Set<string>): number {
   let count = 0;
   for (const token of a) if (b.has(token)) count++;
@@ -658,20 +709,27 @@ function mergeAnchoredCommunities(
   clusters: AgreementCluster[],
   lineWindow: number
 ): AgreementCluster[] {
-  const remaining = [...clusters];
+  const remaining = [...clusters].sort((a, b) =>
+    chooseRepresentative(a.groups.flat()).finding.title.localeCompare(
+      chooseRepresentative(b.groups.flat()).finding.title
+    )
+  );
   for (let i = 0; i < remaining.length; i++) {
     const target = remaining[i]!;
     if (!target.corroborated) continue;
     for (let j = i + 1; j < remaining.length;) {
       const candidate = remaining[j]!;
       if (!candidate.corroborated ||
-          !target.groups.every((left) =>
-            candidate.groups.every((right) => groupsShareLocation(left, right, lineWindow)))) {
+          !clustersAreCompatible(target.groups, candidate.groups, lineWindow)) {
         j++;
         continue;
       }
       const targetAnchors = conceptAnchors(target.groups);
       const candidateAnchors = conceptAnchors(candidate.groups);
+      if (targetAnchors.size === 0 || candidateAnchors.size === 0) {
+        j++;
+        continue;
+      }
       const shared = [...targetAnchors].filter((token) => candidateAnchors.has(token));
       if (shared.length < 2 && !shared.some((token) => token.length >= 6)) {
         j++;
@@ -688,14 +746,14 @@ function agreementClusters(
   groups: TaggedFinding[][],
   lineWindow: number
 ): AgreementCluster[] {
-  const weights = groups.map(() => groups.map(() => 0));
+  const weights = groups.map(() => new Map<number, number>());
   const adjacency = groups.map(() => new Set<number>());
   for (let i = 0; i < groups.length; i++) {
     for (let j = i + 1; j < groups.length; j++) {
       const weight = groupsRelaxedWeight(groups[i]!, groups[j]!, lineWindow);
       if (weight === 0) continue;
-      weights[i]![j] = weight;
-      weights[j]![i] = weight;
+      weights[i]!.set(j, weight);
+      weights[j]!.set(i, weight);
       adjacency[i]!.add(j);
       adjacency[j]!.add(i);
     }
@@ -722,7 +780,7 @@ function agreementClusters(
     for (const neighbor of adjacency[index]!) {
       if (!inCore[neighbor]) continue;
       degree[neighbor]!--;
-      if (degree[neighbor] === 1) queue.push(neighbor);
+      if (degree[neighbor]! < 2) queue.push(neighbor);
     }
   }
 
@@ -749,7 +807,7 @@ function agreementClusters(
   }
 
   const coreClusters = connectedComponents(true)
-    .flatMap((component) => splitLocationChains(component, lineWindow))
+    .flatMap((component) => splitCompatibleChains(component, lineWindow))
     .map((component): AgreementCluster => ({
       groups: component,
       corroborated:
@@ -773,10 +831,16 @@ function attachmentEvidence(
     `${singleton.finding.title} ${singleton.finding.description} ${singleton.finding.suggestedFix ?? ''}`
   );
   const anchorCount = sharedAnchorCount(singletonAnchors, targetAnchors);
-  const fixSupport = cluster.groups.flat().filter((member) =>
-    nonEmptyFieldSimilarity(singleton.finding.suggestedFix, member.finding.suggestedFix) >=
-      CORROBORATED_DETAIL_THRESHOLD
-  ).length;
+  const singletonReviewer = `${singleton.model}::${singleton.role}`;
+  const fixSupport = new Set(
+    cluster.groups.flat()
+      .filter((member) =>
+        `${member.model}::${member.role}` !== singletonReviewer &&
+        nonEmptyFieldSimilarity(singleton.finding.suggestedFix, member.finding.suggestedFix) >=
+          CORROBORATED_DETAIL_THRESHOLD
+      )
+      .map((member) => `${member.model}::${member.role}`)
+  ).size;
   if (anchorCount < 2 && !(anchorCount === 1 && fixSupport >= 2)) {
     return { support: 0, strength: 0 };
   }
@@ -787,9 +851,10 @@ function attachmentEvidence(
       if (hasOpposingSentiment(singleton.finding, member.finding, true)) continue;
       if (!compatibleClaimKinds(singleton.finding, member.finding)) continue;
       if (!corroborationFieldSimilar(singleton.finding.title, member.finding.title)) continue;
+      const key = `${member.model}::${member.role}`;
+      if (key === singletonReviewer) continue;
       const similarity = combinedSimilarity(singleton.finding, member.finding);
       if (similarity >= CORROBORATED_ATTACHMENT_THRESHOLD) {
-        const key = `${member.model}::${member.role}`;
         supporters.set(key, Math.max(supporters.get(key) ?? 0, similarity));
       }
     }
@@ -811,40 +876,66 @@ function mergeCorroboratedLocationClusters(
   // at least two distinct reviewer assignments. Multi-member components are
   // absorbed only when every member supports the same target; this keeps a
   // nearby second concept such as ao-7536's log-capture cluster separate.
-  for (const candidate of clusters) {
-    if (candidate.corroborated) continue;
-    const candidateMembers = candidate.groups.flat();
+  for (;;) {
+    const attachments: Array<{ candidate: AgreementCluster; target: AgreementCluster }> = [];
+    for (const candidate of clusters) {
+      if (candidate.corroborated) continue;
+      const candidateMembers = candidate.groups.flat();
+      if (candidateMembers.length === 0) continue;
 
-    const ranked = clusters
-      .filter((target) => target !== candidate && target.corroborated)
-      .map((target) => {
-        const evidence = candidateMembers.map((member) =>
-          attachmentEvidence(member, target, lineWindow)
+      const ranked = clusters
+        .filter((target) =>
+          target !== candidate &&
+          target.corroborated &&
+          clustersShareFile(candidate.groups, target.groups) &&
+          clustersClaimsAreCompatible(candidate.groups, target.groups)
+        )
+        .map((target) => {
+          const evidence = candidateMembers.map((member) =>
+            attachmentEvidence(member, target, lineWindow)
+          );
+          const supports = evidence.map((item) => item.support);
+          const groupAnchorSupport = candidateMembers.length > 1 &&
+            sharedAnchorCount(detailedConceptAnchors(candidate.groups), conceptAnchors(target.groups)) >= 1;
+          return {
+            target,
+            support: groupAnchorSupport
+              ? CORROBORATED_ATTACHMENT_SUPPORT
+              : Math.min(...supports),
+            strength: evidence.reduce((sum, item) => sum + item.strength, 0),
+            size: target.groups.flat().length,
+            key: chooseRepresentative(target.groups.flat()).finding.title,
+          };
+        })
+        .filter(({ support }) => support >= CORROBORATED_ATTACHMENT_SUPPORT)
+        .sort(
+          (a, b) =>
+            b.support - a.support ||
+            b.strength - a.strength ||
+            b.size - a.size ||
+            a.key.localeCompare(b.key)
         );
-        return {
-          target,
-          support: Math.min(...evidence.map((item) => item.support)),
-          strength: evidence.reduce((sum, item) => sum + item.strength, 0),
-          size: target.groups.flat().length,
-        };
-      })
-      .filter(({ support }) => support >= CORROBORATED_ATTACHMENT_SUPPORT)
-      .sort(
-        (a, b) =>
-          b.support - a.support || b.strength - a.strength || b.size - a.size
-      );
-    if (ranked.length === 0) continue;
-    if (
-      ranked[1] &&
-      ranked[0]!.support === ranked[1].support &&
-      ranked[0]!.strength === ranked[1].strength &&
-      ranked[0]!.size === ranked[1].size
-    ) {
-      continue;
+      if (ranked.length === 0) continue;
+      if (
+        ranked[1] &&
+        ranked[0]!.support === ranked[1].support &&
+        Math.abs(ranked[0]!.strength - ranked[1].strength) <= Number.EPSILON &&
+        ranked[0]!.size === ranked[1].size
+      ) {
+        continue;
+      }
+
+      attachments.push({ candidate, target: ranked[0]!.target });
     }
 
-    ranked[0]!.target.groups.push(...candidate.groups);
-    candidate.groups = [];
+    if (attachments.length === 0) break;
+    // Apply a round only after every candidate was ranked against the same
+    // frozen state. Later rounds may use the newly attached evidence without
+    // making peers in the same round order-dependent.
+    for (const { candidate, target } of attachments) {
+      target.groups.push(...candidate.groups);
+      candidate.groups = [];
+    }
   }
 
   return clusters.flatMap((cluster) => {

@@ -74,7 +74,7 @@ describe('under-merge corpus (RCL-17)', () => {
           expect(leftGroup).not.toBe(rightGroup);
         });
 
-        it(`${c.case}: neither separated concept clears minConsensusScore`, () => {
+        it(`${c.case}: separated concepts retain their independent agreement`, () => {
           const groups = deduplicateFindings(c.reviews);
           for (const title of c.expected.mustStaySeparate!) {
             const group = groups.find((candidate) =>
