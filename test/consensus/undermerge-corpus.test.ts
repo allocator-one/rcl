@@ -61,7 +61,10 @@ describe('under-merge corpus (RCL-17)', () => {
       if (c.expected.miningProxyOvermerged) {
         it(`${c.case}: keeps the two mined concepts separate`, () => {
           const groups = deduplicateFindings(c.reviews);
-          const [left, right] = c.expected.mustStaySeparate!;
+          if (!c.expected.mustStaySeparate) {
+            throw new Error(`${c.case}: miningProxyOvermerged requires mustStaySeparate`);
+          }
+          const [left, right] = c.expected.mustStaySeparate;
           const leftGroup = groups.find((group) =>
             group.members.some((member) => member.finding.title === left)
           );
@@ -76,7 +79,10 @@ describe('under-merge corpus (RCL-17)', () => {
 
         it(`${c.case}: separated concepts retain their independent agreement`, () => {
           const groups = deduplicateFindings(c.reviews);
-          for (const title of c.expected.mustStaySeparate!) {
+          if (!c.expected.mustStaySeparate) {
+            throw new Error(`${c.case}: miningProxyOvermerged requires mustStaySeparate`);
+          }
+          for (const title of c.expected.mustStaySeparate) {
             const group = groups.find((candidate) =>
               candidate.members.some((member) => member.finding.title === title)
             );
@@ -96,6 +102,10 @@ describe('under-merge corpus (RCL-17)', () => {
         const groups = deduplicateFindings(c.reviews);
         const holding = groupsHoldingMembers(groups, c.expected.memberTitles);
         expect(holding).toHaveLength(1);
+        const heldTitles = holding[0]!.members.map((member) => member.finding.title);
+        for (const excluded of c.expected.excludedTitles ?? []) {
+          expect(heldTitles).not.toContain(excluded);
+        }
       });
 
       it(`${c.case}: merged group clears minConsensusScore`, () => {
@@ -132,7 +142,11 @@ describe('under-merge corpus (RCL-17)', () => {
       const matcherTitles = matcherGroup!.members.map((m) => m.finding.title);
       expect(matcherTitles).not.toContain(capture);
       for (const excluded of c!.expected.excludedTitles ?? []) {
-        expect(matcherTitles).not.toContain(excluded);
+        const excludedGroup = groups.find((group) =>
+          group.members.some((member) => member.finding.title === excluded)
+        );
+        expect(excludedGroup).toBeDefined();
+        expect(excludedGroup).not.toBe(matcherGroup);
       }
     });
   });

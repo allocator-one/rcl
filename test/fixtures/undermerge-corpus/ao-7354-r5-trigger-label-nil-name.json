@@ -29,6 +29,11 @@
       "Unsafe map field access column.name in trigger_label/1",
       "trigger_label/1 assumes column.name is always a valid atom/string",
       "trigger_label/1 may raise KeyError or FunctionClauseError if :name is missing or nil"
+    ],
+    "excludedTitles": [
+      "Empty labels bypass the accessible-name fallback",
+      "Empty labels prevent the trigger label fallback",
+      "Blank column labels prevent the accessible-name fallback"
     ]
   },
   "reviews": [
