@@ -12,19 +12,27 @@
       44
     ],
     "severity": "minor",
-    "distinctReviewerPairs": 7,
+    "distinctReviewerPairs": 8,
     "successfulReviews": 17,
-    "agreementRatioIfMerged": 0.412,
+    "agreementRatioIfMerged": 0.471,
     "minConsensusScore": 0.4,
     "clearsThresholdIfMerged": true,
     "memberTitles": [
       "Log assertion still racy: unrelated 'lightning*' icon names would match",
+      "Icon name match is an unclosed prefix, not an exact name",
       "Regex/substring assertion is fragile and may still match unintended log lines",
-      "Log-capture assertion remains inherently racy under concurrent tests",
       "Icon-name scoping pattern is incomplete and can match the wrong log line",
       "Log assertion still matches icon names with the same prefix",
+      "Partial icon-name match can still collide with similarly-prefixed icons",
+      "Prefix match without closing quote weakens the assertion's precision",
+      "Unclosed quote in match string is a prefix match, may be unintended"
+    ],
+    "excludedTitles": [
+      "Comment explains a flaky-test workaround rather than fixing the root cause",
       "Global log capture remains brittle; prefer per-test capture_log",
-      "Partial icon-name match can still collide with similarly-prefixed icons"
+      "Log assertion still race-prone under async: true; capture_log scoping preferred",
+      "Log-capture assertion remains inherently racy under concurrent tests",
+      "Root cause of shared-log flakiness not addressed (global log capture)"
     ]
   },
   "reviews": [

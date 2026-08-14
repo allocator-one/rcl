@@ -352,6 +352,35 @@ describe('deduplicateFindings — same-reviewer collapse', () => {
   });
 });
 
+describe('deduplicateFindings — corroborated location clusters', () => {
+  const variants = [
+    mkF({ id: 'a', title: 'Icon name match is an unclosed prefix, not an exact name', description: 'Prefix accepts alpha variant.', suggestedFix: 'Require an exact quoted alpha match.', category: 'tests' }),
+    mkF({ id: 'b', title: 'Partial icon-name match can still collide with similarly-prefixed icons', description: 'Prefix allows beta collision.', suggestedFix: 'Require an exact quoted beta match.', category: 'tests' }),
+    mkF({ id: 'c', title: 'Icon-name scoping pattern is incomplete and can match the wrong log line', description: 'Prefix matches gamma scope.', suggestedFix: 'Require an exact quoted gamma match.', category: 'tests' }),
+  ];
+
+  it('merges weakly worded location matches when three distinct models corroborate them', () => {
+    expect(combinedSimilarity(variants[0]!, variants[1]!)).toBeLessThan(0.3);
+    const groups = deduplicateFindings([
+      mkReview('m1', 'general', [variants[0]!]),
+      mkReview('m2', 'tests', [variants[1]!]),
+      mkReview('m3', 'edge-cases', [variants[2]!]),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(3);
+  });
+
+  it('does not treat only two reviewer assignments as corroboration', () => {
+    const groups = deduplicateFindings([
+      mkReview('m1', 'general', [variants[0]!]),
+      mkReview('m2', 'edge-cases', [variants[1]!]),
+    ]);
+
+    expect(groups).toHaveLength(2);
+  });
+});
+
 describe('conceptSimilarity — taxonomy boost', () => {
   it('boosts same-concept findings at the same location regardless of wording', () => {
     const a = mkF({

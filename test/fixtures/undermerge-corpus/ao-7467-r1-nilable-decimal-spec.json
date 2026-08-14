@@ -17,6 +17,11 @@
     "agreementRatioIfMerged": 0.444,
     "minConsensusScore": 0.4,
     "clearsThresholdIfMerged": true,
+    "miningProxyOvermerged": true,
+    "mustStaySeparate": [
+      "standard_terms: nil is treated as custom terms",
+      "Typespec allows only Decimal.t() but nil can be returned"
+    ],
     "memberTitles": [
       "nil invite.minimum_investment falls through to fund, but Decimal.t() spec disallows nil",
       "@spec claims Decimal.t() but functions can return nil",
