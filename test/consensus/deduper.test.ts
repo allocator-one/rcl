@@ -352,6 +352,137 @@ describe('deduplicateFindings — same-reviewer collapse', () => {
   });
 });
 
+describe('deduplicateFindings — corroborated location clusters', () => {
+  const variants = [
+    mkF({ id: 'a', title: 'Icon name match is an unclosed prefix, not an exact name', description: 'Prefix accepts alpha variant.', suggestedFix: 'Require an exact quoted alpha match.', category: 'tests' }),
+    mkF({ id: 'b', title: 'Partial icon-name match can still collide with similarly-prefixed icons', description: 'Prefix allows beta collision.', suggestedFix: 'Require an exact quoted beta match.', category: 'tests' }),
+    mkF({ id: 'c', title: 'Icon-name scoping pattern is incomplete and can match the wrong log line', description: 'Prefix matches gamma scope.', suggestedFix: 'Require an exact quoted gamma match.', category: 'tests' }),
+  ];
+
+  it('merges weakly worded location matches when three distinct models corroborate them', () => {
+    expect(combinedSimilarity(variants[0]!, variants[1]!)).toBeLessThan(0.3);
+    const groups = deduplicateFindings([
+      mkReview('m1', 'general', [variants[0]!]),
+      mkReview('m2', 'tests', [variants[1]!]),
+      mkReview('m3', 'edge-cases', [variants[2]!]),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(3);
+  });
+
+  it('does not treat only two reviewer assignments as corroboration', () => {
+    const groups = deduplicateFindings([
+      mkReview('m1', 'general', [variants[0]!]),
+      mkReview('m2', 'edge-cases', [variants[1]!]),
+    ]);
+
+    expect(groups).toHaveLength(2);
+  });
+
+  it('keeps a runtime nil defect separate from a neighboring typespec defect', () => {
+    const runtime = [
+      mkF({ id: 'r1', title: 'nil terms fall through to custom behavior', description: 'A nil value selects the wrong runtime branch.', suggestedFix: 'Handle nil before custom terms.', category: 'correctness' }),
+      mkF({ id: 'r2', title: 'custom branch incorrectly handles nil terms', description: 'The nil input reaches incorrect runtime behavior.', suggestedFix: 'Add an explicit nil branch.', category: 'correctness' }),
+      mkF({ id: 'r3', title: 'nil input takes the wrong behavior path', description: 'Runtime handling sends nil through the custom path.', suggestedFix: 'Treat nil as the default case.', category: 'correctness' }),
+    ];
+    const contracts = [
+      mkF({ id: 's1', title: '@spec omits the reachable nil return', description: 'The return type excludes nil.', suggestedFix: 'Add nil to the @spec.', category: 'correctness' }),
+      mkF({ id: 's2', title: 'Typespec excludes a possible nil result', description: 'The declared return type cannot represent nil.', suggestedFix: 'Widen the typespec with nil.', category: 'correctness' }),
+      mkF({ id: 's3', title: 'Return type should include nil', description: 'The @spec is narrower than the nil result.', suggestedFix: 'Declare the nil return type.', category: 'correctness' }),
+    ];
+    const groups = deduplicateFindings([
+      ...runtime.map((finding, index) => mkReview(`runtime-${index}`, 'general', [finding])),
+      ...contracts.map((finding, index) => mkReview(`contract-${index}`, 'general', [finding])),
+    ]);
+
+    const runtimeGroup = groups.find((group) =>
+      group.members.some((member) => member.finding.id === 'r1')
+    );
+    const contractGroup = groups.find((group) =>
+      group.members.some((member) => member.finding.id === 's1')
+    );
+    expect(runtimeGroup).toBeDefined();
+    expect(contractGroup).toBeDefined();
+    expect(runtimeGroup).not.toBe(contractGroup);
+  });
+
+  it('is deterministic when review order changes', () => {
+    const reviews = [
+      mkReview('m1', 'general', [variants[0]!]),
+      mkReview('m2', 'tests', [variants[1]!]),
+      mkReview('m3', 'edge-cases', [variants[2]!]),
+    ];
+    const signature = (ordered: ModelReview[]) => deduplicateFindings(ordered).map((group) =>
+      group.members.map((member) => member.finding.id).sort().join(',')
+    ).sort();
+
+    expect(signature(reviews)).toEqual(signature([...reviews].reverse()));
+  });
+});
+
+describe('deduplicateFindings — agreement neighborhoods', () => {
+  const titles = [
+    'parser failure alpha amber cobalt delta ember frost',
+    'parser failure bravo bronze cyan dune elm flare',
+    'parser failure charlie copper crimson drift echo flame',
+    'parser failure denver diamond cerulean dusk evergreen flash',
+  ];
+
+  function neighborhoodReviews(): ModelReview[] {
+    const findings = [titles[0]!, titles[0]!, titles[1]!, titles[1]!, titles[2]!, titles[3]!]
+      .map((title, index) => mkF({ id: `n${index}`, title, description: '' }));
+    return [
+      ...findings.map((finding, index) => mkReview(`m${index}`, `r${index}`, [finding])),
+      ...Array.from({ length: 8 }, (_, index) => mkReview(`empty${index}`, `r${index}`, [])),
+    ];
+  }
+
+  it('rescues a dense weak neighborhood only when strict pairs supply redundancy', () => {
+    expect(combinedSimilarity(
+      mkF({ title: titles[0], description: '' }),
+      mkF({ title: titles[1], description: '' })
+    )).toBeGreaterThan(0.11);
+    expect(jaccardSimilarity(titles[0]!, titles[1]!)).toBeLessThan(0.2);
+
+    const groups = deduplicateFindings(neighborhoodReviews(), 0.6, 5, 0.4);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(6);
+  });
+
+  it('does not rescue the same neighborhood when it falls short of the configured gate', () => {
+    const groups = deduplicateFindings(neighborhoodReviews(), 0.6, 5, 0.5);
+
+    expect(groups).toHaveLength(4);
+  });
+
+  it('does not let neutral neighbors bridge opposing claims', () => {
+    const reviews = neighborhoodReviews();
+    reviews[0]!.findings[0]!.title = `${titles[0]} unsafe`;
+    reviews[1]!.findings[0]!.title = `${titles[0]} unsafe`;
+    reviews[2]!.findings[0]!.title = `${titles[1]} safe`;
+    reviews[3]!.findings[0]!.title = `${titles[1]} safe`;
+
+    const groups = deduplicateFindings(reviews, 0.6, 5, 0.4);
+
+    expect(groups.length).toBeGreaterThan(1);
+  });
+
+  it('does not let a transitive chain span beyond the line window', () => {
+    const reviews = neighborhoodReviews();
+    for (let index = 0; index < 6; index++) {
+      const groupIndex = index < 2 ? 0 : index < 4 ? 1 : index - 2;
+      reviews[index]!.findings[0]!.startLine = 10 + groupIndex * 49;
+      reviews[index]!.findings[0]!.endLine = 59 + groupIndex * 49;
+    }
+
+    const groups = deduplicateFindings(reviews, 0.6, 5, 0.4);
+
+    expect(groups).toHaveLength(4);
+  });
+});
+
 describe('conceptSimilarity — taxonomy boost', () => {
   it('boosts same-concept findings at the same location regardless of wording', () => {
     const a = mkF({

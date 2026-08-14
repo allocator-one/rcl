@@ -390,6 +390,780 @@ function splitIncoherent(
 }
 
 /**
+ * Cross-model wording diverges much more than the ordinary pairwise dedup
+ * threshold allows. A relaxed lexical edge is only safe when it is backed by
+ * independent agreement: at least three distinct model-role assignments must participate in
+ * the resulting location cluster. This turns agreement into evidence for a
+ * merge without weakening the normal threshold for one- and two-model noise.
+ *
+ * The 0.20 title floor is calibrated against the RCL-17 production corpus.
+ * A title edge also needs overlap in either the description or proposed fix;
+ * title proximity alone is not enough to bridge separate defects at the same
+ * lines. Weighted graph communities and a 2-core keep sparse lexical bridges
+ * from merging a whole hunk. A fringe variant can join only when two different
+ * reviewer assignments support one unambiguous corroborated community.
+ */
+const CORROBORATED_TITLE_THRESHOLD = 0.2; // title-token Jaccard
+const CORROBORATED_DETAIL_THRESHOLD = 0.1; // description/fix token Jaccard
+const CORROBORATED_MIN_REVIEWERS = 3; // distinct model::role assignments
+const CORROBORATED_MIN_DENSITY = 0.2; // observed / possible relaxed edges
+const CORROBORATED_ATTACHMENT_THRESHOLD = 0.12; // weighted title+description score
+const CORROBORATED_ATTACHMENT_FIX_THRESHOLD = 0.15; // fix-token Jaccard for one-anchor variants
+const CORROBORATED_ATTACHMENT_SUPPORT = 2; // distinct model::role assignments
+const CORROBORATED_SINGLE_ANCHOR_SUPPORT = 3; // extra support for one-token bridges
+const CORROBORATED_MAX_ATTACHMENT_ROUNDS = 2; // bound transitive fringe growth
+const CORROBORATED_NEIGHBORHOOD_THRESHOLD = 0.11; // loose combined lexical partition
+const CORROBORATED_NEIGHBORHOOD_DENSITY = 0.5; // observed / possible weak edges
+const CORROBORATED_MAX_NEIGHBORHOOD_SPAN = 50; // broad findings/components cannot bridge
+// A location-only rescue must contain at least two lexical confirmations
+// already collapsed by the strict pass. Requiring that redundancy keeps an
+// all-singleton neighborhood from manufacturing consensus from proximity.
+const CORROBORATED_NEIGHBORHOOD_CONFIRMATIONS = 2;
+const CORROBORATED_TIE_EPSILON = 1e-9;
+
+const CORROBORATION_STOPWORDS = new Set([
+  ...STOPWORDS,
+  'all', 'allow', 'allows', 'any', 'can', 'could', 'did', 'do', 'does',
+  'had', 'has', 'have', 'lacks', 'may', 'might', 'missing', 'new', 'no',
+  'nil', 'not', 'now', 'only', 'same', 'should', 'still', 'use', 'used', 'uses',
+  'using', 'will', 'without', 'would', 'code', 'function', 'issue', 'test', 'tests',
+  'config', 'configuration', 'file', 'files', 'generated',
+]);
+
+function corroborationTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      // Preserve underscores inside identifiers. Splitting `trigger_label`
+      // into two ordinary words lets a shared function name create a false
+      // semantic edge between unrelated findings about that function.
+      .match(/[\p{L}\p{N}_]+/gu)
+      ?.filter((token) => token.length > 1 && !CORROBORATION_STOPWORDS.has(token)) ?? []
+  );
+}
+
+function corroborationFieldSimilar(a: string | undefined, b: string | undefined): boolean {
+  const tokensA = corroborationTokens(a ?? '');
+  const tokensB = corroborationTokens(b ?? '');
+  // At least one shared semantic token must remain after generic language is
+  // removed. A shared code identifier alone is only evidence that findings
+  // discuss the same function, not the same defect within that function.
+  const shared = [...tokensA].filter((token) => tokensB.has(token));
+  return shared.some((token) => !token.includes('_')) || shared.length >= 2;
+}
+
+function nonEmptyFieldSimilarity(a: string | undefined, b: string | undefined): number {
+  const tokensA = tokenize(a ?? '');
+  const tokensB = tokenize(b ?? '');
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
+  return jaccardOfSets(tokensA, tokensB);
+}
+
+function compatibleClaimKinds(a: Finding, b: Finding): boolean {
+  const conceptsA = extractConcepts(a);
+  const conceptsB = extractConcepts(b);
+  return !(
+    conceptsA.size > 0 &&
+    conceptsB.size > 0 &&
+    ![...conceptsA].some((concept) => conceptsB.has(concept))
+  );
+}
+
+function relaxedLocationDuplicate(a: Finding, b: Finding, lineWindow: number): boolean {
+  if (!areSameFile(a, b)) return false;
+  if (!linesOverlap(a, b, lineWindow)) return false;
+  if (hasOpposingSentiment(a, b, true)) return false;
+  // Known taxonomy concepts can sit beside one another and repeat the same
+  // nouns while requiring different fixes. Do not let the relaxed path use
+  // one as a bridge into the other; the ordinary similarity path remains
+  // available for genuinely near-identical wording.
+  if (!compatibleClaimKinds(a, b)) return false;
+  const descriptionSimilarity = nonEmptyFieldSimilarity(a.description, b.description);
+  const fixSimilarity = nonEmptyFieldSimilarity(a.suggestedFix, b.suggestedFix);
+  return (
+    jaccardSimilarity(a.title, b.title) >= CORROBORATED_TITLE_THRESHOLD &&
+    corroborationFieldSimilar(a.title, b.title) &&
+    Math.max(descriptionSimilarity, fixSimilarity) >= CORROBORATED_DETAIL_THRESHOLD
+  );
+}
+
+function relaxedLocationWeight(a: Finding, b: Finding, lineWindow: number): number {
+  if (!relaxedLocationDuplicate(a, b, lineWindow)) return 0;
+  return (
+    jaccardSimilarity(a.title, b.title) * 0.25 +
+    nonEmptyFieldSimilarity(a.description, b.description) * 0.2 +
+    nonEmptyFieldSimilarity(a.suggestedFix, b.suggestedFix) * 0.55
+  );
+}
+
+function groupsRelaxedWeight(
+  a: TaggedFinding[],
+  b: TaggedFinding[],
+  lineWindow: number
+): number {
+  let weight = 0;
+  for (const left of a) {
+    for (const right of b) {
+      if (`${left.model}::${left.role}` === `${right.model}::${right.role}`) continue;
+      weight = Math.max(
+        weight,
+        relaxedLocationWeight(left.finding, right.finding, lineWindow)
+      );
+    }
+  }
+  return weight;
+}
+
+function groupsShareLocation(
+  a: TaggedFinding[],
+  b: TaggedFinding[],
+  lineWindow: number
+): boolean {
+  return a.every((left) =>
+    b.every(
+      (right) =>
+        areSameFile(left.finding, right.finding) &&
+        linesOverlap(left.finding, right.finding, lineWindow)
+    )
+  );
+}
+
+function clustersClaimsAreCompatible(
+  a: TaggedFinding[][],
+  b: TaggedFinding[][]
+): boolean {
+  return a.every((left) =>
+    b.every((right) =>
+      left.every((leftMember) =>
+        right.every((rightMember) =>
+          compatibleClaimKinds(leftMember.finding, rightMember.finding)
+        )
+      )
+    )
+  );
+}
+
+function clustersAreCompatible(
+  a: TaggedFinding[][],
+  b: TaggedFinding[][],
+  lineWindow: number
+): boolean {
+  return a.every((left) =>
+    b.every((right) => groupsShareLocation(left, right, lineWindow))
+  ) && clustersClaimsAreCompatible(a, b);
+}
+
+function clustersShareFile(a: TaggedFinding[][], b: TaggedFinding[][]): boolean {
+  const filesA = new Set(a.flat().map((member) => member.finding.file));
+  const filesB = new Set(b.flat().map((member) => member.finding.file));
+  return filesA.size === filesB.size && [...filesA].every((file) => filesB.has(file));
+}
+
+function splitCompatibleChains(
+  component: TaggedFinding[][],
+  lineWindow: number
+): TaggedFinding[][][] {
+  const clusters: TaggedFinding[][][] = [];
+  const ordered = [...component].sort((a, b) => {
+    const left = chooseRepresentative(a).finding;
+    const right = chooseRepresentative(b).finding;
+    return left.file.localeCompare(right.file) ||
+      left.startLine - right.startLine ||
+      left.endLine - right.endLine ||
+      left.title.localeCompare(right.title);
+  });
+  for (const group of ordered) {
+    const compatible = clusters.find((cluster) =>
+      clustersAreCompatible([group], cluster, lineWindow)
+    );
+    if (compatible) compatible.push(group);
+    else clusters.push([group]);
+  }
+  return clusters;
+}
+
+function distinctReviewers(groups: TaggedFinding[][]): number {
+  return new Set(
+    groups.flatMap((group) =>
+      group.map((member) => `${member.model}::${member.role}`)
+    )
+  ).size;
+}
+
+function relaxedEdgeDensity(
+  groups: TaggedFinding[][],
+  indexes: Map<TaggedFinding[], number>,
+  adjacency: Array<Set<number>>
+): number {
+  if (groups.length < 2) return 0;
+  let edges = 0;
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      const leftIndex = indexes.get(groups[i]!);
+      const rightIndex = indexes.get(groups[j]!);
+      if (leftIndex === undefined || rightIndex === undefined) {
+        throw new Error('Corroborated group is missing from its adjacency index');
+      }
+      if (adjacency[leftIndex]!.has(rightIndex)) edges++;
+    }
+  }
+  return edges / ((groups.length * (groups.length - 1)) / 2);
+}
+
+/**
+ * Split a weak-similarity graph into weighted modularity communities before
+ * treating a connected component as one concept. This is the key over-merge
+ * boundary: several independently corroborated defects can occupy the same
+ * hunk, and a few shared diff tokens must not bridge those concepts together.
+ */
+function relaxedCommunities(weights: Array<Map<number, number>>): number[] {
+  const count = weights.length;
+  const labels = Array.from({ length: count }, (_, index) => index);
+  const degrees = weights.map((row) =>
+    [...row.values()].reduce((sum, weight) => sum + weight, 0)
+  );
+  const totalWeight = degrees.reduce((sum, degree) => sum + degree, 0) / 2;
+  if (totalWeight === 0) return labels;
+
+  const communityDegrees = [...degrees];
+  const communitySizes = Array.from({ length: count }, () => 1);
+  for (let pass = 0; pass < Math.max(1, count * count); pass++) {
+    let moved = false;
+    for (let index = 0; index < count; index++) {
+      if (degrees[index] === 0) continue;
+      const current = labels[index]!;
+      const weightByCommunity = new Map<number, number>();
+      for (const [neighbor, weight] of weights[index]!) {
+        const label = labels[neighbor]!;
+        weightByCommunity.set(label, (weightByCommunity.get(label) ?? 0) + weight);
+      }
+
+      // Remove the node before evaluating insertion into each neighboring
+      // community. This is the standard first phase of weighted Louvain; the
+      // previous implementation compared against stale community totals.
+      communityDegrees[current] = Math.max(
+        0,
+        communityDegrees[current]! - degrees[index]!
+      );
+      communitySizes[current]!--;
+      const emptyCommunity = communitySizes.findIndex((size) => size === 0);
+      const candidates = new Set([
+        ...weightByCommunity.keys(),
+        current,
+        ...(emptyCommunity >= 0 ? [emptyCommunity] : []),
+      ]);
+      let best = current;
+      let bestGain =
+        (weightByCommunity.get(current) ?? 0) -
+        (communityDegrees[current]! * degrees[index]!) / (2 * totalWeight);
+      for (const candidate of candidates) {
+        const gain =
+          (weightByCommunity.get(candidate) ?? 0) -
+          (communityDegrees[candidate]! * degrees[index]!) / (2 * totalWeight);
+        if (gain > bestGain + CORROBORATED_TIE_EPSILON ||
+            (best !== current &&
+              Math.abs(gain - bestGain) <= CORROBORATED_TIE_EPSILON &&
+              candidate < best)) {
+          best = candidate;
+          bestGain = gain;
+        }
+      }
+
+      communityDegrees[best] += degrees[index]!;
+      communitySizes[best]!++;
+      labels[index] = best;
+      if (best !== current) moved = true;
+    }
+    if (!moved) break;
+  }
+  return labels;
+}
+
+interface AgreementCluster {
+  groups: TaggedFinding[][];
+  corroborated: boolean;
+}
+
+function conceptAnchors(groups: TaggedFinding[][]): Set<string> {
+  const members = groups.flat();
+  const reviewers = new Map<string, Set<string>>();
+  for (const member of members) {
+    for (const token of corroborationTokens(member.finding.title)) {
+      const tokenReviewers = reviewers.get(token) ?? new Set<string>();
+      tokenReviewers.add(`${member.model}::${member.role}`);
+      reviewers.set(token, tokenReviewers);
+    }
+  }
+  const reviewerCount = distinctReviewers(groups);
+  // A one-reviewer fringe must never manufacture its own semantic anchor;
+  // only an independently corroborated target contributes anchor evidence.
+  const support = Math.max(2, Math.ceil(reviewerCount * 0.4));
+  return new Set(
+    [...reviewers]
+      .filter(([, tokenReviewers]) => tokenReviewers.size >= support)
+      .map(([token]) => token)
+  );
+}
+
+function sharedAnchorCount(a: Set<string>, b: Set<string>): number {
+  let count = 0;
+  for (const token of a) if (b.has(token)) count++;
+  return count;
+}
+
+function agreementClusterKey(cluster: AgreementCluster): string {
+  const finding = chooseRepresentative(cluster.groups.flat()).finding;
+  const members = cluster.groups.flat()
+    .map((member) => `${member.model}::${member.role}::${member.finding.id}`)
+    .sort()
+    .join('\0');
+  return `${finding.file}\0${String(finding.startLine).padStart(10, '0')}\0${String(finding.endLine).padStart(10, '0')}\0${finding.title}\0${finding.id}\0${members}`;
+}
+
+function compareAgreementClusters(a: AgreementCluster, b: AgreementCluster): number {
+  const left = agreementClusterKey(a);
+  const right = agreementClusterKey(b);
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function mergeAnchoredCommunities(
+  clusters: AgreementCluster[],
+  lineWindow: number
+): AgreementCluster[] {
+  const remaining = [...clusters].sort(compareAgreementClusters);
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer: for (let i = 0; i < remaining.length; i++) {
+      const target = remaining[i]!;
+      if (!target.corroborated) continue;
+      for (let j = i + 1; j < remaining.length; j++) {
+        const candidate = remaining[j]!;
+        if (!candidate.corroborated ||
+            !clustersAreCompatible(target.groups, candidate.groups, lineWindow)) {
+          continue;
+        }
+        const targetAnchors = conceptAnchors(target.groups);
+        const candidateAnchors = conceptAnchors(candidate.groups);
+        if (targetAnchors.size === 0 || candidateAnchors.size === 0) continue;
+        const shared = [...targetAnchors].filter((token) => candidateAnchors.has(token));
+        if (shared.length < 2 &&
+            !shared.some((token) => token.length >= 6 && !token.includes('_'))) continue;
+        const hasCrossEdge = target.groups.flat().some((left) =>
+          candidate.groups.flat().some((right) =>
+            `${left.model}::${left.role}` !== `${right.model}::${right.role}` &&
+            relaxedLocationWeight(left.finding, right.finding, lineWindow) > 0
+          )
+        );
+        // Anchors alone only prove that both communities discuss the same
+        // code. Require an observed semantic edge as evidence that they make
+        // the same claim; this keeps two defects in one helper separate.
+        if (!hasCrossEdge) continue;
+
+        target.groups.push(...candidate.groups);
+        candidate.groups = [];
+        remaining.splice(j, 1);
+        remaining.sort(compareAgreementClusters);
+        merged = true;
+        break outer;
+      }
+    }
+  }
+  return remaining;
+}
+
+function agreementClusters(
+  groups: TaggedFinding[][],
+  lineWindow: number
+): AgreementCluster[] {
+  groups = [...groups].sort((a, b) => {
+    const left = agreementClusterKey({ groups: [a], corroborated: false });
+    const right = agreementClusterKey({ groups: [b], corroborated: false });
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  const weights = groups.map(() => new Map<number, number>());
+  const adjacency = groups.map(() => new Set<number>());
+  const indexes = new Map(groups.map((group, index) => [group, index]));
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      const weight = groupsRelaxedWeight(groups[i]!, groups[j]!, lineWindow);
+      if (weight === 0) continue;
+      weights[i]!.set(j, weight);
+      weights[j]!.set(i, weight);
+      adjacency[i]!.add(j);
+      adjacency[j]!.add(i);
+    }
+  }
+
+  const communities = relaxedCommunities(weights);
+  for (let i = 0; i < groups.length; i++) {
+    for (const j of adjacency[i]!) {
+      if (communities[i] !== communities[j]) adjacency[i]!.delete(j);
+    }
+  }
+
+  // Keep only the graph's 2-core as corroboration evidence. A chain of weak
+  // similarities can otherwise pull unrelated findings into one component;
+  // every core group must have two independent semantic links. Peeled fringe
+  // components remain available for the stricter attachment pass below.
+  const inCore = groups.map(() => true);
+  const degree = adjacency.map((neighbors) => neighbors.size);
+  const queue = degree.flatMap((value, index) => (value < 2 ? [index] : []));
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const index = queue[cursor]!;
+    if (!inCore[index]) continue;
+    inCore[index] = false;
+    for (const neighbor of adjacency[index]!) {
+      if (!inCore[neighbor]) continue;
+      degree[neighbor]!--;
+      if (degree[neighbor]! < 2) queue.push(neighbor);
+    }
+  }
+
+  function connectedComponents(wantedCore: boolean): TaggedFinding[][][] {
+    const seen = new Set<number>();
+    const out: TaggedFinding[][][] = [];
+    for (let start = 0; start < groups.length; start++) {
+      if (inCore[start] !== wantedCore || seen.has(start)) continue;
+      const indexes: number[] = [];
+      const pending = [start];
+      seen.add(start);
+      while (pending.length > 0) {
+        const index = pending.pop()!;
+        indexes.push(index);
+        for (const neighbor of adjacency[index]!) {
+          if (inCore[neighbor] !== wantedCore || seen.has(neighbor)) continue;
+          seen.add(neighbor);
+          pending.push(neighbor);
+        }
+      }
+      out.push(indexes.map((index) => groups[index]!));
+    }
+    return out;
+  }
+
+  const coreClusters = connectedComponents(true)
+    .flatMap((component) => splitCompatibleChains(component, lineWindow))
+    .map((component): AgreementCluster => ({
+      groups: component,
+      corroborated:
+        distinctReviewers(component) >= CORROBORATED_MIN_REVIEWERS &&
+        relaxedEdgeDensity(component, indexes, adjacency) >= CORROBORATED_MIN_DENSITY,
+    }));
+  const fringeClusters = connectedComponents(false).map(
+    (component): AgreementCluster => ({ groups: component, corroborated: false })
+  );
+  return mergeAnchoredCommunities([...coreClusters, ...fringeClusters], lineWindow);
+}
+
+function attachmentEvidence(
+  singleton: TaggedFinding,
+  cluster: AgreementCluster,
+  lineWindow: number
+): { support: number; strength: number } {
+  const supporters = new Map<string, number>();
+  const targetAnchors = conceptAnchors(cluster.groups);
+  const singletonAnchors = corroborationTokens(
+    `${singleton.finding.title} ${singleton.finding.description ?? ''} ${singleton.finding.suggestedFix ?? ''}`
+  );
+  const anchorCount = sharedAnchorCount(singletonAnchors, targetAnchors);
+  const singletonReviewer = `${singleton.model}::${singleton.role}`;
+  const fixSupport = new Set(
+    cluster.groups.flat()
+      .filter((member) =>
+        `${member.model}::${member.role}` !== singletonReviewer &&
+        nonEmptyFieldSimilarity(singleton.finding.suggestedFix, member.finding.suggestedFix) >=
+          CORROBORATED_ATTACHMENT_FIX_THRESHOLD
+      )
+      .map((member) => `${member.model}::${member.role}`)
+  ).size;
+  if (anchorCount < 2 && !(anchorCount === 1 && fixSupport >= 2)) {
+    return { support: 0, strength: 0 };
+  }
+  for (const group of cluster.groups) {
+    for (const member of group) {
+      if (!areSameFile(singleton.finding, member.finding)) continue;
+      if (!linesOverlap(singleton.finding, member.finding, lineWindow)) continue;
+      if (hasOpposingSentiment(singleton.finding, member.finding, true)) continue;
+      if (!compatibleClaimKinds(singleton.finding, member.finding)) continue;
+      if (!corroborationFieldSimilar(singleton.finding.title, member.finding.title)) continue;
+      const key = `${member.model}::${member.role}`;
+      if (key === singletonReviewer) continue;
+      const similarity = combinedSimilarity(singleton.finding, member.finding);
+      if (similarity >= CORROBORATED_ATTACHMENT_THRESHOLD) {
+        supporters.set(key, Math.max(supporters.get(key) ?? 0, similarity));
+      }
+    }
+  }
+  if (anchorCount === 1 && supporters.size < CORROBORATED_SINGLE_ANCHOR_SUPPORT) {
+    return { support: 0, strength: 0 };
+  }
+  return {
+    support: supporters.size,
+    strength: [...supporters.values()].reduce((sum, value) => sum + value, 0),
+  };
+}
+
+function mergeCorroboratedLocationClusters(
+  groups: TaggedFinding[][],
+  lineWindow: number
+): TaggedFinding[][] {
+  const clusters = agreementClusters(groups, lineWindow);
+
+  // A lone wording variant can sit just below the calibrated title floor.
+  // Attach it only to one unambiguous corroborated cluster, with support from
+  // at least two distinct reviewer assignments. Multi-member components are
+  // absorbed only when every member supports the same target; this keeps a
+  // nearby second concept such as ao-7536's log-capture cluster separate.
+  for (
+    let round = 0;
+    round < Math.min(clusters.length, CORROBORATED_MAX_ATTACHMENT_ROUNDS);
+    round++
+  ) {
+    const attachments: Array<{ candidate: AgreementCluster; target: AgreementCluster }> = [];
+    for (const candidate of clusters) {
+      if (candidate.corroborated) continue;
+      // A strict group already backed by several reviewers is independent
+      // evidence for a concept, even when it has no relaxed graph core of its
+      // own. Do not absorb that consensus into a neighboring community.
+      if (distinctReviewers(candidate.groups) >= CORROBORATED_MIN_REVIEWERS) continue;
+      const candidateMembers = candidate.groups.flat();
+      if (candidateMembers.length === 0) continue;
+
+      const ranked = clusters
+        .filter((target) =>
+          target !== candidate &&
+          target.corroborated &&
+          clustersShareFile(candidate.groups, target.groups) &&
+          clustersClaimsAreCompatible(candidate.groups, target.groups)
+        )
+        .map((target) => {
+          const evidence = candidateMembers.map((member) =>
+            attachmentEvidence(member, target, lineWindow)
+          );
+          const supports = evidence.map((item) => item.support);
+          return {
+            target,
+            support: Math.min(...supports),
+            strength: evidence.reduce((sum, item) => sum + item.strength, 0),
+            size: target.groups.flat().length,
+            key: chooseRepresentative(target.groups.flat()).finding.title,
+          };
+        })
+        .filter(({ support }) => support >= CORROBORATED_ATTACHMENT_SUPPORT)
+        .sort(
+          (a, b) =>
+            b.support - a.support ||
+            b.strength - a.strength ||
+            b.size - a.size ||
+            a.key.localeCompare(b.key)
+        );
+      if (ranked.length === 0) continue;
+      if (
+        ranked[1] &&
+        ranked[0]!.support === ranked[1].support &&
+        Math.abs(ranked[0]!.strength - ranked[1].strength) <= CORROBORATED_TIE_EPSILON &&
+        ranked[0]!.size === ranked[1].size
+      ) {
+        continue;
+      }
+
+      attachments.push({ candidate, target: ranked[0]!.target });
+    }
+
+    if (attachments.length === 0) break;
+    // Apply a round only after every candidate was ranked against the same
+    // frozen state. Later rounds may use the newly attached evidence without
+    // making peers in the same round order-dependent.
+    for (const { candidate, target } of attachments) {
+      target.groups.push(...candidate.groups);
+      candidate.groups = [];
+    }
+  }
+
+  // Fringe evidence can provide the first real lexical edge between two
+  // independently corroborated communities. Revisit anchor merging once
+  // after attachment so that bridge is considered, while still requiring an
+  // observed cross-community edge rather than anchors alone.
+  const mergedClusters = mergeAnchoredCommunities(
+    clusters.filter((cluster) => cluster.groups.length > 0),
+    lineWindow
+  );
+
+  return mergedClusters.flatMap((cluster) => {
+    if (cluster.groups.length === 0) return [];
+    if (!cluster.corroborated) return cluster.groups;
+    return [cluster.groups.flat()];
+  });
+}
+
+/**
+ * Rescue agreement that has no lexical center at all. This pass only considers
+ * weak one- or two-reviewer groups: a group already backed by three reviewers
+ * is evidence for an independent concept and is never absorbed by proximity.
+ * This deliberately narrow fallback activates only when the agreement gate is
+ * at least five reviewers. It merges a dense component only when it hits that
+ * gate exactly and contains two fewer groups than reviewers, proving that at
+ * least two lexical confirmations already collapsed in the strict pass. An
+ * all-singleton location neighborhood is therefore never enough by itself.
+ * This is the vocabulary-independent signal RCL-17 was missing, while the
+ * redundancy guard preserves nearby minority concepts such as ao-7467's
+ * typespec finding.
+ */
+function mergeAgreementNeighborhoods(
+  groups: TaggedFinding[][],
+  lineWindow: number,
+  minimumReviewers: number
+): TaggedFinding[][] {
+  function groupsTouch(a: TaggedFinding[], b: TaggedFinding[]): boolean {
+    return a.some((left) =>
+      b.some(
+        (right) =>
+          areSameFile(left.finding, right.finding) &&
+          linesOverlap(left.finding, right.finding, lineWindow)
+      )
+    );
+  }
+
+  function weakSimilarity(a: TaggedFinding[], b: TaggedFinding[]): number {
+    let similarity = 0;
+    for (const left of a) {
+      for (const right of b) {
+        // One reviewer can emit multiple wording variants. Its own variants
+        // must not manufacture the edge that turns proximity into agreement.
+        if (`${left.model}::${left.role}` === `${right.model}::${right.role}`) {
+          continue;
+        }
+        similarity = Math.max(
+          similarity,
+          combinedSimilarity(left.finding, right.finding)
+        );
+      }
+    }
+    return similarity;
+  }
+
+  function claimsCanShareNeighborhood(
+    a: TaggedFinding[],
+    b: TaggedFinding[]
+  ): boolean {
+    return a.every((left) =>
+      b.every(
+        (right) =>
+          compatibleClaimKinds(left.finding, right.finding) &&
+          !hasOpposingSentiment(left.finding, right.finding, true)
+      )
+    );
+  }
+
+  // With a smaller gate, subtracting the two required lexical confirmations
+  // leaves fewer than three groups, which is not enough to establish a dense
+  // neighborhood. The ordinary corroborated pass still handles those runs.
+  if (
+    minimumReviewers <
+    CORROBORATED_MIN_REVIEWERS + CORROBORATED_NEIGHBORHOOD_CONFIRMATIONS
+  ) {
+    return groups;
+  }
+
+  const strong = groups.filter(
+    (group) => distinctReviewers([group]) >= CORROBORATED_MIN_REVIEWERS
+  );
+  const eligible = groups.map((group) =>
+    distinctReviewers([group]) < CORROBORATED_MIN_REVIEWERS &&
+    group.every(
+      (member) =>
+        member.finding.endLine - member.finding.startLine <=
+        CORROBORATED_MAX_NEIGHBORHOOD_SPAN
+    ) &&
+    !strong.some((established) => groupsTouch(group, established))
+  );
+  const parent = groups.map((_, index) => index);
+  const adjacency = groups.map(() => new Set<number>());
+
+  function find(index: number): number {
+    if (parent[index] !== index) parent[index] = find(parent[index]!);
+    return parent[index]!;
+  }
+
+  for (let i = 0; i < groups.length; i++) {
+    if (!eligible[i]) continue;
+    for (let j = i + 1; j < groups.length; j++) {
+      if (!eligible[j]) continue;
+      if (!groupsTouch(groups[i]!, groups[j]!)) continue;
+      if (!claimsCanShareNeighborhood(groups[i]!, groups[j]!)) continue;
+      if (weakSimilarity(groups[i]!, groups[j]!) < CORROBORATED_NEIGHBORHOOD_THRESHOLD) {
+        continue;
+      }
+      const rootI = find(i);
+      const rootJ = find(j);
+      if (rootI !== rootJ) parent[rootJ] = rootI;
+      adjacency[i]!.add(j);
+      adjacency[j]!.add(i);
+    }
+  }
+
+  const components = new Map<number, number[]>();
+  for (let index = 0; index < groups.length; index++) {
+    if (!eligible[index]) continue;
+    const root = find(index);
+    const component = components.get(root) ?? [];
+    component.push(index);
+    components.set(root, component);
+  }
+
+  const mergedAt = new Map<number, TaggedFinding[]>();
+  const consumed = new Set<number>();
+  for (const indexes of components.values()) {
+    const component = indexes.map((index) => groups[index]!);
+    if (
+      component.length < CORROBORATED_MIN_REVIEWERS ||
+      component.length >
+        minimumReviewers - CORROBORATED_NEIGHBORHOOD_CONFIRMATIONS
+    ) {
+      continue;
+    }
+    const componentMembers = component.flat();
+    const componentSpan =
+      Math.max(...componentMembers.map((member) => member.finding.endLine)) -
+      Math.min(...componentMembers.map((member) => member.finding.startLine));
+    if (componentSpan > CORROBORATED_MAX_NEIGHBORHOOD_SPAN) continue;
+    // Union-find connectivity is transitive, but compatibility is not. A
+    // neutral bridge must not join findings that make opposing claims.
+    if (
+      component.some((group, index) =>
+        component.slice(index + 1).some((other) =>
+          !claimsCanShareNeighborhood(group, other)
+        )
+      )
+    ) {
+      continue;
+    }
+    // Exact support is intentional here. Larger, loosely connected location
+    // neighborhoods are more likely to contain multiple defects; stronger
+    // agreement must be established by the semantic corroboration pass.
+    if (distinctReviewers(component) !== minimumReviewers) continue;
+    let edges = 0;
+    for (let i = 0; i < indexes.length; i++) {
+      for (let j = i + 1; j < indexes.length; j++) {
+        if (!adjacency[indexes[i]!]!.has(indexes[j]!)) continue;
+        edges++;
+      }
+    }
+    const possibleEdges = (indexes.length * (indexes.length - 1)) / 2;
+    if (edges / possibleEdges < CORROBORATED_NEIGHBORHOOD_DENSITY) continue;
+    mergedAt.set(indexes[0]!, component.flat());
+    for (const index of indexes.slice(1)) consumed.add(index);
+  }
+
+  return groups.flatMap((group, index) => {
+    const merged = mergedAt.get(index);
+    if (merged) return [merged];
+    return consumed.has(index) ? [] : [group];
+  });
+}
+
+/**
  * Intra-review dedup is pairwise, so two dissimilar variants from one review
  * can still land in the same final group via a bridge finding from another
  * review. Collapse same-(model, role) members so a single reviewer never
@@ -429,7 +1203,8 @@ function dedupeWithinReview(
 export function deduplicateFindings(
   reviews: ModelReview[],
   jaccardThreshold: number = DEFAULT_THRESHOLDS.jaccardThreshold,
-  lineWindow: number = DEFAULT_THRESHOLDS.dedupeLineWindow
+  lineWindow: number = DEFAULT_THRESHOLDS.dedupeLineWindow,
+  minConsensusScore: number = DEFAULT_THRESHOLDS.minConsensusScore
 ): DeduplicatedGroup[] {
   // Flatten all findings with attribution, deduplicating within each review first
   const all: TaggedFinding[] = [];
@@ -440,16 +1215,30 @@ export function deduplicateFindings(
 
   if (all.length === 0) return [];
 
-  const result: DeduplicatedGroup[] = [];
+  const strictGroups: TaggedFinding[][] = [];
   for (const members of groupTagged(all, jaccardThreshold, lineWindow)) {
     for (const coherent of splitIncoherent(members, jaccardThreshold, lineWindow)) {
-      const collapsed = collapseSameReviewer(coherent);
-      result.push({
-        representative: chooseRepresentative(collapsed).finding,
-        members: collapsed,
-      });
+      strictGroups.push(collapseSameReviewer(coherent));
     }
   }
+
+  const corroborated = mergeCorroboratedLocationClusters(strictGroups, lineWindow);
+  const successfulReviews = reviews.filter((review) => review.status === 'success').length;
+  const minimumReviewers = Math.max(
+    CORROBORATED_MIN_REVIEWERS,
+    Math.ceil(successfulReviews * minConsensusScore)
+  );
+  const result: DeduplicatedGroup[] = mergeAgreementNeighborhoods(
+    corroborated,
+    lineWindow,
+    minimumReviewers
+  ).map((members) => {
+    const collapsed = collapseSameReviewer(members);
+    return {
+      representative: chooseRepresentative(collapsed).finding,
+      members: collapsed,
+    };
+  });
 
   // Sort by severity then file
   const severityOrder = { critical: 0, important: 1, minor: 2, nitpick: 3 };

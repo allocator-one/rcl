@@ -482,7 +482,8 @@ async function executeCouncil(
   const groups = deduplicateFindings(
     reviews,
     config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
-    config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow
+    config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
+    config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
   );
 
   const consensusFindings = computeConsensus(groups, reviews, roleMap, {

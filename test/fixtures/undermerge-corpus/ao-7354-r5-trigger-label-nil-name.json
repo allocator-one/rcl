@@ -12,9 +12,9 @@
       492
     ],
     "severity": "minor",
-    "distinctReviewerPairs": 7,
+    "distinctReviewerPairs": 11,
     "successfulReviews": 17,
-    "agreementRatioIfMerged": 0.412,
+    "agreementRatioIfMerged": 0.647,
     "minConsensusScore": 0.4,
     "clearsThresholdIfMerged": true,
     "memberTitles": [
@@ -24,7 +24,16 @@
       "Unsafe map key access and potential FunctionClauseError in trigger_label/1",
       "trigger_label mixes Map.get with hard field access",
       "trigger_label/1 can produce a misleading label for a column with a nil name",
-      "trigger_label/1 lacks @spec typespec"
+      "trigger_label crashes when field is a struct without :label or column lacks :name",
+      "trigger_label crashes on column maps without a :name key",
+      "Unsafe map field access column.name in trigger_label/1",
+      "trigger_label/1 assumes column.name is always a valid atom/string",
+      "trigger_label/1 may raise KeyError or FunctionClauseError if :name is missing or nil"
+    ],
+    "excludedTitles": [
+      "Empty labels bypass the accessible-name fallback",
+      "Empty labels prevent the trigger label fallback",
+      "Blank column labels prevent the accessible-name fallback"
     ]
   },
   "reviews": [

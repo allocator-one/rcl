@@ -1,0 +1,1284 @@
+{
+  "case": "rcl-24-r1-claim-kind-heuristics",
+  "source": {
+    "report": "rcl-report-rcl-24-r1.json",
+    "rclVersion": "1.8.1+9d432a9",
+    "note": "Live RCL-17 dogfood reproduction: six reviewer assignments split one domain-specific claim-heuristics defect across three groups."
+  },
+  "expected": {
+    "file": "src/consensus/deduper.ts",
+    "lineRange": [
+      443,
+      480
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 6,
+    "successfulReviews": 14,
+    "agreementRatioIfMerged": 0.429,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "Regex claim-kind patterns are brittle and Elixir-specific",
+      "Domain-specific claim-kind regexes hardcoded in generic deduper",
+      "Regex patterns for claim-kind compatibility are fragile",
+      "Domain-specific claim heuristics embedded in generic deduper",
+      "compatibleClaimKinds tests only titles for contract patterns, not descriptions",
+      "Regex patterns are anchored to English keywords and miss common synonyms"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 610,
+          "endLine": 640,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Louvain community degrees never re-aggregated after label moves",
+          "description": "In relaxedCommunities, communityDegrees is initialized as a copy of per-node degrees ([...degrees]) and indexed by community label. This only works while every node is its own community. As nodes move (labels[index] = best), the degree bookkeeping uses `communityDegrees[current] -= degrees[index]` and `communityDegrees[best] += degrees[index]`, which is correct incrementally — but the modularity gain formula compares against `communityDegrees[candidate]` where `candidate` iterates over neighbor labels including `current` after the node was already removed. The subtle bug: when evaluating `current` as a candidate inside the loop, the gain computed for `current` in the loop uses the already-decremented total (correct), but `bestGain` was seeded with the same value before the loop, so `current` is evaluated twice — harmless. The real issue is that the pass loop cap `Math.min(count * 2, 20)` combined with single-level Louvain (no graph coarsening/second phase) means large components may not converge; labels are used directly as community ids without compaction, and there is no aggregation phase, so this is only a local-move heuristic. If that is intentional, document it; otherwise results can be order-dependent for graphs needing more than 20 passes.",
+          "suggestedFix": "Either document that this is a single-level local-moving heuristic (not full Louvain) and that the 20-pass cap can leave the partition unconverged, or detect non-convergence (moved === true after the final pass) and log/handle it deterministically."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 700,
+          "endLine": 712,
+          "severity": "important",
+          "category": "correctness",
+          "title": "mergeAnchoredCommunities mutates shared cluster objects during iteration",
+          "description": "After merging (`target.groups.push(...candidate.groups)`), the candidate cluster is spliced out but the merged `target` keeps `corroborated` from before the merge and its groups grow. `conceptAnchors` and `clustersAreCompatible` are recomputed each iteration against the mutated target, which is fine, but the removed candidate object is not emptied — if any external reference to it exists (e.g., in `mergeCorroboratedLocationClusters`, clusters are the same object instances passed into `mergeAnchoredCommunities`), the original array in the caller still holds the pre-splice cluster with its groups now duplicated inside target. In mergeCorroboratedLocationClusters the final `mergeAnchoredCommunities(clusters.filter(...))` operates on a copy of the array but the same cluster objects; a cluster absorbed there remains in scope. Because the function returns `remaining`, the duplicates don't currently leak, but the merged-cluster's groups now appear in two live cluster objects, which is fragile and will silently duplicate findings if the return value handling ever changes.",
+          "suggestedFix": "After `target.groups.push(...candidate.groups)`, also set `candidate.groups = []` (as done in the attachment loop) so the absorbed cluster cannot resurface with duplicated members."
+        },
+        {
+          "id": "f003",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 696,
+          "endLine": 704,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "O(n^3+) restart-on-merge loop with full re-sort per merge",
+          "description": "mergeAnchoredCommunities re-sorts the entire `remaining` array and restarts the double loop from scratch (`break outer` plus `while (merged)`) after every single merge. Each compatibility check itself is quadratic in member counts (clustersAreCompatible does every-vs-every over groups and members, and conceptAnchors is recomputed for the same target repeatedly across inner iterations). For large components at the same location this is potentially O(n^3 · m^2) and can become a hot spot. The repeated `remaining.sort(...)` after splice is also unnecessary — splice preserves order.",
+          "suggestedFix": "Drop the re-sort after splice (order is already maintained), cache conceptAnchors per cluster and invalidate on merge, and continue scanning from the current position instead of restarting the outer while-loop."
+        },
+        {
+          "id": "f004",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 806,
+          "endLine": 812,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "attachmentEvidence support Math.min over empty-fix members can zero out valid attachments",
+          "description": "In mergeCorroboratedLocationClusters, `support: Math.min(...supports)` requires EVERY member of a multi-member fringe candidate to independently meet the anchor/fix-support gate in attachmentEvidence. attachmentEvidence returns {support: 0} whenever `anchorCount < 2 && !(anchorCount === 1 && fixSupport >= 2)`. A candidate with one strongly-matching member and one member with a terse title/description will therefore never attach, even when the cluster as a whole is clearly the same concept. This is stated as intentional in the comment (\"absorbed only when every member supports the same target\"), but the interaction with fixSupport — which requires suggestedFix similarity, a frequently-absent optional field — makes the gate stricter than the comment implies. Findings without a suggestedFix can never satisfy the anchorCount===1 escape hatch.",
+          "suggestedFix": "Consider allowing description similarity as an alternative to suggestedFix similarity in the fixSupport computation, or document that single-anchor attachment requires the optional suggestedFix field to be present."
+        },
+        {
+          "id": "f005",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 552,
+          "endLine": 566,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "relaxedEdgeDensity computed against pre-community-pruning indexes map keyed by array identity",
+          "description": "`relaxedEdgeDensity(component, indexes, adjacency)` looks up group indexes via a Map keyed by TaggedFinding[] array identity. This works only because splitCompatibleChains and connectedComponents preserve the exact array references from `groups`. If any intermediate step ever copies a group array (e.g., a future refactor using .map or spread on a group), the `indexes.get(...)!` non-null assertion will throw at runtime with an opaque error. The double non-null assertion `adjacency[indexes.get(groups[i]!)!]!` hides this fragility.",
+          "suggestedFix": "Carry the original index alongside each group (e.g., tuple of {group, index}) through splitCompatibleChains/connectedComponents instead of relying on object identity in a Map, or add an explicit guard with a descriptive error."
+        },
+        {
+          "id": "f006",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 500,
+          "endLine": 512,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "groupsShareLocation uses every-vs-every, making cluster compatibility non-monotonic",
+          "description": "groupsShareLocation requires EVERY pair across two groups to be same-file and line-overlapping. clustersAreCompatible then requires this for every group pair. As clusters grow via merges in mergeAnchoredCommunities and the attachment loop, previously-compatible pairs can become incompatible depending on merge order (a cluster that absorbed a fringe member with slightly different lines may now fail overlap against a third cluster). Combined with the greedy first-match `clusters.find(...)` in splitCompatibleChains, the final partition depends on the deterministic-but-arbitrary sort order rather than an optimal grouping. The determinism test only checks review-order invariance, not that the grouping is stable under small line perturbations.",
+          "suggestedFix": "Document the order-dependence, or use a representative span (min start / max end) per cluster for overlap checks so compatibility is monotonic under merges."
+        },
+        {
+          "id": "f007",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 419,
+          "endLine": 427,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Hardcoded domain-specific stopwords mixed with generic ones",
+          "description": "CORROBORATION_STOPWORDS embeds domain-ish tokens like 'config', 'configuration', 'generated', 'test', 'tests' directly into the deduper. These meaningfully change merge behavior (e.g., two findings about test configuration lose those anchors) and are calibrated against one corpus (RCL-17). They are neither configurable nor referenced by the calibration docs.",
+          "suggestedFix": "Extract the added stopwords to a named, documented constant (e.g., REVIEW_DOMAIN_STOPWORDS) with a comment tying each addition to the corpus evidence, or make them configurable alongside the thresholds."
+        },
+        {
+          "id": "f008",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 448,
+          "endLine": 452,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Regex claim-kind patterns are brittle and Elixir-specific",
+          "description": "TYPE_CONTRACT_PATTERN, GLOBAL_LOG_CAPTURE_PATTERN etc. hardcode Elixir/corpus-specific vocabulary (@spec, typespec, capture_log). compatibleClaimKinds tests only the title, not description/fix. A finding titled generically ('Return value not reflected in signature') but describing a typespec issue in its body will be classified as compatible with runtime findings, re-opening the exact bridge the comment in relaxedLocationDuplicate warns about. Also, `\\bn\\s*\\+\\s*1\\b` in PERFORMANCE_CONTRACT_PATTERN will match arithmetic like 'n + 1 retries' in unrelated titles and flip compatibility.",
+          "suggestedFix": "Test the patterns against title + description (or at least document why title-only), and tighten the N+1 pattern (e.g., /\\bn\\s*\\+\\s*1\\s*(quer|select|problem)/i)."
+        },
+        {
+          "id": "f009",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 862,
+          "endLine": 878,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Attachment rounds cap uses clusters.length, not intended constant semantics",
+          "description": "The loop bound `Math.min(clusters.length, CORROBORATED_MAX_ATTACHMENT_ROUNDS)` means that when there is exactly 1 cluster, one round still runs (fine), but the constant's comment says it bounds 'transitive fringe growth' to 2 rounds. Because attachments within a round are applied against frozen state but candidate.groups is emptied (candidate.groups = []) while the cluster object stays in `clusters`, subsequent rounds iterate over empty clusters and `candidateMembers.length === 0` skips them — correct but wasteful. More importantly, an attached fringe cluster's members are added to target.groups but target.corroborated is never recomputed, and evidence from newly-attached members in round 2 comes from clusters whose distinctReviewers may now exceed thresholds without re-validation of density.",
+          "suggestedFix": "Filter emptied clusters out of the iteration set between rounds, and consider recomputing or explicitly documenting that corroborated status is intentionally frozen after the core pass."
+        },
+        {
+          "id": "f010",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 1035,
+          "endLine": 1046,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "collapseSameReviewer applied twice to the same members",
+          "description": "strictGroups are built with collapseSameReviewer(coherent), then after mergeCorroboratedLocationClusters the result maps each merged member list through collapseSameReviewer again. The second pass is necessary for merged clusters (members from different strict groups may share a reviewer) but redundant for unmerged singleton groups. Harmless if collapseSameReviewer is idempotent, but that invariant is implicit; if it ever selects differently on second application (e.g., tie-breaking on group order), representatives could shift versus the pre-change behavior.",
+          "suggestedFix": "Add a comment noting collapseSameReviewer must be idempotent, or only re-collapse groups whose membership changed during mergeCorroboratedLocationClusters."
+        },
+        {
+          "id": "f011",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 645,
+          "endLine": 650,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "agreementClusterKey padStart(10) fails for negative or >10-digit line numbers",
+          "description": "String(finding.startLine).padStart(10, '0') produces incorrect lexicographic ordering for negative line numbers ('-5' pads to '00000000-5') and for hypothetical values over 10 digits. Line numbers should never be negative, but the deduper does not validate inputs, and a malformed finding would silently destabilize the deterministic ordering this key exists to guarantee.",
+          "suggestedFix": "Clamp with Math.max(0, line) before padding, or compare numerically in compareAgreementClusters instead of building a composite string."
+        },
+        {
+          "id": "f012",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 466,
+          "endLine": 480,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "compatibleClaimKinds concept check inverts vacuously when one side has no concepts",
+          "description": "The final return treats findings as compatible whenever either side has zero extracted concepts (conceptsA.size === 0 || conceptsB.size === 0 makes the negated condition true). This means a finding with recognizable concepts can merge with a vaguely-worded finding that extracted none, even though the regex-pattern gates above use strict equality of matches. The asymmetry (patterns: both-or-neither; concepts: overlap-or-either-empty) is undocumented and easy to misread due to the negated boolean expression.",
+          "suggestedFix": "Rewrite for clarity: `if (conceptsA.size === 0 || conceptsB.size === 0) return true; return [...conceptsA].some((c) => conceptsB.has(c));` and add a comment justifying the vacuous-compatibility choice."
+        },
+        {
+          "id": "f013",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 415,
+          "endLine": 415,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "CORROBORATED_TIE_EPSILON declared but tie logic mixes it with exact equality",
+          "description": "The tie-break guard in the attachment ranking uses exact equality for support and size but CORROBORATED_TIE_EPSILON only for strength. Meanwhile relaxedCommunities uses Number.EPSILON for its own tie comparisons. Two different epsilon conventions in the same file for floating-point tie detection invites drift; Number.EPSILON is also generally too small to catch accumulated floating-point error from the summed weighted similarities.",
+          "suggestedFix": "Use CORROBORATED_TIE_EPSILON consistently for all floating-point comparisons in this module, including the modularity gain comparison."
+        },
+        {
+          "id": "f014",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 355,
+          "endLine": 420,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No tests for key relaxed-merge boundary mechanisms",
+          "description": "The new tests cover the 3-reviewer happy path, the 2-reviewer rejection, claim-kind separation, and order determinism, but none exercise: (a) the 2-core peeling (a chain A—B—C of weak edges should not merge), (b) the density gate CORROBORATED_MIN_DENSITY, (c) fringe attachment via attachmentEvidence including the single-anchor + fixSupport escape hatch, (d) mergeAnchoredCommunities anchor-based merging, or (e) opposing-sentiment rejection on the relaxed path. Given the complexity of the new ~600-line clustering pipeline, these internal gates are effectively untested outside the fixture corpus.",
+          "suggestedFix": "Add unit tests for the 2-core/chain case (three findings where only sequential pairs are similar), a density-failure case, and at least one fringe-attachment case with two supporting reviewer assignments."
+        },
+        {
+          "id": "f015",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 96,
+          "endLine": 106,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Negative-guard consensus assertion may pass vacuously if concept fragments further",
+          "description": "For miningProxyOvermerged cases, the second test asserts each mustStaySeparate title's group scores below minConsensusScore. If the deduper regresses and splits a concept into many tiny groups, this test still passes (smaller groups score lower), and the first test also passes (groups are trivially separate). Nothing pins a lower bound on group size or membership for the negative case, so an under-merge regression in these fixtures is invisible.",
+          "suggestedFix": "Additionally assert each mustStaySeparate group's expected member titles (or a minimum member count) so both over-merge and under-merge regressions are caught."
+        },
+        {
+          "id": "f016",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 25,
+          "endLine": 28,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "miningProxyOvermerged fixture flag validated at test-run time, not load time",
+          "description": "The requirement that miningProxyOvermerged implies mustStaySeparate is enforced by throwing inside individual `it` bodies. A malformed fixture fails with a generic thrown Error mid-test rather than being rejected when the corpus is loaded, and the check is duplicated in both tests. Consider validating fixture shape once (e.g., in a beforeAll or a schema check) so all fixture-contract violations surface uniformly.",
+          "suggestedFix": "Validate the CorpusCase invariants in a single load-time assertion loop over `corpus` instead of duplicating throws inside test bodies."
+        },
+        {
+          "id": "f017",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 430,
+          "endLine": 440,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "corroborationTokens recomputed repeatedly for the same findings",
+          "description": "corroborationTokens, tokenize/jaccard computations, and conceptAnchors are recomputed many times for the same finding across relaxedLocationDuplicate, relaxedLocationWeight (which calls relaxedLocationDuplicate and then recomputes the same three similarities), groupsRelaxedWeight (all-pairs), attachmentEvidence, and mergeAnchoredCommunities. For N groups this is O(N^2) tokenizations of identical strings. relaxedLocationWeight in particular computes jaccardSimilarity(a.title, b.title) twice per pair (once inside the duplicate check, once for the weight).",
+          "suggestedFix": "Memoize token sets per finding (e.g., a WeakMap<Finding, Set<string>>) and have relaxedLocationWeight receive the precomputed similarities from relaxedLocationDuplicate instead of recomputing them."
+        }
+      ],
+      "durationMs": 87868,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 674,
+          "endLine": 692,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Community optimization cannot split a node into a singleton",
+          "description": "After removing a node from its current community, the candidate set contains only neighboring community labels and the current label. It does not include an empty/singleton community with insertion gain zero. If the calculated gain for returning to the current community is negative, separating the node may improve modularity, but this implementation is forced to put it into an existing community. Since these communities are the main over-merge boundary, this can retain lexical bridge nodes and incorrectly combine distinct findings.",
+          "suggestedFix": "Include a singleton candidate when evaluating moves, or compute each candidate's gain relative to restoring the current community and allow the node to remain isolated when that is the best option. Prefer a tested Louvain/community-detection implementation and add a regression graph where a previously merged node must split back out."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 850,
+          "endLine": 869,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Same reviewer can supply multiple independent core links",
+          "description": "The 2-core degree and edge-density calculations operate on strict finding groups, not distinct model-role assignments. A single reviewer can have multiple dissimilar strict groups because collapseSameReviewer is applied separately to each strict group. Those groups can then create multiple relaxed edges and satisfy another group's degree-of-two requirement, even though both links come from the same reviewer assignment. The later distinctReviewers >= 3 check only counts reviewers anywhere in the component and does not ensure that each core node has independent reviewer support, allowing one reviewer to disproportionately create a corroborated merge.",
+          "suggestedFix": "Build corroboration degree from distinct neighboring model-role assignments, ignoring or coalescing edges from the same assignment before computing the core and density. Add a test where two relaxed groups from one reviewer connect findings from two other reviewers but those other findings do not corroborate each other."
+        }
+      ],
+      "durationMs": 89497,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 818,
+          "endLine": 820,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Missing fallback for optional description causes false 'undefined' anchor token",
+          "description": "In `attachmentEvidence`, `singleton.finding.description` is interpolated directly into a template string without a fallback (`?? ''`). If `description` is `undefined`, JavaScript coerces it to the literal string `\"undefined\"`. `corroborationTokens` will extract `\"undefined\"` as a valid token (since it is not in `CORROBORATION_STOPWORDS`), causing findings with undefined descriptions to falsely match on the shared token `\"undefined\"`.",
+          "suggestedFix": "const singletonAnchors = corroborationTokens(\n  `${singleton.finding.title} ${singleton.finding.description ?? ''} ${singleton.finding.suggestedFix ?? ''}`\n);"
+        }
+      ],
+      "durationMs": 63480,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 431,
+          "endLine": 441,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "corroborationFieldSimilar contradicts its own identifier-safety comment",
+          "description": "The comment states that a shared code identifier alone is only evidence that findings discuss the same function, not the same defect. However, the fallback `shared.length >= 2` returns true when the only shared tokens are two underscore-containing identifiers (e.g. `trigger_label` and `column_name`), which is exactly the false semantic edge the tokenization comment above warns about. Two findings about different defects in the same function that happen to mention two shared identifiers will pass this gate.",
+          "suggestedFix": "Require at least one non-identifier token unconditionally, e.g. `return shared.some((token) => !token.includes('_'));`, or count identifier matches separately with a higher bar (e.g. >= 3) that is documented as intentional."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 700,
+          "endLine": 716,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "O(n²) relaxed-weight pass recomputes tokenization for every group pair",
+          "description": "agreementClusters computes groupsRelaxedWeight for every pair of strict groups across the entire result set, and each call re-tokenizes titles/descriptions/fixes via jaccardSimilarity/nonEmptyFieldSimilarity/corroborationTokens. relaxedLocationWeight short-circuits on file mismatch, but only after corroboration-independent work is avoided — actually the file check is first, so cross-file pairs are cheap, but same-file corpora with many findings will pay quadratic tokenization cost with no caching. groupTagged already had to solve this pairwise problem; consider bucketing strict groups by file before the pairwise pass and memoizing token sets per finding.",
+          "suggestedFix": "Pre-group strictGroups by finding.file before building the weight matrix, and cache corroborationTokens/tokenize results per finding id in a Map reused across relaxedLocationWeight, conceptAnchors, and attachmentEvidence."
+        },
+        {
+          "id": "f003",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 443,
+          "endLine": 446,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Domain-specific claim-kind regexes hardcoded in generic deduper",
+          "description": "TYPE_CONTRACT_PATTERN (@spec, typespec), GLOBAL_LOG_CAPTURE_PATTERN (capture_log), etc. are Elixir/Phoenix-specific heuristics embedded directly in the language-agnostic consensus deduper. These patterns silently do nothing for other ecosystems and will drift as new false-merge families are discovered. At minimum they deserve a comment noting they are calibrated to the RCL-17 corpus; ideally they would be configurable per-project.",
+          "suggestedFix": "Move the claim-kind patterns into a configurable list (e.g. passed via thresholds/options) or document them as corpus-calibrated constants with a pointer to the fixture README."
+        },
+        {
+          "id": "f004",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 660,
+          "endLine": 700,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "mergeAnchoredCommunities is O(n³) worst-case with full re-sort per merge",
+          "description": "Each successful merge re-sorts the entire `remaining` array and restarts the outer scan from index 0 (`break outer`). With k clusters and m merges this is O(m · k log k · k) compatibility checks, each of which is itself quadratic in members via clustersAreCompatible and the hasCrossEdge flat() scans. Fine for the small corpus sizes tested, but the nested `target.groups.flat().some(... candidate.groups.flat().some(...))` inside the loop recomputes flat() arrays on every iteration.",
+          "suggestedFix": "Hoist `candidate.groups.flat()` out of the `some` callback (`const candidateMembers = candidate.groups.flat()`), and consider restarting the scan only from index i rather than re-sorting and restarting from 0."
+        },
+        {
+          "id": "f005",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 596,
+          "endLine": 600,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "clustersShareFile rejects attachment when file sets are not exactly equal",
+          "description": "clustersShareFile requires `filesA.size === filesB.size` and mutual containment. A fringe candidate whose findings all sit in file X can never attach to a corroborated cluster that legitimately spans files X and Y (e.g. a fix touching a call site and its definition), even when every member of the candidate has strong evidence against the cluster. The equal-size requirement is stricter than the stated intent of 'same location' and will silently drop valid attachments.",
+          "suggestedFix": "Relax to subset containment in the direction that matters: `[...filesA].every((file) => filesB.has(file))`, or gate attachment on per-member areSameFile/linesOverlap evidence (which attachmentEvidence already enforces) and drop the file-set equality pre-filter."
+        },
+        {
+          "id": "f006",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 421,
+          "endLine": 428,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Determinism test only permutes review order, not finding order within reviews",
+          "description": "The determinism test reverses the array of three single-finding reviews. This exercises review-order stability but not order dependence among multiple findings inside one review, nor ties in the Louvain/attachment tie-break paths (CORROBORATED_TIE_EPSILON, compareAgreementClusters). The tricky ordering code (mergeAnchoredCommunities re-sort, attachment rounds) is exactly where order-dependence bugs would hide.",
+          "suggestedFix": "Add a case with several findings per review and shuffle both the reviews array and the findings within each review, asserting identical group signatures across permutations."
+        }
+      ],
+      "durationMs": 62414,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "security-auditor",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 914,
+          "endLine": 920,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Fringe attachment bypasses cluster-wide location compatibility",
+          "description": "Candidate targets are filtered only by file-set and claim-kind compatibility. Although attachmentEvidence requires each candidate member to overlap at least some target members, it does not require every candidate group to be location-compatible with every target group. A candidate can therefore attach at one edge of a corroborated cluster while being outside lineWindow for members at the other edge; later attachment rounds can extend this chain further. This can merge distinct nearby defects and violates the all-pairs location invariant enforced elsewhere by clustersAreCompatible.",
+          "suggestedFix": "Require cluster-wide location compatibility when selecting attachment targets, for example replace the clustersShareFile/clustersClaimsAreCompatible checks with `clustersAreCompatible(candidate.groups, target.groups, lineWindow)`. Add a regression test where a fringe finding overlaps only one edge of a cluster but is farther than lineWindow from another member."
+        }
+      ],
+      "durationMs": 81222,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "performance-engineer",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 730,
+          "endLine": 760,
+          "severity": "important",
+          "category": "best-practices",
+          "title": "Louvain-style clustering is O(n²) and may struggle with large finding sets",
+          "description": "The `agreementClusters` function computes pairwise weights for all groups (O(n²)) and then runs a Louvain-style algorithm with up to `count * 2` passes (line 730), each iterating over all nodes and their neighbors. For large numbers of findings (e.g., 10k), this could be slow. Consider optimizing or documenting the expected input size.",
+          "suggestedFix": "If the number of findings can be large, consider limiting the clustering to smaller subsets or using a more efficient algorithm. Otherwise, document the expected input size."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 850,
+          "endLine": 870,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Attachment loop may not terminate if clusters change",
+          "description": "The attachment loop in `mergeCorroboratedLocationClusters` runs up to `CORROBORATED_MAX_ATTACHMENT_ROUNDS` times, but if attachments modify clusters in ways that create new candidates, the loop may not fully converge. While bounded, this could leave some fringe clusters unattached.",
+          "suggestedFix": "Ensure the loop either converges or document why a fixed number of rounds is sufficient."
+        },
+        {
+          "id": "f003",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 80,
+          "endLine": 100,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Overly strict separation check may fail for legitimate overlaps",
+          "description": "The test asserts that `leftGroup` and `rightGroup` are different (`expect(leftGroup).not.toBe(rightGroup)`), but does not check if they share any members. If the groups are separate but share some findings, the test would pass incorrectly.",
+          "suggestedFix": "Add an assertion to ensure the groups have no overlapping members."
+        },
+        {
+          "id": "f004",
+          "file": "test/fixtures/undermerge-corpus/README.md",
+          "startLine": 35,
+          "endLine": 45,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Documentation could clarify the role of `ao-7467-r1` as a negative guard",
+          "description": "The README mentions `ao-7467-r1` as a negative guard but does not explain why it was chosen or how it differs from the positive cases. Adding more context would help future maintainers.",
+          "suggestedFix": "Expand the explanation of why `ao-7467-r1` is a negative guard and what it tests."
+        }
+      ],
+      "durationMs": 34878,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "api-design",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 29340,
+      "warnings": [
+        "openrouter/deepseek/deepseek-v4-flash-0731/api-design: schema validation failed: Invalid input: expected array, received undefined"
+      ],
+      "status": "parse_failed",
+      "error": "Response was not a usable review; this reviewer's output was lost"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 596,
+          "endLine": 596,
+          "severity": "important",
+          "category": "correctness",
+          "title": "relaxedEdgeDensity crashes if Map key lookup returns undefined",
+          "description": "The expression `indexes.get(groups[i]!)!` uses a non-null assertion on the Map lookup result. The `indexes` map is built from the original `groups` array in `agreementClusters` using array elements as keys. However, `splitCompatibleChains` creates new sub-arrays, and `connectedComponents` maps indexes back to `groups[index]!`. The `indexes` map is constructed with the *original* group array references as keys. If `relaxedEdgeDensity` is called with `component` arrays whose inner `TaggedFinding[]` references are the same objects from `groups`, this works. But if any code path ever creates new array wrappers (e.g., via spread or slice), the Map lookup returns `undefined`, the `!` assertion hides the `undefined`, and `.has()` throws a runtime TypeError. The same pattern applies to `indexes.get(groups[j]!)!`. This is fragile and depends on referential identity being preserved through all code paths.",
+          "suggestedFix": "Either add a guard: `const idxI = indexes.get(groups[i]!); const idxJ = indexes.get(groups[j]!); if (idxI === undefined || idxJ === undefined) continue;` or restructure to pass indices directly rather than relying on object identity in a Map."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 622,
+          "endLine": 650,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Louvain community detection may not converge or may oscillate",
+          "description": "The `relaxedCommunities` function implements a simplified weighted Louvain. The pass limit is `Math.min(count * 2, 20)`, but the `moved` flag only breaks when no node changes community in a full pass. However, the gain comparison uses `Number.EPSILON` which is extremely small (~2.2e-16). For floating-point weights in the range [0,1], rounding differences can cause oscillation between communities where gains differ by less than EPSILON in one pass but more in the next (due to `communityDegrees` being mutated in-place during the same pass). The tie-breaking rule `candidate < best` helps but doesn't fully prevent oscillation when a node is moved to community A, then community B's degree changes, making B preferable next pass, etc. Consider using a larger epsilon (like the existing `CORROBORATED_TIE_EPSILON = 1e-9`) or computing gains against a snapshot of community degrees per pass.",
+          "suggestedFix": "Use `CORROBORATED_TIE_EPSILON` (1e-9) instead of `Number.EPSILON` for the gain comparison, or snapshot `communityDegrees` at the start of each pass to avoid in-pass mutations affecting gain calculations."
+        },
+        {
+          "id": "f003",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 640,
+          "endLine": 644,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "communityDegrees mutated before gain evaluation creates asymmetric removal",
+          "description": "The line `communityDegrees[current] -= degrees[index]!` removes the node's degree from its current community before evaluating all candidates. However, when evaluating the gain for re-inserting into `current`, the `communityDegrees[current]` has already been decremented. This is correct for the standard Louvain first phase. But the `bestGain` initialization computes the gain for staying in `current` using the *already-decremented* `communityDegrees[current]`, while the loop over `candidates` also includes `current`. This means the gain for `current` is computed twice with the same value (redundant but not wrong). More importantly, if `best` remains `current`, the line `communityDegrees[best] += degrees[index]!` restores it correctly. However, if the node was degree 0, it's skipped, so this is fine. The real issue: if `best !== current`, the node's degree is added to `best` but was already removed from `current` — correct. But if in a subsequent iteration within the same pass, another node evaluates community `current`, it sees the reduced degree. This is the standard in-pass mutation behavior of Louvain but can lead to order-dependent results.",
+          "suggestedFix": "Document that results are pass-order dependent, or snapshot communityDegrees per pass for determinism."
+        },
+        {
+          "id": "f004",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 700,
+          "endLine": 720,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "mergeAnchoredCommunities has O(n²) splice+sort in a while loop",
+          "description": "The `mergeAnchoredCommunities` function uses `remaining.splice(j, 1)` followed by `remaining.sort(compareAgreementClusters)` inside a nested loop with a `while(merged)` outer loop. Each merge triggers a full re-sort of the remaining array. In the worst case with many merges, this becomes O(n² log n). For typical corpus sizes this is likely fine, but for large inputs it could be a performance concern. Additionally, after `splice` and `break outer`, the `while` loop restarts from `i=0`, re-examining already-checked pairs.",
+          "suggestedFix": "For large inputs, consider using a priority queue or only re-sorting affected elements. For typical sizes, add a comment noting the expected input bounds."
+        },
+        {
+          "id": "f005",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 711,
+          "endLine": 716,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Cross-edge check in mergeAnchoredCommunities may miss valid merges",
+          "description": "The `hasCrossEdge` check requires that a relaxed edge exists between two members with *different* `model::role` assignments. However, `relaxedLocationWeight` returns 0 if `relaxedLocationDuplicate` returns false, which itself requires `compatibleClaimKinds` to pass. If two communities discuss the same defect but use incompatible claim-kind vocabulary (e.g., one mentions 'missing index' triggering `PERFORMANCE_CONTRACT_PATTERN` and the other doesn't), the cross-edge will be 0 and the merge is blocked even though anchors strongly agree. This could cause under-merging in edge cases where the claim-kind patterns are too aggressive.",
+          "suggestedFix": "Consider whether the cross-edge check should use a relaxed version of compatibility, or whether anchor agreement with sufficient support (e.g., 3+ shared anchors) should be sufficient without requiring a cross-edge."
+        },
+        {
+          "id": "f006",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 440,
+          "endLine": 443,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "corroborationFieldSimilar returns true for two shared underscore tokens",
+          "description": "The function returns true if `shared.some(token => !token.includes('_'))` OR `shared.length >= 2`. This means two findings sharing only two code identifiers (e.g., `trigger_label` and `column_name`) will pass the field-similarity check, even though the comment above says 'A shared code identifier alone is only evidence that findings discuss the same function, not the same defect.' Two identifiers from the same function could still create false edges between different defects in that function.",
+          "suggestedFix": "Consider requiring at least one non-underscore token, or requiring `shared.length >= 3` for the all-underscore case."
+        },
+        {
+          "id": "f007",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 527,
+          "endLine": 530,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "relaxedLocationWeight weights sum to 1.0 but description may be undefined",
+          "description": "The weight formula uses `nonEmptyFieldSimilarity(a.description, b.description) * 0.2` and `nonEmptyFieldSimilarity(a.suggestedFix, b.suggestedFix) * 0.55`. If both description and suggestedFix are empty/undefined for both findings, these terms contribute 0, and the weight is purely title-based (max 0.25). This means a match can pass `relaxedLocationDuplicate` (which requires detail similarity >= 0.1) but then get a very low weight. However, `relaxedLocationDuplicate` already gates on detail similarity, so `relaxedLocationWeight` returning >0 implies detail similarity was met. The inconsistency is that the weight formula gives 55% weight to `suggestedFix` but the gate in `relaxedLocationDuplicate` uses `Math.max(descriptionSimilarity, fixSimilarity)`, meaning a match could pass the gate on description alone but get a low weight because fix similarity is 0. This is by design but worth noting.",
+          "suggestedFix": "No code change needed, but consider adding a comment explaining the intentional asymmetry between the gate and the weight formula."
+        },
+        {
+          "id": "f008",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 415,
+          "endLine": 420,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "CORROBORATION_STOPWORDS extends STOPWORDS with common code-review terms",
+          "description": "The stopword list includes very generic terms like 'code', 'function', 'issue', 'test', 'tests', 'config', 'file', 'files'. While these reduce noise, they could also remove meaningful signal in contexts where the finding is specifically about configuration files vs. source files, or about test files vs. implementation files. For example, two findings about 'test configuration' vs 'source configuration' would lose the distinguishing 'config' token.",
+          "suggestedFix": "Consider whether domain-specific terms like 'config' and 'test' should be stopworded, or whether they carry enough semantic weight to keep. At minimum, add a comment explaining why these specific terms were chosen."
+        },
+        {
+          "id": "f009",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 455,
+          "endLine": 458,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Regex patterns for claim-kind compatibility are fragile",
+          "description": "The patterns `TYPE_CONTRACT_PATTERN`, `PERFORMANCE_CONTRACT_PATTERN`, `DATA_TYPE_CONTRACT_PATTERN`, and `GLOBAL_LOG_CAPTURE_PATTERN` use regex matching on titles. The `DATA_TYPE_CONTRACT_PATTERN` includes `\\bcast(?:ing)?\\b` which would match any title containing the word 'cast' or 'casting', including 'broadcast', 'forecast', or 'podcast'. The `\\b` word boundary should prevent 'broadcast' but 'cast' is a common English word that could appear in non-type-related contexts (e.g., 'cast a wider net').",
+          "suggestedFix": "Consider using more specific patterns like `\\btype cast(?:ing)?\\b` or `\\bexplicit cast\\b` to reduce false positives."
+        },
+        {
+          "id": "f010",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 810,
+          "endLine": 830,
+          "severity": "important",
+          "category": "correctness",
+          "title": "attachmentEvidence anchor count check may incorrectly reject valid attachments",
+          "description": "The condition `if (anchorCount < 2 && !(anchorCount === 1 && fixSupport >= 2))` returns early with zero support. This means: if anchorCount is 0, always reject (correct). If anchorCount is 1, only proceed if fixSupport >= 2. But `fixSupport` is computed by checking `nonEmptyFieldSimilarity(singleton.finding.suggestedFix, member.finding.suggestedFix) >= CORROBORATED_DETAIL_THRESHOLD` across cluster members. If the singleton's `suggestedFix` is undefined/empty, `nonEmptyFieldSimilarity` returns 0 for all comparisons, making `fixSupport` always 0, and the function returns early even if the singleton has strong title/description alignment with the cluster.",
+          "suggestedFix": "Consider also checking description similarity as a fallback when suggestedFix is empty, or adjust the early-return condition to account for missing suggestedFix."
+        },
+        {
+          "id": "f011",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 860,
+          "endLine": 870,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Attachment loop bound uses clusters.length which changes during iteration",
+          "description": "The outer loop `for (let round = 0; round < Math.min(clusters.length, CORROBORATED_MAX_ATTACHMENT_ROUNDS); round++)` uses `clusters.length` as an upper bound. However, `clusters.length` doesn't change during the loop (clusters are emptied via `candidate.groups = []` but not removed from the array). The `Math.min` with `CORROBORATED_MAX_ATTACHMENT_ROUNDS` (2) bounds it correctly. But the `clusters.filter(cluster => cluster.groups.length > 0)` at line ~920 is needed to clean up emptied clusters. This is correct but the loop bound comment could be clearer.",
+          "suggestedFix": "No code change needed. Consider a comment clarifying that clusters.length is stable and the real bound is CORROBORATED_MAX_ATTACHMENT_ROUNDS."
+        },
+        {
+          "id": "f012",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 893,
+          "endLine": 900,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Tie-breaking in attachment ranking may be too strict",
+          "description": "The tie-breaking condition requires `ranked[0]!.support === ranked[1].support && Math.abs(ranked[0]!.strength - ranked[1].strength) <= CORROBORATED_TIE_EPSILON && ranked[0]!.size === ranked[1].size` to skip the attachment. `CORROBORATED_TIE_EPSILON` is 1e-9, which is extremely tight for floating-point strength values that are sums of similarity scores. Two clusters with strengths differing by 1e-8 would not be considered tied, potentially leading to arbitrary attachments based on floating-point noise.",
+          "suggestedFix": "Consider using a larger epsilon like 0.01 or 0.001 for strength comparison, or document that 1e-9 is intentionally strict."
+        },
+        {
+          "id": "f013",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 355,
+          "endLine": 360,
+          "severity": "important",
+          "category": "tests",
+          "title": "Test fixtures use hardcoded finding data without verifying similarity assumptions",
+          "description": "The test asserts `expect(combinedSimilarity(variants[0]!, variants[1]!)).toBeLessThan(0.3)` to verify the findings are below the normal dedup threshold. However, the three variant findings are constructed with very similar titles (all mention 'icon', 'name', 'match/prefix'). If the `combinedSimilarity` function or `jaccardSimilarity` is later modified, this precondition assertion might fail, breaking the test for the wrong reason. More importantly, there's no test verifying that the findings *would* be merged by the corroborated path specifically (i.e., that `relaxedLocationDuplicate` returns true for them).",
+          "suggestedFix": "Add a direct unit test for `relaxedLocationDuplicate` with these variants to verify the relaxed path triggers. Also consider testing with findings that are clearly above the normal threshold to ensure the corroborated path doesn't interfere with normal dedup."
+        },
+        {
+          "id": "f014",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 355,
+          "endLine": 425,
+          "severity": "important",
+          "category": "tests",
+          "title": "Missing edge case tests for corroborated clustering",
+          "description": "The test suite covers the happy path (3 models merge), the two-model rejection, claim-kind separation, and determinism. Missing edge cases include: (1) empty input to `mergeCorroboratedLocationClusters`, (2) a single finding (no possible corroboration), (3) findings with empty/undefined descriptions and suggestedFix, (4) findings at the exact boundary of `lineWindow`, (5) findings with opposing sentiment that should not merge, (6) more than CORROBORATED_MAX_ATTACHMENT_ROUNDS rounds needed, (7) all findings from the same model::role (should not corroborate), (8) findings in different files that share location lines.",
+          "suggestedFix": "Add tests for: single finding input, empty description/suggestedFix fields, boundary lineWindow values, opposing sentiment blocking, same-model-multiple-roles not counting as distinct reviewers, and cross-file rejection."
+        },
+        {
+          "id": "f015",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 397,
+          "endLine": 420,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Determinism test only checks reversed order, not arbitrary permutations",
+          "description": "The determinism test reverses the review array and checks the output signature matches. However, with 3 elements, there are 6 permutations. Reversal only tests one specific reordering. A more thorough test would check multiple random permutations or all permutations for small inputs.",
+          "suggestedFix": "For 3 elements, test all 6 permutations: `const perms = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]]; for (const perm of perms) { expect(signature(perm.map(i => reviews[i]))).toEqual(signature(reviews)); }`"
+        },
+        {
+          "id": "f016",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 72,
+          "endLine": 80,
+          "severity": "minor",
+          "category": "tests",
+          "title": "miningProxyOvermerged test throws Error for missing mustStaySeparate",
+          "description": "When `c.expected.miningProxyOvermerged` is true but `mustStaySeparate` is undefined, the test throws a raw `Error` with a message. This is a test-fixture validation check, but using `throw new Error` inside a test body is unusual. It would be clearer to use a `beforeAll` or `beforeEach` validation, or to use `expect(...).toBeDefined()` with a descriptive message. Also, the `continue` statement after the two `it` blocks means the normal merge test is skipped for overmerged cases, which is correct but subtle.",
+          "suggestedFix": "Consider using `expect(c.expected.mustStaySeparate).toBeDefined()` as a guard, or validate the corpus structure in a `beforeAll` block."
+        },
+        {
+          "id": "f017",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 86,
+          "endLine": 95,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Consensus score check uses division that could be misleading",
+          "description": "The test checks `pairs.size / c.expected.successfulReviews < DEFAULT_THRESHOLDS.minConsensusScore` to verify separated concepts are below threshold. However, `pairs.size` counts distinct `model::role` strings in the group, while `successfulReviews` is the total number of reviews. If a group has members from the same model::role pair, `pairs.size` undercounts. The test assumes each member has a unique model::role, which may not always hold after the new merging logic combines groups.",
+          "suggestedFix": "Verify that the denominator should be `successfulReviews` or the actual number of reviews that produced findings in this group. Add a comment explaining the expected relationship."
+        },
+        {
+          "id": "f018",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 745,
+          "endLine": 750,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "connectedComponents inner function captures mutable inCore and adjacency",
+          "description": "The `connectedComponents` function is defined inside `agreementClusters` and captures `inCore`, `adjacency`, and `groups` from the enclosing scope. It's called twice: once with `wantedCore=true` and once with `wantedCore=false`. Between these calls, `adjacency` is mutated (edges between different communities are removed at lines ~740-743). This is intentional but the mutation happens before both calls, so both calls see the pruned adjacency. The 2-core peeling also mutates `degree` and `inCore`. This is correct but makes the function hard to reason about and test in isolation.",
+          "suggestedFix": "Consider extracting `connectedComponents` to a standalone function that takes explicit parameters, or add a detailed comment about the mutation ordering."
+        },
+        {
+          "id": "f019",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 1035,
+          "endLine": 1045,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "collapseSameReviewer called twice on potentially merged groups",
+          "description": "In the original code, `collapseSameReviewer` was called once per coherent group. In the new code, `mergeCorroboratedLocationClusters` may merge multiple strict groups, and then `collapseSameReviewer` is called again on the merged result at line ~1040. If `collapseSameReviewer` is not idempotent or if the merged group contains findings that were already collapsed, this could produce unexpected results. Specifically, if two strict groups each had their same-reviewer findings collapsed, and then the groups are merged, the merged group might have findings from the same reviewer that weren't collapsed together in the first pass.",
+          "suggestedFix": "Verify that `collapseSameReviewer` is idempotent and handles the case where input already contains collapsed groups. The second call at line ~1040 should handle this correctly if it processes all members, but add a test for this scenario."
+        },
+        {
+          "id": "f020",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 370,
+          "endLine": 380,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Two-reviewer rejection test doesn't verify the strict path still works",
+          "description": "The test 'does not treat only two reviewer assignments as corroboration' verifies that two findings from two different models remain separate. However, it doesn't verify that these findings would also fail the normal (strict) dedup path. If the findings happen to be similar enough for strict dedup, the test would pass for the wrong reason (they'd be merged by strict dedup, then the test would fail). The test should also assert that `combinedSimilarity` is below the strict threshold, similar to the first test.",
+          "suggestedFix": "Add `expect(combinedSimilarity(variants[0]!, variants[1]!)).toBeLessThan(jaccardThreshold)` to verify the findings are below the strict threshold and the test is specifically exercising the corroborated path rejection."
+        }
+      ],
+      "durationMs": 140504,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "dx-critic",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 488,
+          "endLine": 488,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Interpolating optional description string produces false 'undefined' anchor tokens",
+          "description": "In `attachmentEvidence`, `${singleton.finding.description}` is interpolated directly into a template literal. If `description` is `undefined`, JS template string conversion converts it to the literal string `\"undefined\"`. `corroborationTokens` then extracts `\"undefined\"` as a token because it is longer than 1 character and not present in `CORROBORATION_STOPWORDS`. As a result, any findings with undefined descriptions will falsely share `'undefined'` as a semantic anchor token.",
+          "suggestedFix": "`${singleton.finding.title} ${singleton.finding.description ?? ''} ${singleton.finding.suggestedFix ?? ''}`"
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 570,
+          "endLine": 573,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Incomplete sort comparator in splitCompatibleChains can lead to non-deterministic results",
+          "description": "The sort comparator in `splitCompatibleChains` compares `file`, `startLine`, `endLine`, and `title`. When two findings share identical values for these four fields, the comparator returns `0`. Because array sorting preserves input relative order for equal elements, the order of clusters depends on the initial ordering of `component`. If input reviews arrive in a different order, the resulting cluster chains may differ.",
+          "suggestedFix": "return left.file.localeCompare(right.file) ||\n  left.startLine - right.startLine ||\n  left.endLine - right.endLine ||\n  left.title.localeCompare(right.title) ||\n  left.id.localeCompare(right.id);"
+        }
+      ],
+      "durationMs": 58617,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "architecture",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 447,
+          "endLine": 480,
+          "severity": "important",
+          "category": "best-practices",
+          "title": "Domain-specific claim heuristics embedded in generic deduper",
+          "description": "compatibleClaimKinds hardcodes production-corpus patterns (Elixir @spec/typespec, N+1/unbounded query, global log capture) directly into the shared consensus dedup path. That couples a generic clustering module to particular ecosystems and to RCL-17 incident wording; new false merges/splits will require code changes instead of configuration or pluggable classifiers, and unrelated repos inherit Elixir/log-capture special cases.",
+          "suggestedFix": "Move claim-kind signals behind a data-driven strategy (config, taxonomy tags on findings, or an injectable ClaimKindClassifier). Keep the deduper responsible only for “kinds must be compatible,” not for the specific regex inventory."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 392,
+          "endLine": 1020,
+          "severity": "important",
+          "category": "best-practices",
+          "title": "Large corroborated-clustering algorithm added to an already dense module",
+          "description": "Roughly 600 lines of weighted Louvain, 2-core peeling, anchor merging, and fringe attachment were inlined into deduper.ts. This concentrates multiple independent algorithms, constants, and graph mutations in one module, making boundary testing hard (communities vs attachment vs claim filters) and increasing regression risk when tuning one stage.",
+          "suggestedFix": "Extract a dedicated module (e.g. corroboratedLocationClusters.ts) exporting mergeCorroboratedLocationClusters plus pure helpers (relaxedCommunities, agreementClusters, attachmentEvidence). Add focused unit tests per stage with fixture graphs."
+        },
+        {
+          "id": "f003",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 700,
+          "endLine": 730,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Louvain pass is only phase-1 local moving",
+          "description": "relaxedCommunities runs a bounded first-phase weighted Louvain (local label moves) without the aggregation/second phase or community-id compression. Abandoned community labels can remain as empty attractors, and partitions can stop at a coarser local optimum. For corroboration boundaries this may under-merge communities that a full Louvain pass would join, leaving true duplicates split unless later anchor/attachment stages compensate.",
+          "suggestedFix": "Either rename/document this as “modularity-greedy local moving” (not full Louvain), or add an aggregation phase and relabel communities to dense ids after each pass. Add graph fixtures where phase-1 alone fails but full Louvain succeeds."
+        },
+        {
+          "id": "f004",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 618,
+          "endLine": 636,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "CORROBORATED_MIN_DENSITY is nearly inert under 2-core",
+          "description": "Corroboration requires a 2-core of the relaxed graph. In a simple undirected graph every 2-core has minimum degree ≥ 2, so any core with ≥3 nodes already has edge density ≥ 2/n and typically well above 0.2 (a 3-node core must be a triangle, density 1). Combined with CORROBORATED_MIN_REVIEWERS = 3, the density threshold rarely rejects anything the 2-core did not already reject, which makes the constant misleading as a tunable over-merge control.",
+          "suggestedFix": "Drop the density check, or redefine density after peeling using only core-induced edges and calibrate it on graphs that can fail it (or switch to a stronger structural metric such as average edge weight or conductance)."
+        },
+        {
+          "id": "f005",
+          "file": "test/fixtures/undermerge-corpus/ao-7467-r1-nilable-decimal-spec.json",
+          "startLine": 17,
+          "endLine": 28,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Negative corpus case still carries positive-merge expectations",
+          "description": "ao-7467-r1 sets miningProxyOvermerged/mustStaySeparate but still leaves clearsThresholdIfMerged: true, agreementRatioIfMerged: 0.444, and mixed memberTitles from both concepts. undermerge-corpus.test.ts skips the merge assertions when the flag is set, so the stale fields are dead and contradictory documentation for anyone reading the fixture alone.",
+          "suggestedFix": "Clear or rewrite positive-merge fields for the negative case (e.g. clearsThresholdIfMerged: false, agreementRatioIfMerged: null, memberTitles split per concept or removed) so the fixture is self-consistent."
+        },
+        {
+          "id": "f006",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 80,
+          "endLine": 98,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Secondary negative test locks both concepts below threshold",
+          "description": "The test titled “separated concepts retain their independent agreement” actually asserts each separated group’s reviewer-pair ratio is strictly below DEFAULT_THRESHOLDS.minConsensusScore. That freezes “both concepts are unactionable when split” rather than only “they must not share a group.” If fixture membership is later corrected so one real concept legitimately clears consensus, this assertion fails even though separation is correct. It also uses DEFAULT_THRESHOLDS instead of c.expected.minConsensusScore.",
+          "suggestedFix": "Keep the mustStaySeparate identity assertion as the primary guard. If you need a score check, assert against c.expected and document expected per-concept ratios explicitly, or assert only that the over-merged combined group does not appear—not that both sides stay forever below threshold."
+        },
+        {
+          "id": "f007",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 560,
+          "endLine": 575,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Heavy non-null assertions on Map/array lookups",
+          "description": "relaxedEdgeDensity and the graph construction path repeatedly use indexes.get(...)! and adjacency[i]! without narrowing. Reference-keyed Maps are correct only while callers pass the original group object identities; a future transform that copies inner groups would turn these into runtime undefined index accesses.",
+          "suggestedFix": "Helper getters that throw descriptive errors on missing index/edge entries, or store numeric ids on groups up front and index by id instead of object identity."
+        }
+      ],
+      "durationMs": 363559,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "bug-hunter",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 566,
+          "endLine": 566,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Louvain node-removal state never restored when node stays in community",
+          "description": "In relaxedCommunities, `communityDegrees[current] -= degrees[index]` removes the node's degree from its current community before evaluating candidates, and `communityDegrees[best] += degrees[index]` re-adds it after. However, the initial `bestGain` is computed against the already-decremented `communityDegrees[current]`, while candidate loop also includes `current` in `candidates` and recomputes its gain identically — this is fine. The real issue: `labels[index] = best` is assigned unconditionally, but `weightByCommunity` is built from neighbor labels that can include stale community IDs after prior merges within the same pass; more importantly, `degrees[index] === 0` nodes are skipped entirely, so their communityDegrees contributions are never re-evaluated, and if all nodes are skipped the singleton labels stand — acceptable. The concrete bug is subtler: since `candidates` includes `current`, `bestGain` is computed twice for `current` (once as initialization, once in the loop) with the tie-break `candidate < best`; because `best` is initialized to `current`, a candidate with equal gain and lower index will replace it, but a candidate with equal gain evaluated when `best` has already moved to a lower index cannot be compared against communities not in `weightByCommunity`. This makes label assignment order-dependent across passes rather than deterministic in all cases.",
+          "suggestedFix": "Initialize `best = current; bestGain = -Infinity` and let the candidate loop (which already includes `current`) compute all gains uniformly, keeping the deterministic `candidate < best` tie-break."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 690,
+          "endLine": 704,
+          "severity": "important",
+          "category": "correctness",
+          "title": "relaxedEdgeDensity uses adjacency mutated by community/2-core filtering with pre-split groups",
+          "description": "In agreementClusters, `indexes` maps the original group array references to indices, and `adjacency` is mutated (edges removed) by the community filter. Later, `coreClusters` are built from components that were run through `splitCompatibleChains`, which re-sorts and partitions groups. `relaxedEdgeDensity(component, indexes, adjacency)` is then computed on the split sub-cluster. Because the density is computed over the split component's size but the adjacency still reflects edges to groups that were split into other sub-clusters, an incompatible-claims split can leave a sub-cluster whose internal edges were removed only by community filtering — edges between now-separated sub-clusters are still present in `adjacency` and counted only when both endpoints are in the same component, so density can be understated for legitimately corroborated splits (edges to split-away peers no longer count toward the denominator's numerator), causing a corroborated cluster to be misclassified as uncorroborated.",
+          "suggestedFix": "Recompute relaxed edges among the members of each split component directly (via relaxedLocationWeight) instead of consulting the pre-split adjacency structure."
+        },
+        {
+          "id": "f003",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 806,
+          "endLine": 812,
+          "severity": "important",
+          "category": "correctness",
+          "title": "2-core peeling decrements degree of already-removed neighbors' peers incorrectly",
+          "description": "The peeling loop iterates `for (const neighbor of adjacency[index]!)` and decrements `degree[neighbor]` only when `inCore[neighbor]` is still true. However, when a node is enqueued multiple times (a node's degree can drop below 2 while it is already in the queue from an earlier decrement), the `if (!inCore[index]) continue;` guard handles re-processing. The actual bug: `degree` is initialized from `adjacency` AFTER community-edge deletion, but the deletion loop `adjacency[i]!.delete(j)` removes only the i→j direction when iterating `adjacency[i]`; since both directions are checked (`communities[i] !== communities[j]` is symmetric and both i and j iterate), symmetry holds. What does not hold: nodes with degree exactly 0 (isolated singletons) are enqueued and marked `inCore=false`, then reported as fringe components — intended. No functional issue found here on closer inspection of symmetry; however, a node appearing twice in `queue` after `inCore` was already set false is skipped, so the loop is safe. Downgrading: the real risk is that `degree[neighbor]!--` can push a neighbor into the queue multiple times, growing `queue` unboundedly relative to node count is bounded by edge count — acceptable. This finding flags the fragility for maintainers: duplicate queue entries make `queue.length` up to O(E), and the loop relies on the `inCore` guard for correctness.",
+          "suggestedFix": "Guard enqueueing with a check that the neighbor is not already queued below the threshold, or track queued state explicitly for clarity."
+        },
+        {
+          "id": "f004",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 758,
+          "endLine": 762,
+          "severity": "important",
+          "category": "correctness",
+          "title": "indexes Map keyed by array reference breaks after splitCompatibleChains re-sorts",
+          "description": "`agreementClusters` reassigns `groups = [...groups].sort(...)` at the top, then builds `indexes` from the sorted copies. `splitCompatibleChains` creates `ordered = [...component].sort(...)` — this preserves the inner group array references, so `indexes.get(...)` lookups still succeed. However, `relaxedEdgeDensity` calls `indexes.get(groups[i]!)!` with a non-null assertion; if any code path ever passes a group array not present in the map (e.g., after `collapseSameReviewer` produces new arrays upstream, or a future refactor clones groups), this throws or silently yields `adjacency[undefined]`. Currently `adjacency[indexes.get(...)!]!` with an undefined index would throw a TypeError at runtime. This is a latent crash bug hidden by non-null assertions with no validation.",
+          "suggestedFix": "Avoid non-null assertions: look up indices defensively and throw a descriptive error, or compute density directly from the group members without the identity-keyed map."
+        },
+        {
+          "id": "f005",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 838,
+          "endLine": 852,
+          "severity": "important",
+          "category": "correctness",
+          "title": "attachmentEvidence with empty supporters yields Math.min of empty array = Infinity guard missing",
+          "description": "In mergeCorroboratedLocationClusters, `supports = evidence.map(item => item.support)` and `support: Math.min(...supports)`. If `candidateMembers` is non-empty this is fine, but the code guards `candidateMembers.length === 0` with `continue` before mapping — however `evidence` is computed per candidate member against the target, and if `candidateMembers` were empty (guarded) Math.min() would return Infinity, passing the `support >= CORROBORATED_ATTACHMENT_SUPPORT` filter and attaching an empty candidate. The guard exists, but after attachments are applied (`candidate.groups = []`), emptied candidates remain in `clusters` for subsequent rounds. In the next round, `candidateMembers.length === 0` skips them — OK. The actual issue: an emptied candidate cluster remains in `clusters` and is passed as a potential `target` in `.filter((target) => ... target.corroborated ...)`; emptied candidates are never corroborated so they're excluded. However, emptied clusters ARE still passed to the final `mergeAnchoredCommunities` only after filtering `groups.length > 0` — OK. Net remaining bug: `strength: evidence.reduce(...)` sums strengths even from members whose individual support is 0 (evidence returns {support:0, strength:0} — strength is 0 in that path, fine) — but attachmentEvidence can return support 0 with nonzero strength? No: strength is derived from supporters which is empty when returning early. The genuine defect here: when `anchorCount === 1 && supporters.size < CORROBORATED_SINGLE_ANCHOR_SUPPORT`, support is zeroed but `strength` still sums the supporters' similarities, inflating the ranked `strength` tie-breaker for a candidate that should contribute nothing.",
+          "suggestedFix": "When support is forced to 0 for the single-anchor case, also return strength 0: `if (anchorCount === 1 && supporters.size < CORROBORATED_SINGLE_ANCHOR_SUPPORT) return { support: 0, strength: 0 };`"
+        },
+        {
+          "id": "f006",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 899,
+          "endLine": 906,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Batched attachments can attach the same candidate cluster to targets that were themselves attached",
+          "description": "Attachments are collected against a frozen snapshot, then applied in a loop: `target.groups.push(...candidate.groups); candidate.groups = [];`. If cluster A is scheduled to attach to cluster B, and cluster B (uncorroborated clusters are the only candidates, but B could be a candidate while also being a target only if corroborated — candidates are non-corroborated, targets are corroborated, so A→B where B is also a candidate is impossible). However, two different candidates C1 and C2 can attach to the same target T; that is fine. The real hazard: a candidate can appear as `candidate` in one attachment while its `groups` array reference was captured in `ranked` computations of others — after `candidate.groups = []` the earlier `target.groups.push(...candidate.groups)` uses the pre-emptied array only if apply order matches collection order. Since apply is sequential and each candidate appears at most once, the specific bug is order-sensitivity between rounds: round 2 recomputes over mutated state, but the loop bound `Math.min(clusters.length, CORROBORATED_MAX_ATTACHMENT_ROUNDS)` uses clusters.length which includes emptied clusters, harmless. Minor but real: emptied candidate clusters remain in `clusters` and are still iterated as candidates each round (guarded), and `mergedClusters` filtering happens only at the end — the intermediate rounds' `clustersShareFile` on emptied groups compares two empty file sets (`filesA.size === filesB.size` → 0 === 0 → true) making `clustersShareFile` return true for empty candidates against any target with empty... no, target is corroborated and non-empty. Empty candidate: filesA is empty set, filesB non-empty → sizes differ → false. Guarded by candidateMembers.length check anyway. Downgraded to the ordering-sensitivity concern within mergeAnchoredCommunities calls.",
+          "suggestedFix": "Filter emptied clusters between rounds (`clusters = clusters.filter(c => c.groups.length > 0)`) to keep round semantics clear and avoid subtle empty-collection edge cases."
+        },
+        {
+          "id": "f007",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 672,
+          "endLine": 686,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "mergeAnchoredCommunities mutates shared AgreementCluster objects across calls",
+          "description": "mergeAnchoredCommunities mutates `target.groups` in place and is called twice: once inside agreementClusters and once at the end of mergeCorroboratedLocationClusters on the same cluster objects. Because clusters are shared mutable objects, the second call operates on state already mutated by attachment rounds. Additionally, `remaining.sort(compareAgreementClusters)` is re-invoked after every merge inside the while loop, and `agreementClusterKey` depends on `chooseRepresentative` of the merged flat member list — the key of a merged cluster changes after each merge, so the `outer:` restart pattern re-sorts and rescans from scratch. This is O(n³ log n) worst case and, more importantly, the merged flag `corroborated` of the absorbed candidate is discarded: merging two corroborated clusters keeps target.corroborated true (fine), but if a fringe (non-corroborated) cluster was merged into groups via attachment, the final flatten treats the whole cluster as corroborated and collapses fringe members into the representative group — which appears intentional, but is undocumented and worth an explicit comment/test.",
+          "suggestedFix": "Document or assert the mutation contract; consider returning new cluster objects instead of mutating shared state between the two mergeAnchoredCommunities invocations."
+        },
+        {
+          "id": "f008",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 452,
+          "endLine": 464,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "compatibleClaimKinds tests only titles for contract patterns, not descriptions",
+          "description": "TYPE_CONTRACT_PATTERN and the other regexes are applied to `a.title` / `b.title` only. A finding titled generically (e.g., 'Return value not fully typed') whose description says '@spec omits nil' will be classified as non-contract and can bridge into a runtime-nil cluster via the relaxed path — exactly the over-merge the guard is meant to prevent. The corpus test happens to pass because all typespec fixtures mention '@spec', 'typespec', or 'return type' in the title, but production titles are not guaranteed to.",
+          "suggestedFix": "Apply the contract-kind regexes to `${finding.title} ${finding.description}` (or title + first sentence of description) rather than title alone."
+        },
+        {
+          "id": "f009",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 573,
+          "endLine": 578,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Number.EPSILON is an inappropriate tolerance for modularity gain comparison",
+          "description": "The gain comparison uses `gain > bestGain + Number.EPSILON` and `Math.abs(gain - bestGain) <= Number.EPSILON`. Number.EPSILON (~2.2e-16) is the spacing of doubles near 1.0; gains here are sums/quotients of weights and can be much larger or smaller in magnitude, so the epsilon is effectively meaningless for values away from 1 (either always or never within tolerance). The module already defines CORROBORATED_TIE_EPSILON = 1e-9 for a similar purpose but doesn't use it here, so two mathematically-equal gains computed in different orders may fail the tie check and produce order-dependent community labels, undermining the determinism the test asserts.",
+          "suggestedFix": "Use a relative tolerance or the existing CORROBORATED_TIE_EPSILON: `if (gain > bestGain + CORROBORATED_TIE_EPSILON || (Math.abs(gain - bestGain) <= CORROBORATED_TIE_EPSILON && candidate < best))`."
+        },
+        {
+          "id": "f010",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 1035,
+          "endLine": 1046,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Double collapseSameReviewer may pick different representative than strict path",
+          "description": "collapseSameReviewer is applied once when building strictGroups and again after mergeCorroboratedLocationClusters. If the corroborated merge combines groups that each already collapsed the same reviewer (same model::role appearing in two merged groups), the second collapse must pick one member — the result depends on collapseSameReviewer's internal selection. This double-collapse changes which finding text survives for the representative compared to a single-pass collapse over all raw members, and can drop distinct findings from the same reviewer that were legitimately separate concepts pre-merge. If a merge is later judged wrong, the dropped member is unrecoverable in the output.",
+          "suggestedFix": "Collapse same-reviewer members only once, after the corroborated merge, or verify collapseSameReviewer is idempotent and order-independent with a test."
+        },
+        {
+          "id": "f011",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 611,
+          "endLine": 625,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "conceptAnchors support threshold can exceed available reviewers for small clusters",
+          "description": "`support = Math.max(2, Math.ceil(reviewerCount * 0.4))`. For a 2-reviewer cluster, support = 2, meaning both reviewers must share the token — reasonable. But for reviewerCount = 1 (a fringe singleton cluster passed through mergeAnchoredCommunities or attachmentEvidence's conceptAnchors call on small clusters), support = 2 > 1, so anchors are always empty and `targetAnchors.size === 0` silently disables merging/attachment. In attachmentEvidence, an empty targetAnchors set means anchorCount is always 0 and every singleton attachment against small targets returns {0,0}. Since attachment targets must be corroborated (≥3 reviewers) this may be unreachable today, but mergeAnchoredCommunities is also invoked on fringe clusters where 1-reviewer clusters are common — those silently never merge via anchors, which may be intended but is not documented.",
+          "suggestedFix": "Document that single-reviewer clusters cannot produce anchors, or clamp support to reviewerCount when appropriate."
+        },
+        {
+          "id": "f012",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 434,
+          "endLine": 441,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "corroborationFieldSimilar with two shared underscore-only tokens contradicts its comment",
+          "description": "The comment states 'A shared code identifier alone is only evidence that findings discuss the same function, not the same defect', yet the return allows `shared.length >= 2` where both shared tokens may be underscore identifiers (e.g., `trigger_label` and `column_name`). Two findings about two different defects in the same function that both reference the function name and a shared field name will pass this check, weakening the guard the comment claims. This is a logic/documentation mismatch that affects merge behavior.",
+          "suggestedFix": "Require at least one non-identifier token among shared tokens, or count underscore identifiers as at most one unit of evidence: `shared.some(t => !t.includes('_')) || shared.filter(t => !t.includes('_')).length + Math.min(1, shared.filter(t => t.includes('_')).length) >= 2`."
+        },
+        {
+          "id": "f013",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 497,
+          "endLine": 510,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "relaxedLocationWeight recomputes similarity metrics already computed in the predicate",
+          "description": "relaxedLocationWeight calls relaxedLocationDuplicate (which computes jaccardSimilarity on titles and both field similarities) and then recomputes all three metrics. In agreementClusters this runs inside an O(n²) pairwise loop and again inside groupsRelaxedWeight's nested loops and mergeAnchoredCommunities' hasCrossEdge — the redundant tokenization is a measurable hot spot for large finding sets.",
+          "suggestedFix": "Compute the three similarities once and derive both the boolean predicate and the weight from the same values; consider memoizing tokenization per finding."
+        },
+        {
+          "id": "f014",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 530,
+          "endLine": 543,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "groupsShareLocation on empty groups vacuously returns true",
+          "description": "`a.every(...)` over an empty array returns true, so an empty group 'shares location' with anything, and clustersAreCompatible/clustersClaimsAreCompatible are likewise vacuously true for empty clusters. After attachment rounds set `candidate.groups = []`, emptied clusters flow into the final mergeAnchoredCommunities call only after a `groups.length > 0` filter, so today this is guarded — but the vacuous-truth behavior is a trap: any future caller passing an emptied cluster to clustersAreCompatible will get spurious compatibility and could merge unrelated clusters.",
+          "suggestedFix": "Return false (or throw) from groupsShareLocation/clustersAreCompatible when either side is empty."
+        },
+        {
+          "id": "f015",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 640,
+          "endLine": 644,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "agreementClusterKey line-number padding breaks for negative or >10-digit lines",
+          "description": "`String(finding.startLine).padStart(10, '0')` produces lexicographically incorrect ordering for negative line numbers (the '-' sorts before digits inconsistently, e.g. '-000000001' vs '0000000002') and for pathological values exceeding 10 digits. Line numbers should never be negative, but there is no validation upstream in this diff; a defensive clamp or numeric comparison would remove the assumption.",
+          "suggestedFix": "Compare numerically in compareAgreementClusters instead of encoding numbers into a string key."
+        },
+        {
+          "id": "f016",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 59,
+          "endLine": 90,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing mustStaySeparate throws inside test instead of failing fixture validation",
+          "description": "When `miningProxyOvermerged` is set without `mustStaySeparate`, the test throws an Error mid-test after already running deduplicateFindings. This reports as a test failure with a generic message rather than a clear fixture-validation error, and the same check is duplicated in both tests. A malformed fixture is a corpus authoring error that should fail fast in a dedicated validation step (like the fixture sanity checks presumably at the top of the file).",
+          "suggestedFix": "Validate the fixture shape once when loading the corpus (before the describe blocks), or use a type-level discriminated union so miningProxyOvermerged implies mustStaySeparate."
+        },
+        {
+          "id": "f017",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 105,
+          "endLine": 112,
+          "severity": "minor",
+          "category": "tests",
+          "title": "excludedTitles asserted absent from holding group but not asserted present elsewhere",
+          "description": "The positive-case assertion checks `heldTitles` does not contain each excluded title, but never asserts the excluded finding exists in the output at all. If dedup dropped an excluded finding entirely (a different bug), the test would still pass, silently weakening the over-merge guard. The later ao-7536-specific test does assert existence via `expect(excludedGroup).toBeDefined()`, but only for that one case.",
+          "suggestedFix": "In the generic positive-case test, also assert each excluded title appears in some group: `expect(groups.some(g => g.members.some(m => m.finding.title === excluded))).toBe(true)`."
+        },
+        {
+          "id": "f018",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 875,
+          "endLine": 890,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Attachment requires every candidate member to support the target (Math.min), including zero-evidence members",
+          "description": "`support: Math.min(...supports)` requires every member of a multi-member fringe component to independently clear the attachment evidence bar. A fringe component of two findings where one is a strong match and the other a weak paraphrase (support 0) will never attach, even though the comment says multi-member components are absorbed 'when every member supports the same target'. That is consistent with the comment, but combined with the tie-skip logic (`continue` when ranked[0] and ranked[1] tie on support, strength, and size), a legitimate attachment can be silently skipped forever since rounds are capped at 2 and ties are re-evaluated against nearly identical state each round. There is no logging or telemetry for skipped attachments, making production tuning of the calibrated thresholds blind.",
+          "suggestedFix": "Emit debug telemetry (or return diagnostics) for skipped attachments due to ties or min-support failures, to make threshold calibration observable."
+        },
+        {
+          "id": "f019",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 419,
+          "endLine": 427,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "corroborationTokens filters tokens of length 1, dropping meaningful single-char identifiers",
+          "description": "`token.length > 1` drops single-character tokens. For most prose this is right, but code identifiers like `i`, `n` in 'n + 1' contexts are dropped — note PERFORMANCE_CONTRACT_PATTERN explicitly matches 'n + 1', so the token filter and the regex disagree about whether such fragments carry signal. Harmless today since the patterns run on raw text, but worth a comment to prevent future unification from changing behavior.",
+          "suggestedFix": "Add a brief comment noting the intentional divergence between regex-based claim-kind detection (raw text) and token-based similarity (filtered tokens)."
+        }
+      ],
+      "durationMs": 118147,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "accessibility-auditor",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 673,
+          "endLine": 686,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Community optimization omits the singleton-community option",
+          "description": "After removing a node from its current community, the Louvain step only considers neighboring community labels and the node's previous label. If reinserting it into every considered community has negative gain, leaving it in a new singleton community has gain zero and is the correct choice, but that option is unavailable. The implementation can therefore retain a weak bridge in an existing community or move it to a less-negative community, undermining the community boundary intended to prevent unrelated findings from being merged.",
+          "suggestedFix": "Include a fresh singleton community as a zero-gain candidate after removing each node. Select another community only when its insertion gain exceeds zero; otherwise assign the node to the singleton label. Maintain the new label's degree in `communityDegrees`, preferably using a map or dynamically allocated label."
+        }
+      ],
+      "durationMs": 81324,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "project-rules",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 429,
+          "endLine": 432,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "corroborationFieldSimilar contradicts its own identifier guard",
+          "description": "The comment states 'A shared code identifier alone is only evidence that findings discuss the same function, not the same defect within that function', and the code enforces this via `shared.some((token) => !token.includes('_'))`. However the fallback `|| shared.length >= 2` allows two shared tokens that both contain underscores (e.g. `trigger_label` and `column_name`) to establish a semantic edge purely on shared identifiers. Two findings about different defects in the same function will typically share multiple identifier tokens, so this fallback re-opens exactly the false-edge path the comment says must be prevented. Either drop the `shared.length >= 2` clause or filter underscore tokens from it.",
+          "suggestedFix": "return shared.some((token) => !token.includes('_')); // or: shared.filter(t => !t.includes('_')).length >= 1 || shared.length >= 2 with at least one non-identifier token"
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 596,
+          "endLine": 612,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Louvain gain comparison uses stale weightByCommunity for current community",
+          "description": "In relaxedCommunities, weightByCommunity is built from neighbor labels before the node is removed from its community, which is correct, but the initial bestGain for `current` is computed with `(weightByCommunity.get(current) ?? 0)` while candidate gains reuse the same map. If the node has a self-referential label collision (label equals its own index and a neighbor also carries that label index after prior moves), the weight to 'current' can include edges to nodes that have since moved out, because labels are node indices and community identity is not tracked separately. This is a known fragility of label-as-index Louvain: after node X moves into community Y, communityDegrees is keyed by label but weightByCommunity for later nodes aggregates by current labels, so it stays consistent — however isolated nodes (degree 0) are skipped and never re-labeled, leaving singleton labels that later nodes can join based on a communityDegrees entry that only reflects the isolated node's zero degree. Joining a zero-degree 'community' label gives gain 0 - 0 = 0 and can tie with the current community, with the tie broken by smaller label index, causing non-obvious label churn. Consider filtering candidate labels to communities with positive degree or explicitly excluding degree-0 labels.",
+          "suggestedFix": "Skip candidates whose communityDegrees[candidate] === 0 when candidate !== current, or relabel communities compactly after each pass."
+        },
+        {
+          "id": "f003",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 142,
+          "endLine": 150,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Non-null assertion c! bypasses strict null checks",
+          "description": "The over-merge guard test uses `c!.expected.excludedTitles` with a non-null assertion. Per the project's TypeScript review conventions ('non-null assertions (!) without validation'), this should be guarded — if the corpus lookup fails the test would crash with an unhelpful TypeError instead of a clear assertion message.",
+          "suggestedFix": "Add `expect(c).toBeDefined()` (or an early throw) before dereferencing, then use `c.expected` directly."
+        },
+        {
+          "id": "f004",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 364,
+          "endLine": 364,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Test hard-codes combinedSimilarity threshold coupling",
+          "description": "`expect(combinedSimilarity(variants[0]!, variants[1]!)).toBeLessThan(0.3)` hard-codes the current strict-threshold value (0.3) as a magic number. If the strict jaccardThreshold is retuned, this precondition assertion silently becomes meaningless or fails for the wrong reason. Reference the threshold constant or add a comment tying 0.3 to the strict dedup threshold.",
+          "suggestedFix": "Import the threshold constant used by deduplicateFindings and assert against it, e.g. toBeLessThan(jaccardThreshold)."
+        }
+      ],
+      "durationMs": 400942,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "spec-compliance",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600011,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600007,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "dead-code",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 71099,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "dependency-hygiene",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600008,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "edge-case-hunter",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 508,
+          "endLine": 512,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Louvain community-degree indexing assumes labels are valid array indexes",
+          "description": "In relaxedCommunities, `communityDegrees` is indexed by community label (`communityDegrees[current]`, `communityDegrees[candidate]`). Labels start as node indexes so this works initially, but as nodes move between communities, labels remain within [0, count) so array bounds hold. However, when a node moves out of community X and X becomes empty, `communityDegrees[X]` may become a small residual and later comparisons against that stale empty community can produce spurious gains, plus floating-point subtraction can leave tiny negative residues in `communityDegrees` that bias tie-breaking. More importantly, the algorithm never renumbers labels, so the deterministic tie-break `candidate < best` depends on the arbitrary initial ordering of groups; combined with the pre-sort by `agreementClusterKey` this is deterministic, but if two findings share identical file/lines/title, the key falls back to `finding.id`, which is model-generated and not guaranteed unique across reviews — identical keys would make ordering (and thus community assignment) depend on input array order.",
+          "suggestedFix": "Clamp `communityDegrees` values at 0 after removal, and include a guaranteed-unique component (e.g., the TaggedFinding's model::role) in agreementClusterKey so sorting is a total order independent of input order."
+        },
+        {
+          "id": "f002",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 546,
+          "endLine": 552,
+          "severity": "important",
+          "category": "correctness",
+          "title": "conceptAnchors support threshold uses reviewer count of the whole cluster",
+          "description": "`support = Math.max(2, Math.ceil(reviewerCount * 0.4))` scales with cluster size, but `distinctReviewers(groups)` counts reviewers in the cluster being anchored. For a singleton fringe cluster (1 reviewer), support floor is 2, so conceptAnchors of a singleton is always empty (a single reviewer can never supply 2 distinct reviewer assignments per token). This means `mergeAnchoredCommunities` can never merge a fringe singleton via anchors (`targetAnchors.size === 0 || candidateAnchors.size === 0` always short-circuits), and in `attachmentEvidence` only the target's anchors matter — but any two-member fringe cluster where both members are the same model::role also yields zero anchors. If that's intended (single-reviewer clusters shouldn't self-corroborate), it deserves a comment; otherwise fringe merging silently never happens for these cases.",
+          "suggestedFix": "Either document that single-reviewer clusters intentionally produce no anchors, or lower the floor to 1 for clusters with fewer than 2 distinct reviewers if fringe-to-fringe anchor merging is desired."
+        },
+        {
+          "id": "f003",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 858,
+          "endLine": 878,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Simultaneous attachment can attach the same evidence twice and mutate shared targets",
+          "description": "In mergeCorroboratedLocationClusters, all attachments in a round are computed against frozen state and then applied. However, two different candidates may attach to two different targets that are later merged, or a candidate could be chosen as `target` reference while another candidate in the same round attaches into it — the code pushes `candidate.groups` into `target.groups` for each attachment, but if the same `candidate` object appears as a `target` for another attachment (impossible since targets must be corroborated and candidates are not — OK), the real issue is that after `target.groups.push(...candidate.groups)`, the target's anchor set and evidence change, yet subsequent rounds recompute from mutated state as documented. The subtle bug: `candidate.groups = []` empties the candidate, but the candidate cluster object remains in `clusters` and is re-evaluated in the next round with `candidateMembers.length === 0`, which is skipped — fine. The actual defect is `Math.min(...supports)` when `candidateMembers` is empty returns `Infinity`, but that path is guarded. However, if a candidate has multiple members and only some have support, `Math.min` requires EVERY member to individually reach CORROBORATED_ATTACHMENT_SUPPORT — supports of 0 from one member veto the whole component even when the component was formed by transitive weak edges; this is stated as intended in the comment, but `Math.min(...supports)` on a large array can also hit argument-length limits for very large components (spread of thousands of elements).",
+          "suggestedFix": "Use `supports.reduce((m, v) => Math.min(m, v), Infinity)` instead of spreading into Math.min to avoid call-argument limits on large components."
+        },
+        {
+          "id": "f004",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 620,
+          "endLine": 660,
+          "severity": "important",
+          "category": "correctness",
+          "title": "mergeAnchoredCommunities merges corroborated clusters without re-checking density/reviewers",
+          "description": "When two corroborated clusters are merged, the merged cluster keeps `corroborated: true` implicitly (the target's flag), but the merged whole is never re-validated against CORROBORATED_MIN_REVIEWERS or CORROBORATED_MIN_DENSITY. More significantly, after attachment (`mergeCorroboratedLocationClusters` second pass), fringe clusters absorbed into a corroborated target inherit its corroborated status and are flattened into one group at the end — a fringe cluster that never met the 2-core requirement is merged into the final group as full members. That is the design intent for attachment, but in `mergeAnchoredCommunities` two *non-corroborated* clusters are never merged (guarded), while a corroborated + non-corroborated pair is also skipped — only corroborated pairs merge. The gap: the cross-edge check requires only ONE pair with `relaxedLocationWeight > 0` between two clusters that may each contain many groups; a single weak lexical edge between large clusters merges everything, potentially undoing the community split that relaxedCommunities performed on exactly those edges (the anchor+edge test can re-bridge communities that Louvain deliberately separated).",
+          "suggestedFix": "When re-merging communities that Louvain split, require stronger evidence than a single positive-weight edge — e.g., a minimum number of cross edges or a minimum aggregate cross-weight proportional to cluster sizes."
+        },
+        {
+          "id": "f005",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 645,
+          "endLine": 655,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "O(n^2) re-sort inside merge loop; quadratic-times-n behavior on large clusters",
+          "description": "After each merge, `remaining.sort(compareAgreementClusters)` re-sorts the whole array and restarts the outer loop from scratch (`break outer` with `merged = true`). Each merge costs O(n log n) sort plus O(n^2) pair scanning with expensive `clustersAreCompatible` (which is itself O(members^4) via nested every/every/every/every). With many findings at the same location this can become a noticeable hot spot. Also, `agreementClusterKey` is recomputed via `chooseRepresentative` on every comparison during sort.",
+          "suggestedFix": "Cache cluster keys, only re-insert the merged cluster at its sorted position, and continue scanning rather than restarting the full O(n^2) pass after each merge."
+        },
+        {
+          "id": "f006",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 466,
+          "endLine": 470,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Regex patterns are anchored to English keywords and miss common synonyms",
+          "description": "TYPE_CONTRACT_PATTERN matches '@spec', 'typespec(s)', 'return type' but not 'spec is too narrow', 'dialyzer', 'type signature', or 'return value type'. PERFORMANCE_CONTRACT_PATTERN matches 'n + 1' with flexible spacing but misses 'N+1 query' written as 'n plus one' or 'select n+1' variants are covered — however 'missing index' requires the literal word order 'missing ... index' and misses 'index is missing' or 'no index on'. Because compatibleClaimKinds returns false when only ONE side matches a pattern, an asymmetric wording (one title says 'return type', the other says 'type signature') will block a legitimate merge — the guard is one-directional in effect and sensitive to phrasing. This is a calibrated heuristic, but the incomplete keyword lists will produce both false blocks and false passes on real corpora.",
+          "suggestedFix": "Broaden patterns (e.g., add \\btype signature\\b, \\bdialyzer\\b, \\bindex (is )?missing\\b) or derive claim kinds from the taxonomy/concepts already extracted by extractConcepts instead of ad-hoc regexes."
+        },
+        {
+          "id": "f007",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 445,
+          "endLine": 452,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "corroborationFieldSimilar treats any token containing '_' as a code identifier",
+          "description": "The heuristic `shared.some((token) => !token.includes('_')) || shared.length >= 2` assumes underscore implies code identifier. Snake_case words in prose (e.g., copied variable names is intended) are fine, but camelCase and PascalCase identifiers (common in TypeScript/JS findings: `getUserData`, `myFunc`) contain no underscore and will count as a normal semantic token, creating exactly the false semantic edge the comment says it's guarding against. In a TS/JS codebase, a single shared camelCase function name across two unrelated findings satisfies the check.",
+          "suggestedFix": "Also treat tokens matching /[a-z][A-Z]/ (camelCase) or tokens that appear in backticks in the source text as identifiers, or check tokens against identifiers extracted from the diff hunk."
+        },
+        {
+          "id": "f008",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 692,
+          "endLine": 704,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "relaxedEdgeDensity computed against pre-community-filtered adjacency after splitCompatibleChains",
+          "description": "`coreClusters` computes density using the `indexes` map keyed by original group array references and the `adjacency` structure that was filtered to intra-community edges. However, `splitCompatibleChains` can split a component into multiple clusters; density for each sub-cluster is then computed over only that sub-cluster's pairs but against adjacency that includes edges to groups no longer in the sub-cluster — actually only pairs within the sub-cluster are counted, so edges leaving the sub-cluster are ignored, which deflates density. A component split into chains may fail CORROBORATED_MIN_DENSITY purely due to the split even though the original component was dense. Conversely, `distinctReviewers` is checked on the sub-cluster, which is correct. The interaction between chain-splitting and density gating is untested.",
+          "suggestedFix": "Compute density before splitting (per component) or recompute adjacency restricted to the sub-cluster and document which is intended; add a test covering a dense component that splitCompatibleChains partitions."
+        },
+        {
+          "id": "f009",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 1037,
+          "endLine": 1046,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "collapseSameReviewer applied twice; second pass can change the representative",
+          "description": "Strict groups are built with collapseSameReviewer, then mergeCorroboratedLocationClusters flattens clusters and collapseSameReviewer runs again on merged members. If the same model::role contributed findings to two different strict groups that later merge, the second collapse will drop one of them — that's presumably intended. But the strict-path behavior changed: previously chooseRepresentative was picked per strict group; now for unmerged clusters the same members flow through, which should be identity, EXCEPT that mergeCorroboratedLocationClusters may reorder members via sorting inside agreementClusters, so chooseRepresentative could pick a different representative for previously stable groups if it is order-sensitive. If chooseRepresentative has any order-dependent tie-breaking, existing group representatives may silently change for untouched groups.",
+          "suggestedFix": "Verify chooseRepresentative is fully order-independent, or preserve original member order for clusters that were not merged."
+        },
+        {
+          "id": "f010",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 583,
+          "endLine": 586,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "CORROBORATED_TIE_EPSILON unused for support/size ties and duplicated by localeCompare fallback",
+          "description": "The ambiguity check compares support and size with exact equality and strength within CORROBORATED_TIE_EPSILON, then skips attachment. But the sort's final tie-break is `a.key.localeCompare(b.key)` — localeCompare is locale-sensitive and can order differently across Node ICU builds/locales, making the 'unambiguous top candidate' selection environment-dependent when strength differs by more than epsilon but keys decide ordering. Since keys only decide ordering when support/strength/size all tie — which is exactly the case the guard skips — this is mostly moot, but the guard doesn't cover the case where sizes differ but strength and support tie; then order between #1 and #2 is decided by size, which is a weak proxy for correctness of attachment.",
+          "suggestedFix": "Use a non-locale-sensitive comparison (e.g., `a.key < b.key ? -1 : ...`) for determinism across environments."
+        },
+        {
+          "id": "f011",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 425,
+          "endLine": 432,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Stopword list is English-only and duplicates may exist with base STOPWORDS",
+          "description": "CORROBORATION_STOPWORDS extends STOPWORDS with English auxiliaries and generic nouns. Model reviews in other languages (or codebases with non-English identifiers) won't benefit from stopword removal, inflating token overlap and making the 0.20/0.10 thresholds behave differently. Also 'missing', 'no', 'not' being stopwords means negation is stripped: 'does not validate X' and 'validates X' share the same corroboration tokens (hasOpposingSentiment presumably guards this, but the tokenizer itself erases polarity).",
+          "suggestedFix": "Document the English-only assumption, and confirm hasOpposingSentiment fully covers negation since corroborationTokens strips it."
+        },
+        {
+          "id": "f012",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 59,
+          "endLine": 63,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Characterization layer deleted; corpus schema violations now fail at runtime mid-test",
+          "description": "The new branch throws `new Error(...)` inside the test body when `mustStaySeparate` is missing on a `miningProxyOvermerged` case, but only after calling deduplicateFindings — wasted work and the guard runs twice (once per test). Also `mustStaySeparate` is typed as a required tuple check at runtime but optional in the interface; a corpus file with `miningProxyOvermerged: true` and no `mustStaySeparate` produces two confusing runtime errors instead of a schema validation failure in the fixture-loading `it` block that presumably validates corpus shape.",
+          "suggestedFix": "Validate the miningProxyOvermerged/mustStaySeparate invariant once at corpus load time (in the existing schema-check describe block), and check before running deduplicateFindings."
+        },
+        {
+          "id": "f013",
+          "file": "test/consensus/undermerge-corpus.test.ts",
+          "startLine": 82,
+          "endLine": 96,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Negative-guard test assumes each mustStaySeparate title lands in exactly one group",
+          "description": "`groups.find(...)` returns the FIRST group containing the title. If dedup ever duplicates a finding across groups (a regression this suite should catch), `leftGroup !== rightGroup` could pass spuriously while the same title also appears in the other group. Similarly the 'independent agreement' test checks only the first matching group's reviewer-pair ratio.",
+          "suggestedFix": "Use `groups.filter(...)` and assert exactly one group holds each title before comparing identity."
+        },
+        {
+          "id": "f014",
+          "file": "test/consensus/deduper.test.ts",
+          "startLine": 415,
+          "endLine": 425,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Determinism test only permutes review order, not intra-review finding order",
+          "description": "The determinism test reverses the review array but each review contains a single finding. The new code paths (sorting by agreementClusterKey which can collide on identical file/lines/title/id, Louvain label tie-breaking, attachment ranking) have order sensitivity primarily across findings within reviews and across duplicate keys. A stronger test would shuffle findings with identical titles/locations and multiple findings per review.",
+          "suggestedFix": "Add a determinism test with multiple findings per review, including two findings with identical file/startLine/endLine/title from different models, permuted in several orders."
+        },
+        {
+          "id": "f015",
+          "file": "src/consensus/deduper.ts",
+          "startLine": 736,
+          "endLine": 758,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "attachmentEvidence mixes singleton description+fix tokens against title-only cluster anchors",
+          "description": "conceptAnchors builds anchors from member TITLES only, but the singleton's anchor set is built from title + description + suggestedFix concatenated. This asymmetry makes attachment much easier for singletons with verbose descriptions: any two words from the singleton's description that happen to match cluster title anchors satisfy `anchorCount >= 2`, even if the singleton's title is about something else. Combined with CORROBORATED_ATTACHMENT_THRESHOLD of 0.12 (a low combined-similarity bar), a wordy but unrelated finding at the same lines can attach to a corroborated cluster and inherit consensus it did not earn — inflating the group's agreement ratio used for minConsensusScore.",
+          "suggestedFix": "Compute singleton anchors from the title only (matching conceptAnchors), or require at least one anchor to come from the singleton's title."
+        }
+      ],
+      "durationMs": 88142,
+      "status": "success"
+    }
+  ]
+}

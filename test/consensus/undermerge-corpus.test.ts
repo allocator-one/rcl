@@ -22,6 +22,9 @@ interface CorpusCase {
     minConsensusScore: number;
     clearsThresholdIfMerged: boolean;
     memberTitles: string[];
+    miningProxyOvermerged?: boolean;
+    mustStaySeparate?: [string, string];
+    excludedTitles?: string[];
   };
   reviews: ModelReview[];
 }
@@ -53,30 +56,59 @@ describe('under-merge corpus (RCL-17)', () => {
     }
   });
 
-  // Characterization: documents TODAY's behaviour. These pass on the buggy
-  // build and are the baseline the fix has to move.
-  describe('current behaviour — the concept is split across groups', () => {
-    for (const c of corpus) {
-      it(`${c.case}: members land in more than one group`, () => {
-        const groups = deduplicateFindings(c.reviews);
-        const holding = groupsHoldingMembers(groups, c.expected.memberTitles);
-        expect(holding.length).toBeGreaterThan(1);
-      });
-    }
-  });
-
-  // TDD target. `it.fails` asserts the body currently THROWS: green while the
-  // bug is present, and it flips red the moment dedup is fixed — at which
-  // point drop the `.fails` to lock the behaviour in.
   describe('desired behaviour — one concept, one group', () => {
     for (const c of corpus) {
-      it.fails(`${c.case}: members collapse into a single group`, () => {
+      if (c.expected.miningProxyOvermerged) {
+        it(`${c.case}: keeps the two mined concepts separate`, () => {
+          const groups = deduplicateFindings(c.reviews);
+          if (!c.expected.mustStaySeparate) {
+            throw new Error(`${c.case}: miningProxyOvermerged requires mustStaySeparate`);
+          }
+          const [left, right] = c.expected.mustStaySeparate;
+          const leftGroup = groups.find((group) =>
+            group.members.some((member) => member.finding.title === left)
+          );
+          const rightGroup = groups.find((group) =>
+            group.members.some((member) => member.finding.title === right)
+          );
+
+          expect(leftGroup).toBeDefined();
+          expect(rightGroup).toBeDefined();
+          expect(leftGroup).not.toBe(rightGroup);
+        });
+
+        it(`${c.case}: separated concepts retain their independent agreement`, () => {
+          const groups = deduplicateFindings(c.reviews);
+          if (!c.expected.mustStaySeparate) {
+            throw new Error(`${c.case}: miningProxyOvermerged requires mustStaySeparate`);
+          }
+          for (const title of c.expected.mustStaySeparate) {
+            const group = groups.find((candidate) =>
+              candidate.members.some((member) => member.finding.title === title)
+            );
+            expect(group).toBeDefined();
+            const pairs = new Set(
+              group!.members.map((member) => `${member.model}::${member.role}`)
+            );
+            expect(pairs.size / c.expected.successfulReviews).toBeLessThan(
+              DEFAULT_THRESHOLDS.minConsensusScore
+            );
+          }
+        });
+        continue;
+      }
+
+      it(`${c.case}: members collapse into a single group`, () => {
         const groups = deduplicateFindings(c.reviews);
         const holding = groupsHoldingMembers(groups, c.expected.memberTitles);
         expect(holding).toHaveLength(1);
+        const heldTitles = holding[0]!.members.map((member) => member.finding.title);
+        for (const excluded of c.expected.excludedTitles ?? []) {
+          expect(heldTitles).not.toContain(excluded);
+        }
       });
 
-      it.fails(`${c.case}: merged group clears minConsensusScore`, () => {
+      it(`${c.case}: merged group clears minConsensusScore`, () => {
         const groups = deduplicateFindings(c.reviews);
         const holding = groupsHoldingMembers(groups, c.expected.memberTitles);
         expect(holding).toHaveLength(1);
@@ -107,7 +139,15 @@ describe('under-merge corpus (RCL-17)', () => {
       expect(all).toContain(capture);
 
       const matcherGroup = groups.find((g) => g.members.some((m) => m.finding.title === matcher));
-      expect(matcherGroup!.members.map((m) => m.finding.title)).not.toContain(capture);
+      const matcherTitles = matcherGroup!.members.map((m) => m.finding.title);
+      expect(matcherTitles).not.toContain(capture);
+      for (const excluded of c!.expected.excludedTitles ?? []) {
+        const excludedGroup = groups.find((group) =>
+          group.members.some((member) => member.finding.title === excluded)
+        );
+        expect(excludedGroup).toBeDefined();
+        expect(excludedGroup).not.toBe(matcherGroup);
+      }
     });
   });
 });
