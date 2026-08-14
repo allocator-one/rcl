@@ -1,0 +1,733 @@
+{
+  "case": "ao-7484-r2-aria-checked-roles",
+  "source": {
+    "report": "rcl-report-allocator-one-7484-r2.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+    "lineRange": [
+      468,
+      482
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 6,
+    "successfulReviews": 15,
+    "agreementRatioIfMerged": 0.4,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "No enforcement that menuitemcheckbox/menuitemradio rows carry aria-checked",
+      "role :menuitemcheckbox/:menuitemradio allowed without requiring aria-checked",
+      "Checked menu roles do not require aria-checked",
+      "No guard pairing checkbox/radio role with aria-checked",
+      "menuitemradio role offered without any enforcement of radio-group semantics",
+      "role attr accepts :menuitemradio but nothing enforces aria-checked pairing"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 133,
+          "endLine": 134,
+          "severity": "important",
+          "category": "correctness",
+          "title": "aria-checked passed via :rest may not render — verify menu_item forwards it",
+          "description": "The `Dropdown.menu_item` declares `attr :rest, :global, include: ~w(phx-click phx-value-id phx-value-message_id data-confirm download target rel)`. Global attributes with an `include:` list still forward all standard `aria-*` attributes in Phoenix, so `aria-checked` should pass through — but note that `aria-checked={to_string(@show_empty_fields)}` is redundant: passing the boolean directly would render `aria-checked=\"true\"`/omit it when false. More importantly, when `@show_empty_fields` is `false`, `to_string(false)` yields the string `\"false\"` which is correct for `aria-checked` (a false-valued tri-state attribute must render as `aria-checked=\"false\"`, not be omitted). However, if this had been passed as a bare boolean `false`, Phoenix would drop the attribute entirely, which would be an accessibility bug for `menuitemcheckbox` (missing state reads as unchecked but is technically invalid). Consider adding an explicit `attr :\"aria-checked\"` (or a `checked` boolean attr that the component renders as `aria-checked`) to `menu_item` so this contract is enforced at the component boundary rather than depending on callers remembering `to_string/1`.",
+          "suggestedFix": "Add a first-class `attr :checked, :boolean, default: nil` to `Dropdown.menu_item` and render `aria-checked={@checked != nil && to_string(@checked)}` internally, so `role={:menuitemcheckbox}` callers cannot ship a stateless checkbox row."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 478,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "role :menuitemcheckbox/:menuitemradio allowed without requiring aria-checked",
+          "description": "The new `role` attr permits `:menuitemcheckbox` and `:menuitemradio`, but nothing validates that the caller also supplies `aria-checked`. Per WAI-ARIA, `menuitemcheckbox` and `menuitemradio` require the `aria-checked` state; omitting it is an accessibility conformance failure that screen readers handle inconsistently. The component already raises `ArgumentError` at render time for other invalid combinations (e.g. `disabled_tooltip` without `id`, and `Toggle` with `as={:button}` and no accessible name), so the codebase's own convention is to fail fast on such contract violations.",
+          "suggestedFix": "In `menu_item/1`, raise (or at least log) when `assigns.role in [:menuitemcheckbox, :menuitemradio]` and `assigns.rest[:\"aria-checked\"]` is nil, mirroring the existing render-time guards."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 478,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "role override applies to navigation links, where menuitemcheckbox is invalid",
+          "description": "The `role` attr is rendered on all four branches, including the `.link` branch (navigate/patch/href). An anchor with `role=\"menuitemcheckbox\"` is semantically wrong: a checkbox menu item toggles state, it does not navigate, and activating it should not unload the page or patch the URL. Nothing prevents a caller from combining `navigate:` with `role: :menuitemcheckbox` — in fact the new test 'the role and trailing slot reach every render path' explicitly exercises and blesses this combination on a link. Consider restricting `:menuitemcheckbox`/`:menuitemradio` to the button branch, or documenting/raising on the link combination.",
+          "suggestedFix": "Raise when `assigns.role != :menuitem` and any of navigate/patch/href is set, and update the render-path test to only assert the role override on button-based variants."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 606,
+          "endLine": 620,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Trailing slot is aria-hidden even when it contains non-decorative content",
+          "description": "`menu_item_trailing/1` unconditionally wraps slot content in `aria-hidden=\"true\"`. The slot doc says it is 'presentational only', but the slot accepts arbitrary content and nothing enforces that contract. If a caller places text that carries information not duplicated in the label (e.g. a keyboard shortcut hint, a count badge, or 'On'/'Off' text), it becomes invisible to assistive technology. Also, if a caller nests a focusable element in the slot, `aria-hidden=\"true\"` on a focusable element is an accessibility violation (focusable-but-hidden). The contract is documentation-only; consider it acceptable, but a dev-time check or at least a stronger doc warning would prevent misuse.",
+          "suggestedFix": "Either accept as documented convention, or add a comment/test asserting the slot must not contain focusable elements; alternatively expose an `aria_hidden` escape hatch for informative trailing content."
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 151,
+          "endLine": 165,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": ":static toggle silently ignores id, disabled_tooltip, and rest attrs",
+          "description": "The `:static` render branch outputs only `aria-hidden`, class, and no `{@rest}`, `id`, or tooltip wiring. A caller passing `id`, `phx-click`, `aria-label`, or `disabled_tooltip` to `as={:static}` gets them silently dropped (the old field_picker call site passed `id` and `phx-click` to the toggle — a future migration in the other direction could reintroduce them expecting effect). The component elsewhere fails fast on contract violations (`as={:button}` without a name raises). For symmetry, consider raising or warning when interactive-only attrs are supplied to `:static`, or forwarding `{@rest}` and `id` onto the span.",
+          "suggestedFix": "Forward `id={@id}` and `{@rest}` on the static span, or raise when `phx-click`/`aria-label`/`disabled_tooltip` are supplied with `as: :static`."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/field_picker_test.exs",
+          "startLine": 149,
+          "endLine": 155,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test asserting the inert switch actually renders inside the row",
+          "description": "The test 'the switch inside the row is inert' only asserts the absence of `button`/`input` inside the row — it never asserts the presence of the static switch itself (e.g. the `aria-hidden` span, the track classes, or the trailing wrapper). If the `<:trailing>` slot were accidentally removed from `field_picker.ex`, or `menu_item_trailing` dropped the slot on the button branch, all assertions in this test would still pass. The on/off visual state of the switch within the picker is also only indirectly covered ('reflects the off state' checks `.bg-brand` absence, but no test checks `.bg-brand`/`after:translate-x-4` presence for the on state at the picker level).",
+          "suggestedFix": "Add assertions such as `assert doc |> LazyHTML.query(\"#test-field-picker-show-empty-fields [data-menu-item-trailing] [aria-hidden]\") |> Enum.any?()` and an on-state check that the track carries `bg-brand`."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 553,
+          "endLine": 567,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "Trailing indicator rendered inside disabled tooltip branch may misstate state",
+          "description": "The disabled branch renders the trailing slot inside a `disabled` button. If a caller renders a state indicator (e.g. a toggle track) in the trailing slot of a disabled `menuitemcheckbox`, the row will still visually show the on/off track at full opacity via the slot (the `Toggle :static` variant dims only when its own `disabled` assign is set, which the slot caller must remember to pass separately). This is a coordination gap between the two components rather than a bug in either alone, but worth a doc note so disabled checkbox rows don't ship with a crisp, apparently interactive switch.",
+          "suggestedFix": "Document that trailing indicators inside a disabled menu_item should receive their own `disabled: true`, or apply opacity to the trailing wrapper when the row is disabled."
+        },
+        {
+          "id": "f008",
+          "file": "test/allocator_one_web/components_newui/molecules/dropdown_test.exs",
+          "startLine": 589,
+          "endLine": 615,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Render-path test blesses menuitemcheckbox on a navigation link",
+          "description": "The loop test applies `role: :menuitemcheckbox` to the `navigate: \"/somewhere\"` variant and asserts it renders. While this confirms the attribute reaches the link branch, it also encodes an ARIA-invalid combination (a checkbox menu item that navigates) as expected behavior, making it harder to later add the validation suggested in the role-attr finding without breaking this test. Prefer testing the plumbing with `:menuitemradio`/`:menuitem` semantics per-branch or splitting role and trailing assertions.",
+          "suggestedFix": "Test the trailing-slot plumbing across all branches, but restrict the role-override assertion to branches where a toggle role is semantically valid."
+        }
+      ],
+      "durationMs": 45794,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 556,
+          "endLine": 568,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Disabled tooltip branch drops ARIA checked state",
+          "description": "The disabled-tooltip render branch applies the new `@role` but does not spread `@rest`, where `aria-checked` is stored. A disabled `menuitemcheckbox` or `menuitemradio` rendered through this branch therefore exposes the specialized role without its required checked state. The new test only verifies that the role and trailing slot reach this branch, so it does not catch the missing state.",
+          "suggestedFix": "Forward the relevant ARIA state in this branch, for example `aria-checked={@rest[:\"aria-checked\"]}`, while continuing to suppress interactive attributes such as `phx-click`. Add a disabled-tooltip test that supplies and asserts `aria-checked`."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 468,
+          "endLine": 482,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Checked menu roles do not require aria-checked",
+          "description": "The component now permits `:menuitemcheckbox` and `:menuitemradio`, but `aria-checked` remains an optional global attribute. Callers can therefore render either checked-item role without the state required to make it meaningful to assistive technology. The documentation says the role should be paired with `aria-checked`, but the component does not enforce that contract.",
+          "suggestedFix": "Validate in `menu_item/1` that `assigns.rest[:\"aria-checked\"]` is present when the role is `:menuitemcheckbox` or `:menuitemradio`, raising a descriptive `ArgumentError` otherwise. Add tests for both invalid roles without state and valid checked states."
+        }
+      ],
+      "durationMs": 34842,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 14110,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 542,
+          "endLine": 568,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Disabled menu_item branch drops @rest, so aria-checked is lost",
+          "description": "In the disabled-tooltip branch of `menu_item`, the `<button>` does not spread `{@rest}` (it only sets `role`, `class`, `disabled`, `aria-disabled`). Callers now passing `role={:menuitemcheckbox}` together with `aria-checked` will have `aria-checked` silently dropped whenever the item is rendered disabled, producing a `menuitemcheckbox` with no state exposed to assistive technology. The new 'role and trailing slot reach every render path' test only checks the role and trailing marker, not rest attributes, so this gap is not caught.",
+          "suggestedFix": "Add `{@rest}` to the disabled branch's button (or explicitly forward `aria-checked` when the role is `:menuitemcheckbox`/`:menuitemradio`), and extend the multi-variant test to assert `aria-checked` survives on the disabled path."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 479,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "menuitemcheckbox/menuitemradio roles allowed without aria-checked",
+          "description": "The new `role` attr permits `:menuitemcheckbox` and `:menuitemradio`, but nothing enforces (or defaults) the `aria-checked` attribute those roles require — a caller can declare a toggleable menu item that exposes no state. The component already uses render-time validation elsewhere (e.g. raising when `disabled_tooltip` lacks an id, and `Toggle.toggle` raising for an unnamed `:button`), so an analogous guard would fit the codebase's conventions.",
+          "suggestedFix": "Raise an ArgumentError at render time when `role` is `:menuitemcheckbox`/`:menuitemradio` and no `aria-checked` is present in assigns/rest, mirroring the existing validation pattern."
+        }
+      ],
+      "durationMs": 91509,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "security-auditor",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 14595,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "performance-engineer",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 608,
+          "endLine": 618,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Trailing slot wrapper is aria-hidden, hiding potentially meaningful content",
+          "description": "The `menu_item_trailing/1` wrapper hard-codes `aria-hidden=\"true\"` on all trailing slot content. This is fine for the Toggle `:static` decoration (which is itself aria-hidden), but the slot is a general-purpose API on `menu_item` — any future caller who places meaningful content there (a count badge, keyboard shortcut hint, status text) will have it silently hidden from assistive technology, and doubly-hidden content nested inside can never be re-exposed. Because `aria-checked` on the row is the only state exposed, this works today, but the contract relies entirely on doc prose rather than enforcement. Additionally note: for the `:menuitemcheckbox` row driven by `aria-checked`, hiding the switch visual is correct, but the design leaves no escape hatch.",
+          "suggestedFix": "Either make aria-hidden opt-out via an attr on the slot (e.g. `slot :trailing do attr :\"aria-hidden\", :string end`), or narrow the slot's documented contract with a rendered-output assertion, or at minimum document the limitation in the component's @moduledoc so consumers don't put semantic content in the slot."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 478,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "No enforcement that menuitemcheckbox/menuitemradio rows carry aria-checked",
+          "description": "The new `role` attr allows `:menuitemcheckbox` and `:menuitemradio`, but nothing validates that the caller also passes `aria-checked` (it arrives via `@rest`). Per ARIA, `menuitemcheckbox` and `menuitemradio` require `aria-checked`; without it the row announces as a checkbox/radio with no state. The Toggle component in this same diff raises at render time when `as={:button}` lacks an accessible name — the same fail-fast philosophy should apply here.",
+          "suggestedFix": "In `menu_item/1`, raise (or log) when `assigns.role in [:menuitemcheckbox, :menuitemradio]` and `assigns.rest[:\"aria-checked\"]` is nil, mirroring the existing `disabled_tooltip` and Toggle aria-label guards."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 573,
+          "endLine": 588,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "role :menuitemcheckbox permitted on link render path where it is semantically wrong",
+          "description": "The `role` override is applied to the `.link` branch (navigate/patch/href). A `menuitemcheckbox`/`menuitemradio` that navigates is contradictory — those roles denote toggling a setting, and a link cannot carry a meaningful `aria-checked` toggle interaction. The test suite even exercises this combination (`%{label: \"Link\", navigate: \"/somewhere\", role: :menuitemcheckbox}`), cementing an invalid pairing as supported behavior.",
+          "suggestedFix": "Raise or warn when `role != :menuitem` is combined with navigate/patch/href (and with `copy:`), or document explicitly that checkbox/radio roles are only valid on the plain-button path."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 151,
+          "endLine": 166,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": ":static branch silently ignores interaction attrs passed via rest/id",
+          "description": "The `:static` render branch outputs only the class-driven `<span>` and drops `@rest`, `@id`, `@disabled_tooltip`, etc. If a caller passes `phx-click`, `id`, or `aria-*` attributes to `as={:static}` (easy to do when migrating from `as={:button}`, as the field_picker migration in this diff demonstrates), they vanish without warning — a click handler that silently never fires. The component already raises for a missing aria-label on `:button`; a similar guard for meaningless attrs on `:static` would prevent silent breakage.",
+          "suggestedFix": "Raise or emit a compile/render-time warning when `as: :static` is combined with `phx-click`, `id`, `aria-label`, or `aria-labelledby` in `@rest`, since the enclosing control must own those."
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 128,
+          "endLine": 139,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "aria-checked passed via :rest may not be included in menu_item's global attrs",
+          "description": "`aria-checked={to_string(@show_empty_fields)}` on `Dropdown.menu_item` is forwarded through the `:rest` global attr, which is declared with an explicit `include:` list (`~w(phx-click phx-value-id phx-value-message_id data-confirm download target rel)`). Global attrs starting with `aria-` are accepted by Phoenix's default global prefixes, so this likely works — but the reliance is implicit and fragile: the diff adds a `role` attr formally but leaves the mandatory paired `aria-checked` to the global passthrough. If the global include list is ever tightened or the attr renamed, the checkbox row loses its state announcement silently. Tests cover it, which mitigates, but the API asymmetry (formal `role`, informal `aria-checked`) is a trap.",
+          "suggestedFix": "Add an explicit `attr :\"aria-checked\", :string, default: nil` (or a boolean `checked` attr rendered as aria-checked) alongside the new `role` attr so the pair travels together and is documented."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one_web/components_newui/atoms/toggle_test.exs",
+          "startLine": 227,
+          "endLine": 233,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Test name overstates what is asserted",
+          "description": "The test \"needs no accessible name — the enclosing control carries it\" only asserts the absence of `aria-checked` and presence of `aria-hidden`. It does not verify that rendering without an aria-label succeeds where `:button` would raise, which is the actual behavioral contract stated in the new code comment (\"`:static` is exempt\"). A regression that re-applies the aria-label raise to `:static` would not be caught by name-focused assertions here (though it would incidentally crash render_component).",
+          "suggestedFix": "Add an explicit assertion that `render_component(&Toggle.toggle/1, %{as: :static, on: true})` does not raise (i.e., no aria-label/aria-labelledby required), documenting the exemption directly."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 556,
+          "endLine": 570,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Disabled branch renders trailing slot inside a disabled button without dimming context",
+          "description": "The disabled render path now includes `<.menu_item_trailing .../>` inside the disabled button. The Toggle `:static` variant has its own `@disabled` opacity handling, but callers using the trailing slot on a disabled row must independently know to pass a disabled/dimmed visual — the slot content isn't automatically styled to match the disabled row (menu_item_classes applies disabled styling to the button, but slot content like a brand-toned switch track may remain fully saturated).",
+          "suggestedFix": "Consider passing disabled state to the trailing wrapper (e.g., add `class={@disabled && \"opacity-50\"}` on the trailing span) or document that trailing content must handle its own disabled appearance."
+        }
+      ],
+      "durationMs": 39220,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "api-design",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 556,
+          "endLine": 568,
+          "severity": "important",
+          "category": "api-design",
+          "title": "aria-checked not forwarded on all menu_item paths",
+          "description": "menuitemcheckbox/menuitemradio require aria-checked, but that state is only passable via @rest. The disabled+tooltip render path sets role={@role} and renders the trailing slot yet never spreads {@rest}, so aria-checked (and other callersupplied ARIA/phx attrs) are silently dropped. The PR explicitly guards against role/trailing working on only one branch; aria-checked still has that trap. Invalid ARIA for any disabled checkbox/radio row.",
+          "suggestedFix": "Promote checked state to a first-class attr (e.g. attr :aria_checked, :string, values: [\"true\", \"false\", nil]) and emit aria-checked={@aria_checked} on every render branch next to role={@role}, or spread {@rest} onto the disabled button (or its wrapper) consistently with the other branches."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 468,
+          "endLine": 476,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "No guard pairing checkbox/radio role with aria-checked",
+          "description": "Toggle already fails fast when as={:button} lacks an accessible name. menu_item now allows role={:menuitemcheckbox | :menuitemradio} whose ARIA contract requires aria-checked, but nothing validates that pairing at render time. Callers can ship a checkbox row that looks right and still exposes incomplete semantics to assistive tech until a later audit.",
+          "suggestedFix": "After assigns are built, raise ArgumentError when @role in [:menuitemcheckbox, :menuitemradio] and aria-checked is missing (from the new attr or rest), mirroring the Toggle button name check."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/field_picker_test.exs",
+          "startLine": 164,
+          "endLine": 164,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Stale test name still refers to toggle",
+          "description": "The control is now the menu_item row (menuitemcheckbox); the phx-click lives on that row. The test title still says \"the event prefix carries into the toggle\", which no longer matches the behavior under test and will confuse future readers.",
+          "suggestedFix": "Rename to something like \"the event prefix carries into the show-empty-fields row\"."
+        }
+      ],
+      "durationMs": 234893,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 148,
+          "endLine": 165,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing test coverage for disabled state in static toggle variant",
+          "description": "The `render_switch(%{as: :static})` implementation applies `if(@disabled, do: \"opacity-50\")` (line 159), but none of the new tests in `toggle_test.exs` verify the disabled state for `as: :static`. The test suite covers on/off rendering and the absence of controls, but never passes `disabled: true` for the static variant. If a future refactor accidentally drops the disabled styling from the static branch, no test would catch it.",
+          "suggestedFix": "Add a test like:\n\ntest \"applies opacity-50 when disabled\" do\n  html = render_component(&Toggle.toggle/1, %{as: :static, on: true, disabled: true})\n  assert html =~ \"opacity-50\"\nend"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 478,
+          "severity": "important",
+          "category": "best-practices",
+          "title": "No validation that aria-checked is paired with menuitemcheckbox/menuitemradio",
+          "description": "The new `role` attr allows `:menuitemcheckbox` and `:menuitemradio`, but there is no compile-time or render-time check ensuring that `aria-checked` is supplied when these roles are used. The ARIA spec requires `aria-checked` on `menuitemcheckbox` and `menuitemradio`. A caller could set `role: :menuitemcheckbox` without providing `aria-checked`, producing invalid ARIA markup that would confuse screen readers. The Toggle component already has a similar guard (raising for unnamed `:button`), but Dropdown.menu_item has none.",
+          "suggestedFix": "Add a render-time guard in `menu_item/1`:\n\nif assigns.role in [:menuitemcheckbox, :menuitemradio] and is_nil(assigns.rest[:\"aria-checked\"]) do\n  raise ArgumentError, \"menu_item with role #{assigns.role} requires aria-checked\"\nend"
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one_web/components_newui/molecules/dropdown_test.exs",
+          "startLine": 557,
+          "endLine": 627,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test for menu_itemcheckbox without aria-checked (invalid ARIA state)",
+          "description": "The tests verify that `aria-checked` is rendered when explicitly passed, but there is no negative test confirming what happens when `role: :menuitemcheckbox` is set without `aria-checked`. Per ARIA spec, `menuitemcheckbox` without `aria-checked` is treated as unchecked, which may silently hide the actual toggle state. The tests should document this behavior or verify the component rejects it.",
+          "suggestedFix": "Either add a test documenting the current (possibly broken) behavior:\n\ntest \"menuitemcheckbox without aria-checked renders without checked state\" do\n  ...\nend\n\nOr, after implementing the guard from f002, add:\n\ntest \"raises if menuitemcheckbox is used without aria-checked\" do\n  assert_raise ArgumentError, fn -> render_component(...) end\nend"
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 556,
+          "endLine": 570,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Disabled menu item renders trailing slot despite being non-interactive",
+          "description": "The disabled render path (the `<span>` wrapper with disabled `<button>`) now includes `<.menu_item_trailing trailing={@trailing} />`. While the trailing slot is `aria-hidden`, rendering interactive-looking visual indicators (like a toggle switch track) on a disabled item could be confusing to users — it shows state for a control they cannot interact with. Consider whether the trailing slot should be suppressed or visually dimmed for disabled items.",
+          "suggestedFix": "Either suppress the trailing slot when disabled:\n\n<.menu_item_trailing :if={!@disabled} trailing={@trailing} />\n\nOr add a visual indicator (e.g., opacity-50) to the trailing wrapper when the item is disabled."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/field_picker_test.exs",
+          "startLine": 140,
+          "endLine": 155,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Test asserts CSS implementation details rather than behavior",
+          "description": "The test `the whole row is the control` asserts `class =~ \"w-full\"` and `class =~ \"hover:bg-highlight\"` (lines 152-153). These are CSS utility class implementation details that will change with any styling refactor without affecting the actual behavior being tested (that the row is a full-width clickable target). The test would break on a Tailwind upgrade or design token rename while the component still works correctly.",
+          "suggestedFix": "Consider asserting structural/semantic properties instead:\n\nassert LazyHTML.attribute(row, \"type\") == [\"button\"]\nassert LazyHTML.attribute(row, \"role\") == [\"menuitemcheckbox\"]\nassert LazyHTML.attribute(row, \"phx-click\") == [\"eb:toggle_empty_card_fields\"]\n\nOr keep one class assertion as a smoke test but separate it from the behavioral assertions."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 148,
+          "endLine": 165,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "No test that static toggle ignores phx-click or other interactive attrs",
+          "description": "The `:static` variant is documented as 'inert markup with no control at all.' However, since it renders a `<span>`, if a caller accidentally passes `phx-click` or `tabindex` via `rest` attrs, those would be forwarded to the span, making it interactive and violating the contract. There is no test verifying that the static variant does not accidentally become interactive if someone passes event attributes.",
+          "suggestedFix": "Either: (1) Add a test that passes phx-click to the static variant and asserts it does NOT appear in the output (requires filtering in the component), or (2) document explicitly that the static variant will forward all rest attrs and callers must not pass interactive ones, or (3) add a guard that raises if interactive attrs are passed to `:static`."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 614,
+          "endLine": 621,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "menu_item_trailing uses != [] which is fragile for non-list inputs",
+          "description": "The guard `@trailing != []` assumes `@trailing` is always a list. While Phoenix LiveView slots are lists by default, if the component is ever called programmatically with `nil` or another falsy value, this comparison would pass (nil != [] is true) and `render_slot(nil)` would raise. Using `@trailing != [] && @trailing != nil` or a pattern match would be more defensive.",
+          "suggestedFix": "Change to:\n\n<span :if={@trailing not in [nil, []]} data-menu-item-trailing ...>"
+        },
+        {
+          "id": "f008",
+          "file": "test/allocator_one_web/components_newui/molecules/dropdown_test.exs",
+          "startLine": 588,
+          "endLine": 616,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Cross-render-path test does not cover the default button path",
+          "description": "The test 'the role and trailing slot reach every render path' covers navigate (link), copy, and disabled variants, but does not include the plain button variant (no navigate/patch/href/copy/disabled_tooltip). While this path is implicitly covered by other tests, the stated intent of this test is to verify ALL render paths, and the omission of the most common one is inconsistent with the test's stated purpose.",
+          "suggestedFix": "Add the default button variant to the `variants` list:\n\n%{label: \"Button\", id: \"btn-item\"}\n\nThis ensures the test truly covers all four render branches as its name promises."
+        }
+      ],
+      "durationMs": 307202,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "dx-critic",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 556,
+          "endLine": 570,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Disabled menu_item branch drops rest attrs, losing aria-checked",
+          "description": "The disabled-tooltip branch of `menu_item` renders a `<button>` without `{@rest}`. Now that `menu_item` supports `:menuitemcheckbox`/`:menuitemradio` roles, a caller passing `aria-checked` (which flows through the `:rest` global attr) will have the state silently dropped whenever the item is rendered disabled — the row advertises a checkbox role with no checked state to assistive technology. Note the new 'role and trailing reach every render path' test only asserts the role attribute and trailing slot, so this gap is not covered.",
+          "suggestedFix": "Add `{@rest}` to the disabled branch's `<button>` (or explicitly forward `aria-checked`), and extend the 'every render path' test to assert `aria-checked` survives on the disabled variant."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 468,
+          "endLine": 480,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "role attr accepts :menuitemradio but nothing enforces aria-checked pairing",
+          "description": "The `role` attr doc says `:menuitemcheckbox` is 'paired with `aria-checked`', but nothing validates or forwards that pairing — a caller can set `role={:menuitemcheckbox}` without `aria-checked`, producing an ARIA-invalid row (checkbox/radio roles require `aria-checked`). The existing pattern in this codebase of raising at render time for inaccessible output (e.g., the `as={:button}` toggle requiring a name, `disabled_tooltip` requiring an id) suggests a similar guard would fit here.",
+          "suggestedFix": "In `menu_item/1`, raise ArgumentError when `role != :menuitem` and no `aria-checked` is present in assigns/rest, mirroring the existing render-time guards."
+        }
+      ],
+      "durationMs": 300775,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "architecture",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 556,
+          "endLine": 565,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Disabled tooltip branch drops aria-checked",
+          "description": "The disabled-tooltip render branch applies the configurable role but does not spread `@rest`. Since `aria-checked` is supplied through the global attributes, a disabled `menuitemcheckbox` or `menuitemradio` renders without its required state. The same attribute is preserved by the normal button and link branches, making the component's accessibility contract branch-dependent.",
+          "suggestedFix": "Forward the relevant ARIA attributes to this button, for example `aria-checked={@rest[:\"aria-checked\"]}`, or safely spread filtered `@rest` attributes while excluding event attributes that should not be attached to the disabled control."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 468,
+          "endLine": 475,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Checked menu roles can render without required state",
+          "description": "The new API permits `role={:menuitemcheckbox}` and `role={:menuitemradio}` without requiring `aria-checked`. Both roles require that state for a valid accessible control, so callers can now produce invalid ARIA markup even while satisfying all component attribute checks.",
+          "suggestedFix": "In `menu_item/1`, validate that `assigns.rest[:\"aria-checked\"]` is `true`, `false`, `\"true\"`, `\"false\"`, or `\"mixed\"` when the selected role requires it, and raise a descriptive `ArgumentError` otherwise."
+        }
+      ],
+      "durationMs": 40266,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "bug-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600040,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "accessibility-auditor",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 22387,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "project-rules",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 605,
+          "endLine": 620,
+          "severity": "important",
+          "category": "correctness",
+          "title": "aria-checked not rendered on menuitemcheckbox rows — passed via :rest only",
+          "description": "The new `role` attr enables `menuitemcheckbox`, but `aria-checked` is not a declared attr and is not in the `:rest` global include list (`~w(phx-click phx-value-id phx-value-message_id data-confirm download target rel)`). Global attrs with an explicit `include` list still accept arbitrary `aria-*`/`data-*` attributes in Phoenix, so it may pass through today, but the component contract does not guarantee it: a `menuitemcheckbox` without `aria-checked` is an ARIA violation (checked state is required for that role). Also, on the disabled-with-tooltip branch (the `<span>`-wrapped disabled button), `{@rest}` is not spread onto the button at all, so `aria-checked` is silently dropped there — the disabled variant in the new test only asserts the role and trailing slot, masking this. A row announced as a checkbox with no checked state is broken for screen-reader users.",
+          "suggestedFix": "Declare `attr :\"aria-checked\", :string, default: nil` (or accept a boolean `checked` attr and derive `aria-checked`), render it explicitly on every branch including the disabled-tooltip span branch, and consider raising when `role` is `:menuitemcheckbox`/`:menuitemradio` and the checked state is missing — mirroring the Toggle's render-time aria-label guard."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 128,
+          "endLine": 140,
+          "severity": "important",
+          "category": "correctness",
+          "title": "menuitemcheckbox row may still submit the enclosing phx-change form",
+          "description": "The removed comment documented why the old control was `Toggle.toggle as={:button}` — the panel sits inside the picker's `phx-change` form, and a checkbox's change event would fire `save_field_preferences` too. The replacement `Dropdown.menu_item` renders a `<button>`; buttons inside a form default to `type=\"submit\"` unless the component sets `type=\"button\"`. The dropdown button branch does set `type=\"button\"` (and the field_picker test asserts it), so clicking is safe — but if `is_boolean(@show_empty_fields)` is false the guard renders nothing, and there is no test asserting that the row still does NOT trigger `save_field_preferences` via the form's `phx-change` in an integrated (LiveView) context. The prior comment's constraint (\"must not trigger the form's phx-change\") is now only implicitly satisfied. Worth an integration-level assertion since the constraint that motivated the original design is load-bearing.",
+          "suggestedFix": "Add a LiveView-level test (or at minimum keep a comment near the callsite) asserting that clicking the row fires only `eb:toggle_empty_card_fields` and not `save_field_preferences`."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 481,
+          "endLine": 485,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Trailing slot documented as presentational but not enforced",
+          "description": "The `:trailing` slot doc says \"Presentational only: the row is already the control, and a second focusable element inside it would be unreachable markup\", and `menu_item_trailing` wraps content in `aria-hidden=\"true\"`. However nothing prevents a caller from passing a focusable element (a `Toggle.toggle as={:button}`, a link) into the slot, which would produce exactly the invalid nested-interactive HTML the diff works to avoid — an `aria-hidden` element containing a focusable control is also an ARIA violation (focusable content inside aria-hidden). The Toggle component raises at render for a missing aria-label; this slot has a comparable footgun with no guard and no test.",
+          "suggestedFix": "At minimum, strengthen the doc to name `Toggle.toggle as={:static}` as the intended content. Optionally add a Storybook example and a note that focusable content in the slot is forbidden; a render-time check is hard for arbitrary slot content, so documentation plus a story is likely the right level."
+        },
+        {
+          "id": "f004",
+          "file": "test/allocator_one_web/components_newui/molecules/dropdown_test.exs",
+          "startLine": 589,
+          "endLine": 615,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Disabled-tooltip variant test misses that aria-checked is dropped",
+          "description": "The \"role and trailing slot reach every render path\" test covers the link, copy, and disabled-tooltip branches, but only asserts `role` and the trailing slot. On the disabled-tooltip branch `{@rest}` is not spread onto the inner `<button>`, so an `aria-checked` passed via rest would be silently dropped — the exact class of \"works on one branch only\" trap the test comment warns about. Adding `\"aria-checked\": \"true\"` to the merged attrs and asserting it renders on each branch would catch the gap described in f001.",
+          "suggestedFix": "Include `\"aria-checked\": \"true\"` in the `Map.merge` and assert `LazyHTML.query(doc, \"[aria-checked=true]\") |> Enum.any?()` for every variant."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/field_picker_test.exs",
+          "startLine": 145,
+          "endLine": 154,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Inert-switch test only excludes button/input, not other focusables",
+          "description": "The test asserts no `button` or `input` inside the row, but the failure mode being guarded is \"any focusable/interactive element nested in the row\". A future edit could nest an `<a>` or an element with `tabindex` without failing this test. Cheap to widen.",
+          "suggestedFix": "Also assert `doc |> LazyHTML.query(\"#test-field-picker-show-empty-fields a, #test-field-picker-show-empty-fields [tabindex]\") |> Enum.empty?()`."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 151,
+          "endLine": 165,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Static variant duplicates track/knob classes from other branches",
+          "description": "The `:static` branch re-states the track and knob class list (`h-4 w-8 rounded-full p-0.5`, the `after:*` knob classes, the `on_track_class(@tone)`/`bg-strong` pair). If the `:checkbox` or `:button` branches share these same strings, a visual tweak to the switch now needs three coordinated edits, and the field_picker test's `refute ... .bg-brand` coupling makes drift easy to miss. The project rules call for extracting common patterns rather than repeating them across similar code in the same module.",
+          "suggestedFix": "Extract the shared track/knob class list into a private helper (e.g., `track_classes(on, tone, disabled)`) used by all three `render_switch` branches, if the other branches indeed share the same strings."
+        }
+      ],
+      "durationMs": 35479,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "spec-compliance",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600041,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600041,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "dead-code",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 477,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "menuitemradio role offered without any enforcement of radio-group semantics",
+          "description": "The new `role` attr accepts `:menuitemradio`, whose ARIA contract requires the item to be part of a group with exactly one checked sibling and to sit in a container with `role=\"group\"` (or `aria-owns`). Nothing in the component enforces or even documents that requirement — no grouping slot, no validation that `aria-checked` is present, and the `aria-checked` attribute only travels via the generic `:rest` global. Only `:menuitemcheckbox` is exercised anywhere in the diff (field_picker.ex), so the `:menuitemradio` value is scaffolding with zero consumers and no guardrails. Either wire it into a real radio-group use case or drop it from `values:` until one exists.",
+          "suggestedFix": "Restrict `values:` to `[:menuitem, :menuitemcheckbox]` until a radio-group consumer exists, or add the grouping contract to the doc and validate `aria-checked` presence for non-default roles."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 151,
+          "endLine": 166,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": ":static variant silently drops id, rest attrs, and disabled visuals differ",
+          "description": "Unlike the `:checkbox` and `:button` variants, `render_switch(%{as: :static})` renders a bare `<span>` that ignores `@id` and `{@rest}` entirely. A caller passing `id` or data attributes (as the old field_picker code did with `id={\"#{@id}-show-empty-fields\"}`) gets no error — the attrs just vanish. Since the parent menu row now owns the id this works for the current callsite, but a future caller will be surprised. Consider raising if `@id` or non-class rest attrs are passed with `as={:static}`, matching the existing fail-at-render philosophy used for the unnamed-button check.",
+          "suggestedFix": "Add a guard in toggle/1: `if assigns.as == :static and (assigns.id || map_size(assigns.rest) > 0), do: raise ArgumentError, ...`"
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 613,
+          "endLine": 621,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "aria-hidden wrapper around trailing slot hides any focusable content a caller adds",
+          "description": "`menu_item_trailing` wraps slot content in `aria-hidden=\"true\"`. The doc states the slot is presentational-only, but nothing enforces it: if a consumer passes a focusable element (a link, a real toggle), it will be keyboard-reachable yet invisible to assistive technology — the exact 'unreachable markup' trap the change set out to fix, just inverted. Given the component already raises at render for other contract violations (unnamed button toggle, disabled_tooltip without id), a compile/render-time check or at least a stronger doc warning would be consistent.",
+          "suggestedFix": "Document the constraint in the slot doc more explicitly, or scan rendered slot content for interactive elements in test helpers."
+        }
+      ],
+      "durationMs": 488035,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "dependency-hygiene",
+      "provider": "openai",
+      "findings": [],
+      "durationMs": 33524,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "edge-case-hunter",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 135,
+          "endLine": 151,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Menu item click handler lost on static toggle",
+          "description": "The new implementation moves the phx-click event from the Toggle.toggle to the Dropdown.menu_item. However, the Dropdown.menu_item component previously rendered a plain button without any default click handling — the event was solely on the toggle. Now the row handles the click, but the menu_item's phx-click attribute is only applied in the non-disabled, non-copy, non-link branch. If the menu item is ever rendered with a disabled or copy/link variant, the click event will be silently dropped, breaking the toggle functionality. This is a regression risk for any caller who might pair this pattern with those variants.",
+          "suggestedFix": "Ensure the phx-click event is applied consistently across all menu_item render paths, or add a dedicated callback/event attribute that is guaranteed to be forwarded regardless of variant. Alternatively, keep the click handler on the toggle itself but make it a static display that still emits events through a parent delegation mechanism."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 471,
+          "endLine": 481,
+          "severity": "important",
+          "category": "api-design",
+          "title": "role attribute accepts invalid ARIA combinations",
+          "description": "The new role attribute accepts :menuitem, :menuitemcheckbox, and :menuitemradio. However, the component does not enforce that aria-checked is provided when role is set to :menuitemcheckbox or :menuitemradio. It also does not prevent aria-checked from being passed with role :menuitem. This can lead to invalid ARIA markup where a menuitem has aria-checked but the role does not support it, or a checkbox item lacks the required state. The documentation hints at pairing but does not enforce or validate.",
+          "suggestedFix": "Add a validation in menu_item that checks: if role is :menuitemcheckbox or :menuitemradio, require aria-checked attribute; if role is :menuitem, forbid aria-checked. Raise a clear compile-time or runtime error."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/atoms/toggle.ex",
+          "startLine": 151,
+          "endLine": 166,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Static toggle still applies disabled class but ignores disabled semantics",
+          "description": "The static render_switch applies the 'opacity-50' class when @disabled is true, but since it's a span with aria-hidden, the disabled state has no semantic meaning. It may be confusing to see a dimmed switch inside a row that is not actually disabled (only the row's disabled state matters). More importantly, the static variant does not propagate the disabled state to the parent control, so a disabled row could still appear enabled at the switch level, or vice versa.",
+          "suggestedFix": "Decide whether the static switch should visually reflect the parent's disabled state. If so, ensure the parent passes the same disabled flag; otherwise, remove the opacity styling from the static variant to avoid misleading visuals."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/components_newui/molecules/dropdown_test.exs",
+          "startLine": 586,
+          "endLine": 609,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Test only covers three of four menu_item render paths",
+          "description": "The test 'the role and trailing slot reach every render path' iterates over link, copy, and disabled variants, but omits the plain button variant (the default, non-disabled, no-link, no-copy path). That is the most common case and the one used by the field picker. If the plain path were broken, this test would not catch it.",
+          "suggestedFix": "Add the plain button variant to the list in the test, e.g., %{label: 'Plain'}."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/molecules/dropdown.ex",
+          "startLine": 559,
+          "endLine": 571,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "aria-checked not forwarded on disabled and link/copy paths",
+          "description": "The role attribute is now forwarded on all render paths, but the aria-checked attribute is only passed via @rest in the non-disabled button path. On the disabled, link, and copy paths, the aria-checked attribute is not explicitly forwarded, so a caller who sets role=:menuitemcheckbox and aria-checked on those variants will get the role but lose the state, creating inconsistent ARIA. This is a silent failure.",
+          "suggestedFix": "Explicitly forward aria-checked (and other ARIA state attributes) on every menu_item render path, regardless of variant, or add validation that these attributes only appear on the plain button path and document that clearly."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 135,
+          "endLine": 151,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Hard-coded phx-click on menu_item makes the toggle not reusable",
+          "description": "The field picker hard-codes the phx-click event on the Dropdown.menu_item, but the menu_item component is generic. If any other part of the app reuses this pattern, the event name and prefix are baked into the component's usage. It might be better to make the toggle a named slot that accepts arbitrary content, or to provide a higher-level abstraction for 'toggle menu item' that encapsulates the role and aria-checked handling.",
+          "suggestedFix": "Consider creating a dedicated component, e.g., Dropdown.toggle_item, that wraps menu_item with the menuitemcheckbox role and handles the aria-checked and phx-click forwarding, making the field picker cleaner and the pattern reusable."
+        }
+      ],
+      "durationMs": 552106,
+      "droppedFindings": 1,
+      "warnings": [
+        "openrouter/deepseek/deepseek-v4-flash-0731/edge-case-hunter: dropped malformed finding: {\"id\":\"f003\",\"file\":\"lib/allocator_one_web/components_newui/molecules/dropdown.ex\",\"startLine\":598,\"",
+        "openrouter/deepseek/deepseek-v4-flash-0731/edge-case-hunter: schema validation errors (salvaged 6, dropped 1)"
+      ],
+      "status": "success"
+    }
+  ]
+}

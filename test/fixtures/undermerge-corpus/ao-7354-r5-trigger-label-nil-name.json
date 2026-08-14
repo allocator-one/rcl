@@ -1,0 +1,1084 @@
+{
+  "case": "ao-7354-r5-trigger-label-nil-name",
+  "source": {
+    "report": "rcl-report-allocator-one-7354-r5.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+    "lineRange": [
+      480,
+      492
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 7,
+    "successfulReviews": 17,
+    "agreementRatioIfMerged": 0.412,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "trigger_label/1 crashes when column map lacks :name key",
+      "trigger_label/1 may raise on non-atom column.name",
+      "trigger_label assumes column.name is always present",
+      "Unsafe map key access and potential FunctionClauseError in trigger_label/1",
+      "trigger_label mixes Map.get with hard field access",
+      "trigger_label/1 can produce a misleading label for a column with a nil name",
+      "trigger_label/1 lacks @spec typespec"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 231,
+          "endLine": 234,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Nested interactive content risk: cell renderer may emit buttons inside trigger button",
+          "description": "The trigger slot now wraps `render_field_or_default(assigns)` in a `<button>`. If any cell renderer produces interactive content (e.g. `Tag.tag` with an `action`, links, or inputs), this yields invalid HTML (interactive content nested inside a button) and broken click handling. The test acknowledges this risk (\"`Tag.tag` only becomes a button when given an `action`\") but only pins two cell types (country, boolean); other editable cell types rendered through this path are not covered, so a future renderer emitting a control would silently break.",
+          "suggestedFix": "Add test coverage for all combobox-editable cell types, or add a runtime/dev-mode assertion that the rendered cell content contains no interactive elements when placed inside the trigger button."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 485,
+          "endLine": 490,
+          "severity": "important",
+          "category": "correctness",
+          "title": "trigger_label/1 crashes when column map lacks :name key",
+          "description": "The comment claims \"a bare column map (an override, a test)\" is supported and the label \"can never come back empty\", but the final fallback uses `column.name` (strict access via dot syntax). If a bare column map lacks both `:label` and a `field` label AND lacks `:name`, this raises a KeyError. Also, `Map.get(column, :label)` returns an empty string `\"\"` as truthy-ish? No — `\"\" || fallback` keeps `\"\"` because empty string is truthy in Elixir, so a blank label would produce an unnamed control, the exact problem the same PR fixes in field_picker.ex with an explicit blank check.",
+          "suggestedFix": "defp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n\n  first_present([\n    Map.get(column, :label),\n    Map.get(field, :label),\n    Phoenix.Naming.humanize(Map.get(column, :name, \"field\"))\n  ])\nend\n\ndefp first_present(values), do: Enum.find(values, &(is_binary(&1) and &1 != \"\")) || \"Field\""
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 486,
+          "endLine": 486,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "trigger_label output is not localized",
+          "description": "`Phoenix.Naming.humanize(column.name)` produces an English humanization of the field name as the button's accessible name. Elsewhere in this file user-facing strings go through `gettext` (e.g. `gettext(\"Search…\")`). Field/column labels sourced from `Map.get(column, :label)` may be localized, but the humanized fallback never is, giving inconsistent screen-reader announcements in non-English locales.",
+          "suggestedFix": "Consider running the humanized fallback through the translation layer, or documenting that column names are expected to be pre-localized."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 620,
+          "endLine": 626,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "triggerWrapper caches a stale node across LiveView patches",
+          "description": "`_resolveTrigger` assigns `this.triggerWrapper = marked` each time it runs, but if `_warnUnannounceable` can be reached on a code path where `_resolveTrigger` has not yet re-run after a DOM patch (the comment says `_syncTriggerAria` runs on every patch, which presumably calls `_resolveTrigger` first), `triggerWrapper` may reference a detached element whose attributes no longer reflect the current slot. Reading `hasAttribute(\"data-combobox-trigger-programmatic\")` off a detached node would return the OLD programmatic state. This is safe only if `_resolveTrigger` is guaranteed to run before every `_warnUnannounceable` call — that invariant is implicit and fragile.",
+          "suggestedFix": "In `_warnUnannounceable`, query the attribute fresh: `const wrapper = this.el.querySelector(\"[data-combobox-trigger]\")` instead of relying on the cached `this.triggerWrapper`, or document/assert the call-ordering invariant."
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 348,
+          "endLine": 355,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "DatePicker caches triggerWrapper but nothing reads it",
+          "description": "The DatePicker hook mirrors the Combobox change by assigning `this.triggerWrapper = marked` in `_resolveTrigger`, but unlike the Combobox no `programmatic` attribute or slot flag was added to DatePicker, and `_warnUnannounceable` in this file does not read `triggerWrapper`. This is dead state kept 'for symmetry'. Either add the `programmatic` escape hatch to DatePicker too (for parity, since the same offscreen-editor pattern could apply) or drop the unused assignment.",
+          "suggestedFix": "Remove `this.triggerWrapper = marked` from DatePicker until it has a consumer, or implement the matching `programmatic` slot attr for parity with Combobox."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 2534,
+          "endLine": 2536,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "programmatic attr silently ignores truthy non-true values",
+          "description": "`trigger_slot[:programmatic] == true` means a caller who passes `programmatic={\"true\"}` or any truthy non-`true` value gets the attribute silently dropped and the warning fires anyway (or worse, the caller believes it is suppressed). The slot attr is declared `:boolean`, but slot attr types are not enforced at runtime in HEEx the way component attrs are validated at compile time in all cases. A dev-time raise or an explicit `is_boolean/1` check with a clearer contract would surface misuse.",
+          "suggestedFix": "Consider truthiness normalization (`!!trigger_slot[:programmatic]`) with the wrapper attribute rendered only when true (`data-combobox-trigger-programmatic={@trigger_programmatic || nil}`), or document that only literal `true`/bare-attribute forms are honored."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 291,
+          "endLine": 297,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Currency trigger button can be empty when no currency is set",
+          "description": "The currency trigger's accessible name is intentionally its own text (`{@money_current_currency}`). If `@money_current_currency` is nil or empty (a money value without a selected currency), the button's only text is empty and the caret icon is presumably decorative, leaving an unnamed focusable control — the exact issue this PR fixes in the account/currency line editor by adding `empty?` placeholders. The new test only asserts non-emptiness for a cell with a USD value; the empty state is untested.",
+          "suggestedFix": "Render a placeholder (e.g. `gettext(\"Select currency\")`) inside `data-money-currency-text` when `@money_current_currency` is blank, and add a test for the empty-currency money cell."
+        },
+        {
+          "id": "f008",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/location_combobox.ex",
+          "startLine": 55,
+          "endLine": 55,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "Forwarded programmatic attr lacks the 'do not misuse' guidance of the source doc",
+          "description": "The Combobox's `@programmatic_doc` carries an explicit warning not to use the flag to silence real user-facing triggers. The LocationCombobox forwarding doc just says \"Forwarded to the combobox trigger slot\", so callers reading only this component's docs miss the misuse warning. Minor, since the doc links to `NewUI.Combobox.combobox/1`.",
+          "suggestedFix": "Include a one-line summary of the misuse caveat in the forwarded attr doc, or keep the cross-reference but add \"only for triggers opened by code, never by a user\"."
+        },
+        {
+          "id": "f009",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 536,
+          "endLine": 538,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Negative assertion on programmatic warning is racy",
+          "description": "The check `expect(warnings.filter(...)).toHaveLength(0)` runs \"after the poll above, by which point both hooks have mounted\" — but polling until the roleless combobox has warned does not guarantee the programmatic combobox's hook has mounted and evaluated its warning path. Hook mount order and timing are not synchronized across elements; the negative assertion can pass vacuously if the programmatic hook simply hasn't run yet. The test would then never catch a regression where the programmatic combobox warns.",
+          "suggestedFix": "Wait for a positive signal that the programmatic combobox's hook has mounted (e.g. poll for an attribute the hook writes on mount, or open/close it programmatically) before asserting the absence of its warning."
+        },
+        {
+          "id": "f010",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 532,
+          "endLine": 534,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "warnedAbout filter no longer checks the [Combobox] prefix",
+          "description": "The previous filter matched both `[Combobox]` and `aria-expanded`; the new `warnedAbout` helper matches only `#${id}:`. Any unrelated console warning that happens to contain `#roleless-combobox:` (e.g. from another hook adopting the same message format, like the DatePicker which uses an identical pattern) would satisfy the poll. Low risk, but tightening the filter keeps the assertion about the Combobox warning specifically.",
+          "suggestedFix": "const warnedAbout = (id: string) => () => warnings.filter(w => w.includes(\"[Combobox]\") && w.includes(`#${id}:`)).length;"
+        },
+        {
+          "id": "f011",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1144,
+          "endLine": 1148,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "truncate on a button needs a constrained width to take effect",
+          "description": "The previous `<span class=\"truncate\">` was replaced by `<button class=\"truncate text-left\">`. `truncate` (overflow-hidden + text-ellipsis + whitespace-nowrap) only truncates when the element has a bounded width; a button is inline-block by default and will size to its content unless constrained. If the old span truncated by inheriting the cell's width behavior, long account labels may now overflow the cell instead of truncating.",
+          "suggestedFix": "Add `block w-full` (as the entity-browser cell button does) or `max-w-full` to the button so `truncate` still applies."
+        },
+        {
+          "id": "f012",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/field_picker_test.exs",
+          "startLine": 47,
+          "endLine": 57,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test for the blank-tooltip fallback introduced in field_picker.ex",
+          "description": "field_picker.ex adds a specific behavior change: a blank string tooltip (`\"\"`) now falls back to \"Configure columns\" instead of being kept by `||`. The new test only covers the default (no tooltip supplied). The regression the code comment explicitly calls out — `\"\" || …` keeping the empty string — has no pinning test, so it could quietly revert.",
+          "suggestedFix": "Add a test rendering the picker with `trigger_tooltip: \"\"` and asserting `aria-label == [\"Configure columns\"]`."
+        },
+        {
+          "id": "f013",
+          "file": "test/allocator_one_web/live/ledger/journal_entries_line_picker_keyboard_test.exs",
+          "startLine": 59,
+          "endLine": 60,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "render_hook return may not reflect re-rendered HTML if event is handled by a component",
+          "description": "`render_hook(view, \"update_line\", ...)` targets the LiveView root. If the `update_line` event is actually handled by a LiveComponent (common for line editors), the root-targeted hook would raise or the returned HTML may not include the component patch, making the assertion fragile. If it currently passes, this is fine — but worth confirming the event handler lives on the view, not a component.",
+          "suggestedFix": "If the editor is a LiveComponent, target it: `view |> element(\"#line-editor\") |> render_hook(\"update_line\", ...)`."
+        }
+      ],
+      "durationMs": 66528,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 488,
+          "endLine": 491,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Empty labels bypass the accessible-name fallback",
+          "description": "`trigger_label/1` uses `||`, which only falls back for `nil` and `false`. If `column.label` or `field.label` is an empty string, the function returns that empty string instead of humanizing the column name. In the exact case this helper is intended to cover—cell content that renders no accessible text—the added `sr-only` span can therefore also be empty, leaving the button unnamed.",
+          "suggestedFix": "Treat blank strings as absent before selecting a label, for example by finding the first binary label whose trimmed value is non-empty and otherwise falling back to `column.name |> to_string() |> Phoenix.Naming.humanize()`."
+        }
+      ],
+      "durationMs": 59729,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 487,
+          "endLine": 491,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Unsafe map key access and potential FunctionClauseError in trigger_label/1",
+          "description": "If a bare column map without a `:name` key is provided, `column.name` will raise a `KeyError`. Additionally, if `column.name` is `nil`, calling `Phoenix.Naming.humanize(nil)` will raise a `FunctionClauseError`. Using `Map.get(column, :name)` with a nil check before calling `Phoenix.Naming.humanize/1` prevents unexpected runtime crashes when custom or override column maps are evaluated.",
+          "suggestedFix": "defp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  name = Map.get(column, :name)\n\n  Map.get(column, :label) || Map.get(field, :label) || (name && Phoenix.Naming.humanize(name)) || \"\"\nend"
+        }
+      ],
+      "durationMs": 23590,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 676,
+          "endLine": 686,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Programmatic suppression depends on _resolveTrigger running before _warnUnannounceable",
+          "description": "_warnUnannounceable reads this.triggerWrapper, which is only assigned inside _resolveTrigger. The guard `this.triggerWrapper && ...` silently treats an unassigned (undefined) triggerWrapper as 'not programmatic', so if _warnUnannounceable is ever invoked before _resolveTrigger (e.g. a future refactor or a different hook lifecycle path), a legitimately programmatic combobox will emit the console warning the flag exists to suppress. The inline comment claims the wrapper 'is never absent', but that invariant is only true if call order is guaranteed, and nothing in the diff enforces it. Consider resolving the wrapper inside _warnUnannounceable (or querying this.el directly) so the suppression check does not depend on another method's side effect.",
+          "suggestedFix": "In _warnUnannounceable, derive the wrapper locally: `const wrapper = this.el.querySelector(\"[data-combobox-trigger]\")` and test `wrapper && wrapper.hasAttribute(\"data-combobox-trigger-programmatic\")`, removing the hidden ordering dependency on _resolveTrigger."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 351,
+          "endLine": 355,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "DatePicker stores this.triggerWrapper but never reads it",
+          "description": "The DatePicker hook now assigns this.triggerWrapper in _resolveTrigger (mirroring the combobox change), but unlike the combobox, no code in this diff consumes it — the date picker has no programmatic-suppression path and _warnUnannounceable was only changed to include the id. This is dead state carried 'for symmetry'; either wire it to a consumer or drop the assignment to avoid implying a behavior that does not exist.",
+          "suggestedFix": "Remove the this.triggerWrapper assignment from the DatePicker hook, or add the same programmatic attribute support if parity is intended."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 486,
+          "endLine": 492,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "trigger_label/1 can produce a misleading label for a column with a nil name",
+          "description": "The fallback chain ends at `Phoenix.Naming.humanize(column.name)`. If a bare column map (the documented fallback case: 'an override, a test') omits :name or sets it to nil, `humanize(nil)` stringifies the atom nil and yields the accessible name \"Nil\" — the comment promises the label 'can never come back empty', which is technically true but the result is wrong rather than absent. A nil/empty guard on the final fallback would make the contract honest.",
+          "suggestedFix": "Guard the last step: `name = Map.get(column, :name); if name in [nil, \"\"], do: gettext(\"Value\"), else: Phoenix.Naming.humanize(name)` (or similar)."
+        },
+        {
+          "id": "f004",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 532,
+          "endLine": 538,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Non-programmatic warning assertion no longer matches the specific warning text",
+          "description": "The refactored warnedAbout() only filters on `#${id}:` and drops the previous `w.includes(\"aria-expanded\")` predicate. Any console warning that happens to contain the combobox id (from another hook, a network error message, etc.) would now satisfy the poll, weakening what the test proves about the unannounceable-trigger warning specifically. Keeping the 'aria-expanded' substring check alongside the id would preserve the original precision.",
+          "suggestedFix": "const warnedAbout = (id: string) => () => warnings.filter(w => w.includes(`#${id}:`) && w.includes(\"aria-expanded\")).length;"
+        }
+      ],
+      "durationMs": 64142,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "security-auditor",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 485,
+          "endLine": 489,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label assumes column.name is always present",
+          "description": "The new `trigger_label/1` helper calls `Phoenix.Naming.humanize(column.name)` without checking whether the `column` map actually has a `name` key. If a column map lacks `:name`, this will raise a `KeyError` at render time. While the current call sites appear to always provide a name, this is a fragility that could break if a bare column map (e.g., an override or a test fixture) is passed without a name. The comment even acknowledges that a 'bare column map' could be passed, so guarding against a missing name aligns with the stated intent.",
+          "suggestedFix": "Use `Map.get(column, :name)` and add a safe fallback, e.g.:\n```elixir\ndefp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  Map.get(column, :label) || Map.get(field, :label) ||\n    (column.name && Phoenix.Naming.humanize(column.name)) || \"\"\nend\n```"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 352,
+          "endLine": 354,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Unused triggerWrapper assignment in DatePicker hook",
+          "description": "In the DatePicker hook, `_resolveTrigger` now sets `this.triggerWrapper = marked`, but unlike the combobox hook, nothing ever reads this property. The assignment is dead code and could mislead future maintainers into thinking it is used by some later logic. Either remove the line or add a comment explaining why it is kept (e.g., for symmetry or future use).",
+          "suggestedFix": "Remove the `this.triggerWrapper = marked` line from the DatePicker hook's `_resolveTrigger`, or add a comment indicating it is intentionally kept for parity with the combobox hook."
+        }
+      ],
+      "durationMs": 55481,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "performance-engineer",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 619,
+          "endLine": 626,
+          "severity": "important",
+          "category": "correctness",
+          "title": "triggerWrapper only set when _resolveTrigger runs; may be stale after patches",
+          "description": "The hook caches `this.triggerWrapper` inside `_resolveTrigger()`. If `_warnUnannounceable()` can be reached on a code path where `_resolveTrigger()` has not yet executed for the current DOM (e.g., after a LiveView patch replaces the trigger wrapper element but before the trigger is re-resolved), `this.triggerWrapper` will be either `undefined` or a detached DOM node from the previous render. A detached node that lacked (or carried) `data-combobox-trigger-programmatic` from a prior render would incorrectly suppress or emit the warning. The comment claims \"never absent, since the no-wrapper case returns before this is reached\", but that guarantee holds only if `_warnUnannounceable` is exclusively called after `_resolveTrigger` on every patch — a coupling that is easy to break silently.",
+          "suggestedFix": "Re-derive the wrapper inside `_warnUnannounceable()` instead of caching it: `const wrapper = this.el.querySelector(\"[data-combobox-trigger]\")` — or read the attribute at the single call site immediately after `_resolveTrigger()` returns."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 673,
+          "endLine": 683,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Programmatic suppression checked before setting _warnedUnannounceable flag",
+          "description": "When the trigger is programmatic, the method returns before setting `this._warnedUnannounceable = true`. This means the programmatic-attribute check (a DOM `hasAttribute` call) executes on every invocation of `_warnUnannounceable` (which per the comment above runs from `_syncTriggerAria` on every patch), rather than short-circuiting after the first call. Functionally correct today but does per-patch DOM work needlessly, and if the attribute were ever removed by a later patch the combobox would then start warning mid-session, which may or may not be intended behavior. Minor, but worth making the intent explicit.",
+          "suggestedFix": "If the programmatic decision is meant to be one-shot, set `this._warnedUnannounceable = true` before returning in the programmatic branch (or cache the programmatic check once on mount)."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 348,
+          "endLine": 355,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "DatePicker caches triggerWrapper but never uses it",
+          "description": "The DatePicker hook mirrors the Combobox change by assigning `this.triggerWrapper = marked` in `_resolveTrigger()`, but unlike the Combobox, no `programmatic` suppression (or any other consumer) was added to the DatePicker — its `_warnUnannounceable` was only given the id-prefixed message. The cached property is dead state in this component. Either add the same `programmatic` escape hatch for consistency, or drop the unused assignment to avoid implying a feature that does not exist here.",
+          "suggestedFix": "Remove `this.triggerWrapper = marked` from DatePicker's `_resolveTrigger`, or implement the matching `data-date-picker-trigger-programmatic` handling if the feature is intended for date pickers too."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 485,
+          "endLine": 489,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label does not fall back past empty-string labels",
+          "description": "`trigger_label/1` uses `Map.get(column, :label) || Map.get(field, :label) || Phoenix.Naming.humanize(column.name)`. An empty-string label (`\"\"`) is truthy in Elixir, so a column or field with `label: \"\"` short-circuits the chain and yields an empty accessible name — exactly the failure mode this function exists to prevent, and the same pitfall the field_picker.ex change in this very diff fixed for its tooltip (\"Blank, not just nil: … `\\\"\\\" || …` would keep the empty string\"). The comment on this function claims it \"can never come back empty\", which is not true for blank strings.",
+          "suggestedFix": "Apply the same blank-aware fallback used in field_picker.ex, e.g.:\n\ndefp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n\n  first_present([Map.get(column, :label), Map.get(field, :label)]) ||\n    Phoenix.Naming.humanize(column.name)\nend\n\ndefp first_present(values), do: Enum.find(values, &(is_binary(&1) and &1 != \"\"))"
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 485,
+          "endLine": 489,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label crashes when field is a struct without :label or column lacks :name",
+          "description": "`Map.get(column, :field) || %{}` returns the field struct when present, and `Map.get(field, :label)` on a struct raises `BadMapError`? No — `Map.get/2` works on structs, but it raises if `field` is not a map at all (e.g., an atom or keyword override). More concretely: `column.name` uses static access, which raises `KeyError` for a bare map override that provides `:label` on the field but omits `:name`. Also `Phoenix.Naming.humanize/1` will raise if `column.name` is not an atom/string. Since the function's docstring explicitly targets \"a bare column map (an override, a test)\", these looser shapes are in scope and the fallback path is the most fragile one.",
+          "suggestedFix": "Use `Map.get(column, :name)` with a final guard, e.g. fall back to a generic `gettext(\"Edit\")` if `:name` is absent, and only call `humanize/1` on atoms/strings."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 230,
+          "endLine": 233,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "sr-only label always appended, duplicating announcement for named cells",
+          "description": "The `<span class=\"sr-only\">{trigger_label(@column)}</span>` is unconditionally appended after `render_field_or_default(assigns)`. For a cell that already renders a visible value (e.g., \"Austria\"), the button's accessible name becomes \"Austria Country\" — the column label is announced on every cell in the column, adding noise for screen reader users. The comment justifies the label only for the empty-cell case (\"A cell can render nothing at all\"), yet it is emitted for every cell. The empty-cell test in cell_test.exs would still pass because the default empty placeholder renders, meaning the sr-only span may even be redundant in the empty case it was designed for.",
+          "suggestedFix": "Consider emitting the sr-only column name only when the rendered value is empty, or verify with a screen reader that value-plus-column-name is the intended announcement (some tables do want this — if so, document that the duplication is deliberate)."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 230,
+          "endLine": 233,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Nested interactive content risk when cell renderer emits controls",
+          "description": "Wrapping `render_field_or_default(assigns)` in a `<button>` produces invalid HTML and broken event handling if any cell renderer ever emits an interactive element (link, input, or a `Tag.tag` given an `action`). The new test \"the trigger button holds no interactive content of its own\" covers only the country and boolean renderers; other combobox-editable types (entity references, multi-select tags with remove affordances, etc.) are unverified. A nested button swallows clicks and is a WCAG failure.",
+          "suggestedFix": "Extend the nested-controls test to iterate over every combobox-editable field type, or add a runtime/dev-mode assertion in the cell renderer that trigger content contains no interactive elements."
+        },
+        {
+          "id": "f008",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/location_combobox.ex",
+          "startLine": 52,
+          "endLine": 56,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "location_combobox forwards programmatic but callers cannot express false-vs-absent distinction issues",
+          "description": "`Map.get(trigger_slot, :programmatic, false)` forwards any truthy/falsy value, while the Combobox itself normalizes with `trigger_slot[:programmatic] == true` (\"Strictly true, not merely truthy\"). Because LocationCombobox re-emits the value as a slot attr on the inner combobox, a caller passing `programmatic={\"yes\"}` through LocationCombobox reaches the inner combobox as `\"yes\"` and is then normalized to `false` there — consistent, but the double hop means LocationCombobox's own docs (\"Forwarded ... see NewUI.Combobox.combobox/1\") are the only guard. Fine as-is; noting only that keeping the strict `== true` normalization in one place (the Combobox) is the right call and LocationCombobox should not add its own.",
+          "suggestedFix": "No change required; optionally normalize with `Map.get(trigger_slot, :programmatic, false) == true` for symmetry."
+        },
+        {
+          "id": "f009",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 531,
+          "endLine": 538,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Negative assertion on programmatic warning can pass vacuously due to timing",
+          "description": "The test asserts `warnings.filter(w => w.includes(\"#programmatic-combobox:\"))` is empty immediately after polling for the roleless combobox's warning. The comment claims \"by which point both hooks have mounted\", but hook mount ordering across LiveView components is not guaranteed, and even after mount the roleless warning may be flushed before the programmatic hook's `_warnUnannounceable` path runs (the warning is emitted from a sync path per the comment, but the console message capture in Playwright is asynchronous). If the programmatic hook mounted later or its console event had not yet been delivered to the test's `warnings` array, this assertion would pass even in a regressed build. A small fixed wait or a positive signal from the programmatic combobox (e.g., polling for its wrapper attribute being present in the DOM first) would make the negative assertion trustworthy.",
+          "suggestedFix": "Before the negative assertion, await a positive DOM signal that the programmatic combobox's hook has mounted (e.g., `await expect(page.locator('#programmatic-combobox [data-combobox-trigger-programmatic]')).toBeAttached()`), then assert no warning was captured."
+        },
+        {
+          "id": "f010",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 530,
+          "endLine": 530,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "warnedAbout matcher no longer checks the warning is the aria-expanded warning",
+          "description": "The previous filter required both `[Combobox]` and `aria-expanded` in the message; the new `warnedAbout` helper only matches `#${id}:`. Any future console.warn mentioning `#roleless-combobox:` (from a different hook feature) would satisfy the poll, weakening what the test proves.",
+          "suggestedFix": "Tighten the filter: `warnings.filter(w => w.includes(\"[Combobox]\") && w.includes(`#${id}:`) && w.includes(\"aria-expanded\")).length`."
+        },
+        {
+          "id": "f011",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1144,
+          "endLine": 1148,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "truncate on a button needs a constrained width to take effect",
+          "description": "The account trigger changed from `<span class=\"truncate ...\">` to `<button class=\"truncate text-left\">`. `truncate` (overflow-hidden + text-ellipsis + whitespace-nowrap) only clips when the element has a bounded width; a default inline-block button sizes to its content, so long account labels may now overflow the cell instead of truncating as the span (likely constrained by its flex parent) did. The entity-browser cell button in this same diff added `block w-full` for exactly this reason.",
+          "suggestedFix": "Add `block w-full` (or `max-w-full`) to the button's class list to preserve truncation: `class={[\"block w-full truncate text-left\", @empty? && \"text-fg-muted\"]}`."
+        },
+        {
+          "id": "f012",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/cell_test.exs",
+          "startLine": 244,
+          "endLine": 250,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Empty-cell test reuses a fixture that renders a value",
+          "description": "The test \"an empty combobox cell's button is still named\" uses `render_country_cell()`, whose `value_fn` (defined earlier in the file, per the sibling test asserting `#country_id-row1-tags` renders) appears to return a populated value. If the fixture renders \"Austria\", the non-empty-text assertion is satisfied by the value, not by the placeholder or sr-only label the comment claims to pin (\"This cell is EMPTY (no country picked)\"). The test would then not catch removal of `default_empty_placeholder/1` or the sr-only span.",
+          "suggestedFix": "Render the country cell with a value_fn returning nil/empty (mirroring how `render_boolean_cell(fn _,_ -> %{boolean: nil} end)` parameterizes emptiness) so the assertion genuinely exercises the empty state."
+        }
+      ],
+      "durationMs": 71437,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "api-design",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 487,
+          "endLine": 491,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label/1 may raise KeyError or FunctionClauseError if :name is missing or nil",
+          "description": "`column.name` uses dot syntax, which raises a `KeyError` if `column` is a map missing the `:name` key. Additionally, if `column.name` is `nil`, `Phoenix.Naming.humanize(nil)` will raise a `FunctionClauseError`. Using `Map.get(column, :name)` and checking that it is non-nil before calling `humanize/1` prevents runtime crashes when passed custom or partial column maps.",
+          "suggestedFix": "defp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  name = Map.get(column, :name)\n\n  Map.get(column, :label) || Map.get(field, :label) || (name && Phoenix.Naming.humanize(name)) || \"\"\nend"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 351,
+          "endLine": 354,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Unused property this.triggerWrapper assigned in DatePicker._resolveTrigger()",
+          "description": "`this.triggerWrapper = marked` was added in `DatePicker._resolveTrigger()`, but unlike `Combobox`, `DatePicker` does not reference `this.triggerWrapper` in `_warnUnannounceable` or anywhere else in its hook.",
+          "suggestedFix": "Remove `this.triggerWrapper = marked` from `DatePicker._resolveTrigger()` if it is unused, or implement the corresponding programmatic trigger suppression logic in `DatePicker._warnUnannounceable()` if needed."
+        }
+      ],
+      "durationMs": 35611,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 2544,
+          "endLine": 2550,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "data-combobox-trigger-programmatic renders as empty string when true",
+          "description": "When `@trigger_programmatic` is `true`, Phoenix renders `data-combobox-trigger-programmatic=\"\"` (a boolean attribute). When it is `false`, Phoenix omits the attribute entirely. This works correctly with the JS hook's `hasAttribute` check. However, the test at combobox_test.exs line ~2556 asserts `== [\"\"]` for the present case and `== []` for the absent case. If the rendering framework ever changes how boolean attributes serialize (e.g., to `data-combobox-trigger-programmatic=\"true\"`), the hook's `hasAttribute` check would still pass but the test would break. This is a minor coupling concern, not a bug today.",
+          "suggestedFix": "Consider documenting in a comment near the hook's `hasAttribute` check that the attribute's VALUE is irrelevant — only presence matters — so a future contributor doesn't accidentally change the rendering to `data-combobox-trigger-programmatic={to_string(@trigger_programmatic)}` which would render `\"false\"` and still pass `hasAttribute`."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 480,
+          "endLine": 489,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label/1 assumes column.name is always a valid atom/string",
+          "description": "The `trigger_label/1` function calls `Phoenix.Naming.humanize(column.name)` as the final fallback. The comment says 'this can never come back empty', but if `column.name` were ever `nil` (e.g., a malformed column map), `Phoenix.Naming.humanize(nil)` would raise an `ArgumentError` or `FunctionClauseError`. The function guards against missing `:field` and `:label` keys but not a missing `:name` key.",
+          "suggestedFix": "Add a guard or fallback for `column.name`:\n```elixir\ndefp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  Map.get(column, :label) || Map.get(field, :label) || Phoenix.Naming.humanize(column.name || \"field\")\nend\n```"
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 480,
+          "endLine": 489,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "trigger_label/1 lacks @spec typespec",
+          "description": "The new private helper `trigger_label/1` is a public-facing contract for the cell's accessible name. While it's a `defp`, adding a `@spec` would document the expected shape of the `column` map and the guaranteed non-empty binary return, making the 'can never come back empty' invariant machine-checkable.",
+          "suggestedFix": "Add `@spec trigger_label(map()) :: String.t()` above the function."
+        },
+        {
+          "id": "f004",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 537,
+          "endLine": 541,
+          "severity": "important",
+          "category": "tests",
+          "title": "Programmatic combobox no-warn assertion has a race condition",
+          "description": "The test asserts `expect(warnings.filter(w => w.includes('#programmatic-combobox:'))).toHaveLength(0)` immediately after the poll for `roleless-combobox` resolves. The comment says 'by which point both hooks have mounted', but this is an assumption: the poll only guarantees the `roleless-combobox` hook has warned. If the `programmatic-combobox` hook mounts slightly later (e.g., due to LiveView patching order), the assertion could pass vacuously before the programmatic hook has had a chance to (incorrectly) warn. This makes the negative assertion unreliable.",
+          "suggestedFix": "Add a small stabilization wait or poll for a positive signal that the programmatic combobox's hook has mounted (e.g., check for a DOM attribute the hook sets on mount) before asserting the absence of warnings. Alternatively, add a brief `await page.waitForTimeout(...)` or poll for the programmatic combobox element to be present in the DOM with its hook initialized."
+        },
+        {
+          "id": "f005",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 553,
+          "endLine": 567,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Keyboard-open test does not verify Escape/Tab-away closes the panel",
+          "description": "The new test verifies Enter opens the panel and sets `aria-expanded=\"true\"`, but does not test the complementary keyboard interactions: Escape closing the panel, Tab moving focus out, or arrow-key navigation within the opened listbox. These are the primary keyboard-only interactions the change is meant to enable.",
+          "suggestedFix": "Extend the test to press Escape after opening and assert the panel is hidden and `aria-expanded` reverts to `\"false\"`. Optionally test ArrowDown focuses the first option."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 619,
+          "endLine": 626,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "triggerWrapper stored before null-check on marked element",
+          "description": "In `_resolveTrigger()`, `this.triggerWrapper = marked` is assigned before the `if (!marked || ...)` guard. If `marked` is `null` (no `[data-combobox-trigger]` found), `this.triggerWrapper` is set to `null`. Later in `_warnUnannounceable`, the code checks `this.triggerWrapper && this.triggerWrapper.hasAttribute(...)`, so a null `triggerWrapper` correctly falls through to the warning. This is safe, but the assignment before the guard is slightly misleading and could confuse future readers into thinking `triggerWrapper` is always a valid element.",
+          "suggestedFix": "Move the assignment after the null check, or add a brief comment: `// may be null; callers guard with &&`."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 348,
+          "endLine": 355,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "DatePicker stores triggerWrapper but has no programmatic suppression",
+          "description": "The DatePicker hook now stores `this.triggerWrapper = marked` (mirroring the Combobox change), but unlike the Combobox, there is no `programmatic` attribute check in `_warnUnannounceable`. If a DatePicker is ever used in a programmatic context (like the entity browser's location editor), there is no way to suppress the warning. This is not a bug today since no programmatic DatePicker exists, but the asymmetry could cause confusion.",
+          "suggestedFix": "Either add a brief comment noting that DatePicker has no programmatic use-case yet, or add the same `data-date-picker-trigger-programmatic` check for parity."
+        },
+        {
+          "id": "f008",
+          "file": "test/allocator_one_web/live/ledger/journal_entries_line_picker_keyboard_test.exs",
+          "startLine": 33,
+          "endLine": 47,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Test relies on specific CSS selector pattern that couples to implementation",
+          "description": "The test queries `[id^=\"line-#{kind}-cb-\"] [data-combobox-trigger] > button` which tightly couples to the ID naming convention (`line-account-cb-*`, `line-currency-cb-*`). If the ID format changes (e.g., adding a prefix or changing the separator), the test silently passes with zero matches because `Enum.any?(triggers)` would fail with the assertion message, but the selector itself is brittle. This is acceptable for a LiveView integration test but worth noting.",
+          "suggestedFix": "No immediate fix needed, but consider adding a data-attribute like `data-line-picker-kind=\"account\"` to make the selector more semantic and less coupled to ID format."
+        },
+        {
+          "id": "f009",
+          "file": "test/allocator_one_web/live/ledger/journal_entries_line_picker_keyboard_test.exs",
+          "startLine": 49,
+          "endLine": 73,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Currency-clear test does not verify the button's text is the fallback label",
+          "description": "The test asserts `trigger |> LazyHTML.text() |> String.trim() != \"\"` after clearing the currency, confirming the button is non-empty. However, it does not assert the specific fallback text (e.g., 'Select currency'). If a future refactor accidentally renders whitespace or a different fallback, the test would still pass. The account cell test in the same file has the same pattern.",
+          "suggestedFix": "Assert the specific expected text:\n```elixir\nassert trigger |> LazyHTML.text() |> String.trim() == \"Select currency\"\n```"
+        },
+        {
+          "id": "f010",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 220,
+          "endLine": 236,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "sr-only span inside button may be announced redundantly with visible text",
+          "description": "The trigger button renders both `{render_field_or_default(assigns)}` (visible content) and `<span class=\"sr-only\">{trigger_label(@column)}</span>`. When the cell has a visible value, screen readers will announce both the value text and the sr-only column label. This is likely intentional (value + context), but if `render_field_or_default` already includes the column name or a tag with the value, the announcement could be redundant. Worth verifying with a screen reader.",
+          "suggestedFix": "Verify with a screen reader that the combined announcement is not redundant. If it is, consider making the sr-only span conditional: only render it when the cell has no visible text content."
+        },
+        {
+          "id": "f011",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 54,
+          "endLine": 59,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Pattern match on binary could be simplified with guard",
+          "description": "The `case` expression matching `text when is_binary(text) and text != \"\"` is correct but slightly verbose. The comment explains why `||` won't work (empty string is truthy in Elixir), which is good documentation. No issue, just noting the pattern is correct.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f012",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1120,
+          "endLine": 1126,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Intermediate variable `label` adds no value over inline use",
+          "description": "The refactor extracts `label = item.account_label` into a local variable, then uses it in two places (`label: label` and `empty?: label in [nil, \"\"]`). This is fine, but the original inline `item.account_label` was equally clear. The intermediate variable is a minor style choice that doesn't improve readability significantly.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f013",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/cell_test.exs",
+          "startLine": 224,
+          "endLine": 260,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test for the sr-only trigger_label fallback chain",
+          "description": "The `trigger_label/1` function has a three-level fallback: `column.label` → `field.label` → `humanize(column.name)`. The tests verify the button is non-empty but do not test the specific fallback behavior — e.g., a column with no `:label` and a field with no `:label` should fall back to the humanized column name. A column with an explicit `:label` should use that instead.",
+          "suggestedFix": "Add unit tests for `trigger_label/1` covering:\n1. Column with explicit `:label` → uses it\n2. Column without `:label`, field with `:label` → uses field's\n3. Column without either → humanizes `column.name`\n4. Column with empty string `:label` → should it fall through? (Currently it would use `\"\"`)"
+        },
+        {
+          "id": "f014",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 480,
+          "endLine": 489,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label treats empty-string label as valid, producing empty sr-only text",
+          "description": "If `column.label` is `\"\"` (empty string), `Map.get(column, :label)` returns `\"\"`, which is truthy in Elixir's `||` chain, so `trigger_label` returns `\"\"`. The sr-only span would then contain no text, defeating the accessibility purpose. The `field_picker.ex` change explicitly handles this case with a pattern match, but `trigger_label` does not.",
+          "suggestedFix": "Mirror the field_picker approach:\n```elixir\ndefp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  case Map.get(column, :label) do\n    text when is_binary(text) and text != \"\" -> text\n    _ -> case Map.get(field, :label) do\n      text when is_binary(text) and text != \"\" -> text\n      _ -> Phoenix.Naming.humanize(column.name)\n    end\n  end\nend\n```"
+        },
+        {
+          "id": "f015",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 553,
+          "endLine": 567,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "E2E test does not test Space key as alternative to Enter for button activation",
+          "description": "The test verifies Enter opens the combobox panel from the button trigger. Native `<button>` elements also activate on Space. While this is browser-native behavior and unlikely to break, a comprehensive keyboard accessibility test would verify both activation keys.",
+          "suggestedFix": "Add a second test or extend the existing one to press Space and verify the panel opens."
+        }
+      ],
+      "durationMs": 141417,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "dx-critic",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1146,
+          "endLine": 1149,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Journal picker buttons lack full-cell hit/focus target",
+          "description": "Entity browser combobox triggers use `block w-full text-left` so the focusable control fills the cell. The account (and currency) line-picker buttons only add `truncate text-left`, so the tab stop and focus ring shrink to the label width while pointer users still get the full cell via `.LineCellSelect`. That leaves an inconsistent keyboard target and can make `truncate` ineffective without a bounded block width.",
+          "suggestedFix": "Match the entity browser pattern, e.g. `class={[\"block w-full truncate text-left\", @empty? && \"text-fg-muted\"]}` (and the same `block w-full` treatment on the currency trigger button)."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 400,
+          "endLine": 406,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "triggerWrapper assigned but never read",
+          "description": "DatePicker’s `_resolveTrigger` now stores `this.triggerWrapper`, mirroring Combobox, but nothing in DatePicker reads it (no `programmatic` suppress path). That is harmless dead state and may imply DatePicker supports the same slot flag when it does not.",
+          "suggestedFix": "Either drop the `this.triggerWrapper = marked` assignment until DatePicker needs slot-level metadata, or thread through an equivalent explicit opt-out if programmatic date triggers are expected."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 487,
+          "endLine": 491,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "trigger_label mixes Map.get with hard field access",
+          "description": "`trigger_label/1` safely Map.gets `:label` / `:field`, then uses `column.name` with dot access for the final fallback. A bare column map missing `:name` will raise KeyError despite the comment that this “can never come back empty.”",
+          "suggestedFix": "Use `Map.get(column, :name)` and a final hard-coded fallback (e.g. gettext(\"Column\")) so the function always returns a non-empty name as documented."
+        }
+      ],
+      "durationMs": 309334,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "architecture",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 488,
+          "endLine": 492,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label crashes on column maps without a :name key",
+          "description": "The comment above `trigger_label/1` claims it \"can never come back empty\" and handles \"a bare column map (an override, a test)\", but the final fallback uses dot access: `Phoenix.Naming.humanize(column.name)`. Dot access on a map raises `KeyError` when the key is absent, so a bare column map that lacks `:name` (exactly the case the fallback chain is designed for) crashes instead of falling back. Use `Map.get(column, :name)` and guard it, e.g. `|| Map.get(column, :name)` with a final `|| \"\"`/`to_string` fallback, so the function lives up to its contract.",
+          "suggestedFix": "defp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n\n  Map.get(column, :label) || Map.get(field, :label) ||\n    (column |> Map.get(:name) |> case do\n       nil -> \"\"\n       name -> Phoenix.Naming.humanize(name)\n     end)\nend"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 482,
+          "endLine": 490,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Stale comment now attached to the wrong function",
+          "description": "The comment `# Money combobox for currency selection (nil for other types)` used to sit directly above `resolve_money_combobox/4`. The new `trigger_label/1` was inserted between the comment and that function, so the comment now reads as documentation for `trigger_label`, which has nothing to do with money. Move the comment back down above `resolve_money_combobox/4` (or convert `trigger_label`'s own block comment into a `@doc`/proper placement).",
+          "suggestedFix": "Move `# Money combobox for currency selection (nil for other types)` to directly precede `defp resolve_money_combobox(assigns, field, inline_editable?, rid)`."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 676,
+          "endLine": 684,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Programmatic suppression depends on implicit call ordering",
+          "description": "`_warnUnannounceable` reads `this.triggerWrapper`, which is only assigned inside `_resolveTrigger()`. The suppression silently stops working (i.e., the warning fires for programmatic triggers) if `_warnUnannounceable` is ever called before `_resolveTrigger` — `this.triggerWrapper` would be `undefined` and the guard falls through. The inline comment asserts the ordering invariant (\"never absent, since the no-wrapper case returns before this is reached\") but nothing in the visible code enforces it. This is the same pattern duplicated in date_picker.ex, so a future refactor in one place can desynchronize both. Consider resolving the wrapper defensively (`const wrapper = this.triggerWrapper ?? this.el.querySelector(\"[data-combobox-trigger]\")`) or asserting the invariant explicitly.",
+          "suggestedFix": "const wrapper = this.triggerWrapper ?? this.el.querySelector(\"[data-combobox-trigger]\")\nif (wrapper && wrapper.hasAttribute(\"data-combobox-trigger-programmatic\")) return"
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1180,
+          "endLine": 1184,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Currency trigger renders the raw currency id as its label",
+          "description": "When a currency is set, the button renders `{@value}` where `value` is `item.line.transaction_currency_id` — the raw id, not a display label. This predates the diff (the old span did the same), but now that the button is the control's accessible name, a screen reader announces whatever format the id takes (e.g. a UUID rather than \"USD\"), unlike the money cell in cell.ex which deliberately renders `data-money-currency-text`. If ids here are human-readable codes this is fine; otherwise resolve the label from `currency_options` the way the account cell uses `account_label`.",
+          "suggestedFix": "Look up the selected option's label from `@options` by `@value` and render that, falling back to the raw value."
+        }
+      ],
+      "durationMs": 382376,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "bug-hunter",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 55,
+          "endLine": 59,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Whitespace-only tooltip leaves icon button unnamed",
+          "description": "The fallback only recognizes the exact empty string. A `trigger_tooltip` containing only whitespace passes the guard and is used as the button's `aria-label`, leaving this icon-only control without an effective accessible name despite the stated blank-value handling.",
+          "suggestedFix": "Require nonblank trimmed content, for example: `text when is_binary(text) -> if String.trim(text) == \"\", do: gettext(\"Configure columns\"), else: text`."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 486,
+          "endLine": 490,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Empty labels prevent the trigger label fallback",
+          "description": "The `||` chain treats `\"\"` and whitespace-only labels as valid. If a column or field explicitly has a blank label and the rendered value is also blank, the newly added screen-reader span remains unnamed instead of falling back to the field label or humanized column name. This contradicts the function's guarantee that it cannot return an empty label.",
+          "suggestedFix": "Select the first nonblank label, trimming strings when testing them, and then fall back to `Phoenix.Naming.humanize(column.name)`."
+        }
+      ],
+      "durationMs": 54815,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "accessibility-auditor",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "fpa11y-0001",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1144,
+          "endLine": 1146,
+          "severity": "important",
+          "category": "best-practices",
+          "title": "Accessible name of new trigger buttons relies on knowledge of Phoenix internals",
+          "description": "The diff replaces `<span>` with `<button type=\"button\">` in the account cell's `:trigger` slot to make it keyboard-operable. However, being a serious and complaint-focused accessibility audit, a proper accessible name (via `aria-label` or `aria-labelledby`) is not set on the new `<button>`; the author relies on the button's *text content* to be a non-empty string yielded by `render_field_or_default/1` and `@label`, and likewise for the currency cell's `<button>`. This is an implicit contract: nothing enforces that future changes to the renderers (or an unset field state) keep a text node inside the button, and a `span` that can become empty yields a control with no accessible name. Prefer to give the button an explicit, stable `aria-label` (e.g., `gettext(\"Select account\")`) that the surrounding code already provides for the empty-state text, and move the human-readable text into a visually-hidden `<span aria-hidden=\"true\"></span>` wrapper so the button's name never depends on the cell value. (This is the same concern the surrounding code itself acknowledges in `field_picker.ex`: 'a tooltip is not an accessible name'.)"
+        }
+      ],
+      "durationMs": 481656,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "project-rules",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 619,
+          "endLine": 626,
+          "severity": "important",
+          "category": "correctness",
+          "title": "triggerWrapper read in _warnUnannounceable may be stale or unset",
+          "description": "`this.triggerWrapper` is assigned as a side effect inside `_resolveTrigger()`. `_warnUnannounceable()` then reads it to decide whether to suppress the warning. This creates an implicit ordering dependency: if `_warnUnannounceable` is ever called before `_resolveTrigger` (now or after a refactor), `this.triggerWrapper` is `undefined` and the programmatic suppression silently fails, re-emitting the warning for programmatic triggers. The inline comment even asserts \"never absent, since the no-wrapper case returns before this is reached\" — that guarantee lives in a different function and is easy to break. Additionally, after a DOM patch the cached wrapper element may be a detached node if `_resolveTrigger` is not re-run before the warning check, so `hasAttribute` would be read off a stale element.",
+          "suggestedFix": "Have `_warnUnannounceable` resolve the wrapper itself (e.g. `const wrapper = this.el.querySelector(\"[data-combobox-trigger]\")`) or pass the wrapper explicitly as a parameter, rather than depending on a side-effect assignment in `_resolveTrigger`."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 348,
+          "endLine": 356,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "DatePicker caches triggerWrapper but nothing reads it",
+          "description": "The DatePicker hook mirrors the Combobox change by assigning `this.triggerWrapper = marked` in `_resolveTrigger`, but unlike the Combobox, no `programmatic` slot attr or wrapper marker was added to the DatePicker, and `_warnUnannounceable` there never reads `triggerWrapper`. The assignment is dead code that suggests a feature parity that does not exist. Either add the same `programmatic` escape hatch to the DatePicker (the entity browser pattern will presumably hit the same wall for date cells) or drop the unused cache to keep the two hooks honestly divergent.",
+          "suggestedFix": "Remove the unused `this.triggerWrapper = marked` assignment in date_picker.ex, or complete the feature by adding the `programmatic` attr and suppression logic as done for Combobox."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 230,
+          "endLine": 234,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Cell trigger button may nest interactive content rendered by the cell",
+          "description": "`render_field_or_default(assigns)` is now wrapped in a `<button>`. The new test asserts current renderers only emit spans (\"`Tag.tag` only becomes a button when given an `action`\"), but nothing at this callsite prevents a future cell renderer or `cell_override` from emitting a link/button, which would produce invalid HTML (interactive content inside a button) and swallow clicks. The test covers two field types only (country, boolean); overrides are entirely unguarded. This is acceptable as-is given the tests, but worth a defensive note: the risk is concentrated in `cell_override`, which is arbitrary caller markup.",
+          "suggestedFix": "Confirm `cell_override` content never renders inside this button path, or extend the nested-controls test to cover the override branch and the remaining combobox-editable field types."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 484,
+          "endLine": 492,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "trigger_label/1 lacks @doc/@spec but comment placement misattributes it",
+          "description": "The comment \"# Money combobox for currency selection (nil for other types)\" originally documented `resolve_money_combobox/4`; the new `trigger_label/1` was inserted between that comment and the function it describes, so the money comment now reads as a header for `trigger_label`. Move the new function (and its own comment) above or below so the existing comment stays attached to `resolve_money_combobox`. Also note `Map.get(column, :label)` returns an empty string as-is if a column carries `label: \"\"` — the fallback chain only guards nil, unlike the blank-aware handling added in field_picker.ex for the same accessible-name concern.",
+          "suggestedFix": "Reorder so the money comment sits directly above resolve_money_combobox/4, and consider treating \"\" like nil in the label fallback chain for consistency with field_picker.ex."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/components_newui/for_entity_browser/cell_test.exs",
+          "startLine": 246,
+          "endLine": 250,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Empty-cell name test reuses a populated country cell",
+          "description": "The test \"an empty combobox cell's button is still named\" claims to pin the EMPTY state (\"This cell is EMPTY (no country picked)\"), but it calls `render_country_cell()` — the same helper the previous test uses, whose fixture presumably renders a country tag (the previous test asserts `#country_id-row1-tags` exists inside the button). If the fixture renders a selected value, this test's non-empty-text assertion passes trivially via the value text and does not exercise `default_empty_placeholder/1` at all, so removing a placeholder would not be caught as the comment promises.",
+          "suggestedFix": "Render the country cell with a value_fn returning no selection (nil/empty) so the button text can only come from the empty placeholder, then assert it is non-blank."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 54,
+          "endLine": 61,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "Blank-tooltip normalization is silent API behavior worth documenting on the attr",
+          "description": "The `trigger_tooltip` attr now silently replaces an empty string with the default \"Configure columns\". That is the right accessibility call, but a caller passing `\"\"` to intentionally suppress the tooltip will get a surprise. The attr declaration (`attr :trigger_tooltip, :string, default: nil` per line 51 context) carries no doc noting that blank is treated as unset.",
+          "suggestedFix": "Add a `doc:` to the `trigger_tooltip` attr stating that nil or blank falls back to the default, since the text doubles as the trigger's aria-label."
+        },
+        {
+          "id": "f007",
+          "file": "test/allocator_one_web/live/ledger/journal_entries_line_picker_keyboard_test.exs",
+          "startLine": 36,
+          "endLine": 44,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Currency-name assertion on a fresh entry may pass only via placeholder or value ambiguity",
+          "description": "The first test asserts every account/currency trigger has non-blank text on a brand-new journal entry. For the currency cell this passes either because a default currency is preselected or because the new \"Select currency\" placeholder renders — the test cannot tell which, and the second test (clearing) covers the placeholder path explicitly, so this is mostly fine. However, `String.trim/1` on `LazyHTML.text/1` over multiple triggers concatenates all buttons' text; a single named button among several unnamed ones would make the `refute` pass. The account/currency loop asserts the aggregate, not each trigger.",
+          "suggestedFix": "Iterate the matched triggers and assert each one's text individually is non-blank, e.g. `for t <- triggers, do: assert t |> LazyHTML.text() |> String.trim() != \"\"` (adjusting for LazyHTML's per-node API)."
+        },
+        {
+          "id": "f008",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1144,
+          "endLine": 1149,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Account button lost block/full-width styling the cell layout may rely on",
+          "description": "The old trigger was a `<span class=\"truncate ...\">`; the replacement `<button type=\"button\" class={[\"truncate text-left\", ...]}>` has no `block w-full`, unlike the analogous entity-browser cell button which deliberately adds `relative block w-full text-left` with a comment explaining the box must match what the renderer measures. A shrink-to-fit inline button gives a smaller click/focus target than the cell, and `truncate` only truncates when the element has a constrained width — an inline-block button sized to its content will not truncate long account labels the way the old span (inside a flexed cell) may have.",
+          "suggestedFix": "Add `block w-full` (or `min-w-0` within the flex row) to the account and currency trigger buttons so truncation and hit area match the previous layout; verify visually."
+        }
+      ],
+      "durationMs": 49373,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "spec-compliance",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 487,
+          "endLine": 491,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Unsafe map field access column.name in trigger_label/1",
+          "description": "trigger_label/1 retrieves :label and :field defensively using Map.get/2, but accesses column.name using dot syntax. If column is missing the :name key, evaluating column.name will raise a KeyError.",
+          "suggestedFix": "defp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  name = Map.get(column, :name)\n\n  Map.get(column, :label) || Map.get(field, :label) || (name && Phoenix.Naming.humanize(name))\nend"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 351,
+          "endLine": 354,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Unused this.triggerWrapper assignment in DatePicker JS hook",
+          "description": "this.triggerWrapper = marked is set in DatePicker's _resolveTrigger(), but unlike Combobox, DatePicker's _warnUnannounceable() does not reference this.triggerWrapper.",
+          "suggestedFix": "Either check this.triggerWrapper in DatePicker._warnUnannounceable() for programmatic triggers, or remove the unused assignment."
+        }
+      ],
+      "durationMs": 32141,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/combobox.ex",
+          "startLine": 676,
+          "endLine": 685,
+          "severity": "critical",
+          "category": "correctness",
+          "title": "_warnedUnannounceable never set on programmatic triggers; JS warning re-fires",
+          "description": "The `programmatic` early-return executes before the assignment `this._warnedUnannounceable = true`. Because the warning is emitted from `_syncTriggerAria` which runs on every LiveView patch, any subsequent patch of a combobox whose trigger has `data-combobox-trigger-programmatic` will re-enter `_warnUnannounceable`, see the attribute again, and return early — but if the hook is ever remounted (e.g. a LiveView remount, hot code reload in dev, or a structural DOM change that recreates the hook instance), the flag is still unset and the guard must re-evaluate. More critically, if a LiveView patch ever causes `this.triggerWrapper` to become stale (pointing to a detached node) or `null` (e.g. the wrapper is replaced by a patch before `_resolveTrigger` re-runs), the guard falls through and the console warning fires for a trigger that was explicitly marked programmatic. The flag assignment must precede the early return so the warning is permanently suppressed after the first evaluation, matching the original single-fire semantics.",
+          "suggestedFix": "Move `this._warnedUnannounceable = true` above the programmatic check so it executes regardless of the outcome:\n\n```js\n_warnUnannounceable() {\n  if (this._warnedUnannounceable) return\n  this._warnedUnannounceable = true\n  if (\n    this.triggerWrapper &&\n    this.triggerWrapper.hasAttribute(\"data-combobox-trigger-programmatic\")\n  ) {\n    return\n  }\n  console.warn(...)\n}\n```"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 220,
+          "endLine": 234,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Button wraps interactive content; nested-control test may miss it",
+          "description": "The new `<button>` wraps `{render_field_or_default(assigns)}`. The test asserts no `button, a[href], input, select, textarea` descendants exist, but if `render_field_or_default` renders a Tag component with an `action` attribute for any column configuration, the Tag becomes an interactive `<button>` nested inside the outer button. Browsers flatten nested buttons unpredictably (clicks may be swallowed, focus may jump). The test only covers `render_country_cell()` and a boolean-nil case; other column types or entity-link overrides could introduce nested controls that pass the current test suite but produce invalid HTML in production.",
+          "suggestedFix": "Either (a) audit every `render_field_or_default` code path to guarantee no interactive descendants, or (b) broaden the nested-control test to cover entity-link columns and tag-with-action scenarios, or (c) use `role=\"button\"` + `tabindex=\"0\"` on a `<div>` instead of a real `<button>` element to avoid the HTML nesting constraint."
+        },
+        {
+          "id": "f003",
+          "file": "test/e2e/specs/newui_combobox.spec.ts",
+          "startLine": 543,
+          "endLine": 543,
+          "severity": "important",
+          "category": "tests",
+          "title": "No-warn assertion for programmatic trigger is racy",
+          "description": "`expect(warnings.filter(w => w.includes(\"#programmatic-combobox:\"))).toHaveLength(0)` runs immediately after the poll for `roleless-combobox` resolves. The comment says \"by which point both hooks have mounted,\" but there is no guarantee: if the programmatic combobox's hook mounts a tick later (e.g. due to a LiveView patch ordering difference under CI load), the assertion passes vacuously and a regression that re-introduces the warning would go undetected. The roleless check uses `expect.poll` precisely because of this race; the negative check should use an equivalent mechanism.",
+          "suggestedFix": "Poll for the absence with a bounded timeout, e.g.:\n```ts\n// Give the programmatic hook ample time to mount and (incorrectly) warn.\nawait page.waitForTimeout(500);\nexpect(warnings.filter(w => w.includes(\"#programmatic-combobox:\"))).toHaveLength(0);\n```\nOr use `expect.poll` with a `.toBe(0)` after a fixed delay."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 82,
+          "endLine": 97,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Empty-string trigger_tooltip silently falls back to default",
+          "description": "The new `case` treats `\"\"` the same as `nil` and substitutes the gettext default. If a caller ever intentionally passes `trigger_tooltip: \"\"` to suppress the tooltip (e.g. a context where the icon is decorative), this change silently overrides that intent. The `attr` declaration still says `default: nil` with no documentation that empty strings are coerced. This is a subtle API contract change for the `field_picker` component.",
+          "suggestedFix": "Document the coercion in the `attr :trigger_tooltip` doc string, or use a separate boolean attr (e.g. `tooltip?: false`) for the suppress-tooltip use case rather than overloading the string value."
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 483,
+          "endLine": 490,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "trigger_label/1 may raise on non-atom column.name",
+          "description": "`Phoenix.Naming.humanize/1` expects an atom or binary. The fallback chain `Map.get(column, :label) || Map.get(field, :label) || Phoenix.Naming.humanize(column.name)` assumes `column.name` is always present and of a valid type. If a bare column map omits `:name` (the comment says \"a bare column map … falls back to the field's, then to the column name itself\"), `column.name` raises `KeyError`. The `Map.get` pattern used for `:label` and `:field` is not applied to `:name`, creating an inconsistency that could crash at runtime for malformed column maps.",
+          "suggestedFix": "Use `Map.get(column, :name, :unknown)` or add a guard clause, e.g.:\n```elixir\ndefp trigger_label(column) do\n  field = Map.get(column, :field) || %{}\n  Map.get(column, :label) || Map.get(field, :label) || Phoenix.Naming.humanize(Map.get(column, :name, \"column\"))\nend\n```"
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/live/ledger/components/journal_entry_components.ex",
+          "startLine": 1120,
+          "endLine": 1121,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Redundant variable extraction for label",
+          "description": "`label = item.account_label` is extracted solely to be reassigned into the assigns map on the very next line. The original code inlined `item.account_label` directly. The extraction adds a line without changing behavior and makes the diff noisier than necessary. The `empty?` derivation on the next line is the only reason to bind it, but it could be computed inline: `empty?: item.account_label in [nil, \"\"]`.",
+          "suggestedFix": "Inline the value:\n```elixir\nassigns = %{\n  id: item.id,\n  value: item.account_value,\n  label: item.account_label,\n  empty?: item.account_label in [nil, \"\"],\n  options: account_options\n}\n```"
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 289,
+          "endLine": 296,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "cursor-pointer removed from money currency button",
+          "description": "The `cursor-pointer` class was removed when the `<span>` became a `<button>`. While most browsers show a pointer cursor on `<button>` by default, some CSS resets (Tailwind's Preflight included) set `cursor: default` on buttons. If the project's Tailwind config or a global stylesheet resets button cursors, users lose the pointer affordance they had with the old span. The field-picker trigger at line 90 also drops `cursor-pointer` for the same reason.",
+          "suggestedFix": "Verify that the project's CSS does not reset button cursors. If it does, re-add `cursor-pointer` to both the money-currency button and the field-picker trigger button."
+        }
+      ],
+      "durationMs": 561351,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "dead-code",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/molecules/date_picker.ex",
+          "startLine": 348,
+          "endLine": 355,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "triggerWrapper assigned but never read in DatePicker",
+          "description": "The DatePicker hook now sets `this.triggerWrapper = marked` in `_resolveTrigger`, mirroring Combobox, but nothing in DatePicker reads `triggerWrapper` (unlike Combobox, which uses it in `_warnUnannounceable` for the new `programmatic` flag). This is unused scaffolding: it adds state on every resolve with no production consumer and will rot if the Combobox-only attribute design is the real end state.",
+          "suggestedFix": "Either drop the `this.triggerWrapper = marked` assignment from DatePicker until something needs the slot wrapper, or wire an equivalent consumer (e.g. a DatePicker `programmatic` trigger flag) if that was the intent."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 232,
+          "endLine": 236,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "sr-only column label always joins the trigger accessible name",
+          "description": "The editable combobox trigger button always renders `<span class=\"sr-only\">{trigger_label(@column)}</span>` after the cell value. Assistive tech therefore announces value + column label on every focused cell (e.g. the selected country plus \"Country\"), not only when the cell would otherwise be unnamed. The comment motivates the empty-cell case; non-empty cells already get a name from `render_field_or_default/1` (and empty cells from the default placeholder, which tests pin). Redundant naming is noisier than the journal-entry pattern, which substitutes a placeholder only when empty.",
+          "suggestedFix": "Include the sr-only (or aria-label) fallback only when the rendered value/placeholder would leave the control unnamed, or rely on the column header + value and keep sr-only solely for truly empty renders."
+        }
+      ],
+      "durationMs": 597356,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "dependency-hygiene",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 599979,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "edge-case-hunter",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/cell.ex",
+          "startLine": 486,
+          "endLine": 490,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Blank column labels prevent the accessible-name fallback",
+          "description": "Elixir treats empty strings as truthy, so a column such as `%{name: :country_id, label: \"\", field: %{label: \"Country\"}}` returns `\"\"` instead of falling back to the field label or humanized name. If the rendered option is also blank, the newly focusable trigger button has no accessible name, defeating the accessibility fallback this function is intended to provide. Whitespace-only labels have the same practical problem.",
+          "suggestedFix": "Choose the first nonblank label, for example by rejecting non-binary or `String.trim(label) == \"\"` values before falling back to the field label and humanized column name."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/components_newui/for_entity_browser/field_picker.ex",
+          "startLine": 55,
+          "endLine": 59,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Whitespace-only tooltip bypasses the accessible-name fallback",
+          "description": "The fallback handles only the exact empty string. A real configuration value such as `trigger_tooltip: \"   \"` passes the guard and is used for both the tooltip and `aria-label`, leaving the icon-only button effectively unnamed. This contradicts the stated blank-value handling.",
+          "suggestedFix": "Require nonblank text, for example: `text when is_binary(text) -> if String.trim(text) == \"\", do: gettext(\"Configure columns\"), else: text`; otherwise use the fallback."
+        }
+      ],
+      "durationMs": 54558,
+      "status": "success"
+    }
+  ]
+}
