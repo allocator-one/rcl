@@ -421,6 +421,55 @@ describe('deduplicateFindings — corroborated location clusters', () => {
   });
 });
 
+describe('deduplicateFindings — agreement neighborhoods', () => {
+  const titles = [
+    'parser failure alpha amber cobalt delta ember frost',
+    'parser failure bravo bronze cyan dune elm flare',
+    'parser failure charlie copper crimson drift echo flame',
+    'parser failure denver diamond cerulean dusk evergreen flash',
+  ];
+
+  function neighborhoodReviews(): ModelReview[] {
+    const findings = [titles[0]!, titles[0]!, titles[1]!, titles[1]!, titles[2]!, titles[3]!]
+      .map((title, index) => mkF({ id: `n${index}`, title, description: '' }));
+    return [
+      ...findings.map((finding, index) => mkReview(`m${index}`, `r${index}`, [finding])),
+      ...Array.from({ length: 8 }, (_, index) => mkReview(`empty${index}`, `r${index}`, [])),
+    ];
+  }
+
+  it('rescues a dense weak neighborhood only when strict pairs supply redundancy', () => {
+    expect(combinedSimilarity(
+      mkF({ title: titles[0], description: '' }),
+      mkF({ title: titles[1], description: '' })
+    )).toBeGreaterThan(0.11);
+    expect(jaccardSimilarity(titles[0]!, titles[1]!)).toBeLessThan(0.2);
+
+    const groups = deduplicateFindings(neighborhoodReviews(), 0.6, 5, 0.4);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.members).toHaveLength(6);
+  });
+
+  it('does not rescue the same neighborhood when it falls short of the configured gate', () => {
+    const groups = deduplicateFindings(neighborhoodReviews(), 0.6, 5, 0.5);
+
+    expect(groups).toHaveLength(4);
+  });
+
+  it('does not let neutral neighbors bridge opposing claims', () => {
+    const reviews = neighborhoodReviews();
+    reviews[0]!.findings[0]!.title = `${titles[0]} unsafe`;
+    reviews[1]!.findings[0]!.title = `${titles[0]} unsafe`;
+    reviews[2]!.findings[0]!.title = `${titles[1]} safe`;
+    reviews[3]!.findings[0]!.title = `${titles[1]} safe`;
+
+    const groups = deduplicateFindings(reviews, 0.6, 5, 0.4);
+
+    expect(groups.length).toBeGreaterThan(1);
+  });
+});
+
 describe('conceptSimilarity — taxonomy boost', () => {
   it('boosts same-concept findings at the same location regardless of wording', () => {
     const a = mkF({

@@ -415,6 +415,10 @@ const CORROBORATED_MAX_ATTACHMENT_ROUNDS = 2; // bound transitive fringe growth
 const CORROBORATED_NEIGHBORHOOD_THRESHOLD = 0.11; // loose combined lexical partition
 const CORROBORATED_NEIGHBORHOOD_DENSITY = 0.5; // observed / possible weak edges
 const CORROBORATED_MAX_NEIGHBORHOOD_SPAN = 50; // broad file-level findings cannot bridge
+// A location-only rescue must contain at least two lexical confirmations
+// already collapsed by the strict pass. Requiring that redundancy keeps an
+// all-singleton neighborhood from manufacturing consensus from proximity.
+const CORROBORATED_NEIGHBORHOOD_CONFIRMATIONS = 2;
 const CORROBORATED_TIE_EPSILON = 1e-9;
 
 const CORROBORATION_STOPWORDS = new Set([
@@ -469,10 +473,10 @@ function relaxedLocationDuplicate(a: Finding, b: Finding, lineWindow: number): b
   if (!areSameFile(a, b)) return false;
   if (!linesOverlap(a, b, lineWindow)) return false;
   if (hasOpposingSentiment(a, b, true)) return false;
-  // Type-contract findings frequently sit beside runtime nil/error-handling
-  // findings and repeat the same nouns, but require a different fix. Do not
-  // let the relaxed path use one as a bridge into the other; the ordinary
-  // similarity path remains available for genuinely near-identical wording.
+  // Known taxonomy concepts can sit beside one another and repeat the same
+  // nouns while requiring different fixes. Do not let the relaxed path use
+  // one as a bridge into the other; the ordinary similarity path remains
+  // available for genuinely near-identical wording.
   if (!compatibleClaimKinds(a, b)) return false;
   const descriptionSimilarity = nonEmptyFieldSimilarity(a.description, b.description);
   const fixSimilarity = nonEmptyFieldSimilarity(a.suggestedFix, b.suggestedFix);
@@ -997,10 +1001,14 @@ function mergeCorroboratedLocationClusters(
  * Rescue agreement that has no lexical center at all. This pass only considers
  * weak one- or two-reviewer groups: a group already backed by three reviewers
  * is evidence for an independent concept and is never absorbed by proximity.
- * A connected file/line neighborhood merges only when its combined distinct
- * reviewers would clear the report's agreement gate. This is the vocabulary-
- * independent signal RCL-17 was missing, while the strength guard preserves
- * nearby minority concepts such as ao-7467's typespec finding.
+ * This deliberately narrow fallback activates only when the agreement gate is
+ * at least five reviewers. It merges a dense component only when it hits that
+ * gate exactly and contains two fewer groups than reviewers, proving that at
+ * least two lexical confirmations already collapsed in the strict pass. An
+ * all-singleton location neighborhood is therefore never enough by itself.
+ * This is the vocabulary-independent signal RCL-17 was missing, while the
+ * redundancy guard preserves nearby minority concepts such as ao-7467's
+ * typespec finding.
  */
 function mergeAgreementNeighborhoods(
   groups: TaggedFinding[][],
@@ -1030,6 +1038,29 @@ function mergeAgreementNeighborhoods(
     return similarity;
   }
 
+  function claimsCanShareNeighborhood(
+    a: TaggedFinding[],
+    b: TaggedFinding[]
+  ): boolean {
+    return a.every((left) =>
+      b.every(
+        (right) =>
+          compatibleClaimKinds(left.finding, right.finding) &&
+          !hasOpposingSentiment(left.finding, right.finding, true)
+      )
+    );
+  }
+
+  // With a smaller gate, subtracting the two required lexical confirmations
+  // leaves fewer than three groups, which is not enough to establish a dense
+  // neighborhood. The ordinary corroborated pass still handles those runs.
+  if (
+    minimumReviewers <
+    CORROBORATED_MIN_REVIEWERS + CORROBORATED_NEIGHBORHOOD_CONFIRMATIONS
+  ) {
+    return groups;
+  }
+
   const strong = groups.filter(
     (group) => distinctReviewers([group]) >= CORROBORATED_MIN_REVIEWERS
   );
@@ -1055,6 +1086,7 @@ function mergeAgreementNeighborhoods(
     for (let j = i + 1; j < groups.length; j++) {
       if (!eligible[j]) continue;
       if (!groupsTouch(groups[i]!, groups[j]!)) continue;
+      if (!claimsCanShareNeighborhood(groups[i]!, groups[j]!)) continue;
       if (weakSimilarity(groups[i]!, groups[j]!) < CORROBORATED_NEIGHBORHOOD_THRESHOLD) {
         continue;
       }
@@ -1079,7 +1111,27 @@ function mergeAgreementNeighborhoods(
   const consumed = new Set<number>();
   for (const indexes of components.values()) {
     const component = indexes.map((index) => groups[index]!);
-    if (component.length < 3 || component.length > minimumReviewers - 2) continue;
+    if (
+      component.length < CORROBORATED_MIN_REVIEWERS ||
+      component.length >
+        minimumReviewers - CORROBORATED_NEIGHBORHOOD_CONFIRMATIONS
+    ) {
+      continue;
+    }
+    // Union-find connectivity is transitive, but compatibility is not. A
+    // neutral bridge must not join findings that make opposing claims.
+    if (
+      component.some((group, index) =>
+        component.slice(index + 1).some((other) =>
+          !claimsCanShareNeighborhood(group, other)
+        )
+      )
+    ) {
+      continue;
+    }
+    // Exact support is intentional here. Larger, loosely connected location
+    // neighborhoods are more likely to contain multiple defects; stronger
+    // agreement must be established by the semantic corroboration pass.
     if (distinctReviewers(component) !== minimumReviewers) continue;
     let edges = 0;
     for (let i = 0; i < indexes.length; i++) {
