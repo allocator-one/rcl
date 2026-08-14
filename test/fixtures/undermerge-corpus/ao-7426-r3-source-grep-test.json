@@ -1,0 +1,911 @@
+{
+  "case": "ao-7426-r3-source-grep-test",
+  "source": {
+    "report": "rcl-report-allocator-one-7426-r3.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+    "lineRange": [
+      3345,
+      3361
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 7,
+    "successfulReviews": 15,
+    "agreementRatioIfMerged": 0.467,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "Source-reading test is fragile and may give false confidence",
+      "Handler-drift test uses fragile string matching against source text",
+      "Source-grep handler test is brittle and only checks textual presence",
+      "Drift test uses fragile source-grep instead of introspection",
+      "Source-file-reading test is brittle and environment-dependent",
+      "Drift test greps source text instead of asserting behavior",
+      "Handler presence check uses fragile File.read! substring"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 100,
+          "endLine": 117,
+          "severity": "important",
+          "category": "api-design",
+          "title": "Renaming delete_chat_room_user/2 is a breaking API change without deprecation",
+          "description": "The public function `delete_chat_room_user/2` is renamed to `delete_chat_room_user_unchecked/2` with no deprecated delegate left behind. Any external caller (other contexts, scripts, umbrella apps) still calling the arity-2 form will now raise UndefinedFunctionError at runtime — or worse, since `delete_chat_room_user/3` still exists, a caller that passed the wrong arity may get a confusing error. If this module is used outside the paths updated in this diff, consider keeping a `@deprecated` shim that delegates to the unchecked form, or verifying all call sites were updated.",
+          "suggestedFix": "Add a temporary shim:\n\n@deprecated \"Use delete_chat_room_user_unchecked/2 or delete_chat_room_user/3\"\ndef delete_chat_room_user(chat_room, user), do: delete_chat_room_user_unchecked(chat_room, user)\n\nor grep the entire codebase to confirm no remaining arity-2 callers."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2434,
+          "endLine": 2440,
+          "severity": "important",
+          "category": "security",
+          "title": "Room-write event allowlist may omit mutating events (e.g. start_edit_message, reactions)",
+          "description": "The seam gates only seven events: send_message, save_edit, confirm_delete, forward_message, add_chat_member, remove_chat_member, leave_group_chat. The test file shows `start_edit_message` exists but is not gated, and typical messengers also have reaction/pin/typing events. An allowlist means any future room-mutating handler is silently unprotected unless the author remembers to add it here — the exact class of drift the design comment acknowledges. The included handler-existence test only checks that gated names have handlers, not that mutating handlers are gated (the dangerous direction). Consider a denylist of known-safe events instead, or a naming convention plus a test that enumerates all handle_event clauses and asserts each is explicitly classified.",
+          "suggestedFix": "Invert the check: enumerate every handle_event clause and require each event name to appear in either @room_write_events or an explicit @room_safe_events list, failing the test for unclassified events."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2456,
+          "endLine": 2463,
+          "severity": "important",
+          "category": "correctness",
+          "title": "TOCTOU: access check in hook races with the handler's write",
+          "description": "The hook re-checks `Chats.user_has_access?/2` before the handler runs, but the check and the subsequent write are not in one transaction, so a revocation landing between the hook and the handler still allows the write. This is acceptable as a best-effort UX gate for events like send_message, but the membership-write pair (add_chat_member/remove_chat_member) previously relied on `still_has_access?` immediately before calling into the context — now the only transactional enforcement is inside `Chats.delete_chat_room_user/3` (which does lock memberships). Verify that send_message/save_edit/confirm_delete/forward_message context functions also enforce membership atomically, or accept and document the race window. If any of these context functions do NOT re-check membership, a revoked socket can still win the race and write.",
+          "suggestedFix": "Document that the hook is advisory and ensure each room-write context function performs its own membership check inside the transaction, as delete_chat_room_user/3 does."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2452,
+          "endLine": 2459,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Draft-send bypass keyed on assigns that may be stale or spoof-prone across states",
+          "description": "The roomless send_message pass-through matches `%{chat_room_kind: :direct_draft, selected_chat_room: nil}`. Its safety depends entirely on every code path that leaves the draft state resetting `chat_room_kind` — if any navigation path sets `selected_chat_room` to nil (e.g. bounce_to_inbox or a failed room load) while leaving `chat_room_kind: :direct_draft` in assigns, a crafted send_message would pass the seam roomless. The comment asserts a stale-room-plus-draft-kind socket falls through to the checked clause, but the inverse (nil room with lingering draft kind) is the risk and is not covered by any test.",
+          "suggestedFix": "Add a test that navigates from the draft state to the inbox (or triggers bounce_to_inbox) and asserts a subsequent send_message is halted; ensure chat_room_kind is reset whenever selected_chat_room is cleared."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3352,
+          "endLine": 3361,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Handler-drift test uses fragile string matching against source text",
+          "description": "The test greps the LiveView source for the literal `handle_event(\"event\"` string. This breaks on legitimate formatting (multiline heads, guards after the event name are fine, but a pattern like `handle_event(\"send_message\" = event, ...)` or a variable-bound event name would fail), gives false positives for commented-out clauses, and is coupled to the file path. It also only tests one direction of drift (gated-but-missing handlers), not the more dangerous ungated-mutating-handler direction (see f002). Prefer reflection: assert `function_exported?(IndexLive, :handle_event, 3)` clauses via compile-time metadata, or at least also verify each event through a live() interaction.",
+          "suggestedFix": "Drive each gated event through a real LiveView with render_click/render_submit and assert it is handled (no ** (FunctionClauseError)), or parse the AST with Code.string_to_quoted/1 instead of a regex on raw source."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3303,
+          "endLine": 3306,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Tests trigger form events via render_submit/render_click without targeting rendered elements",
+          "description": "Several seam tests push events directly (e.g. `render_submit(view, \"send_message\", %{...})`, `render_click(view, \"add_chat_member\", ...)`) rather than through `element/3` selectors. That is appropriate here since the tests simulate crafted pushes bypassing the UI, but the save_edit test's happy-path setup (`render_submit(view, \"send_message\", ...)` and `render_click(view, \"start_edit_message\", ...)`) also bypasses the DOM, so the test would keep passing even if the actual UI no longer wires these events. Consider using element-driven interactions for the setup steps so the tests remain coupled to the real UI, keeping direct pushes only for the crafted-event assertions.",
+          "suggestedFix": "Use view |> element(\"form#message-form\") |> render_submit(...) style interactions for setup steps."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2483,
+          "endLine": 2484,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "__room_write_events__/0 exposes internals as a public function",
+          "description": "`@doc false def __room_write_events__` exposes module internals purely for the source-grepping test. If the drift test is reworked per f005/f002, this escape hatch may be unnecessary; alternatively, move the drift check into a compile-time assertion in the module itself so the invariant cannot be skipped by excluding the test.",
+          "suggestedFix": "Consider a compile-time check (e.g. in an @after_compile hook) that each @room_write_events name has a matching handle_event clause, and drop the public accessor."
+        },
+        {
+          "id": "f008",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3258,
+          "endLine": 3262,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Gated events not directly covered: confirm_delete, forward_message, remove_chat_member",
+          "description": "The seam tests cover send_message, save_edit, leave_group_chat, add_chat_member (roomless), and the draft state. `confirm_delete`, `forward_message`, and `remove_chat_member` are gated but have no revoked-member test. The comment says the seam is covered 'through the two highest-traffic writes', which is reasonable since one hook guards all, but a lightweight parametrized test looping over @room_write_events with a revoked member would guarantee the allowlist entries actually reach the halt path for every event.",
+          "suggestedFix": "for event <- IndexLive.__room_write_events__() do ... revoke membership, push event with minimal params, assert_redirect ... end (accepting that some params may need per-event stubs)."
+        }
+      ],
+      "durationMs": 45583,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2461,
+          "endLine": 2468,
+          "severity": "important",
+          "category": "security",
+          "title": "Forward authorization checks the source room, not the target",
+          "description": "The hook applies to `forward_message` but authorizes only `socket.assigns.selected_chat_room`. Forwarding writes a new message into a separately selected target room, as shown by the target-room query in the forwarding test. A socket can therefore pass this hook by retaining access to the currently displayed source room even if its access to the forwarding target has been revoked. The generalized seam does not secure that mutation.",
+          "suggestedFix": "Handle `forward_message` separately in the hook by resolving the target room from trusted server-side state or the submitted target ID and checking `Chats.user_has_access?/2` for that room. Prefer repeating that authorization transactionally in the context function that inserts the forwarded message."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2461,
+          "endLine": 2468,
+          "severity": "important",
+          "category": "security",
+          "title": "Access check is not atomic with room mutations",
+          "description": "`Chats.user_has_access?/2` runs in the LiveView hook before the event handler performs its database write. Membership or organization access can be revoked after this check but before a send, edit, delete, or forward commits, allowing a write after revocation. This closes stale-socket access only when revocation completed before event handling; it does not enforce authorization at commit time.",
+          "suggestedFix": "Move authorization into each mutating context operation and execute the access check and write in one transaction with appropriate membership locking, or make the write conditional on an authorization row still existing. Keep the LiveView hook as an early rejection rather than the security boundary."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3350,
+          "endLine": 3359,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Gate synchronization test cannot detect omitted write events",
+          "description": "The test iterates over `__room_write_events__/0` and only verifies that each listed name has a handler. It catches stale entries after a handler rename, but it cannot detect the more security-relevant case where a new or existing room-mutating handler is absent from `@room_write_events`. Thus it does not validate the claim that every room mutation passes through the gate.",
+          "suggestedFix": "Add behavioral revoked-access tests for every room-mutating handler, especially forwarding into a target room. Alternatively centralize room mutation dispatch so handlers must explicitly declare an authorization policy, rather than relying on a manually maintained event-name allowlist."
+        }
+      ],
+      "durationMs": 48310,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3349,
+          "endLine": 3350,
+          "severity": "important",
+          "category": "tests",
+          "title": "Syntax error and invalid match pattern in handler existence test",
+          "description": "In the test 'every gated event still has a handler', `~s(handle_event(\"#{event}\"),` has two issues: 1) In Elixir, parentheses inside `~s(...)` sigils must be balanced. The inner `(` after `handle_event` is balanced by the `)` after `\"#{event}\"`, leaving the outer `~s(` sigil unclosed and causing a syntax error during compilation. 2) Even if closed properly, searching for `handle_event(\"event\")` without a trailing comma will fail to match LiveView's 3-arity handler definitions like `def handle_event(\"add_chat_member\", params, socket)`.",
+          "suggestedFix": "assert source =~ ~s\"handle_event(\\\"#{event}\\\",\""
+        }
+      ],
+      "durationMs": 44586,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2454,
+          "endLine": 2476,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "TOCTOU gap between hook access check and handler write",
+          "description": "The `enforce_room_write_access` hook checks `Chats.user_has_access?/2` before the handler runs, but the actual write (e.g. `send_message`, `save_edit`) happens afterwards without any membership lock or re-check inside a transaction. A membership revocation landing between the hook check and the database insert still commits the write. The diff itself demonstrates the correct pattern elsewhere: `delete_chat_room_user/3` uses `lock_memberships/2` inside a transaction so a revocation 'serialises either side of the check'. The message-send/edit/delete paths gated by this seam have no equivalent serialization, so the seam narrows the window but does not close the race the way the member-removal path does.",
+          "suggestedFix": "For the highest-integrity writes, perform the membership/access check inside the same transaction as the insert (e.g. re-check `user_has_access?` or lock the `chat_room_users` row in the message-insert transaction), or document explicitly that the seam is best-effort for non-membership writes."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2431,
+          "endLine": 2434,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Room-write event list can silently miss existing or future mutating events",
+          "description": "The seam only gates the seven hardcoded events in `@room_write_events`. Any other `handle_event` clause in this LiveView that mutates the selected room (reactions, pins, read markers, typing-driven state, etc.) bypasses the access re-check entirely, and a future room-mutating event added without updating this list will be silently unguarded. The included drift test only verifies that listed events have handlers — it does not detect handlers that write to the room but are missing from the list. The comment says archiving was excluded deliberately, but nothing in the diff proves the list is exhaustive over all room-mutating events.",
+          "suggestedFix": "Consider inverting the default (gate all events except an explicit allowlist of read/UI events), or add a test/audit that enumerates all `handle_event` clauses and asserts each is either in `@room_write_events` or an explicit exempt list with a justification."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3347,
+          "endLine": 3356,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Handler-drift test reads source via hardcoded relative path",
+          "description": "`File.read!(\"lib/allocator_one_web/live/messenger/messages/index_live.ex\")` depends on the test runner's working directory being the project root and on the source file being present at test time (it will fail in an escript/release context or if run from a different cwd). A string match on `handle_event(\"...\")` also won't match clauses defined with different formatting (e.g. `handle_event(\"event\", params, socket)` across lines is fine, but macro-generated or piped definitions would be missed).",
+          "suggestedFix": "Use `Path.relative_to_cwd/1` is still cwd-dependent; prefer deriving the path from the code server (`AllocatorOneWeb.Messenger.Messages.IndexLive.module_info(:compile)[:source]`) or keep the relative path but resolve it against `File.cwd!()` explicitly with a clear failure message."
+        }
+      ],
+      "durationMs": 48035,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "security-auditor",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2431,
+          "endLine": 2478,
+          "severity": "important",
+          "category": "security",
+          "title": "Write seam only checks selected_chat_room, not payload room IDs",
+          "description": "enforce_room_write_access/3 admits a gated event solely based on Chats.user_has_access?(socket.assigns.selected_chat_room, user). Any handler that mutates a different room (or membership) identified by client-supplied params—forward_message's destination is the obvious case in @room_write_events—can pass the seam while the user still has access to the currently selected room, then write elsewhere if the handler does not independently authorize the target. Centralizing “room write” checks on selected_chat_room makes it easy to assume the seam is sufficient authorization for the whole handler. Each handler that takes a room/member/message id from the payload must still enforce access on that resource; the seam only proves the socket may touch the selected room.",
+          "suggestedFix": "Document on the seam and on each gated handler that payload-targeted resources need their own authz. For forward_message specifically, verify user_has_access?/membership on the destination room inside the handler or context before insert. Consider asserting that property in tests (forward to a room the user left/never joined must no-op and bounce)."
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3348,
+          "endLine": 3356,
+          "severity": "important",
+          "category": "tests",
+          "title": "Gate drift test is one-way; new write handlers can skip the seam",
+          "description": "The test only asserts every name in @room_write_events still has a handle_event clause. It does not assert the reverse: that every room-mutating handle_event is listed in @room_write_events. That is the dangerous drift direction—the IO-10944/IO-10982 class of bug returns if someone adds e.g. handle_event(\"pin_message\", ...) or renames a write event and updates the clause but forgets the attribute. A substring source check also matches comments/docs and does not prove the clause is live.",
+          "suggestedFix": "Add a reverse check: parse handle_event/3 clause names from the LiveView (or maintain an explicit @all_write_events tested for equality with __room_write_events__/0), and/or integration tests that revoke membership then exercise each mutating event the product exposes. Prefer failing CI when a new handle_event string is introduced without an allowlist decision (gated vs intentionally ungated)."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 99,
+          "endLine": 112,
+          "severity": "minor",
+          "category": "security",
+          "title": "Public unchecked membership delete remains an authz footgun",
+          "description": "delete_chat_room_user_unchecked/2 is documented as having no actor authorization and remains a public context API. The rename improves clarity, but any future caller (LiveView, job, another context) can still remove members without removal_check/3. Structural rules alone do not replace authorization. This is safer than a silently unchecked delete_chat_room_user/2 name, yet still easy to misuse at a new callsite.",
+          "suggestedFix": "Prefer keeping the write private to the Chats module (defp or def under a constrained internal API) so only delete_chat_room_user/3, leave_group_chat, and explicit system cleanups can reach it; or split system vs actor entrypoints in a way that makes missing authz a compile-time/visible boundary. At minimum add @doc false and a Credo/grep check that LiveView/controllers never call *_unchecked."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2464,
+          "endLine": 2478,
+          "severity": "minor",
+          "category": "security",
+          "title": "Access check is TOCTOU relative to the eventual write",
+          "description": "The hook re-checks user_has_access?/2 then continues into the handler with no shared lock/transaction spanning check and mutation (unlike delete_chat_room_user/3, which locks memberships before removal_check). A membership revocation that lands after {:cont, socket} and before the handler’s Repo write can still allow one unauthorized send/edit/delete/forward. Same class as the old still_has_access?/1 guards; the seam widens how many writes depend on this pattern.",
+          "suggestedFix": "Enforce membership (or equivalent access) inside the context functions that perform writes—e.g. message insert/update/delete require a chat_room_users row for the actor in the same transaction—so LiveView is not the only control. Keep the seam as UX/fail-closed layering, not the sole authz boundary."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3348,
+          "endLine": 3356,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Handler presence check uses fragile File.read! substring",
+          "description": "Reading lib/.../index_live.ex via a relative path and assert source =~ handle_event(\"...\") couples the test to cwd and can pass on commented-out or docs text. Mix usually runs from app root, so this is low risk but brittle.",
+          "suggestedFix": "Resolve via Path.join(File.cwd!(), \"lib/...\") or Code.string_to_quoted!/1 and walk the AST for {:handle_event, _, [event | _]} clauses; compare sets to __room_write_events__()."
+        }
+      ],
+      "durationMs": 123221,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "performance-engineer",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2435,
+          "endLine": 2437,
+          "severity": "important",
+          "category": "security",
+          "title": "Gated event list may miss other room-mutating events (e.g. reactions, pins)",
+          "description": "The @room_write_events allowlist gates only 7 events: send_message, save_edit, confirm_delete, forward_message, add_chat_member, remove_chat_member, leave_group_chat. Any other event that mutates room state — e.g. message reactions, pinning, marking read, typing indicators that persist state, or future handlers — will silently bypass the revocation seam. An allowlist for a security control is fragile: a new room-write handler added later gates nothing unless the author remembers to update the list. The comment acknowledges some deliberate exclusions (block user, archive, report), but there is no mechanism forcing new write events into the list. Consider inverting to a denylist of known-safe events, or adding a naming/registration convention that fails tests when an ungated handle_event clause writes to the room.",
+          "suggestedFix": "Prefer a fail-closed design: gate all events by default and maintain an explicit allowlist of read-only/roomless events, or add a compile-time/test-time check that every handle_event clause is classified as gated or exempt."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2461,
+          "endLine": 2468,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Draft-send bypass matches only :direct_draft, other draft kinds may be blocked or crash",
+          "description": "The roomless pass-through clause matches only chat_room_kind: :direct_draft with selected_chat_room: nil. If the composer supports other draft kinds (e.g. group drafts) or the assign uses a different atom in some flows, a legitimate first send from those states will fall through to the catch-all no-room clause and be bounced to the inbox, silently discarding the user's message. Additionally, if chat_room_kind is not assigned at all in the draft state, the pattern won't match. Verify all draft entry points set exactly {chat_room_kind: :direct_draft, selected_chat_room: nil} before the first send.",
+          "suggestedFix": "Match on all legitimate draft kinds (e.g. `when kind in [:direct_draft, :group_draft]`), or centralize the \"is roomless draft state\" predicate in one function shared with the mount/params logic that establishes the draft state."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2452,
+          "endLine": 2484,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Hook checks access per gated event; DB query on every room-write event",
+          "description": "enforce_room_write_access calls Chats.user_has_access?/2 on every gated event, which issues a database query per send_message/save_edit/etc. For a busy messenger this adds one synchronous query per message send on the LiveView process. This is likely acceptable for correctness-critical revocation checks, but under high message throughput it adds latency and DB load on the hot path. If revocation latency of a few seconds is tolerable, a short-lived per-socket cache (e.g. re-check at most once per N seconds, invalidated by the membership-removal PubSub broadcast the view presumably already receives) would remove the per-message query while keeping the seam.",
+          "suggestedFix": "Consider caching the access check result in socket assigns with a short TTL or invalidating it via the existing membership PubSub events, keeping a hard re-check for the membership-mutating events (add/remove/leave)."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 100,
+          "endLine": 113,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Public unchecked deletion function remains callable from anywhere",
+          "description": "delete_chat_room_user_unchecked/2 is a public function on the Chats context that performs a membership deletion with no actor authorization. The rename makes the danger explicit (good), but any future caller can still invoke it directly, reintroducing the IO-10944 class of bug. Since the documented callers are all inside the Chats context (org-member cleanup, chat-mode path, delete_chat_room_user/3), consider making it defp, or moving the authorized wrapper into the only public surface.",
+          "suggestedFix": "If all legitimate callers are within AllocatorOne.Chats, change `def delete_chat_room_user_unchecked` to `defp`. If external system callers exist, keep it public but document them and consider a Credo check or boundary rule restricting callers."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3350,
+          "endLine": 3360,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Source-grep handler test is brittle and only checks textual presence",
+          "description": "The \"every gated event still has a handler\" test greps the LiveView source file for the literal string `handle_event(\"<event>\"`. This is brittle: it breaks if a handler is moved to a component/shared module, if formatting changes (e.g. multiline call, charlist, or pattern like `handle_event(event, ...) when event in ...`), and it passes if the string appears in a comment. It also hardcodes the file path, so a file move silently breaks the test's premise rather than the gate.",
+          "suggestedFix": "Prefer asserting behaviorally: for each gated event, push it against a live view fixture and assert it is either handled or halted (no FunctionClauseError). Alternatively, use `AllocatorOneWeb.Messenger.Messages.IndexLive.__info__(:functions)` plus a compile-time registration of handled events instead of grepping source text."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3262,
+          "endLine": 3364,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Seam not covered for confirm_delete, forward_message, remove_chat_member",
+          "description": "The new tests cover send_message, save_edit, leave_group_chat, the no-room bounce, and the draft-state bounce for add_chat_member. Three gated events — confirm_delete, forward_message, and remove_chat_member (post-revocation) — have no revoked-access coverage. Since the hook dispatches on `event in @room_write_events` a single clause covers them all today, but the tests are the only thing preventing a future refactor (e.g. a per-event clause) from silently ungating one of them.",
+          "suggestedFix": "Add a parameterized test iterating __room_write_events__/0, revoking membership and asserting each event bounces (or at minimum add cases for confirm_delete, forward_message, and remove_chat_member)."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2470,
+          "endLine": 2484,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "TOCTOU window remains between hook check and handler write",
+          "description": "The hook checks user_has_access? before the handler runs, but the handler's write is not in the same transaction as the check. A revocation landing between the hook and the write still commits the write (the message insert, edit, or forward). The membership pair is protected because Chats.delete_chat_room_user/3 re-locks and re-checks inside a transaction, but send_message/save_edit/confirm_delete/forward_message rely solely on this pre-check. If strict revocation is required, the context functions performing those writes should verify membership within their own transaction; the hook then becomes a UX fast-path rather than the enforcement point.",
+          "suggestedFix": "Enforce membership inside the context write functions (e.g. insert the message via a query joined on an existing chat_room_users row, or check-and-write in one transaction), keeping the hook as an early bounce."
+        },
+        {
+          "id": "f008",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2486,
+          "endLine": 2487,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "__room_write_events__/0 exposes internals solely for a brittle test",
+          "description": "The @doc false public function __room_write_events__/0 exists only so the test can grep the source for handler clauses. Exposing module internals for source-text tests couples the module's public surface to a fragile test strategy. If the behavioral test approach from the tests finding is adopted, this escape hatch can be removed or replaced with a compile-time assertion inside the module itself.",
+          "suggestedFix": "Move the handler/gate consistency check into the module at compile time (e.g. a macro that raises if a gated event lacks a clause), or drive tests behaviorally so the accessor is unnecessary."
+        }
+      ],
+      "durationMs": 45355,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "api-design",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 97,
+          "endLine": 112,
+          "severity": "critical",
+          "category": "api-design",
+          "title": "Renamed public context function is a breaking API change",
+          "description": "Renaming `delete_chat_room_user/2` to `delete_chat_room_user_unchecked/2` changes the public API of the `Chats` context. The diff updates in-repo call sites and tests, but any external consumer (other services, scripts, LiveView components not shown, or downstream apps) calling the old name will fail with an undefined function error at compile or runtime. Context modules in Phoenix apps are the public API boundary for the domain; renames without a deprecation shim break consumers. At minimum, a deprecated `delete_chat_room_user/2` delegating to the new name with a `Logger.warning`/`:warning` in the `@doc` should be kept for one release cycle, or the rename should be announced in a changelog.",
+          "suggestedFix": "Keep a thin shim:\n\n```elixir\n@deprecated \"Use delete_chat_room_user_unchecked/2 or delete_chat_room_user/3 instead\"\ndef delete_chat_room_user(chat_room, user), do: delete_chat_room_user_unchecked(chat_room, user)\n```\nand remove it in the next major release."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2431,
+          "endLine": 2441,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Roomless draft send bypasses the gate — verify handler-side authorization",
+          "description": "The `enforce_room_write_access/3` clause admits `send_message` with `chat_room_kind: :direct_draft` and `selected_chat_room: nil` without any access check, on the assumption that the handler creates the room and enforces its own policy. This is a deliberate hole in the seam keyed off two assign values that a crafted event cannot set — but if any other code path can leave a socket in `:direct_draft` kind with a nil room after the user's access changed (e.g., stale assign after redirect), writes would proceed ungated. The comment says 'a socket carrying both the draft kind and a stale room falls through to the clause below', which is good, but the inverse — draft kind with nil room when the user has since been blocked from DMing the target — is not covered by the seam. Ensure `handle_event(\"send_message\", ...)` for the draft path validates the target user is still reachable (not blocked, still a member of a shared org) before creating the room; this cannot be verified from the diff.",
+          "suggestedFix": "Confirm (and ideally test) that the draft-send handler re-validates the target before `get_or_create_direct_chat`. Add a test like the others in the 'room write seam' describe block: open `/chat/new?user_id=...`, block/delete the target's eligibility, then `render_submit(view, \"send_message\", ...)` and assert no room/message is created."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2428,
+          "endLine": 2431,
+          "severity": "minor",
+          "category": "security",
+          "title": "Archive and blocking events deliberately excluded from the access seam",
+          "description": "The comment states that `archive` (described as 'the caller's own membership metadata, keyed by payload id') and user-blocking/reporting events stay outside `@room_write_events`. Keying archive by payload id rather than by the loaded room means the seam can't help it — but it also means those handlers must independently validate that the payload's room id belongs to a room the user can access, otherwise a crafted `archive` event with an arbitrary `chat_room_id` could toggle archive state on rooms the user isn't a member of (IDOR). The diff doesn't show the archive handler, so this cannot be confirmed. If the archive handler looks up `chat_room_users` by `(payload_room_id, current_user)` and no-ops when absent, this is fine; flagging because the seam's comment could mislead future maintainers into assuming these events are protected by it.",
+          "suggestedFix": "Either include archive in the gate when `selected_chat_room` matches the payload, or add a test asserting `render_click(view, \"archive\", %{\"chat_room_id\" => other_room.id})` for a room the user is not a member of changes nothing."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2476,
+          "endLine": 2478,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Public __room_write_events__/0 exists solely for tests",
+          "description": "Exposing `__room_write_events__/0` as a public function purely so the drift-detection test can read the list expands the module's public surface. The double-underscore convention signals internal use, but it's still callable and could be relied upon by other consumers. This is acceptable as a pragmatic seam for the test (which is genuinely valuable — string drift between the gate list and `handle_event` clauses would silently ungate events), but consider at least `@doc false` plus a comment, which is already partially done, and ensure it isn't used elsewhere.",
+          "suggestedFix": "Acceptable as-is given `@doc false`; alternatively define the list in a module attribute read via `Module.get_attribute/2`-style test helper or duplicate the list in the test with a comment linking the two."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3345,
+          "endLine": 3358,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Drift test uses fragile source-grep instead of introspection",
+          "description": "`File.read!(\"lib/allocator_one_web/live/messenger/messages/index_live.ex\")` with a hardcoded relative path and a regex-style substring match on `handle_event(\"event\")` is brittle: the test breaks if the working directory isn't the project root (e.g., in some CI setups or umbrella layouts, where the correct path would need `Path.relative_to_cwd` handling), and a clause written with a sigil, a different quote style, or pattern-matching the event name via a variable would false-negative. It also conflates 'has a clause' with 'is reachable'. The relative path will fail if tests are ever run from a different cwd.",
+          "suggestedFix": "Resolve the path from the test file location: `Path.relative_to_cwd(__DIR__) |> ...` or use `Application.app_dir(:allocator_one)`-adjacent resolution; more robustly, compare against exported function info won't work for event names, so keep the source-grep but anchor the path: `Path.expand(\"../../../../lib/...\", __DIR__)`."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 51,
+          "endLine": 53,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "attach_hook in mount must not be registered multiple times across reconnects",
+          "description": "`attach_hook/4` is invoked inside what appears to be `mount/3`. LiveView runs `mount` twice on the initial HTTP render + websocket connect for connected mounts, and hooks are per-socket so this is normally safe — but if this `mount` is also reachable after a `live_redirect`-based remount within the same LiveView process (it isn't; remount creates a new process), it would be fine. More subtly, `attach_hook` with the same name (`:room_write_access`) raises if attached twice on the same socket. Given the diff shows it unconditionally at the top of mount this should be safe, but confirm no other `attach_hook(socket, :room_write_access, ...)` exists elsewhere in the module (not visible in the diff).",
+          "suggestedFix": "No change needed if this is the only attach site; otherwise use `attach_hook` once and guard, or give each lifecycle stage a distinct hook name."
+        },
+        {
+          "id": "f007",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3294,
+          "endLine": 3310,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Missing test: forward_message and confirm_delete through the seam",
+          "description": "The describe block comments say the seam is covered 'through the two highest-traffic writes' (send_message, save_edit), plus leave_group_chat and two roomless cases. `forward_message` and `confirm_delete` — also gated — have no revoked-member test. Both mutate or duplicate message data, so a regression that accidentally removed them from `@room_write_events` would only be caught by the drift test if the handler clause also disappeared, which it wouldn't. A revoked-member test for `forward_message` (which writes into a *target* room and thus has the most interesting authorization surface) would be the highest-value addition.",
+          "suggestedFix": "Add: revoke membership, `render_click(view, \"forward_message\", %{...})` / `render_submit(view, \"confirm_delete\", %{...})`, assert no forwarded message created / original message not deleted, `assert_redirect(view, ~p\"/\")`."
+        }
+      ],
+      "durationMs": 123550,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 103,
+          "endLine": 104,
+          "severity": "important",
+          "category": "api-design",
+          "title": "Renaming public function without deprecation breaks external callers",
+          "description": "delete_chat_room_user/2 is renamed to delete_chat_room_user_unchecked/2. Any other module or application using the arity-2 function will fail to compile. This is a breaking change to the public API of the Chats module. The diff only updates internal callers and tests, but any external code path not shown here will be impacted.",
+          "suggestedFix": "Keep a deprecated wrapper: def delete_chat_room_user(chat_room, user) do\n  delete_chat_room_user_unchecked(chat_room, user)\nend\nand mark it as deprecated via @deprecated or a comment."
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3346,
+          "endLine": 3354,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Source-reading test is fragile and may give false confidence",
+          "description": "The test 'every gated event still has a handler' reads the source file at runtime and uses string containment to assert that each event in @room_write_events has a handle_event clause. This is brittle: it can pass due to a string appearing in a comment or string literal, and it will fail with trivial formatting changes (e.g., line breaks). It does not actually verify that the handler is correctly connected to the event.",
+          "suggestedFix": "Instead of reading the source, expose the event list as a module attribute and have the test introspect the module's exported functions (e.g., using __info__(:functions)) to confirm each event name appears in a handle_event/3 clause. Alternatively, keep a separate test that simulates the event and asserts the hook behavior."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2454,
+          "endLine": 2470,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Access check is not atomic with the write",
+          "description": "The hook checks user_has_access? immediately before the handler runs, but there is a race window after the check passes and before the actual database write occurs. If access is revoked in that window (e.g., an admin removes the user concurrently), the operation will still succeed. This is particularly relevant for security-sensitive actions like member removal, though delete_chat_room_user/3 already re-checks inside a transaction. For other events like send_message, the window is small but could still allow a write after revocation.",
+          "suggestedFix": "For critical writes, move the authorization check into the context function that performs the write, wrapping both the check and the write in a transaction. This eliminates the TOCTOU gap."
+        },
+        {
+          "id": "f004",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3255,
+          "endLine": 3365,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing positive tests for the room write seam",
+          "description": "The new tests cover revoked members being bounced, but there is no test that a member with valid access can still successfully perform room-mutating operations (e.g., send a message, edit, or leave). This could mask an over-blocking bug in the hook, such as an incorrect pattern match that bounces everyone. The draft-flow test may cover a positive case, but it is not part of this diff and not clearly integrated with the seam behavior.",
+          "suggestedFix": "Add at least one test that logs in a member, opens a chat room, and verifies they can send a message and see it persist, confirming the hook does not accidentally block legitimate access."
+        }
+      ],
+      "durationMs": 257835,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "dx-critic",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2434,
+          "endLine": 2471,
+          "severity": "important",
+          "category": "security",
+          "title": "Forward authorization checks the source room, not the target",
+          "description": "`forward_message` is included in the gated events, but the hook authorizes only `socket.assigns.selected_chat_room`. Forwarding writes a new message into a target room, as demonstrated by the test querying `target_chat_room`. Consequently, this hook cannot establish that the actor may write to the forwarding destination. A crafted event could bypass UI filtering unless the target room is separately authorized inside the handler.",
+          "suggestedFix": "For `forward_message`, resolve the destination room from the event parameters and authorize access to that room before writing. Keep any source-message authorization as a separate check, since access to the selected source room does not imply access to the target."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2464,
+          "endLine": 2471,
+          "severity": "important",
+          "category": "security",
+          "title": "Access check and room write are vulnerable to a race",
+          "description": "The hook checks `Chats.user_has_access?/2` before continuing to a separate event handler that performs the write. Membership can be revoked after this check but before the handler commits, allowing the write to succeed after revocation. This does not fully provide the stated guarantee that revoked sockets cannot mutate the room.",
+          "suggestedFix": "Enforce access in the context operation that performs each write, using a transaction and appropriate membership locking or a conditional database operation. The LiveView hook can remain as an early rejection, but it should not be the authoritative authorization boundary."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3342,
+          "endLine": 3351,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Gate synchronization test cannot detect removed entries",
+          "description": "The test iterates over `__room_write_events__/0` and verifies that each listed event has a handler. It catches stale names when a handler is renamed or removed, but it cannot catch a mutating event being omitted or removed from the gate—the omitted name is simply no longer iterated. This contradicts the comment that the test protects against removal drift and leaves the principal fail-open case untested.",
+          "suggestedFix": "Maintain an independent expected set of room-mutating event names in the test and compare it with `__room_write_events__/0`, or add explicit revoked-access tests for every mutating handler. Do not derive both the implementation and the test oracle from the same list."
+        }
+      ],
+      "durationMs": 62431,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "architecture",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 24389,
+      "warnings": [
+        "google/gemini-3.6-flash/architecture: JSON parse error: SyntaxError: Expected ',' or '}' after property value in JSON at position 1007 (line 11 column 153)"
+      ],
+      "status": "parse_failed",
+      "error": "Response was not a usable review; this reviewer's output was lost"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "bug-hunter",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2441,
+          "endLine": 2443,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Draft-send bypass can be bypassed by clearing selected_chat_room",
+          "description": "The first clause of `enforce_room_write_access/3` allows `send_message` through when `chat_room_kind` is `:direct_draft` AND `selected_chat_room` is `nil`. However, if any code path (or a crafted client event sequence) can set `chat_room_kind` to `:direct_draft` while a room already exists (e.g., navigating away and back to the draft view without a full remount), the pattern match fails and falls through to the second clause, which is correct. BUT the inverse is the concern: if `selected_chat_room` can be set to `nil` while `chat_room_kind` remains `:direct_draft` after a room was previously created (e.g., via a handle_info or handle_params that clears the assign without resetting the kind), the bypass clause would fire and allow an unauthenticated write. The comment acknowledges this risk ('a socket carrying both the draft kind and a stale room falls through to the clause below') but the guard only protects the stale-room case, not a stale-nil-room case where the kind was never reset.",
+          "suggestedFix": "Consider also checking that no `ChatRoomUser` row exists for the current user in any room before admitting the draft send, or ensure that `chat_room_kind` is always reset to a non-draft value the moment a room is created. Alternatively, add a defensive check in the `send_message` handler itself that verifies the room state matches the draft assumption."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2432,
+          "endLine": 2433,
+          "severity": "important",
+          "category": "correctness",
+          "title": "@room_write_events list may drift from actual handle_event clauses",
+          "description": "The `@room_write_events` module attribute is a static list of event names that must pass the access check. If a new room-mutating `handle_event` clause is added in the future without updating this list, it will silently bypass the access seam. The test at the bottom of the diff only checks that gated events still have handlers (drift in one direction), but does NOT check that all room-mutating handlers are in the gated list (drift in the other direction). For example, if someone adds a `handle_event(\"pin_message\", ...)` that writes to the room, it would not be gated. The test reads the source file at runtime which is fragile and only checks one direction of drift.",
+          "suggestedFix": "Add a complementary test or compile-time check that scans for all `handle_event` clauses that perform room writes (perhaps by convention, e.g., all events that call into `Chats.` write functions) and asserts they appear in `@room_write_events`. Alternatively, invert the approach: gate ALL events by default and maintain an allow-list of read-only events, so new events fail closed by default."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2461,
+          "endLine": 2467,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Catch-all clause silently passes non-gated events without logging",
+          "description": "The final clause `defp enforce_room_write_access(_event, _params, socket), do: {:cont, socket}` silently allows any event not in `@room_write_events` to proceed. While this is intentional for read events, it means that if an event name is misspelled in `@room_write_events` (e.g., `\"send_mesage\"` instead of `\"send_message\"`), the typo'd entry gates nothing and the real event passes ungated. There is no logging or telemetry to detect when a gated event name doesn't match any incoming event, making such typos silent security gaps.",
+          "suggestedFix": "Add a debug-level Logger statement or telemetry event in the catch-all clause that fires when an event name is *close* to a gated event (e.g., via String.jaro_distance or similar), or add a test that verifies each gated event name is actually dispatched during integration tests."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2469,
+          "endLine": 2470,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "__room_write_events__/0 exposes internal implementation via public API",
+          "description": "The `__room_write_events__/0` function is marked `@doc false` but is still a public function on the LiveView module. It exists solely to support a test that reads the source file and string-matches event names. This couples the test to the internal naming convention and exposes implementation details. If the module is ever used as a plug or composed differently, this function becomes an unintended public surface.",
+          "suggestedFix": "Consider making the test use a module attribute via `Module.get_attribute/2` at compile time, or move the list to a shared constant module. Alternatively, use `@impl true` pattern matching introspection or Phoenix.LiveView's `__live__` metadata if available."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3349,
+          "endLine": 3354,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Source-file-reading test is brittle and environment-dependent",
+          "description": "The test `every gated event still has a handler` reads the LiveView source file from disk using `File.read!` with a relative path. This will break if tests are run from a different working directory (e.g., in a release, umbrella sub-app, or CI with a different CWD). It also performs a simple string match (`source =~ ~s(handle_event(\"#{event}\")`) which could false-positive if the event name appears in a comment or doc string, and false-negative if the handle_event uses a variable or guard clause instead of a literal string.",
+          "suggestedFix": "Use `__ENV__.file` or `:code.priv_dir/1` to resolve the path reliably, or better yet, use Elixir's `Code.string_to_quoted` / `Macro` to introspect the module's defined functions at compile time rather than string-matching source."
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 100,
+          "endLine": 113,
+          "severity": "minor",
+          "category": "security",
+          "title": "Unchecked function is public and could be called bypassing authorization",
+          "description": "`delete_chat_room_user_unchecked/2` is a public function that performs a write without actor authorization. While the documentation clearly states it's for system-internal use, Elixir's module system does not enforce visibility. Any module in the application (or a dependency) can call this function directly, bypassing the authorization that `delete_chat_room_user/3` enforces. The rename from `delete_chat_room_user/2` to `delete_chat_room_user_unchecked/2` makes the intent clearer but doesn't add any compile-time or runtime guard against misuse.",
+          "suggestedFix": "Consider making this function `@doc false` and adding a Credo/Dialyzer rule or custom check that restricts which modules may call it. Alternatively, move it to a private internal module (e.g., `AllocatorOne.Chats.Internal`) that is not part of the public API surface, or use `defp` with a wrapper pattern if all callers are in the same module."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 51,
+          "endLine": 51,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Hook attached in mount may not survive LiveView reconnection",
+          "description": "The `attach_hook` call is in `mount/3`. In Phoenix LiveView, hooks attached in `mount` are re-attached on reconnection (e.g., after a websocket disconnect/reconnect), so this is generally safe. However, if the LiveView ever uses `on_mount` hooks or is embedded in a way that changes the mount lifecycle, the hook attachment could be missed. This is a minor note since the current pattern is standard.",
+          "suggestedFix": "No immediate fix needed, but consider adding a comment noting that this hook is re-attached on reconnect per LiveView semantics, to prevent a future developer from moving it to a one-time setup location."
+        }
+      ],
+      "durationMs": 393992,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "accessibility-auditor",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 449491,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "project-rules",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 99,
+          "endLine": 116,
+          "severity": "important",
+          "category": "api-design",
+          "title": "Renaming public delete_chat_room_user/2 is a breaking change; verify all callers",
+          "description": "The public function `delete_chat_room_user/2` is renamed to `delete_chat_room_user_unchecked/2`. The diff updates two internal callsites (lines 186 and 1496) plus tests, but any other caller of the arity-2 form outside `lib/allocator_one/chats.ex` will now fail to compile — or worse, if a caller passed a third argument being defaulted anywhere, silently resolve differently. Per the project rules validation ladder, this warrants at least `mix test` over the contexts and namespaces touched, widened to callers (\"the contexts and namespaces you touched, widened when they have callers you did not\"). The docstring mentions \"org-member cleanup\" and \"the chat-mode path\" as callers of the unchecked form, but no diff hunk updates an org-member cleanup callsite — confirm that path was updated or already routed through this module.",
+          "suggestedFix": "Grep the codebase for `delete_chat_room_user(` arity-2 callsites (e.g. org-member cleanup mentioned in the docs) and confirm every one was updated to `_unchecked/2` or intentionally migrated to the authorized arity-3 form. Run `mix compile --warnings-as-errors` and the wider test scope before opening the PR."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2435,
+          "endLine": 2437,
+          "severity": "important",
+          "category": "security",
+          "title": "Room-write allowlist likely omits mutating events (e.g. edit/delete/reaction variants)",
+          "description": "The seam gates only `send_message save_edit confirm_delete forward_message add_chat_member remove_chat_member leave_group_chat`. An allowlist seam is only as good as its coverage: events like message reactions, pinning, marking read/unread in the room, renaming the group, changing the room avatar, or `start_edit_message` (which the tests themselves use) are common room-scoped mutations in a messenger and none appear in the list. The comment excludes \"blocking a user, archiving, reporting\" deliberately, but it does not enumerate why other room-scoped writes (reactions, room settings) are absent. If any such handler writes into the selected room, a revoked socket can still mutate it — precisely the IO-10944/IO-10982 vulnerability class this change closes. The drift test only checks that listed events have handlers, not that room-mutating handlers are listed, so the dangerous direction of drift (a new room write added without gating) is unguarded.",
+          "suggestedFix": "Audit all handle_event clauses in this LiveView that write room-scoped data (reactions, pins, room rename/settings, typing-adjacent persistence) and add them to @room_write_events. Consider inverting the guard to a denylist of known-safe events, or add a test asserting that every handle_event clause calling a Chats mutation is in the gated list."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2458,
+          "endLine": 2464,
+          "severity": "minor",
+          "category": "security",
+          "title": "Draft-state bypass keys only on assigns, not on the payload's target",
+          "description": "The first clause admits `send_message` roomless when `chat_room_kind == :direct_draft` and `selected_chat_room == nil`. This trusts that the draft handler itself validates whom the draft targets (e.g. that the current user may open a direct chat with the recipient) — the seam intentionally checks nothing here. That is acceptable if `get_or_create_direct_chat`/the draft-send handler enforces its own policy, but nothing in the diff shows that, and the comment does not state where that authorization lives. If the draft handler creates rooms from a client-supplied user_id without a check, this bypass is the remaining unauthenticated write path through the seam.",
+          "suggestedFix": "Add a comment (or assertion) pointing to where the draft-send path authorizes the recipient, e.g. in Chats.get_or_create_direct_chat/2, so a future reader can verify the roomless bypass stays safe."
+        },
+        {
+          "id": "f004",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3350,
+          "endLine": 3360,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Drift test greps source text instead of asserting behavior",
+          "description": "The \"every gated event still has a handler\" test reads the LiveView source file and greps for `handle_event(\"<event>\"`. This is brittle: it breaks if a handler is generated by a macro, delegated, matched with a multi-event guard (`when event in [...]`), or if the file moves; and it passes if the string appears in a comment. The project testing rules say to \"verify behavior, not just execute code paths\". It also couples the test to a hardcoded file path, so a file rename silently keeps the test green only until File.read!/1 raises.",
+          "suggestedFix": "Prefer a behavioral check: for each gated event, push it against a mounted view with a valid room and assert it does not hit Phoenix's \"no handle_event clause\" crash — or at minimum use __info__/module introspection rather than raw source grepping, and derive the path from the module rather than hardcoding it."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3264,
+          "endLine": 3278,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No positive-path test that gated events still succeed for a valid member",
+          "description": "The new \"room write seam\" describe block covers revoked-member bounces, roomless bounces, and the draft bypass for `add_chat_member`, but there is no test asserting that a member with intact access passes the hook and the write lands (except incidentally via send_message inside the save_edit setup). If the hook's `:cont` path or the `user_has_access?` predicate regressed to always halt, only pre-existing tests elsewhere would catch it — and those may not exist for all gated events (e.g. forward_message, confirm_delete after the hook). A seam that fails closed too aggressively is a functional outage.",
+          "suggestedFix": "Add at least one explicit test per gated write class asserting the happy path still commits with the hook attached (e.g. a valid member's send_message persists and no redirect occurs)."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3323,
+          "endLine": 3335,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Draft-flow test asserts only the negative half of its stated behavior",
+          "description": "The test named \"draft state admits the draft send and nothing else\" only exercises the \"nothing else\" half (add_chat_member bounces from draft state). The admitting half — that a roomless `send_message` from `:direct_draft` actually passes the seam and creates the room — is deferred to \"the draft-flow test\" per the comment above the no-room test, but that test is not visible in this diff. If it does not exist or does not run through the new hook, the sole bypass clause of the seam is untested.",
+          "suggestedFix": "Either add a send_message assertion to this test (submit from /chat/new and assert the message/room is created without a redirect) or reference the exact existing draft-flow test name in the comment so reviewers can confirm coverage."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2485,
+          "endLine": 2486,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "__room_write_events__/0 exposes internals as a public function",
+          "description": "The `@doc false def __room_write_events__` escape hatch exists solely so the drift test can grep the source. Exposing module internals for a source-text test is a smell; if the test moved to behavioral or introspection-based assertions (see f004) this public function could be removed, keeping the LiveView's public surface limited to callbacks per the coding rules (\"Skip @doc and @spec for framework callbacks\" implies LiveViews should not grow ad-hoc public API).",
+          "suggestedFix": "If the drift test is rewritten behaviorally, drop __room_write_events__/0; otherwise this is acceptable as a deliberate, documented test seam."
+        }
+      ],
+      "durationMs": 42456,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "spec-compliance",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 51,
+          "endLine": 54,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Hook is attached only on one mount path",
+          "description": "attach_hook(:room_write_access) is added inside mount after Chats.get_or_create_ai_agent_chat(current_user). LiveViews typically have multiple mount clauses (e.g., for /chat, /chat/:id, /chat/new). The diff shows the hook added in only one location; if the module defines other mount clauses (or if mount can return early via redirect before this line), sockets mounted through those paths would run without the seam, re-opening the IO-10982 hole for exactly the events this PR is trying to protect. The test for /chat/new (draft path) passing a gated event through suggests the draft mount does reach this line, but the diff alone cannot confirm every mount path is covered.",
+          "suggestedFix": "Move the attach_hook call to the very top of mount (before any conditional logic or early returns) or into an on_mount callback so every mount path is guaranteed to have the seam."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2455,
+          "endLine": 2464,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Draft-send bypass matches only on chat_room_kind, not on what is being sent",
+          "description": "The first clause of enforce_room_write_access admits any \"send_message\" event when assigns are %{chat_room_kind: :direct_draft, selected_chat_room: nil} without inspecting params. If a client in a true draft state fires send_message with params the handler doesn't expect for drafts (or repeatedly after a draft partially failed), it passes the seam unchecked and relies entirely on the handler's own draft logic. This is the spec-sanctioned exception ('Draft sends ... are unaffected'), so behavior is per-spec, but the comment says 'a socket carrying both the draft kind and a stale room falls through' — the inverse (draft kind with no room but a non-draft send) is not distinguished at the seam.",
+          "suggestedFix": "Acceptable as-is given the spec, but consider asserting in the comment or a test that the send_message handler itself re-validates draft state before creating the room, so the seam's bypass is defense-in-depth rather than the only check."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2478,
+          "endLine": 2479,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Module attribute exposed via public __room_write_events__ function",
+          "description": "def __room_write_events__, do: @room_write_events makes the list public solely for the drift-detection test. This works but adds a public function to the LiveView's API surface; Phoenix will not treat it as an event handler, but it is callable from anywhere.",
+          "suggestedFix": "Consider guarding with @doc false (already present) plus a comment that it is test-only, or derive the list in the test via Code.fetch_docs/ast inspection instead of a runtime function."
+        },
+        {
+          "id": "f004",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3349,
+          "endLine": 3360,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Drift-detection test reads source file relative to CWD",
+          "description": "File.read!(\"lib/allocator_one_web/live/messenger/messages/index_live.ex\") depends on the test being run from the project root (which Mix guarantees, so it works in practice), and the substring match `handle_event(\"#{event}\"` could false-positive if e.g. a comment contains that string. Also the test only checks handler existence, not that the handler clause is reachable (a more specific clause above it would shadow it silently).",
+          "suggestedFix": "Keep as a smoke test but note its limits, or assert on the module's __info__(:functions)/behaviour info instead of source grepping if feasible; at minimum it's an acceptable pragmatic guard."
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2431,
+          "endLine": 2435,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Spec lists leave_group_chat; confirm_delete/forward_message seam coverage untested",
+          "description": "The @room_write_events list includes confirm_delete and forward_message, but the new tests only exercise send_message, save_edit, add_chat_member, leave_group_chat, and the no-room/draft edge cases. The spec's acceptance criteria say the regression tests should prove revoked send and revoked edit (both covered), but a name typo in confirm_delete or forward_message would only be caught by the grep-based drift test, not by an actual behavioral test that a revoked socket's confirm_delete is refused.",
+          "suggestedFix": "Add one behavioral test for confirm_delete or forward_message with a revoked membership to close the loop, or parametrize the existing seam tests across all gated events."
+        }
+      ],
+      "durationMs": 475028,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600004,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "dead-code",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2463,
+          "endLine": 2470,
+          "severity": "important",
+          "category": "security",
+          "title": "Room authorization check is vulnerable to a TOCTOU race",
+          "description": "The hook checks `Chats.user_has_access?/2` before continuing to the event handler, but the authorization query and the subsequent room mutation are not atomic. If membership is revoked after this check and before `send_message`, `save_edit`, `confirm_delete`, or another handler commits its write, the revoked user can still mutate the room. The new tests only revoke membership before dispatching the event, so they do not cover this race.",
+          "suggestedFix": "Enforce membership inside each mutation's database transaction, locking or conditionally querying the relevant membership before writing. The hook can remain as an early rejection, but it should not be the authoritative authorization boundary."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one_web/live/messenger/messages/index_live.ex",
+          "startLine": 2482,
+          "endLine": 2483,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Public export exists only to support a test",
+          "description": "`__room_write_events__/0` is exported from the production LiveView solely so the test can inspect the private event registry; no production consumer is shown. This test-only API inflates and exposes the production module interface without contributing to runtime behavior.",
+          "suggestedFix": "Remove the public function and test the gate through observable event behavior. If structural inspection is still required, keep the helper test-only or inspect the source without adding a production export."
+        }
+      ],
+      "durationMs": 27506,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "dependency-hygiene",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/messenger/messages/index_live_test.exs",
+          "startLine": 3356,
+          "endLine": 3357,
+          "severity": "critical",
+          "category": "tests",
+          "title": "Unclosed sigil syntax error in test assertion causes compilation failure",
+          "description": "In the test \"every gated event still has a handler\", the sigil `~s(handle_event(\"#{event}\"),` has an unclosed delimiter `(`. The inner `)` balances `handle_event(`, leaving the outer `~s(` unclosed. This results in a syntax error that breaks test suite compilation.",
+          "suggestedFix": "assert source =~ ~s(handle_event(\"#{event}\"))"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/chats.ex",
+          "startLine": 170,
+          "endLine": 171,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Incomplete `@spec` for `delete_chat_room_user/3` missing error return type",
+          "description": "`delete_chat_room_user/3` calls `Repo.rollback(reason)` when authorization checks or the underlying deletion fails, which causes the transaction to return `{:error, reason}`. However, the `@spec` only documents the success tuple `{:ok, ChatRoomUser.t()}`.",
+          "suggestedFix": "@spec delete_chat_room_user(ChatRoom.t(), User.t(), User.t()) :: {:ok, ChatRoomUser.t()} | {:error, term()}"
+        }
+      ],
+      "durationMs": 38072,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "edge-case-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600004,
+      "status": "timeout",
+      "error": "Request timed out"
+    }
+  ]
+}

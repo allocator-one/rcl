@@ -1,0 +1,1064 @@
+{
+  "case": "harness-cli-9-r9-empty-body-guard",
+  "source": {
+    "report": "rcl-report-harness-cli-9-r9.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "src/cli.ts",
+    "lineRange": [
+      652,
+      668
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 6,
+    "successfulReviews": 13,
+    "agreementRatioIfMerged": 0.462,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "Empty-body guard applies only to file-backed comments, not inline text",
+      "Comment empty-body check is inconsistent with other file-backed fields",
+      "Empty/whitespace-only file check applied only to comment bodies",
+      "comment: fromFile empty check message includes opts.bodyFile which could be undefined",
+      "Empty-comment error interpolates a possibly-undefined path awkwardly",
+      "Empty-body guard is comment-only",
+      "File-backed comment body bypasses inline empty check but empty-after-trim inline arrays still allowed"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/cli.ts",
+          "startLine": 651,
+          "endLine": 655,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Comment usage check reads stale positional text vs --body-file precedence flow",
+          "description": "In the `comment` action, the usage guard `if (id === undefined || (opts.bodyFile === undefined && text.length === 0))` accepts an invocation like `harness comment IO-1 --body-file -` where stdin later resolves to whitespace-only. However, the empty-body check only applies to the file-backed form; positional text like `harness comment IO-1 \"   \"` (whitespace-only inline text) is still allowed through and would post a blank comment. The stated goal (\"posting it would be the silent outcome\") applies equally to inline text, so the guard is asymmetric.",
+          "suggestedFix": "Apply the same whitespace-only rejection to the joined positional text: e.g. `if (fromFile === undefined && text.join(\" \").trim() === \"\") throw new UsageError(...)` — or document why inline text is exempt."
+        },
+        {
+          "id": "f002",
+          "file": "src/core/textinput.ts",
+          "startLine": 108,
+          "endLine": 113,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Stdin TTY check happens in read pass, not validation pass",
+          "description": "`checkReadable` validates every regular-file path in the validation pass, but the stdin TTY check (`process.stdin.isTTY === true`) lives inside `readTextFile`, which runs in the read pass. If an invocation has `--notes-file valid.md --description-file -` with stdin being a terminal, the valid file is read first (since stdin sorts last), and only then is the TTY usage error raised. This is inconsistent with the module's own design principle that every usage error should be raised before any byte is read. It's harmless for regular files (reads are idempotent), but it means a usage error is reported only after work has started, and the ordering guarantee documented at the top of `resolveTextSources` is subtly violated.",
+          "suggestedFix": "Hoist the TTY check into the validation loop in `resolveTextSources`: when `file === STDIN_PATH`, also check `process.stdin.isTTY === true` and throw the UsageError there, before any reads."
+        },
+        {
+          "id": "f003",
+          "file": "src/core/textinput.ts",
+          "startLine": 63,
+          "endLine": 65,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "flagOf mis-renders names with leading uppercase or consecutive capitals",
+          "description": "`flagOf` converts camelCase to kebab-case by prefixing every uppercase letter with a dash. For current field names (`appendNotes`, `description`, etc.) this is correct, but a name like `URLField` would become `-u-r-l-field` and a leading capital produces a leading dash (`--`-prefixed flag becomes `---x-...`). This is a latent hazard for future callers since `TextSource.name` is an unconstrained `string`.",
+          "suggestedFix": "Either constrain `name` to a union of known field names (e.g. `type FieldName = \"title\" | \"description\" | ...`), or harden flagOf against edge cases and document the expected input shape."
+        },
+        {
+          "id": "f004",
+          "file": "src/core/textinput.ts",
+          "startLine": 80,
+          "endLine": 106,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Duplicate field names in sources silently overwrite each other",
+          "description": "`resolveTextSources` accepts a `readonly TextSource[]` and writes into `resolved[name]` without checking for duplicate names. If a caller passes two sources with the same `name` (e.g. via a future refactor merging `issueTextSources` with extra fields), the later one silently wins, including potentially draining stdin for a value that is then overwritten. Since the module's whole design theme is refusing silent precedence, duplicate names should be a programmer error.",
+          "suggestedFix": "Track seen names in a Set during the validation pass and throw (or assert) on duplicates."
+        },
+        {
+          "id": "f005",
+          "file": "src/core/textinput.ts",
+          "startLine": 150,
+          "endLine": 152,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Size checked against UTF-8 decoded byte length, not raw file size, after read",
+          "description": "After `readFileSync(path, \"utf8\")`, the code re-checks `Buffer.byteLength(text, \"utf8\")`. A file that grew past the limit between stat and read has already been fully buffered into memory by that point, so the stated goal of \"fails fast instead of buffering it\" is only enforced by the pre-read `statSync` check; the post-read check is a correctness backstop but does not prevent the buffering. For a 1 MB ceiling this is fine, but the comment overstates the guarantee. Also, invalid UTF-8 bytes are replaced with U+FFFD (3 bytes) during decode, so the byte count can differ slightly from the on-disk size.",
+          "suggestedFix": "No functional change needed at this size; consider clarifying the comment that the post-read check is a race backstop, not a buffering guard."
+        },
+        {
+          "id": "f006",
+          "file": "src/cli.ts",
+          "startLine": 655,
+          "endLine": 660,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "Comment body passed as single-element array flattens multi-line semantics of positional form",
+          "description": "The positional form sends `text` (an array of words joined downstream), while the file form sends `[fromFile]` — a single element that may contain newlines. This relies on `commands.comment` joining with a separator that is a no-op for a single element. If `commands.comment` joins with a space, this works; if it ever joins with newline or does per-element processing, the two forms diverge. The array-of-strings API for a comment body is a slightly awkward contract now that one element can be an entire multi-line document.",
+          "suggestedFix": "Consider changing `commands.comment` to accept a single `body: string` and join positional words at the CLI boundary, making the contract explicit."
+        },
+        {
+          "id": "f007",
+          "file": "test/textinput.test.ts",
+          "startLine": 108,
+          "endLine": 116,
+          "severity": "minor",
+          "category": "tests",
+          "title": "mkfifo test will fail or be skipped on Windows",
+          "description": "The FIFO test shells out to `mkfifo`, which does not exist on Windows and may be absent from minimal CI images. `execFileSync(\"mkfifo\", ...)` will throw ENOENT and fail the suite for reasons unrelated to the code under test.",
+          "suggestedFix": "Guard the test with a platform check, e.g. `it.skipIf(process.platform === \"win32\")(...)`, or wrap mkfifo availability detection and skip when unavailable."
+        },
+        {
+          "id": "f008",
+          "file": "test/textinput.test.ts",
+          "startLine": 118,
+          "endLine": 135,
+          "severity": "minor",
+          "category": "tests",
+          "title": "\"reads stdin last\" test depends on in-process fd 0 state and may be flaky",
+          "description": "The test asserting stdin is read last relies on the assumption that reading fd 0 in the test runner would fail (EAGAIN) or otherwise not produce the directory error. If the runner's fd 0 is a readable pipe at EOF, `readFileSync(0)` would succeed and return \"\", and the test would still pass only because the directory read fails afterwards — meaning the assertion can pass even when stdin IS read first and drained. The test's own comment acknowledges this is indirect; as written it does not reliably distinguish the orderings it claims to verify. Since checkReadable already rejects directories in the validation pass, the directory error is thrown before ANY read happens, so this test actually exercises the validation pass, not the stdin-last read ordering.",
+          "suggestedFix": "Test the byStdinLast ordering directly (export it or observe read order via a temp file plus a mocked/instrumented read), or acknowledge in the test that the directory case is caught in validation and pick a failure mode that genuinely occurs at read time."
+        },
+        {
+          "id": "f009",
+          "file": "src/core/textinput.ts",
+          "startLine": 128,
+          "endLine": 130,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "readFileSync(0) reads fd 0 synchronously; non-blocking stdin can throw EAGAIN",
+          "description": "On Linux, when stdin is a pipe set to non-blocking mode by a parent process (some shells/CI runners do this), `readFileSync(0, \"utf8\")` can throw EAGAIN even though data is en route. The error is caught and wrapped in a UsageError, so the failure is visible rather than silent, but the message (\"cannot read stdin (Resource temporarily unavailable)\") may confuse users hitting the known Node EAGAIN-on-nonblocking-stdin issue.",
+          "suggestedFix": "Consider retrying on EAGAIN with a short loop, or special-casing the EAGAIN code in `describe()` with a hint (\"stdin is non-blocking; try piping through cat\")."
+        },
+        {
+          "id": "f010",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 195,
+          "endLine": 205,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Mock server JSON.parse of request body without try/catch can crash the shared server",
+          "description": "The new PATCH/POST handlers call `JSON.parse(raw)` inside the `end` event handler with no error handling. A malformed body from any test (or a test bug) would throw inside the HTTP server callback, potentially crashing the shared mock server and cascading failures across unrelated tests with confusing symptoms. The same pattern applies to all three new handlers (issues PATCH, teams POST, comments POST).",
+          "suggestedFix": "Wrap the parse in try/catch and respond 400 on parse failure, so a bad body fails only the offending test."
+        },
+        {
+          "id": "f011",
+          "file": "src/cli.ts",
+          "startLine": 478,
+          "endLine": 484,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "create title check accepts empty-string --title-file result",
+          "description": "The pre-resolution check in `create` verifies that either `--title` or `--title-file` was supplied, but a `--title-file` pointing at an empty file resolves to `\"\"` (the empty-file test in textinput.test.ts confirms empty resolves to an empty value, not absent). The comment says the required-title check \"lives in the command — after resolution\"; if `commands.create` treats an empty string as a present title, an empty title file yields a titleless issue creation request. This is exactly the \"failed pipeline\" case that the comment command explicitly rejects for --body-file, but create has no equivalent whitespace/empty guard for the resolved title.",
+          "suggestedFix": "After resolution, reject a title that is empty or whitespace-only when it came from a file (mirroring the comment command's empty-body guard), or confirm/ensure `commands.create` rejects empty titles."
+        },
+        {
+          "id": "f012",
+          "file": "src/core/textinput.ts",
+          "startLine": 174,
+          "endLine": 179,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "checkReadable statSync follows symlinks; TOCTOU between stat and read",
+          "description": "`statSync` follows symlinks and there is an inherent time-of-check/time-of-use gap between the validation-pass stat and the later read. A regular file can be replaced by a FIFO between the two, reintroducing the block-forever failure the check exists to prevent. The window is tiny and the threat model here (a local CLI reading user-specified paths) makes this low risk, but the code comments present the FIFO rejection as a hard guarantee, which it is not.",
+          "suggestedFix": "For a stronger guarantee, open the file with `openSync` and `fstatSync` the descriptor before reading from it (check-then-read on the same fd), or soften the comment."
+        }
+      ],
+      "durationMs": 62563,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "b38b72ee-3b0b-4cae-b14b-c0a8aac92c44",
+          "file": "src/core/textinput.ts",
+          "startLine": 133,
+          "endLine": 157,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Size limit is enforced only after unbounded reads",
+          "description": "Both stdin and regular files are read completely into memory before their actual byte length is checked. A pipe can therefore send arbitrarily large or never-ending input, and a regular file can grow after statSync, causing the process to consume excessive memory or terminate from OOM despite MAX_TEXT_BYTES.",
+          "suggestedFix": "Read incrementally and stop after MAX_TEXT_BYTES + 1 bytes. For regular files, open a descriptor and perform bounded reads; for stdin, consume chunks while tracking the accumulated byte count and reject as soon as the limit is exceeded."
+        },
+        {
+          "id": "92e345a5-ca4b-44f6-a07e-91b88d649f3c",
+          "file": "src/core/textinput.ts",
+          "startLine": 178,
+          "endLine": 199,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Separate stat and read leave a FIFO blocking race",
+          "description": "checkReadable validates the path with statSync, but readTextFile later reopens the path by name. If the path is replaced between those operations, a validated regular file can become a FIFO or another special file, making readFileSync block indefinitely and bypassing the intended regular-file restriction.",
+          "suggestedFix": "Open the path once, use fstatSync on that descriptor, and read from the same descriptor. Open with a nonblocking flag where supported so opening a replaced FIFO cannot itself block, then close the descriptor in a finally block."
+        },
+        {
+          "id": "48f94395-aa88-43a6-902d-4e6c0da8a0d4",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 673,
+          "endLine": 681,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Close reason test never verifies the request body",
+          "description": "The test named \"close sends a stdin-backed reason\" only checks for a successful exit and an identifier in output. The close server stub immediately responds without reading or recording the request body, so the test would still pass if --reason-file were ignored or the resolved reason were not sent.",
+          "suggestedFix": "Parse and record the close endpoint's request body, reset that capture in beforeEach, and assert that its reason field equals \"Implemented in abc1234\"."
+        },
+        {
+          "id": "0e0a9d23-490f-469e-afaa-ab54304e666f",
+          "file": "test/textinput.test.ts",
+          "startLine": 110,
+          "endLine": 116,
+          "severity": "minor",
+          "category": "tests",
+          "title": "FIFO test depends on the Unix-only mkfifo executable",
+          "description": "The test invokes an external mkfifo command unconditionally. It will fail with ENOENT on Windows and in minimal environments where that utility is unavailable, even though the TypeScript implementation itself is otherwise platform-neutral.",
+          "suggestedFix": "Guard this test by platform/tool availability, or create the FIFO through a platform-specific test helper and skip it with an explicit reason where FIFOs are unsupported."
+        }
+      ],
+      "durationMs": 84255,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 33975,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/core/textinput.ts",
+          "startLine": 119,
+          "endLine": 133,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Stdin is fully buffered before the size cap is enforced",
+          "description": "For `--<field>-file -`, `readFileSync(0, \"utf8\")` reads the entire stdin stream into memory with no limit, and only afterwards checks `Buffer.byteLength(piped) > MAX_TEXT_BYTES`. The 1 MB ceiling is meant to fail fast on absurd input, but a caller piping a multi-gigabyte stream (e.g., `cat huge.bin | harness close X --reason-file -`) will buffer it all before being told no — potentially exhausting memory. Files are protected by the pre-read `statSync` size check in `checkReadable`, but stdin has no equivalent guard at read time.",
+          "suggestedFix": "Read stdin in bounded chunks (or via a loop over `readSync` on fd 0) and abort with the oversize UsageError as soon as the accumulated byte count exceeds MAX_TEXT_BYTES, rather than after the full read."
+        },
+        {
+          "id": "f002",
+          "file": "test/textinput.test.ts",
+          "startLine": 147,
+          "endLine": 157,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "FIFO test shells out to mkfifo, breaking on Windows",
+          "description": "The 'rejects a FIFO instead of blocking on it forever' test uses `execFileSync(\"mkfifo\", [fifo])`, which does not exist on Windows. The test will throw (or worse, hang) on non-POSIX runners, making the suite platform-dependent without any skip guard.",
+          "suggestedFix": "Guard the test with `it.skipIf(process.platform === \"win32\")` or `it.runIf(process.platform !== \"win32\")`, or create the FIFO via a platform-conditional helper."
+        },
+        {
+          "id": "f003",
+          "file": "src/cli.ts",
+          "startLine": 413,
+          "endLine": 422,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "TextFileOpts doc comment says create/update share the options but includes appendNotesFile",
+          "description": "The comment on `TextFileOpts` reads 'The `--<field>-file` companions `create` and `update` share', yet the interface also declares `appendNotesFile`, which only `update` defines (as the `issueTextSources` doc itself explains). `create` never registers `--append-notes-file`, so the interface overstates what the two commands share and a reader could mistakenly add the option to `create` expecting it to work.",
+          "suggestedFix": "Either move `appendNotesFile` out of `TextFileOpts` into the update action's own option type, or adjust the comment to note that `appendNotesFile` applies to `update` only."
+        }
+      ],
+      "durationMs": 57816,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "security-auditor",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/core/textinput.ts",
+          "startLine": 132,
+          "endLine": 142,
+          "severity": "important",
+          "category": "security",
+          "title": "Unbounded memory allocation when reading stdin before size limit check",
+          "description": "When reading from stdin (`path === STDIN_PATH`), `readFileSync(0, \"utf8\")` reads the entire input stream synchronously into memory before checking if its size exceeds `MAX_TEXT_BYTES`. If an unbounded stream (such as `/dev/zero` or a multi-gigabyte file) is piped into stdin, this will buffer the entire payload into heap memory, causing memory exhaustion and process crashes (Out of Memory) before the size check is reached.",
+          "suggestedFix": "Read stdin in chunks (e.g., using `readSync` into a fixed-size buffer up to `MAX_TEXT_BYTES + 1` bytes) and throw a `UsageError` as soon as the accumulated byte size exceeds `MAX_TEXT_BYTES`, rather than buffering the complete stream first."
+        }
+      ],
+      "durationMs": 35424,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "performance-engineer",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/core/textinput.ts",
+          "startLine": 1,
+          "endLine": 216,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Synchronous file I/O blocks the event loop for up to 1 MB reads",
+          "description": "readFileSync and statSync are used throughout. While the code comments acknowledge this is intentional ('Synchronous on purpose'), with MAX_TEXT_BYTES at 1 MB and multiple file-backed fields possible in a single invocation (e.g., `create` with --title-file, --description-file, --design-file, --notes-file, --acceptance-file), this could block the event loop for a noticeable duration. For a CLI this is acceptable, but if this module is ever reused in the MCP server context (which is async), it would become a blocking concern. The comment justifies it well for the CLI case, so this is informational.",
+          "suggestedFix": "Consider adding a comment or export guard noting this module is CLI-only and should not be imported from the MCP server path, or provide an async variant for future use."
+        },
+        {
+          "id": "f002",
+          "file": "src/core/textinput.ts",
+          "startLine": 120,
+          "endLine": 130,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Stdin size check happens after full read into memory",
+          "description": "For stdin (`-`), the entire content is read into memory via `readFileSync(0, 'utf8')` before the size check at line 128. If a malicious or mistaken pipe sends gigabytes of data, the process will buffer it all before rejecting. The comment acknowledges 'Stdin cannot be sized in advance', but there's no streaming guard. For a CLI tool this is low risk, but it's worth noting that unlike the file path (which gets a statSync pre-check), stdin has no upper bound on memory usage before the check fires.",
+          "suggestedFix": "Consider reading stdin in chunks with a running byte count and aborting early once MAX_TEXT_BYTES is exceeded, e.g., using fs.readSync in a loop with a Buffer of bounded size."
+        },
+        {
+          "id": "f003",
+          "file": "src/core/textinput.ts",
+          "startLine": 100,
+          "endLine": 103,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Unnecessary array copy before sorting toRead",
+          "description": "The expression `[...toRead].sort(byStdinLast)` creates a shallow copy of the array solely to avoid mutating `toRead`. Since `toRead` is never used again after this point, the copy is unnecessary allocation. For the typical case (1-6 entries) this is negligible, but it's a minor inefficiency.",
+          "suggestedFix": "Use `toRead.sort(byStdinLast)` directly since the array is not referenced after this loop."
+        },
+        {
+          "id": "f004",
+          "file": "src/core/textinput.ts",
+          "startLine": 195,
+          "endLine": 199,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "stripOneTrailingNewline does not handle lone \\r (old Mac line endings)",
+          "description": "The function handles `\\r\\n` and `\\n` but not a trailing lone `\\r` (classic Mac OS line ending). While extremely rare in modern files, if a file ends with `\\r` only, it will be preserved. This is likely intentional given the rarity, but worth noting for completeness. The `$(cat file)` behavior referenced in the doc comment would also not strip a lone `\\r`, so this is consistent.",
+          "suggestedFix": "No change needed if intentional. Could add a comment noting lone \\r is deliberately preserved."
+        },
+        {
+          "id": "f005",
+          "file": "src/cli.ts",
+          "startLine": 470,
+          "endLine": 486,
+          "severity": "important",
+          "category": "correctness",
+          "title": "resolveTextSources result spread may leak -file keys into command opts",
+          "description": "The spread `{ ...opts, ...resolveTextSources(issueTextSources(opts)) }` passes the entire `opts` object (which includes `titleFile`, `descriptionFile`, etc.) into `commands.create`. If `commands.create` serializes its options object to build the API request body (e.g., via JSON.stringify or Object.keys iteration), these extra `-file` keys could leak into the HTTP request. The test at line ~640 (`expect(Object.keys(lastCreateBody)).not.toContain('descriptionFile')`) suggests the command layer already filters them, but this is fragile — it relies on the command implementation knowing to ignore unknown keys rather than the CLI layer stripping them before passing.",
+          "suggestedFix": "Destructure out the `-file` keys before spreading into the command call, e.g.:\n```ts\nconst { titleFile, descriptionFile, designFile, notesFile, acceptanceFile, ...cmdOpts } = opts;\nreturn commands.create(ctx, { ...cmdOpts, ...resolveTextSources(issueTextSources(opts)) });\n```"
+        },
+        {
+          "id": "f006",
+          "file": "src/cli.ts",
+          "startLine": 524,
+          "endLine": 530,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Same -file key leakage risk in update command",
+          "description": "Similar to the create command, `{ ...opts, ...resolveTextSources([...]) }` in the update action passes `titleFile`, `descriptionFile`, `designFile`, `notesFile`, `appendNotesFile`, `acceptanceFile` through to `commands.update`. If the update command builds a PATCH body from its options, these keys could be sent to the server. The test verifies `lastPatchBody` doesn't contain `description`, but doesn't explicitly check for absence of `-file` suffixed keys.",
+          "suggestedFix": "Strip the `-file` keys before passing to the command, or add an explicit test assertion like `expect(Object.keys(lastPatchBody).every(k => !k.endsWith('File'))).toBe(true)`."
+        },
+        {
+          "id": "f007",
+          "file": "src/cli.ts",
+          "startLine": 651,
+          "endLine": 660,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Empty body check only applies to file-sourced comments, not inline",
+          "description": "The check `if (fromFile !== undefined && fromFile.trim() === '')` guards against empty file-sourced bodies. However, if a user passes only whitespace as positional text (e.g., `harness comment IO-1 '   '`), the `text` array is non-empty (length > 0) so it passes the earlier check, and the whitespace-only text is sent to the API. This inconsistency means the 'empty comment' guard only protects the file path.",
+          "suggestedFix": "Consider applying the same trim check to the positional text path:\n```ts\nif (fromFile === undefined && text.join('').trim() === '') {\n  throw new UsageError('comment text is empty — nothing to post');\n}\n```"
+        },
+        {
+          "id": "f008",
+          "file": "src/core/textinput.ts",
+          "startLine": 85,
+          "endLine": 90,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "resolveTextSources returns untyped Record<string, string>",
+          "description": "The return type `Record<string, string>` loses all type information about which fields are present. Callers spread this over their typed options objects, but TypeScript cannot verify at compile time that the keys are valid field names. A typo in a `TextSource.name` (e.g., `\"titel\"` instead of `\"title\"`) would silently produce a key that gets spread but never matches an expected option, causing the field to be silently absent.",
+          "suggestedFix": "Consider a generic signature like `resolveTextSources<T extends string>(sources: readonly TextSource<T>[]): Partial<Record<T, string>>` or at minimum add a runtime assertion/validation in tests that names match known fields."
+        },
+        {
+          "id": "f009",
+          "file": "test/textinput.test.ts",
+          "startLine": 119,
+          "endLine": 125,
+          "severity": "minor",
+          "category": "tests",
+          "title": "FIFO test is not portable to Windows",
+          "description": "The test uses `execFileSync('mkfifo', [fifo])` which is a Unix-only utility. On Windows, this test will throw an ENOENT for the `mkfifo` binary and fail. There's no platform guard or skip condition.",
+          "suggestedFix": "Add a platform check:\n```ts\nit.skipIf(process.platform === 'win32')('rejects a FIFO instead of blocking on it forever', () => {\n  ...\n});\n```\nOr wrap in a try/catch that skips if mkfifo is unavailable."
+        },
+        {
+          "id": "f010",
+          "file": "test/textinput.test.ts",
+          "startLine": 128,
+          "endLine": 145,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Stdin-last ordering test relies on implementation-specific error behavior",
+          "description": "The test 'reads stdin last, so a file failure cannot follow it' asserts that the error is 'is a directory' rather than a stdin read error. However, this depends on the test runner's fd 0 not being a TTY (which would trigger the TTY check first) and on the specific error that reading stdin produces in the test environment. The comment acknowledges this is indirect, but the test could be brittle across environments (e.g., if the test runner's stdin is a TTY, the error would be about terminal stdin rather than proving ordering).",
+          "suggestedFix": "Consider making the assertion more robust by checking that the error does NOT mention stdin at all, or by mocking process.stdin.isTTY for this specific test."
+        },
+        {
+          "id": "f011",
+          "file": "src/core/textinput.ts",
+          "startLine": 175,
+          "endLine": 185,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "checkReadable race: file can be replaced between statSync and readFileSync",
+          "description": "The code acknowledges the TOCTOU race in comments ('the stat in the validation pass can race a file that is still growing'). Between `statSync` confirming it's a regular file and `readFileSync` reading it, the file could be replaced with a symlink, directory, or device. The post-read size check mitigates the size aspect, but the type check is not re-validated. For a CLI tool this is extremely low risk, but the comment mentions it without a mitigation for the type change case.",
+          "suggestedFix": "No practical fix needed for a CLI tool. The existing post-read size check is sufficient for the stated threat model. The comment adequately documents the known limitation."
+        },
+        {
+          "id": "f012",
+          "file": "src/cli.ts",
+          "startLine": 475,
+          "endLine": 482,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Title-required check runs before resolveTextSources but after spread",
+          "description": "The check `if (opts.title === undefined && opts.titleFile === undefined)` correctly validates that at least one title source exists before reading. However, if `--title-file` is provided but the file is missing, the error will come from `resolveTextSources` (inside `commands.create`), not from this early check. This means the pipe-protection guarantee ('a rejected command never consumes your pipe') depends on `resolveTextSources` doing its validation pass before reading, which it does. The ordering is correct but the comment could be clearer that the file-existence check for title-file happens inside resolveTextSources, not here.",
+          "suggestedFix": "No code change needed. Consider a brief comment noting that --title-file validation (existence, readability) is deferred to resolveTextSources but still occurs before any read."
+        }
+      ],
+      "durationMs": 171595,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "api-design",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 73,
+          "endLine": 104,
+          "severity": "important",
+          "category": "correctness",
+          "title": "cliWithStdin uses spawn without an import added in the diff",
+          "description": "The new `cliWithStdin` helper calls `spawn(...)`, but the only import hunk in this file updates the vitest import (`beforeEach`). There is no corresponding change adding `spawn` from `node:child_process`. If the file previously imported only `execFile`, this fails TypeScript compile and the new e2e cases never run.",
+          "suggestedFix": "Ensure the child_process import includes spawn, e.g. `import { execFile, spawn } from \"node:child_process\";`."
+        },
+        {
+          "id": "f002",
+          "file": "src/cli.ts",
+          "startLine": 485,
+          "endLine": 534,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Resolved command opts still carry *File keys into handlers",
+          "description": "create/update/close spread Commander `opts` (which still contain `titleFile`, `descriptionFile`, `reasonFile`, etc.) and only overlay resolved text fields. The e2e suite asserts create payloads do not include `descriptionFile`, which implies handlers field-pick today, but update/close are not similarly guarded. If any handler ever builds a request body from enumerable opts keys, file paths would leak to the API. Safer to pass an explicit object of command fields only, or strip `*File` keys after resolution.",
+          "suggestedFix": "After resolveTextSources, build a clean opts object (pick known CreateOpts/UpdateOpts/CloseOpts fields) or delete the file companion keys before calling commands.*"
+        },
+        {
+          "id": "f003",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 668,
+          "endLine": 676,
+          "severity": "minor",
+          "category": "tests",
+          "title": "close --reason-file e2e never asserts the reason reached the API",
+          "description": "The close stub responds without reading/recording the POST body, and the test only checks exit code and that output matches /IO-1/. Unlike comment/create/update, a regression that drops `reason` would still pass.",
+          "suggestedFix": "Record the close request body on the stub (as with lastCommentBody/lastPatchBody) and expect the reason string from stdin."
+        },
+        {
+          "id": "f004",
+          "file": "test/textinput.test.ts",
+          "startLine": 118,
+          "endLine": 128,
+          "severity": "minor",
+          "category": "tests",
+          "title": "FIFO test depends on mkfifo and is not portable",
+          "description": "`execFileSync(\"mkfifo\", [fifo])` fails on Windows and anywhere mkfifo is unavailable, so this unit test is platform-specific without a guard. That can make CI fail on non-Unix runners unrelated to the feature.",
+          "suggestedFix": "Skip when process.platform === \"win32\" or when mkfifo is missing (try/catch or which), or create a non-regular fd another portable way."
+        },
+        {
+          "id": "f005",
+          "file": "package.json",
+          "startLine": 1,
+          "endLine": 5,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "New user-facing capability shipped as a patch version",
+          "description": "Adding `--*-file` / stdin companions is a backward-compatible feature. Under semver this is typically a minor bump (1.6.0), not 1.5.2. Consumers pinning ~1.5.1 may not expect new CLI surface in a patch, and the reverse (those who want the feature) get weaker version signal.",
+          "suggestedFix": "Consider versioning as 1.6.0 if you follow semver strictly for this package."
+        },
+        {
+          "id": "f006",
+          "file": "src/cli.ts",
+          "startLine": 662,
+          "endLine": 668,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Empty-body guard is comment-only",
+          "description": "Comment rejects whitespace-only `--body-file` content, but create/update/close do not apply the same check to file-backed title/reason/etc. Empty files become intentional empty strings (unit-tested). That may be desired for update clears, but create `--title-file` of only newlines and close `--reason-file` empty are easy agent mistakes with weaker local feedback than comment gets.",
+          "suggestedFix": "Optionally validate required text fields after resolution (e.g. non-empty title on create) consistently with the comment path."
+        }
+      ],
+      "durationMs": 170946,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 427552,
+      "status": "error",
+      "error": "Response truncated at token limit; findings would be incomplete"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "dx-critic",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/core/textinput.ts",
+          "startLine": 107,
+          "endLine": 113,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "byStdinLast relies on Array.prototype.sort stability for ordering guarantee",
+          "description": "The comment says 'Stdin goes LAST' and the correctness of the pipe-preservation guarantee depends on non-stdin files keeping their relative order and stdin sorting last. Modern V8 sort is stable, so this works, but using sort() with a boolean comparator to move one element to the end is indirect and fragile to reader comprehension — the intent ('read stdin after everything else') is encoded as arithmetic on Number(boolean). A simple partition would express the intent directly and not depend on sort semantics at all.",
+          "suggestedFix": "Replace the sort with an explicit partition:\n\nconst files = toRead.filter((r) => r.file !== STDIN_PATH);\nconst stdin = toRead.filter((r) => r.file === STDIN_PATH);\nfor (const { name, file } of [...files, ...stdin]) { … }"
+        },
+        {
+          "id": "f002",
+          "file": "src/core/textinput.ts",
+          "startLine": 55,
+          "endLine": 60,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "flagOf produces wrong flags for names with consecutive capitals or leading capitals",
+          "description": "flagOf converts camelCase to kebab-case by lowercasing each uppercase letter with a dash prefix. This is fine for current field names (appendNotes → append-notes), but it silently produces wrong output for names like 'APIKey' ('a-p-i-key') or names starting with a capital. Since the function's stated purpose is 'keeps an error message from naming a flag that does not exist', a mismatch here would defeat exactly that goal, and nothing validates the input shape. Low risk today, but worth a guard or a note constraining input to simple camelCase.",
+          "suggestedFix": "Add a doc constraint or a dev-time assertion that `name` matches /^[a-z][a-zA-Z]*$/, or maintain an explicit name→flag mapping in the TextSource entries."
+        },
+        {
+          "id": "f003",
+          "file": "src/cli.ts",
+          "startLine": 652,
+          "endLine": 663,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Comment empty-body check is inconsistent with other file-backed fields",
+          "description": "The comment command rejects a whitespace-only --body-file value ('produced an empty comment — nothing to post'), but create/update/close accept empty file-backed values silently (test 'treats an empty file as an empty value' confirms this is intentional at the textinput layer). An empty --reason-file or --description-file from a failed pipeline has the same silent-wrong-outcome risk described in the comment path's rationale, yet is allowed. If the empty-file-is-a-failed-pipeline reasoning holds for comments, it likely holds for stdin-backed reasons too; if not, documenting why comment is special would help. Also note the check applies only to the file form — positional empty text ('') is handled by the text.length check, but a whitespace-only positional arg would still post.",
+          "suggestedFix": "Either move the empty/whitespace rejection into resolveTextSources behind a per-field flag (e.g. { rejectEmpty: true }), or document in the comment action why only the comment body gets this treatment."
+        },
+        {
+          "id": "f004",
+          "file": "src/cli.ts",
+          "startLine": 484,
+          "endLine": 484,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "Spreading resolveTextSources over opts leaves stale *-file keys on the payload object",
+          "description": "commands.create receives { ...opts, ...resolveTextSources(...) }, which carries titleFile, descriptionFile, etc. through to the command layer. The e2e test 'sends file-backed fields without leaking the -file options' shows the command/serialization layer strips or ignores them, so this works — but it relies on the downstream picking known keys rather than the CLI passing a clean options object. The same pattern appears in update (lines 527-533) and close (lines 556-561). If commands.create ever serializes opts wholesale, the -file paths leak into the API request.",
+          "suggestedFix": "Destructure the -file keys out before passing along, e.g. const { titleFile, descriptionFile, designFile, notesFile, acceptanceFile, ...rest } = opts; return commands.create(ctx, { ...rest, ...resolved });"
+        },
+        {
+          "id": "f005",
+          "file": "src/core/textinput.ts",
+          "startLine": 137,
+          "endLine": 140,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "MAX_TEXT_BYTES formatting assumes the constant is an exact MB multiple",
+          "description": "oversize() renders the limit as `${MAX_TEXT_BYTES / 1_000_000} MB`. This is correct for the current 1_000_000 value, but if the constant is ever tuned to something like 512_000 the message becomes '0.512 MB'. Minor, but a formatted constant or a helper keeps the message robust.",
+          "suggestedFix": "Precompute a display string next to the constant, e.g. const MAX_TEXT_LABEL = \"1 MB\"; or format with toLocaleString bytes."
+        },
+        {
+          "id": "f006",
+          "file": "test/textinput.test.ts",
+          "startLine": 108,
+          "endLine": 118,
+          "severity": "minor",
+          "category": "tests",
+          "title": "FIFO test depends on mkfifo binary and POSIX; will fail on Windows/minimal CI",
+          "description": "The 'rejects a FIFO instead of blocking on it forever' test shells out to mkfifo via execFileSync. On Windows or a container image without coreutils this throws in test setup, failing the suite for an environment reason rather than a code reason. Given the guarded behavior (stats.isFile()) is the important part, the test should skip gracefully where FIFOs are unavailable.",
+          "suggestedFix": "Gate the test: it.skipIf(process.platform === \"win32\")(...) and/or wrap mkfifo in a try/catch that calls ctx.skip() when the binary is missing."
+        },
+        {
+          "id": "f007",
+          "file": "test/textinput.test.ts",
+          "startLine": 120,
+          "endLine": 138,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "'reads stdin last' test depends on the runner's fd 0 state",
+          "description": "The test's own comment acknowledges the assertion is indirect: it relies on reading this process's fd 0 failing (EAGAIN under the runner) if stdin were read first. If a future test runner provides a readable, non-blocking fd 0 (e.g. an empty pipe), reading stdin first would succeed silently and the test would still pass while no longer proving ordering. The e2e suite covers the real behavior, so this is acceptable, but the coupling to runner fd 0 semantics is worth flagging — under some configurations readFileSync(0) could even block.",
+          "suggestedFix": "Consider asserting order via an observable side effect instead, e.g. by pointing the second source at a directory AND spying/stubbing at the module boundary, or rely solely on the e2e stdin-preservation tests and drop this unit-level ordering assertion."
+        },
+        {
+          "id": "f008",
+          "file": "src/core/textinput.ts",
+          "startLine": 84,
+          "endLine": 105,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "TOCTOU window between checkReadable stat and readFileSync is only partially mitigated",
+          "description": "The validation pass stats each path, then the read pass re-reads and re-checks size — the code comments correctly note the race on size. However, a path that is a regular file at stat time could be replaced by a FIFO before readFileSync, reintroducing the block-forever failure the FIFO check exists to prevent. For a CLI reading user-supplied paths this is a vanishingly unlikely and low-severity race (the user races themselves), but since the comments present the FIFO check as the guarantee, it's worth noting it is best-effort. An O_NONBLOCK open or fstat-after-open would close it fully if desired.",
+          "suggestedFix": "Optionally open with openSync(path, constants.O_RDONLY | constants.O_NONBLOCK), fstatSync the fd to confirm isFile(), then readFileSync(fd) — this makes the regular-file check race-free."
+        },
+        {
+          "id": "f009",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 190,
+          "endLine": 199,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Stubbed create route hardcodes team ALL, silently 404ing other teams",
+          "description": "The new POST handler matches only /api/v1/teams/ALL/issues. Any future create test using a different --team value falls through to the 404 branch with a generic 'not_found', which is a confusing failure signal for the next test author. A small comment on the route or a parameterized match would make the harness friendlier.",
+          "suggestedFix": "Match /api/v1/teams/([A-Z]+)/issues with a regex and record the team, or add a comment noting create tests must use --team ALL."
+        },
+        {
+          "id": "f010",
+          "file": "src/cli.ts",
+          "startLine": 655,
+          "endLine": 659,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Empty-comment error interpolates a possibly-undefined path awkwardly",
+          "description": "`--body-file ${opts.bodyFile ?? \"\"}` — bodyFile cannot actually be undefined here (fromFile !== undefined implies a file was given), so the ?? \"\" fallback is dead code that muddies the invariant. Also, when the file was '-', the message reads '--body-file - produced an empty comment', which is fine, but a narrowed local would express the invariant to the type checker instead of papering over it.",
+          "suggestedFix": "Hoist const bodyFile = opts.bodyFile; and gate the block on bodyFile !== undefined so TypeScript narrows it, removing the ?? \"\"."
+        }
+      ],
+      "durationMs": 60966,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "architecture",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 68,
+          "endLine": 70,
+          "severity": "important",
+          "category": "correctness",
+          "title": "spawn used but no import added in the diff",
+          "description": "The new `cliWithStdin` helper calls `spawn(process.execPath, ...)`, but the only import change in this file adds `beforeEach` to the vitest import. No `spawn` import from `node:child_process` appears anywhere in the diff (the existing import brings in `execFile`). If the pre-existing import statement does not already include `spawn`, this file will fail to compile. Please verify and add `spawn` to the `node:child_process` import if it is not already there.",
+          "suggestedFix": "import { execFile, spawn } from \"node:child_process\";"
+        },
+        {
+          "id": "f002",
+          "file": "test/textinput.test.ts",
+          "startLine": 118,
+          "endLine": 140,
+          "severity": "minor",
+          "category": "tests",
+          "title": "\"reads stdin last\" test does not prove read ordering",
+          "description": "The test pairs `--description-file -` with a directory path and claims the surfaced \"is a directory\" error proves stdin was read last. However, `checkReadable` in `src/core/textinput.ts` rejects directories during the validation pass (`stats.isFile()` is false for a directory), before any reads happen. So the error surfaces regardless of read ordering — the test would pass even if stdin were read first, as long as validation runs first. The lengthy comment explaining the directory \"stats cleanly and only fails when READ\" is factually wrong about the implementation. The test is redundant with the \"validates every path before reading any of them\" test and its premise should be corrected or the test removed.",
+          "suggestedFix": "Either drop this test as redundant, or use a regular file that passes stat but fails at read time (e.g., chmod 000) to genuinely exercise post-validation read failures, and fix the comment."
+        },
+        {
+          "id": "f003",
+          "file": "src/cli.ts",
+          "startLine": 654,
+          "endLine": 662,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Empty/whitespace-only file check applied only to comment bodies",
+          "description": "The comment command rejects an empty or whitespace-only `--body-file` result, but the same silent-failure mode exists for other fields: `--title-file` containing only whitespace would send an empty title to `create`, and `--reason-file` with only whitespace sends an empty close reason. The rationale in the comment (\"a failed pipeline, not something worth posting\") applies equally there. Either the check belongs in `resolveTextSources`/`readTextFile` for all fields, or in the `create`/`close` handlers for the required/meaningful fields.",
+          "suggestedFix": "Add a similar trim-and-reject check for the resolved title in create and reason in close, or centralize a per-field `allowEmpty` option in TextSource."
+        },
+        {
+          "id": "f004",
+          "file": "test/textinput.test.ts",
+          "startLine": 146,
+          "endLine": 156,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "mkfifo-based FIFO test is not portable to Windows",
+          "description": "The \"rejects a FIFO instead of blocking on it forever\" test shells out to `mkfifo` via `execFileSync`, which does not exist on Windows. If the project's CI or contributors run tests on Windows, this test will fail with ENOENT on the `mkfifo` binary rather than testing anything. Consider skipping the test on `process.platform === \"win32\"`.",
+          "suggestedFix": "Wrap in `it.runIf(process.platform !== \"win32\")(...)` or catch the mkfifo failure and skip."
+        }
+      ],
+      "durationMs": 472809,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "bug-hunter",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/core/textinput.ts",
+          "startLine": 136,
+          "endLine": 144,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Stdin size limit is enforced only after unbounded buffering",
+          "description": "`readFileSync(0, \"utf8\")` consumes and buffers the entire stdin stream before checking `MAX_TEXT_BYTES`. A very large or unbounded pipe can therefore exhaust memory or keep the CLI blocked indefinitely, defeating the stated 1 MB safety ceiling. This manifests before any API request when `--<field>-file -` receives unexpectedly large input.",
+          "suggestedFix": "Read stdin incrementally and stop once more than `MAX_TEXT_BYTES` has been received, then throw `UsageError`. Avoid accumulating more than `MAX_TEXT_BYTES + 1` bytes."
+        },
+        {
+          "id": "f002",
+          "file": "src/core/textinput.ts",
+          "startLine": 186,
+          "endLine": 201,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Path validation has a TOCTOU race that can block or over-buffer",
+          "description": "`checkReadable` validates the pathname with `statSync`, but `readTextFile` later reopens that pathname. Between those operations, the file can be replaced with a FIFO or another special file, causing `readFileSync` to block indefinitely, or with a large/growing regular file, causing unbounded buffering before the post-read size check. Thus the regular-file and size checks do not reliably constrain the object actually read.",
+          "suggestedFix": "Open each path once, use `fstatSync` on that same descriptor, reject non-regular files, and read from the descriptor with a bounded loop capped at `MAX_TEXT_BYTES + 1`. Open safely so a FIFO cannot block, and close the descriptor in a `finally` block."
+        }
+      ],
+      "durationMs": 43755,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "accessibility-auditor",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/textinput.test.ts",
+          "startLine": 113,
+          "endLine": 121,
+          "severity": "minor",
+          "category": "tests",
+          "title": "execFileSync('mkfifo') causes test failure on Windows platforms",
+          "description": "The unit test 'rejects a FIFO instead of blocking on it forever' calls `execFileSync(\"mkfifo\", [fifo])` without checking the host operating system. The `mkfifo` command is not available on Windows environments, causing `execFileSync` to throw `ENOENT` and fail the test suite.",
+          "suggestedFix": "Conditionally skip the test on Windows platforms (e.g. using `it.skipIf(process.platform === \"win32\")`)."
+        }
+      ],
+      "durationMs": 50216,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "project-rules",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/textinput.test.ts",
+          "startLine": 10,
+          "endLine": 10,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Unused import: execFileSync from node:child_process",
+          "description": "The import `import { execFileSync } from \"node:child_process\";` on line 10 is only used in the FIFO test (line ~117). While not strictly unused, the test file imports from `node:child_process` which is a heavier module. More importantly, the `mkfifo` call will fail on Windows CI runners if any are ever added. Consider guarding with a platform check or noting the platform dependency.",
+          "suggestedFix": "Add a platform guard: `if (process.platform === 'win32') return;` before the mkfifo call, or use `describe.skipIf(process.platform === 'win32')` for that test."
+        },
+        {
+          "id": "f002",
+          "file": "src/core/textinput.ts",
+          "startLine": 126,
+          "endLine": 133,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "readFileSync(0) for stdin can block on non-TTY non-pipe fd",
+          "description": "The code checks `process.stdin.isTTY === true` to reject terminal stdin, but there are edge cases where fd 0 is neither a TTY nor a pipe with data (e.g., redirected from /dev/null on some systems, or an already-consumed stdin in certain test harnesses). In those cases, `readFileSync(0, \"utf8\")` will return an empty string (for /dev/null) which is fine, but the behavior could be surprising. The current handling is acceptable for the documented use case, but worth noting.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f003",
+          "file": "src/core/textinput.ts",
+          "startLine": 89,
+          "endLine": 95,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Validation pass calls checkReadable but readTextFile can still fail differently",
+          "description": "The validation pass calls `checkReadable(file, name)` for non-stdin paths (line 95), which does a `statSync`. Then in the read phase, `readTextFile` does `readFileSync` and re-checks size. However, between the stat and the read, the file could be replaced with a symlink to a directory, or permissions could change. The code does handle the read failure with a try/catch wrapping it in a UsageError, so this is not a crash bug, but the error message path differs from the validation error. This is a TOCTOU race that is acknowledged in comments but the error message in the catch on line 143 (`--${flagOf(name)}-file ${path}: ${describe(error)}`) could produce a confusing double-report if the stat passed but the read failed with EISDIR (e.g., symlink swap). The `describe` function handles EISDIR, so this is handled, but the two-phase design means the error wording differs between 'is a directory' from validation vs read.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f004",
+          "file": "src/cli.ts",
+          "startLine": 470,
+          "endLine": 484,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "create's early title check doesn't account for empty string title",
+          "description": "The early validation on line 477 checks `opts.title === undefined && opts.titleFile === undefined`. If a user passes `--title \"\"` (empty string), it passes this check (title is not undefined, it's an empty string), then `resolveTextSources` resolves it as `{title: \"\"}`. Whether the downstream `commands.create` rejects an empty title is not visible in this diff, but the early check's purpose is to fail fast before consuming stdin. An empty-string title is arguably a usage error that could be caught here alongside the missing-title case.",
+          "suggestedFix": "Consider: `if ((opts.title === undefined || opts.title === '') && opts.titleFile === undefined)`"
+        },
+        {
+          "id": "f005",
+          "file": "src/cli.ts",
+          "startLine": 649,
+          "endLine": 654,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "comment command: empty check only applies to file-sourced body, not inline",
+          "description": "The empty/whitespace check on line 654 (`if (fromFile !== undefined && fromFile.trim() === \"\")`) only triggers for file-sourced bodies. If a user passes `harness comment IO-1 \"   \"` (only whitespace as positional args), the text array `[\"   \"]` is non-empty so it passes the length check on line 643, and the whitespace-only comment would be posted. This is an inconsistency: the file path guards against empty content but the inline path does not.",
+          "suggestedFix": "Apply the same emptiness check to the joined inline text: `if (fromFile === undefined && text.join(' ').trim() === '') throw new UsageError(...)`"
+        },
+        {
+          "id": "f006",
+          "file": "src/core/textinput.ts",
+          "startLine": 72,
+          "endLine": 72,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "resolveTextSources return type Record<string, string> loses field-name safety",
+          "description": "The return type `Record<string, string>` means callers spread the result onto their options object with no compile-time guarantee that the keys match. A typo in a `TextSource.name` would silently produce a key the command handler doesn't read. A generic or mapped type over a union of known field names would catch this at compile time.",
+          "suggestedFix": "Consider `resolveTextSources<K extends string>(sources: readonly TextSource<K>[]): Partial<Record<K, string>>` or at minimum document that the keys must match the command's option names."
+        },
+        {
+          "id": "f007",
+          "file": "src/core/textinput.ts",
+          "startLine": 30,
+          "endLine": 30,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "MAX_TEXT_BYTES constant name could reference the unit more clearly",
+          "description": "The constant is `1_000_000` (1 MB) and the error message divides by `1_000_000` to produce '1 MB'. This is correct but the name `MAX_TEXT_BYTES` with value `1_000_000` could be confused with `1024*1024` (1 MiB). The comment and error message are consistent, so this is purely a naming nitpick.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f008",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 86,
+          "endLine": 106,
+          "severity": "minor",
+          "category": "tests",
+          "title": "cliWithStdin does not set HARNESS_AUTO_UPGRADE=0, relying only on NO_UPDATE_CHECK",
+          "description": "The `cliWithStdin` helper sets `HARNESS_NO_UPDATE_CHECK: \"1\"` but not `HARNESS_AUTO_UPGRADE: \"0\"`. Per AGENTS.md, `HARNESS_NO_UPDATE_CHECK` disables both the notice and automatic upgrade, so this is technically correct. However, the existing `cli` helper (line 48-62, not fully shown) likely follows the same pattern. If the semantics ever diverge, this helper would need updating. Minor consistency note.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f009",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 93,
+          "endLine": 93,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "cliWithStdin env PATH could be undefined if process.env[\"PATH\"] is unset",
+          "description": "Line 93: `PATH: process.env[\"PATH\"]` — if PATH is somehow unset in the test runner environment, this would set PATH to `undefined` (the string), which could cause the child process to fail to find executables. In practice this never happens on CI or dev machines, but a fallback would be more robust.",
+          "suggestedFix": "`PATH: process.env[\"PATH\"] ?? \"/usr/bin:/bin\"`"
+        },
+        {
+          "id": "f010",
+          "file": "src/cli.ts",
+          "startLine": 656,
+          "endLine": 660,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "comment: fromFile empty check message includes opts.bodyFile which could be undefined",
+          "description": "Line 658: the error message uses template literal `` `--body-file ${opts.bodyFile ?? \"\"} produced an empty comment` ``. At this point in the code, `fromFile !== undefined` implies `opts.bodyFile` was provided and resolved, so `opts.bodyFile` should not be undefined. The `?? \"\"` is defensive but masks a logic invariant. More importantly, if `opts.bodyFile` is `-`, the message reads `--body-file - produced an empty comment` which is clear, but if it's a path, it reads `--body-file ./path produced an empty comment` which is also fine. No real bug, just noting the defensive coding.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f011",
+          "file": "src/core/textinput.ts",
+          "startLine": 163,
+          "endLine": 170,
+          "severity": "minor",
+          "category": "security",
+          "title": "checkReadable follows symlinks via statSync without flagging them",
+          "description": "`statSync` follows symlinks, so a symlink pointing to a sensitive file (e.g., `/etc/shadow`, a credentials file) would pass the `isFile()` and size checks and be read. This is standard Unix file-reading behavior and matches `git commit -F`, but it's worth noting that there's no symlink detection or restriction. An agent that is told to read `--description-file ./notes.md` where `notes.md` is a symlink to a secrets file would exfiltrate those contents to the Harness API. This is inherent to the feature design and matches the `git commit -F` precedent, so it's informational.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f012",
+          "file": "test/textinput.test.ts",
+          "startLine": 126,
+          "endLine": 140,
+          "severity": "minor",
+          "category": "tests",
+          "title": "stdin-last test relies on implementation detail of fd 0 behavior under vitest",
+          "description": "The test 'reads stdin last, so a file failure cannot follow it' (lines 126-140) asserts that a directory error surfaces rather than a stdin read error. The comment acknowledges this is indirect. However, under vitest, fd 0 might be a pipe (from the test runner) rather than a TTY, meaning `readFileSync(0)` could succeed and return whatever the runner has on stdin, rather than failing. If the test runner pipes empty stdin, the read succeeds with '', and the sort puts stdin last, so the directory error still fires. But if the runner pipes non-empty data, the test would still pass because the directory is checked in the validation pass. The test is correct but fragile in its reasoning — it works because of the validation pass, not because of the read order.",
+          "suggestedFix": ""
+        },
+        {
+          "id": "f013",
+          "file": "src/cli.ts",
+          "startLine": 430,
+          "endLine": 445,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "issueTextSources returns TextSource[] but doesn't include appendNotes",
+          "description": "The function `issueTextSources` returns sources for 5 fields but not `appendNotes`, which is documented in the JSDoc. The caller (`update` action) must manually append it. This is intentional per the comment, but the function name `issueTextSources` suggests it returns all text sources for an issue. A name like `sharedIssueTextSources` or a comment at the call site would make the omission more discoverable.",
+          "suggestedFix": ""
+        }
+      ],
+      "durationMs": 549535,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600009,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "dead-code",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 600004,
+      "status": "timeout",
+      "error": "Request timed out"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "dependency-hygiene",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "src/cli.ts",
+          "startLine": 655,
+          "endLine": 660,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Empty-body guard applies only to file-backed comments, not inline text",
+          "description": "The whitespace-only rejection (`fromFile.trim() === \"\"`) only fires for `--body-file`. Inline positional text like `harness comment IO-1 \"   \"` still passes because `text.length > 0`. Additionally, the empty check for `--body-file` is treated as a UsageError with exit code 2 but happens AFTER the file/stdin has been read — for stdin this means the pipe was already consumed for a rejected invocation, which contradicts the module's own stated invariant that a rejected command never consumes the pipe. This particular consumption is unavoidable (you can't know it's empty without reading), but the README claim 'a rejected command never consumes your pipe' is now inaccurate for this case.",
+          "suggestedFix": "Either apply the same trim-empty check to inline text for consistency, or document that the empty-body rejection is the one refusal that necessarily happens after the read."
+        },
+        {
+          "id": "f002",
+          "file": "src/core/textinput.ts",
+          "startLine": 76,
+          "endLine": 92,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Duplicate field names in sources silently last-write-wins",
+          "description": "resolveTextSources does not detect two TextSource entries with the same `name`. If a caller ever passes duplicates (e.g., a future command wiring mistake), the later entry silently overwrites the earlier one in `resolved`, and both files would be read. This is exactly the class of silent-precedence bug the module exists to prevent between inline/file forms, but it isn't enforced across entries.",
+          "suggestedFix": "Track seen names in a Set and throw an internal error (or UsageError) on duplicates."
+        },
+        {
+          "id": "f003",
+          "file": "src/core/textinput.ts",
+          "startLine": 113,
+          "endLine": 122,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "TTY stdin check throws inside the read loop, after other files were read",
+          "description": "The `process.stdin.isTTY` check lives in readTextFile, which runs in the second (read) pass. When `--x-file -` is given at an interactive terminal alongside other valid file options, those files are read (harmlessly, but wastefully) before the TTY refusal is raised. More importantly, this is a statically-knowable usage error that could be raised in the validation pass alongside the other pre-read checks, keeping the 'all usage errors before any read' invariant airtight.",
+          "suggestedFix": "Move the isTTY check into the validation pass: when `file === STDIN_PATH`, check `process.stdin.isTTY` at claim time and throw there."
+        },
+        {
+          "id": "f004",
+          "file": "src/core/textinput.ts",
+          "startLine": 100,
+          "endLine": 106,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Non-stable sort used where stability matters for field ordering",
+          "description": "`[...toRead].sort(byStdinLast)` relies on sort stability to preserve the relative order of non-stdin files. Array.prototype.sort is guaranteed stable since ES2019/Node 11, so this is fine on supported runtimes, but the comparator-based sort is heavier than needed and the ordering guarantee is implicit. Since at most one entry can be stdin (enforced above), a simple partition or moving the single stdin entry to the end would be clearer and not depend on sort semantics.",
+          "suggestedFix": "const stdinEntry = toRead.find(e => e.file === STDIN_PATH); const files = toRead.filter(e => e.file !== STDIN_PATH); for (const e of [...files, ...(stdinEntry ? [stdinEntry] : [])]) { … }"
+        },
+        {
+          "id": "f005",
+          "file": "src/core/textinput.ts",
+          "startLine": 152,
+          "endLine": 155,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Synchronous stdin read of fd 0 can throw EAGAIN on some platforms",
+          "description": "readFileSync(0, 'utf8') on a non-blocking stdin (common when stdin is a pipe set O_NONBLOCK by a parent, or on some CI runners) can throw EAGAIN, producing a confusing 'cannot read stdin (EAGAIN…)' UsageError. The e2e test comments even acknowledge EAGAIN 'under the runner'. The error is caught and wrapped, so it doesn't crash, but the message may mislead users into thinking their pipe was malformed.",
+          "suggestedFix": "Add an EAGAIN case to describe() with a friendlier message (e.g. 'stdin is not readable synchronously — try piping through cat'), or retry the read on EAGAIN."
+        },
+        {
+          "id": "f006",
+          "file": "src/core/textinput.ts",
+          "startLine": 186,
+          "endLine": 196,
+          "severity": "minor",
+          "category": "security",
+          "title": "TOCTOU between statSync validation and readFileSync",
+          "description": "checkReadable stats the path in the validation pass, then the file is read later. A path can be swapped between stat and read (regular file → FIFO/symlink to a FIFO), reintroducing the block-forever failure the code explicitly guards against, or → a huge file (mitigated by the post-read size re-check). The size TOCTOU is handled; the file-type TOCTOU is not. For a local CLI reading user-supplied paths the risk is low, but the code's own comments frame the FIFO hang as 'the worst failure this tool could have'.",
+          "suggestedFix": "In readTextFile, open the fd with openSync, fstatSync the fd to re-verify isFile(), then readFileSync(fd) — eliminating the race between check and read."
+        },
+        {
+          "id": "f007",
+          "file": "test/textinput.test.ts",
+          "startLine": 108,
+          "endLine": 117,
+          "severity": "minor",
+          "category": "tests",
+          "title": "FIFO test depends on mkfifo binary and will fail on Windows",
+          "description": "The FIFO rejection test shells out to `mkfifo`, which does not exist on Windows and may be absent in minimal containers. execFileSync will throw ENOENT and the test fails as a harness error rather than being skipped. If the project only supports POSIX CI this is acceptable, but there's no guard or skip condition.",
+          "suggestedFix": "Wrap in `it.skipIf(process.platform === 'win32')` (vitest) or guard on mkfifo availability."
+        },
+        {
+          "id": "f008",
+          "file": "test/textinput.test.ts",
+          "startLine": 119,
+          "endLine": 137,
+          "severity": "minor",
+          "category": "tests",
+          "title": "'reads stdin last' test asserts validation order, not read order",
+          "description": "The test 'reads stdin last, so a file failure cannot follow it' passes a directory as the second source. But a directory is rejected in checkReadable during the VALIDATION pass (isFile() is false), before any read happens at all — so the test never exercises the read-ordering (byStdinLast) logic it claims to verify. The stdin-goes-last behavior in the read loop is effectively untested: a read-time failure after validation (the race scenario the code comments describe) has no coverage. The test's own comment says a directory 'only fails when READ', which is no longer true given checkReadable's isFile() rejection.",
+          "suggestedFix": "To exercise read ordering, use a file that passes validation but fails at read time — e.g., stat a file then chmod 000 it between passes is not possible from outside, so consider unit-testing byStdinLast directly or injecting a read failure; at minimum fix the misleading comment."
+        },
+        {
+          "id": "f009",
+          "file": "src/cli.ts",
+          "startLine": 478,
+          "endLine": 481,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "File-option keys (titleFile etc.) leak into command opts objects",
+          "description": "`{ ...opts, ...resolveTextSources(...) }` spreads the raw commander opts, so keys like `titleFile`, `descriptionFile`, `bodyFile` remain on the object passed to commands.create/update/close. The e2e test asserts the request body does not contain `descriptionFile`, which implies the command layer filters allowed fields — but that contract is implicit. If a command ever serializes opts wholesale (a common refactor), file paths from the user's machine would be sent to the server. Relying on downstream field allow-listing for this is fragile.",
+          "suggestedFix": "Strip the *-file keys before passing opts to commands, e.g. destructure them out: `const { titleFile, descriptionFile, designFile, notesFile, acceptanceFile, ...rest } = opts;` then spread `rest`."
+        },
+        {
+          "id": "f010",
+          "file": "src/cli.ts",
+          "startLine": 662,
+          "endLine": 662,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "File-backed comment body bypasses inline empty check but empty-after-trim inline arrays still allowed",
+          "description": "`const body = fromFile === undefined ? text : [fromFile];` — when the body comes from a file, it is wrapped in a single-element array to match the positional `text: string[]` shape. This means a multi-word inline comment is passed as multiple array elements (presumably joined downstream) while a file body is one element. If commands.comment joins with a space, a file body containing content identical to what a user would type is handled identically — fine — but the asymmetry is a latent trap if the join delimiter ever changes. Consider normalizing to a single string at this boundary.",
+          "suggestedFix": "Have commands.comment accept a single string; join positional text at the call site: `commands.comment(ctx, id, fromFile ?? text.join(\" \"), mentions)`."
+        },
+        {
+          "id": "f011",
+          "file": "test/cli-e2e.test.ts",
+          "startLine": 190,
+          "endLine": 200,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Mock server JSON.parse of request bodies has no error handling",
+          "description": "The new PATCH/POST handlers call JSON.parse(raw) inside the 'end' event with no try/catch. A malformed body from a buggy CLI build would throw inside the HTTP server's event handler, likely crashing or hanging the mock server and causing every subsequent test to time out with an opaque failure instead of a clear assertion error.",
+          "suggestedFix": "Wrap JSON.parse in try/catch and respond 400, or let the assertion on the recorded value fail with the raw string recorded."
+        },
+        {
+          "id": "f012",
+          "file": "src/core/textinput.ts",
+          "startLine": 59,
+          "endLine": 61,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "flagOf does not handle names that are already kebab-case or contain digits",
+          "description": "flagOf converts camelCase to kebab-case but a name containing an uppercase first letter, consecutive capitals, or digits would produce odd flags (e.g., 'APIKey' → '-a-p-i-key'). All current call sites are well-formed, but the function is exported-adjacent infrastructure with no guard or test for these shapes. Low risk; noting for future field additions.",
+          "suggestedFix": "Add a brief comment constraining accepted name shapes, or a debug assertion that name matches /^[a-z][a-zA-Z]*$/."
+        }
+      ],
+      "durationMs": 59428,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "edge-case-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 599972,
+      "status": "timeout",
+      "error": "Request timed out"
+    }
+  ]
+}

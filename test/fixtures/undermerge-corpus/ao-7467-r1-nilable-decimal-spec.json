@@ -1,0 +1,753 @@
+{
+  "case": "ao-7467-r1-nilable-decimal-spec",
+  "source": {
+    "report": "rcl-report-allocator-one-7467-r1.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "lib/allocator_one/funds/invite.ex",
+    "lineRange": [
+      388,
+      415
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 8,
+    "successfulReviews": 18,
+    "agreementRatioIfMerged": 0.444,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "nil invite.minimum_investment falls through to fund, but Decimal.t() spec disallows nil",
+      "@spec claims Decimal.t() but functions can return nil",
+      "No clause for standard_terms: nil — falls through to override behaviour",
+      "standard_terms: nil treated as custom terms",
+      "standard_terms: nil is treated as custom terms",
+      "No guard for nil fund minimum_investment / default_investment_amount",
+      "@spec return type Decimal.t() may be inaccurate if fund amounts are nilable",
+      "Typespec allows only Decimal.t() but nil can be returned",
+      "Typespecs should account for `nil` return values"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 398,
+          "severity": "important",
+          "category": "correctness",
+          "title": "standard_terms clause does not fall back when fund amount is nil",
+          "description": "The new clause `minimum_investment(%Invite{standard_terms: true, fund: %Fund{} = fund})` returns `fund.minimum_investment` unconditionally. If the fund's `minimum_investment` is nil, this returns nil, which violates the `@spec minimum_investment(Invite.t()) :: Decimal.t()` contract and can crash downstream Decimal comparisons or render a blank floor to the LP. The pre-existing fallback clause at least attempted the invite's value first. The same issue applies to `default_investment_amount/1`. If fund amounts are guaranteed non-nil by DB constraints, that guarantee should be stated; otherwise handle nil explicitly.",
+          "suggestedFix": "Either enforce NOT NULL on the fund columns and document the invariant, or make the spec `Decimal.t() | nil`, or add an explicit guard/fallback for nil fund amounts."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 412,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "No clause for standard_terms: nil — falls through to override behaviour",
+          "description": "The new head only matches `standard_terms: true`. If the schema field can be nil (e.g. legacy rows created before the column existed, or a missing default), a nil value falls through to the second clause and the invite's per-row amounts win — precisely the stale-snapshot bug this change is meant to fix. Unless the column is NOT NULL with a default, standard-terms resolution should treat nil conservatively.",
+          "suggestedFix": "Ensure the `standard_terms` column has `default: false, null: false` in the schema/migration, or add a clause matching `standard_terms: nil` with explicitly chosen semantics."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 411,
+          "endLine": 413,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "No function clause for invite with unloaded fund association",
+          "description": "Both functions only match when `fund: %Fund{}` is set. An invite whose `:fund` association is not preloaded (i.e., `%Ecto.Association.NotLoaded{}`) will raise a FunctionClauseError with an unhelpful message. Since these functions are now the single resolution point called from multiple sites (invite page, wizard, server-side backstop), a caller forgetting to preload will crash at runtime. Consider raising a descriptive error or documenting the preload requirement in the @doc.",
+          "suggestedFix": "Add a clause like `def minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}}), do: raise ArgumentError, \"invite.fund must be preloaded\"` or document the precondition."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 401,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Stale snapshotted amounts remain persisted on standard-terms rows",
+          "description": "The fix resolves amounts at read time but, per the doc comment and tests (\"invite_investor_standard_terms snapshots the fund's values onto the row\"), stale per-invite amounts are still stored on standard-terms rows. Any code path that reads `invite.minimum_investment` / `invite.default_investment_amount` directly — reports, admin views, exports, raw SQL — will still see and potentially enforce the stale values. Read-time resolution only protects callers that go through these two functions.",
+          "suggestedFix": "Stop snapshotting the fund amounts onto standard-terms invites at creation (store nil), and/or add a data migration to null out per-invite amounts where standard_terms = true, so persisted data cannot disagree with the resolution rule."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 40,
+          "endLine": 45,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Consistency test is tautological — compares function to itself",
+          "description": "The test \"the floor the invite page shows is the floor the wizard enforces\" asserts `conditions.minimum_investment` equals `Invite.minimum_investment(invite)`. Since the diff shows `get_investment_conditions/1` was changed to call `Invite.minimum_investment(invite)` directly, this asserts f(x) == f(x) and can never catch a regression in the resolved value. It would pass even if the resolution rule were wrong. Assert against the expected literal values instead (or in addition).",
+          "suggestedFix": "assert Decimal.equal?(conditions.minimum_investment, Decimal.new(\"100000\")) and similarly for default_investment_amount."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 8,
+          "endLine": 66,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing test: fund amounts change after invite creation (the stated motivating case)",
+          "description": "The @doc explains the core motivation: a snapshotted amount \"must not outlive a change to the fund.\" No test actually updates the fund's minimum_investment/default_investment_amount after invite creation and verifies the standard-terms invite reflects the new fund values. The current tests use fund values that never change, so they don't exercise the temporal staleness scenario directly. Also missing: coverage of enforcement paths mentioned in the docs (commitment wizard, `Investments` server-side backstop) using the resolved floor.",
+          "suggestedFix": "Add a test that creates the invite, updates the fund's amounts, re-fetches, and asserts resolution returns the new fund amounts for a standard-terms invite (and the old override for a custom-terms invite)."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2358,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "get_investment_conditions now requires invite.fund to be preloaded",
+          "description": "`Invite.minimum_investment/1` and `Invite.default_investment_amount/1` pattern-match on `fund: %Fund{}`. Previously this code read `fund.minimum_investment` from a `fund` variable already in scope; now it depends on the `invite` struct having its `:fund` association preloaded. If the invite passed to `get_investment_conditions/1` was loaded without preloading `:fund`, these calls raise FunctionClauseError. Verify all call sites preload, or resolve using the in-scope `fund` (e.g., pass the fund in, or `%{invite | fund: fund}`).",
+          "suggestedFix": "Ensure `invite` is preloaded with `:fund` in `get_investment_conditions/1` (e.g., `invite = Repo.preload(invite, :fund)`), or set the association from the in-scope fund before calling the resolvers."
+        }
+      ],
+      "durationMs": 34877,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 36,
+          "endLine": 40,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Test does not exercise wizard enforcement",
+          "description": "The test claims to verify that the invite-page floor matches what the wizard enforces, but it only compares `Funds.get_investment_conditions/1` with the same `Invite` resolver functions that `get_investment_conditions/1` now calls directly. It never invokes the commitment wizard or the server-side investment validation, so a stale direct field read in either enforcement path would remain undetected.",
+          "suggestedFix": "Add an integration or changeset test that submits an amount between the stale invite minimum and the current fund minimum through the actual wizard or `Investments` validation path and asserts that it is rejected. Keep a separate unit test for `get_investment_conditions/1` if desired."
+        }
+      ],
+      "durationMs": 23091,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 396,
+          "endLine": 412,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "FunctionClauseError when invite.fund association is not preloaded",
+          "description": "Both `minimum_investment/1` and `default_investment_amount/1` require `%Fund{}` to be pattern-matched on `invite.fund`. If an `Invite` struct is passed without the `:fund` association preloaded (i.e. `fund` is `%Ecto.Association.NotLoaded{}` or `nil`), these functions will raise a `FunctionClauseError` instead of handling the un-preloaded state gracefully or returning a descriptive error.",
+          "suggestedFix": "Consider adding a fallback clause or raising a clear argument error when the association is not loaded:\n\ndef minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}})\n  raise ArgumentError, \"expected :fund association to be preloaded on Invite\"\nend"
+        }
+      ],
+      "durationMs": 22425,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 405,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Non-exhaustive clauses: raises when fund association is not preloaded",
+          "description": "Both minimum_investment/1 and default_investment_amount/1 only match when `fund` is a loaded `%Fund{}`. If called with an `%Invite{}` whose fund association is not preloaded (`%Ecto.Association.NotLoaded{}`) or nil, all clauses fail and a FunctionClauseError is raised. This is a new crash path introduced by making these functions the 'single resolution rule' for enforcement (invite page, commitment wizard, Investments backstop per the docstring) — any caller that fetches an invite without preloading :fund will now crash at runtime. The tests only cover preloaded invites.",
+          "suggestedFix": "Add a clause that loads the fund when missing, e.g. `def minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}} = invite), do: invite |> Repo.preload(:fund) |> minimum_investment()`, or raise a clear error and audit/enforce preloading at every call site."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2357,
+          "severity": "important",
+          "category": "correctness",
+          "title": "get_investment_conditions may now crash if invite.fund is not preloaded",
+          "description": "Previously this function read `fund.minimum_investment` directly, which requires the fund to be loaded. It now calls `Invite.minimum_investment(invite)`, which has the same requirement (see f001). While the fund access pattern is unchanged here, the diff shows no guard verifying the invite passed in always has :fund preloaded; combined with the new function heads the failure mode becomes a FunctionClauseError rather than a clear error. Worth confirming the caller always preloads :fund and adding a test for that path.",
+          "suggestedFix": "Ensure get_investment_conditions/1 documents/enforces that the invite must have :fund preloaded, or preload defensively inside the function."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 413,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Typespec says Decimal.t() but functions can return nil",
+          "description": "`@spec minimum_investment(Invite.t()) :: Decimal.t()` and the default_investment_amount spec claim a Decimal is always returned, but if both the invite field and the fund field are nil, the functions return nil. This will cause Dialyzer warnings at call sites and may hide nil-handling bugs in the enforcement path.",
+          "suggestedFix": "Change the specs to `Decimal.t() | nil` or guarantee non-null fund amounts at the schema level."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 401,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "standard_terms: nil treated as custom terms",
+          "description": "The standard-terms clause matches only `standard_terms: true`. If the column is nullable and any existing rows have `standard_terms: nil`, those invites silently fall into the generic clause and their per-invite amounts win — the exact stale-amount bug this change is meant to fix. No data migration or normalization is shown in the diff.",
+          "suggestedFix": "Verify the column is `null: false, default: true/false` in the schema/migration, or match on `standard_terms in [nil, true]` as appropriate for the intended default, and backfill existing rows if needed."
+        }
+      ],
+      "durationMs": 8913,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "security-auditor",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 5769,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "performance-engineer",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2357,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Invite resolvers require preloaded invite.fund",
+          "description": "get_investment_conditions/1 previously read minimum_investment and default_investment_amount from the local `fund` variable. It now calls Invite.minimum_investment/1 and Invite.default_investment_amount/1, which only match when invite.fund is a %Fund{} struct. If this function resolves `fund` separately (e.g. via fund_id or a different preload path) while invite.fund is %Ecto.Association.NotLoaded{}, these calls will raise FunctionClauseError even though `fund` is already in scope. Ensure the invite’s fund association is preloaded (or pass the in-scope fund into the invite struct) before calling the resolvers.",
+          "suggestedFix": "Either preload before resolve, e.g. invite = Repo.preload(invite, :fund), or make resolution robust to the in-scope fund:\n\n    minimum_investment: Invite.minimum_investment(%{invite | fund: fund}),\n    default_investment_amount: Invite.default_investment_amount(%{invite | fund: fund}),\n\nAlternatively extend the Invite helpers to accept an optional fund argument used when the association is not loaded."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 396,
+          "endLine": 412,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "No clause when fund association is not loaded",
+          "description": "Both minimum_investment/1 and default_investment_amount/1 require fund: %Fund{}. Call sites that forget to preload get an opaque FunctionClauseError rather than a clear API error. Given these are documented as the single resolution path for UI and enforcement, a dedicated catch-all (or preload) would make misuse easier to diagnose.",
+          "suggestedFix": "Add a fallback clause that raises a clear ArgumentError, for example:\n\n  def minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}}) do\n    raise ArgumentError, \"Invite.minimum_investment/1 requires invite.fund to be preloaded\"\n  end\n\n(and the same for default_investment_amount/1)."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 10,
+          "endLine": 66,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing regression for fund amount changes after invite create",
+          "description": "The new docs stress that standard-terms invites must follow the fund’s current amounts after later fund edits, and must not keep snapshotted per-invite values. Tests only assert that a standard-terms invite with stale row values returns the fund’s original fixture amounts; they never update the fund after invite creation and re-resolve. That leaves the main lifecycle regression (fund minimum/default changed post-invite) unproven.",
+          "suggestedFix": "Add a test that creates a standard-terms invite with snapshotted amounts, updates the fund’s minimum_investment/default_investment_amount, reloads invite.fund, and asserts Invite.minimum_investment/1 and default_investment_amount/1 return the updated fund values."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 396,
+          "endLine": 401,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Typespec allows only Decimal.t() but nil can be returned",
+          "description": "The @spec for minimum_investment/1 and default_investment_amount/1 claims Decimal.t(), but the custom-terms clauses use `invite.* || fund.*` and the standard-terms clauses return fund fields directly, so nil can still be returned if both sides are nil. Consider Decimal.t() | nil (or enforcing non-nil at the changeset boundary) so callers and dialyzer agree.",
+          "suggestedFix": "@spec minimum_investment(Invite.t()) :: Decimal.t() | nil\n@spec default_investment_amount(Invite.t()) :: Decimal.t() | nil"
+        }
+      ],
+      "durationMs": 58726,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "api-design",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 398,
+          "severity": "important",
+          "category": "api-design",
+          "title": "Silent semantic change for standard-terms invites (breaking behavior)",
+          "description": "The new clause `minimum_investment(%Invite{standard_terms: true, ...})` changes the resolution semantics for existing standard-terms invites that carry snapshotted per-invite amounts. Previously those invites would resolve to their stored per-invite amounts; now they resolve to the fund's current values. While this is the intended fix, it is a breaking behavioral change to a public function's contract with no versioning, deprecation path, or migration note. Any existing caller relying on the snapshot semantics (e.g., historical reporting, emails already sent to LPs quoting the snapshotted minimum) will silently observe different values. Consider documenting this in a changelog and auditing all call sites, and/or clearing stale per-invite amounts on standard-terms rows via a data migration so the row state matches the resolution rule.",
+          "suggestedFix": "Add a data migration that nulls out minimum_investment/default_investment_amount on rows where standard_terms is true, so the stored data cannot disagree with the resolution rule, and note the behavioral change in the changelog."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 401,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "No clause for invite with unloaded fund association; nil fund amounts possible",
+          "description": "Both function heads require `fund: %Fund{}`. If the `:fund` association is not preloaded (`%Ecto.Association.NotLoaded{}`) the call raises a FunctionClauseError with an opaque message. Additionally, the @spec claims a `Decimal.t()` return, but `fund.minimum_investment` (and the `||` fallback chain) can return `nil` if the fund has no minimum set, violating the spec. The same applies to `default_investment_amount/2`.",
+          "suggestedFix": "Add an explicit clause raising a descriptive error for `%Ecto.Association.NotLoaded{}` (e.g., \"fund must be preloaded\"), and either update the @spec to `Decimal.t() | nil` or enforce non-nil fund amounts at the schema/changeset level."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 411,
+          "endLine": 415,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "standard_terms: nil is treated as custom terms",
+          "description": "The fallback clause matches any invite where `standard_terms` is not exactly `true`, which includes `nil`. If `standard_terms` is a nullable boolean column, a nil value silently gets custom-terms semantics (invite override wins). Depending on the domain, nil may be indistinguishable from 'standard' for legacy rows created before the flag existed, which would allow stale per-invite amounts to override the fund.",
+          "suggestedFix": "Match explicitly on `%Invite{standard_terms: false, ...}` for the custom-terms clause and either raise or default deliberately on nil, or ensure the column has `default: false, null: false` in the migration."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2357,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "get_investment_conditions now requires preloaded fund on invite",
+          "description": "By routing through `Invite.minimum_investment/1` and `Invite.default_investment_amount/1`, `get_investment_conditions/1` now implicitly requires the invite's `:fund` association to be preloaded (the pattern match on `%Fund{}` will fail otherwise). This is a new implicit precondition on the function's contract that is not documented or enforced with a friendly error. Callers that previously passed an invite with an unloaded fund (the old code read amounts directly off `fund`, which was presumably already in scope) may now crash with a FunctionClauseError.",
+          "suggestedFix": "Preload the fund inside get_investment_conditions (e.g., `invite = Repo.preload(invite, :fund)`) or document the preload requirement and raise a clear error when the association is not loaded."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 12,
+          "endLine": 16,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Comment references internal author/context ('Ori')",
+          "description": "The test comment references a specific person's implementation (\"Ori's `invite_investor_standard_terms`\"). Personal references rot quickly and add little value; describe the behavior instead (e.g., \"invite creation snapshots fund amounts onto the row\").",
+          "suggestedFix": "Reword the comment to describe the snapshotting behavior without naming an individual."
+        },
+        {
+          "id": "f006",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 8,
+          "endLine": 66,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test covering fund changes after standard-terms invite creation",
+          "description": "The docstring's core claim is that a per-invite amount \"must not outlive a change to the fund.\" The tests only assert against a static fund. A test that updates the fund's minimum_investment/default_investment_amount after the standard-terms invite is created and asserts the resolved values track the new fund values would directly verify the stated motivation and guard against future regressions (e.g., someone reintroducing snapshot reads).",
+          "suggestedFix": "Add a test that updates the fund's amounts after invite creation, re-fetches/re-preloads the invite, and asserts Invite.minimum_investment/1 and default_investment_amount/1 return the fund's new values."
+        },
+        {
+          "id": "f007",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 8,
+          "endLine": 66,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "No test for standard-terms invite with nil per-invite amounts",
+          "description": "The standard-terms path is only tested with stale per-invite amounts present. A standard-terms invite with nil per-invite amounts (the common case) should also be covered to lock in that it resolves to the fund's amounts through the new clause rather than the fallback clause.",
+          "suggestedFix": "Add a test creating a standard_terms: true invite without minimum_investment/default_investment_amount and asserting fund values are returned."
+        }
+      ],
+      "durationMs": 60727,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 396,
+          "endLine": 396,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Non-exhaustive pattern: no clause for Invite without preloaded fund",
+          "description": "The pattern `%Invite{fund: %Fund{} = fund}` requires the `fund` association to be loaded. If `minimum_investment/1` or `default_investment_amount/1` is called with an invite whose `fund` association has not been preloaded (i.e., `fund` is `%Ecto.Association.NotLoaded{}`), a `FunctionClauseError` will be raised at runtime. There is no catch-all clause or guard to produce a meaningful error. The callers in `Funds.get_investment_conditions/1` do preload, but nothing in the module's contract enforces this, and other call sites (or future ones) may forget.",
+          "suggestedFix": "Add a catch-all clause that raises a descriptive error or returns an `{:error, :fund_not_preloaded}` tuple, e.g.:\n\n```elixir\ndef minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}}),\n  do: raise ArgumentError, \"invite.fund must be preloaded\"\n```\nAlternatively, document the precondition with `@doc` and add a guard using `is_struct/2`."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 396,
+          "endLine": 396,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "No guard for nil fund minimum_investment / default_investment_amount",
+          "description": "The standard-terms clause returns `fund.minimum_investment` directly. If the fund's `minimum_investment` column is NULL in the database, this returns `nil` despite the `@spec` declaring `Decimal.t()`. The custom-terms fallback uses `||` which would also yield `nil` if both the invite and fund values are nil. This mismatch between spec and possible return value can cause downstream `Decimal` operations to crash.",
+          "suggestedFix": "Either add a `Decimal.t()` default (e.g., `Decimal.new(0)`) via a `|| Decimal.new(0)` fallback, or tighten the spec to `Decimal.t() | nil` and handle `nil` at call sites. A database NOT NULL constraint on the fund columns would also prevent this."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 6,
+          "endLine": 65,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing test for standard_terms with nil invite amounts",
+          "description": "The test suite covers standard-terms invites that carry stale per-invite amounts and custom-terms invites with and without overrides, but does not test a standard-terms invite where the per-invite `minimum_investment` and `default_investment_amount` are `nil`. While the standard-terms clause ignores those fields entirely, an explicit test documents that the clause is safe even when the snapshotting code path is skipped or the columns are NULL.",
+          "suggestedFix": "Add a test case:\n```elixir\ntest \"standard terms with nil per-invite amounts still uses fund values\", %{fund: fund} do\n  invite =\n    %{fund: fund, standard_terms: true, minimum_investment: nil, default_investment_amount: nil}\n    |> invite_fixture()\n    |> Repo.preload(:fund)\n\n  assert Decimal.equal?(Invite.minimum_investment(invite), Decimal.new(\"100000\"))\n  assert Decimal.equal?(Invite.default_investment_amount(invite), Decimal.new(\"150000\"))\nend\n```"
+        },
+        {
+          "id": "f004",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 6,
+          "endLine": 65,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test for invite without preloaded fund (FunctionClauseError path)",
+          "description": "The new pattern-matching clauses require `fund` to be a `%Fund{}` struct. There is no negative test verifying the behaviour when the association is not preloaded. If a future caller forgets `Repo.preload(:fund)`, the error will be a confusing `FunctionClauseError` with no test documenting the expectation.",
+          "suggestedFix": "Add a test that asserts the expected error:\n```elixir\ntest \"raises when fund is not preloaded\", %{fund: fund} do\n  invite = invite_fixture(%{fund: fund, standard_terms: true})\n  assert_raise FunctionClauseError, fn -> Invite.minimum_investment(invite) end\nend\n```\nOr, if a guard/catch-all is added per f001, test for the descriptive error instead."
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 6,
+          "endLine": 65,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No test for standard_terms when fund amounts change after invite creation",
+          "description": "The docstring explicitly states the design goal: 'a per-invite amount left behind by an earlier custom-terms edit … must not outlive a change to the fund.' However, the tests only verify that the invite ignores its own snapshot. There is no test that mutates the fund's `minimum_investment` after the invite is created and asserts the invite now reflects the updated fund value. This is the core regression the change is meant to prevent.",
+          "suggestedFix": "Add a test:\n```elixir\ntest \"standard terms tracks fund changes\", %{fund: fund, invite: invite} do\n  fund = fund |> Ecto.Changeset.change(%{minimum_investment: Decimal.new(\"200000\")}) |> Repo.update!()\n  invite = %{invite | fund: fund}\n  assert Decimal.equal?(Invite.minimum_investment(invite), Decimal.new(\"200000\"))\nend\n```"
+        },
+        {
+          "id": "f006",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2357,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Funds.get_investment_conditions relies on invite having preloaded fund",
+          "description": "The diff changes `Funds.get_investment_conditions/1` to call `Invite.minimum_investment(invite)` and `Invite.default_investment_amount(invite)`. These functions pattern-match on `%Invite{fund: %Fund{}}`. If any code path calls `get_investment_conditions` with an invite that does not have `:fund` preloaded, it will crash. The diff does not show whether the caller guarantees the preload, and the previous code accessed `fund.minimum_investment` directly (presumably from a separately-bound `fund` variable), which may have had different preload semantics.",
+          "suggestedFix": "Verify that every caller of `get_investment_conditions/1` preloads `:fund` on the invite. Consider adding a `Repo.preload(invite, :fund)` call inside `get_investment_conditions/1` as a defensive measure, or add a guard/rich error message."
+        },
+        {
+          "id": "f007",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 393,
+          "endLine": 396,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Long single-line def exceeds typical Elixir line-length conventions",
+          "description": "The new standard-terms clauses are written as single-line `def` expressions (e.g., line 396: `def minimum_investment(%Invite{standard_terms: true, fund: %Fund{} = fund}), do: fund.minimum_investment`). At ~110 characters these exceed the conventional 98-character line limit and reduce readability, especially since the pattern match is complex.",
+          "suggestedFix": "Break into multi-line form:\n```elixir\ndef minimum_investment(%Invite{standard_terms: true, fund: %Fund{} = fund}) do\n  fund.minimum_investment\nend\n```"
+        }
+      ],
+      "durationMs": 54835,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "dx-critic",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 388,
+          "endLine": 403,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "Typespecs should account for `nil` return values",
+          "description": "The `@spec` annotations for `minimum_investment/1` and `default_investment_amount/1` specify `Decimal.t()`, but these functions will return `nil` if neither the invite nor the underlying fund defines an investment amount. Updating the typespecs to `Decimal.t() | nil` improves API accuracy and prevents Dialyzer false positives.",
+          "suggestedFix": "@spec minimum_investment(Invite.t()) :: Decimal.t() | nil\n\n@spec default_investment_amount(Invite.t()) :: Decimal.t() | nil"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 390,
+          "endLine": 409,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Unpreloaded `:fund` association raises raw `FunctionClauseError`",
+          "description": "Both `minimum_investment/1` and `default_investment_amount/1` pattern match strictly on `%Invite{fund: %Fund{} = fund}`. If passed an `%Invite{}` struct where `:fund` is `%Ecto.Association.NotLoaded{}` or `nil`, execution fails with a generic `FunctionClauseError`. Adding a fallback clause with an informative error message or preloading check would improve developer experience when debugging.",
+          "suggestedFix": "def minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}})\n  raise ArgumentError, \":fund association must be preloaded on Invite to resolve minimum_investment\"\nend"
+        }
+      ],
+      "durationMs": 22887,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "architecture",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 59,
+          "endLine": 63,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Fallback test does not ensure invite overrides are nil",
+          "description": "The test claims to exercise the custom-terms fallback, but omitting the amount attributes from the fixture input does not establish that the resulting invite fields are nil. If the fixture supplies or snapshots values equal to the fund amounts, the assertions pass without exercising the `|| fund...` fallback and would not catch a regression that always returns the invite fields.",
+          "suggestedFix": "Explicitly set `minimum_investment: nil` and `default_investment_amount: nil`, and assert those fields are nil before checking the resolved values."
+        }
+      ],
+      "durationMs": 24154,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "bug-hunter",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 385,
+          "endLine": 408,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "New clauses still require preloaded fund; NotLoaded raises FunctionClauseError",
+          "description": "Both `minimum_investment/1` and `default_investment_amount/1` only match when `invite.fund` is a loaded `%Fund{}`. If any caller passes an invite whose `:fund` association was not preloaded (an `Ecto.Association.NotLoaded` struct), both clauses fail to match and a `FunctionClauseError` is raised at runtime rather than a graceful fallback. This risk is amplified by the new call in `Funds.get_investment_conditions/1`, which now invokes these functions on whatever invite it receives — if that path previously only read `fund.minimum_investment` from an explicitly loaded fund but the invite's `:fund` is not preloaded, this becomes a crash. The `@spec` also promises `Decimal.t()` but both clauses can return `nil` when both invite and fund amounts are nil.",
+          "suggestedFix": "Either add a clause matching `%Invite{fund: %Ecto.Association.NotLoaded{}} = invite` that preloads (e.g. `invite |> Repo.preload(:fund) |> minimum_investment()`), or verify and document that every caller preloads `:fund`. Also adjust the typespec to `Decimal.t() | nil`."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 385,
+          "endLine": 390,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "standard_terms nil is silently treated as custom terms",
+          "description": "The override clause matches only `standard_terms: true`. If the column is nullable (or a row was created before the column existed) and `standard_terms` is `nil`, the invite falls through to the custom-terms clause and a stale per-invite amount wins — the exact bug this change is meant to prevent. If the schema guarantees a non-nil boolean this is fine, but it is an assumption worth verifying or encoding in the pattern match.",
+          "suggestedFix": "Confirm the `standard_terms` column has `null: false, default: true` (or equivalent) in the schema/migration, or match on `standard_terms in [nil, true]` if legacy nil rows exist."
+        }
+      ],
+      "durationMs": 36683,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "accessibility-auditor",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 111837,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "project-rules",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 38,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Tautological consistency test adds little coverage",
+          "description": "The test named \"the floor the invite page shows is the floor the wizard enforces\" only asserts that `Funds.get_investment_conditions/1` matches `Invite.minimum_investment/1` and `Invite.default_investment_amount/1`. After this change, `get_investment_conditions/1` delegates to those functions, so the assertions are true by construction and do not exercise the wizard or the Investments backstop mentioned in the docs/name. Per project testing rules, assert on behavior that could actually disagree (or drop/rename the test to document the delegation only).",
+          "suggestedFix": "Either rename and narrow it to an explicit delegation check, or replace it with a call through the real enforcement path (commitment wizard validation / Investments backstop) so a future callsite that reads `invite.minimum_investment` directly would fail."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2357,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Resolution now requires invite.fund preloaded",
+          "description": "`get_investment_conditions/1` previously used a local `fund` for these two fields. It now calls `Invite.minimum_investment/1` and `Invite.default_investment_amount/1`, whose heads require `fund: %Fund{}`. If any caller passed an invite whose `fund` association was not loaded while `fund` was obtained another way (e.g. separate fetch by `fund_id`), this becomes a `FunctionClauseError` at runtime. Confirm every callsite preloads `:fund` (as the new test does), or pass a struct with the already-loaded fund, e.g. `Invite.minimum_investment(%{invite | fund: fund})`.",
+          "suggestedFix": "If `fund` in this function is already the loaded association, no code change—just ensure callers preload. If `fund` can differ from `invite.fund`, resolve via `%{invite | fund: fund}` so the local fund wins."
+        }
+      ],
+      "durationMs": 193797,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "spec-compliance",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 398,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Standard-terms clause requires preloaded fund; unloaded association falls through",
+          "description": "The new head `def minimum_investment(%Invite{standard_terms: true, fund: %Fund{} = fund})` only matches when `:fund` is preloaded. If a caller passes an invite with `%Ecto.Association.NotLoaded{}` in `:fund`, the pattern falls through to the second clause, which also fails to match `%Fund{}`, raising a FunctionClauseError. This is the pre-existing contract, but now the standard-terms path (including the server-side backstop in `Investments` per acceptance criterion 5) silently depends on every one of the five enforcement sites preloading `:fund`. The diff does not show that all callers preload it; a missed preload would crash rather than degrade. Same applies to `default_investment_amount/1`. Consider raising a clearer error or documenting the preload requirement explicitly, and verifying all five call sites preload the fund.",
+          "suggestedFix": "Add an explicit clause for the not-loaded case with a descriptive raise, e.g. `def minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}}), do: raise ArgumentError, \"Invite.minimum_investment/1 requires the :fund association to be preloaded\"`, and audit the five enforcement sites for preloads."
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 12,
+          "endLine": 23,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Test does not exercise the stale-snapshot scenario from the spec",
+          "description": "The spec's core defect is that the invite snapshots the fund's minimum at creation, then the GP edits the fund minimum and the invite keeps the stale snapshot. The setup creates an invite whose per-invite amounts (25000/40000) already differ from the fund's (100000/150000) at creation time. This does verify the resolver rule, but it does not reproduce the actual reachable path: create a standard-terms invite snapshotting fund amounts, then update the fund, then assert the resolvers return the NEW fund amounts. Adding that test would guard against a future regression where resolution is done at invite creation or via a cached value rather than at read time.",
+          "suggestedFix": "Add a test that creates the invite with amounts equal to the fund's, updates the fund's minimum_investment/default_investment_amount via the public update function, reloads the invite with fund preloaded, and asserts the resolvers return the updated fund values."
+        },
+        {
+          "id": "f003",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 36,
+          "endLine": 41,
+          "severity": "minor",
+          "category": "tests",
+          "title": "No coverage of the display/enforce invariant for custom-terms invites",
+          "description": "Acceptance criterion 4 states the invariant must hold 'for every invite'. The test asserting `Funds.get_investment_conditions/1` equals the resolvers is only run for the standard-terms invite from setup. The custom-terms tests assert resolver values directly but never assert that `get_investment_conditions/1` agrees for the custom-terms branch (which per the original code takes a different branch in the `else`). If the custom branch of `get_investment_conditions/1` reads invite fields directly rather than through the resolvers, drift could reappear there unnoticed.",
+          "suggestedFix": "Extend the custom-terms tests to also assert `Funds.get_investment_conditions(invite).minimum_investment` matches `Invite.minimum_investment(invite)` (and likewise for the default amount) for both override and fallback cases."
+        },
+        {
+          "id": "f004",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2358,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Custom-terms branch of get_investment_conditions/1 not routed through resolvers",
+          "description": "The diff routes only the standard-terms branch through `Invite.minimum_investment/1` / `Invite.default_investment_amount/1`; the `else` (custom-terms) branch is unchanged and not shown. The spec's design note says 'the rule lives in exactly one place'. If the else branch still computes `invite.minimum_investment || fund.minimum_investment` inline, the resolution rule now exists in two places and could drift for custom-terms invites. Since the resolvers already handle both standard and custom terms, both branches could call them.",
+          "suggestedFix": "If the else branch computes the amounts inline, replace those reads with `Invite.minimum_investment(invite)` and `Invite.default_investment_amount(invite)` so the single-rule design note holds for both branches."
+        },
+        {
+          "id": "f005",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 396,
+          "endLine": 411,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "@spec return type Decimal.t() may be inaccurate if fund amounts are nilable",
+          "description": "Both functions are specced as returning `Decimal.t()`, but if `fund.minimum_investment` or `fund.default_investment_amount` can be nil (the fallback chain `invite.x || fund.x` implies nilability of the invite field at least), the standard-terms clause can return nil, making the spec incorrect for Dialyzer. This is pre-existing for the fallback clause but the new standard-terms head makes the fund value the sole source, so nilability there directly surfaces.",
+          "suggestedFix": "If the fund fields are nilable, change the spec to `Decimal.t() | nil`, or enforce non-nil fund amounts at the schema/changeset level."
+        }
+      ],
+      "durationMs": 36239,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds.ex",
+          "startLine": 2354,
+          "endLine": 2355,
+          "severity": "important",
+          "category": "correctness",
+          "title": "invite.fund preload assumption may cause MatchError at runtime",
+          "description": "The call site changed from `fund.minimum_investment` (reading a preloaded, pattern-matched variable) to `Invite.minimum_investment(invite)` and `Invite.default_investment_amount(invite)`. These functions pattern-match on `%Invite{fund: %Fund{} = fund}`. If the `invite` struct reaching this code path does not have `:fund` preloaded (e.g., it is `%Ecto.Association.NotLoaded{}`), the pattern match will raise a `MatchError` / `FunctionClauseError` at runtime. The previous code was safe because `fund` was already bound in the enclosing context. Verify that every code path calling `get_investment_conditions/1` guarantees `invite.fund` is preloaded, or add a guard/preload inside the resolution functions.",
+          "suggestedFix": "Either ensure the invite is always preloaded with `:fund` before reaching this point, or add a defensive clause:\n\ndef minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}}), do: raise \"fund not preloaded\"\n\nAlternatively, accept the fund explicitly:\nInvite.minimum_investment(invite, fund)"
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 397,
+          "endLine": 397,
+          "severity": "important",
+          "category": "correctness",
+          "title": "No clause handles nil fund on standard_terms invite — MatchError",
+          "description": "The new head `def minimum_investment(%Invite{standard_terms: true, fund: %Fund{} = fund})` requires `fund` to be a loaded `%Fund{}` struct. If a standard-terms invite is constructed or loaded without a preloaded fund (fund is `nil` or `%Ecto.Association.NotLoaded{}`), neither this clause nor the fallback clause (`%Invite{fund: %Fund{} = fund}`) will match, resulting in an unhandled `FunctionClauseError`. The same issue applies to `default_investment_amount/1` at line 409. This is a regression from the previous code where `fund` was a separately bound variable guaranteed to be present.",
+          "suggestedFix": "Add a catch-all or handle the nil/not-loaded case explicitly:\n\ndef minimum_investment(%Invite{standard_terms: true, fund: nil}), do: raise ArgumentError, \"fund must be preloaded\"\n\nOr ensure callers always preload and document the precondition with a `@doc` note."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 399,
+          "endLine": 401,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "nil invite.minimum_investment falls through to fund, but Decimal.t() spec disallows nil",
+          "description": "The fallback clause `invite.minimum_investment || fund.minimum_investment` uses Elixir's truthiness operator. If `invite.minimum_investment` is `nil`, it correctly falls back. However, if it were ever set to `Decimal.new(\"0\")` (which is truthy in Elixir since it's a struct, not nil/false), a zero minimum would be enforced rather than falling back to the fund. The `@spec` declares the return as `Decimal.t()` but the `||` operator's semantics with structs may surprise future maintainers. This is a pre-existing pattern but worth noting since the resolution logic is now the single source of truth.",
+          "suggestedFix": "Consider using an explicit nil check for clarity:\n\ndef minimum_investment(%Invite{fund: %Fund{} = fund} = invite) do\n  if is_nil(invite.minimum_investment), do: fund.minimum_investment, else: invite.minimum_investment\nend"
+        },
+        {
+          "id": "f004",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 48,
+          "endLine": 53,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Integration test couples to get_investment_conditions internal structure",
+          "description": "The test \"the floor the invite page shows is the floor the wizard enforces\" asserts that `conditions.minimum_investment` equals `Invite.minimum_investment(invite)`. However, since the diff shows that `get_investment_conditions` now calls `Invite.minimum_investment(invite)` directly, this test is tautological — it asserts that a function's output equals the function it delegates to. It does not independently verify the correct *value* (e.g., that it equals the fund's 100000). If someone later changes the resolution logic in `Invite.minimum_investment/1`, this test would still pass as long as both call sites use the same function, even if the resolved value is wrong.",
+          "suggestedFix": "Assert the concrete expected value instead:\n\nassert Decimal.equal?(conditions.minimum_investment, Decimal.new(\"100000\"))\nassert Decimal.equal?(conditions.default_investment_amount, Decimal.new(\"150000\"))"
+        },
+        {
+          "id": "f005",
+          "file": "test/allocator_one/funds/invite_test.exs",
+          "startLine": 6,
+          "endLine": 67,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Missing test for standard_terms invite with nil fund amounts",
+          "description": "The tests cover standard-terms with stale invite amounts and custom-terms with/without overrides, but do not test the edge case where the fund's `minimum_investment` or `default_investment_amount` is `nil`. The new standard-terms head returns `fund.minimum_investment` directly without a fallback, so if the fund itself has a nil amount, the function returns `nil`, violating the `@spec Decimal.t()` contract. A test documenting expected behavior in this edge case would be valuable.",
+          "suggestedFix": "Add a test with a fund that has nil minimum_investment and verify the behavior (either a sensible default or an explicit error)."
+        }
+      ],
+      "durationMs": 264605,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "dead-code",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 14467,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "dependency-hygiene",
+      "provider": "openai",
+      "findings": [],
+      "durationMs": 8366,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "edge-case-hunter",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 395,
+          "endLine": 415,
+          "severity": "important",
+          "category": "correctness",
+          "title": "FunctionClauseError when invite.fund is not preloaded",
+          "description": "Both `minimum_investment/1` and `default_investment_amount/1` only have clauses matching `%Invite{fund: %Fund{}}`. If either function is called with an invite whose `fund` association is not preloaded (i.e. `fund` is `%Ecto.Association.NotLoaded{}`) or is `nil`, no clause matches and the call raises `FunctionClauseError`. The typespec advertises `Invite.t()` with no preload requirement, and these functions are now called from `Funds.get_investment_conditions/1` and, per the docstring, from the invite page, commitment wizard, and `Investments` backstop — several call sites where guaranteeing a preloaded fund is easy to miss. Previously the same risk existed, but the new first clause for `standard_terms: true` makes it more likely these functions are called in more places. Example trigger: `Invite.minimum_investment(%Invite{standard_terms: true, fund: %Ecto.Association.NotLoaded{}})` → FunctionClauseError instead of falling back gracefully or raising a descriptive error.",
+          "suggestedFix": "Add an explicit clause that raises a descriptive error or preloads the fund, e.g. `def minimum_investment(%Invite{fund: %Ecto.Association.NotLoaded{}} = invite), do: invite |> Repo.preload(:fund) |> minimum_investment()` — or document and enforce the preload requirement at call sites and change the @spec to require a loaded fund."
+        },
+        {
+          "id": "f002",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 398,
+          "endLine": 415,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "@spec claims Decimal.t() but functions can return nil",
+          "description": "Both `@spec minimum_investment(Invite.t()) :: Decimal.t()` and `@spec default_investment_amount(Invite.t()) :: Decimal.t()` promise a Decimal, but if a custom-terms invite has a nil per-invite amount AND the fund's corresponding field is nil, the fallback chain `invite.x || fund.x` returns nil. Dialyzer will flag call sites that pattern-match on `Decimal.t()`, and downstream comparisons (e.g. enforcing a floor in `Investments`) may crash on nil. Either the fund fields should be guaranteed non-null (schema/DB constraint) or the spec should be `Decimal.t() | nil` and callers must handle nil.",
+          "suggestedFix": "Confirm `minimum_investment`/`default_investment_amount` on Fund have non-null DB constraints; if not, change @spec to `Decimal.t() | nil` and add nil handling in `Funds.get_investment_conditions/1` and the enforcement backstop."
+        },
+        {
+          "id": "f003",
+          "file": "lib/allocator_one/funds/invite.ex",
+          "startLine": 395,
+          "endLine": 400,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "standard_terms: nil falls through to custom-terms clause",
+          "description": "The first clause matches `standard_terms: true` exactly. If `standard_terms` is nil (legacy rows, or a column without a default/not-null constraint), the invite silently resolves via the custom-terms rule, letting a stale per-invite amount override the fund — the exact bug this change is meant to fix. If the column is nullable, legacy standard-terms rows with nil would regress to the old behavior with no error. Only reportable if the column allows nil, but the diff gives no evidence of a not-null constraint.",
+          "suggestedFix": "Ensure `standard_terms` has `null: false, default: true` in the migration, or match `standard_terms in [true, nil]` in the first clause if nil should mean standard terms."
+        }
+      ],
+      "durationMs": 282952,
+      "status": "success"
+    }
+  ]
+}

@@ -1,0 +1,329 @@
+{
+  "case": "ao-7536-r1-icon-matcher-precision",
+  "source": {
+    "report": "rcl-report-allocator-one-7536-r1.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+    "lineRange": [
+      40,
+      44
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 7,
+    "successfulReviews": 17,
+    "agreementRatioIfMerged": 0.412,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "Log assertion still racy: unrelated 'lightning*' icon names would match",
+      "Regex/substring assertion is fragile and may still match unintended log lines",
+      "Log-capture assertion remains inherently racy under concurrent tests",
+      "Icon-name scoping pattern is incomplete and can match the wrong log line",
+      "Log assertion still matches icon names with the same prefix",
+      "Global log capture remains brittle; prefer per-test capture_log",
+      "Partial icon-name match can still collide with similarly-prefixed icons"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Log assertion still racy: unrelated 'lightning*' icon names would match",
+          "description": "The scoped refutation uses an unterminated string fragment ~s(unknown icon name \"lightning) with no closing quote. Any concurrently running test that logs an unknown icon whose name merely starts with \"lightning\" (e.g. \"lightning-slash\", \"lightning-a\") would still trip this refute, reintroducing the same cross-test flakiness the comment says it is fixing. Since the test asserts the row renders the plain \"lightning\" icon, the refute should match the full quoted name.",
+          "suggestedFix": "refute log =~ ~s(unknown icon name \"lightning\")"
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 39,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Root cause of shared-log flakiness not addressed (global log capture)",
+          "description": "The comment correctly identifies that with_log/1 (ExUnit.CaptureLog) captures the global Logger and that concurrent tests at max_cases: 32 can bleed log output into each other's captures. Narrowing the string match reduces the collision surface but does not eliminate it: another test exercising the same \"lightning\" icon (or this test's helpers) could still log the message and cause a false failure, and conversely this test could pass even though its refute matched nothing due to a message-format change (e.g., if the log wording changes, refute log =~ ... silently always passes). Consider making these log-asserting tests async: false, or asserting positively on expected log content and verifying the absence of the warning via a more robust mechanism (e.g., a dedicated Logger handler/metadata filter keyed by test pid).",
+          "suggestedFix": "Mark log-capturing tests as async: false, or filter captured logs by test-specific Logger metadata (e.g., $callers / test pid) before asserting."
+        }
+      ],
+      "durationMs": 15322,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [],
+      "durationMs": 15791,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 3959,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 40,
+          "endLine": 43,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Partial icon-name match can still collide with similarly-prefixed icons",
+          "description": "The new assertion uses a prefix match: `log =~ ~s(unknown icon name \"lightning)`. This scopes the check better than before, but a concurrent test rendering an icon such as `lightning-fill` or `lightning-bolt` would still produce a log line containing `unknown icon name \"lightning...` and trip this refute, reproducing the same flakiness the comment describes. The same applies if the log format ever drops the opening quote or reorders fields.",
+          "suggestedFix": "Match the full exact message including the closing quote, e.g. `refute log =~ ~s(unknown icon name \"lightning\")`, or use a regex anchored to the exact icon name, e.g. `refute log =~ ~r/unknown icon name \"lightning\"/`. Even more robustly, capture the log with Logger.capture_log around just this render instead of the global with_log."
+        }
+      ],
+      "durationMs": 15155,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "security-auditor",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Log assertion still race-prone under async: true; capture_log scoping preferred",
+          "description": "The change narrows the refute to the icon name rendered by this test to avoid flakes from concurrent tests emitting `unknown icon name` for other icons. However, if any concurrent test also renders a `lightning`-family icon (e.g., `lightning-fill` — note the pattern `~s(unknown icon name \"lightning)` matches any name starting with \"lightning\"), the same cross-test contamination flake returns. A more robust fix is to disable async for this test module, or use `ExUnit.CaptureLog.capture_log/2` around only the render call, or tag the test with `@tag capture_log: true` and assert on process-scoped captured output where possible.",
+          "suggestedFix": "Either match the exact rendered name including the closing quote, e.g. `refute log =~ ~s(unknown icon name \"lightning\")` (and also check \"lightning-fill\" explicitly if relevant), or restructure the test to capture logs only around the specific render so the assertion is not affected by concurrent tests."
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Prefix match without closing quote weakens the assertion's precision",
+          "description": "`~s(unknown icon name \"lightning)` intentionally omits the closing quote, so it matches both `\"lightning\"` and `\"lightning-fill\"` (and any other future `lightning-*` variant). If the intent is to only fail when *this row's* icon is unknown, the broad prefix could still produce false failures if a sibling test renders `lightning-fill` unvendored, or false confidence if the exact name under test changes. Being explicit about which names are expected to be vendored makes the test intent clearer.",
+          "suggestedFix": "Use exact-name refutes: `refute log =~ ~s(unknown icon name \"lightning\")` and, if the fill variant is also expected to be vendored by this test, add `refute log =~ ~s(unknown icon name \"lightning-fill\")`."
+        }
+      ],
+      "durationMs": 14524,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "performance-engineer",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Icon name match is an unclosed prefix, not an exact name",
+          "description": "The scoped refute uses `~s(unknown icon name \"lightning)` without a closing quote, so it is a prefix match. Any concurrent (or same-test) log for a longer name such as `\"lightning-fill\"` or `\"lightning-slash\"` would still satisfy `=~` and fail this test, partially undoing the isolation goal described in the comment. Prefer matching the full quoted name.",
+          "suggestedFix": "refute log =~ ~s(unknown icon name \"lightning\")"
+        }
+      ],
+      "durationMs": 15613,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "api-design",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 5314,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 40,
+          "endLine": 43,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Global log capture remains brittle; prefer per-test capture_log",
+          "description": "The fix correctly narrows the assertion to the icon this test renders, which mitigates cross-test interference. However, `with_log/1` still captures the global Logger, so a concurrent test that also fails to render a `lightning` icon (e.g., a regression in the shared icon component) would still trip this test's refute — a false attribution. Additionally, the assertion depends on the exact log message format `unknown icon name \"...\"`, which will silently stop matching if the logging call site changes its wording or quoting style. Consider tagging the test with `@tag capture_log: true` (ExUnit's built-in per-test log capture) if compatible with the LiveView process, or asserting on structured log metadata rather than message text.",
+          "suggestedFix": "If feasible, use ExUnit's `capture_log` test tag for per-test isolation; otherwise keep the scoped match but note the residual coupling to the log message format."
+        }
+      ],
+      "durationMs": 19062,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "dx-critic",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 54159,
+      "status": "error",
+      "error": "Model returned an empty response; the diff was not reviewed"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "architecture",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 42,
+          "endLine": 42,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Regex/substring assertion is fragile and may still match unintended log lines",
+          "description": "The new assertion `refute log =~ ~s(unknown icon name \"lightning)` uses a plain substring match (via `=~` with a string on the right-hand side). This will match any log line containing the substring `unknown icon name \"lightning`, including hypothetical variants like `\"lightning-fill\"` or `\"lightning-other\"`. While this is an improvement over the previous bare `\"unknown icon name\"` check, it could still produce false negatives if another concurrent test renders an icon whose name *starts with* `lightning`. Consider using a more precise pattern (e.g., a regex anchored to the exact icon name rendered by this row) or asserting on the specific log entry structure.",
+          "suggestedFix": "Use a regex that anchors to the full icon name, e.g.:\n```elixir\nrefute log =~ ~s(unknown icon name \"lightning\")\n```\nor if the exact icon name is known:\n```elixir\nrefute log =~ ~r/unknown icon name \"lightning\"/\n```\nThis ensures the closing quote is part of the match, preventing prefix collisions with names like `lightning-fill`."
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 38,
+          "endLine": 42,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Comment explains a flaky-test workaround rather than fixing the root cause",
+          "description": "The comment documents that `with_log/1` captures global Logger output and that concurrent tests can interfere. While scoping the assertion is a reasonable mitigation, the underlying issue — a shared global logger capture in a highly parallel test suite — is an architectural concern. If this pattern of flaky log assertions recurs, consider isolating log capture per test process (e.g., via a custom Logger backend or `:logger` handler added/removed around each test) rather than progressively narrowing substring matches.",
+          "suggestedFix": "Track a follow-up to provide per-test log capture isolation (e.g., a test helper that attaches a temporary `:logger` handler scoped to the calling process) so assertions can remain broad and deterministic."
+        }
+      ],
+      "durationMs": 83284,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "bug-hunter",
+      "provider": "openai",
+      "findings": [],
+      "durationMs": 6079,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "accessibility-auditor",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Log-capture assertion remains inherently racy under concurrent tests",
+          "description": "The change narrows the refute to a specific icon name to reduce flakiness from cross-test log bleed, which is a reasonable mitigation. However, the underlying race remains: another concurrent test could also render an icon whose name starts with \"lightning\" (e.g., \"lightning-a\", or a legitimately unvendored \"lightning-slash\"), producing a false failure; conversely, this test's own defect could be masked if capture is scoped incorrectly. A more robust approach is to run this test with `async: false`, or to assert on the rendered output/telemetry rather than global Logger content.",
+          "suggestedFix": "Consider marking the test module `async: false` for log-capture assertions, or use `ExUnit.CaptureLog.capture_log/2` with a function scoped to this render and assert on the returned string only. Alternatively, match the full quoted icon name: `refute log =~ ~s(unknown icon name \"lightning\")` and `refute log =~ ~s(unknown icon name \"lightning-fill\")` to avoid prefix collisions."
+        },
+        {
+          "id": "f002",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Unclosed quote in match string is a prefix match, may be unintended",
+          "description": "The sigil `~s(unknown icon name \"lightning)` deliberately omits the closing quote, making it a prefix match that covers both \"lightning\" and \"lightning-fill\". While likely intentional (the test renders both variants), it will also match unrelated names like \"lightning-slash\" logged by concurrent tests, partially undermining the stated goal of the comment. Explicitly listing both expected names would be clearer and stricter.",
+          "suggestedFix": "refute log =~ ~s(unknown icon name \"lightning\")\nrefute log =~ ~s(unknown icon name \"lightning-fill\")"
+        }
+      ],
+      "durationMs": 12594,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "project-rules",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 103690,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "spec-compliance",
+      "provider": "google",
+      "findings": [],
+      "durationMs": 6907,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "regression-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 98686,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "dead-code",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "dcd-001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 44,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Icon-name scoping pattern is incomplete and can match the wrong log line",
+          "description": "The new assertion `refute log =~ ~s(unknown icon name \"lightning)` narrows the match to the icon-name fragment, which is the intent. However, the pattern is missing the closing quote/bounds of the actual log message — a real log line such as `unknown icon name \"lightning_other\"` or `unknown icon name \"lightningrod\"` would still match this substring. More importantly, because the pattern omits any anchoring to the full token, an unrelated concurrent test logging an empty/partial unknown-icon message that happens to begin with 'lightning' would still trip or, conversely, a legitimately different random suffix could silently pass. For exact scoping, match the full token including the trailing quote, e.g. `assert log =~ ~s(unknown icon name \"lightning\")` (plus `refute` on the absence case). Also note `with_log/1` captures process-global Logger output across concurrently running tests, so consider this line's assertion remains inherently racy if two tests can log unknown icons concurrently — the narrowest robust fix is to match the complete token.",
+          "suggestedFix": "refute log =~ ~s(unknown icon name \"lightning\")"
+        }
+      ],
+      "durationMs": 264077,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "dependency-hygiene",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 283852,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "edge-case-hunter",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "test/allocator_one_web/live/contacts/groups/sidebar_group_icon_test.exs",
+          "startLine": 43,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Log assertion still matches icon names with the same prefix",
+          "description": "The scoped substring omits the closing quote after `lightning`, so it also matches unrelated messages such as `unknown icon name \"lightning-fill\"` or `unknown icon name \"lightning-bolt\"`. A concurrent test logging either name can therefore still fail this test, contrary to the stated goal of matching only the icon rendered by this row.",
+          "suggestedFix": "Include the closing quote in the expected log text, for example: `refute log =~ ~s(unknown icon name \"lightning\")`."
+        }
+      ],
+      "durationMs": 8766,
+      "status": "success"
+    }
+  ]
+}

@@ -1,0 +1,1111 @@
+{
+  "case": "ios-44-r1-di-test-detection",
+  "source": {
+    "report": "rcl-report-infra-one-ios-44-r1.json",
+    "rclVersion": "1.8.1",
+    "note": "reviews[] is the verbatim dedup input from a real council run"
+  },
+  "expected": {
+    "file": "InfraOne/Core/DI/Container+Services.swift",
+    "lineRange": [
+      66,
+      84
+    ],
+    "severity": "minor",
+    "distinctReviewerPairs": 8,
+    "successfulReviews": 16,
+    "agreementRatioIfMerged": 0.5,
+    "minConsensusScore": 0.4,
+    "clearsThresholdIfMerged": true,
+    "memberTitles": [
+      "Test-environment detection embedded in production DI registration",
+      "Environment-based test detection runs ProcessInfo lookup on every resolution in DEBUG",
+      "Test-environment detection relies on multiple env vars; fragile heuristic",
+      "Test/preview detection is compiled out in non-DEBUG configurations",
+      "Environment-variable test detection is heuristic and can be spoofed/miss cases",
+      "Test environment detection relies solely on process environment variables",
+      "Test-detection bypass compiles out in release but relies on env vars in DEBUG",
+      "Test-runner detection is DEBUG-only; release test plans hit the real Keychain",
+      "Test/preview detection duplicated as an inline env-var list"
+    ]
+  },
+  "reviews": [
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "general",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 86,
+          "endLine": 92,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "SecItemAdd/SecItemDelete return statuses are silently ignored",
+          "description": "In `setSecureString`, both `SecItemDelete` and `SecItemAdd` results are discarded. If `SecItemAdd` fails (e.g. errSecDuplicateItem in a race, entitlement issues, keychain locked), the token silently fails to persist and the user may appear signed out later with no diagnostic trail. This carries over the original TokenManager behavior, but the new seam is a good opportunity to at least log or assert on unexpected statuses.",
+          "suggestedFix": "Capture and check the OSStatus: `let status = SecItemAdd(addQuery as CFDictionary, nil); if status != errSecSuccess { Logger.auth.error(\"Keychain write failed: \\(status)\") }` — or return a Bool/throw from the protocol so callers can react."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 133,
+          "endLine": 166,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "InMemoryCredentialStore shares one string dictionary for secure and plain values",
+          "description": "`secureString/setSecureString` and `string/setString` both delegate to the same `strings` dictionary in `OSAllocatedUnfairLockBox`. In production these are two distinct namespaces (Keychain vs UserDefaults). A key collision between a secure key and a defaults key would behave differently in tests than in production (a write to one would overwrite the other in tests only). Current keys don't collide, but the fake diverges from the real store's semantics, which can mask bugs.",
+          "suggestedFix": "Use separate dictionaries (e.g. `secureStrings` and `plainStrings`) inside the lock box, mirroring the production Keychain/UserDefaults split."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 146,
+          "endLine": 166,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "OSAllocatedUnfairLockBox is named after a type it does not use",
+          "description": "The class is named `OSAllocatedUnfairLockBox` but is implemented with `NSLock`, not `OSAllocatedUnfairLock`. The misleading name will confuse future readers, especially since `OSAllocatedUnfairLock` (os module, iOS 16+) is a real type that could actually be used here for lower overhead.",
+          "suggestedFix": "Either rename to something like `LockedCredentialBox`, or actually use `OSAllocatedUnfairLock<State>` from the `os` module to protect the dictionaries."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 71,
+          "endLine": 78,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Environment-variable test detection is heuristic and can be spoofed/miss cases",
+          "description": "The DEBUG-only check inspects `XCTestConfigurationFilePath`, `XCTestSessionIdentifier`, `XCTestBundlePath`, and `XCODE_RUNNING_FOR_PREVIEWS` to decide between in-memory and real Keychain storage. Under Swift Testing without XCTest hosting, or future Xcode versions, these variables may not be set, silently reverting the seam to the real Keychain — reintroducing the IOS-22 flake with no failing signal except the isolation tests. Conversely, DEBUG builds launched with these variables set (e.g. UI-test-launched app processes) would use in-memory storage unexpectedly. The `CredentialStoreIsolationTests` mitigate the first risk, but the detection deserves a comment or a more explicit mechanism.",
+          "suggestedFix": "Prefer an explicit registration in a shared test-setup (e.g. `Container.shared.credentialStore.register { InMemoryCredentialStore() }` in a test observer / `.container` trait setup) rather than environment sniffing, or check `NSClassFromString(\"XCTestCase\") != nil` as an additional signal."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 20,
+          "endLine": 26,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Multi-call TokenManager operations may straddle a container reset",
+          "description": "`store` is resolved per call, so compound operations like `saveToken` (two `store.` accesses) and `deleteToken` (four accesses) can resolve different store instances if `Container.shared` is reset concurrently (e.g. parallel Swift Testing suites using the `.container` trait). That could leave half a token in one store and half in another, producing hard-to-diagnose flakes — ironic given the seam exists to fix a flake. This is mostly a test-time hazard, but worth guarding.",
+          "suggestedFix": "Resolve the store once per operation into a local: `static func deleteToken() { let store = Self.store; store.setSecureString(nil, forKey: tokenKey); … }` — this at least guarantees each logical operation is atomic against a single store instance."
+        },
+        {
+          "id": "f006",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 79,
+          "endLine": 99,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Per-test isolation tests depend on serial execution to detect .singleton leakage",
+          "description": "The `startsEmptyOne`/`startsEmptyTwo` pair asserts a fresh store per test, claiming they would catch a `.singleton` misconfiguration. Under Swift Testing's default parallel execution, both tests could run in different container contexts simultaneously and both pass even with a shared store, or produce a flaky rather than deterministic failure. The guarantee they \"pin\" is weaker than the comment implies.",
+          "suggestedFix": "Add `.serialized` to the suite (or to these two tests) so the leakage scenario is deterministically observable, or restructure as a single test that writes via one container, resets, and asserts emptiness."
+        },
+        {
+          "id": "f007",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 39,
+          "endLine": 65,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Isolation tests silently pass if environment detection fails",
+          "description": "`tokenWriteDoesNotReachTheKeychain` asserts the raw Keychain value is unchanged after `TokenManager.saveToken`. If the environment-based detection in `Container.credentialStore` ever stops recognizing the test runner AND the test writes the same value that was already present (or the keychain read fails for both before/after), the comparison `before == after` can pass while isolation is broken. The secondary `#expect(TokenManager.getToken() != nil)` also passes against the real Keychain. Consider asserting that the resolved store is actually an `InMemoryCredentialStore`.",
+          "suggestedFix": "Add a direct type assertion: `#expect(Container.shared.credentialStore() is InMemoryCredentialStore, \"test runner must resolve the in-memory store\")` — the UUID-suffixed token mitigates value collision, but the type check makes the guarantee explicit and failure immediate."
+        },
+        {
+          "id": "f008",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 26,
+          "endLine": 37,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "Protocol conflates two storage tiers with no compile-time guidance",
+          "description": "`CredentialStoring` exposes secure (Keychain) and insecure (UserDefaults) methods side by side with only doc comments distinguishing them. A future caller can trivially store a sensitive value via `setString` instead of `setSecureString` and the compiler won't object. The file comment acknowledges this (\"not an endorsement\"), but the API shape invites the mistake.",
+          "suggestedFix": "Consider splitting into two protocols (`SecureCredentialStoring`, `PlainCredentialStoring`) or using key types (e.g. an enum of known keys tagged with their tier) so the secure/insecure decision is made once per key, not per call site."
+        },
+        {
+          "id": "f009",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 52,
+          "endLine": 64,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Keychain queries lack kSecAttrService, matching any generic password by account",
+          "description": "The Keychain queries (carried over verbatim from the old TokenManager, per the comment) key items only by `kSecAttrAccount` with generic names like \"authToken\", without `kSecAttrService`. Within the app's keychain access group this risks collisions with other items using the same account name (e.g. SDKs), and makes the items harder to identify. Preserving behavior for the seam is reasonable, but this is worth a follow-up now that the code has a dedicated home.",
+          "suggestedFix": "Add `kSecAttrService: Bundle.main.bundleIdentifier ?? \"InfraOne\"` to all queries in a follow-up (note: requires a one-time migration read of the old items)."
+        }
+      ],
+      "durationMs": 45980,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "general",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 72,
+          "endLine": 80,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Release-configured tests use the real credential stores",
+          "description": "Test-runner detection is compiled only under DEBUG. Tests can be built and run with an optimized or Release configuration, in which case the factory always returns KeychainCredentialStore despite running under XCTest. Those tests will again overwrite or delete the host app's real Keychain and UserDefaults data; the newly added isolation tests would themselves mutate the real credentials before failing.",
+          "suggestedFix": "Perform test-runner environment detection in all build configurations. Keep preview-only handling conditional if necessary, but do not compile out XCTest detection. Alternatively, have the test target explicitly register InMemoryCredentialStore before any application code can resolve the factory."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 66,
+          "endLine": 81,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Keychain writes can silently lose the existing credential",
+          "description": "setSecureString deletes the existing item before attempting to add the replacement and ignores both OSStatus results. If SecItemAdd fails after a successful deletion, the previous credential is permanently lost while the caller is told nothing. The delete/add sequence also races between concurrent writers: both can delete, one add can fail with errSecDuplicateItem, and the later call may not take effect.",
+          "suggestedFix": "Use SecItemUpdate for an existing item and SecItemAdd only when the item is not found, handling a concurrent errSecDuplicateItem by retrying the update. Return or throw the resulting OSStatus so TokenManager can propagate or log persistence failures rather than silently continuing."
+        }
+      ],
+      "durationMs": 87623,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "general",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 147,
+          "endLine": 165,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "InMemoryCredentialStore shares storage for secure and non-secure strings",
+          "description": "In `OSAllocatedUnfairLockBox`, both `secureString`/`setSecureString` and `string`/`setString` operate on the same `strings: [String: String]` dictionary. In production (`KeychainCredentialStore`), secure strings live in the Keychain and standard strings live in `UserDefaults`. Sharing a single dictionary in the mock implementation means secure and non-secure strings with the same key name will overwrite each other, and `string(forKey:)` in tests will return values stored via `setSecureString`, unlike production behavior.",
+          "suggestedFix": "Maintain a separate `secureStrings: [String: String]` dictionary inside `OSAllocatedUnfairLockBox` to isolate Keychain-backed strings from `UserDefaults`-backed strings."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 147,
+          "endLine": 148,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Misleading class name OSAllocatedUnfairLockBox",
+          "description": "The helper class is named `OSAllocatedUnfairLockBox`, suggesting the use of `os.OSAllocatedUnfairLock` from the `os` framework, but it actually uses `NSLock` internally.",
+          "suggestedFix": "Rename the class to `LockBox` or `NSLockBox`, or replace `NSLock` with `OSAllocatedUnfairLock`."
+        }
+      ],
+      "durationMs": 27840,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "general",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 60,
+          "endLine": 75,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "SecItemAdd result is ignored — a failed write silently drops the token",
+          "description": "setSecureString performs SecItemDelete followed by SecItemAdd without checking the add's OSStatus. If SecItemAdd fails (e.g., errSecDuplicate from a concurrent write between delete and add, or a Keychain access error), the credential is silently not stored and callers have no way to detect it — TokenManager.saveToken would appear to succeed while getToken() returns nil. The original TokenManager code had the same pattern, but the seam is the right place to at least log or assert on failure since the comment claims the behavior was preserved verbatim.",
+          "suggestedFix": "Capture the result: `let status = SecItemAdd(addQuery as CFDictionary, nil)` and at minimum `assert(status == errSecSuccess || status == errSecDuplicate)` in DEBUG, or log the status on failure."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 66,
+          "endLine": 76,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Test/preview detection is compiled out in non-DEBUG configurations",
+          "description": "The in-memory default is gated behind `#if DEBUG`. If tests are ever run in a Release-configured scheme (e.g., a CI release test plan or a profiling run), the environment checks are compiled out and the suite resolves KeychainCredentialStore, reintroducing exactly the host-app Keychain/UserDefaults clobbering this seam removes — and the CredentialStoreIsolationTests would start failing (or worse, mutate the simulator's account before failing). Consider keying the check on the test environment variables themselves rather than the build configuration, since the presence of XCTestConfigurationFilePath is a sufficient signal regardless of optimization level.",
+          "suggestedFix": "Remove the `#if DEBUG` wrapper (or replace it with a comment) so the environment-variable detection runs in every configuration; the checks are cheap and only evaluated once per container thanks to `.cached`."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 145,
+          "endLine": 166,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Lock box is named OSAllocatedUnfairLockBox but uses NSLock",
+          "description": "The private type is named `OSAllocatedUnfairLockBox`, strongly implying it wraps `OSAllocatedUnfairLock` (the modern, faster unfair lock on Apple platforms), but it is implemented with `NSLock`. The misleading name will confuse future readers and makes the deliberate choice of NSLock (presumably for deployment-target or `withLock` availability reasons) invisible. Either use OSAllocatedUnfairLock if the deployment target allows, or rename the type (e.g., `LockedCredentialValues`) to reflect what it actually is.",
+          "suggestedFix": "Rename to something neutral like `LockedStoreBox`, or switch the implementation to `OSAllocatedUnfairLock` if the minimum OS version permits."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 22,
+          "endLine": 27,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Per-call container resolution adds overhead on every TokenManager access",
+          "description": "`store` is a computed property that calls `Container.shared.credentialStore()` on every single TokenManager call. The rationale in the comment (not capturing the store across test-container resets) is sound, but Factory resolution involves cache lookup and scope bookkeeping on every token read, including hot paths like attaching auth headers to each network request. This is likely negligible, but worth noting as a deliberate trade-off; if profiling ever shows it, a cache-invalidation hook on container reset would preserve the semantics without per-call resolution.",
+          "suggestedFix": "No change required if profiling shows no impact; otherwise consider a weakly-held cached store invalidated by container reset notifications."
+        }
+      ],
+      "durationMs": 34387,
+      "status": "success"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "security-auditor",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 147,
+          "endLine": 165,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Type name OSAllocatedUnfairLockBox is misleading as it uses NSLock",
+          "description": "The private wrapper class is named `OSAllocatedUnfairLockBox`, but its internal implementation instantiates `NSLock()` rather than `os.OSAllocatedUnfairLock`. To avoid confusion, either rename the class to `LockBox` or update the lock instantiation to use `OSAllocatedUnfairLock`.",
+          "suggestedFix": "private final class LockBox: @unchecked Sendable {\n    private let lock = NSLock()\n    ..."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 71,
+          "endLine": 81,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Test environment detection relies solely on process environment variables",
+          "description": "Inspecting `ProcessInfo.processInfo.environment` for `XCTest` keys can fail to detect certain test execution contexts or custom test runners. Adding a runtime check for the presence of the test framework (such as `NSClassFromString(\"XCTestCase\") != nil`) makes test container detection more robust.",
+          "suggestedFix": "if NSClassFromString(\"XCTestCase\") != nil\n    || environment[\"XCTestConfigurationFilePath\"] != nil\n    || environment[\"XCTestSessionIdentifier\"] != nil\n    || environment[\"XCTestBundlePath\"] != nil\n    || environment[\"XCODE_RUNNING_FOR_PREVIEWS\"] == \"1\" {\n    return InMemoryCredentialStore()\n}"
+        }
+      ],
+      "durationMs": 41486,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "performance-engineer",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 19,
+          "endLine": 21,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "DI container resolved on every TokenManager call adds per-call overhead",
+          "description": "`store` is a computed property that calls `Container.shared.credentialStore()` on every access. Each of the 23 call sites now pays a container-lookup + closure-execution cost per invocation (e.g., `saveToken` calls `store` twice). For hot paths like token retrieval on every network request, this adds measurable overhead vs. the previous direct Keychain/UserDefaults calls. The comment explains why it's not `static let`, but the trade-off isn't quantified.",
+          "suggestedFix": "Consider caching the resolved store in a thread-local or short-lived local variable within methods that call `store` multiple times (e.g., `saveToken` and `deleteToken`). Alternatively, resolve once per method: `let s = store; s.setSecureString(...); s.setSecureString(...)`. The container lookup itself is likely cheap with `.cached`, but the closure re-evaluation and environment checks (in DEBUG) are not."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 72,
+          "endLine": 80,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Environment-based test detection runs ProcessInfo lookup on every resolution in DEBUG",
+          "description": "In DEBUG builds, every call to `credentialStore()` (which happens on every `TokenManager.store` access) evaluates `ProcessInfo.processInfo.environment` and checks four keys. `ProcessInfo.processInfo.environment` creates a new dictionary copy on each access. For a token retrieved on every authenticated API request, this is repeated unnecessary work in debug/test builds.",
+          "suggestedFix": "Cache the environment check result in a static stored property (safe here since the environment won't change mid-process): `private static let isTestEnvironment: Bool = { let env = ProcessInfo.processInfo.environment; return env[\"XCTestConfigurationFilePath\"] != nil || ... }()`. Then use `if Self.isTestEnvironment { return InMemoryCredentialStore() }`."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 73,
+          "endLine": 84,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Keychain write ignores SecItemAdd failure — silent data loss on write",
+          "description": "`setSecureString` performs delete-then-add but discards the `OSStatus` returned by `SecItemAdd`. If the add fails (e.g., disk full, keychain locked, entitlement issue), the previously-deleted token is gone and the new one was never written — the user is silently logged out with no diagnostic. The same pattern existed in the old `TokenManager`, but now that this is a reusable `CredentialStoring` implementation, it's worth fixing.",
+          "suggestedFix": "Check the return value of `SecItemAdd` and at minimum log the failure:\n```swift\nlet status = SecItemAdd(addQuery as CFDictionary, nil)\nif status != errSecSuccess {\n    // Log or assert; the token was deleted but not re-written\n}\n```\nAlternatively, use `SecItemUpdate` when the item already exists to make it atomic."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 66,
+          "endLine": 70,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Keychain delete in setSecureString ignores SecItemDelete result",
+          "description": "`SecItemDelete` returns `errSecItemNotFound` when the key doesn't exist, which is benign, but other error codes (e.g., keychain locked) are silently swallowed. If the delete fails due to a real error, the subsequent `SecItemAdd` will also fail (duplicate), compounding the silent-failure issue from f003.",
+          "suggestedFix": "Check the status and only proceed with the add if delete succeeded or returned `errSecItemNotFound`."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 109,
+          "endLine": 130,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "InMemoryCredentialStore uses NSLock where os_unfair_lock would be faster",
+          "description": "`OSAllocatedUnfairLockBox` uses `NSLock`, which involves an Objective-C message send and is heavier than `os_unfair_lock` for short critical sections like dictionary lookups. The class name even references 'UnfairLock' but doesn't use one. For a store that may be hit on every token read in tests, this is a minor but easy win.",
+          "suggestedFix": "Replace `NSLock` with `os_unfair_lock` via `OSAllocatedUnfairLock` (iOS 16+), or use `NSLock` but rename the class to avoid confusion. Alternatively, since this is test/preview-only, the performance impact is negligible and this is truly a nitpick — but the naming mismatch is misleading."
+        },
+        {
+          "id": "f006",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 70,
+          "endLine": 82,
+          "severity": "minor",
+          "category": "security",
+          "title": "Test-detection bypass compiles out in release but relies on env vars in DEBUG",
+          "description": "The `#if DEBUG` guard means release builds always get `KeychainCredentialStore`, which is correct. However, in DEBUG builds, the detection relies on environment variables that could theoretically be set outside a test runner (e.g., a developer running the app from Xcode with those vars set, or a CI script that exports them). This would silently swap in `InMemoryCredentialStore`, meaning tokens written during that session would be lost on next launch.",
+          "suggestedFix": "This is low-risk since those env vars are only set by Xcode's test infrastructure, but consider adding a `#if DEBUG` log/assert when the in-memory path is taken outside a test bundle, or gate on `Bundle.main.bundlePath` containing `.xctest` as an additional signal."
+        },
+        {
+          "id": "f007",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 82,
+          "endLine": 99,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Per-test isolation tests rely on execution order assumptions",
+          "description": "Tests `startsEmptyOne` and `startsEmptyTwo` prove per-test isolation by asserting `getToken() == nil` at the start. This works because `.container` scope resets between tests. However, if the test framework ever runs them in parallel within the same container, or if a future refactor changes the scope, these tests become order-dependent. The comment acknowledges this, but the tests don't explicitly enforce the precondition.",
+          "suggestedFix": "This is acceptable given the `.container` attribute, but consider adding a brief comment noting that these tests MUST NOT be marked `@Test(.parallel)` or the guarantee they test would be violated. The current structure is fine."
+        },
+        {
+          "id": "f008",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 28,
+          "endLine": 35,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "CredentialStoring protocol methods don't indicate which backing store they use",
+          "description": "The protocol has `secureString`/`setSecureString` and `data`/`setData`/`string`/`setString`, but the names don't convey that the 'secure' variants are Keychain-backed and the others are UserDefaults-backed. A conforming type could implement them differently. The doc comment on the protocol mentions this, but the API surface itself is ambiguous.",
+          "suggestedFix": "Consider naming like `keychainString(forKey:)` / `defaultsData(forKey:)` to make the storage tier explicit in the API, or split into two protocols (`SecureCredentialStoring` and `PlainCredentialStoring`). Low priority since there are only two conformances."
+        }
+      ],
+      "durationMs": 124107,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "api-design",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 73,
+          "endLine": 81,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Release-configured tests bypass credential isolation",
+          "description": "Test-runner detection is compiled only under `#if DEBUG`. Tests executed with a Release or other non-Debug configuration will therefore resolve `KeychainCredentialStore`, despite the documented guarantee that test runners default to in-memory storage. Those tests can overwrite or delete the host app's real credentials and reintroduce the cross-suite state leakage this change is intended to prevent.",
+          "suggestedFix": "Do not compile test-runner detection out of non-Debug builds. Keep preview detection conditional if necessary, but perform reliable test-process detection in every configuration, or explicitly register `InMemoryCredentialStore` from the test host before application code can resolve the factory."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 43,
+          "endLine": 80,
+          "severity": "important",
+          "category": "tests",
+          "title": "Isolation tests can destructively modify real credentials",
+          "description": "These tests invoke writes and deletion without restoring the real Keychain and UserDefaults state. If the environment heuristic or factory registration regresses—the exact condition these tests are intended to detect—the token test overwrites the host token, the deletion test clears credentials, and the user test overwrites the stored user before failing. This recreates the destructive simulator-account behavior described by the change and also leaves `tokenType` and `deviceToken` unsnapshotted.",
+          "suggestedFix": "Make the regression check non-destructive, for example by asserting that the resolved default store is an `InMemoryCredentialStore` under the test process and testing its behavior separately. If end-to-end writes are still required, snapshot and restore all four values (`authToken`, `tokenType`, `currentUser`, and `deviceToken`) with `defer`, using direct raw-store helpers that check Keychain operation results."
+        }
+      ],
+      "durationMs": 132576,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "test-coverage",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 70,
+          "endLine": 84,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Environment-based test detection silently fails when env vars are missing",
+          "description": "The detection of test runners relies on four environment variables (XCTestConfigurationFilePath, XCTestSessionIdentifier, XCTestBundlePath, XCODE_RUNNING_FOR_PREVIEWS) being present. If a test is executed in a context where none of these are set (custom test harness, swift test via SPM, CI scripts that strip environment, or future Xcode changes), the factory silently falls back to KeychainCredentialStore — reintroducing exactly the IOS-22 flake this seam removes, and doing so silently since the failure mode is cross-suite clobbering rather than an immediate error. Consider also checking for the presence of the XCTest framework being loaded (e.g., NSClassFromString(\"XCTestCase\") != nil) as an additional signal, or failing loudly (assertion in DEBUG) when running under a host app context that looks like a test but didn't match.",
+          "suggestedFix": "Add a fallback check such as `NSClassFromString(\"XCTestCase\") != nil` to cover runners where the XCTestConfigurationFilePath family of variables isn't set, and/or add a DEBUG assertion if the store resolves to KeychainCredentialStore while an XCTest bundle is loaded."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 140,
+          "endLine": 166,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "OSAllocatedUnfairLockBox is misnamed and recreates a thread-safe dictionary poorly",
+          "description": "The class is named OSAllocatedUnfairLockBox but is implemented with NSLock, not OSAllocatedUnfairLock — the name is misleading. More importantly, the read and write operations take the lock separately, so compound operations (e.g., read-modify-write across two calls) aren't atomic, and `strings[key] = value` with a nil value inside withLock relies on Dictionary subscript nil-assignment semantics to remove — correct, but the two separate dictionaries (strings/blobs) mean a key could exist in both stores simultaneously if misuse occurs (setString then setData with same key both retain values). In practice keys are distinct per type in TokenManager, but nothing in the type enforces that.",
+          "suggestedFix": "Either use OSAllocatedUnfairLock<[String: String]> directly (matching the name), or rename to something like LockedCredentialValues. Consider storing a single enum-keyed dictionary or documenting the invariant that secure and defaults key namespaces must not overlap."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 77,
+          "endLine": 94,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Keychain write is not atomic — delete-then-add can lose the token on interruption",
+          "description": "setSecureString performs SecItemDelete followed by SecItemAdd as two separate operations. If the process is suspended or crashes between the two (plausible on iOS when writing during backgrounding or sign-out race), the credential is lost entirely. The comment says this preserves the original behavior, so it's a known carry-over, but the seam was an opportunity to use SecItemUpdate with add-fallback, or at least check the SecItemAdd result (currently discarded — a failure, e.g. errSecDuplicateItem from a race between two writers, is silently swallowed and the token is lost).",
+          "suggestedFix": "Check the SecItemAdd status and log/assert on failure in DEBUG. Optionally attempt SecItemUpdate first and fall back to SecItemAdd on errSecItemNotFound."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 28,
+          "endLine": 31,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Resolving the store per call can split one logical operation across two stores",
+          "description": "`store` is a computed property resolving Container.shared.credentialStore() on every access. Multi-step operations like saveToken (two setSecureString calls) or deleteToken (four calls) each re-resolve the store. If the container is reset or re-registered between calls — which is exactly what .container-scoped test resets do — the first write can land in one store instance and the second in another, leaving torn state (e.g., token written but tokenType absent). With .cached the risk window is small but real for any reset triggered mid-operation; it also means deleteToken() could delete from a different store than the one saveToken wrote to if registration changed in between.",
+          "suggestedFix": "Capture the store once per public operation: `let s = store; s.setSecureString(token, ...); s.setSecureString(tokenType, ...)`. This guarantees all writes within one call go to the same store instance."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 48,
+          "endLine": 50,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "saveUser still silently swallows encoding failures",
+          "description": "`guard let data = try? JSONEncoder().encode(user) else { return }` drops encoding failures with no logging. A failure to encode the user results in a silent no-op where callers believe the user was saved; getUser() then returns stale data or nil. This was pre-existing behavior, but the refactor touched this line and the new store abstraction makes it no harder to at least log.",
+          "suggestedFix": "Use do/catch and log the encoding error (e.g., via LoggingConfiguration) before returning, or make saveUser throwing so callers can handle it."
+        },
+        {
+          "id": "f006",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 85,
+          "endLine": 99,
+          "severity": "important",
+          "category": "tests",
+          "title": "Per-test isolation pair tests are order- and parallelism-dependent in a flawed way",
+          "description": "startsEmptyOne/startsEmptyTwo attempt to prove the store is per-test, but each test asserts getToken() == nil at its start. This only proves isolation if the tests actually run — if swift-testing runs suite tests in parallel (default), each test gets isolation only if the .container trait gives each parallel task its own container; if it doesn't, both tests can interleave (one writes before the other's nil check) and flake. Conversely, if the tests run serially and the store were .singleton, the second test's nil check would catch the leak — good — but the comment claims the pair proves per-TEST isolation while each test individually can't distinguish 'fresh store per test' from 'first test to run'. Only the second-executing test actually detects a leak, and test execution order is not guaranteed, so the failure attribution would be non-deterministic.",
+          "suggestedFix": "Make the leak-detection deterministic: have both tests write a UNIQUE token, then assert each reads back its own token at the end (detects interleaving/clobbering), and keep the nil-start assertion. Also consider marking the suite .serialized if the nil-start assertion is load-bearing, and document why."
+        },
+        {
+          "id": "f007",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 45,
+          "endLine": 58,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Keychain isolation test can false-pass if the app was never signed in",
+          "description": "tokenWriteDoesNotReachTheKeychain compares the Keychain value before and after TokenManager.saveToken. If the simulator/host app has no 'authToken' in the Keychain at all (fresh simulator, or a previous test run deleted it), `before` is nil and after is nil — the test passes even if the seam were broken and the write DID reach the real Keychain then... wait, if the write reached the real keychain, after would be non-nil, so it would fail. However the reverse case matters: if a broken seam writes then something else deletes, or if the Keychain query is subtly wrong (e.g., missing kSecAttrAccessible mismatch isn't an issue for reads, but access group differences on device could make rawKeychainString read a different item than KeychainCredentialStore writes), the test passes vacuously. The test would be stronger if it first established a known sentinel value in the real Keychain and asserted it survives.",
+          "suggestedFix": "Seed the real Keychain with a sentinel value via raw SecItemAdd before the test (cleaning up after), then assert the sentinel is unchanged after TokenManager.saveToken. This proves the probe and the store target the same Keychain item."
+        },
+        {
+          "id": "f008",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 33,
+          "endLine": 43,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Raw Keychain probe doesn't match the store's query exactly",
+          "description": "The production KeychainCredentialStore writes with kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly and no kSecAttrService; the test probe queries only by kSecAttrAccount. On a device (vs simulator) Keychain behavior with access groups / entitlement differences could cause the probe and the store to hit different items, making the isolation tests pass vacuously. Also, the probe duplicates the query logic instead of sharing it, so the two can drift apart silently in future changes.",
+          "suggestedFix": "Expose the query construction from KeychainCredentialStore (internal, visible via @testable) and reuse it in the probe to guarantee the test reads exactly what the store would write."
+        },
+        {
+          "id": "f009",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 57,
+          "endLine": 86,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Production DI container contains test-environment detection logic",
+          "description": "The shipping Container now embeds knowledge of XCTest environment variables to decide which credential store to vend. This couples production DI wiring to test infrastructure and increases the surface for mistakes (e.g., f001's silent fallback). A cleaner pattern is for the test bundle to explicitly register the in-memory store once at startup (e.g., in a test bundle constructor or +load equivalent), keeping the production factory unconditional.",
+          "suggestedFix": "Consider registering InMemoryCredentialStore from the test target's initialization (e.g., a static initializer triggered by the test bundle) and keeping Container.credentialStore as `self { KeychainCredentialStore() }.cached`. If the 'no opt-in' property is the goal, a DEBUG-only assertion verifying a test-context override exists would preserve it without runtime env sniffing in production code."
+        },
+        {
+          "id": "f010",
+          "file": "AGENTS.md",
+          "startLine": 366,
+          "endLine": 372,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Documentation notes AppState UserDefaults keys are not isolated — gap worth tracking",
+          "description": "The docs candidly note that AppState's UserDefaults keys (profileState, registeredEmail, publicProfile.currentStep) bypass the seam and still require per-suite cleanup. That means test isolation is still incomplete and suites can still clobber each other through those keys — the same class of IOS-22 flake. No code issue in this diff, but the residual risk deserves a tracking reference.",
+          "suggestedFix": "Reference a follow-up ticket (or create one) for routing AppState's UserDefaults access through a similar seam, or through the same CredentialStoring/defaults abstraction."
+        }
+      ],
+      "durationMs": 53637,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "dx-critic",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 113,
+          "endLine": 140,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "In-memory store merges Keychain and UserDefaults string namespaces",
+          "description": "InMemoryCredentialStore routes both secureString/setSecureString and string/setString through the same `strings` dictionary on OSAllocatedUnfairLockBox. Production KeychainCredentialStore keeps those in separate backends (Keychain vs UserDefaults), so identical keys would not collide there but would in tests/previews. Current TokenManager keys do not overlap, so this is latent; a future shared key would make tests pass while production behaved differently (or hide a collision bug).",
+          "suggestedFix": "Use separate maps (e.g. secureStrings vs strings), or prefix in-memory keys (`secure:` / `defaults:`) inside the box so the test double preserves the two-store partition."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 145,
+          "endLine": 166,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Lock box name does not match implementation",
+          "description": "OSAllocatedUnfairLockBox is named after OSAllocatedUnfairLock but is implemented with NSLock. That confuses readers skim-reading for the concurrency primitive in use and suggests a different performance/reentrancy profile than what is actually there.",
+          "suggestedFix": "Rename to something accurate (e.g. LockedCredentialBox / NSLockBox), or switch the implementation to OSAllocatedUnfairLock if that was the intent."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 64,
+          "endLine": 80,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Keychain write ignores SecItemAdd failure after delete",
+          "description": "setSecureString always SecItemDelete's then SecItemAdd's and ignores the add status. On failure the previous value is already gone, so a transient Keychain error can clear the session token with no signal to the caller. Behavior matches the old TokenManager helpers, but the logic now lives in a dedicated store where checking OSStatus (and/or logging) would be straightforward and would make auth failures diagnosable.",
+          "suggestedFix": "Capture SecItemAdd’s OSStatus; on failure log at error level (without token contents) and/or surface success via Bool/throws if call sites can handle it. Consider SecItemUpdate first and add only on errSecItemNotFound to avoid delete-then-add data loss."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 71,
+          "endLine": 84,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Test/preview detection duplicated as an inline env-var list",
+          "description": "credentialStore’s DEBUG branch hard-codes four ProcessInfo environment keys, and the comment says this mirrors browserDataSource. Duplicated process-environment sniffing tends to drift (e.g. one site updated for a new Swift Testing/Xcode signal, the other not), which would silently send tests back to KeychainCredentialStore and reintroduce IOS-22-style pollution.",
+          "suggestedFix": "Extract a single helper (e.g. RuntimeEnvironment.isTestRunner || isPreview) used by credentialStore and browserDataSource so the signals stay in one place."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 54,
+          "endLine": 79,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Isolation tests omit APNs device-token path",
+          "description": "Coverage proves token (Keychain) and user (UserDefaults data) writes stay off the host stores, and deleteToken does not clear host Keychain/defaults. saveDeviceToken/getDeviceToken/deleteDeviceToken also go through the seam via setString/string but are not asserted against UserDefaults.standard, so a regression that only wired the string API back to .standard would not be caught.",
+          "suggestedFix": "Add a parallel test: record UserDefaults.standard.string(forKey: \"deviceToken\"), call TokenManager.saveDeviceToken, expect host defaults unchanged while TokenManager.getDeviceToken() returns the probe value."
+        }
+      ],
+      "durationMs": 139560,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "architecture",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 62,
+          "endLine": 89,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Keychain OSStatus results silently ignored in KeychainCredentialStore",
+          "description": "SecItemDelete and SecItemAdd return OSStatus values that are discarded, and setSecureString silently returns on encoding failure. A failed keychain write (e.g., errSecInteractionNotAllowed before first unlock, entitlement issues) means the token is silently lost — the user appears logged out with no diagnostic trail. The comment says this preserves the original behavior, but the new seam is a natural place to at least log unexpected statuses. Also note the write path is delete-then-add rather than SecItemUpdate/SecItemAdd, which is non-atomic: a crash between the two calls loses the credential.",
+          "suggestedFix": "Capture the OSStatus from SecItemDelete/SecItemAdd and log unexpected values (anything other than errSecSuccess/errSecItemNotFound), e.g. via the app's logging infrastructure. Consider SecItemCopyMatching + SecItemUpdate, falling back to SecItemAdd, to make the write atomic."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 21,
+          "endLine": 27,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "Static TokenManager facade hides the DI seam and keeps hidden coupling",
+          "description": "TokenManager remains a static facade over an injected store, resolving Container.shared.credentialStore() on every call. This is a pragmatic 'seam' but it leaves 23 call sites coupled to a hidden Service Locator: nothing in a caller's signature indicates it touches credential storage, and each static call performs a container resolution (Factory lock + cache lookup) on what may be hot paths (e.g., building auth headers per request). It also means non-test code cannot substitute a store per-scope (e.g., per-session) without going through the global container. The per-call resolution is correctly justified for test isolation, but the long-term direction should be migrating call sites to inject CredentialStoring (or a TokenStoring abstraction) directly, as the codebase has done for other services.",
+          "suggestedFix": "Keep the facade for now, but add a tracked follow-up to migrate call sites to @Injected(\\.credentialStore) or a higher-level TokenStoring protocol, then delete the static facade. Document in AGENTS.md that new code should not add call sites to TokenManager."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 70,
+          "endLine": 83,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Test-environment detection embedded in production DI registration",
+          "description": "The credentialStore factory hardcodes knowledge of XCTest environment variables and preview detection inside the app's composition root. Even though it's compiled out in release, this inverts the dependency direction: production code knows about the test harness. If the test process detection heuristics change (e.g., Swift Testing without XCTest hosting, different env vars in future Xcode versions), the isolation silently breaks and the old Keychain-clobbering bug returns without any test failing — CredentialStoreIsolationTests would fail only if it happens to run, and only in that configuration. A cleaner pattern is for the test bundle itself to register the in-memory store (e.g., via Container.shared.credentialStore.register in a test observer/trait, or an AutoRegistering conformance in the test target), keeping the app's composition root free of test knowledge.",
+          "suggestedFix": "Prefer registering InMemoryCredentialStore from the test target (FactoryTesting's .container trait setup or Container.shared.autoRegister in the test bundle's principal class) instead of sniffing XCTest env vars in the app target. If the sniffing must stay as defense-in-depth, extract it into a shared `ProcessInfo.isRunningTests` helper so all factories (this one and browserDataSource) use one definition."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 111,
+          "endLine": 117,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "OSAllocatedUnfairLockBox is misnamed — it uses NSLock, not OSAllocatedUnfairLock",
+          "description": "The private helper is named OSAllocatedUnfairLockBox but is implemented with NSLock. The name promises os.lock semantics (OSAllocatedUnfairLock, iOS 16+), which the implementation does not deliver. A future reader may assume unfair-lock characteristics or attempt to 'simplify' by removing the class in favor of the real OSAllocatedUnfairLock without noticing the discrepancy. Either use OSAllocatedUnfairLock<State> directly (which would also let InMemoryCredentialStore be Sendable without @unchecked) or rename the box to something implementation-neutral.",
+          "suggestedFix": "Replace with `OSAllocatedUnfairLock<(strings: [String: String], blobs: [String: Data])>` from the os module, or rename the class to e.g. `LockedCredentialBox`."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 27,
+          "endLine": 37,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "CredentialStoring protocol leaks storage-tier decisions to every caller",
+          "description": "The protocol exposes secure vs. non-secure methods (secureString/setSecureString vs. string/data), making each caller responsible for choosing the correct security tier per key. This encodes today's Keychain/UserDefaults split into the abstraction, so a future decision to move the user object or APNs token into secure storage requires changing call sites (currently just TokenManager, but the protocol is a general seam). A higher-level abstraction keyed by credential kind (token, tokenType, user, deviceToken) would centralize the tier decision in the store implementation and prevent a caller from accidentally writing a secret through the non-secure path. The file's own header acknowledges the split is 'current behavior, not an endorsement' — the protocol shape makes that behavior harder to fix later.",
+          "suggestedFix": "Consider a domain-level protocol (e.g., func token() -> String?, func setToken(_:), func user() -> Data?, …) or an enum-keyed API where the implementation decides the storage tier, so the security classification lives in one place."
+        },
+        {
+          "id": "f006",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 42,
+          "endLine": 55,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Isolation tests race with real Keychain/UserDefaults state and parallel suites",
+          "description": "The before/after comparisons against the real Keychain and UserDefaults.standard assume no other code mutates those keys between the two reads. Swift Testing runs suites in parallel by default; if any other suite (or app startup code in the host process) touches 'authToken' or 'currentUser' during the window, these tests fail spuriously — the very flakiness class this PR fixes. The tests are inherently valuable, but they should be serialized or the assertion should tolerate concurrent external mutation. Additionally, if the seam ever regresses, the '1 of 2'/'2 of 2' pair can also produce order-dependent false passes since they only detect leakage if both run and share a store.",
+          "suggestedFix": "Add .serialized to the suite (it already has .container) and/or use unique probe keys where possible. For the token test, the unique UUID token value could be asserted absent from the real keychain rather than comparing full before/after snapshots."
+        },
+        {
+          "id": "f007",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 44,
+          "endLine": 50,
+          "severity": "nitpick",
+          "category": "correctness",
+          "title": "Sendable claim on KeychainCredentialStore relies on UserDefaults thread-safety, undocumented for Swift concurrency",
+          "description": "KeychainCredentialStore is declared Sendable and hides UserDefaults.standard behind a computed property to avoid storing a non-Sendable value. This compiles, but the Sendable guarantee is only as strong as UserDefaults' internal thread-safety (which Apple documents as thread-safe, so this is acceptable) — worth noting because the pattern of 'computed property to dodge Sendable checking' is effectively an implicit @unchecked and could be copied to types where the underlying dependency is not thread-safe.",
+          "suggestedFix": "Add a brief comment noting UserDefaults is documented thread-safe, which is what actually justifies the Sendable conformance — the computed property alone doesn't."
+        },
+        {
+          "id": "f008",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 86,
+          "endLine": 88,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "authenticatedUser factory still reaches through TokenManager instead of the new seam",
+          "description": "The authenticatedUser factory (visible in the diff context) resolves the user via TokenManager.getUser() rather than depending on the credentialStore factory directly. Inside the composition root, going through the static facade creates an indirect self-dependency (container → TokenManager → Container.shared) instead of a straightforward factory-to-factory dependency (self.credentialStore()). It works because both resolve the same cached instance, but it obscures the dependency graph and would break if a non-shared container were ever used.",
+          "suggestedFix": "Within Container extensions, resolve the store directly: `self { guard let data = self.credentialStore().data(forKey: \"currentUser\"), let user = try? JSONDecoder().decode(User.self, from: data) else { return nil } ... }` — or accept the facade but document that Container.shared is assumed."
+        }
+      ],
+      "durationMs": 48018,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "role": "bug-hunter",
+      "provider": "openrouter",
+      "findings": [],
+      "durationMs": 353287,
+      "status": "error",
+      "error": "Response truncated at token limit; findings would be incomplete"
+    },
+    {
+      "model": "google/gemini-3.6-flash",
+      "role": "accessibility-auditor",
+      "provider": "google",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 71,
+          "endLine": 79,
+          "severity": "important",
+          "category": "best-practices",
+          "title": "#if DEBUG check prevents test isolation in Release test builds",
+          "description": "The credentialStore factory uses #if DEBUG to guard test and preview environment detection. If unit tests or integration tests are executed in a Release build configuration (e.g., performance test suites or Release CI jobs), the environment check is compiled out. This causes tests to fall back to KeychainCredentialStore and write directly to the app's real Keychain and UserDefaults.",
+          "suggestedFix": "Remove the #if DEBUG compiler directive or ensure test environment detection is performed dynamically regardless of compilation flags."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 120,
+          "endLine": 141,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Shared underlying dictionary for secure and non-secure strings",
+          "description": "InMemoryCredentialStore routes both secureString and string operations to the same underlying strings dictionary in OSAllocatedUnfairLockBox. If the same key is ever used for both secure (Keychain) and non-secure (UserDefaults) storage, InMemoryCredentialStore will share storage for them, whereas KeychainCredentialStore keeps them separated in Keychain vs UserDefaults.",
+          "suggestedFix": "Use separate dictionaries inside OSAllocatedUnfairLockBox for secure strings (Keychain) and standard strings (UserDefaults)."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 147,
+          "endLine": 149,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Misleading class name OSAllocatedUnfairLockBox",
+          "description": "The class is named OSAllocatedUnfairLockBox, but its lock property is instantiated as an NSLock rather than OSAllocatedUnfairLock.",
+          "suggestedFix": "Rename OSAllocatedUnfairLockBox to LockBox or NSLockBox, or update the lock property to use OSAllocatedUnfairLock if targeting iOS 16+."
+        }
+      ],
+      "durationMs": 35536,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/qwen/qwen3.8-max",
+      "role": "project-rules",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 17,
+          "endLine": 19,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Per-call Factory resolution may return different store instances",
+          "description": "The `store` computed property resolves `Container.shared.credentialStore()` on every access. With `.cached` scope this should return the same instance within a container lifetime, but if `Container.shared.reset(scope:)` is called mid-operation (e.g., `AppState.login()` / `AppState.logout()` call `reset(scope: .session)`), a subsequent `TokenManager` call within the same logical operation could resolve a *new* `InMemoryCredentialStore` (or `KeychainCredentialStore`) instance. For example, `deleteToken()` calls `store.setSecureString(nil, ...)` four times — if a reset fires between calls (unlikely but possible via re-entrant code paths), the second pair of deletions would target a fresh empty store, silently skipping the user/deviceToken deletions. More practically, `saveToken` writes to one resolved instance and a later `getToken()` in the same run loop tick could theoretically resolve a different instance if a session reset happened in between. The comment says 'resolved per call rather than cached' to avoid outliving the per-test container, but this introduces a subtle window for inconsistency within a single logical operation.",
+          "suggestedFix": "Consider resolving the store once at the start of multi-step operations like `deleteToken()` and `saveToken(_:tokenType:)` and passing it through, or document that a container reset must not occur mid-operation. Alternatively, cache the resolved store in a `nonisolated(unsafe) static` that is invalidated on session reset."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 68,
+          "endLine": 80,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Keychain delete-then-add is not atomic; error from SecItemAdd is ignored",
+          "description": "In `KeychainCredentialStore.setSecureString`, the delete succeeds but `SecItemAdd` could fail (e.g., device locked in a race, or a transient Keychain error). The `SecItemAdd` return status is discarded (`nil` passed as the result pointer). If the add fails after the delete succeeds, the token is silently lost. The original code had the same issue, but since this is a new file establishing the seam, it's worth noting. Additionally, `SecItemDelete` returning `errSecItemNotFound` is fine (idempotent), but other error codes are also silently ignored.",
+          "suggestedFix": "Check the `OSStatus` from `SecItemAdd` and at minimum log a warning in DEBUG builds via `LoggingConfiguration` / `NetworkLogger` so silent credential loss is diagnosable."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 72,
+          "endLine": 78,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "Test-environment detection relies on multiple env vars; fragile heuristic",
+          "description": "The check uses three environment variables (`XCTestConfigurationFilePath`, `XCTestSessionIdentifier`, `XCTestBundlePath`) plus `XCODE_RUNNING_FOR_PREVIEWS`. If Apple changes or removes any of these in a future Xcode/Testing framework release, the detection silently falls through to `KeychainCredentialStore` in tests, reintroducing the exact IOS-22 flake this change fixes. The `#if DEBUG` guard means release builds are safe, but the test-environment detection is a heuristic with no compile-time guarantee.",
+          "suggestedFix": "Consider adding a comment noting which Xcode/Swift Testing version these variables were verified against, and whether `CredentialStoreIsolationTests` would catch a regression (it does — the test reads the real Keychain and would fail if the real store were used). This is acceptable as-is given the isolation tests, but documenting the verification baseline helps future maintainers."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 82,
+          "endLine": 99,
+          "severity": "important",
+          "category": "tests",
+          "title": "Per-test isolation tests assume execution order is not guaranteed",
+          "description": "The two tests `startsEmptyOne` and `startsEmptyTwo` each assert `TokenManager.getToken() == nil` at the start, then write a token. The comment says 'each writes a token and asserts it starts from an empty store' and relies on the `.container` trait providing a fresh container per test. However, Swift Testing does not guarantee execution order within a suite, and both tests write to the same `TokenManager` static interface. If the `.container` trait's reset happens at suite-level rather than test-level (or if the Factory `.cached` scope outlives the per-test container reset), the second test to run would see the first test's token and fail. The tests are correctly designed to detect this, but the `#expect(TokenManager.getToken() == nil)` assertion at the top of each test makes them order-dependent in their *pass/fail behavior* — one will always fail if isolation is broken, which is the intent. However, if `.container` resets between tests but the `.cached` scope is NOT tied to the `.container` trait's lifecycle, both tests could pass with a shared store that happens to be empty at suite start. The test pair only proves isolation if `.container` truly gives each test a fresh container AND `.cached` is scoped to that container.",
+          "suggestedFix": "Verify that the `.container` trait in `FactoryTesting` resets `Container.shared` (including `.cached` scope) before each test function, not just before the suite. If `.cached` survives the `.container` reset, these tests would both pass trivially on the first run (empty store) but the second test would see the first's token. Consider adding an explicit assertion that the two tokens are different strings (which they are) to make the failure mode unambiguous."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 46,
+          "endLine": 51,
+          "severity": "minor",
+          "category": "best-practices",
+          "title": "UserDefaults accessed via computed property for Sendable compliance is fragile",
+          "description": "The comment explains that `UserDefaults` is not `Sendable` and the computed property avoids storing it. However, `KeychainCredentialStore` is a `struct` conforming to `Sendable` (inherited from `CredentialStoring: Sendable`). `UserDefaults.standard` is a shared mutable singleton — accessing it from multiple threads is technically safe per Apple's docs (UserDefaults is thread-safe), but the struct's `Sendable` conformance is somewhat misleading: it implies the struct's state is safe to send across concurrency domains, but the *effect* of calling its methods mutates shared global state. This is fine in practice but the comment could note that thread-safety comes from `UserDefaults` itself being thread-safe, not from the struct's value semantics.",
+          "suggestedFix": "No code change needed; consider a brief comment clarifying that thread-safety is inherited from UserDefaults/Keychain APIs being thread-safe, not from the struct's Sendable conformance."
+        },
+        {
+          "id": "f006",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 10,
+          "endLine": 10,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "TokenManager changed from struct to enum without @available or migration note",
+          "description": "The type changed from `struct TokenManager` to `enum TokenManager`. Since all members are static, this is semantically equivalent (prevents instantiation), but if any external code or test did `let tm = TokenManager()` or used `TokenManager` as a type annotation for a value, it would break. The AGENTS.md notes say 'all 23 call sites are unchanged', so this is likely safe, but the change from struct to enum is a source-breaking change for any code that instantiated the type.",
+          "suggestedFix": "Confirm no call site instantiates `TokenManager()`. If none do (as stated), this is fine. The enum-as-namespace pattern is idiomatic Swift."
+        },
+        {
+          "id": "f007",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 85,
+          "endLine": 88,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "authenticatedUser factory still calls TokenManager.getUser() directly",
+          "description": "The `authenticatedUser` factory at line 85-88 calls `TokenManager.getUser()` which now resolves through `Container.shared.credentialStore()`. This creates a circular-ish dependency: resolving `authenticatedUser` triggers resolution of `credentialStore` via `TokenManager`. This is not a true cycle (credentialStore doesn't depend on authenticatedUser), but it means the `authenticatedUser` factory's behavior silently depends on the credentialStore registration. If someone registers a custom `credentialStore` for a test but forgets that `authenticatedUser` also goes through it, they may get unexpected nil users. This is by design per the AGENTS.md, but worth noting for test authors.",
+          "suggestedFix": "No change needed; this is the intended design. The AGENTS.md documentation covers this adequately."
+        },
+        {
+          "id": "f008",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 47,
+          "endLine": 53,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Isolation test uses UUID in token but doesn't clean up in-memory store",
+          "description": "The `tokenWriteDoesNotReachTheKeychain` test saves a token with a UUID suffix but never deletes it. While the `.container` trait should provide isolation, if the test framework runs tests in the same container (e.g., if `.container` is misconfigured), the leftover token could affect sibling tests. The `deleteDoesNotReachTheRealStores` test at line 56 calls `TokenManager.deleteToken()` which would clean up, but test execution order is not guaranteed.",
+          "suggestedFix": "The `.container` trait should handle this, and the `startsEmptyOne`/`startsEmptyTwo` tests explicitly verify clean state. This is acceptable as-is given the isolation guarantees, but a `defer { TokenManager.deleteToken() }` would make the test self-cleaning regardless of the container trait."
+        }
+      ],
+      "durationMs": 463417,
+      "status": "success"
+    },
+    {
+      "model": "openai/gpt-5.6-sol",
+      "role": "regression-hunter",
+      "provider": "openai",
+      "findings": [
+        {
+          "id": "5e66bb57-4e89-4fc0-b679-4327c447a886",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 72,
+          "endLine": 80,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Release-config test runs still use the production credential store",
+          "description": "The test-runner detection is entirely compiled out when DEBUG is unset. Hosted tests can be run using a Release or other non-DEBUG configuration, in which case `credentialStore` silently falls through to `KeychainCredentialStore` and once again writes the host app's real Keychain and UserDefaults. This contradicts the documented guarantee that test runners default to isolated storage and reintroduces the credential-clobbering behavior this change is intended to remove.",
+          "suggestedFix": "Perform reliable test-process detection in all build configurations, preferably using a runtime test-bundle signal that cannot accidentally affect normal production launches. Keep preview-only detection conditional if necessary, but do not compile test isolation out of Release-config test runs."
+        },
+        {
+          "id": "321621e9-fb6b-413c-b9e7-88f85774a188",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 42,
+          "endLine": 63,
+          "severity": "critical",
+          "category": "tests",
+          "title": "Isolation tests destructively overwrite credentials when the guard fails",
+          "description": "These tests invoke `saveToken` and `deleteToken` against the fixed production keys without restoring their original values. If the environment detection fails—including the non-DEBUG case in this diff—the test first overwrites or deletes the simulator's actual session and only then reports an assertion failure, leaving the host app signed out or holding test credentials. The delete test is especially destructive because `deleteToken` also removes `tokenType` and `deviceToken`, while the test snapshots and checks only `authToken` and `currentUser`.",
+          "suggestedFix": "Snapshot all four underlying values (`authToken`, `tokenType`, `currentUser`, and `deviceToken`) and restore them with a `defer` block using direct Keychain/UserDefaults helpers, regardless of whether assertions pass. Also assert that every production-backed value remains unchanged."
+        }
+      ],
+      "durationMs": 112198,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/moonshotai/kimi-k3",
+      "role": "dead-code",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 147,
+          "endLine": 166,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "OSAllocatedUnfairLockBox is named after a primitive it doesn't use",
+          "description": "The private lock box is named `OSAllocatedUnfairLockBox` but is implemented with `NSLock`, not `OSAllocatedUnfairLock`. The name promises a specific synchronization primitive (which would also require importing `os` and an iOS 16+ availability story), and the comment above it even frames the type as avoiding an actor — a reader verifying Sendable-safety will look for the unfair lock and find NSLock instead. Either rename it (e.g. `LockedCredentialValues`) or actually use `OSAllocatedUnfairLock`.",
+          "suggestedFix": "Rename the type to something implementation-agnostic like `LockedStore` or `LockedCredentialValues`, or switch the internals to `OSAllocatedUnfairLock` if that was the intent."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 65,
+          "endLine": 78,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Keychain write failures are silently discarded",
+          "description": "`setSecureString` ignores the `OSStatus` from both `SecItemDelete` and `SecItemAdd`. If the add fails (e.g. errSecDuplicateItem from a race between two writers, or an access-control error), the token is silently not persisted and the next `getToken()` returns nil — an auth failure with no diagnostic anywhere. This preserves the pre-seam behavior verbatim (as the comment states), so it is not a regression, but the seam was the right moment to at least log failures; the new `TokenManager` layer has no other way to observe them.",
+          "suggestedFix": "Capture the status: `let status = SecItemAdd(addQuery as CFDictionary, nil)` and log (via the existing logging configuration) when `status != errSecSuccess && status != errSecDuplicateItem` — or have the protocol throw so callers can decide."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 68,
+          "endLine": 84,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Test-runner detection is DEBUG-only; release test plans hit the real Keychain",
+          "description": "The in-memory default is gated behind `#if DEBUG`, so any test plan that runs against a Release configuration (a common CI setup for performance or release-validation jobs) will silently go back to writing the host app's real Keychain and UserDefaults — reintroducing exactly the IOS-22 flake and simulator-account clobbering this change removes, with no warning. The comment says 'release builds compile the check out' as a feature, but the failure mode it guards against is silent and environmental, which is the same trap the in-memory default was built to avoid.",
+          "suggestedFix": "Gate on the presence of `XCTestConfigurationFilePath` regardless of build configuration (the env var only exists under a test runner, so there is no production cost), or document loudly in AGENTS.md that Release-configuration test runs are unsupported."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 60,
+          "endLine": 69,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Delete-isolation test only checks the authToken key",
+          "description": "`deleteDoesNotReachTheRealStores` snapshots `authToken` in the Keychain and `currentUser` in UserDefaults, but `TokenManager.deleteToken()` also clears `tokenType` and `deviceToken`. If a future refactor routed those two keys through the real stores, this test would still pass. Snapshotting all four keys (or at least asserting on `deviceToken`, the other UserDefaults-backed key) would make the pin complete.",
+          "suggestedFix": "Add `rawKeychainString(forKey: \"tokenType\")` and `UserDefaults.standard.string(forKey: \"deviceToken\")` to the before/after expectations."
+        }
+      ],
+      "durationMs": 458768,
+      "status": "success"
+    },
+    {
+      "model": "openrouter/x-ai/grok-4.5",
+      "role": "dependency-hygiene",
+      "provider": "openrouter",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 64,
+          "endLine": 80,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Keychain update can drop credentials on failed SecItemAdd",
+          "description": "setSecureString always SecItemDelete-s first, then calls SecItemAdd without checking the OSStatus. If add fails after a successful delete (errSecAuthFailed, errSecDecode, disk/full keychain, etc.), the previous token is already gone and the new value was not stored, silently logging the user out. The load path similarly treats any non-success as nil with no distinction from not-found. At minimum, add failures should be detected (and ideally the write should use SecItemUpdate with add-on-missing, or surface/log non-success statuses other than errSecItemNotFound).",
+          "suggestedFix": "Prefer update-or-add: try SecItemUpdate; on errSecItemNotFound, SecItemAdd. Check OSStatus on both paths and log/assert non-success (except item-not-found on delete). Example shape:\n\nfunc setSecureString(_ value: String?, forKey key: String) {\n    let base: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrAccount: key]\n    guard let value, let data = value.data(using: .utf8) else {\n        SecItemDelete(base as CFDictionary)\n        return\n    }\n    let update = SecItemUpdate(base as CFDictionary, [kSecValueData: data] as CFDictionary)\n    if update == errSecItemNotFound {\n        var add = base\n        add[kSecValueData] = data\n        add[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly\n        let status = SecItemAdd(add as CFDictionary, nil)\n        assert(status == errSecSuccess || status == errSecDuplicateItem)\n    }\n}"
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 112,
+          "endLine": 140,
+          "severity": "minor",
+          "category": "tests",
+          "title": "InMemoryCredentialStore collapses Keychain and UserDefaults namespaces",
+          "description": "KeychainCredentialStore keeps secure strings in the Keychain and plain strings/data in UserDefaults, so the same key written via setSecureString is not visible to string(forKey:) (and vice versa). InMemoryCredentialStore routes secureString/setSecureString and string/setString through one strings map (and only blobs for data). Tests can therefore pass while production would return nil (or the reverse) if any caller ever reused a key across the two APIs. TokenManager’s keys currently do not overlap, so this is latent, but the double’s fidelity gap weakens the seam as a general substitute.",
+          "suggestedFix": "Split the lock box into separate maps, e.g. secureStrings vs plainStrings (and keep blobs for data), and have secure* and non-secure* methods use different maps so cross-API reads stay isolated like production."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 71,
+          "endLine": 84,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Test/preview store isolation is compiled out of non-DEBUG builds",
+          "description": "The XCTest/preview environment check is wrapped in #if DEBUG, so any test or preview run compiled without DEBUG (e.g. Release test plans, some CI schemes) will resolve KeychainCredentialStore and write the host app’s real Keychain/UserDefaults—the exact IOS-22 failure mode this seam is meant to prevent. Isolation then depends on build configuration rather than runtime context alone.",
+          "suggestedFix": "Keep runtime ProcessInfo checks outside #if DEBUG, or gate with a broader flag that Release test targets also define (e.g. #if DEBUG || TESTING). Alternatively register InMemoryCredentialStore from the test bundle’s setUp via Container.shared.credentialStore.register { … } so isolation does not depend on the factory’s compile-time default."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 145,
+          "endLine": 165,
+          "severity": "nitpick",
+          "category": "best-practices",
+          "title": "Lock box named for OSAllocatedUnfairLock but uses NSLock",
+          "description": "OSAllocatedUnfairLockBox suggests os_unfair_lock / OSAllocatedUnfairLock, but the implementation is NSLock. The name will mislead readers searching for unfair-lock semantics or lock ordering assumptions.",
+          "suggestedFix": "Rename to something accurate (e.g. LockedCredentialBox) or switch the implementation to OSAllocatedUnfairLock if that is the intended primitive."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 54,
+          "endLine": 64,
+          "severity": "nitpick",
+          "category": "tests",
+          "title": "Delete isolation test omits deviceToken UserDefaults key",
+          "description": "deleteDoesNotReachTheRealStores asserts Keychain authToken and UserDefaults currentUser are unchanged after TokenManager.deleteToken(), but deleteToken also clears deviceToken via setString(nil, …). A regression that pointed only the APNs key at UserDefaults.standard would not be caught.",
+          "suggestedFix": "Also snapshot and compare UserDefaults.standard.string(forKey: \"deviceToken\") before/after deleteToken()."
+        }
+      ],
+      "durationMs": 556297,
+      "status": "success"
+    },
+    {
+      "model": "anthropic/claude-fable-5",
+      "role": "edge-case-hunter",
+      "provider": "anthropic",
+      "findings": [
+        {
+          "id": "f001",
+          "file": "InfraOne/Core/DI/Container+Services.swift",
+          "startLine": 69,
+          "endLine": 82,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Test-runner detection can silently fail, letting tests write the real Keychain",
+          "description": "The DEBUG-only environment sniffing (`XCTestConfigurationFilePath`, `XCTestSessionIdentifier`, `XCTestBundlePath`, `XCODE_RUNNING_FOR_PREVIEWS`) is a fragile inclusion list. Swift Testing (which this project uses — the isolation tests are written with `import Testing`) does not guarantee the XCTest-era environment variables are set in all configurations: when tests run under the pure swift-testing runner (e.g. `swift test`, or future Xcode versions that decouple from XCTest hosting), none of the three XCTest variables may be present, and the factory silently falls back to `KeychainCredentialStore` — reintroducing the exact IOS-22 host-app clobbering this seam exists to prevent. The failure mode is silent: the isolation tests themselves would fail, but only after the host app's Keychain/UserDefaults were already mutated (the account replacement happens before the assertion detects it). Additionally, `XCODE_RUNNING_FOR_PREVIEWS` is compared with exact string `\"1\"`; Xcode has changed this value's presence/semantics across versions. A more robust approach is to check `NSClassFromString(\"XCTestCase\") != nil` or `Bundle.allBundles` for a `.xctest` bundle in addition to the env vars, or have the test target register the in-memory store explicitly in a suite-level trait so the guarantee doesn't rest on environment sniffing alone.",
+          "suggestedFix": "Add a runtime fallback check, e.g. `|| NSClassFromString(\"XCTestCase\") != nil`, and/or register `InMemoryCredentialStore` explicitly from the `.container` trait / test setup so isolation does not depend solely on environment-variable presence."
+        },
+        {
+          "id": "f002",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 66,
+          "endLine": 83,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Keychain write errors are silently ignored (SecItemAdd/SecItemDelete)",
+          "description": "`setSecureString` discards the OSStatus results of both `SecItemDelete` and `SecItemAdd`. If `SecItemAdd` fails (e.g. `errSecInteractionNotAllowed` when the device has never been unlocked since boot — relevant given `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` — or `errSecDuplicateItem` from a concurrent writer racing between the delete and the add), the auth token is silently lost. The next `getToken()` returns nil and the user is logged out with no diagnostic trail. The delete-then-add pattern is also not atomic: two concurrent `saveToken` calls can interleave (delete A, delete B, add A, add B-fails-duplicate) leaving a stale token. This is preserved verbatim from the old TokenManager, but the new type is documented as `Sendable` and callable \"from arbitrary contexts\", making the race more likely, and a seam refactor is the right moment to at least log failures.",
+          "suggestedFix": "Capture and log the OSStatus from SecItemAdd/SecItemDelete (at minimum via os_log/assertionFailure in DEBUG), and consider SecItemUpdate-with-fallback-to-add or serializing writes to make save atomic."
+        },
+        {
+          "id": "f003",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 51,
+          "endLine": 62,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "Keychain queries lack kSecAttrService, matching items across all services",
+          "description": "Both the read query in `secureString(forKey:)` and the write/delete queries key only on `kSecClass` + `kSecAttrAccount` with generic account names like `\"authToken\"`. Without `kSecAttrService`, the query matches (and `SecItemDelete` deletes) ANY generic-password item with that account name in the app's keychain access group — including items written by SDKs or other components that happen to use the same generic key. Conversely, a third-party SDK writing an item with account `\"authToken\"` and a different service would be read back as the app's auth token. This is preserved from the original code, but since the new `CredentialStoreIsolationTests` also hardcode the same unscoped query, the ambiguity is now baked into the test contract too.",
+          "suggestedFix": "Add a `kSecAttrService: Bundle.main.bundleIdentifier ?? \"InfraOne\"` attribute to all queries (with a one-time migration read of the legacy unscoped items)."
+        },
+        {
+          "id": "f004",
+          "file": "InfraOne/Core/Storage/TokenManager.swift",
+          "startLine": 23,
+          "endLine": 29,
+          "severity": "important",
+          "category": "correctness",
+          "title": "Per-call store resolution creates TOCTOU across multi-key operations",
+          "description": "`store` is a computed property resolved from `Container.shared` on every access, and `saveToken`, `deleteToken` each access it multiple times (once per statement). If the container is reset or a new registration lands between two accesses — exactly what the `.container` test trait does between tests, or what parallel Swift Testing execution can do mid-test — a single logical operation can straddle two different store instances: e.g. `deleteToken()` clears `tokenKey` in store A but `tokenTypeKey`/`userKey` in freshly-created store B, leaving store A with a dangling `tokenType` and no `token` (or vice versa for `saveToken`, leaving a token without its type). Since Factory's `.cached` scope reset is precisely the mechanism the tests rely on, this time-of-check/time-of-use gap is reachable in parallelized test runs and produces the same cross-suite interference flake class (IOS-22) the seam is meant to fix, in a rarer form.",
+          "suggestedFix": "Resolve the store once per operation: `static func saveToken(...) { let store = Self.store; store.setSecureString(token, forKey: tokenKey); store.setSecureString(tokenType, forKey: tokenTypeKey) }` — same for `deleteToken()`. This guarantees each logical operation sees a single consistent store instance."
+        },
+        {
+          "id": "f005",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 125,
+          "endLine": 166,
+          "severity": "minor",
+          "category": "api-design",
+          "title": "OSAllocatedUnfairLockBox is misnamed — it uses NSLock, not OSAllocatedUnfairLock",
+          "description": "The private class is named `OSAllocatedUnfairLockBox` but is implemented with `NSLock`. This is misleading for future maintainers who will assume `OSAllocatedUnfairLock` semantics (no recursion, os_unfair_lock priority handling, iOS 16+ availability). Either use the real `OSAllocatedUnfairLock<[State]>` from the `os` module (which would also let the class become a struct and drop `@unchecked Sendable`), or rename to something implementation-neutral like `LockedCredentialBox`.",
+          "suggestedFix": "Rename to `LockedCredentialBox`, or actually adopt `OSAllocatedUnfairLock` around a small state struct and remove the `@unchecked Sendable` annotation."
+        },
+        {
+          "id": "f006",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 137,
+          "endLine": 155,
+          "severity": "minor",
+          "category": "correctness",
+          "title": "In-memory store shares one string namespace for secure and non-secure values",
+          "description": "`InMemoryCredentialStore` routes both `secureString`/`setSecureString` and `string`/`setString` into the same `strings` dictionary in the lock box. The production `KeychainCredentialStore` keeps these in disjoint stores (Keychain vs UserDefaults). If a secure key and a plain key ever share the same name (e.g. a future refactor stores `\"tokenType\"` via `setString` while a legacy path still reads it via `secureString`), the in-memory store would make them alias each other while production would not — a behavioral divergence between the test double and the real store that could mask or create test-only pass/fail differences. Today the keys are disjoint, but nothing enforces it.",
+          "suggestedFix": "Give the box separate `secureStrings` and `plainStrings` dictionaries so the in-memory store mirrors the production store's namespace separation."
+        },
+        {
+          "id": "f007",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 55,
+          "endLine": 65,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Isolation assertions compare against mutable host state, allowing false passes",
+          "description": "`tokenWriteDoesNotReachTheKeychain` and `deleteDoesNotReachTheRealStores` snapshot the real Keychain/UserDefaults `before` and assert equality `after`. If a sibling suite (or a regression in the seam plus a coincidentally-identical write) mutates the real store between the snapshot and the assertion, or if the seam is broken but the test happens to write the same value that was already present (`before == after` even though a real write occurred), the test passes falsely. In particular, `deleteDoesNotReachTheRealStores` passes vacuously when the real Keychain has no `authToken` at all — deleting nothing looks identical to being isolated. The unique-UUID token in the first test mitigates the write case; the delete test has no such guard. Consider seeding a known sentinel into the real Keychain/UserDefaults in the test (and cleaning it up) so the assertion distinguishes 'isolated' from 'nothing there to clobber'.",
+          "suggestedFix": "In `deleteDoesNotReachTheRealStores`, write a sentinel value directly into the real Keychain/UserDefaults first (via the raw helpers), run `TokenManager.deleteToken()`, assert the sentinel survives, then clean the sentinel up in a defer block."
+        },
+        {
+          "id": "f008",
+          "file": "InfraOneTests/Core/CredentialStoreIsolationTests.swift",
+          "startLine": 84,
+          "endLine": 99,
+          "severity": "minor",
+          "category": "tests",
+          "title": "Per-test isolation pair can pass even when isolation is broken, under ordering luck",
+          "description": "`startsEmptyOne`/`startsEmptyTwo` each assert `getToken() == nil` at start and then write distinct tokens. This correctly fails if the `.container` reset stops working AND both tests run in the same process sequentially. However, under Swift Testing's default parallel execution the two tests may run concurrently in separate container contexts (or in random order), and the first test of the pair always sees an empty store even without isolation — only the second catches leakage, and only if it runs after the first. If parallelization places them in different processes/isolated containers for other reasons, both pass regardless. The comment claims the pair 'prove' per-test isolation; they only probabilistically detect its absence.",
+          "suggestedFix": "Force sequential execution for the pair with `.serialized` on the suite, or assert leakage deterministically: have one test write, then within the SAME test force a container reset (as the trait would) and assert `getToken() == nil` afterward."
+        },
+        {
+          "id": "f009",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 27,
+          "endLine": 37,
+          "severity": "nitpick",
+          "category": "api-design",
+          "title": "Protocol mixes nil-deletes semantics into setters without a dedicated delete API",
+          "description": "`CredentialStoring` overloads `nil` on setters to mean delete (`/// nil deletes`, `/// nil removes`). This works but makes call sites like `store.setString(nil, forKey: deviceTokenKey)` read ambiguously (is this 'set empty' or 'remove'?) and invites accidental deletes when an optional value flows through unchecked (e.g. `setSecureString(maybeToken, forKey:)` silently deleting the stored token when `maybeToken` is nil upstream). A dedicated `removeValue(forKey:)`/`removeSecureValue(forKey:)` would make deletion explicit and let setters take non-optional values.",
+          "suggestedFix": "Split into non-optional setters plus explicit `remove(forKey:)` / `removeSecure(forKey:)` methods."
+        },
+        {
+          "id": "f010",
+          "file": "InfraOne/Core/Storage/CredentialStore.swift",
+          "startLine": 16,
+          "endLine": 19,
+          "severity": "minor",
+          "category": "security",
+          "title": "User object and APNs token stored in plaintext UserDefaults (preserved, but flagged)",
+          "description": "The header comment acknowledges that the user object (which per the tests contains email, name, id) and the APNs device token live in `UserDefaults.standard` unencrypted, and explicitly says this is 'current behavior, not an endorsement'. UserDefaults is included in unencrypted backups (depending on device settings) and is trivially readable on jailbroken devices. The user object contains PII (email address). Since this refactor already introduces a `CredentialStoring` seam with a secure half, migrating `currentUser` to `setSecureString`/`setData`-on-Keychain would be low-cost now and much harder later once more call sites accrete.",
+          "suggestedFix": "Move `currentUser` (PII) into the Keychain-backed half of the store, with a one-time migration read from UserDefaults."
+        }
+      ],
+      "durationMs": 62853,
+      "status": "success"
+    }
+  ]
+}
