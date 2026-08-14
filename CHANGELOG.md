@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.8.2
+
+- **Cross-model agreement no longer disappears when reviewers describe the
+  same defect in different words.** Dedup now recognizes independently
+  corroborated findings in a tight file/line neighborhood before report
+  thresholds run, so agreement raises the signal instead of splitting into
+  single-reviewer findings that all sink below `minConsensusScore`.
+- The agreement fallback is deliberately conservative: it requires distinct
+  model/role evidence, dense local support, strict lexical confirmations, and
+  bounded spans; established and opposing concepts remain separate. The
+  behavior is pinned by nine real council runs, including two-sided over-merge
+  guards. No report threshold was loosened.
+
 ## 1.8.1
 
 - **A reviewer that returns no findings array is no longer reported as
