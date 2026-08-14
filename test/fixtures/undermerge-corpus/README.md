@@ -1,6 +1,6 @@
 # Under-merge corpus (RCL-17)
 
-Eight real council runs in which a group of findings that **should** have merged
+Nine real council runs in which a group of findings that **should** have merged
 did not, so the concept never reached the report. Each fixture is the verbatim
 `reviews[]` array from a production run — the true input to
 `deduplicateFindings` — plus an `expected` block describing the cluster that
@@ -39,8 +39,9 @@ Note the confidence floor is **not** involved: single-model findings score
 | `ao-7354-r5-trigger-label-nil-name` | allocator-one | `trigger_label/1` raises on missing/non-atom `column.name` | 11/17 | 0.647 |
 | `ao-7536-r1-icon-matcher-precision` | allocator-one | unclosed prefix in a test's string matcher | 8/17 | 0.471 |
 | `ao-7484-r2-aria-checked-roles` | allocator-one | `menuitemcheckbox`/`menuitemradio` not required to carry `aria-checked` | 6/15 | 0.400 |
+| `rcl-24-r1-claim-kind-heuristics` | rcl | corpus-specific claim heuristics embedded in generic dedup | 6/14 | 0.429 |
 
-Seven verified concepts clear `minConsensusScore: 0.4` once merged, so
+Eight verified concepts clear `minConsensusScore: 0.4` once merged, so
 **fixing dedup alone is sufficient** — no threshold retuning required. The
 `ao-7467-r1` proxy is a negative case: `standard_terms: nil` behavior and a
 `Decimal.t() | nil` typespec require different fixes and must remain separate.
@@ -57,10 +58,11 @@ recurrence detection cannot help, because the finding never entered the ledger.
 
 `undermerge-corpus.test.ts` has two layers:
 
-1. **Regression target** — fourteen assertions require the seven verified
+1. **Regression target** — sixteen assertions require the eight verified
    concepts to collapse and clear `minConsensusScore`; two more lock the
-   `ao-7467-r1` proxy as separate, below-threshold concepts. These were the
-   sixteen `it.fails` TDD targets before RCL-17 was implemented.
+   `ao-7467-r1` proxy as separate, below-threshold concepts. The original
+   fourteen positive and two negative assertions were the sixteen `it.fails`
+   TDD targets; dogfooding added the live RCL-24 pair.
 2. **Over-merge guard** — `ao-7536-r1` carries a second,
    distinct concept at the same lines ("global log capture is brittle, prefer
    per-test `capture_log`") which is unactionable and correctly below threshold
@@ -75,7 +77,12 @@ pass breaks the negative guards — the corpus is built to catch that.
   `ao-7354-r5` "lacks `@spec`" row was removed from the expectation, while five
   additional missing-`:name` variants were added. `ao-7467-r1` was confirmed
   to combine two concepts and is retained as a negative guard.
-- Drawn from 369 reports over 108 review targets. The eight are the survivors at
+- The ninth fixture came from RCL reviewing this fix itself. Six reviewers
+  independently flagged the hardcoded claim-kind heuristics, but the live
+  report split them across four groups until the agreement-neighborhood pass
+  was added. It is the fresh, unfrozen reproduction required by dogfooding.
+- The original eight fixtures were drawn from 369 reports over 108 review targets and
+  are the survivors at
   the calibrated threshold; at a looser 0.15 there were 21, at 0.10 there were
   58. Nothing clustered at 0.25 or above across all 17,899 below-threshold
   findings — which is itself the measurement of how little vocabulary
