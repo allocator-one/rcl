@@ -74,6 +74,7 @@ describe('generated skill files', () => {
       expect(content, path).toMatch(/Exit 2 is the configured consent boundary/i);
       expect(content, path).toMatch(/Exit 3 is an accounting\/infrastructure failure/i);
       expect(content, path).toMatch(/Never terminate a live council/i);
+      expect(content, path).toContain('failed to remove stale review artifacts');
       if (normalizedPath.includes('/.claude/')) {
         expect(content, path).toContain('exactly once as a foreground Bash call');
         expect(content.indexOf('run_in_background: true'), path).toBeGreaterThan(claim);

@@ -109,7 +109,7 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
 2. **Claim in the foreground, then run the review detached.** Run the first block below exactly once as a foreground Bash call. Its quoted `<TARGET>` is the exact resolved accounting key (the quotes are shell syntax, not part of the value). Never set `run_in_background` on this claim and never call it separately again. Any non-zero exit stops before the review: exit 2 is the configured consent boundary, so release the target lock and ask the user whether to stop for human review or continue with a specific higher cap; continue only after explicit approval by resuming with `--max-attempts <N>`. Exit 3 is an accounting/infrastructure failure: release the lock, report it, and do not suggest raising the cap. A successful claim is spent even if the later launch fails, is killed, produces no report, or is inconclusive.
 
    ```bash
-   rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json
+   rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json || { echo "failed to remove stale review artifacts" >&2; exit 3; }
    rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>
    ```
 
@@ -122,13 +122,13 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
      [--spec <SPEC>] [--roles <roles>]
    ```
 
-   Never pass `--post` or `--inline` mid-loop. If the run exits non-zero or the JSON report is missing or empty, read the run output, report the failure, and stop. It does not count as an evidence round, but its foreground claim remains spent.
+   Never pass `--post` or `--inline` mid-loop. If the run exits non-zero or the JSON report is missing or empty, read the run output, release the target lock, report the failure, and stop. It does not count as an evidence round, but its foreground claim remains spent.
 {{/claude}}
 {{#codex}}
 2. **Claim the attempt, then run the review detached.** Run the complete block below exactly once per intended council launch; its foreground first command claims exactly one attempt. Its quoted `<TARGET>` is the exact resolved accounting key (the quotes are shell syntax, not part of the value). Never call the claim separately and then rerun the complete block. Any non-zero claim exit stops the launch. Exit 2 is the configured consent boundary: release the target lock and ask the user whether to stop for human review or continue with a specific higher cap. Continue only after explicit approval, by resuming this skill with the approved `--max-attempts <N>`; never select or silently raise the cap yourself. Exit 3 is an accounting/infrastructure failure: release the lock, report the error, and do not suggest raising the cap because that cannot repair state, lock, Git, or filesystem failures. A successful claim is spent even if the following process fails to launch, is killed, times out, produces no report, or is inconclusive. RCL prints the run-specific runtime plan; never assume a fixed duration. Do not run the review as a plain foreground shell call. Delete stale reports and the PID file first, because a retry reuses the evidence-round number and must never monitor an old or recycled PID.
 
    ```bash
-   rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid
+   rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid || { echo "failed to remove stale review artifacts" >&2; exit 3; }
    rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>
    ATTEMPT_STATUS=$?
    [ "$ATTEMPT_STATUS" -eq 0 ] || exit "$ATTEMPT_STATUS"
