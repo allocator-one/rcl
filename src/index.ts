@@ -35,6 +35,11 @@ import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
 import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
 import {
+  buildCouncilRunPlan,
+  CouncilProgressReporter,
+  formatCouncilRunPlan,
+} from './output/progress.js';
+import {
   resolveFinding,
   buildDiscussPrompts,
   runDiscussion,
@@ -44,6 +49,11 @@ import type { ModelReview, ReviewResult } from './consensus/types.js';
 import type { Config } from './config/schema.js';
 import type { Role } from './roles/types.js';
 import type { Diff } from './resolver/types.js';
+import {
+  DEFAULT_CONVERGE_ATTEMPT_CAP,
+  claimConvergeAttempt,
+  resolveGitCommonDir,
+} from './converge/attempt-budget.js';
 
 const program = new Command();
 
@@ -154,6 +164,44 @@ program
   .option('--config <path>', 'Path to config file')
   .action(async (question: string, opts) => {
     await runDiscuss(question, opts);
+  });
+
+// Machine-enforced cost/safety guard used by the rcl-converge workflow.
+program
+  .command('converge-attempt')
+  .description('Atomically consume one persisted rcl-converge attempt before starting a review')
+  .requiredOption('--target <key>', 'Stable repository-and-PR/branch convergence target key')
+  .option(
+    '--max-attempts <n>',
+    `Explicit per-target cap override (default ${DEFAULT_CONVERGE_ATTEMPT_CAP} for a new target)`,
+    (value: string) => {
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed < 1) {
+        throw new InvalidArgumentError('--max-attempts must be a positive safe integer');
+      }
+      return parsed;
+    }
+  )
+  .option('--json', 'Output the claim as JSON')
+  .action(async (opts: { target: string; maxAttempts?: number; json?: boolean }) => {
+    try {
+      const claim = await claimConvergeAttempt({
+        gitCommonDir: await resolveGitCommonDir(),
+        target: opts.target,
+        maxAttempts: opts.maxAttempts,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(claim));
+      } else {
+        console.log(
+          `Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}. ` +
+            `State: ${claim.stateFile}`
+        );
+      }
+    } catch (err) {
+      console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+      process.exitCode = 2;
+    }
   });
 
 // roles subcommand
@@ -439,39 +487,58 @@ async function executeCouncil(
     )
   );
 
-  spinner.text = `Running ${chunkAssignments.length} reviews (${assignments.length} reviewers × ${chunks.length} chunk(s))...`;
-  spinner.start();
-
   const startTime = Date.now();
-  const completedReviews: ModelReview[] = [];
   const totalCalls = chunkAssignments.length;
+  const timeoutMs = config.timeout ?? DEFAULT_TIMEOUT_MS;
+  const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
+  const runPlan = buildCouncilRunPlan({
+    totalCalls,
+    reviewers: assignments.length,
+    chunks: chunks.length,
+    concurrency,
+    timeoutMs,
+  });
+  const planText = formatCouncilRunPlan(runPlan);
+  const interactive = process.stderr.isTTY === true;
+  if (interactive) {
+    spinner.text = planText;
+    spinner.start();
+  } else {
+    spinner.stop();
+    process.stderr.write(`${planText}\n`);
+  }
 
-  const chunkReviews = await runReviews(
-    chunkAssignments.map((ca) => ca.assignment),
-    prompts,
-    {
-      // Fall back to the shared constants, never to inline literals:
-      // duplicated defaults drift (this read 120_000 after the default
-      // moved to 600_000).
-      timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-      concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
-      reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
-      onReviewComplete: (review) => {
-        completedReviews.push(review);
-        const done = completedReviews.length;
-        const icon =
-          review.status === 'success'
-            ? '✓'
-            : review.status === 'timeout'
-              ? '⏱'
-              : review.status === 'parse_failed'
-                ? '⚠'
-                : '✗';
-        spinner.text = `Reviews: ${done}/${totalCalls} [${icon} ${review.model}/${review.role}]`;
-      },
-    }
-  );
+  const progress = new CouncilProgressReporter({
+    totalCalls,
+    interactive,
+    updateInteractive: (text) => {
+      spinner.text = text;
+    },
+    writeLine: (text) => {
+      process.stderr.write(`${text}\n`);
+    },
+  });
+  progress.start();
+
+  let chunkReviews: ModelReview[];
+  try {
+    chunkReviews = await runReviews(
+      chunkAssignments.map((ca) => ca.assignment),
+      prompts,
+      {
+        // Fall back to the shared constants, never to inline literals:
+        // duplicated defaults drift (this read 120_000 after the default
+        // moved to 600_000).
+        timeoutMs,
+        maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+        concurrency,
+        reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+        onReviewComplete: (review) => progress.complete(review),
+      }
+    );
+  } finally {
+    progress.stop();
+  }
 
   // Collapse per-chunk reviews back to one per (model, role) reviewer.
   const reviews = mergeChunkReviews(chunkReviews);

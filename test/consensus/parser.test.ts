@@ -129,6 +129,41 @@ describe('parseReviewOutput — untrusted output robustness', () => {
     expect(result.findings[0]!.id.length).toBeGreaterThan(0);
     expect(result.warnings.length).toBeGreaterThan(0);
   });
+
+  it('repairs literal control characters inside JSON strings with an explicit warning', () => {
+    const strict = JSON.stringify({
+      findings: [{ ...VALID_FINDING, description: 'first line\nsecond line' }],
+    });
+    const malformed = strict.replace('first line\\nsecond line', 'first line\nsecond line');
+    const result = parseReviewOutput(malformed, 'google/gemini-3.6-flash', 'general');
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]!.description).toBe('first line\nsecond line');
+    expect(result.unusable).toBe(false);
+    expect(result.warnings).toEqual([
+      'google/gemini-3.6-flash/general: repaired 1 unescaped JSON control character(s) inside string values',
+    ]);
+  });
+
+  it('does not repair control characters outside JSON strings', () => {
+    const malformed = '{"findings":\u0000null}';
+    const result = parseReviewOutput(malformed, 'google/gemini-3.6-flash', 'general');
+
+    expect(result.findings).toEqual([]);
+    expect(result.unusable).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes('JSON parse error'))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes('repaired'))).toBe(false);
+  });
+
+  it('leaves already-escaped control characters on the strict path', () => {
+    const strict = JSON.stringify({
+      findings: [{ ...VALID_FINDING, description: 'first line\nsecond line' }],
+    });
+    const result = parseReviewOutput(strict, 'google/gemini-3.6-flash', 'general');
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.warnings).toEqual([]);
+  });
 });
 
 // RCL-14: models routinely emit line numbers as JSON strings. A strict

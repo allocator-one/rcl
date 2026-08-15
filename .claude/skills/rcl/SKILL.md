@@ -173,7 +173,7 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 
 **Never** pipe the `rcl review` command through `head`, `tail`, `| head -n`, or similar — the report is captured in the files above no matter what scrolls past in the console.
 
-**Always launch the run in the background** (`run_in_background: true`) after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs, and continue when the task-completion notification arrives — never block on a foreground wait or sleep loop. Then confirm the JSON report file exists and is non-empty before parsing it. The full council takes 10–15 minutes; a plain foreground Bash call is killed at the 600-second tool cap with no report files written and the whole model spend wasted.
+**Always launch the run in the background** (`run_in_background: true`) after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs, and continue when the task-completion notification arrives — never block on a foreground wait or sleep loop. Then confirm the JSON report file exists and is non-empty before parsing it. RCL prints a run-specific call/wave estimate; multi-chunk councils can take much longer than one provider timeout. A plain foreground Bash call can be killed at the tool cap with no report files written and the whole model spend wasted.
 
 ### 6. Report back
 

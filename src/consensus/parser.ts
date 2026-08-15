@@ -96,6 +96,56 @@ function extractJsonCandidates(text: string): string[] {
   return candidates;
 }
 
+/**
+ * Gemini occasionally emits literal U+0000–U+001F characters inside a JSON
+ * string even when responseMimeType is application/json. Those characters
+ * have exactly one semantics-preserving JSON representation: a unicode
+ * escape. Repair only that unambiguous shape; controls outside strings and
+ * every other syntax error remain failures.
+ */
+function escapeUnquotedControlCharactersInStrings(
+  candidate: string
+): { text: string; repaired: number } | undefined {
+  let inString = false;
+  let escaped = false;
+  let repaired = 0;
+  let text = '';
+
+  for (const char of candidate) {
+    if (!inString) {
+      if (char === '"') inString = true;
+      text += char;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      text += char;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      text += char;
+      continue;
+    }
+    if (char === '"') {
+      inString = false;
+      text += char;
+      continue;
+    }
+
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f) {
+      text += `\\u${code.toString(16).padStart(4, '0')}`;
+      repaired++;
+    } else {
+      text += char;
+    }
+  }
+
+  return repaired > 0 ? { text, repaired } : undefined;
+}
+
 /** Assign stable, unique ids: empty or colliding ids are regenerated. */
 function normalizeIds(findings: Finding[], model: string, role: string): Finding[] {
   const modelSlug = model.replace(/[^a-z0-9]/gi, '');
@@ -144,6 +194,23 @@ export function parseReviewOutput(
       break;
     } catch (err) {
       lastParseError = err;
+    }
+  }
+  if (!parsedOk) {
+    for (const candidate of candidates) {
+      const repair = escapeUnquotedControlCharactersInStrings(candidate);
+      if (!repair) continue;
+      try {
+        parsed = JSON.parse(repair.text);
+        parsedOk = true;
+        warnings.push(
+          `${model}/${role}: repaired ${repair.repaired} unescaped JSON control character(s) inside string values`
+        );
+        break;
+      } catch {
+        // The candidate has other damage too. Keep the original strict parse
+        // error as the diagnostic and classify the response as unusable.
+      }
     }
   }
   if (!parsedOk) {

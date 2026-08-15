@@ -153,6 +153,24 @@ rcl roles show <name>      # Show system prompt and details for a role
 
 ---
 
+### `rcl converge-attempt`
+
+Machine-enforced safety guard used by the generated `rcl-converge` skill.
+Each call atomically consumes one per-target attempt under the repository's
+common Git directory, so the budget survives sessions and linked worktrees.
+New targets default to seven attempts, but an explicit invocation can set any
+positive cap with `--max-attempts`. Omitting the flag on resume preserves the
+persisted cap. At the boundary, RCL refuses before provider calls and directs
+the workflow to ask the user; an approved continuation explicitly supplies a
+higher cap.
+
+```bash
+rcl converge-attempt --target owner-repo-123                 # default/persisted cap
+rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit override
+```
+
+---
+
 ## Config File
 
 Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.
@@ -224,6 +242,12 @@ spec: SPEC.md
 ```
 
 Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`, `review-council.config.js`.
+
+Before dispatch, RCL prints the expanded reviewer × chunk call count,
+concurrency, wave count, timeout, and timeout-bound queue estimate. Interactive
+runs update the spinner; redirected runs emit periodic heartbeat and bounded
+completion lines with status counters, so a long queue is distinguishable from
+a hung process.
 
 ---
 
