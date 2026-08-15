@@ -1,6 +1,17 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -8,7 +19,6 @@ export const DEFAULT_CONVERGE_ATTEMPT_CAP = 7;
 
 const STATE_VERSION = 2;
 const STATE_DIR = 'rcl-converge-attempts';
-const LOCK_OWNER_FILE = 'owner.json';
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
 
@@ -37,6 +47,7 @@ export interface ConvergeAttemptClaim {
   attemptsUsed: number;
   cap: number;
   stateFile: string;
+  warning?: string;
 }
 
 export class ConvergeAttemptBudgetExceededError extends Error {
@@ -74,7 +85,7 @@ interface ClaimOptions {
   target: string;
   maxAttempts?: number;
   now?: () => Date;
-  pid?: number;
+  recordPid?: number;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
 }
@@ -83,6 +94,12 @@ interface AttemptLockOwner {
   pid: number;
   claimedAt: string;
   token: string;
+}
+
+interface AttemptLockSnapshot {
+  owner: AttemptLockOwner;
+  dev: bigint;
+  ino: bigint;
 }
 
 function validateTarget(target: string): string {
@@ -234,12 +251,12 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-async function readLockOwner(lockDir: string): Promise<AttemptLockOwner | undefined> {
+function parseLockOwner(raw: string): AttemptLockOwner | undefined {
   try {
-    const parsed = JSON.parse(
-      await readFile(join(lockDir, LOCK_OWNER_FILE), 'utf8')
-    ) as Partial<AttemptLockOwner>;
+    const parsed = JSON.parse(raw) as Partial<AttemptLockOwner> | null;
     if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
       Number.isInteger(parsed.pid) &&
       (parsed.pid ?? 0) > 0 &&
       typeof parsed.claimedAt === 'string' &&
@@ -251,16 +268,51 @@ async function readLockOwner(lockDir: string): Promise<AttemptLockOwner | undefi
       return parsed as AttemptLockOwner;
     }
   } catch (err) {
-    if (!isNodeError(err, 'ENOENT') && !isNodeError(err, 'ENOTDIR') && !(err instanceof SyntaxError)) {
-      throw err;
-    }
+    if (!(err instanceof SyntaxError)) throw err;
   }
   return undefined;
 }
 
-async function lockPathExists(lockDir: string): Promise<boolean> {
+async function readLockSnapshot(lockFile: string): Promise<AttemptLockSnapshot | undefined> {
+  let handle;
   try {
-    await lstat(lockDir);
+    handle = await open(lockFile, 'r');
+  } catch (err) {
+    if (
+      isNodeError(err, 'ENOENT') ||
+      isNodeError(err, 'EISDIR') ||
+      isNodeError(err, 'EPERM')
+    ) {
+      return undefined;
+    }
+    throw err;
+  }
+
+  let raw: string;
+  let stats;
+  let primaryError: unknown;
+  try {
+    raw = await handle.readFile('utf8');
+    stats = await handle.stat({ bigint: true });
+  } catch (err) {
+    primaryError = err;
+    if (isNodeError(err, 'EISDIR') || isNodeError(err, 'ENOTDIR')) return undefined;
+    throw err;
+  } finally {
+    try {
+      await handle.close();
+    } catch (closeError) {
+      if (primaryError === undefined) throw closeError;
+    }
+  }
+
+  const owner = parseLockOwner(raw);
+  return owner ? { owner, dev: stats.dev, ino: stats.ino } : undefined;
+}
+
+async function lockPathExists(lockFile: string): Promise<boolean> {
+  try {
+    await lstat(lockFile);
     return true;
   } catch (err) {
     if (isNodeError(err, 'ENOENT')) return false;
@@ -268,10 +320,10 @@ async function lockPathExists(lockDir: string): Promise<boolean> {
   }
 }
 
-async function isRenameContention(err: unknown, destination: string): Promise<boolean> {
+async function isPublicationContention(err: unknown, destination: string): Promise<boolean> {
   if (isNodeError(err, 'EEXIST') || isNodeError(err, 'ENOTEMPTY')) return true;
-  // Windows commonly reports an existing directory destination as EPERM or
-  // EACCES. Treat those as contention only when the destination now exists;
+  // Windows can report an existing destination as EPERM or EACCES. Treat
+  // those as contention only when the destination now exists;
   // a genuine permission failure on an absent path remains infrastructure
   // failure and must fail closed.
   return (
@@ -280,24 +332,23 @@ async function isRenameContention(err: unknown, destination: string): Promise<bo
   );
 }
 
-async function tryAcquireOwnedLock(lockDir: string, owner: AttemptLockOwner): Promise<boolean> {
-  // Populate a private directory first, then publish it with one atomic
-  // rename. A canonical lock is therefore never visible without owner data,
-  // eliminating the mkdir -> owner.json race entirely.
-  const claimDir = `${lockDir}.claim.${process.pid}.${randomUUID()}`;
-  await mkdir(claimDir);
+async function tryAcquireOwnedLock(lockFile: string, owner: AttemptLockOwner): Promise<boolean> {
+  // Fully write a private regular file, then atomically hard-link it into the
+  // canonical path. link(2) never replaces an existing file *or directory*,
+  // so this remains safe while an older mkdir-based client is in flight.
+  const claimFile = `${lockFile}.claim.${process.pid}.${randomUUID()}`;
   let primaryError: unknown;
   let published = false;
   try {
-    await writeFile(join(claimDir, LOCK_OWNER_FILE), `${JSON.stringify(owner)}\n`, {
+    await writeFile(claimFile, `${JSON.stringify(owner)}\n`, {
       encoding: 'utf8',
       flag: 'wx',
       mode: 0o600,
     });
     try {
-      await rename(claimDir, lockDir);
+      await link(claimFile, lockFile);
     } catch (err) {
-      if (await isRenameContention(err, lockDir)) return false;
+      if (await isPublicationContention(err, lockFile)) return false;
       throw err;
     }
     published = true;
@@ -306,67 +357,107 @@ async function tryAcquireOwnedLock(lockDir: string, owner: AttemptLockOwner): Pr
     primaryError = err;
     throw err;
   } finally {
-    if (!published) {
-      try {
-        await rm(claimDir, { recursive: true, force: true });
-      } catch (cleanupError) {
-        if (primaryError === undefined) throw cleanupError;
-      }
+    try {
+      await rm(claimFile, { force: true });
+    } catch (cleanupError) {
+      // Once linked, the canonical inode is complete and authoritative; an
+      // orphaned private hard link is harmless and must not negate success.
+      if (!published && primaryError === undefined) throw cleanupError;
     }
   }
 }
 
-async function reclaimStaleLock(lockDir: string, staleOwner: AttemptLockOwner): Promise<boolean> {
-  const currentOwner = await readLockOwner(lockDir);
-  if (
-    !currentOwner ||
-    currentOwner.token !== staleOwner.token ||
-    processIsAlive(currentOwner.pid)
-  ) {
-    return false;
-  }
-
-  // All reclaimers for one stale generation derive the same destination.
-  // The first atomic rename leaves the non-empty directory as a tombstone;
-  // delayed reclaimers cannot rename a freshly acquired lock over it.
-  const staleDir = `${lockDir}.stale.${staleOwner.token}`;
+async function pathMatchesSnapshot(
+  path: string,
+  snapshot: AttemptLockSnapshot
+): Promise<boolean> {
   try {
-    await rename(lockDir, staleDir);
-    return true;
+    const stats = await lstat(path, { bigint: true });
+    return stats.dev === snapshot.dev && stats.ino === snapshot.ino;
   } catch (err) {
-    if (isNodeError(err, 'ENOENT') || (await isRenameContention(err, staleDir))) return false;
+    if (isNodeError(err, 'ENOENT')) return false;
     throw err;
   }
 }
 
+async function reclaimStaleLock(
+  lockFile: string,
+  staleSnapshot: AttemptLockSnapshot
+): Promise<boolean> {
+  const current = await readLockSnapshot(lockFile);
+  if (
+    !current ||
+    current.owner.token !== staleSnapshot.owner.token ||
+    current.dev !== staleSnapshot.dev ||
+    current.ino !== staleSnapshot.ino ||
+    processIsAlive(current.owner.pid)
+  ) {
+    return false;
+  }
+
+  // Exactly one reclaimer can create this generation's hard-link tombstone.
+  // Every delayed peer sees EEXIST and is forbidden from unlinking canonical,
+  // so it can never remove a newer generation that appeared later.
+  const staleFile = `${lockFile}.stale.${current.owner.token}`;
+  try {
+    await link(lockFile, staleFile);
+  } catch (err) {
+    if (isNodeError(err, 'ENOENT') || (await isPublicationContention(err, staleFile))) return false;
+    throw err;
+  }
+
+  const stillCanonical = await pathMatchesSnapshot(lockFile, current);
+  const ownsTombstone = await pathMatchesSnapshot(staleFile, current);
+  if (!stillCanonical || !ownsTombstone || processIsAlive(current.owner.pid)) {
+    await rm(staleFile, { force: true });
+    return !stillCanonical;
+  }
+
+  try {
+    await unlink(lockFile);
+  } catch (err) {
+    if (!isNodeError(err, 'ENOENT')) throw err;
+  }
+  // Inode comparison makes even an arbitrarily delayed reclaimer safe after
+  // this point, so the tombstone can be removed without reopening the race.
+  try {
+    await rm(staleFile, { force: true });
+  } catch {
+    // A leftover hard link is harmless and generation-scoped.
+  }
+  return true;
+}
+
 async function acquireOwnedLock(
-  lockDir: string,
+  lockFile: string,
   timeoutMs: number,
   retryMs: number,
   owner: AttemptLockOwner
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let waitMs = Math.max(1, retryMs);
   while (true) {
     // These reads choose between acquire, reclaim, and fail-closed waiting;
-    // they do not provide mutual exclusion. Atomic directory publication and
-    // the non-empty generation tombstone are the serialization primitives.
-    const currentOwner = await readLockOwner(lockDir);
-    if (currentOwner && !processIsAlive(currentOwner.pid)) {
-      if (await reclaimStaleLock(lockDir, currentOwner)) {
+    // they do not provide mutual exclusion. Exclusive hard-link publication
+    // and the generation tombstone are the serialization primitives.
+    const current = await readLockSnapshot(lockFile);
+    if (current && !processIsAlive(current.owner.pid)) {
+      if (await reclaimStaleLock(lockFile, current)) {
         continue;
       }
-    } else if (!currentOwner && !(await lockPathExists(lockDir))) {
-      if (await tryAcquireOwnedLock(lockDir, owner)) return;
+    } else if (!current && !(await lockPathExists(lockFile))) {
+      if (await tryAcquireOwnedLock(lockFile, owner)) return;
     }
 
     if (Date.now() >= deadline) {
       throw new ConvergeAttemptStateError(
-        `Timed out waiting for convergence attempt lock: ${lockDir}. ` +
+        `Timed out waiting for convergence attempt lock: ${lockFile}. ` +
           'Refusing to start provider calls while accounting is uncertain. ' +
-          'If no live converge-attempt process owns it, move or remove that lock directory and retry.'
+          'If no live converge-attempt process owns it, move or remove that lock path and retry.'
       );
     }
-    await delay(retryMs);
+    await delay(Math.min(waitMs, Math.max(1, deadline - Date.now())));
+    waitMs = Math.min(waitMs * 2, 250);
   }
 }
 
@@ -394,6 +485,7 @@ async function syncDirectory(path: string): Promise<void> {
 async function writeStateAtomically(stateFile: string, state: ConvergeAttemptState): Promise<void> {
   const tempFile = `${stateFile}.${process.pid}.${randomUUID()}.tmp`;
   let primaryError: unknown;
+  let renamed = false;
   try {
     const tempHandle = await open(tempFile, 'wx', 0o600);
     let tempHandleError: unknown;
@@ -411,12 +503,20 @@ async function writeStateAtomically(stateFile: string, state: ConvergeAttemptSta
       }
     }
     await rename(tempFile, stateFile);
+    renamed = true;
     // fsyncing the file before rename makes its contents durable; syncing the
     // parent directory makes the atomic name replacement durable too.
     await syncDirectory(dirname(stateFile));
   } catch (err) {
-    primaryError = err;
-    throw err;
+    primaryError =
+      renamed && !(err instanceof ConvergeAttemptStateError)
+        ? new ConvergeAttemptStateError(
+            `Attempt state was replaced but its directory durability sync failed: ${stateFile}. ` +
+              'Treat the attempt as spent and do not retry automatically.',
+            { cause: err }
+          )
+        : err;
+    throw primaryError;
   } finally {
     try {
       await rm(tempFile, { force: true });
@@ -426,21 +526,21 @@ async function writeStateAtomically(stateFile: string, state: ConvergeAttemptSta
   }
 }
 
-async function releaseOwnedLock(lockDir: string, owner: AttemptLockOwner): Promise<void> {
-  const currentOwner = await readLockOwner(lockDir);
-  if (!currentOwner || currentOwner.token !== owner.token) {
+async function releaseOwnedLock(lockFile: string, owner: AttemptLockOwner): Promise<void> {
+  const current = await readLockSnapshot(lockFile);
+  if (!current || current.owner.token !== owner.token) {
     throw new ConvergeAttemptStateError(
-      `Convergence attempt lock ownership changed unexpectedly: ${lockDir}. ` +
+      `Convergence attempt lock ownership changed unexpectedly: ${lockFile}. ` +
         'Refusing to remove a lock that may belong to another process.'
     );
   }
-  const releasedDir = `${lockDir}.released.${owner.token}`;
-  await rename(lockDir, releasedDir);
+  const releasedFile = `${lockFile}.released.${owner.token}`;
+  await rename(lockFile, releasedFile);
   // The canonical lock is already gone. A cleanup failure leaves only a
   // harmless generation-scoped artifact and must not turn a recorded claim
   // into a reported failure that an agent might retry.
   try {
-    await rm(releasedDir, { recursive: true, force: true });
+    await rm(releasedFile, { force: true });
   } catch {
     // Intentionally retained for later manual cleanup.
   }
@@ -458,9 +558,9 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     options.maxAttempts === undefined ? undefined : validateCap(options.maxAttempts);
   const stateFile = convergeAttemptStatePath(options.gitCommonDir, target);
   const stateDir = join(resolve(options.gitCommonDir), STATE_DIR);
-  const lockDir = `${stateFile}.lock`;
+  const lockFile = `${stateFile}.lock`;
   const now = options.now ?? (() => new Date());
-  const pid = options.pid ?? process.pid;
+  const recordPid = options.recordPid ?? process.pid;
   const lockOwner: AttemptLockOwner = {
     pid: process.pid,
     claimedAt: now().toISOString(),
@@ -474,12 +574,14 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   // because mkdir now observes the directory.
   await syncDirectory(dirname(stateDir));
   await acquireOwnedLock(
-    lockDir,
+    lockFile,
     options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
     options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
     lockOwner
   );
 
+  let claim: ConvergeAttemptClaim | undefined;
+  let claimError: unknown;
   try {
     const timestamp = now().toISOString();
     const stored = await readState(stateFile, target);
@@ -512,16 +614,43 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
       attemptsUsed: attempt,
       attempts: [
         ...(previous?.attempts ?? []),
-        { attempt, claimedAt: timestamp, pid, source: 'claim' },
+        { attempt, claimedAt: timestamp, pid: recordPid, source: 'claim' },
       ],
       updatedAt: timestamp,
     };
     await writeStateAtomically(stateFile, state);
-
-    return { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile };
-  } finally {
-    await releaseOwnedLock(lockDir, lockOwner);
+    claim = { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile };
+  } catch (err) {
+    claimError = err;
   }
+
+  let releaseError: unknown;
+  try {
+    await releaseOwnedLock(lockFile, lockOwner);
+  } catch (err) {
+    releaseError = err;
+  }
+
+  if (claimError !== undefined) {
+    if (claimError instanceof Error && releaseError !== undefined) {
+      const releaseMessage =
+        releaseError instanceof Error ? releaseError.message : String(releaseError);
+      claimError.message += ` Lock release also failed: ${releaseMessage}`;
+    }
+    throw claimError;
+  }
+
+  if (!claim) {
+    throw new ConvergeAttemptStateError('Attempt accounting ended without a claim or error.');
+  }
+  if (releaseError !== undefined) {
+    const releaseMessage =
+      releaseError instanceof Error ? releaseError.message : String(releaseError);
+    claim.warning =
+      `Attempt ${claim.attempt}/${claim.cap} is durably recorded, but lock release failed: ` +
+      `${releaseMessage} Do not retry this claim; the review may proceed.`;
+  }
+  return claim;
 }
 
 export async function loadConvergeAttemptState(

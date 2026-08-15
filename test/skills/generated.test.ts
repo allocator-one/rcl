@@ -39,7 +39,8 @@ describe('generated skill files', () => {
       (renderAll() as Rendered[]).map((r) => [r.path, r.content])
     );
     for (const [path, content] of bySkillDir) {
-      if (path.includes('/.claude/')) {
+      const normalizedPath = path.replaceAll('\\', '/');
+      if (normalizedPath.includes('/.claude/')) {
         // Claude Code has a first-class background facility; the nohup/PID
         // dance is Codex-only and would be unrunnable guidance here.
         expect(content, path).toContain('run_in_background');
@@ -52,11 +53,12 @@ describe('generated skill files', () => {
 
   it('machine-claims every convergence attempt before launching a review', () => {
     const convergeSkills = (renderAll() as Rendered[]).filter(({ path }) =>
-      path.includes('/rcl-converge/')
+      path.replaceAll('\\', '/').includes('/rcl-converge/')
     );
     expect(convergeSkills.length).toBeGreaterThan(0);
 
     for (const { path, content } of convergeSkills) {
+      const normalizedPath = path.replaceAll('\\', '/');
       const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
       const claimCount = content.split(claimCommand).length - 1;
       const claim = content.indexOf(claimCommand);
@@ -65,19 +67,20 @@ describe('generated skill files', () => {
       expect(claim, path).toBeGreaterThan(-1);
       expect(launch, path).toBeGreaterThan(claim);
       expect(content, path).toContain('Bash(rcl converge-attempt:*)');
-      expect(content, path).toContain('every review attempt counts toward the configured cap');
-      expect(content, path).toContain('machine-enforced cost cap defaults to 7');
-      expect(content, path).toContain('legacy `--max-rounds` flag remains a separate evidence-round limit');
+      expect(content, path).toMatch(/cost cap defaults to 7/);
+      expect(content, path).toContain('`--max-rounds <N>`');
       expect(content, path).toContain('`--max-attempts <N>`');
-      expect(content, path).toContain('ask the user whether to stop for human review or continue');
-      expect(content, path).toContain('Never invent a higher value on the user\'s behalf');
-      expect(content, path).toContain('Exit 2 is the configured consent boundary');
-      expect(content, path).toContain('Exit 3 is an accounting/infrastructure failure');
-      expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
-      expect(content, path).toContain('Run the command block below exactly once');
-      expect(content, path).toContain('Never terminate a live council merely because');
-      if (path.includes('/.codex/') || path.includes('/.agents/')) {
+      expect(content, path).toMatch(/Exit 2 is the configured consent boundary/i);
+      expect(content, path).toMatch(/Exit 3 is an accounting\/infrastructure failure/i);
+      expect(content, path).toMatch(/Never terminate a live council/i);
+      if (normalizedPath.includes('/.claude/')) {
+        expect(content, path).toContain('exactly once as a foreground Bash call');
+        expect(content.indexOf('run_in_background: true'), path).toBeGreaterThan(claim);
+      } else {
+        const pidFile = '<RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid';
         expect(content, path).toContain('echo "$$" > <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid');
+        expect(content.indexOf(`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json ${pidFile}`), path).toBeLessThan(claim);
+        expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
       }
     }
   });

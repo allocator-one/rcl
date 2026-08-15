@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_CONVERGE_ATTEMPT_CAP,
   claimConvergeAttempt,
@@ -15,11 +17,45 @@ import {
 } from '../../src/converge/attempt-budget.js';
 
 const dirs: string[] = [];
+const claimWorker = fileURLToPath(new URL('../fixtures/converge-claim-worker.ts', import.meta.url));
+const tsxImport = import.meta.resolve('tsx');
+const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const isolatedGitEnv = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: nullDevice,
+  GIT_CONFIG_SYSTEM: nullDevice,
+};
 
 async function tempGitDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'rcl-attempt-budget-'));
   dirs.push(dir);
   return dir;
+}
+
+async function exitedChildPid(): Promise<number> {
+  const child = spawn(process.execPath, ['-e', '']);
+  const pid = child.pid;
+  if (pid === undefined) throw new Error('Child process did not receive a PID');
+  await once(child, 'exit');
+  return pid;
+}
+
+async function runClaimProcess(gitCommonDir: string, target: string, cap: number) {
+  const child = spawn(
+    process.execPath,
+    ['--import', tsxImport, claimWorker, gitCommonDir, target, String(cap)],
+    { env: { ...process.env, NODE_NO_WARNINGS: '1' }, timeout: 10_000 }
+  );
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+    stderr += chunk;
+  });
+  const [status] = (await once(child, 'close')) as [number];
+  return { status, stdout, stderr };
 }
 
 afterEach(async () => {
@@ -34,13 +70,13 @@ describe('convergence attempt budget', () => {
       gitCommonDir,
       target: 'rcl-18',
       now: () => new Date('2026-08-15T12:00:00Z'),
-      pid: 101,
+      recordPid: 101,
     });
     const second = await claimConvergeAttempt({
       gitCommonDir,
       target: 'rcl-18',
       now: () => new Date('2026-08-15T12:01:00Z'),
-      pid: 202,
+      recordPid: 202,
     });
 
     expect(first.attempt).toBe(1);
@@ -162,6 +198,20 @@ describe('convergence attempt budget', () => {
     expect((await loadConvergeAttemptState(gitCommonDir, 'repo-7559'))?.attemptsUsed).toBe(7);
   });
 
+  it('serializes independent processes so none can race past the cap', async () => {
+    const gitCommonDir = await tempGitDir();
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () => runClaimProcess(gitCommonDir, 'cross-process', 2))
+    );
+
+    expect(results.map((result) => result.status).sort()).toEqual([0, 0, 2, 2]);
+    expect(results.filter((result) => result.status === 0).every((result) => result.stdout)).toBe(
+      true
+    );
+    expect(results.every((result) => result.stderr === '')).toBe(true);
+    expect((await loadConvergeAttemptState(gitCommonDir, 'cross-process'))?.attemptsUsed).toBe(2);
+  });
+
   it('fails closed when persisted accounting is corrupt', async () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
@@ -187,12 +237,13 @@ describe('convergence attempt budget', () => {
   it('reclaims an attempt lock owned by a dead process', async () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
-    const lockDir = `${stateFile}.lock`;
+    const lockFile = `${stateFile}.lock`;
     const token = '00000000-0000-4000-8000-000000000001';
-    await mkdir(lockDir, { recursive: true });
+    const deadPid = await exitedChildPid();
+    await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
-      join(lockDir, 'owner.json'),
-      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
+      lockFile,
+      `${JSON.stringify({ pid: deadPid, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
     );
 
     await expect(
@@ -203,20 +254,21 @@ describe('convergence attempt budget', () => {
         lockRetryMs: 1,
       })
     ).resolves.toMatchObject({ attempt: 1 });
-    await expect(readFile(join(`${lockDir}.stale.${token}`, 'owner.json'), 'utf8')).resolves.toContain(
-      token
-    );
+    await expect(readFile(`${lockFile}.stale.${token}`, 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('serializes concurrent stale-lock reclaimers without racing past the cap', async () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
-    const lockDir = `${stateFile}.lock`;
+    const lockFile = `${stateFile}.lock`;
     const token = '00000000-0000-4000-8000-000000000002';
-    await mkdir(lockDir, { recursive: true });
+    const deadPid = await exitedChildPid();
+    await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
-      join(lockDir, 'owner.json'),
-      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
+      lockFile,
+      `${JSON.stringify({ pid: deadPid, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
     );
 
     const claims = await Promise.allSettled(
@@ -224,18 +276,25 @@ describe('convergence attempt budget', () => {
         claimConvergeAttempt({
           gitCommonDir,
           target: 'rcl-18',
-          lockTimeoutMs: 500,
+          lockTimeoutMs: 5_000,
           lockRetryMs: 1,
         })
       )
     );
 
     expect(claims.filter((claim) => claim.status === 'fulfilled')).toHaveLength(7);
-    expect(claims.filter((claim) => claim.status === 'rejected')).toHaveLength(5);
+    const rejected = claims.filter((claim) => claim.status === 'rejected');
+    expect(rejected).toHaveLength(5);
+    expect(
+      rejected.every(
+        (claim) =>
+          claim.status === 'rejected' && claim.reason instanceof ConvergeAttemptBudgetExceededError
+      )
+    ).toBe(true);
     expect((await loadConvergeAttemptState(gitCommonDir, 'rcl-18'))?.attemptsUsed).toBe(7);
-    await expect(readFile(join(`${lockDir}.stale.${token}`, 'owner.json'), 'utf8')).resolves.toContain(
-      token
-    );
+    await expect(readFile(`${lockFile}.stale.${token}`, 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 
   it('fails closed on an ownerless legacy lock instead of replacing it', async () => {
@@ -250,16 +309,33 @@ describe('convergence attempt budget', () => {
         lockTimeoutMs: 10,
         lockRetryMs: 1,
       })
-    ).rejects.toThrow('move or remove that lock directory and retry');
+    ).rejects.toThrow('move or remove that lock path and retry');
+    expect((await lstat(`${stateFile}.lock`)).isDirectory()).toBe(true);
+  });
+
+  it('fails closed on a null lock owner without throwing a raw TypeError', async () => {
+    const gitCommonDir = await tempGitDir();
+    const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
+    await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
+    await writeFile(`${stateFile}.lock`, 'null\n');
+
+    await expect(
+      claimConvergeAttempt({
+        gitCommonDir,
+        target: 'rcl-18',
+        lockTimeoutMs: 10,
+        lockRetryMs: 1,
+      })
+    ).rejects.toThrow('move or remove that lock path and retry');
   });
 
   it('does not reclaim a lock owned by a live process', async () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
-    const lockDir = `${stateFile}.lock`;
-    await mkdir(lockDir, { recursive: true });
+    const lockFile = `${stateFile}.lock`;
+    await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
-      join(lockDir, 'owner.json'),
+      lockFile,
       `${JSON.stringify({
         pid: process.pid,
         claimedAt: '2026-08-15T12:00:00Z',
@@ -347,13 +423,29 @@ describe('convergence attempt budget', () => {
     const root = await tempGitDir();
     const repository = join(root, 'repository');
     const worktree = join(root, 'worktree');
-    execFileSync('git', ['init', '-q', repository]);
+    execFileSync('git', ['init', '-q', repository], { env: isolatedGitEnv });
     execFileSync(
       'git',
-      ['-c', 'user.name=RCL Test', '-c', 'user.email=rcl@example.test', 'commit', '--allow-empty', '-qm', 'seed'],
-      { cwd: repository }
+      [
+        '-c',
+        'user.name=RCL Test',
+        '-c',
+        'user.email=rcl@example.test',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        `core.hooksPath=${nullDevice}`,
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'seed',
+      ],
+      { cwd: repository, env: isolatedGitEnv }
     );
-    execFileSync('git', ['worktree', 'add', '-qb', 'linked-test', worktree], { cwd: repository });
+    execFileSync('git', ['worktree', 'add', '-qb', 'linked-test', worktree], {
+      cwd: repository,
+      env: isolatedGitEnv,
+    });
 
     const repositoryCommonDir = await resolveGitCommonDir(repository);
     const worktreeCommonDir = await resolveGitCommonDir(worktree);

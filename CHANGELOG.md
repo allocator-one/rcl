@@ -11,11 +11,13 @@
   reaching it requires the workflow to stop and ask the user before any
   continuation. Existing evidence ledgers seed the machine counter during
   upgrade on a best-effort basis (old ledgers cannot reconstruct failed or
-  missing-report launches). Attempt mutexes are atomically published, reclaim
+  missing-report launches). Attempt mutexes are atomically published with
+  exclusive hard links that cannot replace legacy lock directories, reclaim
   dead owners through token-scoped tombstones, and fail closed on invalid
-  legacy locks. CLI exit codes distinguish a cap refusal from accounting or
+  locks. CLI exit codes distinguish a cap refusal from accounting or
   infrastructure failures, and `--json` also covers missing/invalid claim
   options. State and directory entries are synced before a claim succeeds.
+  Post-record lock-release problems surface as non-retriable claim warnings.
   The skill's legacy `--max-rounds` flag remains an evidence-round limit;
   `--max-attempts` is the distinct overridable launch budget.
   Failed, killed, missing-report, and inconclusive launches remain spent, so

@@ -173,6 +173,9 @@ program
 program
   .command('converge-attempt')
   .description('Atomically consume one persisted rcl-converge attempt before starting a review')
+  // Optional-value syntax is deliberate: Commander otherwise exits before
+  // the action, preventing --json callers from receiving structured errors
+  // for a missing value. The action enforces both values as required.
   .option('--target [key]', 'Required stable repository-and-PR/branch convergence target key')
   .option(
     '--max-attempts [n]',
@@ -210,6 +213,7 @@ program
             `Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}. ` +
               `State: ${claim.stateFile}`
           );
+          if (claim.warning) console.error(chalk.yellow(claim.warning));
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

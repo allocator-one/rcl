@@ -106,19 +106,29 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    git diff "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```
 {{#claude}}
-2. **Claim the attempt, then run the review detached.** Run the command block below exactly once per intended council launch; its first command claims exactly one attempt. Never call the claim separately and then rerun the complete block. Any non-zero claim exit stops the launch. Exit 2 is the configured consent boundary: release the target lock and ask the user whether to stop for human review or continue with a specific higher cap. Continue only after explicit approval, by resuming this skill with the approved `--max-attempts <N>`; never select or silently raise the cap yourself. Exit 3 is an accounting/infrastructure failure: release the lock, report the error, and do not suggest raising the cap because that cannot repair state, lock, Git, or filesystem failures. A successful claim is spent even if the following process fails to launch, is killed, times out, produces no report, or is inconclusive. RCL prints the run-specific runtime plan; never assume a fixed duration. Do not run the review as a plain foreground Bash call (the tool cap can kill it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch with `run_in_background: true` and continue when the task-completion notification arrives — never block on it with a foreground wait or sleep loop. Confirm the JSON report exists and is non-empty before parsing.
-{{/claude}}
-{{#codex}}
-2. **Claim the attempt, then run the review detached.** Run the command block below exactly once per intended council launch; its first command claims exactly one attempt. Never call the claim separately and then rerun the complete block. Any non-zero claim exit stops the launch. Exit 2 is the configured consent boundary: release the target lock and ask the user whether to stop for human review or continue with a specific higher cap. Continue only after explicit approval, by resuming this skill with the approved `--max-attempts <N>`; never select or silently raise the cap yourself. Exit 3 is an accounting/infrastructure failure: release the lock, report the error, and do not suggest raising the cap because that cannot repair state, lock, Git, or filesystem failures. A successful claim is spent even if the following process fails to launch, is killed, times out, produces no report, or is inconclusive. RCL prints the run-specific runtime plan; never assume a fixed duration. Do not run the review as a plain foreground shell call (the tool timeout can kill it with no report written and the model spend wasted). First delete any leftover report files for this round (`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json`) so a stale file from an earlier session is never mistaken for this round's result. Then launch detached with `nohup … &`, a log file, and a PID file:
-{{/codex}}
+2. **Claim in the foreground, then run the review detached.** Run the first block below exactly once as a foreground Bash call. Its quoted `<TARGET>` is the exact resolved accounting key (the quotes are shell syntax, not part of the value). Never set `run_in_background` on this claim and never call it separately again. Any non-zero exit stops before the review: exit 2 is the configured consent boundary, so release the target lock and ask the user whether to stop for human review or continue with a specific higher cap; continue only after explicit approval by resuming with `--max-attempts <N>`. Exit 3 is an accounting/infrastructure failure: release the lock, report it, and do not suggest raising the cap. A successful claim is spent even if the later launch fails, is killed, produces no report, or is inconclusive.
+
    ```bash
-{{#claude}}
+   rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json
    rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>
-   ATTEMPT_STATUS=$?
-   [ "$ATTEMPT_STATUS" -eq 0 ] || exit "$ATTEMPT_STATUS"
+   ```
+
+   Only after that foreground call succeeds, launch this second block as a separate Bash call with `run_in_background: true`; never run the review as a plain foreground call. RCL prints the run-specific runtime plan, so never assume a fixed duration. Continue when the task-completion notification arrives — never block on it with a foreground wait or sleep loop.
+
+   ```bash
    GITHUB_TOKEN=$(gh auth token) rcl review <target> \
+     --markdown <RCL_TMP>/rcl-report-<TARGET>-r<R>.md \
+     --json-file <RCL_TMP>/rcl-report-<TARGET>-r<R>.json \
+     [--spec <SPEC>] [--roles <roles>]
+   ```
+
+   Never pass `--post` or `--inline` mid-loop. If the run exits non-zero or the JSON report is missing or empty, read the run output, report the failure, and stop. It does not count as an evidence round, but its foreground claim remains spent.
 {{/claude}}
 {{#codex}}
+2. **Claim the attempt, then run the review detached.** Run the complete block below exactly once per intended council launch; its foreground first command claims exactly one attempt. Its quoted `<TARGET>` is the exact resolved accounting key (the quotes are shell syntax, not part of the value). Never call the claim separately and then rerun the complete block. Any non-zero claim exit stops the launch. Exit 2 is the configured consent boundary: release the target lock and ask the user whether to stop for human review or continue with a specific higher cap. Continue only after explicit approval, by resuming this skill with the approved `--max-attempts <N>`; never select or silently raise the cap yourself. Exit 3 is an accounting/infrastructure failure: release the lock, report the error, and do not suggest raising the cap because that cannot repair state, lock, Git, or filesystem failures. A successful claim is spent even if the following process fails to launch, is killed, times out, produces no report, or is inconclusive. RCL prints the run-specific runtime plan; never assume a fixed duration. Do not run the review as a plain foreground shell call. Delete stale reports and the PID file first, because a retry reuses the evidence-round number and must never monitor an old or recycled PID.
+
+   ```bash
+   rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid
    rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>
    ATTEMPT_STATUS=$?
    [ "$ATTEMPT_STATUS" -eq 0 ] || exit "$ATTEMPT_STATUS"
@@ -126,21 +136,12 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    GITHUB_TOKEN=$(gh auth token)
    export GITHUB_TOKEN
    exec rcl review <target> \
-{{/codex}}
      --markdown <RCL_TMP>/rcl-report-<TARGET>-r<R>.md \
      --json-file <RCL_TMP>/rcl-report-<TARGET>-r<R>.json \
-{{#claude}}
-     [--spec <SPEC>] [--roles <roles>]
-{{/claude}}
-{{#codex}}
      [--spec <SPEC>] [--roles <roles>]' \
      > <RCL_TMP>/rcl-converge-<TARGET>-r<R>.log 2>&1 &
-{{/codex}}
    ```
-{{#claude}}
-   Never pass `--post` or `--inline` mid-loop. If the run exits non-zero or the JSON report is missing or empty, read the run output, report the failure, and stop. It does not count as an evidence round, but its pre-launch attempt claim remains spent.
-{{/claude}}
-{{#codex}}
+
    Wait until the child-created PID file exists and is non-empty, then poll `kill -0 $(cat <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop (which hits the same tool timeout; the nohup'd review survives a killed poll; just poll again), and never by process name, which collides with concurrent rcl runs. The child writes its own PID before `exec` replaces it with RCL, so an interrupted parent shell cannot lose the identity of a live review. Only after that PID exits, confirm the JSON report exists and is non-empty; a half-written file must never be parsed. The report file is the success signal: the exit status of a backgrounded process is not recoverable across tool calls. Never pass `--post` or `--inline` mid-loop. If the process is gone but the JSON report is missing or empty, read the log, report the failure, and stop. It does not count as an evidence round, but its pre-launch attempt claim remains spent.
 {{/codex}}
 3. **Check reviewer health first, then parse findings from the JSON file**, never from console scrollback. `stats.successfulReviews` / `stats.totalReviews` gates the whole round: a report is produced even when most model calls time out or error, so a near-empty finding list can mean 'nothing found' or 'nobody looked'. If fewer than two of the reviewers succeeded, or fewer than two thirds of them did, the round is **inconclusive** — never counted as converged. Report the failure pattern (which models, timeout vs error), fix the cause if it is under your control (timeouts, missing keys, reasoning budget), and re-run only if the machine attempt budget permits it. Re-runs are budgeted: at most two per evidence-round number, while every review attempt counts toward the configured cap. Raising that cap requires a new, explicit, user-approved `--max-attempts` invocation, so a permanently broken fleet cannot spin unattended. Split by severity: critical/important findings gate convergence; minor findings are opportunistic.
@@ -191,7 +192,7 @@ Consequences:
 - Never amend or force-push — fixes are always new commits.
 - Every council launch must be preceded by a successful `rcl converge-attempt` claim. Never bypass or reset its persisted state, and never exceed the configured cap. The count is cumulative across sessions, force-pushes, and resumes. Seven is only the default; a higher cap is valid when the user explicitly supplied `--max-attempts` at invocation or explicitly approved it after a refusal.
 - Preserve `--max-rounds` as the evidence-round limit it has always represented; never use it as an alias for the machine attempt cap.
-- Run the round's claim-and-launch command block exactly once. Never call `rcl converge-attempt` separately and then rerun the full block, because each successful call spends another attempt.
+- Execute the host variant's claim exactly once: Claude runs its claim block in the foreground and its review block separately; Codex runs its combined claim-and-launch block once. Never repeat `rcl converge-attempt`, because each successful call spends another attempt.
 - Never terminate a live council merely because its log contains one model/parser warning. Let RCL finish and assess reviewer health from the completed JSON report; killing the process destroys the evidence needed for that decision.
 - Read reports from files, never console scrollback; every round gets its own report files.
 

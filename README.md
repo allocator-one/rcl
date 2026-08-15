@@ -174,12 +174,16 @@ Exit code 2 means the configured cap was exhausted and explicit continuation
 approval is required. Exit code 3 means attempt accounting itself failed
 (state, lock, Git, filesystem, or another infrastructure error); increasing
 the cap is not the remedy. With `--json`, failures are emitted as structured
-JSON on stderr.
+JSON on stderr. If the attempt is durably recorded but final lock release
+fails, the claim still succeeds with a warning so retrying cannot spend a
+second slot for the same intended launch.
 
-The short accounting mutex is fully populated in a private directory and then
-published atomically. State contents and, where supported, their directory
-entry are synced before a claim succeeds. A dead owner is quarantined to a
-token-scoped tombstone before another claimant can proceed; invalid or legacy
+The short accounting mutex is fully written as a private owner file and then
+published with an exclusive hard link, which cannot replace an existing file
+or legacy directory. State contents and, where supported, their directory
+entry are synced before a claim succeeds. A dead owner is isolated through a
+token-scoped hard-link tombstone before another claimant can proceed; inode
+checks make that tombstone safe to remove after reclamation. Invalid or legacy
 ownerless locks fail closed, and timeout errors include the manual recovery
 path. When upgrading,
 an evidence ledger seeds only its highest recorded round: historical failed or
