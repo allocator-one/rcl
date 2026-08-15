@@ -65,6 +65,7 @@ describe('generated skill files', () => {
       const launch = content.indexOf('rcl review <target>');
       expect(claimCount, path).toBe(1);
       expect(claim, path).toBeGreaterThan(-1);
+      expect(launch, path).toBeGreaterThan(-1);
       expect(launch, path).toBeGreaterThan(claim);
       expect(content, path).toContain('Bash(rcl converge-attempt:*)');
       expect(content, path).toMatch(/cost cap defaults to 7/);
@@ -78,8 +79,13 @@ describe('generated skill files', () => {
         expect(content.indexOf('run_in_background: true'), path).toBeGreaterThan(claim);
       } else {
         const pidFile = '<RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid';
-        expect(content, path).toContain('echo "$$" > <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid');
-        expect(content.indexOf(`rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json ${pidFile}`), path).toBeLessThan(claim);
+        const cleanup = content.indexOf(
+          `rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json ${pidFile}`
+        );
+        expect(content, path).toContain(`printf "%s\\n" "$$" > ${pidFile} || exit 125`);
+        expect(content, path).toContain('for no more than 30 seconds');
+        expect(cleanup, path).toBeGreaterThan(-1);
+        expect(cleanup, path).toBeLessThan(claim);
         expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
       }
     }

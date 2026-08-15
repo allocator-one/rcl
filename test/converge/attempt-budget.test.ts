@@ -54,7 +54,12 @@ async function runClaimProcess(gitCommonDir: string, target: string, cap: number
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
     stderr += chunk;
   });
-  const [status] = (await once(child, 'close')) as [number];
+  const [status, signal] = (await once(child, 'close')) as [number | null, string | null];
+  if (status === null) {
+    throw new Error(
+      `Claim worker terminated by ${signal ?? 'an unknown signal'}${stderr ? `: ${stderr}` : ''}`
+    );
+  }
   return { status, stdout, stderr };
 }
 

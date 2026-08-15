@@ -632,10 +632,18 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   }
 
   if (claimError !== undefined) {
-    if (claimError instanceof Error && releaseError !== undefined) {
+    if (releaseError !== undefined) {
+      const claimMessage = claimError instanceof Error ? claimError.message : String(claimError);
       const releaseMessage =
         releaseError instanceof Error ? releaseError.message : String(releaseError);
-      claimError.message += ` Lock release also failed: ${releaseMessage}`;
+      // A cap refusal alone is exit 2, but a simultaneous release failure
+      // means the accounting lock is unhealthy. Classify the combined outcome
+      // as infrastructure failure so raising the cap is never suggested as a
+      // remedy for a stranded lock.
+      throw new ConvergeAttemptStateError(
+        `${claimMessage} Lock release also failed: ${releaseMessage}`,
+        { cause: releaseError }
+      );
     }
     throw claimError;
   }
