@@ -153,6 +153,52 @@ rcl roles show <name>      # Show system prompt and details for a role
 
 ---
 
+### `rcl converge-attempt`
+
+Machine-enforced safety guard used by the generated `rcl-converge` skill.
+Each call atomically and durably consumes one per-target attempt under the
+repository's common Git directory, so the budget survives sessions, linked
+worktrees, and abrupt system restarts.
+New targets default to seven attempts, but an explicit invocation can set any
+positive cap with `--max-attempts`. Omitting the flag on resume preserves the
+persisted cap. At the boundary, RCL refuses before provider calls and directs
+the workflow to ask the user; an approved continuation explicitly supplies a
+higher cap.
+
+At the skill level, `--max-attempts N` controls this machine launch budget.
+The pre-existing `--max-rounds N` flag retains its original meaning as a
+separate evidence-round limit (1–7), so existing invocations do not silently
+change behavior.
+
+Exit code 2 means the configured cap was exhausted and explicit continuation
+approval is required. Exit code 3 means attempt accounting itself failed
+(state, lock, Git, filesystem, or another infrastructure error); increasing
+the cap is not the remedy. With `--json`, failures are emitted as structured
+JSON on stderr. If the attempt is durably recorded but final lock release
+fails, the claim still succeeds with a warning so retrying cannot spend a
+second slot for the same intended launch.
+
+The short accounting mutex is fully written as a private owner file and then
+published with an exclusive hard link, which cannot replace an existing file
+or legacy directory. State contents and, where supported, their directory
+entry are synced before a claim succeeds. A dead owner is isolated through a
+token-scoped hard-link tombstone before another claimant can proceed; inode
+checks make that tombstone safe to remove after reclamation. Invalid or legacy
+ownerless locks fail closed, and timeout errors include the manual recovery
+path. When upgrading,
+an evidence ledger seeds only its highest recorded round: historical failed or
+missing-report launches cannot be reconstructed, while every claim after the
+machine state is created is counted exactly. The state remains a same-user
+local safety mechanism, not a tamper-proof store: deliberately deleting
+`.git/rcl-converge-attempts` is an explicit policy bypass.
+
+```bash
+rcl converge-attempt --target owner-repo-123                 # default/persisted cap
+rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit override
+```
+
+---
+
 ## Config File
 
 Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.
@@ -224,6 +270,12 @@ spec: SPEC.md
 ```
 
 Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`, `review-council.config.js`.
+
+Before dispatch, RCL prints the expanded reviewer × chunk call count,
+concurrency, wave count, timeout, and timeout-bound queue estimate. Interactive
+runs update the spinner; redirected runs emit periodic heartbeat and bounded
+completion lines with status counters, so a long queue is distinguishable from
+a hung process.
 
 ---
 

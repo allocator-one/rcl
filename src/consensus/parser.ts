@@ -96,6 +96,75 @@ function extractJsonCandidates(text: string): string[] {
   return candidates;
 }
 
+/**
+ * Gemini occasionally emits literal U+0000–U+001F characters inside a JSON
+ * string even when responseMimeType is application/json. Those characters
+ * have exactly one semantics-preserving JSON representation: a unicode
+ * escape. Repair only that unambiguous shape; controls outside strings and
+ * every other syntax error remain failures.
+ */
+function escapeUnquotedControlCharactersInStrings(
+  candidate: string
+): { text: string; repaired: number } | undefined {
+  let inString = false;
+  let escaped = false;
+  let repaired = 0;
+  let repairedInString = 0;
+  let text = '';
+
+  for (let index = 0; index < candidate.length; index++) {
+    const char = candidate[index]!;
+    if (!inString) {
+      if (char === '"') {
+        inString = true;
+        repairedInString = 0;
+      }
+      text += char;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      text += char;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      text += char;
+      continue;
+    }
+    if (char === '"') {
+      if (repairedInString > 0) {
+        let nextIndex = index + 1;
+        while (nextIndex < candidate.length && /\s/.test(candidate[nextIndex]!)) {
+          nextIndex++;
+        }
+        // A quoted token followed by ':' is an object key, not a value.
+        // Leave malformed keys on the strict failure path.
+        if (candidate[nextIndex] === ':') return undefined;
+      }
+      inString = false;
+      text += char;
+      continue;
+    }
+
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f) {
+      text += `\\u${code.toString(16).padStart(4, '0')}`;
+      repaired++;
+      repairedInString++;
+    } else {
+      text += char;
+    }
+  }
+
+  // Do not present a partial lexical rewrite as a repair. JSON.parse would
+  // still reject an unterminated string or dangling escape, but withholding
+  // the repaired candidate keeps the fallback deliberately narrow and avoids
+  // emitting a misleading repair warning for otherwise malformed output.
+  return repaired > 0 && !inString && !escaped ? { text, repaired } : undefined;
+}
+
 /** Assign stable, unique ids: empty or colliding ids are regenerated. */
 function normalizeIds(findings: Finding[], model: string, role: string): Finding[] {
   const modelSlug = model.replace(/[^a-z0-9]/gi, '');
@@ -144,6 +213,23 @@ export function parseReviewOutput(
       break;
     } catch (err) {
       lastParseError = err;
+    }
+  }
+  if (!parsedOk) {
+    for (const candidate of candidates) {
+      const repair = escapeUnquotedControlCharactersInStrings(candidate);
+      if (!repair) continue;
+      try {
+        parsed = JSON.parse(repair.text);
+        parsedOk = true;
+        warnings.push(
+          `${model}/${role}: repaired ${repair.repaired} unescaped JSON control character(s) inside string values`
+        );
+        break;
+      } catch {
+        // The candidate has other damage too. Keep the original strict parse
+        // error as the diagnostic and classify the response as unusable.
+      }
     }
   }
   if (!parsedOk) {

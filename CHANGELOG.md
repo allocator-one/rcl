@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **RCL-18: convergence attempt budgets are machine-enforced.** The generated
+  `rcl-converge` workflow now claims every council launch through the new
+  `rcl converge-attempt` command. Claims are atomically persisted under the
+  repository common Git directory, shared across linked worktrees and
+  sessions, and fail closed at the configured boundary. New targets default
+  to seven attempts, while an explicit invocation can set or raise the cap;
+  reaching it requires the workflow to stop and ask the user before any
+  continuation. Existing evidence ledgers seed the machine counter during
+  upgrade on a best-effort basis (old ledgers cannot reconstruct failed or
+  missing-report launches). Attempt mutexes are atomically published with
+  exclusive hard links that cannot replace legacy lock directories, reclaim
+  dead owners through token-scoped tombstones, and fail closed on invalid
+  locks. CLI exit codes distinguish a cap refusal from accounting or
+  infrastructure failures, and `--json` also covers missing/invalid claim
+  options. State and directory entries are synced before a claim succeeds.
+  Post-record lock-release problems surface as non-retriable claim warnings.
+  The skill's legacy `--max-rounds` flag remains an evidence-round limit;
+  `--max-attempts` is the distinct overridable launch budget.
+  Failed, killed, missing-report, and inconclusive launches remain spent, so
+  agent bookkeeping cannot turn the cap into an unattended retry loop.
+- **RCL-19: large chunked runs remain observable when redirected.** RCL now
+  prints the reviewer × chunk call plan, concurrency, waves, per-call timeout,
+  and timeout-bound queue estimate. Non-TTY runs emit bounded completion
+  checkpoints and heartbeat lines with success/timeout/error/parse-failure
+  counts instead of leaving a static spinner line for tens of minutes.
+- Gemini responses containing literal JSON control characters inside string
+  values get one narrowly scoped, semantics-preserving escape pass with an
+  explicit warning. Controls outside strings and every other malformed shape
+  remain `parse_failed`.
+
 ## 1.8.2
 
 - **Cross-model agreement no longer disappears when reviewers describe the
