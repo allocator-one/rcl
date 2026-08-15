@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -131,14 +131,14 @@ describe('convergence attempt budget', () => {
     });
     await expect(
       claimConvergeAttempt({ gitCommonDir, target: 'other', maxAttempts: 0 })
-    ).rejects.toThrow('--max-attempts must be a positive safe integer');
+    ).rejects.toThrow('maxAttempts (--max-attempts) must be a positive safe integer');
     await expect(
       claimConvergeAttempt({
         gitCommonDir,
         target: 'other',
         maxAttempts: Number.MAX_SAFE_INTEGER + 1,
       })
-    ).rejects.toThrow('--max-attempts must be a positive safe integer');
+    ).rejects.toThrow('maxAttempts (--max-attempts) must be a positive safe integer');
   });
 
   it('serializes concurrent starters so no process can race past the cap', async () => {
@@ -188,10 +188,11 @@ describe('convergence attempt budget', () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     const lockDir = `${stateFile}.lock`;
+    const token = '00000000-0000-4000-8000-000000000001';
     await mkdir(lockDir, { recursive: true });
     await writeFile(
       join(lockDir, 'owner.json'),
-      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z' })}\n`
+      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
     );
 
     await expect(
@@ -202,16 +203,20 @@ describe('convergence attempt budget', () => {
         lockRetryMs: 1,
       })
     ).resolves.toMatchObject({ attempt: 1 });
+    await expect(readFile(join(`${lockDir}.stale.${token}`, 'owner.json'), 'utf8')).resolves.toContain(
+      token
+    );
   });
 
   it('serializes concurrent stale-lock reclaimers without racing past the cap', async () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     const lockDir = `${stateFile}.lock`;
+    const token = '00000000-0000-4000-8000-000000000002';
     await mkdir(lockDir, { recursive: true });
     await writeFile(
       join(lockDir, 'owner.json'),
-      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z' })}\n`
+      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
     );
 
     const claims = await Promise.allSettled(
@@ -228,9 +233,12 @@ describe('convergence attempt budget', () => {
     expect(claims.filter((claim) => claim.status === 'fulfilled')).toHaveLength(7);
     expect(claims.filter((claim) => claim.status === 'rejected')).toHaveLength(5);
     expect((await loadConvergeAttemptState(gitCommonDir, 'rcl-18'))?.attemptsUsed).toBe(7);
+    await expect(readFile(join(`${lockDir}.stale.${token}`, 'owner.json'), 'utf8')).resolves.toContain(
+      token
+    );
   });
 
-  it('reclaims an abandoned ownerless lock after its grace period', async () => {
+  it('fails closed on an ownerless legacy lock instead of replacing it', async () => {
     const gitCommonDir = await tempGitDir();
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     await mkdir(`${stateFile}.lock`, { recursive: true });
@@ -239,11 +247,10 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 100,
+        lockTimeoutMs: 10,
         lockRetryMs: 1,
-        ownerlessLockStaleMs: 0,
       })
-    ).resolves.toMatchObject({ attempt: 1 });
+    ).rejects.toThrow('move or remove that lock directory and retry');
   });
 
   it('does not reclaim a lock owned by a live process', async () => {
@@ -253,7 +260,11 @@ describe('convergence attempt budget', () => {
     await mkdir(lockDir, { recursive: true });
     await writeFile(
       join(lockDir, 'owner.json'),
-      `${JSON.stringify({ pid: process.pid, claimedAt: '2026-08-15T12:00:00Z' })}\n`
+      `${JSON.stringify({
+        pid: process.pid,
+        claimedAt: '2026-08-15T12:00:00Z',
+        token: '00000000-0000-4000-8000-000000000003',
+      })}\n`
     );
 
     await expect(

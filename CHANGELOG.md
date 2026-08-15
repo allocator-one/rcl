@@ -10,8 +10,11 @@
   to seven attempts, while an explicit invocation can set or raise the cap;
   reaching it requires the workflow to stop and ask the user before any
   continuation. Existing evidence ledgers seed the machine counter during
-  upgrade. Attempt mutexes reclaim dead owners, and CLI exit codes distinguish
-  a cap refusal from accounting or infrastructure failures.
+  upgrade on a best-effort basis (old ledgers cannot reconstruct failed or
+  missing-report launches). Attempt mutexes are atomically published, reclaim
+  dead owners through token-scoped tombstones, and fail closed on invalid
+  legacy locks. CLI exit codes distinguish a cap refusal from accounting or
+  infrastructure failures.
   Failed, killed, missing-report, and inconclusive launches remain spent, so
   agent bookkeeping cannot turn the cap into an unattended retry loop.
 - **RCL-19: large chunked runs remain observable when redirected.** RCL now

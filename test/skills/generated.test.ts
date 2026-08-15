@@ -54,8 +54,10 @@ describe('generated skill files', () => {
     for (const { path, content } of renderAll() as Rendered[]) {
       if (!path.includes('/rcl-converge/')) continue;
       const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
-      const claim = content.lastIndexOf(claimCommand);
+      const claimCount = content.split(claimCommand).length - 1;
+      const claim = content.indexOf(claimCommand);
       const launch = content.indexOf('rcl review <target>');
+      expect(claimCount, path).toBe(1);
       expect(claim, path).toBeGreaterThan(-1);
       expect(launch, path).toBeGreaterThan(claim);
       expect(content, path).toContain('Bash(rcl converge-attempt:*)');
@@ -66,6 +68,7 @@ describe('generated skill files', () => {
       expect(content, path).toContain('Exit 2 is the configured consent boundary');
       expect(content, path).toContain('Exit 3 is an accounting/infrastructure failure');
       expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
+      expect(content, path).toContain('Run the command block below exactly once');
       expect(content, path).toContain('Never terminate a live council merely because');
     }
   });

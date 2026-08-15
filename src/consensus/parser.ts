@@ -143,7 +143,11 @@ function escapeUnquotedControlCharactersInStrings(
     }
   }
 
-  return repaired > 0 ? { text, repaired } : undefined;
+  // Do not present a partial lexical rewrite as a repair. JSON.parse would
+  // still reject an unterminated string or dangling escape, but withholding
+  // the repaired candidate keeps the fallback deliberately narrow and avoids
+  // emitting a misleading repair warning for otherwise malformed output.
+  return repaired > 0 && !inString && !escaped ? { text, repaired } : undefined;
 }
 
 /** Assign stable, unique ids: empty or colliding ids are regenerated. */

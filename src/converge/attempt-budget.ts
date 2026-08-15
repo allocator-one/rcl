@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -11,7 +11,6 @@ const STATE_DIR = 'rcl-converge-attempts';
 const LOCK_OWNER_FILE = 'owner.json';
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
-const DEFAULT_OWNERLESS_LOCK_STALE_MS = 60_000;
 
 const execFileAsync = promisify(execFile);
 
@@ -78,12 +77,12 @@ interface ClaimOptions {
   pid?: number;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
-  ownerlessLockStaleMs?: number;
 }
 
 interface AttemptLockOwner {
   pid: number;
   claimedAt: string;
+  token: string;
 }
 
 function validateTarget(target: string): string {
@@ -97,7 +96,7 @@ function validateTarget(target: string): string {
 function validateCap(maxAttempts: number): number {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
     throw new ConvergeAttemptStateError(
-      '--max-attempts must be a positive safe integer.'
+      'maxAttempts (--max-attempts) must be a positive safe integer.'
     );
   }
   return maxAttempts;
@@ -235,16 +234,7 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-async function lockCanBeReclaimed(lockDir: string, ownerlessStaleMs: number): Promise<boolean> {
-  let lockStat;
-  try {
-    lockStat = await stat(lockDir);
-  } catch (err) {
-    if (isNodeError(err, 'ENOENT')) return false;
-    throw err;
-  }
-
-  let owner: AttemptLockOwner | undefined;
+async function readLockOwner(lockDir: string): Promise<AttemptLockOwner | undefined> {
   try {
     const parsed = JSON.parse(
       await readFile(join(lockDir, LOCK_OWNER_FILE), 'utf8')
@@ -252,49 +242,88 @@ async function lockCanBeReclaimed(lockDir: string, ownerlessStaleMs: number): Pr
     if (
       Number.isInteger(parsed.pid) &&
       (parsed.pid ?? 0) > 0 &&
-      typeof parsed.claimedAt === 'string'
+      typeof parsed.claimedAt === 'string' &&
+      typeof parsed.token === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        parsed.token
+      )
     ) {
-      owner = parsed as AttemptLockOwner;
+      return parsed as AttemptLockOwner;
     }
   } catch (err) {
-    if (!isNodeError(err, 'ENOENT') && !(err instanceof SyntaxError)) throw err;
-  }
-
-  if (owner) return !processIsAlive(owner.pid);
-
-  // A process can die in the tiny gap between mkdir and writing owner.json.
-  // Give a healthy claimant ample time to publish its owner before treating
-  // an ownerless or partially-written lock as abandoned.
-  return Date.now() - lockStat.mtimeMs >= ownerlessStaleMs;
-}
-
-async function reclaimStaleLock(lockDir: string, ownerlessStaleMs: number): Promise<boolean> {
-  // Serialize reclaimers separately from claimants. Without this small
-  // recovery mutex, two processes could both classify the old lock as stale;
-  // the slower one might then rename a fresh lock created by the winner.
-  const recoveryDir = `${lockDir}.reclaim`;
-  try {
-    await mkdir(recoveryDir);
-  } catch (err) {
-    if (isNodeError(err, 'EEXIST')) return false;
-    throw err;
-  }
-
-  const staleDir = `${lockDir}.stale.${process.pid}.${randomUUID()}`;
-  try {
-    // Re-check after winning the recovery mutex. The original owner may have
-    // released the lock, and another claimant may now own a fresh one.
-    if (!(await lockCanBeReclaimed(lockDir, ownerlessStaleMs))) return false;
-    try {
-      await rename(lockDir, staleDir);
-    } catch (err) {
-      if (isNodeError(err, 'ENOENT')) return false;
+    if (!isNodeError(err, 'ENOENT') && !isNodeError(err, 'ENOTDIR') && !(err instanceof SyntaxError)) {
       throw err;
     }
-    await rm(staleDir, { recursive: true, force: true });
+  }
+  return undefined;
+}
+
+async function lockPathExists(lockDir: string): Promise<boolean> {
+  try {
+    await lstat(lockDir);
     return true;
+  } catch (err) {
+    if (isNodeError(err, 'ENOENT')) return false;
+    throw err;
+  }
+}
+
+function isRenameContention(err: unknown): boolean {
+  return isNodeError(err, 'EEXIST') || isNodeError(err, 'ENOTEMPTY');
+}
+
+async function tryAcquireOwnedLock(lockDir: string, owner: AttemptLockOwner): Promise<boolean> {
+  // Populate a private directory first, then publish it with one atomic
+  // rename. A canonical lock is therefore never visible without owner data,
+  // eliminating the mkdir -> owner.json race entirely.
+  const claimDir = `${lockDir}.claim.${process.pid}.${randomUUID()}`;
+  await mkdir(claimDir);
+  let primaryError: unknown;
+  try {
+    await writeFile(join(claimDir, LOCK_OWNER_FILE), `${JSON.stringify(owner)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
+    try {
+      await rename(claimDir, lockDir);
+    } catch (err) {
+      if (isRenameContention(err)) return false;
+      throw err;
+    }
+    return true;
+  } catch (err) {
+    primaryError = err;
+    throw err;
   } finally {
-    await rm(recoveryDir, { recursive: true, force: true });
+    try {
+      await rm(claimDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      if (primaryError === undefined) throw cleanupError;
+    }
+  }
+}
+
+async function reclaimStaleLock(lockDir: string, staleOwner: AttemptLockOwner): Promise<boolean> {
+  const currentOwner = await readLockOwner(lockDir);
+  if (
+    !currentOwner ||
+    currentOwner.token !== staleOwner.token ||
+    processIsAlive(currentOwner.pid)
+  ) {
+    return false;
+  }
+
+  // All reclaimers for one stale generation derive the same destination.
+  // The first atomic rename leaves the non-empty directory as a tombstone;
+  // delayed reclaimers cannot rename a freshly acquired lock over it.
+  const staleDir = `${lockDir}.stale.${staleOwner.token}`;
+  try {
+    await rename(lockDir, staleDir);
+    return true;
+  } catch (err) {
+    if (isNodeError(err, 'ENOENT') || isRenameContention(err)) return false;
+    throw err;
   }
 }
 
@@ -302,54 +331,57 @@ async function acquireOwnedLock(
   lockDir: string,
   timeoutMs: number,
   retryMs: number,
-  ownerlessStaleMs: number,
   owner: AttemptLockOwner
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
-    try {
-      await mkdir(lockDir);
-    } catch (err) {
-      if (!isNodeError(err, 'EEXIST')) throw err;
-      if (
-        (await lockCanBeReclaimed(lockDir, ownerlessStaleMs)) &&
-        (await reclaimStaleLock(lockDir, ownerlessStaleMs))
-      ) {
+    const currentOwner = await readLockOwner(lockDir);
+    if (currentOwner && !processIsAlive(currentOwner.pid)) {
+      if (await reclaimStaleLock(lockDir, currentOwner)) {
         continue;
       }
-      if (Date.now() >= deadline) {
-        throw new ConvergeAttemptStateError(
-          `Timed out waiting for convergence attempt lock: ${lockDir}. ` +
-            'Refusing to start provider calls while accounting is uncertain. ' +
-            'If no live converge-attempt process owns it, move or remove that lock directory and retry.'
-        );
-      }
-      await delay(retryMs);
-      continue;
+    } else if (!currentOwner && !(await lockPathExists(lockDir))) {
+      if (await tryAcquireOwnedLock(lockDir, owner)) return;
     }
 
-    try {
-      await writeFile(join(lockDir, LOCK_OWNER_FILE), `${JSON.stringify(owner)}\n`, {
-        encoding: 'utf8',
-        flag: 'wx',
-        mode: 0o600,
-      });
-      return;
-    } catch (err) {
-      await rm(lockDir, { recursive: true, force: true });
-      throw err;
+    if (Date.now() >= deadline) {
+      throw new ConvergeAttemptStateError(
+        `Timed out waiting for convergence attempt lock: ${lockDir}. ` +
+          'Refusing to start provider calls while accounting is uncertain. ' +
+          'If no live converge-attempt process owns it, move or remove that lock directory and retry.'
+      );
     }
+    await delay(retryMs);
   }
 }
 
 async function writeStateAtomically(stateFile: string, state: ConvergeAttemptState): Promise<void> {
   const tempFile = `${stateFile}.${process.pid}.${randomUUID()}.tmp`;
+  let primaryError: unknown;
   try {
     await writeFile(tempFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
     await rename(tempFile, stateFile);
+  } catch (err) {
+    primaryError = err;
+    throw err;
   } finally {
-    await rm(tempFile, { force: true });
+    try {
+      await rm(tempFile, { force: true });
+    } catch (cleanupError) {
+      if (primaryError === undefined) throw cleanupError;
+    }
   }
+}
+
+async function releaseOwnedLock(lockDir: string, owner: AttemptLockOwner): Promise<void> {
+  const currentOwner = await readLockOwner(lockDir);
+  if (!currentOwner || currentOwner.token !== owner.token) {
+    throw new ConvergeAttemptStateError(
+      `Convergence attempt lock ownership changed unexpectedly: ${lockDir}. ` +
+        'Refusing to remove a lock that may belong to another process.'
+    );
+  }
+  await rm(lockDir, { recursive: true });
 }
 
 /**
@@ -367,14 +399,18 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   const lockDir = `${stateFile}.lock`;
   const now = options.now ?? (() => new Date());
   const pid = options.pid ?? process.pid;
+  const lockOwner: AttemptLockOwner = {
+    pid: process.pid,
+    claimedAt: now().toISOString(),
+    token: randomUUID(),
+  };
 
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await acquireOwnedLock(
     lockDir,
     options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
     options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
-    options.ownerlessLockStaleMs ?? DEFAULT_OWNERLESS_LOCK_STALE_MS,
-    { pid, claimedAt: now().toISOString() }
+    lockOwner
   );
 
   try {
@@ -417,7 +453,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
 
     return { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile };
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    await releaseOwnedLock(lockDir, lockOwner);
   }
 }
 

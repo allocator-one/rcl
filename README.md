@@ -170,11 +170,15 @@ approval is required. Exit code 3 means attempt accounting itself failed
 the cap is not the remedy. With `--json`, failures are emitted as structured
 JSON on stderr.
 
-The short accounting mutex records its owner PID. A dead owner is reclaimed
-automatically; an ownerless partial lock becomes reclaimable after one minute,
-and timeout errors include the manual recovery path. The state remains a
-same-user local safety mechanism, not a tamper-proof store: deliberately
-deleting `.git/rcl-converge-attempts` is an explicit policy bypass.
+The short accounting mutex is fully populated in a private directory and then
+published atomically. A dead owner is quarantined to a token-scoped tombstone
+before another claimant can proceed; invalid or legacy ownerless locks fail
+closed, and timeout errors include the manual recovery path. When upgrading,
+an evidence ledger seeds only its highest recorded round: historical failed or
+missing-report launches cannot be reconstructed, while every claim after the
+machine state is created is counted exactly. The state remains a same-user
+local safety mechanism, not a tamper-proof store: deliberately deleting
+`.git/rcl-converge-attempts` is an explicit policy bypass.
 
 ```bash
 rcl converge-attempt --target owner-repo-123                 # default/persisted cap
