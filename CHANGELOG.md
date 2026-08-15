@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.0
 
 - **RCL-18: convergence attempt budgets are machine-enforced.** The generated
   `rcl-converge` workflow now claims every council launch through the new
