@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 7;
@@ -268,8 +268,16 @@ async function lockPathExists(lockDir: string): Promise<boolean> {
   }
 }
 
-function isRenameContention(err: unknown): boolean {
-  return isNodeError(err, 'EEXIST') || isNodeError(err, 'ENOTEMPTY');
+async function isRenameContention(err: unknown, destination: string): Promise<boolean> {
+  if (isNodeError(err, 'EEXIST') || isNodeError(err, 'ENOTEMPTY')) return true;
+  // Windows commonly reports an existing directory destination as EPERM or
+  // EACCES. Treat those as contention only when the destination now exists;
+  // a genuine permission failure on an absent path remains infrastructure
+  // failure and must fail closed.
+  return (
+    (isNodeError(err, 'EPERM') || isNodeError(err, 'EACCES')) &&
+    (await lockPathExists(destination))
+  );
 }
 
 async function tryAcquireOwnedLock(lockDir: string, owner: AttemptLockOwner): Promise<boolean> {
@@ -279,6 +287,7 @@ async function tryAcquireOwnedLock(lockDir: string, owner: AttemptLockOwner): Pr
   const claimDir = `${lockDir}.claim.${process.pid}.${randomUUID()}`;
   await mkdir(claimDir);
   let primaryError: unknown;
+  let published = false;
   try {
     await writeFile(join(claimDir, LOCK_OWNER_FILE), `${JSON.stringify(owner)}\n`, {
       encoding: 'utf8',
@@ -288,18 +297,21 @@ async function tryAcquireOwnedLock(lockDir: string, owner: AttemptLockOwner): Pr
     try {
       await rename(claimDir, lockDir);
     } catch (err) {
-      if (isRenameContention(err)) return false;
+      if (await isRenameContention(err, lockDir)) return false;
       throw err;
     }
+    published = true;
     return true;
   } catch (err) {
     primaryError = err;
     throw err;
   } finally {
-    try {
-      await rm(claimDir, { recursive: true, force: true });
-    } catch (cleanupError) {
-      if (primaryError === undefined) throw cleanupError;
+    if (!published) {
+      try {
+        await rm(claimDir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        if (primaryError === undefined) throw cleanupError;
+      }
     }
   }
 }
@@ -322,7 +334,7 @@ async function reclaimStaleLock(lockDir: string, staleOwner: AttemptLockOwner): 
     await rename(lockDir, staleDir);
     return true;
   } catch (err) {
-    if (isNodeError(err, 'ENOENT') || isRenameContention(err)) return false;
+    if (isNodeError(err, 'ENOENT') || (await isRenameContention(err, staleDir))) return false;
     throw err;
   }
 }
@@ -335,6 +347,9 @@ async function acquireOwnedLock(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
+    // These reads choose between acquire, reclaim, and fail-closed waiting;
+    // they do not provide mutual exclusion. Atomic directory publication and
+    // the non-empty generation tombstone are the serialization primitives.
     const currentOwner = await readLockOwner(lockDir);
     if (currentOwner && !processIsAlive(currentOwner.pid)) {
       if (await reclaimStaleLock(lockDir, currentOwner)) {
@@ -355,12 +370,50 @@ async function acquireOwnedLock(
   }
 }
 
+async function syncDirectory(path: string): Promise<void> {
+  // Windows does not expose directory handles that Node can fsync. The state
+  // file itself is still flushed before the atomic rename; POSIX platforms
+  // additionally flush the directory entry here.
+  if (process.platform === 'win32') return;
+  const directory = await open(path, 'r');
+  let primaryError: unknown;
+  try {
+    await directory.sync();
+  } catch (err) {
+    primaryError = err;
+    throw err;
+  } finally {
+    try {
+      await directory.close();
+    } catch (closeError) {
+      if (primaryError === undefined) throw closeError;
+    }
+  }
+}
+
 async function writeStateAtomically(stateFile: string, state: ConvergeAttemptState): Promise<void> {
   const tempFile = `${stateFile}.${process.pid}.${randomUUID()}.tmp`;
   let primaryError: unknown;
   try {
-    await writeFile(tempFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+    const tempHandle = await open(tempFile, 'wx', 0o600);
+    let tempHandleError: unknown;
+    try {
+      await tempHandle.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
+      await tempHandle.sync();
+    } catch (err) {
+      tempHandleError = err;
+      throw err;
+    } finally {
+      try {
+        await tempHandle.close();
+      } catch (closeError) {
+        if (tempHandleError === undefined) throw closeError;
+      }
+    }
     await rename(tempFile, stateFile);
+    // fsyncing the file before rename makes its contents durable; syncing the
+    // parent directory makes the atomic name replacement durable too.
+    await syncDirectory(dirname(stateFile));
   } catch (err) {
     primaryError = err;
     throw err;
@@ -381,7 +434,16 @@ async function releaseOwnedLock(lockDir: string, owner: AttemptLockOwner): Promi
         'Refusing to remove a lock that may belong to another process.'
     );
   }
-  await rm(lockDir, { recursive: true });
+  const releasedDir = `${lockDir}.released.${owner.token}`;
+  await rename(lockDir, releasedDir);
+  // The canonical lock is already gone. A cleanup failure leaves only a
+  // harmless generation-scoped artifact and must not turn a recorded claim
+  // into a reported failure that an agent might retry.
+  try {
+    await rm(releasedDir, { recursive: true, force: true });
+  } catch {
+    // Intentionally retained for later manual cleanup.
+  }
 }
 
 /**
@@ -406,6 +468,11 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   };
 
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  // Persist a newly created directory entry before relying on state files
+  // inside it. Repeating the sync is intentional: if a prior sync failed,
+  // the next invocation must not silently skip the durability barrier merely
+  // because mkdir now observes the directory.
+  await syncDirectory(dirname(stateDir));
   await acquireOwnedLock(
     lockDir,
     options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,

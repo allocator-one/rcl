@@ -173,62 +173,73 @@ program
 program
   .command('converge-attempt')
   .description('Atomically consume one persisted rcl-converge attempt before starting a review')
-  .requiredOption('--target <key>', 'Stable repository-and-PR/branch convergence target key')
+  .option('--target [key]', 'Required stable repository-and-PR/branch convergence target key')
   .option(
-    '--max-attempts <n>',
-    `Explicit per-target cap override (default ${DEFAULT_CONVERGE_ATTEMPT_CAP} for a new target)`,
-    (value: string) => {
-      const parsed = Number(value);
-      if (!Number.isSafeInteger(parsed) || parsed < 1) {
-        throw new InvalidArgumentError('--max-attempts must be a positive safe integer');
-      }
-      return parsed;
-    }
+    '--max-attempts [n]',
+    `Explicit per-target cap override (default ${DEFAULT_CONVERGE_ATTEMPT_CAP} for a new target)`
   )
   .option('--json', 'Output the claim as JSON')
-  .action(async (opts: { target: string; maxAttempts?: number; json?: boolean }) => {
-    try {
-      const claim = await claimConvergeAttempt({
-        gitCommonDir: await resolveGitCommonDir(),
-        target: opts.target,
-        maxAttempts: opts.maxAttempts,
-      });
-      if (opts.json) {
-        console.log(JSON.stringify(claim));
-      } else {
-        console.log(
-          `Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}. ` +
-            `State: ${claim.stateFile}`
-        );
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const code =
-        err instanceof ConvergeAttemptBudgetExceededError
-          ? err.code
-          : err instanceof ConvergeAttemptStateError
+  .action(
+    async (opts: {
+      target?: string | boolean;
+      maxAttempts?: string | boolean;
+      json?: boolean;
+    }) => {
+      try {
+        if (typeof opts.target !== 'string' || opts.target.trim() === '') {
+          throw new ConvergeAttemptStateError('--target is required.');
+        }
+        let maxAttempts: number | undefined;
+        if (opts.maxAttempts !== undefined) {
+          maxAttempts = typeof opts.maxAttempts === 'string' ? Number(opts.maxAttempts) : NaN;
+          if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+            throw new ConvergeAttemptStateError(
+              'maxAttempts (--max-attempts) must be a positive safe integer.'
+            );
+          }
+        }
+        const claim = await claimConvergeAttempt({
+          gitCommonDir: await resolveGitCommonDir(),
+          target: opts.target,
+          maxAttempts,
+        });
+        if (opts.json) {
+          console.log(JSON.stringify(claim));
+        } else {
+          console.log(
+            `Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}. ` +
+              `State: ${claim.stateFile}`
+          );
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code =
+          err instanceof ConvergeAttemptBudgetExceededError
             ? err.code
-            : 'RCL_CONVERGE_ATTEMPT_ERROR';
-      if (opts.json) {
-        console.error(
-          JSON.stringify({
-            error: {
-              code,
-              message,
-              ...(err instanceof ConvergeAttemptBudgetExceededError
-                ? { attemptsUsed: err.attemptsUsed, cap: err.cap, target: err.target }
-                : {}),
-            },
-          })
-        );
-      } else {
-        console.error(chalk.red(message));
+            : err instanceof ConvergeAttemptStateError
+              ? err.code
+              : 'RCL_CONVERGE_ATTEMPT_ERROR';
+        if (opts.json) {
+          console.error(
+            JSON.stringify({
+              error: {
+                code,
+                message,
+                ...(err instanceof ConvergeAttemptBudgetExceededError
+                  ? { attemptsUsed: err.attemptsUsed, cap: err.cap, target: err.target }
+                  : {}),
+              },
+            })
+          );
+        } else {
+          console.error(chalk.red(message));
+        }
+        // Exit 2 is the expected consent boundary. Exit 3 means accounting or
+        // infrastructure failed and raising the cap is not the remediation.
+        process.exitCode = convergeAttemptErrorExitCode(err);
       }
-      // Exit 2 is the expected consent boundary. Exit 3 means accounting or
-      // infrastructure failed and raising the cap is not the remediation.
-      process.exitCode = convergeAttemptErrorExitCode(err);
     }
-  });
+  );
 
 // roles subcommand
 const rolesCmd = program.command('roles').description('Manage and inspect roles');

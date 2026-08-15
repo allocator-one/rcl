@@ -51,8 +51,12 @@ describe('generated skill files', () => {
   });
 
   it('machine-claims every convergence attempt before launching a review', () => {
-    for (const { path, content } of renderAll() as Rendered[]) {
-      if (!path.includes('/rcl-converge/')) continue;
+    const convergeSkills = (renderAll() as Rendered[]).filter(({ path }) =>
+      path.includes('/rcl-converge/')
+    );
+    expect(convergeSkills.length).toBeGreaterThan(0);
+
+    for (const { path, content } of convergeSkills) {
       const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
       const claimCount = content.split(claimCommand).length - 1;
       const claim = content.indexOf(claimCommand);
@@ -62,7 +66,9 @@ describe('generated skill files', () => {
       expect(launch, path).toBeGreaterThan(claim);
       expect(content, path).toContain('Bash(rcl converge-attempt:*)');
       expect(content, path).toContain('every review attempt counts toward the configured cap');
-      expect(content, path).toContain('The default cap is 7');
+      expect(content, path).toContain('machine-enforced cost cap defaults to 7');
+      expect(content, path).toContain('legacy `--max-rounds` flag remains a separate evidence-round limit');
+      expect(content, path).toContain('`--max-attempts <N>`');
       expect(content, path).toContain('ask the user whether to stop for human review or continue');
       expect(content, path).toContain('Never invent a higher value on the user\'s behalf');
       expect(content, path).toContain('Exit 2 is the configured consent boundary');
@@ -70,6 +76,9 @@ describe('generated skill files', () => {
       expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
       expect(content, path).toContain('Run the command block below exactly once');
       expect(content, path).toContain('Never terminate a live council merely because');
+      if (path.includes('/.codex/') || path.includes('/.agents/')) {
+        expect(content, path).toContain('echo "$$" > <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid');
+      }
     }
   });
 });

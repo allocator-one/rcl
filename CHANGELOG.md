@@ -14,7 +14,10 @@
   missing-report launches). Attempt mutexes are atomically published, reclaim
   dead owners through token-scoped tombstones, and fail closed on invalid
   legacy locks. CLI exit codes distinguish a cap refusal from accounting or
-  infrastructure failures.
+  infrastructure failures, and `--json` also covers missing/invalid claim
+  options. State and directory entries are synced before a claim succeeds.
+  The skill's legacy `--max-rounds` flag remains an evidence-round limit;
+  `--max-attempts` is the distinct overridable launch budget.
   Failed, killed, missing-report, and inconclusive launches remain spent, so
   agent bookkeeping cannot turn the cap into an unattended retry loop.
 - **RCL-19: large chunked runs remain observable when redirected.** RCL now

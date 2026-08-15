@@ -156,13 +156,19 @@ rcl roles show <name>      # Show system prompt and details for a role
 ### `rcl converge-attempt`
 
 Machine-enforced safety guard used by the generated `rcl-converge` skill.
-Each call atomically consumes one per-target attempt under the repository's
-common Git directory, so the budget survives sessions and linked worktrees.
+Each call atomically and durably consumes one per-target attempt under the
+repository's common Git directory, so the budget survives sessions, linked
+worktrees, and abrupt system restarts.
 New targets default to seven attempts, but an explicit invocation can set any
 positive cap with `--max-attempts`. Omitting the flag on resume preserves the
 persisted cap. At the boundary, RCL refuses before provider calls and directs
 the workflow to ask the user; an approved continuation explicitly supplies a
 higher cap.
+
+At the skill level, `--max-attempts N` controls this machine launch budget.
+The pre-existing `--max-rounds N` flag retains its original meaning as a
+separate evidence-round limit (1–7), so existing invocations do not silently
+change behavior.
 
 Exit code 2 means the configured cap was exhausted and explicit continuation
 approval is required. Exit code 3 means attempt accounting itself failed
@@ -171,9 +177,11 @@ the cap is not the remedy. With `--json`, failures are emitted as structured
 JSON on stderr.
 
 The short accounting mutex is fully populated in a private directory and then
-published atomically. A dead owner is quarantined to a token-scoped tombstone
-before another claimant can proceed; invalid or legacy ownerless locks fail
-closed, and timeout errors include the manual recovery path. When upgrading,
+published atomically. State contents and, where supported, their directory
+entry are synced before a claim succeeds. A dead owner is quarantined to a
+token-scoped tombstone before another claimant can proceed; invalid or legacy
+ownerless locks fail closed, and timeout errors include the manual recovery
+path. When upgrading,
 an evidence ledger seeds only its highest recorded round: historical failed or
 missing-report launches cannot be reconstructed, while every claim after the
 machine state is created is counted exactly. The state remains a same-user

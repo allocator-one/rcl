@@ -165,6 +165,16 @@ describe('parseReviewOutput — untrusted output robustness', () => {
     expect(result.warnings.some((warning) => warning.includes('repaired'))).toBe(false);
   });
 
+  it('does not repair literal control characters inside object keys', () => {
+    const malformed = '{"bad\nkey":"value","findings":null}';
+    const result = parseReviewOutput(malformed, 'google/gemini-3.6-flash', 'general');
+
+    expect(result.findings).toEqual([]);
+    expect(result.unusable).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes('JSON parse error'))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes('repaired'))).toBe(false);
+  });
+
   it('leaves already-escaped control characters on the strict path', () => {
     const strict = JSON.stringify({
       findings: [{ ...VALID_FINDING, description: 'first line\nsecond line' }],

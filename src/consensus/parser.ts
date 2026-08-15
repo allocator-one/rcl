@@ -109,11 +109,16 @@ function escapeUnquotedControlCharactersInStrings(
   let inString = false;
   let escaped = false;
   let repaired = 0;
+  let repairedInString = 0;
   let text = '';
 
-  for (const char of candidate) {
+  for (let index = 0; index < candidate.length; index++) {
+    const char = candidate[index]!;
     if (!inString) {
-      if (char === '"') inString = true;
+      if (char === '"') {
+        inString = true;
+        repairedInString = 0;
+      }
       text += char;
       continue;
     }
@@ -129,6 +134,15 @@ function escapeUnquotedControlCharactersInStrings(
       continue;
     }
     if (char === '"') {
+      if (repairedInString > 0) {
+        let nextIndex = index + 1;
+        while (nextIndex < candidate.length && /\s/.test(candidate[nextIndex]!)) {
+          nextIndex++;
+        }
+        // A quoted token followed by ':' is an object key, not a value.
+        // Leave malformed keys on the strict failure path.
+        if (candidate[nextIndex] === ':') return undefined;
+      }
       inString = false;
       text += char;
       continue;
@@ -138,6 +152,7 @@ function escapeUnquotedControlCharactersInStrings(
     if (code <= 0x1f) {
       text += `\\u${code.toString(16).padStart(4, '0')}`;
       repaired++;
+      repairedInString++;
     } else {
       text += char;
     }
