@@ -19,6 +19,9 @@ export function buildCouncilRunPlan(options: {
 }): CouncilRunPlan {
   const concurrency = Math.max(1, Math.floor(options.concurrency));
   const waves = options.totalCalls === 0 ? 0 : Math.ceil(options.totalCalls / concurrency);
+  // timeoutMs is the whole adapter-call budget. Provider retry loops share a
+  // single AbortController and deadline, so retries do not multiply this
+  // timeout-bound queue estimate.
   return {
     ...options,
     concurrency,

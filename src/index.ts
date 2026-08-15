@@ -52,6 +52,9 @@ import type { Diff } from './resolver/types.js';
 import {
   DEFAULT_CONVERGE_ATTEMPT_CAP,
   claimConvergeAttempt,
+  ConvergeAttemptBudgetExceededError,
+  convergeAttemptErrorExitCode,
+  ConvergeAttemptStateError,
   resolveGitCommonDir,
 } from './converge/attempt-budget.js';
 
@@ -199,8 +202,31 @@ program
         );
       }
     } catch (err) {
-      console.error(chalk.red(err instanceof Error ? err.message : String(err)));
-      process.exitCode = 2;
+      const message = err instanceof Error ? err.message : String(err);
+      const code =
+        err instanceof ConvergeAttemptBudgetExceededError
+          ? err.code
+          : err instanceof ConvergeAttemptStateError
+            ? err.code
+            : 'RCL_CONVERGE_ATTEMPT_ERROR';
+      if (opts.json) {
+        console.error(
+          JSON.stringify({
+            error: {
+              code,
+              message,
+              ...(err instanceof ConvergeAttemptBudgetExceededError
+                ? { attemptsUsed: err.attemptsUsed, cap: err.cap, target: err.target }
+                : {}),
+            },
+          })
+        );
+      } else {
+        console.error(chalk.red(message));
+      }
+      // Exit 2 is the expected consent boundary. Exit 3 means accounting or
+      // infrastructure failed and raising the cap is not the remediation.
+      process.exitCode = convergeAttemptErrorExitCode(err);
     }
   });
 

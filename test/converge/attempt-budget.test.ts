@@ -7,6 +7,7 @@ import {
   DEFAULT_CONVERGE_ATTEMPT_CAP,
   claimConvergeAttempt,
   ConvergeAttemptBudgetExceededError,
+  convergeAttemptErrorExitCode,
   ConvergeAttemptStateError,
   convergeAttemptStatePath,
   loadConvergeAttemptState,
@@ -75,6 +76,14 @@ describe('convergence attempt budget', () => {
     });
     await expect(refused).rejects.toThrow('Ask the user whether to continue');
     expect((await loadConvergeAttemptState(gitCommonDir, 'repo-7559'))?.attemptsUsed).toBe(7);
+  });
+
+  it('distinguishes a consent-boundary refusal from accounting failures', () => {
+    expect(convergeAttemptErrorExitCode(new ConvergeAttemptBudgetExceededError('target', 7, 7))).toBe(
+      2
+    );
+    expect(convergeAttemptErrorExitCode(new ConvergeAttemptStateError('corrupt state'))).toBe(3);
+    expect(convergeAttemptErrorExitCode(new Error('unexpected'))).toBe(3);
   });
 
   it('preserves the configured cap when a resumed run omits an override', async () => {
@@ -162,6 +171,99 @@ describe('convergence attempt budget', () => {
     await expect(claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' })).rejects.toBeInstanceOf(
       ConvergeAttemptStateError
     );
+  });
+
+  it('fails closed when persisted accounting is not valid JSON', async () => {
+    const gitCommonDir = await tempGitDir();
+    const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
+    await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
+    await writeFile(stateFile, '{"attemptsUsed":');
+
+    await expect(claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' })).rejects.toThrow(
+      'refusing to reset the safety budget'
+    );
+  });
+
+  it('reclaims an attempt lock owned by a dead process', async () => {
+    const gitCommonDir = await tempGitDir();
+    const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
+    const lockDir = `${stateFile}.lock`;
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, 'owner.json'),
+      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z' })}\n`
+    );
+
+    await expect(
+      claimConvergeAttempt({
+        gitCommonDir,
+        target: 'rcl-18',
+        lockTimeoutMs: 100,
+        lockRetryMs: 1,
+      })
+    ).resolves.toMatchObject({ attempt: 1 });
+  });
+
+  it('serializes concurrent stale-lock reclaimers without racing past the cap', async () => {
+    const gitCommonDir = await tempGitDir();
+    const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
+    const lockDir = `${stateFile}.lock`;
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, 'owner.json'),
+      `${JSON.stringify({ pid: 2_147_483_647, claimedAt: '2026-08-15T12:00:00Z' })}\n`
+    );
+
+    const claims = await Promise.allSettled(
+      Array.from({ length: 12 }, () =>
+        claimConvergeAttempt({
+          gitCommonDir,
+          target: 'rcl-18',
+          lockTimeoutMs: 500,
+          lockRetryMs: 1,
+        })
+      )
+    );
+
+    expect(claims.filter((claim) => claim.status === 'fulfilled')).toHaveLength(7);
+    expect(claims.filter((claim) => claim.status === 'rejected')).toHaveLength(5);
+    expect((await loadConvergeAttemptState(gitCommonDir, 'rcl-18'))?.attemptsUsed).toBe(7);
+  });
+
+  it('reclaims an abandoned ownerless lock after its grace period', async () => {
+    const gitCommonDir = await tempGitDir();
+    const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
+    await mkdir(`${stateFile}.lock`, { recursive: true });
+
+    await expect(
+      claimConvergeAttempt({
+        gitCommonDir,
+        target: 'rcl-18',
+        lockTimeoutMs: 100,
+        lockRetryMs: 1,
+        ownerlessLockStaleMs: 0,
+      })
+    ).resolves.toMatchObject({ attempt: 1 });
+  });
+
+  it('does not reclaim a lock owned by a live process', async () => {
+    const gitCommonDir = await tempGitDir();
+    const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
+    const lockDir = `${stateFile}.lock`;
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, 'owner.json'),
+      `${JSON.stringify({ pid: process.pid, claimedAt: '2026-08-15T12:00:00Z' })}\n`
+    );
+
+    await expect(
+      claimConvergeAttempt({
+        gitCommonDir,
+        target: 'rcl-18',
+        lockTimeoutMs: 10,
+        lockRetryMs: 1,
+      })
+    ).rejects.toThrow('If no live converge-attempt process owns it');
   });
 
   it('seeds a missing machine counter from an existing evidence ledger', async () => {

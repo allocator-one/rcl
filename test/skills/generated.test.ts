@@ -53,8 +53,7 @@ describe('generated skill files', () => {
   it('machine-claims every convergence attempt before launching a review', () => {
     for (const { path, content } of renderAll() as Rendered[]) {
       if (!path.includes('/rcl-converge/')) continue;
-      const claimCommand =
-        "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG> || exit 1";
+      const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
       const claim = content.lastIndexOf(claimCommand);
       const launch = content.indexOf('rcl review <target>');
       expect(claim, path).toBeGreaterThan(-1);
@@ -64,6 +63,9 @@ describe('generated skill files', () => {
       expect(content, path).toContain('The default cap is 7');
       expect(content, path).toContain('ask the user whether to stop for human review or continue');
       expect(content, path).toContain('Never invent a higher value on the user\'s behalf');
+      expect(content, path).toContain('Exit 2 is the configured consent boundary');
+      expect(content, path).toContain('Exit 3 is an accounting/infrastructure failure');
+      expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
       expect(content, path).toContain('Never terminate a live council merely because');
     }
   });

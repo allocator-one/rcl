@@ -164,6 +164,18 @@ persisted cap. At the boundary, RCL refuses before provider calls and directs
 the workflow to ask the user; an approved continuation explicitly supplies a
 higher cap.
 
+Exit code 2 means the configured cap was exhausted and explicit continuation
+approval is required. Exit code 3 means attempt accounting itself failed
+(state, lock, Git, filesystem, or another infrastructure error); increasing
+the cap is not the remedy. With `--json`, failures are emitted as structured
+JSON on stderr.
+
+The short accounting mutex records its owner PID. A dead owner is reclaimed
+automatically; an ownerless partial lock becomes reclaimable after one minute,
+and timeout errors include the manual recovery path. The state remains a
+same-user local safety mechanism, not a tamper-proof store: deliberately
+deleting `.git/rcl-converge-attempts` is an explicit policy bypass.
+
 ```bash
 rcl converge-attempt --target owner-repo-123                 # default/persisted cap
 rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit override
