@@ -170,6 +170,11 @@ The pre-existing `--max-rounds N` flag retains its original meaning as a
 separate evidence-round limit (1–7), so existing invocations do not silently
 change behavior.
 
+Full-fleet reviewer completion is not required. For the generated
+`rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
+when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Every timeout or
+error must be disclosed, and a result below that threshold is inconclusive.
+
 Exit code 2 means the configured cap was exhausted and explicit continuation
 approval is required. Exit code 3 means attempt accounting itself failed
 (state, lock, Git, filesystem, or another infrastructure error); increasing
