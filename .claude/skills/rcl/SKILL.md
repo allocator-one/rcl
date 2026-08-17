@@ -185,6 +185,7 @@ Then tell the user:
 - Whether this was a PR review or a local diff review
 - Which PR was reviewed (if PR mode), or which branch and merge-base range (if diff mode)
 - Which spec was used (if any) and where it came from (Harness issue, file, explicit flag)
+- Reviewer completion as `stats.successfulReviews` / `stats.totalReviews`, plus every timeout or error. Do not require full-fleet completion; when the report feeds `rcl-converge`, apply its separate conclusive-round threshold.
 - Which models ran and how many findings each returned
 - Link to the posted review comment (from rcl output) only if `--post` or `--inline` was used in PR mode
 - Brief summary: N critical, N important, N minor
