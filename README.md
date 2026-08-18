@@ -210,12 +210,12 @@ Place `.review-council.yml` in your project root (or any parent directory). All 
 
 ```yaml
 # Blocking council (provider-prefixed names) — every round waits for these.
-# Default: the three direct-API models below. Keep slow/aggregator-routed
-# models out of this list; give them an async seat instead.
+# Shown here: the actual defaults. Keep slow/aggregator-routed models out of
+# this list; give them an async seat instead.
 models:
-  - anthropic/claude-opus-4-6
-  - openai/gpt-5.4
-  - google/gemini-2.5-pro
+  - anthropic/claude-fable-5
+  - openai/gpt-5.6-sol
+  - google/gemini-3.6-flash
 
 # Async bonus reviewers — fired with each round, never awaited. Results that
 # have arrived by the next round of the same target are merged into that

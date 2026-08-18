@@ -472,8 +472,12 @@ async function prepareCouncil(
   // seat is an explicit choice, so the model stays blocking and gets no
   // duplicate async seat. Async models appearing only in `secondaryModels`
   // are partitioned OUT of the blocking path below. Explicit --reviewer
-  // pairs mean exact manual control: no async bonus seats.
-  const asyncModels = (config.asyncModels ?? []).filter((m) => !models.includes(m));
+  // pairs mean exact manual control: every pair runs as given — even a
+  // model that is usually async — and no bonus seats are added, so the
+  // async roster must not partition pairs away.
+  const asyncModels = explicitReviewers
+    ? []
+    : (config.asyncModels ?? []).filter((m) => !models.includes(m));
   const { blocking: assignments } = partitionAsyncAssignments(built, asyncModels);
   const generalRoles = roles.filter((r) => !r.isSpecialized);
   const asyncAssignments =
@@ -594,16 +598,17 @@ async function executeCouncil(
   // await them; collect whatever arrived from earlier rounds after the
   // blocking council returns. Best-effort by design — a broken lane must
   // never fail or slow the blocking round.
-  const asyncLaneActive =
-    extra?.asyncTargetLabel !== undefined &&
-    (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0);
+  const asyncTargetLabel = extra?.asyncTargetLabel;
   let asyncStoreDir: string | undefined;
   let asyncKey: string | undefined;
   let asyncLaunched = 0;
-  if (asyncLaneActive) {
+  if (
+    asyncTargetLabel !== undefined &&
+    (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0)
+  ) {
     try {
       asyncStoreDir = await resolveAsyncStoreDir();
-      asyncKey = asyncTargetKey(extra!.asyncTargetLabel!);
+      asyncKey = asyncTargetKey(asyncTargetLabel);
       let asyncChunkAssignments = chunks.flatMap((chunk) =>
         asyncAssignments.map((assignment) => ({ assignment, chunk }))
       );
@@ -760,18 +765,20 @@ async function executeCouncil(
   };
 
   spinner.succeed('Review complete');
+  // Status lines go to stderr: stdout may be a machine-read JSON stream
+  // (`--json | jq`), which a stray status line would corrupt.
   if (asyncLaunched > 0) {
-    console.log(
+    process.stderr.write(
       chalk.dim(
         `Fired ${asyncLaunched} async reviewer call(s) — results merge into the next round of this target.`
-      )
+      ) + '\n'
     );
   }
   if (arrivedAsync.length > 0) {
-    console.log(
+    process.stderr.write(
       chalk.dim(
         `Merged ${mergeChunkReviews(arrivedAsync).length} async reviewer result(s) from an earlier round.`
-      )
+      ) + '\n'
     );
   }
 
@@ -928,7 +935,12 @@ async function runPlanReview(
     spinner.text = `Loading plan: ${file}`;
     const diff = await loadPlanAsDiff(file);
 
-    await executeCouncil(spinner, prepared, diff, opts, { focus });
+    // Plan reviews get an async lane too: re-reviewing the same plan file
+    // collects what the previous run fired.
+    await executeCouncil(spinner, prepared, diff, opts, {
+      focus,
+      asyncTargetLabel: `plan:${file}`,
+    });
   } catch (err) {
     spinner.fail(String(err));
     if (process.env['RCL_DEBUG']) {

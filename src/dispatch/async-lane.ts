@@ -167,25 +167,57 @@ export async function spoolAsyncCalls(
   return paths;
 }
 
+const WORKER_ENV_PREFIXES = /^(ANTHROPIC_|OPENAI_|GOOGLE_|GEMINI_|OPENROUTER_|AZURE_|NODE_|RCL_|LC_)/;
+const WORKER_ENV_EXACT = new Set([
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'USER',
+  'SHELL',
+  'LANG',
+  'TERM',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+]);
+
+/**
+ * Environment for a detached worker: provider credentials/config, proxy and
+ * locale basics — nothing else. The worker only ever talks to its model
+ * provider, so unrelated secrets in the parent env (GITHUB_TOKEN, cloud
+ * credentials, …) have no business outliving the review in a background
+ * process.
+ */
+export function workerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (WORKER_ENV_PREFIXES.test(key) || WORKER_ENV_EXACT.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 /**
  * Launch one detached worker process per spool. Fire-and-forget by design:
  * the parent exits when the blocking council is done, and the workers keep
- * running until their call completes or times out. Provider keys travel via
- * inherited env (the worker is this same same-user codebase, not a third
- * party). Launch failures are contained: an unhandled child 'error' event
- * would crash the review process that is doing the real work.
+ * running until their call completes or times out. Launch failures are
+ * contained: an unhandled child 'error' event would crash the review
+ * process that is doing the real work.
  */
 export function launchAsyncWorkers(spoolPaths: string[], cliScript = process.argv[1]): void {
   if (!cliScript) {
     console.warn('Async lane: cannot resolve the CLI script path; async reviewers not launched.');
     return;
   }
+  const env = workerEnv();
   for (const spool of spoolPaths) {
     try {
       const child = spawn(process.execPath, [cliScript, 'async-worker', '--spool', spool], {
         detached: true,
         stdio: 'ignore',
-        env: process.env,
+        env,
       });
       child.on('error', (err) => {
         console.warn(`Async worker failed to launch: ${String(err)}`);

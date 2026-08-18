@@ -8,6 +8,7 @@ import {
   spoolAsyncCalls,
   runAsyncWorker,
   collectAsyncResults,
+  workerEnv,
 } from '../../src/dispatch/async-lane.js';
 import type { ReviewAdapter } from '../../src/dispatch/adapter.js';
 import type { Role, ReviewAssignment } from '../../src/roles/types.js';
@@ -68,6 +69,34 @@ describe('asyncTargetKey', () => {
   it('produces filesystem-safe keys', () => {
     const key = asyncTargetKey('weird target/../../name with spaces#7');
     expect(key).toMatch(/^[A-Za-z0-9._-]+$/);
+  });
+});
+
+describe('workerEnv', () => {
+  it('keeps provider credentials and basics, drops unrelated secrets', () => {
+    const env = workerEnv({
+      ANTHROPIC_API_KEY: 'a',
+      OPENROUTER_API_KEY: 'o',
+      GEMINI_API_KEY: 'g',
+      OPENAI_BASE_URL: 'http://localhost',
+      PATH: '/usr/bin',
+      HOME: '/home/u',
+      HTTPS_PROXY: 'http://proxy',
+      GITHUB_TOKEN: 'gh-secret',
+      AWS_SECRET_ACCESS_KEY: 'aws-secret',
+      SSH_AUTH_SOCK: '/tmp/sock',
+      NPM_TOKEN: 'npm-secret',
+    });
+    expect(env['ANTHROPIC_API_KEY']).toBe('a');
+    expect(env['OPENROUTER_API_KEY']).toBe('o');
+    expect(env['GEMINI_API_KEY']).toBe('g');
+    expect(env['OPENAI_BASE_URL']).toBe('http://localhost');
+    expect(env['PATH']).toBe('/usr/bin');
+    expect(env['HTTPS_PROXY']).toBe('http://proxy');
+    expect(env['GITHUB_TOKEN']).toBeUndefined();
+    expect(env['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
+    expect(env['SSH_AUTH_SOCK']).toBeUndefined();
+    expect(env['NPM_TOKEN']).toBeUndefined();
   });
 });
 
