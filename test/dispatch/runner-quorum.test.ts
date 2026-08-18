@@ -128,6 +128,91 @@ describe('runReviews quorum closure (RCL-26)', () => {
     expect(reviews.every((r) => r.status === 'success')).toBe(true);
   });
 
+  it('counts failed calls toward the quorum — a dead reviewer still completes the wait', async () => {
+    const adapter: ReviewAdapter = {
+      name: 'fake',
+      provider: 'fake',
+      review: (model) =>
+        new Promise((resolve) => {
+          if (model === 'slow') return; // hangs until canceled
+          setTimeout(
+            () =>
+              resolve(
+                model === 'failing'
+                  ? { ...successReview(model), status: 'error', error: 'boom' }
+                  : successReview(model)
+              ),
+            5
+          );
+        }),
+      ask: async () => {
+        throw new Error('not used');
+      },
+    };
+    const assignments = ['ok', 'failing', 'slow'].map(makeAssignment);
+    const start = Date.now();
+    const reviews = await runReviews(assignments, assignments.map(makePrompt), {
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      concurrency: 3,
+      adapterFactory: () => adapter,
+      quorum: { fraction: 2 / 3 },
+    });
+    expect(Date.now() - start).toBeLessThan(5_000);
+    expect(reviews.find((r) => r.model === 'slow')!.status).toBe('canceled');
+  });
+
+  it('an exact-integer quorum fraction does not overshoot from float noise', async () => {
+    // 2/3 of 6 must be 4 completions, not 5 — ceil(float noise) once cost a call.
+    const adapter = delayedAdapter({
+      f1: 5, f2: 5, f3: 5, f4: 5,
+      s1: Infinity, s2: Infinity,
+    });
+    const assignments = ['f1', 'f2', 'f3', 'f4', 's1', 's2'].map(makeAssignment);
+    const start = Date.now();
+    const reviews = await runReviews(assignments, assignments.map(makePrompt), {
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      concurrency: 6,
+      adapterFactory: () => adapter,
+      quorum: { fraction: 2 / 3 },
+    });
+    expect(Date.now() - start).toBeLessThan(5_000);
+    expect(reviews.filter((r) => r.status === 'canceled')).toHaveLength(2);
+  });
+
+  it('a canceled call whose promise later rejects does not crash the run', async () => {
+    const adapter: ReviewAdapter = {
+      name: 'fake',
+      provider: 'fake',
+      review: (model, _role, _s, _u, opts: AdapterOptions) =>
+        new Promise((resolve, reject) => {
+          if (model !== 'slow') {
+            setTimeout(() => resolve(successReview(model)), 5);
+            return;
+          }
+          opts.signal?.addEventListener('abort', () =>
+            setTimeout(() => reject(new Error('late rejection after cancel')), 10)
+          );
+        }),
+      ask: async () => {
+        throw new Error('not used');
+      },
+    };
+    const assignments = ['a', 'b', 'slow'].map(makeAssignment);
+    const reviews = await runReviews(assignments, assignments.map(makePrompt), {
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      concurrency: 3,
+      adapterFactory: () => adapter,
+      quorum: { fraction: 2 / 3 },
+    });
+    expect(reviews.find((r) => r.model === 'slow')!.status).toBe('canceled');
+    // Give the late rejection a beat to fire; an unhandled rejection would
+    // fail the test process.
+    await new Promise((r) => setTimeout(r, 30));
+  });
+
   it('propagates the abort to the in-flight adapter call', async () => {
     let sawAbort = false;
     const adapter: ReviewAdapter = {

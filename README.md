@@ -262,8 +262,9 @@ output:
 concurrency: 6
 timeout: 300000       # ms per blocking model call (every direct-API p90 is under 260s)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
-quorumFraction: 0.667 # round closes once this share of calls has completed; stragglers are
-                      # canceled and recorded (core `models` are never canceled). 1 disables.
+# quorumFraction: 0.75  # round closes once this share of calls has completed; stragglers
+                        # are canceled and recorded (core `models` are never canceled).
+                        # Default: exactly 2/3 — leave unset for that; 1 disables.
 maxRetries: 3
 
 # Reasoning budget for providers that support it (currently OpenRouter).

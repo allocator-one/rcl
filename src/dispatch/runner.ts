@@ -108,9 +108,11 @@ export async function runReviews(
   // cap just like it does on the wall-clock. Core-model calls are exempt
   // from cancellation, so the round still waits for the blocking council.
   const planned = calls.length;
+  // The epsilon absorbs float noise so fraction*planned that is
+  // mathematically an integer (e.g. 2/3 of 6) never ceils one call too high.
   const quorumThreshold =
     options.quorum && options.quorum.fraction < 1
-      ? Math.min(planned, Math.max(1, Math.ceil(options.quorum.fraction * planned)))
+      ? Math.min(planned, Math.max(1, Math.ceil(options.quorum.fraction * planned - 1e-9)))
       : Infinity;
   const coreModels = new Set(options.quorum?.coreModels ?? []);
   let completedCount = 0;
@@ -158,6 +160,10 @@ export async function runReviews(
           call.userPrompt,
           { ...adapterOpts, signal: controller.signal }
         );
+        // Builtin adapters never reject, but a custom adapterFactory might.
+        // Once the cancellation wins the race, a late rejection from the
+        // abandoned promise must not surface as an unhandled rejection.
+        reviewPromise.catch(() => {});
         review = cancelable
           ? await Promise.race([
               reviewPromise,
