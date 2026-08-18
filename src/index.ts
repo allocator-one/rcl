@@ -11,6 +11,7 @@ import {
   DEFAULT_MODELS,
   DEFAULT_THRESHOLDS,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_ASYNC_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
@@ -27,6 +28,15 @@ import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
+import {
+  partitionAsyncAssignments,
+  asyncTargetKey,
+  resolveAsyncStoreDir,
+  spoolAsyncCalls,
+  launchAsyncWorkers,
+  runAsyncWorker,
+  collectAsyncResults,
+} from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
@@ -245,6 +255,21 @@ program
     }
   );
 
+// Detached async-lane worker (RCL-25) — launched by the review process for
+// each async (non-blocking) reviewer call; not for interactive use.
+program
+  .command('async-worker', { hidden: true })
+  .requiredOption('--spool <path>', 'Spool file written by the launching review')
+  .action(async (opts: { spool: string }) => {
+    try {
+      await runAsyncWorker(opts.spool);
+    } catch {
+      // Nothing is awaiting this process; a failed worker simply leaves no
+      // result to merge. Exit non-zero for post-mortem visibility only.
+      process.exitCode = 1;
+    }
+  });
+
 // roles subcommand
 const rolesCmd = program.command('roles').description('Manage and inspect roles');
 
@@ -308,6 +333,8 @@ interface PreparedCouncil {
   config: Config;
   roleMap: Map<string, Role>;
   assignments: ReturnType<typeof buildAssignments>;
+  /** Async bonus reviewers — fired with the round, never awaited (RCL-25). */
+  asyncAssignments: ReturnType<typeof buildAssignments>;
   contextFiles: string[];
 }
 
@@ -347,10 +374,12 @@ async function prepareCouncil(
   // Override models from CLI
   if (opts.models) {
     config.models = opts.models.split(',').map((s) => s.trim()).filter(Boolean);
-    // Clear secondary models unless explicitly provided — don't leak code to default providers
+    // Clear secondary and async models unless explicitly provided — don't
+    // leak code to default providers the user overrode away from.
     if (opts.secondaryModels === undefined) {
       config.secondaryModels = [];
     }
+    config.asyncModels = [];
   }
   if (opts.secondaryModels !== undefined) {
     config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim()).filter(Boolean);
@@ -420,7 +449,7 @@ async function prepareCouncil(
 
   const models = config.models ?? [...DEFAULT_MODELS];
   const secondaryModels = config.secondaryModels ?? [];
-  const assignments = buildAssignments({
+  const built = buildAssignments({
     models,
     roles,
     secondaryModels,
@@ -428,9 +457,21 @@ async function prepareCouncil(
     roleMap,
   });
 
+  // Async lane (RCL-25): async models run the general role(s) only, and are
+  // never allowed onto the blocking path — even if a config lists a model in
+  // both places, partitioning keeps the round from waiting on it. Explicit
+  // --reviewer pairs mean exact manual control: no async bonus seats.
+  const asyncModels = (config.asyncModels ?? []).filter((m) => !models.includes(m));
+  const { blocking: assignments } = partitionAsyncAssignments(built, asyncModels);
+  const generalRoles = roles.filter((r) => !r.isSpecialized);
+  const asyncAssignments =
+    explicitReviewers || asyncModels.length === 0 || generalRoles.length === 0
+      ? []
+      : buildAssignments({ models: asyncModels, roles: generalRoles, roleMap });
+
   const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
 
-  return { config, roleMap, assignments, contextFiles };
+  return { config, roleMap, assignments, asyncAssignments, contextFiles };
 }
 
 async function runReview(target: string | undefined, opts: CouncilCliOpts & {
@@ -452,7 +493,8 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       process.exit(1);
     }
 
-    const { config, roleMap, assignments, contextFiles } = await prepareCouncil(spinner, opts);
+    const prepared = await prepareCouncil(spinner, opts);
+    const { config } = prepared;
 
     const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
@@ -484,7 +526,13 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       process.exit(0);
     }
 
-    await executeCouncil(spinner, { config, roleMap, assignments, contextFiles }, diff, opts);
+    // Stable across rounds of the same converge run, so round N+1 finds the
+    // async results round N fired.
+    const asyncTargetLabel = diff.metadata
+      ? `${diff.metadata.owner}/${diff.metadata.repo}#${diff.metadata.number}`
+      : (target ?? `git-${gitMode}`);
+
+    await executeCouncil(spinner, prepared, diff, opts, { asyncTargetLabel });
   } catch (err) {
     spinner.fail(String(err));
     if (process.env['RCL_DEBUG']) {
@@ -503,9 +551,10 @@ async function executeCouncil(
   prepared: PreparedCouncil,
   diff: Diff,
   opts: CouncilCliOpts,
-  planContext?: { focus?: PlanFocus }
+  extra?: { focus?: PlanFocus; asyncTargetLabel?: string }
 ): Promise<void> {
-  const { config, roleMap, assignments, contextFiles } = prepared;
+  const { config, roleMap, assignments, asyncAssignments, contextFiles } = prepared;
+  const planContext = extra?.focus !== undefined ? { focus: extra.focus } : undefined;
 
   // Chunk the diff
   const chunks = chunkDiff(diff.files);
@@ -527,6 +576,57 @@ async function executeCouncil(
       })
     )
   );
+
+  // Async lane (RCL-25): fire the async reviewers with the round, never
+  // await them; collect whatever arrived from earlier rounds after the
+  // blocking council returns. Best-effort by design — a broken lane must
+  // never fail or slow the blocking round.
+  const asyncLaneActive =
+    extra?.asyncTargetLabel !== undefined &&
+    (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0);
+  let asyncStoreDir: string | undefined;
+  let asyncKey: string | undefined;
+  let asyncLaunched = 0;
+  if (asyncLaneActive) {
+    try {
+      asyncStoreDir = await resolveAsyncStoreDir();
+      asyncKey = asyncTargetKey(extra!.asyncTargetLabel!);
+      const asyncChunkAssignments = chunks.flatMap((chunk) =>
+        asyncAssignments.map((assignment) => ({ assignment, chunk }))
+      );
+      if (asyncChunkAssignments.length > 0) {
+        const asyncPrompts = await Promise.all(
+          asyncChunkAssignments.map(({ assignment, chunk }) =>
+            buildPrompt(chunk, assignment.role, {
+              contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
+              plan: planContext,
+            })
+          )
+        );
+        const spools = await spoolAsyncCalls(
+          asyncChunkAssignments.map(({ assignment }, i) => ({
+            model: assignment.model,
+            role: assignment.role.name,
+            provider: assignment.provider,
+            systemPrompt: asyncPrompts[i]!.systemPrompt,
+            userPrompt: asyncPrompts[i]!.userPrompt,
+          })),
+          {
+            storeDir: asyncStoreDir,
+            targetKey: asyncKey,
+            timeoutMs: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,
+            maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+            reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+          }
+        );
+        launchAsyncWorkers(spools);
+        asyncLaunched = spools.length;
+      }
+    } catch (err) {
+      console.warn(`Async reviewer lane unavailable: ${String(err)}`);
+      asyncStoreDir = undefined;
+    }
+  }
 
   const startTime = Date.now();
   const totalCalls = chunkAssignments.length;
@@ -581,8 +681,18 @@ async function executeCouncil(
     progress.stop();
   }
 
-  // Collapse per-chunk reviews back to one per (model, role) reviewer.
-  const reviews = mergeChunkReviews(chunkReviews);
+  // Merge async results that have arrived from earlier rounds of this
+  // target (marked async), then collapse per-chunk reviews back to one per
+  // (model, role) reviewer.
+  let arrivedAsync: ModelReview[] = [];
+  if (asyncStoreDir && asyncKey) {
+    try {
+      arrivedAsync = await collectAsyncResults(asyncStoreDir, asyncKey);
+    } catch (err) {
+      console.warn(`Could not collect async reviewer results: ${String(err)}`);
+    }
+  }
+  const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
 
   spinner.text = 'Computing consensus...';
 
@@ -622,10 +732,28 @@ async function executeCouncil(
       totalDeduped: consensusFindings.length,
       belowThreshold: droppedFindings.length,
       durationMs: Date.now() - startTime,
+      ...(asyncLaunched > 0 ? { asyncLaunched } : {}),
+      ...(arrivedAsync.length > 0
+        ? { asyncMerged: mergeChunkReviews(arrivedAsync).length }
+        : {}),
     },
   };
 
   spinner.succeed('Review complete');
+  if (asyncLaunched > 0) {
+    console.log(
+      chalk.dim(
+        `Fired ${asyncLaunched} async reviewer call(s) — results merge into the next round of this target.`
+      )
+    );
+  }
+  if (arrivedAsync.length > 0) {
+    console.log(
+      chalk.dim(
+        `Merged ${mergeChunkReviews(arrivedAsync).length} async reviewer result(s) from an earlier round.`
+      )
+    );
+  }
 
   // Output
   if (opts.json) {

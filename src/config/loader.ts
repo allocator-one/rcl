@@ -3,8 +3,10 @@ import { ConfigSchema, type Config } from './schema.js';
 import {
   DEFAULT_MODELS,
   DEFAULT_SECONDARY_MODELS,
+  DEFAULT_ASYNC_MODELS,
   DEFAULT_THRESHOLDS,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_ASYNC_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
@@ -100,8 +102,10 @@ function buildDefaultConfig(): Config {
   return {
     models: dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models'),
     secondaryModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models'),
+    asyncModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_ASYNC_MODELS, 'async models'),
     thresholds: { ...DEFAULT_THRESHOLDS },
     timeout: DEFAULT_TIMEOUT_MS,
+    asyncTimeout: DEFAULT_ASYNC_TIMEOUT_MS,
     maxRetries: DEFAULT_MAX_RETRIES,
     concurrency: DEFAULT_CONCURRENCY,
     reasoningEffort: DEFAULT_REASONING_EFFORT,
@@ -116,6 +120,14 @@ function mergeWithDefaults(config: Config): Config {
       (config.models
         ? []
         : dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models')),
+    // Same containment rule as secondaryModels: an explicit `models` list
+    // means "send code to exactly these providers" — default async reviewers
+    // must not leak the diff to a provider the user configured away from.
+    asyncModels:
+      config.asyncModels ??
+      (config.models
+        ? []
+        : dropOpenRouterDefaultsWithoutKey(DEFAULT_ASYNC_MODELS, 'async models')),
     roles: config.roles,
     reviewers: config.reviewers,
     customRoles: config.customRoles,
@@ -125,6 +137,7 @@ function mergeWithDefaults(config: Config): Config {
     },
     output: config.output,
     timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
+    asyncTimeout: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
     reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,

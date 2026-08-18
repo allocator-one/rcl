@@ -87,6 +87,54 @@ describe('loadConfig', () => {
   });
 });
 
+describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
+  it('routes no blocking call via OpenRouter in the default config', async () => {
+    const config = await loadConfig(undefined, dir);
+    expect(config.models!.length).toBeGreaterThan(0);
+    for (const model of [...config.models!, ...config.secondaryModels!]) {
+      expect(model).not.toMatch(/^openrouter\//);
+    }
+  });
+
+  it('defaults the blocking council to the three direct-API models', async () => {
+    const config = await loadConfig(undefined, dir);
+    expect(config.models).toEqual([
+      'anthropic/claude-fable-5',
+      'openai/gpt-5.6-sol',
+      'google/gemini-3.6-flash',
+    ]);
+  });
+
+  it('keeps kimi-k3 as the default async (non-blocking) reviewer', async () => {
+    const config = await loadConfig(undefined, dir);
+    expect(config.asyncModels).toEqual(['openrouter/moonshotai/kimi-k3']);
+  });
+
+  it('drops the async openrouter reviewer without OPENROUTER_API_KEY', async () => {
+    delete process.env['OPENROUTER_API_KEY'];
+    const config = await loadConfig(undefined, dir);
+    expect(config.asyncModels).toEqual([]);
+  });
+
+  it('clears default async models when models are configured explicitly', async () => {
+    await writeFile(
+      join(dir, '.review-council.yml'),
+      'models:\n  - openai-compat/llama3.2\n'
+    );
+    const config = await loadConfig(undefined, dir);
+    expect(config.asyncModels).toEqual([]);
+  });
+
+  it('honors explicitly configured async models', async () => {
+    await writeFile(
+      join(dir, '.review-council.yml'),
+      'asyncModels:\n  - openrouter/moonshotai/kimi-k3\n'
+    );
+    const config = await loadConfig(undefined, dir);
+    expect(config.asyncModels).toEqual(['openrouter/moonshotai/kimi-k3']);
+  });
+});
+
 describe('OpenRouter default degradation', () => {
   it('drops openrouter/ models from both default lists when OPENROUTER_API_KEY is unset', async () => {
     delete process.env['OPENROUTER_API_KEY'];
