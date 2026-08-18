@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 2.0.0
+
+The speed & convergence release — implements all five recommendations of the
+RCL-21 audit (922 rounds, 15,268 calls, 143 converge runs). Major version
+because several defaults change behavior: the blocking roster shrinks to the
+direct-API trio, the per-call timeout drops to 300 s, rounds close at quorum,
+CI gates on verified consensus instead of raw severity, and converge evidence
+rounds are machine-capped at 3 (hard max 5). Corpus-replayed headline:
+median review round 14.4 → 2.0 min; the converge stop condition becomes
+satisfiable (median first zero-gating round 2–3, was 1/143 runs ever).
 
 - **RCL-27: rcl learns from its own triage history.** Every reviewer call
   and every `converge-verdict` outcome (fixed/dismissed, with the finding's
