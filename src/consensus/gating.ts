@@ -166,6 +166,47 @@ When unsure, answer "confirmed".`;
 
 const MAX_PATCH_CHARS = 4_000;
 
+/** Lines of slack when matching a finding's range against a hunk's span. */
+const HUNK_MARGIN_LINES = 16;
+
+/**
+ * Reduce a unified diff to the hunks that overlap the findings' line ranges.
+ * Blind tail-truncation could cut the exact hunk a finding refers to and let
+ * the verifier judge (and refute) from unrelated context. Returns the whole
+ * patch when it has no hunk headers (plan pseudo-files), and '' when no hunk
+ * overlaps — the caller then treats the finding as having no usable context.
+ */
+export function relevantPatchExcerpt(
+  patch: string,
+  ranges: Array<{ start: number; end: number }>
+): string {
+  const hunks: Array<{ startNew: number; countNew: number; text: string[] }> = [];
+  let current: { startNew: number; countNew: number; text: string[] } | undefined;
+  for (const line of patch.split('\n')) {
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (header) {
+      current = {
+        startNew: Number(header[1]),
+        countNew: header[2] !== undefined ? Number(header[2]) : 1,
+        text: [line],
+      };
+      hunks.push(current);
+    } else if (current) {
+      current.text.push(line);
+    }
+  }
+  if (hunks.length === 0) return patch;
+
+  const selected = hunks.filter((h) =>
+    ranges.some(
+      (r) =>
+        h.startNew - HUNK_MARGIN_LINES <= r.end &&
+        r.start - HUNK_MARGIN_LINES <= h.startNew + h.countNew
+    )
+  );
+  return selected.map((h) => h.text.join('\n')).join('\n');
+}
+
 function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string, string>): string {
   // Finding text originates from council models reading an untrusted diff —
   // neutralize boundary delimiters so it cannot fake a trusted region.
@@ -273,17 +314,40 @@ export async function applyGating(
   // file has no patch content (renames the resolver didn't map, plan
   // pseudo-files, missing diff) are never sent — the verifier judging a
   // claim from the claim's own wording could un-gate real findings.
-  const patches = new Map<string, string>();
+  const fullPatches = new Map<string, string>();
   for (const df of options.diffFiles ?? []) {
     const patch = df.patch ?? '';
-    if (patch.trim().length > 0) patches.set(df.filename, patch);
+    if (patch.trim().length > 0) fullPatches.set(df.filename, patch);
   }
+  // Per-file excerpt covering that file's candidates, so the verifier sees
+  // exactly the hunks the claims are about — never a tail-truncated patch
+  // whose relevant hunk fell off.
+  const candidateRangesByFile = new Map<string, Array<{ start: number; end: number }>>();
+  for (const findingIndex of candidateIndices) {
+    const f = findings[findingIndex]!;
+    if (!fullPatches.has(f.file)) continue;
+    const ranges = candidateRangesByFile.get(f.file) ?? [];
+    ranges.push({ start: f.startLine, end: f.endLine });
+    candidateRangesByFile.set(f.file, ranges);
+  }
+  const patches = new Map<string, string>();
+  for (const [file, ranges] of candidateRangesByFile) {
+    const excerpt = relevantPatchExcerpt(fullPatches.get(file)!, ranges);
+    if (excerpt.trim().length > 0) patches.set(file, excerpt);
+  }
+
   const verifiable: number[] = [];
   for (const findingIndex of candidateIndices) {
-    if (patches.has(findings[findingIndex]!.file)) {
+    const f = findings[findingIndex]!;
+    if (patches.has(f.file)) {
       verifiable.push(findingIndex);
     } else {
-      markUnavailable(findingIndex, 'no diff context for this file — not sent to the verifier');
+      markUnavailable(
+        findingIndex,
+        fullPatches.has(f.file)
+          ? 'finding lines match no hunk in the diff — not sent to the verifier'
+          : 'no diff context for this file — not sent to the verifier'
+      );
     }
   }
 

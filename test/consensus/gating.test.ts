@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { applyGating, resolveGatingConfig } from '../../src/consensus/gating.js';
+import {
+  applyGating,
+  resolveGatingConfig,
+  relevantPatchExcerpt,
+} from '../../src/consensus/gating.js';
 import type { ConsensusFinding, ConsensusInfo } from '../../src/consensus/types.js';
 import type { ModelAnswer } from '../../src/dispatch/adapter.js';
 
@@ -240,6 +244,51 @@ describe('applyGating (RCL-23)', () => {
     expect(user).toContain('<<<DIFF_START>>>');
     // The literal delimiter inside the finding text must be neutralized.
     expect(user.split('<<<DIFF_END>>>').length).toBe(2);
+  });
+});
+
+describe('relevantPatchExcerpt', () => {
+  const patch = [
+    '@@ -1,3 +1,4 @@',
+    ' a',
+    '+added early',
+    ' b',
+    '@@ -200,3 +300,4 @@',
+    ' x',
+    '+added late',
+    ' y',
+  ].join('\n');
+
+  it('keeps only hunks overlapping the findings, so truncation cannot cut the referenced hunk', () => {
+    const excerpt = relevantPatchExcerpt(patch, [{ start: 300, end: 302 }]);
+    expect(excerpt).toContain('added late');
+    expect(excerpt).not.toContain('added early');
+  });
+
+  it('returns empty when no hunk overlaps — the finding points outside the change', () => {
+    expect(relevantPatchExcerpt(patch, [{ start: 5000, end: 5002 }]).trim()).toBe('');
+  });
+
+  it('returns non-hunk content unchanged (plan pseudo-files)', () => {
+    expect(relevantPatchExcerpt('plain plan text', [{ start: 1, end: 2 }])).toBe(
+      'plain plan text'
+    );
+  });
+});
+
+describe('applyGating hunk scoping', () => {
+  it('marks a candidate unavailable when its lines match no hunk in the diff', async () => {
+    const ask = vi.fn();
+    const { findings } = await applyGating(
+      [makeFinding({ startLine: 5000, endLine: 5002, models: ['m1'] })],
+      { ...baseOpts, ask }
+    );
+    expect(ask).not.toHaveBeenCalled();
+    expect(findings[0]!.gating).toMatchObject({
+      reason: 'verified',
+      verification: { verdict: 'unavailable' },
+    });
+    expect(findings[0]!.gating!.verification!.note).toMatch(/no hunk/i);
   });
 });
 
