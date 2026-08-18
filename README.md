@@ -231,6 +231,30 @@ rcl converge-verdict --target rcl-30 --round 2 \
 
 ---
 
+### `rcl models`
+
+The tool's own memory of which reviewers earn their seat. Every reviewer call
+and every `converge-verdict` outcome accrues in a cross-run store at `~/.rcl`
+(`RCL_DATA_DIR` overrides; deliberately not under /tmp, so history survives
+converge-state cleanup). `rcl models` prints, per model over a trailing 90-day
+window: triage precision (share of its supported findings the converge loop
+verified and fixed rather than dismissed), triage volume, call volume,
+dead-call rate, p50 latency — and the consensus **weight** the model earns:
+`0.5 + precision`, clamped to [0.5, 1.5], neutral (1) below 20 triaged
+outcomes. Weights scale each model's consensus vote in report confidence and
+in consensus gating, so persistently noisy models lose gating power
+automatically; the applied weights are visible per finding
+(`consensus.weightedScore` / `consensus.modelWeights`) and per run
+(`stats.modelWeights`) in the report JSON.
+
+```bash
+rcl models                       # table over the trailing 90 days
+rcl models show --window 30 --json
+rcl models seed --from ~/recovered-rcl-artifacts   # backfill from reports + converge ledgers
+```
+
+---
+
 ## Config File
 
 Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.

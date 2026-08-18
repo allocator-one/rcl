@@ -65,6 +65,13 @@ export interface GatingOptions {
    * and stays gating, marked unavailable.
    */
   diffFiles?: FileChange[];
+  /**
+   * Trailing-precision weights (RCL-27): consensus gating counts each
+   * supporting model by its weight (unknown models are neutral 1), so two
+   * persistently noisy models no longer auto-gate — they go through the
+   * verification pass like a single-model claim.
+   */
+  modelWeights?: Map<string, number>;
 }
 
 export interface VerificationStats {
@@ -271,11 +278,19 @@ export async function applyGating(
   const annotated: ConsensusFinding[] = new Array(findings.length);
   const candidateIndices: number[] = [];
 
+  const weightedSupport = (models: readonly string[]): number =>
+    options.modelWeights === undefined
+      ? models.length
+      : models.reduce((sum, m) => sum + (options.modelWeights!.get(m) ?? 1), 0);
+
   findings.forEach((finding, i) => {
     const blocking = finding.severity === 'critical' || finding.severity === 'important';
     if (!blocking) {
       annotated[i] = { ...finding, gating: { reason: 'none' } };
-    } else if (finding.consensus.models.length >= options.minModels) {
+    } else if (
+      finding.consensus.models.length >= 2 &&
+      weightedSupport(finding.consensus.models) >= options.minModels
+    ) {
       annotated[i] = { ...finding, gating: { reason: 'consensus' } };
     } else if (finding.severity === 'critical') {
       annotated[i] = { ...finding, gating: { reason: 'critical' } };
