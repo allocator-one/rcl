@@ -159,7 +159,7 @@ Machine-enforced safety guard used by the generated `rcl-converge` skill.
 Each call atomically and durably consumes one per-target attempt under the
 repository's common Git directory, so the budget survives sessions, linked
 worktrees, and abrupt system restarts.
-New targets default to seven attempts, but an explicit invocation can set any
+New targets default to twenty attempts, but an explicit invocation can set any
 positive cap with `--max-attempts`. Omitting the flag on resume preserves the
 persisted cap. At the boundary, RCL refuses before provider calls and directs
 the workflow to ask the user; an approved continuation explicitly supplies a
@@ -167,8 +167,10 @@ higher cap.
 
 At the skill level, `--max-attempts N` controls this machine launch budget.
 The separate `--max-rounds N` flag caps evidence rounds and is machine-enforced
-by `rcl converge-report` (default 3, valid range 2–5; rounds past 5 are
-impossible under any flag).
+by `rcl converge-report` (default 15, valid range 2–99; rounds past 99 are
+impossible under any flag). The default is a consent boundary, not a stop: at
+15 rounds the workflow asks the user, and an approved continuation supplies a
+higher `--max-rounds`.
 
 Full-fleet reviewer completion is not required. For the generated
 `rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
@@ -216,7 +218,7 @@ models rephrase ~98% of them between rounds). Each finding is classified
 `new`, `repeat`, `suppressed` (previously dismissed, no new corroboration —
 cannot re-gate), or `regating` (previously dismissed but now backed by ≥2
 models or critical severity). The same call enforces the evidence-round cap:
-default 3, `--max-rounds` accepts 2–5, and rounds past 5 are impossible. Exit
+default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
 code 2 is the cap consent boundary; exit 3 is a state failure.
 
 `converge-verdict` records triage outcomes per finding identity —

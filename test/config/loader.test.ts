@@ -136,10 +136,10 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
 });
 
 describe('quorum and timeout defaults (RCL-26)', () => {
-  it('defaults quorumFraction to exactly 2/3 and the blocking timeout to 300s', async () => {
+  it('defaults quorumFraction to exactly 2/3 and the blocking timeout to 540s', async () => {
     const config = await loadConfig(undefined, dir);
     expect(config.quorumFraction).toBe(2 / 3);
-    expect(config.timeout).toBe(300_000);
+    expect(config.timeout).toBe(540_000);
     expect(config.asyncTimeout).toBe(900_000);
   });
 

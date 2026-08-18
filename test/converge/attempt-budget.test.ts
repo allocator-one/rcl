@@ -89,7 +89,7 @@ describe('convergence attempt budget', () => {
     const state = await loadConvergeAttemptState(gitCommonDir, 'rcl-18');
     expect(state).toMatchObject({
       target: 'rcl-18',
-      cap: 7,
+      cap: DEFAULT_CONVERGE_ATTEMPT_CAP,
       migratedAttempts: 0,
       attemptsUsed: 2,
       attempts: [
@@ -112,11 +112,13 @@ describe('convergence attempt budget', () => {
     const refused = claimConvergeAttempt({ gitCommonDir, target: 'repo-7559' });
     await expect(refused).rejects.toMatchObject({
       name: 'ConvergeAttemptBudgetExceededError',
-      attemptsUsed: 7,
-      cap: 7,
+      attemptsUsed: DEFAULT_CONVERGE_ATTEMPT_CAP,
+      cap: DEFAULT_CONVERGE_ATTEMPT_CAP,
     });
     await expect(refused).rejects.toThrow('Ask the user whether to continue');
-    expect((await loadConvergeAttemptState(gitCommonDir, 'repo-7559'))?.attemptsUsed).toBe(7);
+    expect((await loadConvergeAttemptState(gitCommonDir, 'repo-7559'))?.attemptsUsed).toBe(
+      DEFAULT_CONVERGE_ATTEMPT_CAP
+    );
   });
 
   it('distinguishes a consent-boundary refusal from accounting failures', () => {
@@ -140,24 +142,25 @@ describe('convergence attempt budget', () => {
 
   it('allows an explicit invocation to raise the cap above the default', async () => {
     const gitCommonDir = await tempGitDir();
-    for (let attempt = 1; attempt <= 7; attempt++) {
+    for (let attempt = 1; attempt <= DEFAULT_CONVERGE_ATTEMPT_CAP; attempt++) {
       await claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' });
     }
     await expect(claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' })).rejects.toMatchObject({
-      attemptsUsed: 7,
-      cap: 7,
+      attemptsUsed: DEFAULT_CONVERGE_ATTEMPT_CAP,
+      cap: DEFAULT_CONVERGE_ATTEMPT_CAP,
     });
 
+    const raised = DEFAULT_CONVERGE_ATTEMPT_CAP + 2;
     await expect(
-      claimConvergeAttempt({ gitCommonDir, target: 'rcl-18', maxAttempts: 9 })
-    ).resolves.toMatchObject({ attempt: 8, cap: 9 });
+      claimConvergeAttempt({ gitCommonDir, target: 'rcl-18', maxAttempts: raised })
+    ).resolves.toMatchObject({ attempt: DEFAULT_CONVERGE_ATTEMPT_CAP + 1, cap: raised });
     await expect(claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' })).resolves.toMatchObject({
-      attempt: 9,
-      cap: 9,
+      attempt: raised,
+      cap: raised,
     });
     await expect(claimConvergeAttempt({ gitCommonDir, target: 'rcl-18' })).rejects.toMatchObject({
-      attemptsUsed: 9,
-      cap: 9,
+      attemptsUsed: raised,
+      cap: raised,
     });
   });
 
@@ -184,9 +187,11 @@ describe('convergence attempt budget', () => {
 
   it('serializes concurrent starters so no process can race past the cap', async () => {
     const gitCommonDir = await tempGitDir();
+    // An explicit low cap keeps the serialized-lock contention fast; the
+    // default's value is covered elsewhere.
     const claims = await Promise.allSettled(
       Array.from({ length: 12 }, () =>
-        claimConvergeAttempt({ gitCommonDir, target: 'repo-7559', lockRetryMs: 1 })
+        claimConvergeAttempt({ gitCommonDir, target: 'repo-7559', maxAttempts: 7, lockRetryMs: 1 })
       )
     );
 
@@ -276,11 +281,14 @@ describe('convergence attempt budget', () => {
       `${JSON.stringify({ pid: deadPid, claimedAt: '2026-08-15T12:00:00Z', token })}\n`
     );
 
+    // An explicit low cap keeps the serialized-lock contention fast; the
+    // default's value is covered elsewhere.
     const claims = await Promise.allSettled(
       Array.from({ length: 12 }, () =>
         claimConvergeAttempt({
           gitCommonDir,
           target: 'rcl-18',
+          maxAttempts: 7,
           lockTimeoutMs: 5_000,
           lockRetryMs: 1,
         })
@@ -380,36 +388,41 @@ describe('convergence attempt budget', () => {
     const gitCommonDir = await tempGitDir();
     await writeFile(
       join(gitCommonDir, 'rcl-converge-repo-42-ledger.md'),
-      Array.from({ length: 7 }, (_, index) => `## Round ${index + 1} — HEAD abc`).join('\n')
+      Array.from(
+        { length: DEFAULT_CONVERGE_ATTEMPT_CAP },
+        (_, index) => `## Round ${index + 1} — HEAD abc`
+      ).join('\n')
     );
 
     await expect(claimConvergeAttempt({ gitCommonDir, target: 'repo-42' })).rejects.toMatchObject({
-      attemptsUsed: 7,
-      cap: 7,
+      attemptsUsed: DEFAULT_CONVERGE_ATTEMPT_CAP,
+      cap: DEFAULT_CONVERGE_ATTEMPT_CAP,
     });
-    expect((await loadConvergeAttemptState(gitCommonDir, 'repo-42'))?.attemptsUsed).toBe(7);
+    expect((await loadConvergeAttemptState(gitCommonDir, 'repo-42'))?.attemptsUsed).toBe(
+      DEFAULT_CONVERGE_ATTEMPT_CAP
+    );
   });
 
   it('preserves an existing ledger above the default and continues only with an explicit override', async () => {
     const gitCommonDir = await tempGitDir();
     await writeFile(
       join(gitCommonDir, 'rcl-converge-repo-42-ledger.md'),
-      '# RCL converge ledger\n\n## Round 19 — HEAD abc\n'
+      '# RCL converge ledger\n\n## Round 25 — HEAD abc\n'
     );
 
     await expect(claimConvergeAttempt({ gitCommonDir, target: 'repo-42' })).rejects.toMatchObject({
-      attemptsUsed: 19,
-      cap: 7,
+      attemptsUsed: 25,
+      cap: DEFAULT_CONVERGE_ATTEMPT_CAP,
     });
     expect(await loadConvergeAttemptState(gitCommonDir, 'repo-42')).toMatchObject({
-      migratedAttempts: 19,
-      attemptsUsed: 19,
+      migratedAttempts: 25,
+      attemptsUsed: 25,
       attempts: [],
     });
 
     await expect(
-      claimConvergeAttempt({ gitCommonDir, target: 'repo-42', maxAttempts: 20 })
-    ).resolves.toMatchObject({ attempt: 20, cap: 20 });
+      claimConvergeAttempt({ gitCommonDir, target: 'repo-42', maxAttempts: 26 })
+    ).resolves.toMatchObject({ attempt: 26, cap: 26 });
   });
 
   it('hashes an untrusted target instead of allowing it to escape the state directory', async () => {

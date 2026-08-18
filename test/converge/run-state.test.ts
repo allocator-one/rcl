@@ -54,21 +54,21 @@ function finding(over: Partial<ConsensusFinding> & { models?: string[] } = {}): 
 }
 
 describe('round cap policy (RCL-24)', () => {
-  it('defaults to 3 rounds with a hard cap of 5', () => {
-    expect(DEFAULT_CONVERGE_ROUND_CAP).toBe(3);
-    expect(HARD_CONVERGE_ROUND_CAP).toBe(5);
+  it('defaults to 15 rounds with a hard cap of 99', () => {
+    expect(DEFAULT_CONVERGE_ROUND_CAP).toBe(15);
+    expect(HARD_CONVERGE_ROUND_CAP).toBe(99);
   });
 
-  it('accepts caps between 2 and 5 and rejects everything else', () => {
+  it('accepts caps between 2 and 99 and rejects everything else', () => {
     expect(validateRoundCap(2)).toBe(2);
-    expect(validateRoundCap(5)).toBe(5);
+    expect(validateRoundCap(99)).toBe(99);
     expect(() => validateRoundCap(1)).toThrow(/2/);
-    expect(() => validateRoundCap(6)).toThrow(/5/);
+    expect(() => validateRoundCap(100)).toThrow(/99/);
     expect(() => validateRoundCap(0)).toThrow();
   });
 
-  it('refuses to process a round beyond the cap — and beyond 5 under any cap', async () => {
-    for (let round = 1; round <= 3; round++) {
+  it('refuses to process a round beyond the default consent boundary', async () => {
+    for (let round = 1; round <= DEFAULT_CONVERGE_ROUND_CAP; round++) {
       await processRoundReport({
         gitCommonDir: dir,
         target: 't1',
@@ -77,21 +77,37 @@ describe('round cap policy (RCL-24)', () => {
       });
     }
     await expect(
-      processRoundReport({ gitCommonDir: dir, target: 't1', round: 4, findings: [] })
+      processRoundReport({
+        gitCommonDir: dir,
+        target: 't1',
+        round: DEFAULT_CONVERGE_ROUND_CAP + 1,
+        findings: [],
+      })
     ).rejects.toThrow(ConvergeRoundCapError);
 
-    // Explicit override extends to 5…
+    // Explicit override extends past the boundary…
     await processRoundReport({
       gitCommonDir: dir,
       target: 't1',
-      round: 4,
-      maxRounds: 5,
+      round: DEFAULT_CONVERGE_ROUND_CAP + 1,
+      maxRounds: DEFAULT_CONVERGE_ROUND_CAP + 2,
       findings: [],
     });
-    await processRoundReport({ gitCommonDir: dir, target: 't1', round: 5, findings: [] });
-    // …but never past it.
+    await processRoundReport({
+      gitCommonDir: dir,
+      target: 't1',
+      round: DEFAULT_CONVERGE_ROUND_CAP + 2,
+      findings: [],
+    });
+    // …but never past the configured cap.
     await expect(
-      processRoundReport({ gitCommonDir: dir, target: 't1', round: 6, maxRounds: 5, findings: [] })
+      processRoundReport({
+        gitCommonDir: dir,
+        target: 't1',
+        round: DEFAULT_CONVERGE_ROUND_CAP + 3,
+        maxRounds: DEFAULT_CONVERGE_ROUND_CAP + 2,
+        findings: [],
+      })
     ).rejects.toThrow(ConvergeRoundCapError);
   });
 });

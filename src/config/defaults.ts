@@ -46,12 +46,13 @@ export const DEFAULT_THRESHOLDS = {
 } as const;
 
 /**
- * Blocking-path per-call timeout. Every direct-API model's p90 in the
- * RCL-21 corpus is under 260 s, so 300 s only ever cuts models that should
- * not be on the blocking path in the first place (slow reasoning models
- * belong in the async lane, which has its own longer cap below).
+ * Blocking-path per-call timeout. The RCL-21 corpus put every direct-API
+ * model's p90 under 260 s, but the 2.0.0 rollout (RCL-29) showed heavier
+ * reasoning defaults pushing real calls past 300 s; losing a reviewer costs
+ * more than waiting, so the blocking path now gets 540 s. Slow-by-design
+ * models still belong in the async lane, which has its own cap below.
  */
-export const DEFAULT_TIMEOUT_MS = 300_000;
+export const DEFAULT_TIMEOUT_MS = 540_000;
 
 /**
  * Quorum round closure (RCL-26): a round closes once this fraction of its
