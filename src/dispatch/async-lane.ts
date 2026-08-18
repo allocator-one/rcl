@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ModelReview } from '../consensus/types.js';
@@ -49,6 +50,13 @@ interface SpoolPayload extends AsyncCallSpec {
 /** Results older than this are stale runs' leftovers and get swept. */
 const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Detached workers are one Node process each; a huge chunked diff must not
+ * fan out into an unbounded process swarm. Beyond this, extra async calls
+ * are dropped (the lane is a bonus, never load-bearing).
+ */
+export const MAX_ASYNC_CALLS_PER_ROUND = 8;
+
 /** Split assignments so async models never sit on the blocking path. */
 export function partitionAsyncAssignments<A extends { model: string }>(
   assignments: A[],
@@ -80,6 +88,11 @@ export function asyncTargetKey(target: string): string {
 /**
  * Store directory: `<gitCommonDir>/rcl-async` inside a repository, else a
  * per-user directory under the OS tmpdir (mode 0700 either way).
+ *
+ * The directory is verified before use — spools contain the diff, and a
+ * forged result file would inject findings into the next round. A tmpdir
+ * path in particular is predictable, so a pre-created symlink or another
+ * user's directory must be rejected, never chmod'd or written into.
  */
 export async function resolveAsyncStoreDir(cwd = process.cwd()): Promise<string> {
   let base: string;
@@ -90,11 +103,43 @@ export async function resolveAsyncStoreDir(cwd = process.cwd()): Promise<string>
     base = join(tmpdir(), `rcl-async-${uid}`);
   }
   await mkdir(base, { recursive: true, mode: 0o700 });
+  const info = await lstat(base);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`async store path is not a plain directory: ${base}`);
+  }
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error(`async store directory is not owned by the current user: ${base}`);
+  }
+  // Ownership is established; now clamp permissions (mkdir mode does not
+  // apply to a pre-existing directory).
+  await chmod(base, 0o700);
   return base;
 }
 
 function spoolPath(storeDir: string, targetKey: string): string {
   return join(storeDir, `pending-${targetKey}-${randomUUID()}.json`);
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Current branch name for git-mode target labels, so `--staged` /
+ * `--working-tree` reviews on different branches of one repository never
+ * exchange async results. Best-effort: '' outside a repo or on detached
+ * HEAD (the store is repo-scoped, so the label only needs to split
+ * branches).
+ */
+export async function currentBranchLabel(cwd = process.cwd()): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd,
+      encoding: 'utf8',
+    });
+    const branch = stdout.trim();
+    return branch === 'HEAD' ? '' : branch;
+  } catch {
+    return '';
+  }
 }
 
 /** Write one spool file per async call; returns the spool paths. */
@@ -126,16 +171,29 @@ export async function spoolAsyncCalls(
  * Launch one detached worker process per spool. Fire-and-forget by design:
  * the parent exits when the blocking council is done, and the workers keep
  * running until their call completes or times out. Provider keys travel via
- * inherited env.
+ * inherited env (the worker is this same same-user codebase, not a third
+ * party). Launch failures are contained: an unhandled child 'error' event
+ * would crash the review process that is doing the real work.
  */
-export function launchAsyncWorkers(spoolPaths: string[], cliScript = process.argv[1]!): void {
+export function launchAsyncWorkers(spoolPaths: string[], cliScript = process.argv[1]): void {
+  if (!cliScript) {
+    console.warn('Async lane: cannot resolve the CLI script path; async reviewers not launched.');
+    return;
+  }
   for (const spool of spoolPaths) {
-    const child = spawn(process.execPath, [cliScript, 'async-worker', '--spool', spool], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    });
-    child.unref();
+    try {
+      const child = spawn(process.execPath, [cliScript, 'async-worker', '--spool', spool], {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.on('error', (err) => {
+        console.warn(`Async worker failed to launch: ${String(err)}`);
+      });
+      child.unref();
+    } catch (err) {
+      console.warn(`Async worker failed to launch: ${String(err)}`);
+    }
   }
 }
 

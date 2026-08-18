@@ -36,6 +36,8 @@ import {
   launchAsyncWorkers,
   runAsyncWorker,
   collectAsyncResults,
+  currentBranchLabel,
+  MAX_ASYNC_CALLS_PER_ROUND,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
@@ -110,6 +112,7 @@ program
   .option('--spec <path>', 'Specification file for spec-compliance role')
   .option('--models <models>', 'Comma-separated list of primary (SOTA) models')
   .option('--secondary-models <models>', 'Comma-separated list of secondary models (specialized roles only)')
+  .option('--async-models <models>', 'Comma-separated list of async (non-blocking) bonus reviewers')
   .option('--focus <areas>', 'Comma-separated focus areas')
   .option('--post', 'Post review as GitHub PR comment')
   .option('--json', 'Output JSON to stdout')
@@ -149,6 +152,7 @@ program
   .option('--spec <path>', 'Specification the plan should satisfy (enables spec-compliance role)')
   .option('--models <models>', 'Comma-separated list of primary (SOTA) models')
   .option('--secondary-models <models>', 'Comma-separated list of secondary models (specialized roles only)')
+  .option('--async-models <models>', 'Comma-separated list of async (non-blocking) bonus reviewers')
   .option('--json', 'Output JSON to stdout')
   .option('--json-file <path>', 'Write JSON output to file')
   .option('--markdown <path>', 'Write Markdown report to file')
@@ -321,6 +325,7 @@ interface CouncilCliOpts {
   spec?: string;
   models?: string;
   secondaryModels?: string;
+  asyncModels?: string;
   post?: boolean;
   json?: boolean;
   jsonFile?: string;
@@ -379,10 +384,15 @@ async function prepareCouncil(
     if (opts.secondaryModels === undefined) {
       config.secondaryModels = [];
     }
-    config.asyncModels = [];
+    if (opts.asyncModels === undefined) {
+      config.asyncModels = [];
+    }
   }
   if (opts.secondaryModels !== undefined) {
     config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (opts.asyncModels !== undefined) {
+    config.asyncModels = opts.asyncModels.split(',').map((s) => s.trim()).filter(Boolean);
   }
 
   // Determine roles to use
@@ -457,10 +467,12 @@ async function prepareCouncil(
     roleMap,
   });
 
-  // Async lane (RCL-25): async models run the general role(s) only, and are
-  // never allowed onto the blocking path — even if a config lists a model in
-  // both places, partitioning keeps the round from waiting on it. Explicit
-  // --reviewer pairs mean exact manual control: no async bonus seats.
+  // Async lane (RCL-25): async models run the general role(s) only.
+  // Membership in `models` wins over `asyncModels` — an explicit blocking
+  // seat is an explicit choice, so the model stays blocking and gets no
+  // duplicate async seat. Async models appearing only in `secondaryModels`
+  // are partitioned OUT of the blocking path below. Explicit --reviewer
+  // pairs mean exact manual control: no async bonus seats.
   const asyncModels = (config.asyncModels ?? []).filter((m) => !models.includes(m));
   const { blocking: assignments } = partitionAsyncAssignments(built, asyncModels);
   const generalRoles = roles.filter((r) => !r.isSpecialized);
@@ -527,10 +539,11 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     }
 
     // Stable across rounds of the same converge run, so round N+1 finds the
-    // async results round N fired.
+    // async results round N fired. Git modes carry the branch name so two
+    // branches reviewed in one repository never exchange async results.
     const asyncTargetLabel = diff.metadata
       ? `${diff.metadata.owner}/${diff.metadata.repo}#${diff.metadata.number}`
-      : (target ?? `git-${gitMode}`);
+      : (target ?? `git-${gitMode}-${await currentBranchLabel()}`);
 
     await executeCouncil(spinner, prepared, diff, opts, { asyncTargetLabel });
   } catch (err) {
@@ -591,9 +604,16 @@ async function executeCouncil(
     try {
       asyncStoreDir = await resolveAsyncStoreDir();
       asyncKey = asyncTargetKey(extra!.asyncTargetLabel!);
-      const asyncChunkAssignments = chunks.flatMap((chunk) =>
+      let asyncChunkAssignments = chunks.flatMap((chunk) =>
         asyncAssignments.map((assignment) => ({ assignment, chunk }))
       );
+      if (asyncChunkAssignments.length > MAX_ASYNC_CALLS_PER_ROUND) {
+        console.warn(
+          `Async lane: capping ${asyncChunkAssignments.length} async calls at ` +
+            `${MAX_ASYNC_CALLS_PER_ROUND} (one detached process each); the rest are dropped.`
+        );
+        asyncChunkAssignments = asyncChunkAssignments.slice(0, MAX_ASYNC_CALLS_PER_ROUND);
+      }
       if (asyncChunkAssignments.length > 0) {
         const asyncPrompts = await Promise.all(
           asyncChunkAssignments.map(({ assignment, chunk }) =>
