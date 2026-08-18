@@ -135,6 +135,26 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
   });
 });
 
+describe('quorum and timeout defaults (RCL-26)', () => {
+  it('defaults quorumFraction to exactly 2/3 and the blocking timeout to 300s', async () => {
+    const config = await loadConfig(undefined, dir);
+    expect(config.quorumFraction).toBe(2 / 3);
+    expect(config.timeout).toBe(300_000);
+    expect(config.asyncTimeout).toBe(900_000);
+  });
+
+  it('rejects a quorumFraction below the converge-health floor', async () => {
+    await writeFile(join(dir, '.review-council.yml'), 'quorumFraction: 0.5\n');
+    await expect(loadConfig(undefined, dir)).rejects.toThrow(ConfigError);
+  });
+
+  it('accepts 1 to disable early closure', async () => {
+    await writeFile(join(dir, '.review-council.yml'), 'quorumFraction: 1\n');
+    const config = await loadConfig(undefined, dir);
+    expect(config.quorumFraction).toBe(1);
+  });
+});
+
 describe('OpenRouter default degradation', () => {
   it('drops openrouter/ models from both default lists when OPENROUTER_API_KEY is unset', async () => {
     delete process.env['OPENROUTER_API_KEY'];
