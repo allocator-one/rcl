@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **RCL-23: convergence gates on verified consensus, not raw single-model
+  claims.** Every kept finding is annotated with `gating.reason` in the
+  report JSON: `consensus` (≥2 distinct models after dedup), `critical`,
+  `verified` (single-model important that survived a refutation pass), or
+  `none`. Single-model important findings get ONE batched refutation call to
+  a fast direct-API model (`gating.verificationModel`, default
+  gemini-3.6-flash, 60 s cap; openrouter-routed verifiers are rejected); a
+  refuted claim stays in the report but stops blocking convergence and CI. A
+  failed verification pass fails safe: candidates keep gating, marked
+  `unavailable`. `gating.mode: all-findings` restores the legacy
+  severity-only behavior. The CI gate and the rcl-converge stop condition
+  now read gating annotations (legacy reports fall back to severity).
+  Corpus replay (143 converge runs): median gating findings per round drop
+  16 → 3 (recorded roster) / 2 (new-roster projection), and the stop
+  condition becomes satisfiable — median first zero-gating round 3
+  (recorded roster) / 2 (new-roster projection) among runs that ran long
+  enough to observe one, where the old definition reached zero in 1 of 143
+  runs ever.
+
 - **RCL-26: rounds close at quorum; per-call latency is capped.** A review
   round now closes once ⅔ of its planned calls have completed
   (`quorumFraction`, default 2/3, `1` disables): outstanding calls are

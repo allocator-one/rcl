@@ -43,6 +43,7 @@ import {
 import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
+import { applyGating, resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
@@ -750,13 +751,35 @@ async function executeCouncil(
     }
   );
 
+  // Convergence gating (RCL-23): annotate every kept finding with why it
+  // does or does not gate; single-model blocking findings get one batched
+  // refutation call to a fast direct-API model.
+  const gatingConfig = resolveGatingConfig(config.gating);
+  let finalFindings = reportFindings;
+  let gatedAppendix = droppedFindings;
+  let verificationStats: ReviewResult['stats']['verification'];
+  if (gatingConfig.mode === 'verified-consensus') {
+    spinner.text = 'Verifying single-model findings...';
+    const gated = await applyGating(reportFindings, {
+      minModels: gatingConfig.minModels,
+      verificationModel: gatingConfig.verificationModel,
+      verificationTimeoutMs: gatingConfig.verificationTimeoutMs,
+      diffFiles: diff.files,
+    });
+    finalFindings = gated.findings;
+    verificationStats = gated.verification;
+    // Appendix findings never block convergence; mark them so the report
+    // JSON carries a gating reason on every finding.
+    gatedAppendix = droppedFindings.map((f) => ({ ...f, gating: { reason: 'none' as const } }));
+  }
+
   const keepAppendix = config.output?.belowThresholdAppendix ?? true;
   const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
   const result: ReviewResult = {
     reviews,
-    findings: reportFindings,
-    ...(keepAppendix && droppedFindings.length > 0
-      ? { belowThresholdFindings: droppedFindings }
+    findings: finalFindings,
+    ...(keepAppendix && gatedAppendix.length > 0
+      ? { belowThresholdFindings: gatedAppendix }
       : {}),
     stats: {
       totalReviews: reviews.length,
@@ -778,6 +801,7 @@ async function executeCouncil(
               .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
           }
         : {}),
+      ...(verificationStats ? { verification: verificationStats } : {}),
     },
   };
 

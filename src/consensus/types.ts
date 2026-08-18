@@ -81,6 +81,12 @@ export interface ConsensusInfo {
 
 export interface ConsensusFinding extends Finding {
   consensus: ConsensusInfo;
+  /**
+   * Why this finding does (or does not) block convergence — see
+   * `consensus/gating.ts` (RCL-23). Absent in `all-findings` fallback mode,
+   * where severity alone decides.
+   */
+  gating?: import('./gating.js').GatingInfo;
 }
 
 export interface DeduplicatedGroup {
@@ -113,5 +119,7 @@ export interface ReviewResult {
      * running — persistent stragglers stay visible per round (RCL-26).
      */
     canceledCalls?: Array<{ model: string; role: string; elapsedMs: number }>;
+    /** Outcome of the single-model finding verification pass (RCL-23). */
+    verification?: import('./gating.js').VerificationStats;
   };
 }
