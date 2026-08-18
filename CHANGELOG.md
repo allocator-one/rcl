@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.1.0
+
+Recalibration after the first night of 2.0.0 converge runs (RCL-29): roughly
+half of real runs hit the 3-round evidence cap without converging, and drivers
+began rebadging capped targets to keep working — the cap was tighter than the
+work, not the noise. The default posture is now *run until it converges*.
+
+- **Converge round cap: default 3 (hard max 5) → default 15 (hard max 99).**
+  The default is a consent boundary, not a stop: at 15 rounds the workflow
+  asks the user; an approved continuation supplies a higher `--max-rounds`
+  (up to 99, past which no override exists). The skill now also names target
+  rebadging ("v2" targets for the same PR) as a cap bypass.
+- **Converge attempt cap: default 7 → 20 launches per target**, so the attempt
+  budget no longer interrupts before the 15-round consent boundary (every
+  evidence round consumes one attempt).
+- **Blocking per-call timeout: 300 s → 540 s.** Heavier reasoning defaults
+  pushed real calls past 300 s; losing a reviewer costs more than waiting.
+  The async lane keeps its own 900 s cap.
+
 ## 2.0.0
 
 The speed & convergence release — implements all five recommendations of the

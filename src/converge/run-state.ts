@@ -16,8 +16,8 @@ import {
  * serializes writers per target at the workflow level.
  */
 
-export const DEFAULT_CONVERGE_ROUND_CAP = 3;
-export const HARD_CONVERGE_ROUND_CAP = 5;
+export const DEFAULT_CONVERGE_ROUND_CAP = 15;
+export const HARD_CONVERGE_ROUND_CAP = 99;
 export const MIN_CONVERGE_ROUNDS = 2;
 
 const STATE_VERSION = 1;
@@ -35,9 +35,9 @@ export class ConvergeRoundCapError extends Error {
     super(
       round > HARD_CONVERGE_ROUND_CAP
         ? `Round ${round} for ${target} exceeds the hard cap of ${HARD_CONVERGE_ROUND_CAP} rounds — no override exists. ` +
-          'Rounds past 5 are noise-sampling, not review (RCL-21).'
-        : `Round ${round} for ${target} exceeds the configured cap of ${cap} rounds. ` +
-          `An explicit --max-rounds (up to ${HARD_CONVERGE_ROUND_CAP}) may extend it.`
+          `A target still not converged after ${HARD_CONVERGE_ROUND_CAP} rounds needs human review, not more sampling (RCL-29).`
+        : `Round ${round} for ${target} exceeds the configured cap of ${cap} rounds — ask the user whether to continue. ` +
+          `With explicit approval, an explicit --max-rounds (up to ${HARD_CONVERGE_ROUND_CAP}) extends it.`
     );
     this.name = 'ConvergeRoundCapError';
   }
@@ -60,7 +60,8 @@ export function validateRoundCap(maxRounds: number): number {
   ) {
     throw new ConvergeRunStateError(
       `--max-rounds must be an integer between ${MIN_CONVERGE_ROUNDS} and ${HARD_CONVERGE_ROUND_CAP} ` +
-        `(a fix pass deserves one re-review; rounds past ${HARD_CONVERGE_ROUND_CAP} are noise-sampling).`
+        `(the loop runs until convergence, asking at ${DEFAULT_CONVERGE_ROUND_CAP} rounds by default; ` +
+        `past ${HARD_CONVERGE_ROUND_CAP} rounds a human takes over).`
     );
   }
   return maxRounds;

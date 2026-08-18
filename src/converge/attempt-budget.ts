@@ -15,7 +15,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-export const DEFAULT_CONVERGE_ATTEMPT_CAP = 7;
+export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
 
 const STATE_VERSION = 2;
 const STATE_DIR = 'rcl-converge-attempts';

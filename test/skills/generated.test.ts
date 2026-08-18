@@ -68,7 +68,7 @@ describe('generated skill files', () => {
       expect(launch, path).toBeGreaterThan(-1);
       expect(launch, path).toBeGreaterThan(claim);
       expect(content, path).toContain('Bash(rcl converge-attempt:*)');
-      expect(content, path).toMatch(/cost cap defaults to 7/);
+      expect(content, path).toMatch(/cost cap defaults to 20/);
       expect(content, path).toContain('`--max-rounds <N>`');
       expect(content, path).toContain('`--max-attempts <N>`');
       expect(content, path).toMatch(/Exit 2 is the configured consent boundary/i);
