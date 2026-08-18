@@ -62,3 +62,22 @@ describe('matchBulletToFindings', () => {
     expect(matchBulletToFindings(bullet, findings)).toHaveLength(0);
   });
 });
+
+describe('file-name matching precision', () => {
+  it('a bullet citing a.ex never substring-matches data.ex', () => {
+    const bullet = {
+      verdict: 'fixed' as const,
+      text: 'a.ex — zero_byte missing from unhealthy integrity list required slot satisfied',
+    };
+    const findings = [
+      {
+        file: 'lib/data.ex',
+        title: 'zero_byte missing from unhealthy integrity list',
+        description: '',
+        severity: 'important',
+        models: ['mX'],
+      },
+    ];
+    expect(matchBulletToFindings(bullet, findings)).toHaveLength(0);
+  });
+});

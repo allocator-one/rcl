@@ -141,9 +141,21 @@ export async function loadModelStats(options: {
     return b;
   };
 
+  // Idempotency at load: verdicts can be re-recorded (converge re-runs, a
+  // later verdict superseding an earlier one) and seeds re-run — the LAST
+  // record per (target, findingKey) wins; keyless records pass through.
+  const outcomesByKey = new Map<string, OutcomeRecord>();
+  const keylessOutcomes: OutcomeRecord[] = [];
   for (const rec of await readJsonl<OutcomeRecord>(dir, OUTCOMES_FILE)) {
     if (!Array.isArray(rec.models) || !inWindow(rec.ts)) continue;
     if (rec.verdict !== 'fixed' && rec.verdict !== 'dismissed') continue;
+    if (rec.target && rec.findingKey) {
+      outcomesByKey.set(`${rec.target} ${rec.findingKey}`, rec);
+    } else {
+      keylessOutcomes.push(rec);
+    }
+  }
+  for (const rec of [...outcomesByKey.values(), ...keylessOutcomes]) {
     for (const model of new Set(rec.models)) {
       const b = bucket(model);
       b.outcomes++;
@@ -151,8 +163,17 @@ export async function loadModelStats(options: {
     }
   }
 
+  // Seeded call records carry stable timestamps (artifact mtimes), so
+  // re-seeding the same directory reproduces identical records — dedupe
+  // those by full identity. Live records are never collapsed.
+  const seenSeedCalls = new Set<string>();
   for (const rec of await readJsonl<CallRecord>(dir, CALLS_FILE)) {
     if (typeof rec.model !== 'string' || !inWindow(rec.ts)) continue;
+    if (rec.source === 'seed') {
+      const id = `${rec.ts} ${rec.model} ${rec.role ?? ''} ${rec.durationMs} ${rec.status}`;
+      if (seenSeedCalls.has(id)) continue;
+      seenSeedCalls.add(id);
+    }
     const b = bucket(rec.model);
     b.calls++;
     if (rec.status === 'timeout' || rec.status === 'error') b.dead++;

@@ -102,3 +102,43 @@ describe('computeWeight', () => {
     expect(computeWeight(0.27, 50)).toBeCloseTo(0.77);
   });
 });
+
+describe('idempotency (round-1 review findings)', () => {
+  it('last verdict wins per (target, findingKey) — re-recording never inflates history', async () => {
+    const rec = {
+      ts: '2026-08-10T00:00:00Z',
+      verdict: 'dismissed' as const,
+      models: ['m1'],
+      target: 't1',
+      findingKey: 'k1',
+    };
+    await appendOutcomes([rec], dir);
+    await appendOutcomes([rec], dir); // converge re-run
+    await appendOutcomes([{ ...rec, ts: '2026-08-11T00:00:00Z', verdict: 'fixed' }], dir);
+    const stats = await loadModelStats({ dir, now: NOW });
+    const m1 = stats.find((s) => s.model === 'm1')!;
+    expect(m1.outcomes).toBe(1);
+    expect(m1.fixed).toBe(1);
+  });
+
+  it('re-seeded call records collapse; live call records never do', async () => {
+    const seedCall = {
+      ts: '2026-08-10T00:00:00Z',
+      model: 'm1',
+      role: 'general',
+      durationMs: 100,
+      status: 'success',
+      source: 'seed' as const,
+    };
+    await appendCalls([seedCall, seedCall], dir); // double seed
+    await appendCalls(
+      [
+        { ts: '2026-08-10T01:00:00Z', model: 'm1', durationMs: 50, status: 'success', source: 'live' as const },
+        { ts: '2026-08-10T01:00:00Z', model: 'm1', durationMs: 50, status: 'success', source: 'live' as const },
+      ],
+      dir
+    );
+    const stats = await loadModelStats({ dir, now: NOW });
+    expect(stats.find((s) => s.model === 'm1')!.calls).toBe(3);
+  });
+});

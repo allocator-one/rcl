@@ -270,6 +270,28 @@ describe('precision-weighted consensus gating (RCL-27)', () => {
     expect(ask).toHaveBeenCalledTimes(1);
   });
 
+  it('weights can only demote: strong weights never let fewer distinct models than minModels gate', async () => {
+    const ask = vi.fn(
+      async (): Promise<ModelAnswer> => ({
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[{"id":"F1","verdict":"confirmed"}]',
+        durationMs: 5,
+        status: 'success',
+      })
+    );
+    const weights = new Map([
+      ['m1', 1.5],
+      ['m2', 1.5],
+    ]);
+    const { findings } = await applyGating(
+      [makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
+      { ...baseOpts, minModels: 3, modelWeights: weights, ask }
+    );
+    // Weighted mass is 3.0 but only 2 distinct models — not consensus.
+    expect(findings[0]!.gating!.reason).toBe('verified');
+  });
+
   it('neutral or unknown weights keep two-model findings consensus-gated', async () => {
     const ask = vi.fn();
     const { findings } = await applyGating(

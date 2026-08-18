@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { CallRecord, OutcomeRecord } from './stats-store.js';
@@ -76,10 +77,15 @@ export function matchBulletToFindings(
   minTitleOverlap = 0.5
 ): ReportFinding[] {
   const bulletTokens = tokens(bullet.text);
+  // Whitespace-delimited words, so "a.ex" never substring-matches "data.ex".
+  const bulletWords = bullet.text.split(/[\s'"`()]+/);
   const matches: Array<{ finding: ReportFinding; overlap: number }> = [];
   for (const finding of findings) {
     const base = basename(finding.file);
-    if (!bullet.text.includes(base)) continue;
+    const namesFile = bulletWords.some(
+      (w) => w === base || w.endsWith(`/${base}`) || w === `${base}:` || w === `${base},`
+    );
+    if (!namesFile) continue;
     const titleTokens = tokens(finding.title);
     if (titleTokens.size === 0) continue;
     let hits = 0;
@@ -187,12 +193,19 @@ export async function buildSeedRecords(
       }
       for (const finding of matched) {
         if (finding.models.length === 0) continue;
+        const target = name.replace(/^rcl-converge-|-ledger\.md$/g, '');
         outcomes.push({
           ts,
           verdict: bullet.verdict,
           models: finding.models,
           ...(finding.severity !== undefined ? { severity: finding.severity } : {}),
-          target: name.replace(/^rcl-converge-|-ledger\.md$/g, ''),
+          target,
+          // Stable synthetic key so re-seeding the same artifacts collapses
+          // to one outcome per finding at load time.
+          findingKey: createHash('sha256')
+            .update(`${bullet.reportBase ?? ''} ${finding.file} ${finding.title}`)
+            .digest('hex')
+            .slice(0, 16),
           source: 'seed',
         });
       }
