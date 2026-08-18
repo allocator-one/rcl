@@ -157,6 +157,35 @@ describe('round ordering and re-runs (RCL-24)', () => {
   });
 });
 
+describe('intra-round identity (RCL-24)', () => {
+  it('near-duplicates within one report share one identity even across bucket boundaries', async () => {
+    const r = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'ir1',
+      round: 1,
+      findings: [
+        finding({ startLine: 9, endLine: 10 }),
+        finding({ startLine: 11, endLine: 12, title: 'other phrasing' }),
+      ],
+    });
+    expect(r.findings[0]!.identity).toBe(r.findings[1]!.identity);
+  });
+
+  it('non-overlapping findings sharing a line bucket keep separate identities', async () => {
+    const r = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'ir2',
+      round: 1,
+      findings: [
+        finding({ startLine: 40, endLine: 41 }),
+        finding({ startLine: 49, endLine: 49, title: 'unrelated thing nearby' }),
+      ],
+    });
+    expect(r.findings[0]!.identity).not.toBe(r.findings[1]!.identity);
+    expect(r.counts.new).toBe(2);
+  });
+});
+
 describe('cross-round identity and suppression (RCL-24)', () => {
   it('classifies first sightings as new and later sightings as repeat', async () => {
     const r1 = await processRoundReport({

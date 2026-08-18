@@ -314,6 +314,11 @@ program
         let maxRounds: number | undefined;
         if (opts.maxRounds !== undefined) {
           maxRounds = typeof opts.maxRounds === 'string' ? Number(opts.maxRounds) : NaN;
+          if (!Number.isSafeInteger(maxRounds)) {
+            throw new ConvergeRunStateError(
+              `--max-rounds must be an integer between 2 and ${HARD_CONVERGE_ROUND_CAP}.`
+            );
+          }
         }
 
         let report: ReviewResult;

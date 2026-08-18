@@ -244,16 +244,17 @@ export async function processRoundReport(options: {
     );
   }
 
+  // Live list: entries created earlier in THIS round must be matchable by
+  // later findings of the same report, or near-duplicates in one report
+  // would split into separate identities. Matching is overlap-only — a
+  // bucket-key shortcut would merge non-overlapping findings that merely
+  // share a 10-line neighborhood.
   const entries: IdentityEntry[] = Object.values(state.findings);
   const counts: RoundCounts = { new: 0, repeat: 0, suppressed: 0, regating: 0 };
   const annotated: AnnotatedRoundFinding[] = [];
 
   for (const finding of options.findings) {
-    const matched =
-      matchFinding(finding, entries, lineWindow) ??
-      // Bucket-key fallback: same file+category+anchor bucket is the same
-      // neighborhood even when the persisted span doesn't overlap.
-      (state.findings[stableFindingKey(finding)] as IdentityEntry | undefined);
+    const matched = matchFinding(finding, entries, lineWindow);
 
     if (!matched) {
       let key = stableFindingKey(finding);
@@ -262,7 +263,7 @@ export async function processRoundReport(options: {
       while (state.findings[key]) {
         key = createHash('sha256').update(`${key}+`).digest('hex').slice(0, 16);
       }
-      state.findings[key] = {
+      const created: FindingEntry = {
         key,
         file: finding.file,
         category: finding.category,
@@ -274,6 +275,8 @@ export async function processRoundReport(options: {
         firstRound: options.round,
         lastRound: options.round,
       };
+      state.findings[key] = created;
+      entries.push(created);
       counts.new++;
       annotated.push({ identity: key, status: 'new', finding });
       continue;
