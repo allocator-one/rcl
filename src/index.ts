@@ -497,8 +497,12 @@ program
                 source: 'live' as const,
               }))
           );
-        } catch {
-          // Advisory history; verdict recording must not fail over it.
+        } catch (err) {
+          // Advisory history; verdict recording must not fail over it —
+          // but say so, or a broken store silently stops learning.
+          console.warn(
+            `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
+          );
         }
         if (opts.json) {
           console.log(JSON.stringify({ target: opts.target, round, recorded: verdicts.length }));
@@ -1098,8 +1102,10 @@ async function executeCouncil(
         source: 'live' as const,
       }))
     );
-  } catch {
-    // Stats are advisory; reviews must not fail over them.
+  } catch (err) {
+    // Stats are advisory; reviews must not fail over them — but a broken
+    // store should not be invisible either.
+    console.warn(`Model-stats store unavailable (call history not recorded): ${String(err)}`);
   }
 
   // Trailing-precision weights scale each model's consensus vote. An empty

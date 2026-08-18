@@ -66,11 +66,29 @@ export function resolveDataDir(env: NodeJS.ProcessEnv = process.env): string {
   return override && override.length > 0 ? override : join(homedir(), '.rcl');
 }
 
+/**
+ * Keep each write() below this size and aligned to line boundaries, so two
+ * concurrent rcl processes appending to the shared store interleave whole
+ * lines instead of tearing them (the reader still skips a torn tail from a
+ * mid-write crash).
+ */
+const APPEND_CHUNK_BYTES = 64 * 1024;
+
 async function appendJsonl(dir: string, file: string, records: object[]): Promise<void> {
   if (records.length === 0) return;
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  const lines = records.map((r) => JSON.stringify(r)).join('\n') + '\n';
-  await appendFile(join(dir, file), lines, { encoding: 'utf8', mode: 0o600 });
+  const path = join(dir, file);
+  let chunk = '';
+  for (const record of records) {
+    chunk += JSON.stringify(record) + '\n';
+    if (chunk.length >= APPEND_CHUNK_BYTES) {
+      await appendFile(path, chunk, { encoding: 'utf8', mode: 0o600 });
+      chunk = '';
+    }
+  }
+  if (chunk.length > 0) {
+    await appendFile(path, chunk, { encoding: 'utf8', mode: 0o600 });
+  }
 }
 
 export async function appendOutcomes(records: OutcomeRecord[], dir = resolveDataDir()): Promise<void> {
@@ -156,7 +174,7 @@ export async function loadModelStats(options: {
     }
   }
   for (const rec of [...outcomesByKey.values(), ...keylessOutcomes]) {
-    for (const model of new Set(rec.models)) {
+    for (const model of new Set(rec.models.filter((m) => typeof m === 'string'))) {
       const b = bucket(model);
       b.outcomes++;
       if (rec.verdict === 'fixed') b.fixed++;

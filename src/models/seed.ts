@@ -26,7 +26,9 @@ interface ReportFinding {
   models: string[];
 }
 
-const BULLET_RE = /^-\s*\[(?:minor\/)?(fixed|dismissed)\]\s*(.*)$/;
+// Verdict may carry a severity prefix — [fixed], [minor/fixed],
+// [important/dismissed] all count.
+const BULLET_RE = /^-\s*\[(?:[a-z]+\/)?(fixed|dismissed)\]\s*(.*)$/;
 
 /** Parse a converge ledger into verdict bullets, each tied to its round's report basename. */
 export function parseLedgerBullets(ledger: string): LedgerBullet[] {
