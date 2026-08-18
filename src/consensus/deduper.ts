@@ -256,7 +256,11 @@ interface TaggedFinding {
   role: string;
 }
 
-export function linesOverlap(a: Finding, b: Finding, window: number): boolean {
+export function linesOverlap(
+  a: Pick<Finding, 'startLine' | 'endLine'>,
+  b: Pick<Finding, 'startLine' | 'endLine'>,
+  window: number
+): boolean {
   // Ranges overlap when the gap between them is at most `window` lines.
   // Expanding BOTH ranges by the window would double the configured
   // distance (a window of 5 merging findings 10 lines apart).

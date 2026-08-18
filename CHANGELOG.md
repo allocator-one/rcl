@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **RCL-24: converge loops are capped at 3 rounds and findings keep a stable
+  identity across rounds.** New `rcl converge-report` dedupes each round's
+  report against the persisted run state (`.git/rcl-converge-runs/`),
+  classifying every finding as new / repeat / suppressed / regating by a
+  location-anchored identity — hash of (file, category, line bucket) plus
+  overlap matching — instead of titles, which models rephrase (corpus
+  spot-check over 374 consecutive-round pairs: identity recognizes a median
+  64% of next-round findings as repeats; exact titles ~1%). The same command
+  machine-enforces the evidence-round cap: default 3, explicit `--max-rounds`
+  up to a hard 5, rounds past 5 impossible. `rcl converge-verdict` persists
+  fixed/dismissed triage outcomes; a dismissed finding cannot re-gate in a
+  later round without new corroboration (≥2 models or critical) — it is
+  reported as suppressed, visibly, with per-round new/repeat/suppressed/
+  regating counts for the ledger. The rcl-converge skill drives both
+  commands and records the counts.
+
 - **RCL-23: convergence gates on verified consensus, not raw single-model
   claims.** Every kept finding is annotated with `gating.reason` in the
   report JSON: `consensus` (≥2 distinct models after dedup), `critical`,

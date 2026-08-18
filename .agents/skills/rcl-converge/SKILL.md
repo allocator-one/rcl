@@ -10,6 +10,8 @@ allowed-tools:
   - Bash(gh repo view:*)
   - Bash(rcl review:*)
   - Bash(rcl converge-attempt:*)
+  - Bash(rcl converge-report:*)
+  - Bash(rcl converge-verdict:*)
   - Bash(rcl roles:*)
   - Bash(git status:*)
   - Bash(git merge-base:*)
@@ -56,14 +58,14 @@ Invoke as `$rcl-converge` in a Codex session.
 
 Drive the current PR (or branch diff) to a clean Review Council verdict: loop review → triage → fix → push until a round produces no new actionable findings. This skill composes the `rcl` skill — each round runs the same review; this skill owns the loop, the triage ledger, and the safety interlocks.
 
-Cost awareness: every attempt is a full multi-model council run. RCL prints a run-specific call/wave estimate; multi-chunk diffs can take much longer than one provider timeout. The machine-enforced cost cap defaults to 7 **attempts**, including failed, killed, no-report, and inconclusive runs. It is a consent boundary, not an absolute ceiling: an explicit `--max-attempts <N>` invocation may choose a different cap. The legacy `--max-rounds` flag remains a separate evidence-round limit.
+Cost awareness: every attempt is a full multi-model council run. RCL prints a run-specific call/wave estimate; multi-chunk diffs can take much longer than one provider timeout. The machine-enforced cost cap defaults to 7 **attempts**, including failed, killed, no-report, and inconclusive runs. It is a consent boundary, not an absolute ceiling: an explicit `--max-attempts <N>` invocation may choose a different cap. Separately, **evidence rounds are machine-capped at 3 by default (hard maximum 5, no override past 5)** — enforced by `rcl converge-report`, because the audit (RCL-21) measured triage precision falling from ~29% to ~12% by round and rounds past 3 to be noise-sampling, not review.
 
 Authorization: invoking this skill IS the explicit request for the loop's fix commits (and pushes, in PR mode) — no additional mid-loop approval is sought for those edits. Raising the configured attempt cap is a separate cost decision and always requires explicit user approval. This satisfies repository profiles that otherwise require asking before committing. A standing "do not commit" or "do not push" instruction still wins: do not start the loop while one is active.
 
 ## Flags
 
 - `PR#N` / `#N` / `N` — converge a specific PR (default: current branch's PR, else local diff mode)
-- `--max-rounds <N>` — legacy evidence-round limit, counted from the ledger (default 7, valid range 1–7); failed/no-report attempts do not advance it
+- `--max-rounds <N>` — evidence-round cap, machine-enforced by `rcl converge-report` (default 3, valid range 2–5; rounds past 5 are impossible); failed/no-report attempts do not advance it. Pass it through to `converge-report` only when the user supplied it.
 - `--max-attempts <N>` — explicitly set the target's total launch-attempt cap to any positive integer (default 7 for a new target); it may lower or raise a persisted cap, while omitting it on resume preserves the existing cap
 - `--roles <list>`, `--spec <path>` — passed through to every round's review
 - `--post-final` — after convergence, post a summary comment to the PR (never posts mid-loop)
@@ -95,7 +97,7 @@ Order matters: the symlink and ownership checks run **before** `chmod`, because 
 
 ### 2. Round loop
 
-For each evidence round `<R>` (numbering continues from a resumed ledger), first consume one machine-accounted attempt. A failed or inconclusive attempt may leave `<R>` unchanged, but it still advances the attempt counter. Stop when either the legacy `--max-rounds` evidence limit (default 7, maximum 7) or the configured attempt cap is exhausted. The attempt cap defaults to 7, while an explicit `--max-attempts` invocation may configure another value:
+For each evidence round `<R>` (numbering continues from a resumed ledger), first consume one machine-accounted attempt. A failed or inconclusive attempt may leave `<R>` unchanged, but it still advances the attempt counter. Stop when either the machine-enforced round cap (default 3, maximum 5 — `rcl converge-report` refuses rounds beyond it) or the configured attempt cap is exhausted. The attempt cap defaults to 7, while an explicit `--max-attempts` invocation may configure another value:
 
 1. **Refresh the target.** PR mode: re-check that the PR head still equals local HEAD and that the PR is still OPEN (an external push mid-loop means someone else is driving the branch, and a merged or closed PR must not be converged — stop and report). Otherwise nothing to do — the PR already contains last round's pushed fixes. Local diff mode: regenerate the patch so the round reviews the fixed code:
    ```bash
@@ -124,8 +126,16 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
 
    Poll for the child-created PID file in short, repeated tool calls for no more than 30 seconds. The PID write is load-bearing: if it fails, the child exits 125 before resolving credentials or starting provider calls. If the file is still missing or empty at that deadline, read the log, release the target lock, and stop; the pre-launch claim remains spent, but no review could have started past the failed PID write. Never retry the launch or search by process name. Once the PID file exists and is non-empty, poll `kill -0 $(cat <RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid)` until the process is gone — again in short, repeated tool calls, never one blocking loop (which hits the same tool timeout; the nohup'd review survives a killed poll; just poll again), and never by process name, which collides with concurrent rcl runs. The child writes its own PID before `exec` replaces it with RCL, so an interrupted parent shell cannot lose the identity of a live review. Only after that PID exits, confirm the JSON report exists and is non-empty; a half-written file must never be parsed. The report file is the success signal: the exit status of a backgrounded process is not recoverable across tool calls. Never pass `--post` or `--inline` mid-loop. If the process is gone but the JSON report is missing or empty, read the log, report the failure, release the target lock, and stop. It does not count as an evidence round, but its pre-launch attempt claim remains spent.
 3. **Check reviewer health first, then parse findings from the JSON file**, never from console scrollback. `stats.successfulReviews` / `stats.totalReviews` gates the whole round: a report is produced even when most model calls time out or error, so a near-empty finding list can mean 'nothing found' or 'nobody looked'. Full-fleet completion is not required. Let `N = stats.totalReviews`; a round is conclusive only when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Otherwise it is **inconclusive** — never counted as converged. Disclose every timeout or error and the successful/total count. Report the failure pattern (which models, timeout vs error), fix the cause if it is under your control (timeouts, missing keys, reasoning budget), and re-run only if the machine attempt budget permits it. Re-runs are budgeted: at most two per evidence-round number, while every review attempt counts toward the configured cap. Raising that cap requires a new, explicit, user-approved `--max-attempts` invocation, so a permanently broken fleet cannot spin unattended. Split by the report's gating annotations: a finding **gates convergence** when its `gating.reason` is `consensus`, `critical`, or `verified`; findings with `gating.reason: "none"` (refuted single-model claims and everything below important) are opportunistic — fix them when cheap, never loop on them. A `gating.verification.verdict` of `unavailable` means the verification pass could not check that finding: it still gates, but read its `note` — a persistently broken verifier is a fixable cause, like a missing key. Legacy reports without `gating` fields fall back to the severity split (critical/important gate).
-4. **Dedup against the ledger.** Models rephrase across rounds — match by file plus the substance of the issue, not exact wording. Findings already dismissed get a quick re-check that the dismissal reason still holds against the current code — a later fix can invalidate it (for example by removing the guard that made the issue harmless). If the reason holds, mark them `[recurring]` without full re-triage; if not, treat them as new. A recurring finding previously marked **fixed** gets a quick re-verification that the fix actually landed and addresses it — if it does, mark it `[recurring]`; if not, treat it as new.
-5. **Triage every new finding against the actual code before touching anything.** Council findings skew heavily false-positive (historically roughly 1 in 10 is actionable). Classify each as `fix` (real, worth fixing) or `dismiss` (false positive, not actionable, or out of scope) — every dismissal gets a one-line reason in the ledger.
+4. **Dedup against the run state with the identity tool.** Run once per round — this call also consumes/validates the round against the machine round cap (default 3, hard max 5; exit 2 means the cap is reached — treat it exactly like the attempt-cap consent boundary):
+   ```bash
+   rcl converge-report --target '<TARGET>' --report <RCL_TMP>/rcl-report-<TARGET>-r<R>.json --round <R> [--max-rounds <N>] --json
+   ```
+   It matches findings by stable identity (file + category + location anchor — NOT titles, which models rephrase ~98% of the time), against every prior round of this run, and classifies each as `new`, `repeat`, `suppressed`, or `regating`. `suppressed` = previously dismissed and back without new corroboration: do NOT re-triage it; it cannot re-gate. `regating` = previously dismissed but now corroborated (≥2 models or critical): re-triage it. `repeat` of a **fixed** finding gets a quick re-verification that the fix actually landed — if it does, mark it `[recurring]` in the ledger; if not, triage as new. Record the tool's per-round counts (new/repeat/suppressed/regating) in the ledger.
+5. **Triage every `new`/`regating` gating finding against the actual code before touching anything.** Council findings skew heavily false-positive (historically roughly 1 in 10 is actionable). Classify each as `fix` (real, worth fixing) or `dismiss` (false positive, not actionable, or out of scope) — every dismissal gets a one-line reason in the ledger. Then persist the verdicts so later rounds suppress dismissed re-findings and the tool's precision history accrues:
+   ```bash
+   rcl converge-verdict --target '<TARGET>' --round <R> --fixed <identity> --dismissed '<identity>=<one-line reason>'
+   ```
+   (both flags repeatable; identities come from the converge-report output)
 6. **Apply the fixes.** After edits: `npm run lint` (type-check) and `npm test` (vitest suite). Do not commit until these are green; if a fix cannot be made green, drop it, record that in the ledger, and report it.
 7. **Record the round in the ledger** (format below — the round header records the reviewed HEAD SHA). Write the findings and verdicts now, but leave each fixed entry's commit hash blank: the commit does not exist until the next step. Fill the hashes in immediately after committing, so the ledger never cites a hash that was never created.
 8. **Commit and push** (PR mode) if anything was fixed: one commit per round, e.g. `Address RCL round 2 findings: <short summary>`. Local diff mode: commit only; there is nothing to push. Immediately before `git push`, re-check the PR is still OPEN — if it merged or closed mid-loop, keep the commit local, stop, and report.
@@ -140,7 +150,7 @@ Consequences:
 
 - A round that fixed any gating finding did **not** converge — at least one more round must confirm those fixes and catch regressions they may have introduced. A round whose only fixes were non-gating findings can still converge.
 - If the attempt cap is hit while the last evidence round still fixed things, report **"capped, not converged"**: the last round's fixes are unreviewed. Stop before another launch and ask the user whether to use human review or explicitly resume with a higher `--max-attempts` value. No answer means no additional attempt.
-- If the legacy evidence-round limit is hit, stop under its original semantics; `--max-attempts` does not silently raise or reinterpret `--max-rounds`.
+- If the round cap is hit (`rcl converge-report` exits 2), stop and report "capped, not converged" — continuing requires the user to explicitly resume with a higher `--max-rounds`, which can never exceed 5; `--max-attempts` does not raise or reinterpret `--max-rounds`.
 
 ### 4. After the loop
 
@@ -158,9 +168,10 @@ Consequences:
 ```markdown
 # RCL converge ledger — <TARGET>
 
-## Round 1 — HEAD abc1234 — report <RCL_TMP>/rcl-report-<TARGET>-r1.json — 12 findings (2 critical / 4 important / 6 minor)
-- [fixed] src/consensus/deduper.ts — line-overlap window applied twice — commit abc1234
-- [dismissed] src/output/github.ts — "prompt injection via diff content" — delimiters already neutralized in sanitize.ts
+## Round 1 — HEAD abc1234 — report <RCL_TMP>/rcl-report-<TARGET>-r1.json — 12 findings (2 critical / 4 important / 6 minor) — identity: 9 new / 2 repeat / 1 suppressed / 0 regating
+- [fixed] 9787c6ea72ae778c src/consensus/deduper.ts — line-overlap window applied twice — commit abc1234
+- [dismissed] d2baf9675eb450f0 src/output/github.ts — "prompt injection via diff content" — delimiters already neutralized in sanitize.ts
+- [suppressed] c4842562392f4b60 src/dispatch/runner.ts — dismissed in round 1, no new corroboration
 - [minor/fixed] src/config/defaults.ts — typo in comment — commit abc1234
 ```
 
@@ -170,14 +181,15 @@ Consequences:
 - Never arm auto-merge; disarm it at the start if armed. Never run `gh pr merge` in any form other than `--disable-auto` — that allowlist entry exists solely for disarming; merging is out of scope for this skill.
 - Never amend or force-push — fixes are always new commits.
 - Every council launch must be preceded by a successful `rcl converge-attempt` claim. Never bypass or reset its persisted state, and never exceed the configured cap. The count is cumulative across sessions, force-pushes, and resumes. Seven is only the default; a higher cap is valid when the user explicitly supplied `--max-attempts` at invocation or explicitly approved it after a refusal.
-- Preserve `--max-rounds` as the evidence-round limit it has always represented; never use it as an alias for the machine attempt cap.
+- Preserve `--max-rounds` as the evidence-round limit; never use it as an alias for the machine attempt cap. Never bypass or reset the converge run state (`.git/rcl-converge-runs/`) to dodge the round cap or resurrect suppressed findings; rounds past 5 are impossible by design.
 - Execute the host variant's claim exactly once: Claude runs its claim block in the foreground and its review block separately; Codex runs its combined claim-and-launch block once. Never repeat `rcl converge-attempt`, because each successful call spends another attempt.
 - Never terminate a live council merely because its log contains one model/parser warning. Let RCL finish and assess reviewer health from the completed JSON report; killing the process destroys the evidence needed for that decision.
 - Read reports from files, never console scrollback; every round gets its own report files.
 
 ## Examples
 
-- `$rcl-converge` — converge the current branch's PR with the default 7-attempt cap
-- `$rcl-converge #7 --max-rounds 2` — preserve the legacy behavior: stop after two evidence rounds
+- `$rcl-converge` — converge the current branch's PR with the default caps (3 evidence rounds, 7 attempts)
+- `$rcl-converge #7 --max-rounds 2` — tighter budget: stop after two evidence rounds
+- `$rcl-converge #7 --max-rounds 5` — extend to the hard round maximum (nothing can go past 5)
 - `$rcl-converge #7 --max-attempts 10` — explicitly authorize up to 10 launch attempts at invocation, or resume with 10 after approving continuation at a lower cap
 - `$rcl-converge --roles security-auditor,bug-hunter --post-final` — converge on two roles, post the summary once clean

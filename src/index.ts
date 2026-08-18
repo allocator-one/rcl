@@ -71,6 +71,14 @@ import {
   ConvergeAttemptStateError,
   resolveGitCommonDir,
 } from './converge/attempt-budget.js';
+import {
+  DEFAULT_CONVERGE_ROUND_CAP,
+  HARD_CONVERGE_ROUND_CAP,
+  processRoundReport,
+  recordVerdicts,
+  ConvergeRoundCapError,
+  ConvergeRunStateError,
+} from './converge/run-state.js';
 
 const program = new Command();
 
@@ -257,6 +265,219 @@ program
         // Exit 2 is the expected consent boundary. Exit 3 means accounting or
         // infrastructure failed and raising the cap is not the remediation.
         process.exitCode = convergeAttemptErrorExitCode(err);
+      }
+    }
+  );
+
+/** Gating reason for legacy reports without RCL-23 annotations. */
+function findingGatingReason(f: {
+  severity: string;
+  gating?: { reason: string };
+}): string {
+  if (f.gating) return f.gating.reason;
+  return f.severity === 'critical' || f.severity === 'important' ? 'legacy-blocking' : 'none';
+}
+
+// Cross-round finding identity + machine-enforced round cap (RCL-24).
+program
+  .command('converge-report')
+  .description(
+    'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating'
+  )
+  .option('--target [key]', 'Stable convergence target key (same key as converge-attempt)')
+  .option('--report [path]', 'Round report JSON (a --json-file output)')
+  .option('--round [n]', 'Evidence round number (1-based)')
+  .option(
+    '--max-rounds [n]',
+    `Round cap override (default ${DEFAULT_CONVERGE_ROUND_CAP}, hard maximum ${HARD_CONVERGE_ROUND_CAP})`
+  )
+  .option('--json', 'Output JSON')
+  .action(
+    async (opts: {
+      target?: string | boolean;
+      report?: string | boolean;
+      round?: string | boolean;
+      maxRounds?: string | boolean;
+      json?: boolean;
+    }) => {
+      try {
+        if (typeof opts.target !== 'string' || opts.target.trim() === '') {
+          throw new ConvergeRunStateError('--target is required.');
+        }
+        if (typeof opts.report !== 'string' || opts.report.trim() === '') {
+          throw new ConvergeRunStateError('--report is required.');
+        }
+        const round = typeof opts.round === 'string' ? Number(opts.round) : NaN;
+        if (!Number.isSafeInteger(round) || round < 1) {
+          throw new ConvergeRunStateError('--round must be a positive integer.');
+        }
+        let maxRounds: number | undefined;
+        if (opts.maxRounds !== undefined) {
+          maxRounds = typeof opts.maxRounds === 'string' ? Number(opts.maxRounds) : NaN;
+        }
+
+        let report: ReviewResult;
+        try {
+          report = JSON.parse(await readFile(opts.report, 'utf-8')) as ReviewResult;
+        } catch (err) {
+          throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
+            cause: err,
+          });
+        }
+        if (!Array.isArray(report.findings)) {
+          throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
+        }
+
+        const result = await processRoundReport({
+          gitCommonDir: await resolveGitCommonDir(),
+          target: opts.target,
+          round,
+          findings: report.findings,
+          ...(maxRounds !== undefined ? { maxRounds } : {}),
+        });
+
+        const classified = result.findings.map((f) => ({
+          identity: f.identity,
+          status: f.status,
+          gating: findingGatingReason(f.finding),
+          severity: f.finding.severity,
+          file: f.finding.file,
+          startLine: f.finding.startLine,
+          endLine: f.finding.endLine,
+          title: f.finding.title,
+          ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
+        }));
+        const actionable = classified.filter(
+          (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
+        );
+
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                target: opts.target,
+                round,
+                roundCap: result.roundCap,
+                counts: result.counts,
+                actionableGating: actionable.length,
+                findings: classified,
+              },
+              null,
+              2
+            )
+          );
+          return;
+        }
+
+        console.log(
+          `Round ${round}/${result.roundCap} for ${opts.target}: ` +
+            `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
+            `${result.counts.suppressed} suppressed, ${result.counts.regating} regating · ` +
+            `${actionable.length} actionable gating finding(s)`
+        );
+        for (const f of actionable) {
+          console.log(`  [${f.status}] ${f.identity} ${f.file}:${f.startLine} — ${f.title}`);
+        }
+        for (const f of classified.filter((c) => c.status === 'suppressed')) {
+          console.log(
+            chalk.dim(`  [suppressed] ${f.identity} ${f.file}:${f.startLine} — ${f.suppressReason}`)
+          );
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (opts.json) {
+          const code =
+            err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
+              ? err.code
+              : 'RCL_CONVERGE_REPORT_ERROR';
+          console.error(JSON.stringify({ error: { code, message } }));
+        } else {
+          console.error(chalk.red(message));
+        }
+        // Exit 2 = round-cap consent boundary (mirrors converge-attempt);
+        // exit 3 = state/infrastructure failure.
+        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : 3;
+      }
+    }
+  );
+
+// Record triage outcomes for finding identities (RCL-24; the precision
+// history these verdicts build feeds RCL-27's model weighting).
+program
+  .command('converge-verdict')
+  .description('Record fixed/dismissed triage verdicts for finding identities in the converge run state')
+  .option('--target [key]', 'Stable convergence target key')
+  .option('--round [n]', 'Evidence round the triage belongs to')
+  .option(
+    '--fixed <key>',
+    'Finding identity verified and fixed (repeatable)',
+    (val: string, prev: string[]) => {
+      prev.push(val);
+      return prev;
+    },
+    [] as string[]
+  )
+  .option(
+    '--dismissed <key=reason>',
+    'Finding identity dismissed, with reason (repeatable)',
+    (val: string, prev: string[]) => {
+      prev.push(val);
+      return prev;
+    },
+    [] as string[]
+  )
+  .option('--json', 'Output JSON')
+  .action(
+    async (opts: {
+      target?: string | boolean;
+      round?: string | boolean;
+      fixed: string[];
+      dismissed: string[];
+      json?: boolean;
+    }) => {
+      try {
+        if (typeof opts.target !== 'string' || opts.target.trim() === '') {
+          throw new ConvergeRunStateError('--target is required.');
+        }
+        const round = typeof opts.round === 'string' ? Number(opts.round) : NaN;
+        if (!Number.isSafeInteger(round) || round < 1) {
+          throw new ConvergeRunStateError('--round must be a positive integer.');
+        }
+        const verdicts = [
+          ...opts.fixed.map((key) => ({ key, verdict: 'fixed' as const })),
+          ...opts.dismissed.map((entry) => {
+            const eq = entry.indexOf('=');
+            return eq === -1
+              ? { key: entry, verdict: 'dismissed' as const }
+              : {
+                  key: entry.slice(0, eq),
+                  verdict: 'dismissed' as const,
+                  reason: entry.slice(eq + 1),
+                };
+          }),
+        ];
+        if (verdicts.length === 0) {
+          throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
+        }
+        await recordVerdicts({
+          gitCommonDir: await resolveGitCommonDir(),
+          target: opts.target,
+          round,
+          verdicts,
+        });
+        if (opts.json) {
+          console.log(JSON.stringify({ target: opts.target, round, recorded: verdicts.length }));
+        } else {
+          console.log(`Recorded ${verdicts.length} verdict(s) for ${opts.target} round ${round}.`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (opts.json) {
+          console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_VERDICT', message } }));
+        } else {
+          console.error(chalk.red(message));
+        }
+        process.exitCode = 3;
       }
     }
   );
