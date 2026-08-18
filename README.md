@@ -166,9 +166,9 @@ the workflow to ask the user; an approved continuation explicitly supplies a
 higher cap.
 
 At the skill level, `--max-attempts N` controls this machine launch budget.
-The pre-existing `--max-rounds N` flag retains its original meaning as a
-separate evidence-round limit (1–7), so existing invocations do not silently
-change behavior.
+The separate `--max-rounds N` flag caps evidence rounds and is machine-enforced
+by `rcl converge-report` (default 3, valid range 2–5; rounds past 5 are
+impossible under any flag).
 
 Full-fleet reviewer completion is not required. For the generated
 `rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
@@ -200,6 +200,33 @@ local safety mechanism, not a tamper-proof store: deliberately deleting
 ```bash
 rcl converge-attempt --target owner-repo-123                 # default/persisted cap
 rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit override
+```
+
+---
+
+### `rcl converge-report` and `rcl converge-verdict`
+
+The cross-round memory of a converge run, persisted in
+`.git/rcl-converge-runs/<target>.json`.
+
+`converge-report` dedupes one round's report JSON against every prior round of
+the run using a location-anchored finding identity (hash of file + category +
+line bucket, plus a line-overlap matcher — titles are deliberately ignored:
+models rephrase ~98% of them between rounds). Each finding is classified
+`new`, `repeat`, `suppressed` (previously dismissed, no new corroboration —
+cannot re-gate), or `regating` (previously dismissed but now backed by ≥2
+models or critical severity). The same call enforces the evidence-round cap:
+default 3, `--max-rounds` accepts 2–5, and rounds past 5 are impossible. Exit
+code 2 is the cap consent boundary; exit 3 is a state failure.
+
+`converge-verdict` records triage outcomes per finding identity —
+`--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which
+drives later-round suppression and accrues the per-model precision history.
+
+```bash
+rcl converge-report --target rcl-30 --report report-r2.json --round 2 --json
+rcl converge-verdict --target rcl-30 --round 2 \
+  --fixed 9787c6ea72ae778c --dismissed 'd2baf9675eb450f0=guard already exists'
 ```
 
 ---
