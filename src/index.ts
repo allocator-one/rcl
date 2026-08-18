@@ -11,6 +11,7 @@ import {
   DEFAULT_MODELS,
   DEFAULT_THRESHOLDS,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_ASYNC_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
@@ -27,6 +28,17 @@ import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
+import {
+  partitionAsyncAssignments,
+  asyncTargetKey,
+  resolveAsyncStoreDir,
+  spoolAsyncCalls,
+  launchAsyncWorkers,
+  runAsyncWorker,
+  collectAsyncResults,
+  currentBranchLabel,
+  MAX_ASYNC_CALLS_PER_ROUND,
+} from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
@@ -100,6 +112,7 @@ program
   .option('--spec <path>', 'Specification file for spec-compliance role')
   .option('--models <models>', 'Comma-separated list of primary (SOTA) models')
   .option('--secondary-models <models>', 'Comma-separated list of secondary models (specialized roles only)')
+  .option('--async-models <models>', 'Comma-separated list of async (non-blocking) bonus reviewers')
   .option('--focus <areas>', 'Comma-separated focus areas')
   .option('--post', 'Post review as GitHub PR comment')
   .option('--json', 'Output JSON to stdout')
@@ -139,6 +152,7 @@ program
   .option('--spec <path>', 'Specification the plan should satisfy (enables spec-compliance role)')
   .option('--models <models>', 'Comma-separated list of primary (SOTA) models')
   .option('--secondary-models <models>', 'Comma-separated list of secondary models (specialized roles only)')
+  .option('--async-models <models>', 'Comma-separated list of async (non-blocking) bonus reviewers')
   .option('--json', 'Output JSON to stdout')
   .option('--json-file <path>', 'Write JSON output to file')
   .option('--markdown <path>', 'Write Markdown report to file')
@@ -245,6 +259,21 @@ program
     }
   );
 
+// Detached async-lane worker (RCL-25) — launched by the review process for
+// each async (non-blocking) reviewer call; not for interactive use.
+program
+  .command('async-worker', { hidden: true })
+  .requiredOption('--spool <path>', 'Spool file written by the launching review')
+  .action(async (opts: { spool: string }) => {
+    try {
+      await runAsyncWorker(opts.spool);
+    } catch {
+      // Nothing is awaiting this process; a failed worker simply leaves no
+      // result to merge. Exit non-zero for post-mortem visibility only.
+      process.exitCode = 1;
+    }
+  });
+
 // roles subcommand
 const rolesCmd = program.command('roles').description('Manage and inspect roles');
 
@@ -296,6 +325,7 @@ interface CouncilCliOpts {
   spec?: string;
   models?: string;
   secondaryModels?: string;
+  asyncModels?: string;
   post?: boolean;
   json?: boolean;
   jsonFile?: string;
@@ -308,6 +338,8 @@ interface PreparedCouncil {
   config: Config;
   roleMap: Map<string, Role>;
   assignments: ReturnType<typeof buildAssignments>;
+  /** Async bonus reviewers — fired with the round, never awaited (RCL-25). */
+  asyncAssignments: ReturnType<typeof buildAssignments>;
   contextFiles: string[];
 }
 
@@ -347,13 +379,20 @@ async function prepareCouncil(
   // Override models from CLI
   if (opts.models) {
     config.models = opts.models.split(',').map((s) => s.trim()).filter(Boolean);
-    // Clear secondary models unless explicitly provided — don't leak code to default providers
+    // Clear secondary and async models unless explicitly provided — don't
+    // leak code to default providers the user overrode away from.
     if (opts.secondaryModels === undefined) {
       config.secondaryModels = [];
+    }
+    if (opts.asyncModels === undefined) {
+      config.asyncModels = [];
     }
   }
   if (opts.secondaryModels !== undefined) {
     config.secondaryModels = opts.secondaryModels.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (opts.asyncModels !== undefined) {
+    config.asyncModels = opts.asyncModels.split(',').map((s) => s.trim()).filter(Boolean);
   }
 
   // Determine roles to use
@@ -420,7 +459,7 @@ async function prepareCouncil(
 
   const models = config.models ?? [...DEFAULT_MODELS];
   const secondaryModels = config.secondaryModels ?? [];
-  const assignments = buildAssignments({
+  const built = buildAssignments({
     models,
     roles,
     secondaryModels,
@@ -428,9 +467,27 @@ async function prepareCouncil(
     roleMap,
   });
 
+  // Async lane (RCL-25): async models run the general role(s) only.
+  // Membership in `models` wins over `asyncModels` — an explicit blocking
+  // seat is an explicit choice, so the model stays blocking and gets no
+  // duplicate async seat. Async models appearing only in `secondaryModels`
+  // are partitioned OUT of the blocking path below. Explicit --reviewer
+  // pairs mean exact manual control: every pair runs as given — even a
+  // model that is usually async — and no bonus seats are added, so the
+  // async roster must not partition pairs away.
+  const asyncModels = explicitReviewers
+    ? []
+    : (config.asyncModels ?? []).filter((m) => !models.includes(m));
+  const { blocking: assignments } = partitionAsyncAssignments(built, asyncModels);
+  const generalRoles = roles.filter((r) => !r.isSpecialized);
+  const asyncAssignments =
+    explicitReviewers || asyncModels.length === 0 || generalRoles.length === 0
+      ? []
+      : buildAssignments({ models: asyncModels, roles: generalRoles, roleMap });
+
   const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
 
-  return { config, roleMap, assignments, contextFiles };
+  return { config, roleMap, assignments, asyncAssignments, contextFiles };
 }
 
 async function runReview(target: string | undefined, opts: CouncilCliOpts & {
@@ -452,7 +509,8 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       process.exit(1);
     }
 
-    const { config, roleMap, assignments, contextFiles } = await prepareCouncil(spinner, opts);
+    const prepared = await prepareCouncil(spinner, opts);
+    const { config } = prepared;
 
     const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
@@ -484,7 +542,14 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       process.exit(0);
     }
 
-    await executeCouncil(spinner, { config, roleMap, assignments, contextFiles }, diff, opts);
+    // Stable across rounds of the same converge run, so round N+1 finds the
+    // async results round N fired. Git modes carry the branch name so two
+    // branches reviewed in one repository never exchange async results.
+    const asyncTargetLabel = diff.metadata
+      ? `${diff.metadata.owner}/${diff.metadata.repo}#${diff.metadata.number}`
+      : (target ?? `git-${gitMode}-${await currentBranchLabel()}`);
+
+    await executeCouncil(spinner, prepared, diff, opts, { asyncTargetLabel });
   } catch (err) {
     spinner.fail(String(err));
     if (process.env['RCL_DEBUG']) {
@@ -503,9 +568,10 @@ async function executeCouncil(
   prepared: PreparedCouncil,
   diff: Diff,
   opts: CouncilCliOpts,
-  planContext?: { focus?: PlanFocus }
+  extra?: { focus?: PlanFocus; asyncTargetLabel?: string }
 ): Promise<void> {
-  const { config, roleMap, assignments, contextFiles } = prepared;
+  const { config, roleMap, assignments, asyncAssignments, contextFiles } = prepared;
+  const planContext = extra?.focus !== undefined ? { focus: extra.focus } : undefined;
 
   // Chunk the diff
   const chunks = chunkDiff(diff.files);
@@ -527,6 +593,65 @@ async function executeCouncil(
       })
     )
   );
+
+  // Async lane (RCL-25): fire the async reviewers with the round, never
+  // await them; collect whatever arrived from earlier rounds after the
+  // blocking council returns. Best-effort by design — a broken lane must
+  // never fail or slow the blocking round.
+  const asyncTargetLabel = extra?.asyncTargetLabel;
+  let asyncStoreDir: string | undefined;
+  let asyncKey: string | undefined;
+  let asyncLaunched = 0;
+  if (
+    asyncTargetLabel !== undefined &&
+    (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0)
+  ) {
+    try {
+      asyncStoreDir = await resolveAsyncStoreDir();
+      asyncKey = asyncTargetKey(asyncTargetLabel);
+      let asyncChunkAssignments = chunks.flatMap((chunk) =>
+        asyncAssignments.map((assignment) => ({ assignment, chunk }))
+      );
+      if (asyncChunkAssignments.length > MAX_ASYNC_CALLS_PER_ROUND) {
+        console.warn(
+          `Async lane: capping ${asyncChunkAssignments.length} async calls at ` +
+            `${MAX_ASYNC_CALLS_PER_ROUND} (one detached process each); the rest are dropped.`
+        );
+        asyncChunkAssignments = asyncChunkAssignments.slice(0, MAX_ASYNC_CALLS_PER_ROUND);
+      }
+      if (asyncChunkAssignments.length > 0) {
+        const asyncPrompts = await Promise.all(
+          asyncChunkAssignments.map(({ assignment, chunk }) =>
+            buildPrompt(chunk, assignment.role, {
+              contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
+              plan: planContext,
+            })
+          )
+        );
+        const spools = await spoolAsyncCalls(
+          asyncChunkAssignments.map(({ assignment }, i) => ({
+            model: assignment.model,
+            role: assignment.role.name,
+            provider: assignment.provider,
+            systemPrompt: asyncPrompts[i]!.systemPrompt,
+            userPrompt: asyncPrompts[i]!.userPrompt,
+          })),
+          {
+            storeDir: asyncStoreDir,
+            targetKey: asyncKey,
+            timeoutMs: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,
+            maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
+            reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+          }
+        );
+        launchAsyncWorkers(spools);
+        asyncLaunched = spools.length;
+      }
+    } catch (err) {
+      console.warn(`Async reviewer lane unavailable: ${String(err)}`);
+      asyncStoreDir = undefined;
+    }
+  }
 
   const startTime = Date.now();
   const totalCalls = chunkAssignments.length;
@@ -581,8 +706,18 @@ async function executeCouncil(
     progress.stop();
   }
 
-  // Collapse per-chunk reviews back to one per (model, role) reviewer.
-  const reviews = mergeChunkReviews(chunkReviews);
+  // Merge async results that have arrived from earlier rounds of this
+  // target (marked async), then collapse per-chunk reviews back to one per
+  // (model, role) reviewer.
+  let arrivedAsync: ModelReview[] = [];
+  if (asyncStoreDir && asyncKey) {
+    try {
+      arrivedAsync = await collectAsyncResults(asyncStoreDir, asyncKey);
+    } catch (err) {
+      console.warn(`Could not collect async reviewer results: ${String(err)}`);
+    }
+  }
+  const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
 
   spinner.text = 'Computing consensus...';
 
@@ -622,10 +757,30 @@ async function executeCouncil(
       totalDeduped: consensusFindings.length,
       belowThreshold: droppedFindings.length,
       durationMs: Date.now() - startTime,
+      ...(asyncLaunched > 0 ? { asyncLaunched } : {}),
+      ...(arrivedAsync.length > 0
+        ? { asyncMerged: mergeChunkReviews(arrivedAsync).length }
+        : {}),
     },
   };
 
   spinner.succeed('Review complete');
+  // Status lines go to stderr: stdout may be a machine-read JSON stream
+  // (`--json | jq`), which a stray status line would corrupt.
+  if (asyncLaunched > 0) {
+    process.stderr.write(
+      chalk.dim(
+        `Fired ${asyncLaunched} async reviewer call(s) — results merge into the next round of this target.`
+      ) + '\n'
+    );
+  }
+  if (arrivedAsync.length > 0) {
+    process.stderr.write(
+      chalk.dim(
+        `Merged ${mergeChunkReviews(arrivedAsync).length} async reviewer result(s) from an earlier round.`
+      ) + '\n'
+    );
+  }
 
   // Output
   if (opts.json) {
@@ -780,7 +935,12 @@ async function runPlanReview(
     spinner.text = `Loading plan: ${file}`;
     const diff = await loadPlanAsDiff(file);
 
-    await executeCouncil(spinner, prepared, diff, opts, { focus });
+    // Plan reviews get an async lane too: re-reviewing the same plan file
+    // collects what the previous run fired.
+    await executeCouncil(spinner, prepared, diff, opts, {
+      focus,
+      asyncTargetLabel: `plan:${file}`,
+    });
   } catch (err) {
     spinner.fail(String(err));
     if (process.env['RCL_DEBUG']) {

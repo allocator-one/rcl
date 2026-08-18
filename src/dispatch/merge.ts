@@ -41,6 +41,9 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
     const degraded = {
       ...(dropped > 0 ? { droppedFindings: dropped } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
+      // A reviewer is homogeneous across chunks, so any async part means the
+      // whole merged review came from the async lane.
+      ...(parts.some((p) => p.async) ? { async: true } : {}),
     };
 
     if (successes.length > 0) {

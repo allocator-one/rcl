@@ -209,12 +209,19 @@ rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit overr
 Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.
 
 ```yaml
-# Models to use (provider-prefixed names)
+# Blocking council (provider-prefixed names) — every round waits for these.
+# Shown here: the actual defaults. Keep slow/aggregator-routed models out of
+# this list; give them an async seat instead.
 models:
-  - anthropic/claude-opus-4-6
-  - openai/gpt-5.4
-  - google/gemini-2.5-pro
-  # Any model on https://openrouter.ai — keep the vendor segment after the prefix
+  - anthropic/claude-fable-5
+  - openai/gpt-5.6-sol
+  - google/gemini-3.6-flash
+
+# Async bonus reviewers — fired with each round, never awaited. Results that
+# have arrived by the next round of the same target are merged into that
+# round's dedup and marked `async` in the report JSON.
+# Any model on https://openrouter.ai works — keep the vendor segment after the prefix.
+asyncModels:
   - openrouter/moonshotai/kimi-k3
 
 # Default roles to run
@@ -253,7 +260,8 @@ output:
 
 # Concurrency and reliability
 concurrency: 6
-timeout: 600000       # ms per model call (reasoning models need headroom on real diffs)
+timeout: 600000       # ms per blocking model call
+asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 maxRetries: 3
 
 # Reasoning budget for providers that support it (currently OpenRouter).
@@ -311,16 +319,15 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
 | `RCL_NO_HARNESS_KEYS` | Set to any value to disable Harness key distribution (below) |
 
-The default model fleet includes OpenRouter-hosted models. If `OPENROUTER_API_KEY`
-is not set, those entries are dropped from the defaults with a warning naming the
-surviving fleet (models you configure explicitly still fail loudly instead). The
-default secondary list is entirely OpenRouter-hosted, so without the key it is
-empty and specialist roles are spread across the primary models only — set
-`secondaryModels:` explicitly if you want a secondary tier without OpenRouter. Note that when the key is set,
-default reviews send diff and context content to OpenRouter — an aggregator and
-an additional data processor beyond the direct model providers — as well as to
-Anthropic, OpenAI, and Google. Configure `models:` explicitly if that matters
-for your repository.
+The default blocking council is direct-API only (Anthropic, OpenAI, Google) —
+no default review round ever waits on an OpenRouter-routed call. The default
+async lane holds one OpenRouter-hosted bonus reviewer (`kimi-k3`); if
+`OPENROUTER_API_KEY` is not set, it is dropped from the defaults with a warning
+(models you configure explicitly still fail loudly instead). Note that when the
+key is set, default reviews send diff and context content to OpenRouter — an
+aggregator and an additional data processor beyond the direct model providers —
+as well as to Anthropic, OpenAI, and Google. Configure `models:` and
+`asyncModels:` explicitly if that matters for your repository.
 
 ### Key distribution via Harness
 

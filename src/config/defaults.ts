@@ -1,22 +1,33 @@
-/** SOTA models — run the general role + participate in specialized round-robin */
+/**
+ * Core (blocking) council — every round waits for these and only these.
+ * Direct-API models only: the RCL-21 audit (922 rounds, 15,268 calls) found
+ * the OpenRouter wing at p50 7–9.5 min per call with 19–39% dead calls,
+ * last-finisher in 97.6% of rounds; the direct trio answers in 45–70 s with
+ * ~0% dead calls. Replaying the corpus with this trio alone drops the median
+ * round from 14.4 to 2.0 min while 91% of multi-model findings still surface.
+ */
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5',
   'openai/gpt-5.6-sol',
   'google/gemini-3.6-flash',
-  'openrouter/moonshotai/kimi-k3',
 ] as const;
 
 /**
- * Secondary models — specialized round-robin only, no general role.
- * Chosen for training-lineage diversity: with the four SOTA models above,
- * every default voter comes from a different lab, so cross-model consensus
- * always reflects independent confirmation.
+ * Async bonus reviewers — fired with the round but never awaited; whatever
+ * has arrived by the NEXT round's dedup is merged then, marked async in the
+ * report. kimi-k3 keeps a seat here because it has the council's best
+ * corroboration rate (62%) but is ~6× slower than the core trio.
  */
-export const DEFAULT_SECONDARY_MODELS = [
-  'openrouter/qwen/qwen3.8-max',
-  'openrouter/deepseek/deepseek-v4-flash-0731',
-  'openrouter/x-ai/grok-4.5',
-] as const;
+export const DEFAULT_ASYNC_MODELS = ['openrouter/moonshotai/kimi-k3'] as const;
+
+/**
+ * Secondary models — specialized round-robin only, no general role.
+ * Empty by default since RCL-25: qwen3.8-max, deepseek-v4-flash and grok-4.5
+ * were removed after the audit (24–39% dead calls, worst finding-cost in the
+ * council). Before any slow model earns a seat back, try it via its direct
+ * provider API instead of OpenRouter and re-measure.
+ */
+export const DEFAULT_SECONDARY_MODELS = [] as const;
 
 export const DEFAULT_THRESHOLDS = {
   minConsensusScore: 0.4,
@@ -42,6 +53,13 @@ export const DEFAULT_THRESHOLDS = {
  * headroom). Dogfooded on this repo's own diffs.
  */
 export const DEFAULT_TIMEOUT_MS = 600_000;
+
+/**
+ * Per-call timeout for the async (non-blocking) lane. Async reviewers are
+ * slow by definition — kimi-k3's p50 is 7–9.5 min — and nothing waits on
+ * them, so they get more headroom than the blocking council.
+ */
+export const DEFAULT_ASYNC_TIMEOUT_MS = 900_000;
 export const DEFAULT_MAX_RETRIES = 3;
 
 /**

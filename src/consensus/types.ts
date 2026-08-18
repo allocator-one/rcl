@@ -33,6 +33,12 @@ export interface ModelReview {
   droppedFindings?: number;
   /** Parser warnings, carried into the report instead of only console.warn. */
   warnings?: string[];
+  /**
+   * Review came from the async (non-blocking) lane: fired with an earlier
+   * round, never awaited, merged into this round's dedup on arrival. Its
+   * findings reference the code as of the round that launched it.
+   */
+  async?: boolean;
 }
 
 /**
@@ -96,5 +102,9 @@ export interface ReviewResult {
     totalDeduped: number;
     belowThreshold: number;
     durationMs: number;
+    /** Async-lane calls fired with this round (not awaited, not in totalReviews). */
+    asyncLaunched?: number;
+    /** Async-lane reviews (from earlier rounds) merged into this round's dedup. */
+    asyncMerged?: number;
   };
 }

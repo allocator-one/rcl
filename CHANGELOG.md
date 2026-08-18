@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **RCL-25: OpenRouter models are off the blocking path.** The default
+  blocking council is now the direct-API trio (claude-fable-5, gpt-5.6-sol,
+  gemini-3.6-flash). The RCL-21 audit of 922 rounds found the four
+  OpenRouter-routed models at p50 7–9.5 min per call with 19–39% dead calls
+  and last-finisher in 97.6% of rounds; replaying the corpus with the trio
+  alone drops the median round from 14.4 to 2.0 min while 91% of multi-model
+  findings still surface. deepseek-v4-flash, qwen3.8-max and grok-4.5 leave
+  the default roster entirely. kimi-k3 (best corroboration rate in the
+  council) keeps a seat in the new **async lane** (`asyncModels` config):
+  async reviewers are fired with the round via detached workers, never
+  awaited, and whatever has arrived by the next round of the same target is
+  merged into that round's dedup, marked `async` in the report JSON
+  (`stats.asyncLaunched` / `stats.asyncMerged`). A new `asyncTimeout`
+  (default 900 s) gives the lane headroom without holding any round open.
+
 ## 1.9.0
 
 - **RCL-18: convergence attempt budgets are machine-enforced.** The generated

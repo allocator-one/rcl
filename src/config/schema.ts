@@ -48,12 +48,20 @@ export const ReasoningEffortSchema = z.enum(['low', 'medium', 'high']);
 export const ConfigSchema = z.object({
   models: z.array(z.string()).optional(),
   secondaryModels: z.array(z.string()).optional(),
+  /**
+   * Async bonus reviewers — fired with each round, never awaited. Results
+   * that have arrived by the next round's dedup are merged then and marked
+   * async in the report. Never on the blocking path.
+   */
+  asyncModels: z.array(z.string()).optional(),
   roles: z.array(z.string()).optional(),
   reviewers: z.array(ReviewerPairSchema).optional(),
   customRoles: z.array(RoleConfigSchema).optional(),
   thresholds: ThresholdsSchema.optional(),
   output: OutputSchema.optional(),
   timeout: z.number().positive().optional(),
+  /** Per-call timeout (ms) for the async lane; defaults higher than `timeout`. */
+  asyncTimeout: z.number().positive().optional(),
   maxRetries: z.number().int().nonnegative().optional(),
   concurrency: z.number().int().positive().optional(),
   /** Reasoning budget for providers that support it (currently OpenRouter). */
