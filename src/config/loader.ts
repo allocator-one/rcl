@@ -137,6 +137,8 @@ function mergeWithDefaults(config: Config): Config {
       ...DEFAULT_THRESHOLDS,
       ...config.thresholds,
     },
+    // Resolved (and validated) at use by resolveGatingConfig.
+    gating: config.gating,
     output: config.output,
     timeout: config.timeout ?? DEFAULT_TIMEOUT_MS,
     asyncTimeout: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,

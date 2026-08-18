@@ -73,3 +73,30 @@ describe('evaluateCiGate', () => {
     expect(verdict.message).toContain('nothing was reviewed');
   });
 });
+
+describe('evaluateCiGate with gating annotations (RCL-23)', () => {
+  it('does not block on an important finding gated as none (refuted single-model)', () => {
+    const f = { ...finding('important'), gating: { reason: 'none' as const } };
+    const verdict = evaluateCiGate(
+      result({ successfulReviews: 3, totalReviews: 3, findings: [f] })
+    );
+    expect(verdict.exitCode).toBe(0);
+  });
+
+  it('blocks on findings gated as consensus, critical, or verified', () => {
+    for (const reason of ['consensus', 'critical', 'verified'] as const) {
+      const f = { ...finding('important'), gating: { reason } };
+      const verdict = evaluateCiGate(
+        result({ successfulReviews: 3, totalReviews: 3, findings: [f] })
+      );
+      expect(verdict.exitCode).toBe(1);
+    }
+  });
+
+  it('falls back to severity for findings without gating annotations', () => {
+    const verdict = evaluateCiGate(
+      result({ successfulReviews: 3, totalReviews: 3, findings: [finding('important')] })
+    );
+    expect(verdict.exitCode).toBe(1);
+  });
+});

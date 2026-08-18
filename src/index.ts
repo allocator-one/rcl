@@ -43,6 +43,7 @@ import {
 import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
+import { applyGating, resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
@@ -341,6 +342,8 @@ interface PreparedCouncil {
   assignments: ReturnType<typeof buildAssignments>;
   /** Async bonus reviewers — fired with the round, never awaited (RCL-25). */
   asyncAssignments: ReturnType<typeof buildAssignments>;
+  /** Resolved early so a bad gating config fails BEFORE the council spends. */
+  gatingConfig: ReturnType<typeof resolveGatingConfig>;
   contextFiles: string[];
 }
 
@@ -488,7 +491,16 @@ async function prepareCouncil(
 
   const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
 
-  return { config, roleMap, assignments, asyncAssignments, contextFiles };
+  // Resolve gating now: a config error (e.g. an aggregator-routed verifier)
+  // must fail before any model time is spent, and the verifier is chosen
+  // under roster containment — never a provider outside the configured fleet.
+  const gatingConfig = resolveGatingConfig(config.gating, [
+    ...models,
+    ...secondaryModels,
+    ...(config.asyncModels ?? []),
+  ]);
+
+  return { config, roleMap, assignments, asyncAssignments, gatingConfig, contextFiles };
 }
 
 async function runReview(target: string | undefined, opts: CouncilCliOpts & {
@@ -750,13 +762,44 @@ async function executeCouncil(
     }
   );
 
+  // Convergence gating (RCL-23): annotate every kept finding with why it
+  // does or does not gate; single-model blocking findings get one batched
+  // refutation call to a fast direct-API model.
+  const { gatingConfig } = prepared;
+  let finalFindings = reportFindings;
+  let gatedAppendix = droppedFindings;
+  let verificationStats: ReviewResult['stats']['verification'];
+  if (gatingConfig.mode === 'verified-consensus') {
+    spinner.text = 'Verifying single-model findings...';
+    try {
+      const gated = await applyGating(reportFindings, {
+        minModels: gatingConfig.minModels,
+        verificationModel: gatingConfig.verificationModel,
+        verificationTimeoutMs: gatingConfig.verificationTimeoutMs,
+        diffFiles: diff.files,
+      });
+      finalFindings = gated.findings;
+      verificationStats = gated.verification;
+      // Appendix findings never block convergence; mark them so the report
+      // JSON carries a gating reason on every finding.
+      gatedAppendix = droppedFindings.map((f) => ({ ...f, gating: { reason: 'none' as const } }));
+    } catch (err) {
+      // Never abort a completed council run over the gating pass — fall
+      // back to unannotated findings, which the CI gate reads with the
+      // stricter legacy severity rule.
+      console.warn(
+        `Gating pass failed (${String(err)}); falling back to severity gating for this round.`
+      );
+    }
+  }
+
   const keepAppendix = config.output?.belowThresholdAppendix ?? true;
   const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
   const result: ReviewResult = {
     reviews,
-    findings: reportFindings,
-    ...(keepAppendix && droppedFindings.length > 0
-      ? { belowThresholdFindings: droppedFindings }
+    findings: finalFindings,
+    ...(keepAppendix && gatedAppendix.length > 0
+      ? { belowThresholdFindings: gatedAppendix }
       : {}),
     stats: {
       totalReviews: reviews.length,
@@ -778,6 +821,7 @@ async function executeCouncil(
               .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
           }
         : {}),
+      ...(verificationStats ? { verification: verificationStats } : {}),
     },
   };
 

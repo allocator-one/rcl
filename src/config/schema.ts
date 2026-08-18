@@ -45,6 +45,22 @@ export const OutputSchema = z.object({
 
 export const ReasoningEffortSchema = z.enum(['low', 'medium', 'high']);
 
+/**
+ * Convergence gating (RCL-23). `verified-consensus` (default): a finding
+ * gates only when multi-model, critical, or unrefuted by the verification
+ * pass. `all-findings` restores the legacy behavior where every
+ * critical/important finding gates.
+ */
+export const GatingSchema = z.object({
+  mode: z.enum(['verified-consensus', 'all-findings']).optional(),
+  /** Distinct supporting models that make a finding consensus-gated. */
+  minModels: z.number().int().min(2).optional(),
+  /** Direct-API model for the refutation pass (openrouter/ is rejected). */
+  verificationModel: z.string().optional(),
+  /** Per-call timeout (ms) for the verification pass. */
+  verificationTimeout: z.number().positive().optional(),
+});
+
 export const ConfigSchema = z.object({
   models: z.array(z.string()).optional(),
   secondaryModels: z.array(z.string()).optional(),
@@ -58,6 +74,7 @@ export const ConfigSchema = z.object({
   reviewers: z.array(ReviewerPairSchema).optional(),
   customRoles: z.array(RoleConfigSchema).optional(),
   thresholds: ThresholdsSchema.optional(),
+  gating: GatingSchema.optional(),
   output: OutputSchema.optional(),
   timeout: z.number().positive().optional(),
   /** Per-call timeout (ms) for the async lane; defaults higher than `timeout`. */

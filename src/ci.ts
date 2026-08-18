@@ -21,8 +21,14 @@ export function evaluateCiGate(result: ReviewResult): CiVerdict {
     };
   }
 
-  const blocking = result.findings.filter(
-    (f) => f.severity === 'critical' || f.severity === 'important'
+  // Gating-annotated findings (RCL-23) block on their gating reason —
+  // consensus, critical, or verified — so a refuted single-model claim no
+  // longer fails CI. Legacy reports without annotations keep the pure
+  // severity gate.
+  const blocking = result.findings.filter((f) =>
+    f.gating
+      ? f.gating.reason !== 'none'
+      : f.severity === 'critical' || f.severity === 'important'
   );
   if (blocking.length > 0) {
     return {

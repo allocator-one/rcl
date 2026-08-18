@@ -181,6 +181,25 @@ export function toMarkdown(result: ReviewResult): string {
   );
   sections.push('');
 
+  // Convergence gating (RCL-23): the numbers the converge loop stops on.
+  const annotated = result.findings.filter((f) => f.gating);
+  if (annotated.length > 0) {
+    const byReason = (reason: string): number =>
+      annotated.filter((f) => f.gating!.reason === reason).length;
+    const gatingCount = annotated.length - byReason('none');
+    let line =
+      `**Gating:** ${gatingCount} finding(s) block convergence ` +
+      `(${byReason('consensus')} consensus · ${byReason('critical')} critical · ` +
+      `${byReason('verified')} verified) · ${byReason('none')} non-gating`;
+    const v = stats.verification;
+    if (v) {
+      line += ` · verification: ${v.refuted}/${v.candidates} single-model claim(s) refuted in ${(v.durationMs / 1000).toFixed(1)}s`;
+      if (v.unavailable > 0) line += ` (${v.unavailable} unavailable — treated as gating)`;
+    }
+    sections.push(line);
+    sections.push('');
+  }
+
   // Degraded coverage belongs next to the headline counts, not only in the
   // reviewers table: a lost reviewer means the finding lists below are
   // incomplete in a way no severity total can show.

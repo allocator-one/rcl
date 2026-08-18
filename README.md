@@ -252,6 +252,17 @@ thresholds:
   dedupeLineWindow: 5      # lines within which findings are merged
   jaccardThreshold: 0.3    # weighted title+description similarity threshold for dedup
 
+# Convergence gating: which findings block convergence / CI (RCL-23).
+# A finding gates when multi-model, critical, or unrefuted by a cheap
+# verification pass; refuted single-model claims stay in the report but
+# stop blocking. Report JSON marks every finding with gating.reason
+# (consensus | critical | verified | none).
+gating:
+  mode: verified-consensus        # or all-findings (legacy: severity alone decides)
+  minModels: 2                    # distinct models for consensus gating
+  verificationModel: google/gemini-3.6-flash  # direct-API only
+  verificationTimeout: 60000      # ms for the single batched refutation call
+
 # Output defaults
 output:
   markdown: true
