@@ -10,6 +10,7 @@ import {
   recordVerdicts,
   loadConvergeRunState,
   ConvergeRoundCapError,
+  ConvergeRunStateError,
 } from '../../src/converge/run-state.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 
@@ -92,6 +93,67 @@ describe('round cap policy (RCL-24)', () => {
     await expect(
       processRoundReport({ gitCommonDir: dir, target: 't1', round: 6, maxRounds: 5, findings: [] })
     ).rejects.toThrow(ConvergeRoundCapError);
+  });
+});
+
+describe('round ordering and re-runs (RCL-24)', () => {
+  it('re-running the current round keeps its findings classified as new', async () => {
+    const r1 = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'rr1',
+      round: 1,
+      findings: [finding()],
+    });
+    expect(r1.counts.new).toBe(1);
+    const rerun = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'rr1',
+      round: 1,
+      findings: [finding()],
+    });
+    expect(rerun.counts).toMatchObject({ new: 1, repeat: 0, suppressed: 0 });
+    expect(rerun.findings[0]!.status).toBe('new');
+  });
+
+  it('rejects backfilling an earlier round or skipping ahead', async () => {
+    await processRoundReport({ gitCommonDir: dir, target: 'rr2', round: 1, findings: [] });
+    await processRoundReport({ gitCommonDir: dir, target: 'rr2', round: 2, findings: [] });
+    await expect(
+      processRoundReport({ gitCommonDir: dir, target: 'rr2', round: 1, findings: [] })
+    ).rejects.toThrow(ConvergeRunStateError);
+    // Round 3 would be next; there is no recorded round 3 yet, so 4 skips.
+    await expect(
+      processRoundReport({ gitCommonDir: dir, target: 'rr2', round: 4, maxRounds: 5, findings: [] })
+    ).rejects.toThrow(ConvergeRunStateError);
+  });
+
+  it('a fresh state adopts a mid-run round from a resumed pre-upgrade ledger', async () => {
+    const r = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'rr3',
+      round: 3,
+      findings: [finding()],
+    });
+    expect(r.counts.new).toBe(1);
+  });
+
+  it('updates the stored span to the latest sighting so drift does not decay matching', async () => {
+    await processRoundReport({
+      gitCommonDir: dir,
+      target: 'rr4',
+      round: 1,
+      findings: [finding({ startLine: 10, endLine: 14 })],
+    });
+    await processRoundReport({
+      gitCommonDir: dir,
+      target: 'rr4',
+      round: 2,
+      findings: [finding({ startLine: 13, endLine: 17 })],
+    });
+    const state = await loadConvergeRunState(dir, 'rr4');
+    const entry = Object.values(state!.findings)[0]!;
+    expect(entry.startLine).toBe(13);
+    expect(entry.endLine).toBe(17);
   });
 });
 

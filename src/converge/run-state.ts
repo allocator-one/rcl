@@ -231,6 +231,18 @@ export async function processRoundReport(options: {
     if (options.maxRounds !== undefined) await writeState(options.gitCommonDir, state);
     throw new ConvergeRoundCapError(target, options.round, state.roundCap);
   }
+  // Rounds advance contiguously: the current round may be re-processed (the
+  // skill allows bounded re-runs), the next round may start, and nothing
+  // else — reusing old numbers or skipping ahead would let a loop dodge the
+  // cap's intent. A state with no recorded rounds adopts whatever round the
+  // resumed ledger is on (pre-upgrade runs have history the state lacks).
+  const maxRecorded = state.rounds.reduce((max, r) => Math.max(max, r.round), 0);
+  if (maxRecorded > 0 && (options.round < maxRecorded || options.round > maxRecorded + 1)) {
+    throw new ConvergeRunStateError(
+      `Round ${options.round} for ${target} is out of order: recorded rounds reach ` +
+        `${maxRecorded}; only round ${maxRecorded} (re-run) or ${maxRecorded + 1} is accepted.`
+    );
+  }
 
   const entries: IdentityEntry[] = Object.values(state.findings);
   const counts: RoundCounts = { new: 0, repeat: 0, suppressed: 0, regating: 0 };
@@ -268,11 +280,23 @@ export async function processRoundReport(options: {
     }
 
     const entry = state.findings[matched.key]!;
-    entry.lastRound = options.round;
+    entry.lastRound = Math.max(entry.lastRound, options.round);
     entry.models = [...new Set([...entry.models, ...finding.consensus.models])];
+    // Track the latest sighting's span: fixes shift lines between rounds,
+    // and matching against a stale first-seen span would decay round over
+    // round.
+    entry.startLine = finding.startLine;
+    entry.endLine = finding.endLine;
 
     let status: FindingStatus;
     let suppressReason: string | undefined;
+    if (entry.firstRound === options.round) {
+      // A re-run of the round that first recorded this finding — it is this
+      // round's own NEW finding being reprocessed, not a cross-round repeat.
+      counts.new++;
+      annotated.push({ identity: entry.key, status: 'new', finding });
+      continue;
+    }
     if (entry.verdict === 'dismissed') {
       if (isCorroborated(finding)) {
         status = 'regating';
