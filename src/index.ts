@@ -79,6 +79,16 @@ import {
   ConvergeRoundCapError,
   ConvergeRunStateError,
 } from './converge/run-state.js';
+import {
+  appendCalls,
+  appendOutcomes,
+  loadModelStats,
+  loadModelWeights,
+  resolveDataDir,
+  DEFAULT_WINDOW_DAYS,
+  MIN_OUTCOMES_FOR_WEIGHT,
+} from './models/stats-store.js';
+import { buildSeedRecords } from './models/seed.js';
 
 const program = new Command();
 
@@ -464,12 +474,36 @@ program
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
-        await recordVerdicts({
+        const updated = await recordVerdicts({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
           verdicts,
         });
+        // Feed the cross-run precision history (RCL-27) — fail-soft, the
+        // verdicts above are already durably recorded.
+        try {
+          const ts = new Date().toISOString();
+          await appendOutcomes(
+            updated
+              .filter((e) => e.verdict !== undefined && e.models.length > 0)
+              .map((e) => ({
+                ts,
+                verdict: e.verdict!,
+                models: e.models,
+                severity: e.severity,
+                target: opts.target as string,
+                findingKey: e.key,
+                source: 'live' as const,
+              }))
+          );
+        } catch (err) {
+          // Advisory history; verdict recording must not fail over it —
+          // but say so, or a broken store silently stops learning.
+          console.warn(
+            `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
+          );
+        }
         if (opts.json) {
           console.log(JSON.stringify({ target: opts.target, round, recorded: verdicts.length }));
         } else {
@@ -498,6 +532,95 @@ program
     } catch {
       // Nothing is awaiting this process; a failed worker simply leaves no
       // result to merge. Exit non-zero for post-mortem visibility only.
+      process.exitCode = 1;
+    }
+  });
+
+// Per-model triage history (RCL-27): trailing precision, volume, latency,
+// dead-call rate, and the consensus weight each model earns from them.
+const modelsCmd = program
+  .command('models')
+  .description('Per-model trailing precision, volume, latency, dead-call rate, and consensus weight');
+
+modelsCmd
+  .command('show', { isDefault: true })
+  .description(`Print per-model stats over the trailing window (default ${DEFAULT_WINDOW_DAYS} days)`)
+  .option('--window <days>', 'Trailing window in days', String(DEFAULT_WINDOW_DAYS))
+  .option('--json', 'Output JSON')
+  .action(async (opts: { window: string; json?: boolean }) => {
+    const windowDays = Number(opts.window);
+    if (!Number.isFinite(windowDays) || windowDays <= 0) {
+      console.error(chalk.red('--window must be a positive number of days.'));
+      process.exitCode = 1;
+      return;
+    }
+    const stats = await loadModelStats({ windowDays });
+    if (opts.json) {
+      console.log(JSON.stringify({ windowDays, dataDir: resolveDataDir(), models: stats }, null, 2));
+      return;
+    }
+    if (stats.length === 0) {
+      console.log(
+        `No model history in ${resolveDataDir()} yet. Converge runs record it automatically; ` +
+          'seed from recovered artifacts with `rcl models seed --from <dir>`.'
+      );
+      return;
+    }
+    console.log('\n' + chalk.bold(`Model history — trailing ${windowDays} days`) + '\n');
+    const pct = (v: number | undefined): string => (v === undefined ? '—' : `${(v * 100).toFixed(0)}%`);
+    console.log(
+      chalk.dim(
+        'model'.padEnd(46) +
+          'precision (n)'.padEnd(16) +
+          'calls'.padEnd(8) +
+          'dead'.padEnd(7) +
+          'p50'.padEnd(8) +
+          'weight'
+      )
+    );
+    for (const s of stats) {
+      const precision =
+        s.outcomes > 0 ? `${pct(s.precision)} (${s.outcomes})` : '— (0)';
+      const weightNote = s.outcomes < MIN_OUTCOMES_FOR_WEIGHT ? ' (neutral)' : '';
+      console.log(
+        s.model.padEnd(46) +
+          precision.padEnd(16) +
+          String(s.calls).padEnd(8) +
+          pct(s.deadRate).padEnd(7) +
+          (s.p50Ms !== undefined ? `${(s.p50Ms / 1000).toFixed(0)}s` : '—').padEnd(8) +
+          s.weight.toFixed(2) +
+          chalk.dim(weightNote)
+      );
+    }
+    console.log(
+      chalk.dim(
+        `\nWeights (0.5 + precision, clamped to [0.5, 1.5]; neutral 1 under ${MIN_OUTCOMES_FOR_WEIGHT} outcomes) ` +
+          'scale each model’s consensus vote in reviews and gating.\n'
+      )
+    );
+  });
+
+modelsCmd
+  .command('seed')
+  .description('Backfill the model-stats store from a directory of rcl reports and converge ledgers')
+  .requiredOption('--from <dir>', 'Directory holding rcl-report-*.json and rcl-converge-*-ledger.md files')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { from: string; json?: boolean }) => {
+    try {
+      const { calls, outcomes, ...summary } = await buildSeedRecords(opts.from);
+      await appendCalls(calls);
+      await appendOutcomes(outcomes);
+      if (opts.json) {
+        console.log(JSON.stringify({ ...summary, dataDir: resolveDataDir() }, null, 2));
+      } else {
+        console.log(
+          `Seeded ${summary.callsSeeded} call record(s) from ${summary.reportsScanned} report(s) and ` +
+            `${summary.outcomesSeeded} outcome record(s) from ${summary.ledgersScanned} ledger(s) ` +
+            `(${summary.unmatchedBullets}/${summary.bullets} ledger bullets could not be matched) → ${resolveDataDir()}`
+        );
+      }
+    } catch (err) {
+      console.error(chalk.red(`Seed failed: ${err instanceof Error ? err.message : String(err)}`));
       process.exitCode = 1;
     }
   });
@@ -965,6 +1088,36 @@ async function executeCouncil(
   }
   const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
 
+  // RCL-27: every call feeds the cross-run model history (fail-soft — the
+  // stats store must never break a review).
+  try {
+    const ts = new Date().toISOString();
+    await appendCalls(
+      [...chunkReviews, ...arrivedAsync].map((r) => ({
+        ts,
+        model: r.model,
+        role: r.role,
+        durationMs: r.durationMs,
+        status: r.status,
+        source: 'live' as const,
+      }))
+    );
+  } catch (err) {
+    // Stats are advisory; reviews must not fail over them — but a broken
+    // store should not be invisible either.
+    console.warn(`Model-stats store unavailable (call history not recorded): ${String(err)}`);
+  }
+
+  // Trailing-precision weights scale each model's consensus vote. An empty
+  // history means no weighting (and no weight noise in the report).
+  let modelWeights: Map<string, number> | undefined;
+  try {
+    const loaded = await loadModelWeights();
+    if (loaded.size > 0) modelWeights = loaded;
+  } catch {
+    modelWeights = undefined;
+  }
+
   spinner.text = 'Computing consensus...';
 
   // Deduplicate and compute consensus
@@ -975,10 +1128,16 @@ async function executeCouncil(
     config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
   );
 
-  const consensusFindings = computeConsensus(groups, reviews, roleMap, {
-    lineWindow: config.thresholds?.dedupeLineWindow,
-    jaccardThreshold: config.thresholds?.jaccardThreshold,
-  });
+  const consensusFindings = computeConsensus(
+    groups,
+    reviews,
+    roleMap,
+    {
+      lineWindow: config.thresholds?.dedupeLineWindow,
+      jaccardThreshold: config.thresholds?.jaccardThreshold,
+    },
+    modelWeights
+  );
 
   const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
     consensusFindings,
@@ -1003,6 +1162,7 @@ async function executeCouncil(
         verificationModel: gatingConfig.verificationModel,
         verificationTimeoutMs: gatingConfig.verificationTimeoutMs,
         diffFiles: diff.files,
+        ...(modelWeights ? { modelWeights } : {}),
       });
       finalFindings = gated.findings;
       verificationStats = gated.verification;
@@ -1048,6 +1208,18 @@ async function executeCouncil(
           }
         : {}),
       ...(verificationStats ? { verification: verificationStats } : {}),
+      // Applied weights for this run's models, so the report shows what
+      // scaled the votes (RCL-27).
+      ...(modelWeights
+        ? {
+            modelWeights: Object.fromEntries(
+              [...new Set(reviews.map((r) => r.model))].map((m) => [
+                m,
+                modelWeights.get(m) ?? 1,
+              ])
+            ),
+          }
+        : {}),
     },
   };
 

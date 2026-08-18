@@ -55,7 +55,8 @@ function confidenceLabel(
 function computeDiversity(
   group: DeduplicatedGroup,
   allModels: string[],
-  allRoles: string[]
+  allRoles: string[],
+  modelWeights?: Map<string, number>
 ): number {
   const uniqueModels = new Set(group.members.map((m) => m.model));
   const uniqueRoles = new Set(group.members.map((m) => m.role));
@@ -63,7 +64,16 @@ function computeDiversity(
   const saturating = (unique: number, total: number): number =>
     Math.min(1, unique / Math.max(2, Math.ceil(total / 2)));
 
-  return saturating(uniqueModels.size, allModels.length) * 0.5 +
+  // RCL-27: with weights active, a model's vote counts by its trailing
+  // triage precision (unknown models stay neutral at 1), so persistently
+  // noisy models raise confidence less than proven ones. All-neutral
+  // weights reproduce the plain model count.
+  const modelMass =
+    modelWeights === undefined
+      ? uniqueModels.size
+      : [...uniqueModels].reduce((sum, m) => sum + (modelWeights.get(m) ?? 1), 0);
+
+  return saturating(modelMass, allModels.length) * 0.5 +
     saturating(uniqueRoles.size, allRoles.length) * 0.5;
 }
 
@@ -371,7 +381,8 @@ export function computeConsensus(
   groups: DeduplicatedGroup[],
   reviews: ModelReview[],
   roleMap: Map<string, Role>,
-  thresholds: Partial<ConsensusThresholds> = {}
+  thresholds: Partial<ConsensusThresholds> = {},
+  modelWeights?: Map<string, number>
 ): ConsensusFinding[] {
   const resolvedThresholds: ConsensusThresholds = {
     lineWindow: thresholds.lineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
@@ -387,7 +398,7 @@ export function computeConsensus(
     const uniqueReviewers = new Set(group.members.map((m) => `${m.model}::${m.role}`)).size;
 
     // Layer 2: Signal scoring
-    const diversity = computeDiversity(group, allModels, allRoles);
+    const diversity = computeDiversity(group, allModels, allRoles, modelWeights);
     const relevance = computeRelevance(group, roleMap);
     const isolation = computeIsolation(group, reviews, roleMap);
 
@@ -446,6 +457,14 @@ export function computeConsensus(
       disputed: disputed || undefined,
       disputeDetails,
       positions: disputed ? buildPositions(group) : undefined,
+      ...(modelWeights !== undefined
+        ? {
+            weightedScore: uniqueModels.reduce((sum, m) => sum + (modelWeights.get(m) ?? 1), 0),
+            modelWeights: Object.fromEntries(
+              uniqueModels.map((m) => [m, modelWeights.get(m) ?? 1])
+            ),
+          }
+        : {}),
     };
 
     return {

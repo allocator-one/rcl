@@ -708,3 +708,60 @@ describe('computeConsensus — parse_failed reviewers are excluded', () => {
     expect(result!.consensus.total).toBe(1);
   });
 });
+
+describe('computeConsensus — precision-weighted votes (RCL-27)', () => {
+  const f = mkF();
+  const reviews = [
+    mkReview('m1', 'general', [f]),
+    mkReview('m2', 'general', [f]),
+    mkReview('m3', 'general', []),
+  ];
+  const groups = [
+    mkGroup(f, [
+      { finding: f, model: 'm1', role: 'general' },
+      { finding: f, model: 'm2', role: 'general' },
+    ]),
+  ];
+
+  it('exposes weightedScore and per-model weights in the consensus info', () => {
+    const weights = new Map([
+      ['m1', 0.6],
+      ['m2', 1.4],
+    ]);
+    const [result] = computeConsensus(groups, reviews, ROLES, {}, weights);
+    expect(result!.consensus.weightedScore).toBeCloseTo(2.0);
+    expect(result!.consensus.modelWeights).toEqual({ m1: 0.6, m2: 1.4 });
+  });
+
+  it('noisy models lower confidence relative to neutral weights', () => {
+    const [neutral] = computeConsensus(groups, reviews, ROLES, {});
+    const noisy = new Map([
+      ['m1', 0.5],
+      ['m2', 0.5],
+    ]);
+    const [weighted] = computeConsensus(groups, reviews, ROLES, {}, noisy);
+    expect(weighted!.consensus.confidence).toBeLessThan(neutral!.consensus.confidence);
+  });
+
+  it('all-neutral weights reproduce the unweighted confidence exactly', () => {
+    const [neutral] = computeConsensus(groups, reviews, ROLES, {});
+    const ones = new Map([
+      ['m1', 1],
+      ['m2', 1],
+    ]);
+    const [weighted] = computeConsensus(groups, reviews, ROLES, {}, ones);
+    expect(weighted!.consensus.confidence).toBeCloseTo(neutral!.consensus.confidence);
+  });
+
+  it('omits weighting fields when no weights are provided', () => {
+    const [result] = computeConsensus(groups, reviews, ROLES, {});
+    expect(result!.consensus.weightedScore).toBeUndefined();
+    expect(result!.consensus.modelWeights).toBeUndefined();
+  });
+
+  it('unknown models default to a neutral weight of 1', () => {
+    const weights = new Map([['somebody-else', 0.5]]);
+    const [result] = computeConsensus(groups, reviews, ROLES, {}, weights);
+    expect(result!.consensus.weightedScore).toBeCloseTo(2);
+  });
+});

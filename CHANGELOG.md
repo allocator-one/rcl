@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **RCL-27: rcl learns from its own triage history.** Every reviewer call
+  and every `converge-verdict` outcome (fixed/dismissed, with the finding's
+  supporting models) now accrues in a cross-run store at `~/.rcl`
+  (`RCL_DATA_DIR` overrides; deliberately not /tmp or the repo's converge
+  dirs, so history survives cleanup). New `rcl models` prints per-model
+  trailing precision, triage volume, call volume, dead-call rate, and p50
+  latency over a 90-day window, plus the consensus **weight** each model
+  earns: 0.5 + precision, clamped to [0.5, 1.5], neutral below 20 outcomes.
+  Weights scale each model's consensus vote — confidence in the report and
+  the consensus-gating threshold both use weighted vote mass (two
+  persistently noisy models no longer auto-gate; they go through the
+  verification pass) — and are visible per finding
+  (`consensus.weightedScore`, `consensus.modelWeights`) and per run
+  (`stats.modelWeights`). `rcl models seed --from <dir>` backfills the store
+  from recovered reports and converge ledgers; seeded from the RCL-21 audit
+  corpus it reproduces the audit's shape (overall precision ~27%; per-model
+  19–55%). The roster question R3 settled by one-off audit is now something
+  the tool answers continuously.
+
 - **RCL-24: converge loops are capped at 3 rounds and findings keep a stable
   identity across rounds.** New `rcl converge-report` dedupes each round's
   report against the persisted run state (`.git/rcl-converge-runs/`),

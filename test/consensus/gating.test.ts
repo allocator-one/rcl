@@ -247,6 +247,62 @@ describe('applyGating (RCL-23)', () => {
   });
 });
 
+describe('precision-weighted consensus gating (RCL-27)', () => {
+  it('two noisy models no longer auto-gate — the finding goes to verification', async () => {
+    const ask = vi.fn(
+      async (): Promise<ModelAnswer> => ({
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[{"id":"F1","verdict":"confirmed"}]',
+        durationMs: 5,
+        status: 'success',
+      })
+    );
+    const weights = new Map([
+      ['m1', 0.6],
+      ['m2', 0.6],
+    ]);
+    const { findings } = await applyGating(
+      [makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
+      { ...baseOpts, modelWeights: weights, ask }
+    );
+    expect(findings[0]!.gating!.reason).toBe('verified');
+    expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it('weights can only demote: strong weights never let fewer distinct models than minModels gate', async () => {
+    const ask = vi.fn(
+      async (): Promise<ModelAnswer> => ({
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[{"id":"F1","verdict":"confirmed"}]',
+        durationMs: 5,
+        status: 'success',
+      })
+    );
+    const weights = new Map([
+      ['m1', 1.5],
+      ['m2', 1.5],
+    ]);
+    const { findings } = await applyGating(
+      [makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
+      { ...baseOpts, minModels: 3, modelWeights: weights, ask }
+    );
+    // Weighted mass is 3.0 but only 2 distinct models — not consensus.
+    expect(findings[0]!.gating!.reason).toBe('verified');
+  });
+
+  it('neutral or unknown weights keep two-model findings consensus-gated', async () => {
+    const ask = vi.fn();
+    const { findings } = await applyGating(
+      [makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
+      { ...baseOpts, modelWeights: new Map(), ask }
+    );
+    expect(findings[0]!.gating!.reason).toBe('consensus');
+    expect(ask).not.toHaveBeenCalled();
+  });
+});
+
 describe('relevantPatchExcerpt', () => {
   const patch = [
     '@@ -1,3 +1,4 @@',

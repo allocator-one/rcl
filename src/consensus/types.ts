@@ -77,6 +77,14 @@ export interface ConsensusInfo {
   disputeDetails?: string;
   /** Per-reviewer stances, populated only for disputed findings. */
   positions?: DisputePosition[];
+  /**
+   * Precision-weighted vote mass of the supporting models (RCL-27): sum of
+   * each supporting model's trailing-precision weight. Present only when
+   * weighting is active; all-neutral weights make it equal the model count.
+   */
+  weightedScore?: number;
+  /** The weight each supporting model contributed, for report transparency. */
+  modelWeights?: Record<string, number>;
 }
 
 export interface ConsensusFinding extends Finding {
@@ -121,5 +129,7 @@ export interface ReviewResult {
     canceledCalls?: Array<{ model: string; role: string; elapsedMs: number }>;
     /** Outcome of the single-model finding verification pass (RCL-23). */
     verification?: import('./gating.js').VerificationStats;
+    /** Trailing-precision weight applied to each of this run's models (RCL-27). */
+    modelWeights?: Record<string, number>;
   };
 }

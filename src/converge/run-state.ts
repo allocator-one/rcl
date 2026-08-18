@@ -334,13 +334,17 @@ export async function processRoundReport(options: {
   return { roundCap: state.roundCap, counts, findings: annotated };
 }
 
-/** Record triage verdicts for this run's findings (feeds suppression and RCL-27). */
+/**
+ * Record triage verdicts for this run's findings (feeds suppression and
+ * RCL-27's cross-run precision history). Returns the updated entries so the
+ * caller can append them to the global model-stats store.
+ */
 export async function recordVerdicts(options: {
   gitCommonDir: string;
   target: string;
   round: number;
   verdicts: Array<{ key: string; verdict: FindingVerdict; reason?: string }>;
-}): Promise<void> {
+}): Promise<FindingEntry[]> {
   const target = options.target.trim();
   const state = await readState(options.gitCommonDir, target);
   if (!state) {
@@ -348,6 +352,7 @@ export async function recordVerdicts(options: {
       `No converge run state for ${target} — run converge-report before recording verdicts.`
     );
   }
+  const updated: FindingEntry[] = [];
   for (const { key, verdict, reason } of options.verdicts) {
     const entry = state.findings[key];
     if (!entry) {
@@ -356,7 +361,9 @@ export async function recordVerdicts(options: {
     entry.verdict = verdict;
     entry.verdictRound = options.round;
     if (reason !== undefined) entry.verdictReason = reason;
+    updated.push(entry);
   }
   state.updatedAt = new Date().toISOString();
   await writeState(options.gitCommonDir, state);
+  return updated;
 }
