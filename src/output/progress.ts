@@ -62,6 +62,7 @@ interface ProgressCounters {
   timeout: number;
   error: number;
   parse_failed: number;
+  canceled: number;
 }
 
 interface ProgressReporterOptions {
@@ -79,6 +80,7 @@ const STATUS_ICONS: Record<ReviewStatus, string> = {
   timeout: '⏱',
   error: '✗',
   parse_failed: '⚠',
+  canceled: '⊘',
 };
 
 const DEFAULT_HEARTBEAT_MS = 60_000;
@@ -102,6 +104,7 @@ export class CouncilProgressReporter {
     timeout: 0,
     error: 0,
     parse_failed: 0,
+    canceled: 0,
   };
 
   constructor(private readonly options: ProgressReporterOptions) {
@@ -153,10 +156,11 @@ export class CouncilProgressReporter {
   }
 
   private summary(current: number): string {
+    const canceled = this.counters.canceled > 0 ? `, canceled ${this.counters.canceled}` : '';
     return (
       `Reviews ${this.completed}/${this.options.totalCalls} ` +
       `(success ${this.counters.success}, timeout ${this.counters.timeout}, ` +
-      `error ${this.counters.error}, parse_failed ${this.counters.parse_failed}) · ` +
+      `error ${this.counters.error}, parse_failed ${this.counters.parse_failed}${canceled}) · ` +
       `elapsed ${formatDuration(current - this.startedAt)}`
     );
   }

@@ -12,6 +12,7 @@ import {
   DEFAULT_THRESHOLDS,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_ASYNC_TIMEOUT_MS,
+  DEFAULT_QUORUM_FRACTION,
   DEFAULT_MAX_RETRIES,
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
@@ -699,6 +700,13 @@ async function executeCouncil(
         maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
         concurrency,
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+        // Quorum closure (RCL-26): the round stops waiting once the quorum
+        // fraction of calls has completed; the blocking council's own models
+        // are core and never canceled.
+        quorum: {
+          fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION,
+          coreModels: config.models ?? DEFAULT_MODELS,
+        },
         onReviewComplete: (review) => progress.complete(review),
       }
     );
@@ -760,6 +768,15 @@ async function executeCouncil(
       ...(asyncLaunched > 0 ? { asyncLaunched } : {}),
       ...(arrivedAsync.length > 0
         ? { asyncMerged: mergeChunkReviews(arrivedAsync).length }
+        : {}),
+      // Per-call (pre-merge) so a straggler canceled on one chunk stays
+      // visible even when its other chunks succeeded.
+      ...(chunkReviews.some((r) => r.status === 'canceled')
+        ? {
+            canceledCalls: chunkReviews
+              .filter((r) => r.status === 'canceled')
+              .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
+          }
         : {}),
     },
   };

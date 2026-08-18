@@ -22,8 +22,10 @@ export interface ModelReview {
    * consensus and from `successfulReviews` — a reviewer whose output was
    * lost must never read as "reviewed and found nothing" — but keeping them
    * apart tells an operator whether to look at the network or the prompt.
+   * `canceled` means the round closed at quorum before this call returned;
+   * the reviewer was healthy but slower than the round (RCL-26).
    */
-  status: 'success' | 'timeout' | 'error' | 'parse_failed';
+  status: 'success' | 'timeout' | 'error' | 'parse_failed' | 'canceled';
   error?: string;
   /**
    * Findings the parser discarded as malformed. Present (and non-zero) on a
@@ -106,5 +108,10 @@ export interface ReviewResult {
     asyncLaunched?: number;
     /** Async-lane reviews (from earlier rounds) merged into this round's dedup. */
     asyncMerged?: number;
+    /**
+     * Calls canceled by quorum round closure, with how long each had been
+     * running — persistent stragglers stay visible per round (RCL-26).
+     */
+    canceledCalls?: Array<{ model: string; role: string; elapsedMs: number }>;
   };
 }

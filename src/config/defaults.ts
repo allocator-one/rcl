@@ -46,13 +46,21 @@ export const DEFAULT_THRESHOLDS = {
 } as const;
 
 /**
- * Reasoning-heavy models (kimi-k3, qwen3.8-max, deepseek-v4, grok-4.5)
- * routinely need several minutes to review a real diff: at 120s the entire
- * OpenRouter wing of the default fleet timed out, and at 300s most
- * specialist runs still did (successful calls measured 217–291s, with no
- * headroom). Dogfooded on this repo's own diffs.
+ * Blocking-path per-call timeout. Every direct-API model's p90 in the
+ * RCL-21 corpus is under 260 s, so 300 s only ever cuts models that should
+ * not be on the blocking path in the first place (slow reasoning models
+ * belong in the async lane, which has its own longer cap below).
  */
-export const DEFAULT_TIMEOUT_MS = 600_000;
+export const DEFAULT_TIMEOUT_MS = 300_000;
+
+/**
+ * Quorum round closure (RCL-26): a round closes once this fraction of its
+ * planned calls has completed; outstanding non-core calls are canceled and
+ * recorded. ⅔ matches the converge reviewer-health threshold, so a round
+ * closed exactly at quorum can still be conclusive. Corpus replay: −51%
+ * total review wall even with the pre-RCL-25 roster. Set to 1 to disable.
+ */
+export const DEFAULT_QUORUM_FRACTION = 2 / 3;
 
 /**
  * Per-call timeout for the async (non-blocking) lane. Async reviewers are

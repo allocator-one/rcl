@@ -10,6 +10,7 @@ import {
   attemptWithRetries,
   failedReview,
   isBlankOutput,
+  linkAbortSignal,
   reviewFromParse,
 } from './utils.js';
 
@@ -68,6 +69,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     const start = Date.now();
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
+    const unlinkAbort = linkAbortSignal(controller, options.signal);
 
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
@@ -171,6 +173,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
       }
     } finally {
       clearTimeout(timeoutHandle);
+      unlinkAbort();
     }
 
     const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
