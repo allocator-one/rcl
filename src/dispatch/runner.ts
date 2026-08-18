@@ -19,6 +19,15 @@ export interface RunnerOptions {
   reasoningEffort?: ReasoningEffort;
   /** Test seam / config-key wiring; defaults to the builtin providers. */
   adapterFactory?: (provider: string) => ReviewAdapter;
+  /**
+   * Quorum round closure (RCL-26): once `fraction` of planned calls have
+   * completed, outstanding calls are canceled and recorded as such — the
+   * round stops waiting for stragglers. Calls from `coreModels` are never
+   * canceled: the round always waits for the blocking council itself, so
+   * wall-clock ≤ max(time to quorum, slowest core-model call). A fraction
+   * of 1 (or omitting the option) disables early closure.
+   */
+  quorum?: { fraction: number; coreModels?: readonly string[] };
 }
 
 type AdapterCall = {
@@ -94,33 +103,94 @@ export async function runReviews(
   const results: ModelReview[] = new Array(calls.length);
   let nextIndex = 0;
 
+  // Quorum round closure (RCL-26). A call counts toward the quorum when it
+  // settles for any reason except cancellation — a timeout completes at the
+  // cap just like it does on the wall-clock. Core-model calls are exempt
+  // from cancellation, so the round still waits for the blocking council.
+  const planned = calls.length;
+  const quorumThreshold =
+    options.quorum && options.quorum.fraction < 1
+      ? Math.min(planned, Math.max(1, Math.ceil(options.quorum.fraction * planned)))
+      : Infinity;
+  const coreModels = new Set(options.quorum?.coreModels ?? []);
+  let completedCount = 0;
+  let roundClosed = false;
+  const onRoundClosed: Array<() => void> = [];
+  function noteCompletion(): void {
+    completedCount++;
+    if (!roundClosed && completedCount >= quorumThreshold) {
+      roundClosed = true;
+      for (const cancel of onRoundClosed) cancel();
+    }
+  }
+
+  function canceledReview(call: AdapterCall, elapsedMs: number, detail: string): ModelReview {
+    return {
+      model: call.model,
+      role: call.role,
+      provider: call.provider,
+      findings: [],
+      durationMs: elapsedMs,
+      status: 'canceled',
+      error: `Canceled at quorum round closure ${detail}`,
+    };
+  }
+
   async function runOne(index: number): Promise<void> {
     const call = calls[index]!;
+    const cancelable = quorumThreshold !== Infinity && !coreModels.has(call.model);
     let review: ModelReview;
-    try {
-      let adapter = adapters.get(call.provider);
-      if (!adapter) {
-        adapter = factory(call.provider);
-        adapters.set(call.provider, adapter);
+    if (roundClosed && cancelable) {
+      review = canceledReview(call, 0, 'before starting');
+    } else {
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      try {
+        let adapter = adapters.get(call.provider);
+        if (!adapter) {
+          adapter = factory(call.provider);
+          adapters.set(call.provider, adapter);
+        }
+        const reviewPromise = adapter.review(
+          call.model,
+          call.role,
+          call.systemPrompt,
+          call.userPrompt,
+          { ...adapterOpts, signal: controller.signal }
+        );
+        review = cancelable
+          ? await Promise.race([
+              reviewPromise,
+              new Promise<ModelReview>((resolveCancel) => {
+                onRoundClosed.push(() => {
+                  // Settle the cancellation FIRST: aborting can settle the
+                  // adapter promise synchronously, and the race must record
+                  // this call as canceled, not as the adapter's timeout.
+                  resolveCancel(
+                    canceledReview(
+                      call,
+                      Date.now() - startedAt,
+                      `after ${Math.round((Date.now() - startedAt) / 1000)}s`
+                    )
+                  );
+                  controller.abort();
+                });
+              }),
+            ])
+          : await reviewPromise;
+      } catch (err) {
+        review = {
+          model: call.model,
+          role: call.role,
+          provider: call.provider,
+          findings: [],
+          durationMs: 0,
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+        };
       }
-      review = await adapter.review(
-        call.model,
-        call.role,
-        call.systemPrompt,
-        call.userPrompt,
-        adapterOpts
-      );
-    } catch (err) {
-      review = {
-        model: call.model,
-        role: call.role,
-        provider: call.provider,
-        findings: [],
-        durationMs: 0,
-        status: 'error',
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
+    if (review.status !== 'canceled') noteCompletion();
     if (review.status === 'error' && options.verbose) {
       console.error(`${call.model}/${call.role}: ${review.error}`);
     }

@@ -62,6 +62,13 @@ export const ConfigSchema = z.object({
   timeout: z.number().positive().optional(),
   /** Per-call timeout (ms) for the async lane; defaults higher than `timeout`. */
   asyncTimeout: z.number().positive().optional(),
+  /**
+   * Fraction of planned calls whose completion closes a review round;
+   * outstanding non-core calls are canceled. 1 disables early closure.
+   * Floored at ⅔ so a closed round can still pass the converge
+   * reviewer-health check (successful ≥ ⅔ of total).
+   */
+  quorumFraction: z.number().min(2 / 3).max(1).optional(),
   maxRetries: z.number().int().nonnegative().optional(),
   concurrency: z.number().int().positive().optional(),
   /** Reasoning budget for providers that support it (currently OpenRouter). */

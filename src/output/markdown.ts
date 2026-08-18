@@ -220,7 +220,9 @@ export function toMarkdown(result: ReviewResult): string {
           ? '⏱️'
           : review.status === 'parse_failed'
             ? '⚠️'
-            : '❌';
+            : review.status === 'canceled'
+              ? '⊘'
+              : '❌';
     // A dropped count beside the findings count is what tells a reader that
     // "3 findings" might have been 5 — degraded coverage, not a clean run.
     const dropped = review.droppedFindings ?? 0;

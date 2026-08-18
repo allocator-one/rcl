@@ -202,6 +202,8 @@ function printReviewerSummary(result: ReviewResult): void {
         ? chalk.yellow('⏱')
         : review.status === 'parse_failed'
         ? chalk.yellow('⚠')
+        : review.status === 'canceled'
+        ? chalk.dim('⊘')
         : chalk.red('✗');
 
     const dropped = review.droppedFindings ?? 0;

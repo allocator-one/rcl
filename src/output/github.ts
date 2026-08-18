@@ -146,7 +146,9 @@ function buildSummaryComment(result: ReviewResult, demoted: ConsensusFinding[]):
           ? '⏱️'
           : review.status === 'parse_failed'
             ? '⚠️'
-            : '❌';
+            : review.status === 'canceled'
+              ? '⊘'
+              : '❌';
     const dropped = review.droppedFindings ?? 0;
     lines.push(
       `- ${icon} **${review.model}** / ${review.role}: ` +

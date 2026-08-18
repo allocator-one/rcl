@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **RCL-26: rounds close at quorum; per-call latency is capped.** A review
+  round now closes once ⅔ of its planned calls have completed
+  (`quorumFraction`, default 2/3, `1` disables): outstanding calls are
+  canceled (new `canceled` review status), aborted at the socket, and
+  recorded in `stats.canceledCalls` with model, role, and elapsed time so
+  persistent stragglers stay visible per round. Calls from the blocking
+  council's own `models` are never canceled — round wall-clock is bounded by
+  max(time to quorum, slowest core-model call). Corpus replay (922 rounds,
+  recorded pre-RCL-25 roster): median round 14.4 → 6.3 min, −45% total
+  review wall, with 100% of multi-model gating findings still surfaced.
+  Under the RCL-25 default roster every blocking call is core, so quorum
+  cancels nothing and exists purely as robustness against future slow
+  reviewers. The default per-call timeout drops 600 s → 300 s (every
+  direct-API model's corpus p90 is under 260 s; slow reasoning models belong
+  in the async lane with its 900 s cap).
+
 - **RCL-25: OpenRouter models are off the blocking path.** The default
   blocking council is now the direct-API trio (claude-fable-5, gpt-5.6-sol,
   gemini-3.6-flash). The RCL-21 audit of 922 rounds found the four

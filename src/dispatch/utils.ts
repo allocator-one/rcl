@@ -115,6 +115,26 @@ export function reviewFromParse(opts: {
   return { ...base, status: 'success' };
 }
 
+/**
+ * Chain an external cancellation signal (quorum round closure) onto an
+ * adapter's internal timeout controller, so canceled calls abort their
+ * in-flight request instead of holding sockets (and the process) open.
+ * Returns an unlink function for the adapter's cleanup path.
+ */
+export function linkAbortSignal(
+  controller: AbortController,
+  external: AbortSignal | undefined
+): () => void {
+  if (!external) return () => {};
+  if (external.aborted) {
+    controller.abort();
+    return () => {};
+  }
+  const onAbort = (): void => controller.abort();
+  external.addEventListener('abort', onAbort, { once: true });
+  return () => external.removeEventListener('abort', onAbort);
+}
+
 export const RETRY_DELAYS = [1000, 2000, 4000] as const;
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
