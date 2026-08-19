@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1.1
+
+Dismissals are terminal (RCL-30). The 2.0.0 regating rule — a dismissed
+finding reopens whenever ≥2 models raise it again — put popular false
+positives on a treadmill: dismiss → fresh corroboration → regate → re-triage →
+fresh round, every round, unboundedly once 2.1.0 lifted the round cap
+(allocator-one PR #7774 ran 24 rounds on one un-killable claim). Identity
+matching is location-anchored, so a claim about different code is a *new*
+identity by construction; corroboration count alone adds no new evidence.
+
+- **A dismissal is terminal on its evidence.** A dismissed identity stays
+  `suppressed` regardless of how many models re-raise it. The one re-gate
+  trigger left: escalation to critical after a non-critical dismissal.
+  Re-dismissing at critical is terminal for critical sightings too.
+- **Dismissal-only rounds converge.** `converge-verdict` now reports the
+  round's resolution once every gating identity is triaged:
+  `converged-dismissal-only` (all dismissed, nothing fixed — the round
+  converges on the spot; no confirmation round), `fixes-pending-fresh-round`,
+  or `unresolved` with the open identities. This restores the 1.9-era
+  convergence rhythm (dismiss-everything → done) on top of 2.x's exact
+  cross-round bookkeeping.
+- Verdicts now record the severity they triaged (`verdictSeverity`), and the
+  run state keeps the last round's classified identities so the resolution is
+  machine-decided instead of re-derived by the driving agent. Pre-2.1.1 run
+  states load unchanged.
+
 ## 2.1.0
 
 Recalibration after the first night of 2.0.0 converge runs (RCL-29): roughly

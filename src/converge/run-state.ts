@@ -83,6 +83,12 @@ export interface FindingEntry {
   verdict?: FindingVerdict;
   verdictReason?: string;
   verdictRound?: number;
+  /**
+   * Severity at the moment the verdict was recorded (RCL-30). A dismissal is
+   * terminal on that evidence; only escalation past it re-gates. Absent on
+   * pre-2.1.1 states — the first-seen `severity` stands in.
+   */
+  verdictSeverity?: string;
 }
 
 export interface RoundCounts {
@@ -99,6 +105,16 @@ export interface ConvergeRunState {
   rounds: Array<{ round: number; counts: RoundCounts }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
+  /**
+   * The most recent round's classified identities (RCL-30), so
+   * `converge-verdict` can decide the round's resolution — in particular
+   * whether a dismissal-only round converges — without re-reading the report.
+   * Replaced whenever a round is processed; absent on pre-2.1.1 states.
+   */
+  lastAnnotations?: {
+    round: number;
+    identities: Array<{ identity: string; status: FindingStatus; gating: string }>;
+  };
 }
 
 export type FindingStatus = 'new' | 'repeat' | 'suppressed' | 'regating';
@@ -188,18 +204,28 @@ export async function loadConvergeRunState(
   return readState(gitCommonDir, target.trim());
 }
 
-function isCorroborated(finding: ConsensusFinding): boolean {
-  return finding.severity === 'critical' || finding.consensus.models.length >= 2;
+/**
+ * Gating reason for a finding, tolerating legacy reports without RCL-23
+ * annotations. Shared with the CLI so classification and display agree.
+ */
+export function findingGatingReason(f: { severity: string; gating?: { reason: string } }): string {
+  if (f.gating) return f.gating.reason;
+  return f.severity === 'critical' || f.severity === 'important' ? 'legacy-blocking' : 'none';
 }
 
 /**
  * Dedupe one round's findings against every prior round of this run,
  * enforce the round cap, and persist the updated identity ledger.
  *
- * Suppression rule: a finding DISMISSED in an earlier round cannot re-gate
- * later on the same evidence — it is 'suppressed' unless it returns with new
- * corroboration (≥2 models or critical severity), which makes it 'regating'
- * and puts it back in front of triage.
+ * Suppression rule (RCL-30): a dismissal is terminal on its evidence. A
+ * finding DISMISSED in an earlier round stays 'suppressed' no matter how many
+ * models raise it again — identity matching is location-anchored, so a claim
+ * about different code is a new identity, not a repeat sighting. The one
+ * re-gate trigger is escalation: a sighting turned critical after a
+ * non-critical dismissal is 'regating' and goes back in front of triage.
+ * (Before 2.1.1 fresh ≥2-model corroboration also re-gated; on large diffs
+ * that reopened popular false positives every round — see allocator-one#7774,
+ * 24 rounds.)
  */
 export async function processRoundReport(options: {
   gitCommonDir: string;
@@ -284,13 +310,18 @@ export async function processRoundReport(options: {
     }
 
     const entry = state.findings[matched.key]!;
+    // Capture the evidence the verdict reasoned about before this sighting
+    // overwrites it (pre-2.1.1 entries lack verdictSeverity; the first-seen
+    // severity stands in).
+    const severityAtVerdict = entry.verdictSeverity ?? entry.severity;
     entry.lastRound = Math.max(entry.lastRound, options.round);
     entry.models = [...new Set([...entry.models, ...finding.consensus.models])];
-    // Track the latest sighting's span: fixes shift lines between rounds,
-    // and matching against a stale first-seen span would decay round over
-    // round.
+    // Track the latest sighting's span and severity: fixes shift lines
+    // between rounds, and matching against a stale first-seen span would
+    // decay round over round.
     entry.startLine = finding.startLine;
     entry.endLine = finding.endLine;
+    entry.severity = finding.severity;
 
     let status: FindingStatus;
     let suppressReason: string | undefined;
@@ -302,7 +333,7 @@ export async function processRoundReport(options: {
       continue;
     }
     if (entry.verdict === 'dismissed') {
-      if (isCorroborated(finding)) {
+      if (finding.severity === 'critical' && severityAtVerdict !== 'critical') {
         status = 'regating';
         counts.regating++;
       } else {
@@ -311,7 +342,7 @@ export async function processRoundReport(options: {
         suppressReason =
           `dismissed in round ${entry.verdictRound}` +
           (entry.verdictReason ? ` (${entry.verdictReason})` : '') +
-          ' — re-gating requires new corroboration (≥2 models or critical)';
+          ' — a dismissal is terminal on its evidence; re-gating requires escalation to critical (RCL-30)';
       }
     } else {
       status = 'repeat';
@@ -329,6 +360,14 @@ export async function processRoundReport(options: {
     ...state.rounds.filter((r) => r.round !== options.round),
     { round: options.round, counts },
   ].sort((a, b) => a.round - b.round);
+  state.lastAnnotations = {
+    round: options.round,
+    identities: annotated.map((a) => ({
+      identity: a.identity,
+      status: a.status,
+      gating: findingGatingReason(a.finding),
+    })),
+  };
   state.updatedAt = new Date().toISOString();
   await writeState(options.gitCommonDir, state);
 
@@ -336,16 +375,43 @@ export async function processRoundReport(options: {
 }
 
 /**
+ * Resolution of one evidence round after triage (RCL-30). A round whose
+ * gating identities were all dismissed — nothing fixed, so the reviewed
+ * patch is unchanged — CONVERGES on the spot; no confirmation round exists
+ * that could say anything new about the same code.
+ */
+export interface RoundResolution {
+  round: number;
+  /** Gating identities this round put in front of triage (new + regating, gating ≠ none). */
+  actionable: number;
+  /** Actionable identities still lacking a verdict recorded for this round. */
+  unresolved: string[];
+  /** Identities recorded fixed this round (any status — every fix changes the patch). */
+  fixedThisRound: number;
+  status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
+}
+
+export interface RecordVerdictsResult {
+  entries: FindingEntry[];
+  /**
+   * Present only when the verdicts belong to the most recently processed
+   * round; verdicts recorded against older rounds make no resolution claim.
+   */
+  resolution?: RoundResolution;
+}
+
+/**
  * Record triage verdicts for this run's findings (feeds suppression and
  * RCL-27's cross-run precision history). Returns the updated entries so the
- * caller can append them to the global model-stats store.
+ * caller can append them to the global model-stats store, plus the round's
+ * resolution when it can be decided.
  */
 export async function recordVerdicts(options: {
   gitCommonDir: string;
   target: string;
   round: number;
   verdicts: Array<{ key: string; verdict: FindingVerdict; reason?: string }>;
-}): Promise<FindingEntry[]> {
+}): Promise<RecordVerdictsResult> {
   const target = options.target.trim();
   const state = await readState(options.gitCommonDir, target);
   if (!state) {
@@ -361,10 +427,39 @@ export async function recordVerdicts(options: {
     }
     entry.verdict = verdict;
     entry.verdictRound = options.round;
+    entry.verdictSeverity = entry.severity;
     if (reason !== undefined) entry.verdictReason = reason;
     updated.push(entry);
   }
   state.updatedAt = new Date().toISOString();
   await writeState(options.gitCommonDir, state);
-  return updated;
+
+  let resolution: RoundResolution | undefined;
+  if (state.lastAnnotations && state.lastAnnotations.round === options.round) {
+    const actionable = state.lastAnnotations.identities.filter(
+      (a) => (a.status === 'new' || a.status === 'regating') && a.gating !== 'none'
+    );
+    const unresolved = actionable
+      .filter((a) => {
+        const entry = state.findings[a.identity];
+        return !entry || entry.verdict === undefined || entry.verdictRound !== options.round;
+      })
+      .map((a) => a.identity);
+    const fixedThisRound = Object.values(state.findings).filter(
+      (e) => e.verdict === 'fixed' && e.verdictRound === options.round
+    ).length;
+    resolution = {
+      round: options.round,
+      actionable: actionable.length,
+      unresolved,
+      fixedThisRound,
+      status:
+        unresolved.length > 0
+          ? 'unresolved'
+          : fixedThisRound > 0
+            ? 'fixes-pending-fresh-round'
+            : 'converged-dismissal-only',
+    };
+  }
+  return { entries: updated, ...(resolution ? { resolution } : {}) };
 }
