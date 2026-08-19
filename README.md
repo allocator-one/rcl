@@ -215,15 +215,20 @@ The cross-round memory of a converge run, persisted in
 the run using a location-anchored finding identity (hash of file + category +
 line bucket, plus a line-overlap matcher — titles are deliberately ignored:
 models rephrase ~98% of them between rounds). Each finding is classified
-`new`, `repeat`, `suppressed` (previously dismissed, no new corroboration —
-cannot re-gate), or `regating` (previously dismissed but now backed by ≥2
-models or critical severity). The same call enforces the evidence-round cap:
+`new`, `repeat`, `suppressed` (previously dismissed — a dismissal is terminal
+on its evidence and fresh corroboration alone never reopens it), or `regating`
+(previously dismissed at non-critical severity, now sighted as critical —
+genuinely new evidence). The same call enforces the evidence-round cap:
 default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
 code 2 is the cap consent boundary; exit 3 is a state failure.
 
 `converge-verdict` records triage outcomes per finding identity —
 `--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which
 drives later-round suppression and accrues the per-model precision history.
+Once every gating identity of the current round is triaged, it also reports
+the round's resolution: `converged-dismissal-only` (everything dismissed,
+nothing fixed — the round converges on the spot, no confirmation round),
+`fixes-pending-fresh-round`, or `unresolved` with the identities still open.
 
 ```bash
 rcl converge-report --target rcl-30 --report report-r2.json --round 2 --json

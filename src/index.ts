@@ -76,6 +76,7 @@ import {
   HARD_CONVERGE_ROUND_CAP,
   processRoundReport,
   recordVerdicts,
+  findingGatingReason,
   ConvergeRoundCapError,
   ConvergeRunStateError,
 } from './converge/run-state.js';
@@ -279,14 +280,6 @@ program
     }
   );
 
-/** Gating reason for legacy reports without RCL-23 annotations. */
-function findingGatingReason(f: {
-  severity: string;
-  gating?: { reason: string };
-}): string {
-  if (f.gating) return f.gating.reason;
-  return f.severity === 'critical' || f.severity === 'important' ? 'legacy-blocking' : 'none';
-}
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
 program
@@ -474,7 +467,7 @@ program
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
-        const updated = await recordVerdicts({
+        const { entries: updated, resolution } = await recordVerdicts({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
@@ -505,9 +498,39 @@ program
           );
         }
         if (opts.json) {
-          console.log(JSON.stringify({ target: opts.target, round, recorded: verdicts.length }));
+          console.log(
+            JSON.stringify({
+              target: opts.target,
+              round,
+              recorded: verdicts.length,
+              ...(resolution ? { resolution } : {}),
+            })
+          );
         } else {
           console.log(`Recorded ${verdicts.length} verdict(s) for ${opts.target} round ${round}.`);
+          if (resolution) {
+            switch (resolution.status) {
+              case 'converged-dismissal-only':
+                console.log(
+                  `Round ${round} resolution: all ${resolution.actionable} gating finding(s) dismissed, ` +
+                    'nothing fixed — the reviewed patch is unchanged, so this round CONVERGES. ' +
+                    'No confirmation round is required (RCL-30).'
+                );
+                break;
+              case 'fixes-pending-fresh-round':
+                console.log(
+                  `Round ${round} resolution: ${resolution.fixedThisRound} fix(es) recorded — ` +
+                    'the patch changes; commit, push, and run a fresh exact-head round.'
+                );
+                break;
+              case 'unresolved':
+                console.log(
+                  `Round ${round} resolution: ${resolution.unresolved.length} gating identity(ies) ` +
+                    `still untriaged: ${resolution.unresolved.join(', ')}`
+                );
+                break;
+            }
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

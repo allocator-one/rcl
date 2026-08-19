@@ -247,7 +247,7 @@ describe('cross-round identity and suppression (RCL-24)', () => {
     expect(r2.findings[0]!.suppressReason).toMatch(/dismissed/i);
   });
 
-  it('lets a dismissed finding re-gate with new corroboration (>=2 models or critical)', async () => {
+  it('keeps a dismissal terminal under fresh corroboration; only escalation to critical re-gates (RCL-30)', async () => {
     const r1 = await processRoundReport({
       gitCommonDir: dir,
       target: 't4',
@@ -261,15 +261,19 @@ describe('cross-round identity and suppression (RCL-24)', () => {
       verdicts: [{ key: r1.findings[0]!.identity, verdict: 'dismissed', reason: 'not applicable' }],
     });
 
+    // Fresh ≥2-model corroboration on the same evidence: stays suppressed —
+    // this is exactly the popular-false-positive treadmill (allocator-one#7774).
     const r2 = await processRoundReport({
       gitCommonDir: dir,
       target: 't4',
       round: 2,
       findings: [finding({ models: ['m1', 'm2'], gating: { reason: 'consensus' } })],
     });
-    expect(r2.findings[0]!.status).toBe('regating');
-    expect(r2.counts.suppressed).toBe(0);
+    expect(r2.findings[0]!.status).toBe('suppressed');
+    expect(r2.findings[0]!.suppressReason).toMatch(/terminal/i);
+    expect(r2.counts.regating).toBe(0);
 
+    // Escalation past the dismissed severity is genuinely new evidence.
     const r3 = await processRoundReport({
       gitCommonDir: dir,
       target: 't4',
@@ -279,6 +283,84 @@ describe('cross-round identity and suppression (RCL-24)', () => {
       ],
     });
     expect(r3.findings[0]!.status).toBe('regating');
+
+    // Re-dismissing at critical makes even critical sightings terminal.
+    await recordVerdicts({
+      gitCommonDir: dir,
+      target: 't4',
+      round: 3,
+      verdicts: [
+        { key: r3.findings[0]!.identity, verdict: 'dismissed', reason: 'critical is by design' },
+      ],
+    });
+    const r4 = await processRoundReport({
+      gitCommonDir: dir,
+      target: 't4',
+      round: 4,
+      findings: [
+        finding({ models: ['m1', 'm2', 'm3'], severity: 'critical', gating: { reason: 'critical' } }),
+      ],
+    });
+    expect(r4.findings[0]!.status).toBe('suppressed');
+  });
+
+  it('resolves a dismissal-only round as converged and a fixing round as pending (RCL-30)', async () => {
+    const r1 = await processRoundReport({
+      gitCommonDir: dir,
+      target: 't4r',
+      round: 1,
+      findings: [
+        finding({ models: ['m1', 'm2'] }),
+        finding({ models: ['m1'], startLine: 100, endLine: 104, title: 'other bug' }),
+      ],
+    });
+    const keys = r1.findings.map((f) => f.identity);
+
+    // First verdict alone: the round still has an untriaged gating identity.
+    const partial = await recordVerdicts({
+      gitCommonDir: dir,
+      target: 't4r',
+      round: 1,
+      verdicts: [{ key: keys[0]!, verdict: 'dismissed', reason: 'by design' }],
+    });
+    expect(partial.resolution?.status).toBe('unresolved');
+    expect(partial.resolution?.unresolved).toEqual([keys[1]!]);
+
+    // Dismissing the rest with nothing fixed: the round converges outright.
+    const done = await recordVerdicts({
+      gitCommonDir: dir,
+      target: 't4r',
+      round: 1,
+      verdicts: [{ key: keys[1]!, verdict: 'dismissed', reason: 'false positive' }],
+    });
+    expect(done.resolution?.status).toBe('converged-dismissal-only');
+    expect(done.resolution?.actionable).toBe(2);
+
+    // A fix flips the round to pending: the reviewed patch changed.
+    const fixed = await recordVerdicts({
+      gitCommonDir: dir,
+      target: 't4r',
+      round: 1,
+      verdicts: [{ key: keys[1]!, verdict: 'fixed' }],
+    });
+    expect(fixed.resolution?.status).toBe('fixes-pending-fresh-round');
+  });
+
+  it('makes no resolution claim for verdicts recorded against an older round', async () => {
+    const r1 = await processRoundReport({
+      gitCommonDir: dir,
+      target: 't4o',
+      round: 1,
+      findings: [finding()],
+    });
+    await processRoundReport({ gitCommonDir: dir, target: 't4o', round: 2, findings: [] });
+    const result = await recordVerdicts({
+      gitCommonDir: dir,
+      target: 't4o',
+      round: 1,
+      verdicts: [{ key: r1.findings[0]!.identity, verdict: 'dismissed' }],
+    });
+    expect(result.resolution).toBeUndefined();
   });
 
   it('persists per-round counts and verdicts in the state file', async () => {
