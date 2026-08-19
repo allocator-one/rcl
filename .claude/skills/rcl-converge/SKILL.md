@@ -1,6 +1,6 @@
 ---
 name: rcl-converge
-description: Drive the current PR or branch diff to a clean Review Council verdict by looping review → triage → fix → push until no new actionable findings remain
+description: Drive the current PR or branch diff to a converged Review Council verdict by looping review → triage → fix → push until a conclusive round converges
 argument-hint: "[PR#N] [--max-rounds N] [--max-attempts N] [--roles <roles>] [--spec <path>] [--post-final]"
 allowed-tools:
   - Bash(gh pr view:*)
@@ -50,7 +50,7 @@ allowed-tools:
 
 # Review Council converge (rcl-converge)
 
-Drive the current PR (or branch diff) to a clean Review Council verdict: loop review → triage → fix → push until a round produces no new actionable findings. This skill composes the `rcl` skill — each round runs the same review; this skill owns the loop, the triage ledger, and the safety interlocks.
+Drive the current PR (or branch diff) to a converged Review Council verdict: loop review → triage → fix → push until a round converges — zero new or regating gating findings, or every gating finding dismissed with nothing fixed (`converged-dismissal-only`). This skill composes the `rcl` skill — each round runs the same review; this skill owns the loop, the triage ledger, and the safety interlocks.
 
 Cost awareness: every attempt is a full multi-model council run. RCL prints a run-specific call/wave estimate; multi-chunk diffs can take much longer than one provider timeout. The machine-enforced cost cap defaults to 20 **attempts**, including failed, killed, no-report, and inconclusive runs. It is a consent boundary, not an absolute ceiling: an explicit `--max-attempts <N>` invocation may choose a different cap. Separately, **evidence rounds default to a 15-round consent boundary (hard maximum 99, no override past 99)** — enforced by `rcl converge-report`. The default posture is *run until it converges*: the 2.0.0 rollout (RCL-29) showed roughly half of real converge runs need more than the old 3-round budget. Hitting 15 rounds is not a stop — it is the point where you ask the user whether to continue; with their explicit approval, resume with a higher `--max-rounds` (up to 99).
 
@@ -184,4 +184,4 @@ Consequences:
 - `/rcl-converge #7 --max-rounds 2` — tighter budget: stop after two evidence rounds
 - `/rcl-converge #7 --max-rounds 30` — after approving continuation at the 15-round boundary, resume with a higher cap (hard maximum 99)
 - `/rcl-converge #7 --max-attempts 10` — explicitly authorize up to 10 launch attempts at invocation, or resume with 10 after approving continuation at a lower cap
-- `/rcl-converge --roles security-auditor,bug-hunter --post-final` — converge on two roles, post the summary once clean
+- `/rcl-converge --roles security-auditor,bug-hunter --post-final` — converge on two roles, post the summary once converged

@@ -221,4 +221,4 @@ Then tell the user:
 - `{{PREFIX}}rcl #7` — review a specific PR by number
 - `{{PREFIX}}rcl --roles security-auditor,bug-hunter` — run only specific reviewer roles
 
-For a review → fix → re-review loop that drives the PR or branch to a clean council verdict, use `{{PREFIX}}rcl-converge` instead (separate skill; it composes this one per round).
+For a review → fix → re-review loop that drives the PR or branch to a converged council verdict, use `{{PREFIX}}rcl-converge` instead (separate skill; it composes this one per round).
