@@ -49,13 +49,31 @@ cp -rf source dest          # NOT: cp -r source dest
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+npm ci
+npm run lint
+npm run build
+npm test
+npm pack --dry-run
 ```
+
+## Release
+
+`review-council` publishes to npm through `.github/workflows/release.yml`.
+The npm package trusts that exact GitHub Actions workflow through OIDC, so no
+long-lived npm token belongs in this repository.
+
+1. Bump `package.json`, `package-lock.json`, and `CHANGELOG.md` on a branch.
+2. Validate and merge the protected PR with green `ci`.
+3. Create annotated tag `vX.Y.Z` on the merge commit, never the pre-merge
+   branch tip, and push the tag.
+4. Monitor the Release workflow, then verify npm's exact version and dist-tag
+   and reinstall the published CLI before checking `rcl --version`.
+
+The workflow refuses a tag that differs from `package.json`, reruns lint,
+build, tests, and package inspection, then publishes with npm trusted
+publishing. RCL's public GitHub repository also gives the package an automatic
+provenance attestation.
 
 ## Architecture Overview
 
