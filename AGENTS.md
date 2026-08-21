@@ -66,7 +66,8 @@ long-lived npm token belongs in this repository.
 1. Bump `package.json`, `package-lock.json`, and `CHANGELOG.md` on a branch.
 2. Validate and merge the protected PR with green `ci`.
 3. Create annotated tag `vX.Y.Z` on the merge commit, never the pre-merge
-   branch tip, and push the tag.
+   branch tip, and push the tag. GitHub rulesets restrict `v*` creation to
+   organization owners and prevent tag updates and deletions.
 4. Monitor the Release workflow, then verify npm's exact version and dist-tag
    and reinstall the published CLI before checking `rcl --version`.
 

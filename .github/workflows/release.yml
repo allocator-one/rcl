@@ -20,15 +20,22 @@ jobs:
           cache: npm
       - name: Validate release tag
         run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           git fetch --no-tags origin main:refs/remotes/origin/main
 
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "tagged commit is not on main — refusing to publish"
+          if [ "$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(objecttype)')" != "tag" ]; then
+            echo "tag $GITHUB_REF_NAME is not annotated — refusing to publish"
             exit 1
           fi
 
-          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != "tag" ]; then
-            echo "tag $GITHUB_REF_NAME is not annotated — refusing to publish"
+          TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF_NAME")
+          if [ "$TAG_COMMIT" != "$(git rev-parse HEAD)" ]; then
+            echo "tag $GITHUB_REF_NAME no longer points to the workflow commit — refusing to publish"
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "tagged commit is not on main — refusing to publish"
             exit 1
           fi
 
@@ -80,4 +87,6 @@ jobs:
             exit 1
           fi
           echo "path=${packages[0]}" >> "$GITHUB_OUTPUT"
-      - run: npm publish "${{ steps.package.outputs.path }}" --access public --provenance --ignore-scripts
+      - run: npm publish "$PACKAGE_PATH" --access public --provenance --ignore-scripts
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
