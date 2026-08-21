@@ -20,6 +20,8 @@ jobs:
           cache: npm
       - name: Validate release tag
         run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+
           if ! git merge-base --is-ancestor HEAD origin/main; then
             echo "tagged commit is not on main — refusing to publish"
             exit 1
