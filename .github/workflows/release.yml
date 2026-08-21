@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      package_filename: ${{ steps.package.outputs.filename }}
+      package_sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Validate release tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git fetch --no-tags origin "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+
+          if [ "$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(objecttype)')" != "tag" ]; then
+            echo "tag $GITHUB_REF_NAME is not annotated — refusing to publish"
+            exit 1
+          fi
+
+          TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF_NAME")
+          if [ "$TAG_COMMIT" != "$(git rev-parse HEAD)" ]; then
+            echo "tag $GITHUB_REF_NAME no longer points to the workflow commit — refusing to publish"
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" "origin/$DEFAULT_BRANCH"; then
+            echo "tagged commit is not on $DEFAULT_BRANCH — refusing to publish"
+            exit 1
+          fi
+
+          VERSION=$(node -p "require('./package.json').version")
+          case "$VERSION" in
+            *-*)
+              echo "prerelease version $VERSION requires an explicit npm dist-tag — refusing to publish"
+              exit 1
+              ;;
+          esac
+
+          PKG="v$VERSION"
+          if [ "$GITHUB_REF_NAME" != "$PKG" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $PKG — refusing to publish"
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - name: Package and verify
+        id: package
+        shell: bash
+        run: |
+          npm pack
+          shopt -s nullglob
+          packages=(review-council-*.tgz)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "expected exactly one package artifact, found ${#packages[@]}"
+            exit 1
+          fi
+
+          PACKED_VERSION=$(tar -xOf "${packages[0]}" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          if [ "v$PACKED_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "packed version $PACKED_VERSION does not match tag $GITHUB_REF_NAME — refusing to publish"
+            exit 1
+          fi
+
+          SMOKE_DIR=$(mktemp -d)
+          npm install --prefix "$SMOKE_DIR" --ignore-scripts --no-audit --no-fund "./${packages[0]}"
+          SMOKE_VERSION=$("$SMOKE_DIR/node_modules/.bin/rcl" --version)
+          if [ "$SMOKE_VERSION" != "$PACKED_VERSION" ]; then
+            echo "packed CLI reports version $SMOKE_VERSION, expected $PACKED_VERSION"
+            exit 1
+          fi
+
+          PACKAGE_SHA256=$(sha256sum "${packages[0]}" | cut -d ' ' -f 1)
+          echo "filename=${packages[0]}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package
+          path: review-council-*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Resolve package artifact
+        id: package
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.validate.outputs.package_sha256 }}
+          PACKAGE_PATH: ${{ needs.validate.outputs.package_filename }}
+        run: |
+          if [ ! -f "$PACKAGE_PATH" ]; then
+            echo "expected package artifact $PACKAGE_PATH"
+            exit 1
+          fi
+
+          ACTUAL_SHA256=$(sha256sum "$PACKAGE_PATH" | cut -d ' ' -f 1)
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "package artifact checksum mismatch"
+            exit 1
+          fi
+
+          echo "path=$PACKAGE_PATH" >> "$GITHUB_OUTPUT"
+      - run: npm publish "$PACKAGE_PATH" --access public --provenance --ignore-scripts
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
