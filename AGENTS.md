@@ -70,10 +70,11 @@ long-lived npm token belongs in this repository.
 4. Monitor the Release workflow, then verify npm's exact version and dist-tag
    and reinstall the published CLI before checking `rcl --version`.
 
-The workflow refuses a tag that differs from `package.json`, reruns lint,
-build, tests, and package inspection, then publishes with npm trusted
-publishing. RCL's public GitHub repository also gives the package an automatic
-provenance attestation.
+The workflow accepts stable annotated tags only when their commit is on
+`main` and the tag matches `package.json`. A tokenless job reruns lint, build,
+and tests and creates the package tarball. A separate minimal job receives only
+that tarball and publishes it with npm trusted publishing and provenance; npm
+install and package lifecycle scripts never receive OIDC publishing authority.
 
 ## Architecture Overview
 
