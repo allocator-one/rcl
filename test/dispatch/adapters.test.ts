@@ -187,18 +187,20 @@ describe('google model contract', () => {
     );
 
     expect(review.status).toBe('success');
-    expect(generateContent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: 'gemini-3.8-flash',
-        config: expect.not.objectContaining({
-          temperature: expect.anything(),
-          topP: expect.anything(),
-          topK: expect.anything(),
-          candidateCount: expect.anything(),
-          thinkingBudget: expect.anything(),
-        }),
-      })
-    );
+    const request = generateContent.mock.calls[0]![0] as {
+      model: string;
+      config: Record<string, unknown>;
+    };
+    expect(request.model).toBe('gemini-3.8-flash');
+    for (const parameter of [
+      'temperature',
+      'topP',
+      'topK',
+      'candidateCount',
+      'thinkingBudget',
+    ]) {
+      expect(request.config).not.toHaveProperty(parameter);
+    }
   });
 });
 
