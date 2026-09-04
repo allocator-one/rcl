@@ -273,7 +273,7 @@ Place `.review-council.yml` in your project root (or any parent directory). All 
 models:
   - anthropic/claude-fable-5
   - openai/gpt-5.6-sol
-  - google/gemini-3.6-flash
+  - google/gemini-3.8-flash
 
 # Async bonus reviewers — fired with each round, never awaited. Results that
 # have arrived by the next round of the same target are merged into that
@@ -318,7 +318,7 @@ thresholds:
 gating:
   mode: verified-consensus        # or all-findings (legacy: severity alone decides)
   minModels: 2                    # distinct models for consensus gating
-  verificationModel: google/gemini-3.6-flash  # direct-API only
+  verificationModel: google/gemini-3.8-flash  # direct-API only
   verificationTimeout: 60000      # ms for the single batched refutation call
 
 # Output defaults
@@ -329,7 +329,7 @@ output:
 
 # Concurrency and reliability
 concurrency: 6
-timeout: 300000       # ms per blocking model call (every direct-API p90 is under 260s)
+timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 # quorumFraction: 0.75  # round closes once this share of calls has completed; stragglers
                         # are canceled and recorded (core `models` are never canceled).

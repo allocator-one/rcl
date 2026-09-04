@@ -2,14 +2,15 @@
  * Core (blocking) council — every round waits for these and only these.
  * Direct-API models only: the RCL-21 audit (922 rounds, 15,268 calls) found
  * the OpenRouter wing at p50 7–9.5 min per call with 19–39% dead calls,
- * last-finisher in 97.6% of rounds; the direct trio answers in 45–70 s with
- * ~0% dead calls. Replaying the corpus with this trio alone drops the median
- * round from 14.4 to 2.0 min while 91% of multi-model findings still surface.
+ * last-finisher in 97.6% of rounds; the audited direct trio answered in
+ * 45–70 s with ~0% dead calls. Replaying the corpus with that direct-provider
+ * topology drops the median round from 14.4 to 2.0 min while 91% of
+ * multi-model findings still surface.
  */
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5',
   'openai/gpt-5.6-sol',
-  'google/gemini-3.6-flash',
+  'google/gemini-3.8-flash',
 ] as const;
 
 /**

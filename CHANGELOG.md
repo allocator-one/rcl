@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.2
+
+- Bump the default Google reviewer and direct-API verification model from
+  `gemini-3.6-flash` to the stable, generally available `gemini-3.8-flash`.
+  The Google adapter already uses a compatible generation config and forwards
+  the stable model ID without deprecated sampling parameters.
+
 ## 2.1.1
 
 Dismissals are terminal (RCL-30). The 2.0.0 regating rule — a dismissed
