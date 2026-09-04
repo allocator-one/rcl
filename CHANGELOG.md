@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.3
+
+- Fix trusted-publishing tag validation when Actions checkout has materialized
+  the pushed annotated tag as a conflicting local ref. The validation job now
+  force-refreshes only its local tag from the immutable protected remote tag
+  before checking its object type, peeled commit, ancestry, and package version.
+
 ## 2.1.2
 
 - Bump the default Google reviewer and direct-API verification model from
