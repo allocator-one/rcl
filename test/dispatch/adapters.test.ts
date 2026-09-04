@@ -172,6 +172,36 @@ describe('google timer hygiene', () => {
   });
 });
 
+describe('google model contract', () => {
+  it('forwards the stable Gemini 3.8 Flash model ID without deprecated sampling parameters', async () => {
+    const generateContent = vi.fn().mockResolvedValue(googleResponse());
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, { models: { generateContent } });
+
+    const review = await adapter.review(
+      'google/gemini-3.8-flash',
+      'general',
+      'system',
+      'user',
+      OPTS
+    );
+
+    expect(review.status).toBe('success');
+    expect(generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-3.8-flash',
+        config: expect.not.objectContaining({
+          temperature: expect.anything(),
+          topP: expect.anything(),
+          topK: expect.anything(),
+          candidateCount: expect.anything(),
+          thinkingBudget: expect.anything(),
+        }),
+      })
+    );
+  });
+});
+
 describe('truncation detection', () => {
   it('anthropic: stop_reason max_tokens is an error, not an empty success', async () => {
     const adapter = new AnthropicAdapter('test-key');

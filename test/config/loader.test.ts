@@ -101,7 +101,7 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
     expect(config.models).toEqual([
       'anthropic/claude-fable-5',
       'openai/gpt-5.6-sol',
-      'google/gemini-3.6-flash',
+      'google/gemini-3.8-flash',
     ]);
   });
 

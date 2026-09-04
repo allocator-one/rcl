@@ -376,9 +376,9 @@ describe('resolveGatingConfig', () => {
     it('uses the default verifier when its provider is already in the roster', () => {
       const cfg = resolveGatingConfig(undefined, [
         'anthropic/claude-fable-5',
-        'google/gemini-3.6-flash',
+        'google/gemini-3.8-flash',
       ]);
-      expect(cfg.verificationModel).toBe('google/gemini-3.6-flash');
+      expect(cfg.verificationModel).toBe('google/gemini-3.8-flash');
     });
 
     it('falls back to a direct-API roster model when the default provider is not configured', () => {

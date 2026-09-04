@@ -102,9 +102,9 @@ const DIRECT_PROVIDERS = new Set(['anthropic', 'openai', 'google']);
 export const DEFAULT_GATING_CONFIG = {
   mode: 'verified-consensus',
   minModels: 2,
-  // Fastest direct-API council member (corpus p50 well under a minute);
-  // the verification pass must add ≤60s p50 to a round.
-  verificationModel: 'google/gemini-3.6-flash',
+  // Use the stable Flash council member for this latency-sensitive pass;
+  // verification remains capped at 60 s so it cannot dominate round time.
+  verificationModel: 'google/gemini-3.8-flash',
   verificationTimeoutMs: 60_000,
 } as const;
 
