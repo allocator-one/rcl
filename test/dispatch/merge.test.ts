@@ -112,13 +112,28 @@ describe('mergeChunkReviews — degraded coverage', () => {
 });
 
 describe('mergeChunkReviews — token usage', () => {
-  it('sums usage when every chunk reported it', () => {
+  it('sums each counter only when every chunk reported that counter', () => {
     const merged = mergeChunkReviews([
       review({ usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5 } }),
       review({ usage: { inputTokens: 200, outputTokens: 20 } }),
     ]);
     expect(merged).toHaveLength(1);
-    expect(merged[0]!.usage).toEqual({ inputTokens: 300, outputTokens: 30, reasoningTokens: 5 });
+    // reasoningTokens was reported by one chunk only, so its total is unknown.
+    expect(merged[0]!.usage).toEqual({ inputTokens: 300, outputTokens: 30 });
+    expect(
+      mergeChunkReviews([
+        review({ usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5 } }),
+        review({ usage: { inputTokens: 200, outputTokens: 20, reasoningTokens: 7 } }),
+      ])[0]!.usage
+    ).toEqual({ inputTokens: 300, outputTokens: 30, reasoningTokens: 12 });
+  });
+
+  it('never presents a per-counter lower bound as a total', () => {
+    const merged = mergeChunkReviews([
+      review({ usage: { inputTokens: 100, outputTokens: 10 } }),
+      review({ usage: { inputTokens: 200 } }),
+    ]);
+    expect(merged[0]!.usage).toEqual({ inputTokens: 300 });
   });
 
   it('omits usage rather than reporting a silent lower bound when a chunk did not report it', () => {
