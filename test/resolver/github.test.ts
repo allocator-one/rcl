@@ -128,8 +128,18 @@ describe('fetchPRDiff', () => {
     });
   });
 
-  it('treats a compare response at the 300-file cap as possibly truncated and falls back to the paged listing', async () => {
-    const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(300), compareFiles: 300, listed: 300 });
+  it('accepts a compare response exactly at the 300-file cap when it accounts for every reported file', async () => {
+    const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(300), compareFiles: 300 });
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
+
+    expect(compare).toHaveBeenCalledTimes(1);
+    expect(paginate).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(diff.files).toHaveLength(300);
+  });
+
+  it('falls back to the bracketed paged listing when the compare accounts for fewer files than the PR reports', async () => {
+    const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(300), compareFiles: 250, listed: 300 });
     const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
 
     expect(compare).toHaveBeenCalledTimes(1);
@@ -139,6 +149,23 @@ describe('fetchPRDiff', () => {
     );
     expect(get).toHaveBeenCalledTimes(2);
     expect(diff.files).toHaveLength(300);
+  });
+
+  it('refuses an incomplete listing instead of reviewing a truncated diff as if it were whole', async () => {
+    const { octokit } = octokitWith({ pr: fakePr(3500), listed: 3000 });
+    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit)).rejects.toThrow(
+      /reports 3500 changed files but the API listed 3000/
+    );
+  });
+
+  it('carries the blob id of every file so patchless changes stay bound to their content', async () => {
+    const pr = fakePr(1);
+    const compare = vi.fn(async () => ({
+      data: { files: [{ filename: 'app.bin', status: 'modified', additions: 0, deletions: 0, sha: 'blob123' }] },
+    }));
+    const octokit = { pulls: { get: vi.fn().mockResolvedValue(pr) }, repos: { compareCommitsWithBasehead: compare } } as unknown as Octokit;
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
+    expect(diff.files[0]).toMatchObject({ filename: 'app.bin', patch: '', blobSha: 'blob123' });
   });
 
   it('skips the compare for PRs above the cap and brackets the paged listing with PR reads', async () => {

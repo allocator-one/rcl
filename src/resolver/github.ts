@@ -97,9 +97,9 @@ async function fetchChangedFiles(
       // below still binds the files, just less tightly.
       files = undefined;
     }
-    // Exactly at the cap the list may be truncated; only a shorter list is
-    // known to be complete.
-    if (files !== undefined && files.length < COMPARE_FILE_CAP) return files;
+    // Complete only when it accounts for every file the PR reports; anything
+    // else (the 300 cap, or an API nuance) falls through to the listing.
+    if (files !== undefined && files.length === pr.changed_files) return files;
   }
 
   const listed: ChangedFile[] = await octokit.paginate(octokit.pulls.listFiles, {
@@ -114,6 +114,13 @@ async function fetchChangedFiles(
   if (recheck.head.sha !== pr.head.sha || recheck.base.sha !== pr.base.sha) {
     throw new Error(
       `PR #${target.number} moved (${pr.base.sha}...${pr.head.sha} → ${recheck.base.sha}...${recheck.head.sha}) while its ${listed.length} files were being listed — rerun the review.`
+    );
+  }
+  // GitHub lists at most 3,000 files; a shorter list than the PR reports is
+  // an incomplete diff, and an incomplete diff must never read as reviewed.
+  if (listed.length !== recheck.changed_files) {
+    throw new Error(
+      `PR #${target.number} reports ${recheck.changed_files} changed files but the API listed ${listed.length} — the diff is incomplete (GitHub lists at most 3,000 files), refusing to review it as if it were whole.`
     );
   }
   return listed;
@@ -168,6 +175,7 @@ export async function fetchPRDiff(
     patch: f.patch ?? '',
     language: detectLanguage(f.filename),
     previousFilename: f.previous_filename,
+    ...(f.sha ? { blobSha: f.sha } : {}),
   }));
 
   return {

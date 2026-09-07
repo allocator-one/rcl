@@ -188,6 +188,9 @@ export function diffDigest(files: readonly FileChange[]): string {
         patch: f.patch,
         additions: f.additions,
         deletions: f.deletions,
+        // Binds a patchless (binary / oversized) file to its content where
+        // the source provides a blob id.
+        blobSha: f.blobSha ?? null,
       })
     );
   });

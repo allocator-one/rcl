@@ -463,6 +463,7 @@ describe('round-4 hardening', () => {
         patch: f.patch,
         additions: f.additions,
         deletions: f.deletions,
+        blobSha: f.blobSha ?? null,
       }));
     expect(diffDigest(files)).toBe(sha256Hex(stableStringify(canonical)));
   });
@@ -552,5 +553,16 @@ describe('round-7 hardening', () => {
     const decided = new Set<string>([...DIGESTED_CONFIG_FIELDS, ...EXCLUDED_CONFIG_FIELDS]);
     expect(Object.keys(ConfigSchema.shape).sort()).toEqual([...decided].sort());
     expect(EXCLUDED_CONFIG_FIELDS).toEqual(['githubToken']);
+  });
+});
+
+describe('round-11 hardening', () => {
+  it('diffDigest binds patchless files with identical counts through their blob id', () => {
+    const a = file({ filename: 'app.bin', patch: '', additions: 0, deletions: 0, blobSha: 'a'.repeat(40) });
+    const b = file({ filename: 'app.bin', patch: '', additions: 0, deletions: 0, blobSha: 'b'.repeat(40) });
+    expect(diffDigest([a])).not.toBe(diffDigest([b]));
+    // Local sources carry no blob id; the record normalizes it to null.
+    const local = file({ filename: 'app.bin', patch: '', additions: 0, deletions: 0 });
+    expect(diffDigest([local])).toBe(diffDigest([{ ...local, blobSha: undefined }]));
   });
 });
