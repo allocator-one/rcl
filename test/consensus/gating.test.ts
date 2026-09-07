@@ -6,6 +6,7 @@ import {
 } from '../../src/consensus/gating.js';
 import type { ConsensusFinding, ConsensusInfo } from '../../src/consensus/types.js';
 import type { ModelAnswer } from '../../src/dispatch/adapter.js';
+import { parseUnifiedDiff } from '../../src/prepare/unified-diff.js';
 
 function makeConsensus(models: string[]): ConsensusInfo {
   return {
@@ -355,6 +356,127 @@ describe('relevantPatchExcerpt', () => {
   it('fails closed for oversized content without unified-diff headers', () => {
     expect(relevantPatchExcerpt('x'.repeat(4_001), [{ start: 1, end: 1 }])).toBe('');
   });
+
+  it('fails closed when complete replacement evidence cannot fit the verifier bound', () => {
+    const patch = [
+      '@@ -1,100 +1,1 @@ deletionRun',
+      ...Array.from({ length: 100 }, (_, index) => `-${index} ${'deleted '.repeat(8)}`),
+      '+TARGET',
+    ].join('\n');
+
+    expect(relevantPatchExcerpt(patch, [{ start: 1, end: 1 }])).toBe('');
+  });
+
+  it('keeps deleted evidence required for a later line in a replacement', () => {
+    const patch = [
+      '@@ -1,1 +1,2 @@ replacement',
+      `-REMOVED_SECURITY_GUARD ${'x'.repeat(4_100)}`,
+      '+FIRST',
+      '+TARGET',
+    ].join('\n');
+
+    expect(relevantPatchExcerpt(patch, [{ start: 2, end: 2 }])).toBe('');
+  });
+
+  it('keeps a compact replacement intact for a later target line', () => {
+    const patch = ['@@ -1,1 +1,2 @@ replacement', '-REMOVED_GUARD', '+FIRST', '+TARGET'].join(
+      '\n'
+    );
+
+    const excerpt = relevantPatchExcerpt(patch, [{ start: 2, end: 2 }]);
+
+    expect(excerpt).toContain('-REMOVED_GUARD');
+    expect(excerpt).toContain('+FIRST');
+    expect(excerpt).toContain('+TARGET');
+    expect(parseUnifiedDiff(excerpt).ok).toBe(true);
+  });
+
+  it('does not excerpt an unsafe subset of an oversized deletion-only target', () => {
+    const patch = [
+      '@@ -1,100 +0,0 @@ deletionOnly',
+      ...Array.from({ length: 100 }, (_, index) => `-${index} ${'deleted '.repeat(8)}`),
+    ].join('\n');
+
+    expect(relevantPatchExcerpt(patch, [{ start: 1, end: 1 }])).toBe('');
+  });
+
+  it('scans a matching replacement block only once', () => {
+    const sideLines = 128;
+    const bodyLines = sideLines * 2;
+    const patch = [
+      `@@ -1,${sideLines} +1,${sideLines} @@ replacement`,
+      ...Array.from({ length: sideLines }, (_, index) => `-old ${index}`),
+      ...Array.from({ length: sideLines }, (_, index) => `+new ${index}`),
+    ].join('\n');
+    const sliceSpy = vi.spyOn(Array.prototype, 'slice');
+    let excerpt = '';
+    let replacementScans = 0;
+
+    try {
+      excerpt = relevantPatchExcerpt(patch, [{ start: 1, end: sideLines }]);
+      replacementScans = sliceSpy.mock.calls.filter(([start, end], index) => {
+        const receiver = sliceSpy.mock.contexts[index];
+        return (
+          Array.isArray(receiver) &&
+          receiver.length === bodyLines &&
+          receiver[0]?.text === '-old 0' &&
+          start === 0 &&
+          end === bodyLines
+        );
+      }).length;
+    } finally {
+      sliceSpy.mockRestore();
+    }
+
+    expect(excerpt).toContain('-old 0');
+    expect(excerpt).toContain('+new 127');
+    expect(replacementScans).toBe(1);
+  });
+
+  it.each([100, 101])(
+    'keeps an oversized mid-file deletion unavailable at coordinate %i',
+    (line) => {
+      const patch = [
+        '@@ -101,100 +100,0 @@ deletionOnly',
+        ...Array.from({ length: 100 }, (_, index) => `-${index} ${'deleted '.repeat(8)}`),
+      ].join('\n');
+
+      expect(relevantPatchExcerpt(patch, [{ start: line, end: line }])).toBe('');
+    }
+  );
+
+  it('includes a deletion-only hunk beside a hunk at its effective new-file coordinate', () => {
+    const patch = [
+      '@@ -21,1 +20,0 @@ removed',
+      '-REMOVED_GUARD',
+      '@@ -22,1 +21,1 @@ next',
+      '-old next',
+      '+new next',
+    ].join('\n');
+
+    const excerpt = relevantPatchExcerpt(patch, [{ start: 21, end: 21 }]);
+
+    expect(excerpt).toContain('-REMOVED_GUARD');
+    expect(excerpt).toContain('+new next');
+    expect(parseUnifiedDiff(excerpt).ok).toBe(true);
+  });
+
+  it('includes a trailing deletion beside a following hunk at the same coordinate', () => {
+    const patch = [
+      '@@ -1,2 +1,1 @@ trailingDeletion',
+      ' context',
+      '-REMOVED_GUARD',
+      '@@ -3,1 +2,1 @@ followingReplacement',
+      '-old next',
+      '+new next',
+    ].join('\n');
+
+    const excerpt = relevantPatchExcerpt(patch, [{ start: 2, end: 2 }]);
+
+    expect(excerpt).toContain('-REMOVED_GUARD');
+    expect(excerpt).toContain('+new next');
+    expect(parseUnifiedDiff(excerpt).ok).toBe(true);
+  });
 });
 
 describe('applyGating hunk scoping', () => {
@@ -407,6 +529,27 @@ describe('applyGating hunk scoping', () => {
 
   it('does not invoke the verifier when one referenced diff line exceeds its bound', async () => {
     const patch = `@@ -0,0 +1 @@\n+${'x'.repeat(4_001)}`;
+    const ask = vi.fn();
+
+    const { findings } = await applyGating(
+      [makeFinding({ startLine: 1, endLine: 1, models: ['m1'] })],
+      { ...baseOpts, diffFiles: [diffFile('src/a.ts', patch)], ask }
+    );
+
+    expect(ask).not.toHaveBeenCalled();
+    expect(findings[0]!.gating).toMatchObject({
+      reason: 'verified',
+      verification: { verdict: 'unavailable' },
+    });
+  });
+
+  it('does not invoke the verifier with partial evidence from an oversized replacement', async () => {
+    const patch = [
+      '@@ -1,100 +1,1 @@ replacement',
+      '-REMOVED_SECURITY_GUARD',
+      ...Array.from({ length: 99 }, (_, index) => `-${index} ${'deleted '.repeat(8)}`),
+      '+TARGET',
+    ].join('\n');
     const ask = vi.fn();
 
     const { findings } = await applyGating(
