@@ -4,6 +4,12 @@ import type { FileChange } from '../resolver/types.js';
 import { defaultAdapterFactory } from '../dispatch/runner.js';
 import { detectProvider } from '../roles/dispatcher.js';
 import { neutralizeDelimiters, wrapDiff } from '../prompts/hardening.js';
+import {
+  formatSyntheticHunkHeader,
+  parseUnifiedDiff,
+  type UnifiedDiffHunk,
+  type UnifiedDiffLine,
+} from '../prepare/unified-diff.js';
 
 /**
  * Convergence gating (RCL-23). The RCL-21 audit showed why "any single
@@ -176,42 +182,254 @@ const MAX_PATCH_CHARS = 4_000;
 /** Lines of slack when matching a finding's range against a hunk's span. */
 const HUNK_MARGIN_LINES = 16;
 
+interface HunkWindow {
+  hunkIndex: number;
+  start: number;
+  end: number;
+}
+
+function isChangedLine(line: UnifiedDiffLine): boolean {
+  return !line.marker && line.oldCount !== line.newCount;
+}
+
+function replacementBlock(
+  body: readonly UnifiedDiffLine[],
+  index: number
+): { start: number; end: number; hasDeletion: boolean } {
+  let start = index;
+  while (start > 0) {
+    const previous = body[start - 1]!;
+    if (isChangedLine(previous)) {
+      start -= 1;
+    } else if (previous.marker && start > 1 && isChangedLine(body[start - 2]!)) {
+      start -= 2;
+    } else {
+      break;
+    }
+  }
+
+  let end = index + 1;
+  while (end < body.length) {
+    const next = body[end]!;
+    if (isChangedLine(next)) {
+      end += 1;
+    } else if (next.marker && end > start && isChangedLine(body[end - 1]!)) {
+      end += 1;
+    } else {
+      break;
+    }
+  }
+
+  return {
+    start,
+    end,
+    hasDeletion: body
+      .slice(start, end)
+      .some((line) => line.oldCount === 1 && line.newCount === 0),
+  };
+}
+
+function windowForMatches(
+  hunk: UnifiedDiffHunk,
+  hunkIndex: number,
+  matches: readonly number[]
+): HunkWindow | undefined {
+  const first = matches[0];
+  const last = matches.at(-1);
+  if (first === undefined || last === undefined) return undefined;
+
+  let start = first;
+  let end = last + 1;
+  for (const index of matches) {
+    const line = hunk.body[index]!;
+    if (!isChangedLine(line)) continue;
+    const block = replacementBlock(hunk.body, index);
+    if (block.hasDeletion) {
+      start = Math.min(start, block.start);
+      end = Math.max(end, block.end);
+    }
+  }
+  return { hunkIndex, start, end };
+}
+
+function hunkDistance(
+  hunk: UnifiedDiffHunk,
+  range: { start: number; end: number }
+): number {
+  // A zero-count range is anchored after newStart and its deletion body uses
+  // newStart + 1 as the effective new-file coordinate. Treat both sides of
+  // that boundary as adjacent so either conventional line reference keeps
+  // the complete removal in view.
+  const hunkStart = hunk.newStart;
+  let hunkEnd = hunk.newCount === 0 ? hunk.newStart + 1 : hunk.newStart + hunk.newCount - 1;
+  // A deletion after the hunk's final new-file line is anchored at the next
+  // coordinate. Parsed body coordinates are monotonic; only a legal trailing
+  // no-newline marker can follow the last real line.
+  const last = hunk.body.at(-1);
+  const lastBodyLine = last?.marker ? hunk.body.at(-2) : last;
+  if (lastBodyLine) hunkEnd = Math.max(hunkEnd, lastBodyLine.newLine);
+  if (range.end < hunkStart) return hunkStart - range.end;
+  if (range.start > hunkEnd) return range.start - hunkEnd;
+  return 0;
+}
+
+function requiredWindow(
+  hunk: UnifiedDiffHunk,
+  hunkIndex: number,
+  range: { start: number; end: number }
+): HunkWindow | undefined {
+  const exact: number[] = [];
+  for (let index = 0; index < hunk.body.length; index += 1) {
+    const line = hunk.body[index]!;
+    if (!line.marker && line.newLine >= range.start && line.newLine <= range.end) {
+      exact.push(index);
+    }
+  }
+
+  // Deletions and the following new-file line share a coordinate. Keep the
+  // whole span: omitting either side can let a verifier refute a finding from
+  // incomplete replacement evidence. If it cannot fit, the caller fails
+  // closed instead of sending a partial removal.
+  if (exact.length > 0) {
+    return windowForMatches(hunk, hunkIndex, exact);
+  }
+
+  const closest: number[] = [];
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < hunk.body.length; index += 1) {
+    const line = hunk.body[index]!;
+    if (line.marker) continue;
+    const distance =
+      line.newLine < range.start
+        ? range.start - line.newLine
+        : line.newLine > range.end
+          ? line.newLine - range.end
+          : 0;
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closest.length = 0;
+      closest.push(index);
+    } else if (distance === closestDistance) {
+      closest.push(index);
+    }
+  }
+  return windowForMatches(hunk, hunkIndex, closest);
+}
+
+function mergeWindows(windows: HunkWindow[]): HunkWindow[] {
+  const sorted = [...windows].sort(
+    (left, right) => left.hunkIndex - right.hunkIndex || left.start - right.start
+  );
+  const merged: HunkWindow[] = [];
+  for (const window of sorted) {
+    const previous = merged.at(-1);
+    if (previous && previous.hunkIndex === window.hunkIndex && window.start <= previous.end) {
+      previous.end = Math.max(previous.end, window.end);
+    } else {
+      merged.push({ ...window });
+    }
+  }
+  return merged;
+}
+
+function expandWindows(
+  hunks: UnifiedDiffHunk[],
+  required: HunkWindow[],
+  margin: number
+): HunkWindow[] {
+  const expanded = required.map((window) => {
+    const body = hunks[window.hunkIndex]!.body;
+    let start = Math.max(0, window.start - margin);
+    let end = Math.min(body.length, window.end + margin);
+    while (start > 0 && body[start]!.marker) start -= 1;
+    while (end < body.length && body[end]!.marker) end += 1;
+    return { hunkIndex: window.hunkIndex, start, end };
+  });
+  return mergeWindows(expanded);
+}
+
+function renderWindows(hunks: UnifiedDiffHunk[], windows: HunkWindow[]): string {
+  return windows
+    .map((window) => {
+      const hunk = hunks[window.hunkIndex]!;
+      const body = hunk.body.slice(window.start, window.end);
+      const header = formatSyntheticHunkHeader(body);
+      if (!header) return '';
+      return [header, ...body.map((line) => line.text)].join('\n');
+    })
+    .join('\n');
+}
+
 /**
  * Reduce a unified diff to the hunks that overlap the findings' line ranges.
- * Blind tail-truncation could cut the exact hunk a finding refers to and let
- * the verifier judge (and refute) from unrelated context. Returns the whole
- * patch when it has no hunk headers (plan pseudo-files), and '' when no hunk
- * overlaps — the caller then treats the finding as having no usable context.
+ * Oversized hunks are excerpted around every requested range with accurate
+ * synthetic headers. Returns short non-hunk content unchanged for backward
+ * compatibility, and '' when trustworthy context cannot fit in the bound —
+ * the caller then keeps the finding gating without invoking the verifier.
  */
 export function relevantPatchExcerpt(
   patch: string,
   ranges: Array<{ start: number; end: number }>
 ): string {
-  const hunks: Array<{ startNew: number; countNew: number; text: string[] }> = [];
-  let current: { startNew: number; countNew: number; text: string[] } | undefined;
-  for (const line of patch.split('\n')) {
-    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (header) {
-      current = {
-        startNew: Number(header[1]),
-        countNew: header[2] !== undefined ? Number(header[2]) : 1,
-        text: [line],
-      };
-      hunks.push(current);
-    } else if (current) {
-      current.text.push(line);
+  if (ranges.length === 0) return '';
+  if (!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(patch)) {
+    return patch.length <= MAX_PATCH_CHARS ? patch : '';
+  }
+  if (
+    ranges.some(
+      ({ start, end }) =>
+        !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start
+    )
+  ) {
+    return '';
+  }
+
+  const parsed = parseUnifiedDiff(patch);
+  if (!parsed.ok) return '';
+  const { hunks } = parsed.diff;
+
+  const required: HunkWindow[] = [];
+  const selectedHunks = new Set<number>();
+  for (const range of ranges) {
+    const distances = hunks.map((hunk) => hunkDistance(hunk, range));
+    const overlapping = distances
+      .map((distance, index) => ({ distance, index }))
+      .filter(({ distance }) => distance === 0);
+    const closestDistance = distances.reduce(
+      (closest, distance) => Math.min(closest, distance),
+      Number.POSITIVE_INFINITY
+    );
+    const matches =
+      overlapping.length > 0
+        ? overlapping
+        : distances
+            .map((distance, index) => ({ distance, index }))
+            .filter(({ distance }) => distance === closestDistance && distance <= HUNK_MARGIN_LINES);
+    if (matches.length === 0) return '';
+
+    for (const { index } of matches) {
+      const window = requiredWindow(hunks[index]!, index, range);
+      if (!window) return '';
+      required.push(window);
+      selectedHunks.add(index);
     }
   }
-  if (hunks.length === 0) return patch;
 
-  const selected = hunks.filter((h) =>
-    ranges.some(
-      (r) =>
-        h.startNew - HUNK_MARGIN_LINES <= r.end &&
-        r.start - HUNK_MARGIN_LINES <= h.startNew + h.countNew
-    )
-  );
-  return selected.map((h) => h.text.join('\n')).join('\n');
+  const selected = [...selectedHunks]
+    .sort((left, right) => left - right)
+    .map((index) => {
+      const hunk = hunks[index]!;
+      return [hunk.originalHeader, ...hunk.body.map((line) => line.text)].join('\n');
+    })
+    .join('\n');
+  if (selected.length <= MAX_PATCH_CHARS) return selected;
+
+  const minimal = mergeWindows(required);
+  for (let margin = HUNK_MARGIN_LINES; margin >= 0; margin -= 1) {
+    const excerpt = renderWindows(hunks, expandWindows(hunks, minimal, margin));
+    if (excerpt.length <= MAX_PATCH_CHARS) return excerpt;
+  }
+  return '';
 }
 
 function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string, string>): string {
@@ -231,9 +449,7 @@ function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string
 
   lines.push('## The change under review (relevant files, untrusted content)', '');
   for (const [filename, patch] of patches) {
-    const bounded =
-      patch.length > MAX_PATCH_CHARS ? `${patch.slice(0, MAX_PATCH_CHARS)}\n… (truncated)` : patch;
-    lines.push(`### ${neutralizeDelimiters(filename)}`, wrapDiff(bounded), '');
+    lines.push(`### ${neutralizeDelimiters(filename)}`, wrapDiff(patch), '');
   }
   return lines.join('\n');
 }
@@ -365,7 +581,7 @@ export async function applyGating(
       markUnavailable(
         findingIndex,
         fullPatches.has(f.file)
-          ? 'finding lines match no hunk in the diff — not sent to the verifier'
+          ? 'no hunk context fits the safe verifier bound — not sent to the verifier'
           : 'no diff context for this file — not sent to the verifier'
       );
     }

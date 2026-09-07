@@ -49,3 +49,14 @@ describe('buildPrompt — severity bias', () => {
     expect(systemPrompt).not.toContain('Severity calibration');
   });
 });
+
+describe('buildPrompt — diff budget', () => {
+  it('fails closed when a caller bypasses chunking with an oversized secured diff', async () => {
+    const chunk = makeChunk();
+    chunk.files[0]!.patch = `@@ -0,0 +1,1 @@\n+${'x'.repeat(64 * 1024)}`;
+
+    await expect(buildPrompt(chunk, makeRole())).rejects.toThrow(
+      /secured diff requires.*65,536 bytes/i
+    );
+  });
+});
