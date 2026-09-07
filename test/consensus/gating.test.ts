@@ -400,6 +400,23 @@ describe('relevantPatchExcerpt', () => {
     expect(relevantPatchExcerpt(patch, [{ start: 1, end: 1 }])).toBe('');
   });
 
+  it(
+    'does not rescan a maximum-cap replacement for every matching line',
+    { timeout: 15_000 },
+    () => {
+      const sideLines = 31_980;
+      const patch = [
+        `@@ -1,${sideLines} +1,${sideLines} @@ replacement`,
+        ...Array.from({ length: sideLines }, (_, index) => `-old ${index}`),
+        ...Array.from({ length: sideLines }, (_, index) => `+new ${index}`),
+      ].join('\n');
+      const started = performance.now();
+
+      expect(relevantPatchExcerpt(patch, [{ start: 1, end: sideLines }])).toBe('');
+      expect(performance.now() - started).toBeLessThan(2_000);
+    }
+  );
+
   it.each([100, 101])(
     'keeps an oversized mid-file deletion unavailable at coordinate %i',
     (line) => {
