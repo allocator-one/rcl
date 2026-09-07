@@ -506,7 +506,7 @@ describe('round-5 hardening', () => {
     const input = { ...baseInput(), converge: { target: 't', round: 1 } };
     const run = buildRunHeader(input);
     input.roster[0]!.model = 'changed';
-    input.runner.kind = 'ci';
+    Object.assign(input.runner, { kind: 'ci' });
     input.converge.round = 99;
     expect(run.roster[0]!.model).toBe('anthropic/claude-fable-5');
     expect(run.runner.kind).toBe('human');
@@ -523,5 +523,16 @@ describe('round-5 hardening', () => {
     const a = file({ filename: 'app.bin', patch: '', additions: 0, deletions: 0 });
     const b = file({ filename: 'app.bin', patch: '', additions: 12, deletions: 3 });
     expect(diffDigest([a])).not.toBe(diffDigest([b]));
+  });
+});
+
+describe('round-6 hardening', () => {
+  it('validateSha trims whitespace, rejects off-by-one lengths and the null object id', () => {
+    expect(validateSha(`  ${'a'.repeat(40)}\n`, '--head-sha')).toBe('a'.repeat(40));
+    for (const len of [39, 41, 63, 65]) {
+      expect(() => validateSha('a'.repeat(len), '--head-sha')).toThrow(/--head-sha/);
+    }
+    expect(() => validateSha('0'.repeat(40), '--head-sha')).toThrow(/null object id/);
+    expect(() => validateSha('0'.repeat(64), '--expect-head-sha')).toThrow(/null object id/);
   });
 });

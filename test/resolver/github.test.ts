@@ -48,6 +48,39 @@ describe('isGitHubTarget', () => {
       expect(isGitHubTarget(local)).toBe(false);
     }
   });
+
+  it('accepts the URL variants people paste', () => {
+    for (const url of [
+      'https://github.com/o/r/pull/7/',
+      'https://github.com/o/r/pull/7/files',
+      'https://github.com/o/r/pull/7/commits',
+      'https://github.com/o/r/pull/7?diff=split',
+      'https://github.com/o/r/pull/7#discussion_r123',
+      'http://github.com/o/r/pull/7',
+      'https://www.github.com/o/r/pull/7',
+      'HTTPS://GitHub.com/o/r/pull/7',
+      'github.com/o/r/pull/7',
+    ]) {
+      expect(isGitHubTarget(url)).toBe(true);
+      expect(parseGitHubTarget(url)).toEqual({ owner: 'o', repo: 'r', number: 7 });
+    }
+  });
+
+  it('is anchored: local paths that merely contain a PR-like substring are patch files', () => {
+    for (const local of [
+      'patches/github.com/o/r/pull/1.patch',
+      './vendor/github.com/o/r/pull/12',
+      'test-github.com/o/r/pull/123',
+      'a/b/c#5',
+      'out/patches/round#2',
+      'notes#1.diff',
+      'o/r#abc',
+      'https://gitlab.com/o/r/pull/7',
+    ]) {
+      expect(isGitHubTarget(local)).toBe(false);
+    }
+    expect(() => parseGitHubTarget('a/b/c#5')).toThrow(/Invalid GitHub target/);
+  });
 });
 
 describe('fetchPRDiff', () => {

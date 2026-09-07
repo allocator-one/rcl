@@ -316,6 +316,10 @@ export function validateSha(value: string, flag: string): string {
       `${flag} must be a full 40- or 64-character hex commit SHA, got "${value}".`
     );
   }
+  // Git's null object id means "no object" — a review cannot be bound to it.
+  if (/^0+$/.test(sha)) {
+    throw new Error(`${flag} is the null object id (all zeros), which names no commit.`);
+  }
   return sha;
 }
 

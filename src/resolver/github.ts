@@ -8,8 +8,13 @@ export interface GitHubTarget {
   number: number;
 }
 
-const PR_URL = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
-const PR_SHORT = /^([^/]+)\/([^#]+)#(\d+)$/;
+// Anchored: the whole target must be a PR URL (any scheme, optional www,
+// optional sub-page such as /files, optional query or fragment) or the short
+// owner/repo#N form with single-segment owner and repo. A local path that
+// merely contains "github.com/…/pull/N" or ends in "#2" is not a PR.
+const PR_URL =
+  /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s#?]+)\/([^/\s#?]+)\/pull\/(\d+)(?:\/[^\s?#]*)?(?:[?#].*)?$/i;
+const PR_SHORT = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/;
 
 /**
  * Whether a positional target names a GitHub PR (`owner/repo#N` or a PR
