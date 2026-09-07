@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { buildRunEnvelope, declareArtifacts } from '../../src/telemetry/envelope.js';
+import { buildRunEnvelope, declareArtifacts, sanitizeForDelivery } from '../../src/telemetry/envelope.js';
 import { REDACTED } from '../../src/telemetry/scrub.js';
 import { sampleResult } from './fixtures.js';
 
@@ -134,6 +134,20 @@ describe('buildRunEnvelope', () => {
         else process.env[key] = before[key];
       }
     }
+  });
+
+  it('renders a delivery view of the report: scrubbed prose, parser message only, raw answer on opt-in', () => {
+    const result = sampleResult();
+    result.findings[0]!.description = 'quotes sk-ant-abcdefghijklmnopqrstuvwxyz';
+    const view = sanitizeForDelivery(result);
+    expect(view.findings[0]!.description).toBe(`quotes ${REDACTED}`);
+    expect(view.reviews[1]!.error).toBe('JSON parse error at position 12');
+    expect(JSON.stringify(view)).not.toContain('sk-ant-');
+    // The original is untouched.
+    expect(result.reviews[1]!.error).toContain('```json');
+
+    const verbose = sanitizeForDelivery(result, { parseFailures: true });
+    expect(verbose.reviews[1]!.error).toBe('JSON parse error at position 12\n[code omitted]');
   });
 
   it('refuses a report without a run header', () => {

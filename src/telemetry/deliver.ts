@@ -1,4 +1,6 @@
-import type { Config } from '../config/schema.js';
+import { cosmiconfig } from 'cosmiconfig';
+import { SEARCH_PLACES } from '../config/loader.js';
+import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { resolveDataDir } from '../models/stats-store.js';
 import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
@@ -6,6 +8,7 @@ import { buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type Telemetry
 import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
 import { Outbox } from './outbox.js';
+import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink } from './sink.js';
 
 /**
@@ -13,8 +16,9 @@ import { describeOutcome, HarnessSink } from './sink.js';
  * (epic IO-12475, section 8): resolve where the evidence goes, send it,
  * spool what could not be sent, and say in one dim line what happened.
  * Delivery never blocks a review on the network beyond its own timeouts,
- * and never changes the review's result — only `--evidence-required`
- * turns an unacknowledged delivery into an exit code.
+ * never changes the review's result, and never turns a local failure of its
+ * own (a read-only data dir, a torn file) into a failed review — only
+ * `--evidence-required` turns an unacknowledged delivery into an exit code.
  */
 
 export const STARTUP_FLUSH_DEADLINE_MS = 5_000;
@@ -35,6 +39,7 @@ export interface TelemetryRuntime {
 
 export interface RuntimeOptions {
   rclVersion: string;
+  /** The loaded project config; when omitted, the `harness` section is read from the project's config file. */
   config?: Config;
   /** `--no-telemetry` (commander passes `telemetry: false`). */
   noTelemetry?: boolean;
@@ -44,11 +49,13 @@ export interface RuntimeOptions {
   credentialsPath?: string;
   fetchImpl?: typeof fetch;
   stderr?: (line: string) => void;
+  /** `rcl telemetry` works on the user's outbox from any directory. */
+  requireRepo?: boolean;
 }
 
 /** `RCL_TELEMETRY=off` and `--no-telemetry` win; then `harness.telemetry`; default `full`. */
 export function resolveTelemetryLevel(
-  config: Config | undefined,
+  config: Pick<Config, 'harness'> | undefined,
   flags: { noTelemetry?: boolean },
   env: Record<string, string | undefined>
 ): TelemetryLevel {
@@ -57,13 +64,33 @@ export function resolveTelemetryLevel(
   return config?.harness?.telemetry ?? 'full';
 }
 
+/**
+ * The `harness` section of the project's config file, read without the
+ * full loader (whose fleet degradation warns on stderr — noise no startup
+ * flush should print). A missing or unusable file reads as no settings.
+ */
+export async function loadHarnessSettings(cwd: string): Promise<Pick<Config, 'harness'> | undefined> {
+  try {
+    const found = await cosmiconfig('review-council', { searchPlaces: SEARCH_PLACES }).search(cwd);
+    if (!found || found.isEmpty || typeof found.config !== 'object' || found.config === null) return undefined;
+    const harness = (found.config as { harness?: unknown }).harness;
+    if (harness === undefined) return {};
+    const parsed = HarnessSchema.safeParse(harness);
+    return parsed.success ? { harness: parsed.data } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function createTelemetryRuntime(options: RuntimeOptions): Promise<TelemetryRuntime> {
   const env = options.env ?? process.env;
+  const cwd = options.cwd ?? process.cwd();
   const dataDir = options.dataDir ?? resolveDataDir(env as NodeJS.ProcessEnv);
-  const level = resolveTelemetryLevel(options.config, { noTelemetry: options.noTelemetry }, env);
+  const config = options.config ?? (await loadHarnessSettings(cwd));
+  const level = resolveTelemetryLevel(config, { noTelemetry: options.noTelemetry }, env);
   const runtime: TelemetryRuntime = {
     level,
-    parseFailures: options.config?.harness?.parseFailures === true,
+    parseFailures: config?.harness?.parseFailures === true,
     outbox: new Outbox(`${dataDir}/outbox`),
     dataDir,
     rclVersion: options.rclVersion,
@@ -73,10 +100,11 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
 
   const resolved = await resolveHarnessCredential({
     env,
-    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    cwd,
     ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}),
+    ...(options.requireRepo !== undefined ? { requireRepo: options.requireRepo } : {}),
   });
-  if (!resolved.repoManaged) {
+  if (!resolved.repoManaged && options.requireRepo !== false) {
     // Not a Harness-managed repository: there is nowhere the evidence belongs.
     return { ...runtime, level: 'off' };
   }
@@ -100,21 +128,33 @@ export async function flushOutboxAtStart(runtime: TelemetryRuntime, deadlineMs =
     if (entries.length === 0) return;
     const summary = await runtime.outbox.flush(runtime.sink, { deadlineMs });
     if (summary.delivered.length > 0) {
-      runtime.stderr(`Delivered ${summary.delivered.length} spooled evidence entr${summary.delivered.length === 1 ? 'y' : 'ies'} to ${credentialHost(runtime.credential!)}.`);
+      runtime.stderr(
+        `Delivered ${summary.delivered.length} spooled evidence entr${summary.delivered.length === 1 ? 'y' : 'ies'} to ${credentialHost(runtime.credential!)}.`
+      );
     }
   } catch {
     // The outbox is a convenience; a broken data dir must not stop the command.
   }
 }
 
-export type DeliveryStatus = 'recorded' | 'spooled' | 'disabled' | 'rejected' | 'conflict' | 'skipped' | 'off';
+export type DeliveryStatus =
+  | 'recorded'
+  | 'spooled'
+  | 'disabled'
+  | 'rejected'
+  | 'conflict'
+  | 'skipped'
+  | 'off'
+  | 'error';
 
 export interface DeliveryOutcome {
   status: DeliveryStatus;
-  /** The one dim status line to print (empty when telemetry is off). */
+  /** The one dim status line to print (empty when telemetry is off and nothing was required). */
   line: string;
   url?: string;
   runId?: string;
+  /** Something waits in the outbox for `rcl telemetry flush`. */
+  spooled: boolean;
   /** 4 when `--evidence-required` and the envelope was not acknowledged. */
   exitCode: 0 | typeof EVIDENCE_REQUIRED_EXIT_CODE;
 }
@@ -130,21 +170,34 @@ function exitFor(status: DeliveryStatus, evidenceRequired: boolean): DeliveryOut
   return evidenceRequired && status !== 'recorded' ? EVIDENCE_REQUIRED_EXIT_CODE : 0;
 }
 
+function localFailure(err: unknown): string {
+  return scrubText(err instanceof Error ? err.message : String(err), 300);
+}
+
 /**
  * POST the envelope, PUT the artifacts (at `full`), POST any events; spool
- * whatever the server could not take because it was unreachable.
+ * whatever the server could not take because it was unreachable. Local
+ * failures (notice file, outbox) are reported, never thrown.
  */
 export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInput): Promise<DeliveryOutcome> {
   const evidenceRequired = input.evidenceRequired === true;
   if (runtime.level === 'off') {
-    return { status: 'off', line: '', exitCode: exitFor('off', evidenceRequired) };
+    return {
+      status: 'off',
+      line: evidenceRequired ? 'Evidence not sent: telemetry is off, or this repository is not Harness-managed' : '',
+      spooled: false,
+      exitCode: exitFor('off', evidenceRequired),
+    };
   }
   const runId = input.result.run?.id;
-  if (!runtime.sink || !runtime.credential || runId === undefined) {
-    const reason = runId === undefined ? 'the report has no run header' : runtime.note ?? 'no Harness credential';
-    return { status: 'skipped', line: `Evidence not sent: ${reason}`, exitCode: exitFor('skipped', evidenceRequired) };
+  if (runId === undefined) {
+    return {
+      status: 'skipped',
+      line: 'Evidence not sent: the report has no run header',
+      spooled: false,
+      exitCode: exitFor('skipped', evidenceRequired),
+    };
   }
-  const host = credentialHost(runtime.credential);
   const envelope = buildRunEnvelope(input.result, input.artifacts, {
     level: runtime.level,
     delivery: { mode: 'direct' },
@@ -153,27 +206,74 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
   const events = (input.events ?? []).filter(deliverable);
   const artifactsToSend: Partial<Record<ArtifactKind, string>> =
     runtime.level === 'full'
-      ? { report_json: input.artifacts.report_json, ...(input.artifacts.report_md !== undefined ? { report_md: input.artifacts.report_md } : {}) }
+      ? {
+          report_json: input.artifacts.report_json,
+          ...(input.artifacts.report_md !== undefined ? { report_md: input.artifacts.report_md } : {}),
+        }
       : {};
 
-  await ensureNoticeShown(host, runtime.dataDir, runtime.stderr);
+  if (!runtime.sink || !runtime.credential) {
+    // No credential to send with. When the caller insists on evidence, the
+    // run still goes to the outbox so a later login + flush can deliver it.
+    const reason = runtime.note ?? 'no Harness credential';
+    if (!evidenceRequired) {
+      return { status: 'skipped', line: `Evidence not sent: ${reason}`, runId, spooled: false, exitCode: 0 };
+    }
+    try {
+      await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
+      return {
+        status: 'skipped',
+        line: `Evidence spooled (${reason}); run rcl telemetry flush once a credential is available`,
+        runId,
+        spooled: true,
+        exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
+      };
+    } catch (err) {
+      return {
+        status: 'skipped',
+        line: `Evidence not sent: ${reason}; could not spool it either (${localFailure(err)})`,
+        runId,
+        spooled: false,
+        exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
+      };
+    }
+  }
+  const host = credentialHost(runtime.credential);
+
+  try {
+    await ensureNoticeShown(host, runtime.dataDir, runtime.stderr);
+  } catch {
+    // A notice that cannot be recorded shows again next time; never a failure.
+  }
 
   const posted = await runtime.sink.postRun(envelope);
   switch (posted.kind) {
     case 'unavailable': {
-      const spooled = await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
-      const dropped = spooled.artifactsDropped.length > 0 ? ' — artifacts not spooled: outbox over its cap' : '';
-      return {
-        status: 'spooled',
-        runId,
-        line: `Evidence spooled (Harness unreachable: ${posted.reason}); run rcl telemetry flush${dropped}`,
-        exitCode: exitFor('spooled', evidenceRequired),
-      };
+      try {
+        const spooled = await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
+        const dropped = spooled.artifactsDropped.length > 0 ? ' — artifacts not spooled: outbox over its cap' : '';
+        return {
+          status: 'spooled',
+          runId,
+          spooled: true,
+          line: `Evidence spooled (Harness unreachable: ${posted.reason}); run rcl telemetry flush${dropped}`,
+          exitCode: exitFor('spooled', evidenceRequired),
+        };
+      } catch (err) {
+        return {
+          status: 'error',
+          runId,
+          spooled: false,
+          line: `Evidence not sent (Harness unreachable: ${posted.reason}) and could not be spooled: ${localFailure(err)}`,
+          exitCode: exitFor('error', evidenceRequired),
+        };
+      }
     }
     case 'disabled':
       return {
         status: 'disabled',
         runId,
+        spooled: false,
         line: `Evidence not sent: ${host} has not enabled review evidence for this organization`,
         exitCode: exitFor('disabled', evidenceRequired),
       };
@@ -181,6 +281,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
       return {
         status: 'conflict',
         runId,
+        spooled: false,
         line: `Evidence conflict: ${host} already holds run ${runId} with a different report; nothing recorded`,
         exitCode: exitFor('conflict', evidenceRequired),
       };
@@ -188,6 +289,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
       return {
         status: 'rejected',
         runId,
+        spooled: false,
         line: `Evidence refused by ${host} (${describeOutcome(posted)}); nothing spooled`,
         exitCode: exitFor('rejected', evidenceRequired),
       };
@@ -198,8 +300,15 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
   const receipt = posted.value;
   const notes: string[] = [];
   const pendingArtifacts: Partial<Record<ArtifactKind, string>> = {};
+  let unreachable = false;
   for (const [kind, bytes] of Object.entries(artifactsToSend) as Array<[ArtifactKind, string]>) {
     if (!receipt.artifacts_expected.includes(kind)) continue;
+    if (unreachable) {
+      // The server went away mid-delivery: spool the rest instead of
+      // waiting out one timeout per artifact.
+      pendingArtifacts[kind] = bytes;
+      continue;
+    }
     const outcome = await runtime.sink.putArtifact(runId, kind, bytes);
     if (outcome.kind === 'ok') continue;
     if (outcome.kind === 'disabled') {
@@ -207,6 +316,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
       break;
     }
     if (outcome.kind === 'unavailable') {
+      unreachable = true;
       pendingArtifacts[kind] = bytes;
       continue;
     }
@@ -215,27 +325,42 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
 
   let pendingEvents: WireEvent[] = [];
   if (events.length > 0) {
-    const outcome = await runtime.sink.postEvents(events);
-    if (outcome.kind === 'unavailable') pendingEvents = events;
-    else if (outcome.kind === 'rejected' || outcome.kind === 'conflict') notes.push(`events refused: ${describeOutcome(outcome)}`);
+    if (unreachable) {
+      pendingEvents = events;
+    } else {
+      const outcome = await runtime.sink.postEvents(events);
+      if (outcome.kind === 'unavailable') pendingEvents = events;
+      else if (outcome.kind === 'rejected' || outcome.kind === 'conflict') notes.push(`events refused: ${describeOutcome(outcome)}`);
+    }
   }
 
+  let spooled = false;
   if (Object.keys(pendingArtifacts).length > 0 || pendingEvents.length > 0) {
-    await runtime.outbox.spoolRun({
-      runId,
-      envelope,
-      artifacts: pendingArtifacts,
-      events: pendingEvents,
-      envelopeDelivered: true,
-      runUrl: receipt.url,
-    });
-    notes.push('artifacts spooled; run rcl telemetry flush');
+    const parts = [
+      Object.keys(pendingArtifacts).length > 0 ? 'artifacts' : undefined,
+      pendingEvents.length > 0 ? 'events' : undefined,
+    ].filter((p): p is string => p !== undefined);
+    try {
+      await runtime.outbox.spoolRun({
+        runId,
+        envelope,
+        artifacts: pendingArtifacts,
+        events: pendingEvents,
+        envelopeDelivered: true,
+        runUrl: receipt.url,
+      });
+      spooled = true;
+      notes.push(`${parts.join(' and ')} spooled; run rcl telemetry flush`);
+    } catch (err) {
+      notes.push(`${parts.join(' and ')} not delivered and could not be spooled: ${localFailure(err)}`);
+    }
   }
 
   return {
     status: 'recorded',
     runId,
     url: receipt.url,
+    spooled,
     line: `Evidence recorded: ${receipt.url}${notes.length > 0 ? ` (${notes.join('; ')})` : ''}`,
     exitCode: 0,
   };
@@ -257,8 +382,12 @@ export async function emitConvergeEvents(
     case 'ok':
       return 'sent';
     case 'unavailable':
-      await runtime.outbox.spoolEvents(sendable);
-      return 'spooled';
+      try {
+        await runtime.outbox.spoolEvents(sendable);
+        return 'spooled';
+      } catch {
+        return 'refused';
+      }
     case 'disabled':
       return 'skipped';
     case 'conflict':

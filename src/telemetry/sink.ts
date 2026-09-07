@@ -138,6 +138,14 @@ export class HarnessSink {
     if (status >= 500 || status === 429 || status === 408) {
       return { kind: 'unavailable', reason: `HTTP ${status}${message ? ` ${message}` : ''}` };
     }
+    // A rejected credential is not a rejected run: after `harness login` (or
+    // a fresh CI token) the same entry can still land, so it stays spooled.
+    if (status === 401) {
+      return { kind: 'unavailable', reason: `HTTP 401 credential rejected${message ? ` (${message})` : ''} — log in again and run rcl telemetry flush` };
+    }
+    if (status >= 300 && status < 400) {
+      return { kind: 'rejected', httpStatus: status, error: 'redirected', message: 'the server redirected the request — check HARNESS_API_URL / the login host (redirects are not followed with a token)' };
+    }
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
@@ -164,9 +172,12 @@ export class HarnessSink {
 
   /** `PUT /api/v1/reviews/runs/:id/artifacts/:kind` — the raw bytes, never JSON. */
   async putArtifact(runId: string, kind: ArtifactKind, bytes: string): Promise<SinkOutcome<ArtifactReceipt>> {
+    if (kind !== 'report_json' && kind !== 'report_md') {
+      return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: String(kind) };
+    }
     const result = await this.request(
       'PUT',
-      `/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`,
+      `/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}`,
       bytes,
       'application/octet-stream'
     );

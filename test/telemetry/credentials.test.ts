@@ -47,7 +47,40 @@ describe('resolveHarnessCredential', () => {
       credentialsPath,
     });
     expect(malformed.credential).toBeUndefined();
-    expect(malformed.note).toMatch(/absolute http\(s\) URL/);
+    expect(malformed.note).toMatch(/absolute https URL/);
+  });
+
+  it('sends the token over TLS only, except to loopback hosts', async () => {
+    const plain = await resolveHarnessCredential({
+      env: { HARNESS_API_TOKEN: 'aone_ci', HARNESS_API_URL: 'http://harness.example.test' },
+      cwd: repo,
+      credentialsPath,
+    });
+    expect(plain.credential).toBeUndefined();
+    expect(plain.note).toMatch(/https/);
+
+    const local = await resolveHarnessCredential({
+      env: { HARNESS_API_TOKEN: 'aone_ci', HARNESS_API_URL: 'http://harness.infraone.localhost:4110/' },
+      cwd: repo,
+      credentialsPath,
+    });
+    expect(local.credential?.url).toBe('http://harness.infraone.localhost:4110');
+
+    await writeFile(credentialsPath, JSON.stringify({ url: 'http://stored.example.test', token: 'aone_login' }));
+    const storedPlain = await resolveHarnessCredential({ env: {}, cwd: repo, credentialsPath });
+    expect(storedPlain.credential).toBeUndefined();
+    expect(storedPlain.note).toMatch(/plain text/);
+  });
+
+  it('serves the outbox commands from any directory when the repo signal is not required', async () => {
+    const plain = await mkdtemp(join(tmpdir(), 'rcl-cred-anywhere-'));
+    try {
+      const resolved = await resolveHarnessCredential({ env: {}, cwd: plain, credentialsPath, requireRepo: false });
+      expect(resolved.repoManaged).toBe(false);
+      expect(resolved.credential?.source).toBe('login');
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
   });
 
   it('does not apply outside a Harness-managed repository', async () => {

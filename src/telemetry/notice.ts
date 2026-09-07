@@ -17,8 +17,13 @@ interface NoticeRecord {
 async function readRecord(path: string): Promise<NoticeRecord> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
-    if (typeof parsed === 'object' && parsed !== null && typeof (parsed as NoticeRecord).shown === 'object') {
-      return parsed as NoticeRecord;
+    const shown = (parsed as { shown?: unknown } | null)?.shown;
+    if (typeof shown === 'object' && shown !== null && !Array.isArray(shown)) {
+      const clean: Record<string, string> = {};
+      for (const [host, at] of Object.entries(shown as Record<string, unknown>)) {
+        if (typeof at === 'string') clean[host] = at;
+      }
+      return { shown: clean };
     }
   } catch {
     // Missing or malformed reads as "never shown".

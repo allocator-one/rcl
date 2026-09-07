@@ -216,6 +216,49 @@ export function buildRunEnvelope(
   };
 }
 
+/**
+ * The report as it may leave the machine: every free-text field scrubbed
+ * and a `parse_failed` call's error reduced to the parser message unless
+ * `parseFailures` opts in (fenced code removed, capped). The artifacts are
+ * rendered from this view — and written to `--json-file` / `--markdown`
+ * from it too — so what the server stores is exactly what was written, and
+ * neither contains a raw model answer or a key quoted from the diff.
+ */
+export function sanitizeForDelivery(result: ReviewResult, options: { parseFailures?: boolean } = {}): ReviewResult {
+  const parseFailures = options.parseFailures === true;
+  const finding = (f: ConsensusFinding): ConsensusFinding => ({
+    ...f,
+    file: scrubText(f.file),
+    title: scrubText(f.title, 500),
+    description: scrubText(f.description),
+    ...(f.suggestedFix !== undefined ? { suggestedFix: scrubText(f.suggestedFix) } : {}),
+    consensus: scrubDeep(f.consensus),
+  });
+  const review = (r: ModelReview): ModelReview => {
+    const error = callError(r, parseFailures);
+    const { error: _dropped, ...rest } = r;
+    return {
+      ...rest,
+      findings: r.findings.map((f) => ({
+        ...f,
+        file: scrubText(f.file),
+        title: scrubText(f.title, 500),
+        description: scrubText(f.description),
+        ...(f.suggestedFix !== undefined ? { suggestedFix: scrubText(f.suggestedFix) } : {}),
+      })),
+      ...(r.warnings ? { warnings: r.warnings.map((w) => scrubText(w)) } : {}),
+      ...(error !== undefined ? { error } : {}),
+    };
+  };
+  return {
+    ...result,
+    ...(result.run ? { run: scrubRunHeader(result.run) } : {}),
+    reviews: result.reviews.map(review),
+    findings: result.findings.map(finding),
+    ...(result.belowThresholdFindings ? { belowThresholdFindings: result.belowThresholdFindings.map(finding) } : {}),
+  };
+}
+
 /** The header is already allow-listed; its free-text runner claims still pass the scrubber. */
 function scrubRunHeader(run: RunHeader): RunHeader {
   return {

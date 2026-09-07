@@ -38,13 +38,22 @@ export interface CredentialOptions {
   env?: Record<string, string | undefined>;
   cwd?: string;
   credentialsPath?: string;
+  /** `rcl telemetry` operates on the user's outbox from anywhere; reviews need the repo signal. */
+  requireRepo?: boolean;
 }
 
-function normalizeUrl(raw: string): string | null {
+const LOOPBACK = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|[a-z0-9.-]+\.localhost)$/i;
+
+/**
+ * The token travels only over TLS, except to loopback hosts (a local
+ * development server). Returns the base URL without a trailing slash.
+ */
+export function normalizeUrl(raw: string): string | null {
   try {
     const url = new URL(raw);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    return raw.replace(/\/+$/, '');
+    if (url.protocol === 'https:') return raw.replace(/\/+$/, '');
+    if (url.protocol === 'http:' && LOOPBACK.test(url.hostname)) return raw.replace(/\/+$/, '');
+    return null;
   } catch {
     return null;
   }
@@ -55,7 +64,7 @@ export async function resolveHarnessCredential(
 ): Promise<CredentialResolution> {
   const env = options.env ?? process.env;
   const repoManaged = findHarnessRepoConfig(options.cwd ?? process.cwd()) !== null;
-  if (!repoManaged) return { repoManaged: false };
+  if (!repoManaged && options.requireRepo !== false) return { repoManaged: false };
 
   const envToken = (env['HARNESS_API_TOKEN'] ?? '').trim();
   const envUrl = (env['HARNESS_API_URL'] ?? '').trim();
@@ -68,7 +77,7 @@ export async function resolveHarnessCredential(
     }
     const url = normalizeUrl(envUrl);
     if (url === null) {
-      return { repoManaged, note: `HARNESS_API_URL is not an absolute http(s) URL: ${envUrl}` };
+      return { repoManaged, note: `HARNESS_API_URL must be an absolute https URL (http only for loopback hosts): ${envUrl}` };
     }
     return { repoManaged, credential: { url, token: envToken, source: 'env' } };
   }
@@ -80,7 +89,11 @@ export async function resolveHarnessCredential(
       note: 'not logged in to Harness — run `harness login` (or set HARNESS_API_TOKEN and HARNESS_API_URL in CI).',
     };
   }
-  return { repoManaged, credential: { url: stored.url, token: stored.token, source: 'login' } };
+  const storedUrl = normalizeUrl(stored.url);
+  if (storedUrl === null) {
+    return { repoManaged, note: `the stored Harness login names a host the token must not travel to in plain text: ${stored.url}` };
+  }
+  return { repoManaged, credential: { url: storedUrl, token: stored.token, source: 'login' } };
 }
 
 /** The host name a status line may name (never the token). */

@@ -43,7 +43,14 @@ report field is additive and pre-3.0 reports load unchanged.
 - **`rcl telemetry status | flush [--run <id>]`** for operators.
 - **Scrubbing.** Every free-text field that leaves the process (errors,
   warnings, runner claims, finding prose, consensus excerpts) is truncated and
-  scrubbed for bearer/key-shaped substrings.
+  scrubbed for bearer/key-shaped substrings. The reports written to
+  `--json-file` / `--markdown` are that same delivery view (a `parse_failed`
+  call keeps only the parser message unless `harness.parseFailures` is set),
+  so the uploaded artifacts are byte-identical to the files; with telemetry
+  off the raw report is written as before.
+- **Transport.** The Harness credential travels over TLS only, except to
+  loopback hosts (a local development server); a 401 keeps a spooled entry
+  for retry after re-login instead of failing it for good.
 - The rcl and rcl-converge skills document the evidence line, the
   `--evidence-required` flush-retry rule (five minutes, then stop the loop),
   and the opt-outs.

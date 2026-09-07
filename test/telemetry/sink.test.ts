@@ -60,6 +60,16 @@ describe('HarnessSink.postRun', () => {
     expect(forbidden).toMatchObject({ kind: 'rejected', httpStatus: 403 });
   });
 
+  it('keeps a spooled entry alive on 401 and explains a redirect', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const unauthorized = await sink(() => ({ status: 401, body: { error: 'unauthorized', message: 'expired' } })).sink.postRun(envelope);
+    expect(unauthorized).toMatchObject({ kind: 'unavailable' });
+    expect((unauthorized as { reason: string }).reason).toMatch(/401 credential rejected/);
+
+    const redirected = await sink(() => ({ status: 302 })).sink.postRun(envelope);
+    expect(redirected).toMatchObject({ kind: 'rejected', httpStatus: 302, error: 'redirected' });
+  });
+
   it('classifies 5xx, 429 and network failures as unavailable', async () => {
     const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     expect(await sink(() => ({ status: 503 })).sink.postRun(envelope)).toMatchObject({ kind: 'unavailable' });

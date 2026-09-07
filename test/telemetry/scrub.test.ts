@@ -17,6 +17,13 @@ describe('scrubSecrets', () => {
     expect(scrubbed.split(REDACTED).length - 1).toBe(7);
   });
 
+  it('redacts JWTs, AWS key ids and key=value assignments, keeping the key name', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c';
+    expect(scrubSecrets(`jwt ${jwt}`)).toBe(`jwt ${REDACTED}`);
+    expect(scrubSecrets('aws AKIAIOSFODNN7EXAMPLE')).toBe(`aws ${REDACTED}`);
+    expect(scrubSecrets('api_key=abcdefghij1234 token: "zyxwvutsrq9876"')).toBe(`api_key=${REDACTED} token: "${REDACTED}"`);
+  });
+
   it('redacts an opaque mixed-class token but keeps hex digests and prose', () => {
     const digest = 'f'.repeat(64);
     const sha = '3ffee698ed340e49943d4aa7f47d244a94b8ef87';
@@ -38,15 +45,17 @@ describe('scrubText', () => {
 });
 
 describe('scrubDeep', () => {
-  it('scrubs every nested string and leaves the structure alone', () => {
-    const value = { a: ['sk-ant-abcdefghijklmnopqrstuvwxyz', { b: 'fine', n: 3, z: null }] };
-    expect(scrubDeep(value)).toEqual({ a: [REDACTED, { b: 'fine', n: 3, z: null }] });
+  it('scrubs every nested string — keys included — and leaves the structure alone', () => {
+    const value = { a: ['sk-ant-abcdefghijklmnopqrstuvwxyz', { b: 'fine', n: 3, z: null }], 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123': 1 };
+    expect(scrubDeep(value)).toEqual({ a: [REDACTED, { b: 'fine', n: 3, z: null }], [REDACTED]: 1 });
   });
 });
 
 describe('stripFencedCode', () => {
-  it('drops fenced blocks, closed or not', () => {
+  it('drops backtick and tilde fences, closed or not', () => {
     expect(stripFencedCode('before ```json\n{"a":1}\n``` after')).toBe('before [code omitted] after');
     expect(stripFencedCode('open ```\nnever closed')).toBe('open [code omitted]');
+    expect(stripFencedCode('tilde ~~~json\n{"prompt":"raw"}\n~~~ done')).toBe('tilde [code omitted] done');
+    expect(stripFencedCode('long ````\nx\n```` end')).toBe('long [code omitted] end');
   });
 });

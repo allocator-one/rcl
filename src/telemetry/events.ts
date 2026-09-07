@@ -70,6 +70,9 @@ export function buildEvent(input: EventInput): WireEvent {
  * would be refused, so it is not worth sending.
  */
 export function deliverable(event: WireEvent): boolean {
-  if (!RUN_BOUND_KINDS.has(event.kind)) return event.kind !== 'attempt_claimed' || event.attempt !== undefined;
-  return event.run_id !== undefined && event.round !== undefined;
+  const counter = (n: number | undefined) => n === undefined || (Number.isSafeInteger(n) && n >= 1);
+  if (!counter(event.round) || !counter(event.attempt)) return false;
+  if (event.kind === 'attempt_claimed') return event.attempt !== undefined;
+  if (!RUN_BOUND_KINDS.has(event.kind)) return true;
+  return typeof event.run_id === 'string' && event.run_id !== '' && event.round !== undefined;
 }

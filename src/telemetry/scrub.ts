@@ -12,6 +12,10 @@ export const REDACTED = '[redacted]';
 const KEY_PATTERNS: RegExp[] = [
   // Authorization header values.
   /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi,
+  // JSON Web Tokens: three base64url segments.
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+  // AWS access key ids.
+  /\bAKIA[0-9A-Z]{16}\b/g,
   // OpenAI, Anthropic (sk-ant-), OpenRouter (sk-or-), project keys (sk-proj-).
   /\bsk-[A-Za-z0-9_-]{16,}/g,
   // GitHub tokens, classic and fine-grained.
@@ -23,15 +27,28 @@ const KEY_PATTERNS: RegExp[] = [
   /\b(?:aone|hcli)_[A-Za-z0-9]{16,}/g,
   // Slack.
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  // Any long opaque token mixing upper, lower and digits (never a pure hex
-  // digest, which has no upper-case letters).
-  /\b(?=[A-Za-z0-9+/=_-]{32,}\b)(?=[A-Za-z0-9+/=_-]*[A-Z])(?=[A-Za-z0-9+/=_-]*[a-z])(?=[A-Za-z0-9+/=_-]*[0-9])[A-Za-z0-9+/=_-]{32,}\b/g,
 ];
+
+/** `api_key=…`, `token: "…"` and the like: the value goes, the name stays. */
+const ASSIGNMENT = /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token)\s*[:=]\s*["']?)([^\s"',;]{8,})/gi;
+
+/**
+ * Any long opaque token mixing upper, lower and digits — never a pure hex
+ * digest (no upper-case letters) or a plain word. Matched with a simple
+ * bounded pattern and judged procedurally, so no backtracking blow-up.
+ */
+const OPAQUE_TOKEN = /\b[A-Za-z0-9+/=_-]{32,}\b/g;
+
+function opaqueToken(candidate: string): boolean {
+  return /[A-Z]/.test(candidate) && /[a-z]/.test(candidate) && /[0-9]/.test(candidate);
+}
 
 /** Replace every credential-shaped substring with `[redacted]`. */
 export function scrubSecrets(text: string): string {
   let out = text;
   for (const pattern of KEY_PATTERNS) out = out.replace(pattern, REDACTED);
+  out = out.replace(ASSIGNMENT, (_match, prefix: string) => `${prefix}${REDACTED}`);
+  out = out.replace(OPAQUE_TOKEN, (candidate) => (opaqueToken(candidate) ? REDACTED : candidate));
   return out;
 }
 
@@ -46,21 +63,25 @@ export function scrubOptional(text: string | undefined, max: number = MAX_FREE_T
   return text === undefined ? undefined : scrubText(text, max);
 }
 
-/** Scrub every string nested inside a JSON-like value (structure untouched). */
+/** Scrub every string nested inside a JSON-like value — keys included (structure untouched). */
 export function scrubDeep<T>(value: T): T {
   if (typeof value === 'string') return scrubText(value) as unknown as T;
   if (Array.isArray(value)) return value.map((item) => scrubDeep(item)) as unknown as T;
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = scrubDeep(item);
+      out[scrubSecrets(key)] = scrubDeep(item);
     }
     return out as T;
   }
   return value;
 }
 
-/** Drop fenced code blocks — a malformed model answer can echo the prompt, and the prompt contains the diff. */
+/**
+ * Drop fenced code blocks (backtick or tilde fences of three or more, closed
+ * or not) — a malformed model answer can echo the prompt, and the prompt
+ * contains the diff.
+ */
 export function stripFencedCode(text: string): string {
-  return text.replace(/```[\s\S]*?(?:```|$)/g, '[code omitted]');
+  return text.replace(/(`{3,}|~{3,})[\s\S]*?(?:\1|$)/g, '[code omitted]');
 }

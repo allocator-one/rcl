@@ -2,7 +2,7 @@
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
-import { readFile, writeFile } from 'fs/promises';
+import { readdir, readFile, writeFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -111,8 +111,11 @@ import {
   deliverRun,
   emitConvergeEvents,
   flushOutboxAtStart,
+  type DeliveryOutcome,
+  type TelemetryRuntime,
 } from './telemetry/deliver.js';
-import type { ArtifactBytes } from './telemetry/envelope.js';
+import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, type WireEvent } from './telemetry/events.js';
 import { credentialHost } from './telemetry/credentials.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
@@ -135,12 +138,20 @@ program
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
   if (name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  const flags = actionCommand.opts<{ telemetry?: boolean }>();
+  if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
+    // One cheap readdir before any credential or config work: most commands
+    // find an empty outbox and pay nothing.
+    const entries = await readdir(join(resolveDataDir(), 'outbox')).catch(() => [] as string[]);
+    if (entries.length === 0) return;
     await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
   } catch {
     // Never let the outbox stop the command the user asked for.
   }
 });
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
 async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
@@ -412,7 +423,19 @@ program
           throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
         }
 
-        const runId = typeof report.run?.id === 'string' ? report.run.id : undefined;
+        // The round remembers the report's run id only when it is a UUID and
+        // the report was produced for this converge target (a report copied
+        // from another target must not bind its run to this loop).
+        const reportRunId =
+          typeof report.run?.id === 'string' && UUID_PATTERN.test(report.run.id) ? report.run.id : undefined;
+        const reportTarget = report.run?.converge?.target;
+        const runId =
+          reportRunId !== undefined && (reportTarget === undefined || reportTarget === opts.target) ? reportRunId : undefined;
+        if (reportRunId !== undefined && runId === undefined) {
+          console.error(
+            chalk.yellow(`Report run ${reportRunId} belongs to converge target ${reportTarget}, not ${opts.target}; the round keeps no run id.`)
+          );
+        }
         const result = await processRoundReport({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
@@ -678,7 +701,7 @@ telemetry
   .description('Show the telemetry level, the credential source and every spooled delivery')
   .option('--json', 'Output JSON')
   .action(async (opts: { json?: boolean }) => {
-    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
     const entries = await runtime.outbox.list();
     const loss = await runtime.outbox.pendingLoss();
     const status = {
@@ -719,7 +742,7 @@ telemetry
   .option('--run <id>', 'Flush one spooled run only')
   .option('--json', 'Output JSON')
   .action(async (opts: { run?: string; json?: boolean }) => {
-    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
     if (!runtime.sink) {
       const reason = runtime.level === 'off' ? 'telemetry is off' : runtime.note ?? 'no Harness credential';
       console.error(chalk.red(`Cannot flush: ${reason}.`));
@@ -1637,9 +1660,26 @@ async function executeCouncil(
     );
   }
 
-  // The artifact bytes are rendered once: what --json-file and --markdown
-  // receive is exactly what the evidence declaration digests and uploads.
-  const artifacts: ArtifactBytes = { report_json: toJson(result), report_md: toMarkdown(result) };
+  // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
+  // turn a finished review into a failure unless --evidence-required asks.
+  let runtime: TelemetryRuntime | undefined;
+  try {
+    runtime = await createTelemetryRuntime({
+      rclVersion: RCL_VERSION,
+      config,
+      noTelemetry: opts.telemetry === false,
+    });
+  } catch (err) {
+    process.stderr.write(chalk.dim(`Evidence delivery unavailable: ${scrubText(String(err), 200)}`) + '\n');
+  }
+  // The report as it may leave the machine — free text scrubbed, a parse
+  // failure reduced to the parser message unless harness.parseFailures opts
+  // in. --json-file and --markdown are written from the same view, so the
+  // declared digests match the files and nothing raw travels. With
+  // telemetry off the raw report is written as before.
+  const delivered =
+    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+  const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
 
   // Output
   if (opts.json) {
@@ -1671,39 +1711,36 @@ async function executeCouncil(
     }
   }
 
-  // Evidence delivery (IO-12475 section 8): after the report is on disk and
-  // before any exit code, so a review is never lost to the network.
-  const runtime = await createTelemetryRuntime({
-    rclVersion: RCL_VERSION,
-    config,
-    noTelemetry: opts.telemetry === false,
-  });
-  const delivery = await deliverRun(runtime, {
-    result,
-    artifacts,
-    evidenceRequired: opts.evidenceRequired === true,
-  });
+  // Deliver after the report is on disk and before any exit code, so a
+  // review is never lost to the network.
+  const evidenceRequired = opts.evidenceRequired === true;
+  const delivery: DeliveryOutcome = runtime
+    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired }).catch((err: unknown) => ({
+        status: 'error' as const,
+        line: `Evidence delivery failed: ${scrubText(String(err), 300)}`,
+        exitCode: evidenceRequired ? (4 as const) : (0 as const),
+        spooled: false,
+      }))
+    : { status: 'off', line: '', exitCode: evidenceRequired ? 4 : 0, spooled: false };
   if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
-  const retryHint = `rcl telemetry flush${delivery.runId ? ` --run ${delivery.runId}` : ''}`;
+  // The flush hint is honest only when something was spooled to flush.
+  const evidenceFailure = delivery.spooled
+    ? `Evidence was not recorded (--evidence-required). Retry delivery with \`rcl telemetry flush --run ${delivery.runId}\` rather than re-running the review.`
+    : `Evidence was not recorded (--evidence-required): ${delivery.line || delivery.status}.`;
 
-  // CI mode: fail on a fully-failed run or on blocking findings
+  // CI mode: fail on a fully-failed run or on blocking findings. The gate
+  // verdict keeps its exit code — pipelines branch on it — and an evidence
+  // failure is reported beside it.
   if (opts.ci) {
     const verdict = evaluateCiGate(result);
     if (verdict.exitCode !== 0) {
       console.error(chalk.red(`\n${verdict.message}`));
-      if (delivery.exitCode !== 0) {
-        console.error(chalk.red(`Evidence was not recorded (--evidence-required); retry delivery with \`${retryHint}\`.`));
-        process.exit(delivery.exitCode);
-      }
+      if (delivery.exitCode !== 0) console.error(chalk.red(evidenceFailure));
       process.exit(verdict.exitCode);
     }
   }
   if (delivery.exitCode !== 0) {
-    console.error(
-      chalk.red(
-        `Evidence was not recorded (--evidence-required). Retry delivery with \`${retryHint}\` rather than re-running the review.`
-      )
-    );
+    console.error(chalk.red(evidenceFailure));
     process.exit(delivery.exitCode);
   }
 }

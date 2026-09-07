@@ -36,4 +36,11 @@ describe('deliverable', () => {
     expect(deliverable(buildEvent({ kind: 'cap_changed' }))).toBe(true);
     expect(deliverable(buildEvent({ kind: 'loss' }))).toBe(true);
   });
+
+  it('refuses counters that are not positive integers', () => {
+    expect(deliverable(buildEvent({ kind: 'attempt_claimed', attempt: Number.NaN }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'attempt_claimed', attempt: 0 }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'round_processed', round: 1.5, runId: 'r' }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'round_processed', round: 2, runId: '' }))).toBe(false);
+  });
 });

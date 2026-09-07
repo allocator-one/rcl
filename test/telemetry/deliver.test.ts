@@ -167,10 +167,63 @@ describe('telemetry delivery', () => {
     }
 
     const noLogin = await runtime(acceptEverything, { credentialsPath: join(repo, 'missing.json') });
-    const outcome = await deliverRun(noLogin.rt, { result: sampleResult(), artifacts: ARTIFACTS, evidenceRequired: true });
-    expect(outcome.status).toBe('skipped');
+    const outcome = await deliverRun(noLogin.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    expect(outcome).toMatchObject({ status: 'skipped', spooled: false, exitCode: 0 });
     expect(outcome.line).toMatch(/^Evidence not sent: not logged in to Harness/);
-    expect(outcome.exitCode).toBe(EVIDENCE_REQUIRED_EXIT_CODE);
+    expect(await noLogin.rt.outbox.list()).toEqual([]);
+  });
+
+  it('spools an evidence-required run when no credential is available, and says so when telemetry is off', async () => {
+    const noLogin = await runtime(acceptEverything, { credentialsPath: join(repo, 'missing.json') });
+    const result = sampleResult();
+    const outcome = await deliverRun(noLogin.rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    expect(outcome).toMatchObject({ status: 'skipped', spooled: true, exitCode: EVIDENCE_REQUIRED_EXIT_CODE });
+    expect(outcome.line).toMatch(/^Evidence spooled \(not logged in to Harness/);
+    expect((await noLogin.rt.outbox.list()).map((e) => e.id)).toEqual([result.run!.id]);
+
+    const off = await runtime(acceptEverything, { noTelemetry: true });
+    expect(await deliverRun(off.rt, { result: sampleResult(), artifacts: ARTIFACTS, evidenceRequired: true })).toMatchObject({
+      status: 'off',
+      line: 'Evidence not sent: telemetry is off, or this repository is not Harness-managed',
+      exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
+    });
+  });
+
+  it('reads the harness section of the project config when none is passed, and serves the outbox from anywhere on request', async () => {
+    await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n', 'utf8');
+    const configured = await runtime(acceptEverything);
+    expect(configured.rt.level).toBe('off');
+
+    await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: findings\n  parseFailures: true\n', 'utf8');
+    const findings = await runtime(acceptEverything);
+    expect(findings.rt.level).toBe('findings');
+    expect(findings.rt.parseFailures).toBe(true);
+
+    const plain = await mkdtemp(join(tmpdir(), 'rcl-deliver-anywhere-'));
+    try {
+      const anywhere = await runtime(acceptEverything, { cwd: plain, requireRepo: false });
+      expect(anywhere.rt.sink).toBeDefined();
+      expect(anywhere.rt.credential?.source).toBe('login');
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
+  });
+
+  it('spools the remaining artifacts as soon as one upload finds the server gone', async () => {
+    let puts = 0;
+    const flaky = await runtime((request) => {
+      if (request.url.includes('/artifacts/')) {
+        puts += 1;
+        return new TypeError('fetch failed');
+      }
+      return acceptEverything(request);
+    });
+    const outcome = await deliverRun(flaky.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    expect(outcome.status).toBe('recorded');
+    expect(outcome.spooled).toBe(true);
+    expect(outcome.line).toContain('artifacts spooled; run rcl telemetry flush');
+    expect(puts).toBe(1);
+    expect((await flaky.rt.outbox.list())[0]).toMatchObject({ artifacts: ['report_json', 'report_md'], meta: { envelope_delivered: true } });
   });
 
   it('emits converge events, spooling them when unreachable and skipping undeliverable ones', async () => {
