@@ -3,7 +3,7 @@ import { join, resolve, sep } from 'path';
 import { resolveDataDir } from '../models/stats-store.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import { buildEvent, type WireEvent } from './events.js';
-import type { HarnessSink } from './sink.js';
+import type { HarnessSink, RequestOptions } from './sink.js';
 
 /**
  * Failed deliveries wait here (epic IO-12475, section 8.4): one directory
@@ -40,6 +40,9 @@ const LOSS_DIR = 'loss';
 const FAILED_MARKER = 'failed.json';
 /** A loss report the server refused stays on disk under this suffix; it is never retried or counted as reported. */
 const LOSS_REFUSED_SUFFIX = '.refused';
+/** Loss reports go out in batches this size, well under the server's event cap. */
+const LOSS_BATCH = 100;
+const LOSS_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i;
 /** A directory without `meta.json` older than this is an interrupted spool, not one in progress. */
 export const INTERRUPTED_SPOOL_MS = 10 * 60 * 1000;
 
@@ -107,7 +110,11 @@ export interface FlushSummary {
   stopped?: 'unavailable' | 'deadline';
   /** Pending loss reports delivered in this flush. */
   lossReported?: number;
+  /** Loss reports still waiting after this flush (unreachable, out of time, or not all acknowledged). */
+  lossPending?: number;
 }
+
+type LossOutcome = { kind: 'done'; reported: number } | { kind: 'unavailable' } | { kind: 'deadline' };
 
 type ReadResult<T> =
   | { kind: 'ok'; value: T; raw: string }
@@ -245,6 +252,9 @@ export class Outbox {
   /** Spool a run whose delivery failed (or whose artifacts could not be uploaded). */
   async spoolRun(input: SpoolRunInput): Promise<SpoolResult> {
     if (!UUID.test(input.runId)) throw new OutboxError(`Not a run id: ${JSON.stringify(input.runId)}`);
+    if (input.envelope.run?.id !== input.runId) {
+      throw new OutboxError(`Envelope run id ${JSON.stringify(input.envelope.run?.id)} does not match the entry id ${input.runId}.`);
+    }
     const dir = this.entryDir(input.runId);
     await mkdir(join(dir, ARTIFACTS_DIR), { recursive: true, mode: 0o700 });
     const existing = await readOptionalJson<OutboxMeta>(join(dir, META_FILE));
@@ -317,18 +327,41 @@ export class Outbox {
 
   /** The loss events still to report. */
   async pendingLoss(): Promise<WireEvent[]> {
-    let names: string[];
+    return (await this.pendingLossFiles()).map((f) => f.event);
+  }
+
+  /** Loss reports the server refused for good, kept on disk (`<id>.json.refused`) and never retried. */
+  async refusedLoss(): Promise<string[]> {
     try {
-      names = (await readdir(join(this.dir, LOSS_DIR))).filter((n) => n.endsWith('.json')).sort();
+      return (await readdir(join(this.dir, LOSS_DIR))).filter((n) => n.endsWith(`.json${LOSS_REFUSED_SUFFIX}`)).sort();
     } catch {
       return [];
     }
-    const events: WireEvent[] = [];
-    for (const name of names) {
-      const read = await readJson<WireEvent>(join(this.dir, LOSS_DIR, name));
-      if (read.kind === 'ok' && isRecord(read.value) && typeof read.value['id'] === 'string') events.push(read.value);
+  }
+
+  /**
+   * Loss files whose name is `<uuid>.json` and whose event carries that very
+   * id — only such a file ever becomes a path again. Anything else in the
+   * directory is ignored, never reported and never touched.
+   */
+  private async pendingLossFiles(): Promise<Array<{ name: string; event: WireEvent }>> {
+    let names: string[];
+    try {
+      names = (await readdir(join(this.dir, LOSS_DIR))).sort();
+    } catch {
+      return [];
     }
-    return events;
+    const files: Array<{ name: string; event: WireEvent }> = [];
+    for (const name of names) {
+      const match = LOSS_FILE.exec(name);
+      if (!match) continue;
+      const read = await readJson<WireEvent>(join(this.dir, LOSS_DIR, name));
+      if (read.kind !== 'ok' || !isRecord(read.value)) continue;
+      const id = read.value['id'];
+      if (typeof id !== 'string' || id.toLowerCase() !== match[1]!.toLowerCase()) continue;
+      files.push({ name, event: read.value });
+    }
+    return files;
   }
 
   async list(): Promise<OutboxEntry[]> {
@@ -379,6 +412,10 @@ export class Outbox {
     const now = options.now ?? Date.now;
     const started = now();
     const pastDeadline = () => options.deadlineMs !== undefined && now() - started >= options.deadlineMs;
+    // Every request is bounded by what remains of the deadline, so a flush
+    // given five seconds cannot sit in one ten-second request.
+    const request = (): RequestOptions =>
+      options.deadlineMs === undefined ? {} : { timeoutMs: Math.max(1, options.deadlineMs - (now() - started)) };
     const summary: FlushSummary = { delivered: [], remaining: [], failed: [] };
 
     const entries = (await this.list()).filter((e) => options.runId === undefined || e.id === options.runId);
@@ -396,7 +433,7 @@ export class Outbox {
         summary.remaining.push(entry.id);
         continue;
       }
-      const result = await this.flushEntry(sink, entry, pastDeadline).catch((err: unknown) => {
+      const result = await this.flushEntry(sink, entry, pastDeadline, request).catch((err: unknown) => {
         if (err instanceof EntryGone) return { kind: 'delivered' as const };
         throw err;
       });
@@ -422,8 +459,11 @@ export class Outbox {
     }
 
     if (summary.stopped !== 'unavailable' && options.runId === undefined) {
-      const reported = await this.reportLoss(sink, pastDeadline);
-      if (reported > 0) summary.lossReported = reported;
+      const loss = await this.reportLoss(sink, pastDeadline, request);
+      if (loss.kind === 'done' && loss.reported > 0) summary.lossReported = loss.reported;
+      if (loss.kind !== 'done' && !summary.stopped) summary.stopped = loss.kind;
+      const pending = (await this.pendingLossFiles()).length;
+      if (pending > 0) summary.lossPending = pending;
     }
     return summary;
   }
@@ -431,7 +471,8 @@ export class Outbox {
   private async flushEntry(
     sink: HarnessSink,
     entry: OutboxEntry,
-    pastDeadline: () => boolean
+    pastDeadline: () => boolean,
+    request: () => RequestOptions
   ): Promise<
     | { kind: 'delivered' }
     | { kind: 'failed'; reason: string }
@@ -455,6 +496,11 @@ export class Outbox {
     };
     await remember();
 
+    // A 409 means the server already holds this run id with a different
+    // report: the envelope is refused for good, but the events queued with
+    // it are independent (idempotent by id) and still go out first.
+    let conflict: string | undefined;
+
     if (meta.kind === 'run' && !meta.envelope_delivered) {
       const read = await readJson<RunEnvelope>(join(dir, ENVELOPE_FILE));
       if (read.kind === 'error') {
@@ -466,7 +512,7 @@ export class Outbox {
       }
       const envelope = read.value;
       envelope.delivery = { mode: 'retried', spooled_at: meta.spooled_at };
-      const outcome = await sink.postRun(envelope);
+      const outcome = await sink.postRun(envelope, request());
       switch (outcome.kind) {
         case 'ok':
           meta.envelope_delivered = true;
@@ -481,13 +527,14 @@ export class Outbox {
           await this.drop(dir);
           return { kind: 'failed', reason: outcome.message || outcome.reason };
         case 'conflict':
-          return this.markFailed(dir, `conflict: ${outcome.message}`);
+          conflict = `conflict: ${outcome.message}`;
+          break;
         case 'rejected':
           return this.markFailed(dir, `HTTP ${outcome.httpStatus} ${outcome.error} ${outcome.message}`.trim());
       }
     }
 
-    if (meta.kind === 'run') {
+    if (meta.kind === 'run' && conflict === undefined) {
       for (const kind of entry.artifacts) {
         if (pastDeadline()) return { kind: 'deadline' };
         const path = join(dir, ARTIFACTS_DIR, ARTIFACT_FILES[kind]);
@@ -499,7 +546,7 @@ export class Outbox {
           await remember(`artifact ${kind} unreadable: ${err instanceof Error ? err.message : String(err)}`);
           return { kind: 'retry' };
         }
-        const outcome = await sink.putArtifact(entry.id, kind, bytes);
+        const outcome = await sink.putArtifact(entry.id, kind, bytes, request());
         switch (outcome.kind) {
           case 'ok':
             await rm(path, { force: true });
@@ -538,7 +585,7 @@ export class Outbox {
     }
     if (events.kind === 'ok' && validEvents(events.value) && events.value.length > 0) {
       if (pastDeadline()) return { kind: 'deadline' };
-      const outcome = await sink.postEvents(events.value);
+      const outcome = await sink.postEvents(events.value, request());
       switch (outcome.kind) {
         case 'ok':
           await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, events.value);
@@ -562,16 +609,19 @@ export class Outbox {
       await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, []);
     }
 
-    await this.finish(dir, meta);
-    return { kind: 'delivered' };
+    if (conflict !== undefined) return this.markFailed(dir, conflict);
+
+    // Whatever arrived while flushing stays for the next flush; the entry
+    // is only "delivered" once nothing of it remains.
+    return (await this.finish(dir, meta)) ? { kind: 'delivered' } : { kind: 'retry' };
   }
 
   /**
    * Everything this flush read has been delivered: remove exactly those
    * files, then the directory — which stays, listed, if another process
-   * put something new into it meanwhile.
+   * put something new into it meanwhile. Returns whether the directory went.
    */
-  private async finish(dir: string, meta: OutboxMeta): Promise<void> {
+  private async finish(dir: string, meta: OutboxMeta): Promise<boolean> {
     await rm(join(dir, ENVELOPE_FILE), { force: true });
     await rm(join(dir, FAILED_MARKER), { force: true });
     await this.sweepTempFiles(dir);
@@ -579,11 +629,13 @@ export class Outbox {
     await rm(join(dir, META_FILE), { force: true });
     try {
       await rmdir(dir);
+      return true;
     } catch (err) {
-      if (isEnoent(err)) return;
+      if (isEnoent(err)) return true;
       if ((err as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw err;
       // Something arrived while flushing: keep the entry visible for the next flush.
       await writeJsonAtomic(join(dir, META_FILE), { ...meta, envelope_delivered: true }).catch(() => undefined);
+      return false;
     }
   }
 
@@ -615,26 +667,48 @@ export class Outbox {
   }
 
   /**
-   * Report pending losses with their stable ids. A file goes once the server
-   * has taken it, or when the organization has switched evidence off (there
-   * is nobody to report to). One the server refuses is kept under a
-   * `.refused` suffix — visible on disk, never retried, never counted.
+   * Report pending losses with their stable ids, in bounded batches. A batch's
+   * files go once the server has taken every event in it (inserted or
+   * already known), or when the organization has switched evidence off
+   * (there is nobody to report to). A batch the server refuses is kept under
+   * a `.refused` suffix — visible on disk and in `rcl telemetry status`,
+   * never retried, never counted. An unreachable server or an expired
+   * deadline ends the pass with the rest still pending.
    */
-  private async reportLoss(sink: HarnessSink, pastDeadline: () => boolean): Promise<number> {
-    const events = await this.pendingLoss();
-    if (events.length === 0 || pastDeadline()) return 0;
-    const outcome = await sink.postEvents(events);
-    if (outcome.kind === 'ok' || outcome.kind === 'disabled') {
-      for (const event of events) await rm(join(this.dir, LOSS_DIR, `${event.id}.json`), { force: true });
-      return outcome.kind === 'ok' ? events.length : 0;
-    }
-    if (outcome.kind === 'rejected' || outcome.kind === 'conflict') {
-      for (const event of events) {
-        const path = join(this.dir, LOSS_DIR, `${event.id}.json`);
-        await rename(path, `${path}${LOSS_REFUSED_SUFFIX}`).catch(() => undefined);
+  private async reportLoss(sink: HarnessSink, pastDeadline: () => boolean, request: () => RequestOptions): Promise<LossOutcome> {
+    const files = await this.pendingLossFiles();
+    let reported = 0;
+    for (let i = 0; i < files.length; i += LOSS_BATCH) {
+      if (pastDeadline()) return { kind: 'deadline' };
+      const batch = files.slice(i, i + LOSS_BATCH);
+      const outcome = await sink.postEvents(
+        batch.map((f) => f.event),
+        request()
+      );
+      switch (outcome.kind) {
+        case 'ok': {
+          const accounted = outcome.value.inserted + outcome.value.duplicates;
+          // Anything the server did not account for stays for the next flush; it dedupes by id.
+          if (accounted < batch.length) return { kind: 'done', reported };
+          for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true });
+          reported += batch.length;
+          break;
+        }
+        case 'disabled':
+          for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true });
+          break;
+        case 'conflict':
+        case 'rejected':
+          for (const f of batch) {
+            const path = join(this.dir, LOSS_DIR, f.name);
+            await rename(path, `${path}${LOSS_REFUSED_SUFFIX}`).catch(() => undefined);
+          }
+          break;
+        case 'unavailable':
+          return { kind: 'unavailable' };
       }
     }
-    return 0;
+    return { kind: 'done', reported };
   }
 
   /** Remove one entry by id (validated like every other id). */

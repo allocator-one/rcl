@@ -255,6 +255,8 @@ describe('telemetry delivery', () => {
     ];
     expect(await emitConvergeEvents(up.rt, events)).toBe('sent');
     expect((JSON.parse(up.requests[0]!.body!) as { events: unknown[] }).events).toHaveLength(1);
+    // The consent notice precedes the first transmission of any kind.
+    expect(lines.join('\n')).toContain('records evidence of this review on harness.example.test');
 
     const down = await runtime(() => new TypeError('fetch failed'));
     expect(await emitConvergeEvents(down.rt, [events[0]!])).toBe('spooled');

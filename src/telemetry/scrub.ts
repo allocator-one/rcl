@@ -14,8 +14,8 @@ const KEY_PATTERNS: RegExp[] = [
   /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi,
   // JSON Web Tokens: three base64url segments.
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-  // AWS access key ids.
-  /\bAKIA[0-9A-Z]{16}\b/g,
+  // AWS access key ids, long-lived (AKIA) and temporary STS (ASIA).
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
   // OpenAI, Anthropic (sk-ant-), OpenRouter (sk-or-), project keys (sk-proj-).
   /\bsk-[A-Za-z0-9_-]{16,}/g,
   // GitHub tokens, classic and fine-grained.
@@ -29,8 +29,16 @@ const KEY_PATTERNS: RegExp[] = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
 ];
 
-/** `api_key=…`, `token: "…"` and the like: the value goes, the name stays. */
-const ASSIGNMENT = /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token)\s*[:=]\s*["']?)([^\s"',;]{8,})/gi;
+/**
+ * `api_key=…`, `token: "…"` and the like: the value goes, the name stays. A
+ * quoted value is consumed through its closing quote whatever it contains
+ * (spaces, commas, a short passphrase); an unquoted one is a run of eight or
+ * more non-delimiter characters — shorter unquoted runs are left alone so
+ * that prose such as `token: string` keeps its type name.
+ */
+const SENSITIVE_KEY = String.raw`(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token)`;
+const ASSIGNMENT_QUOTED = new RegExp(String.raw`\b(${SENSITIVE_KEY}\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*')`, 'gi');
+const ASSIGNMENT = new RegExp(String.raw`\b(${SENSITIVE_KEY}\s*[:=]\s*)([^\s"',;]{8,})`, 'gi');
 
 /**
  * Any long opaque token mixing upper, lower and digits — never a pure hex
@@ -47,16 +55,42 @@ function opaqueToken(candidate: string): boolean {
 export function scrubSecrets(text: string): string {
   let out = text;
   for (const pattern of KEY_PATTERNS) out = out.replace(pattern, REDACTED);
+  out = out.replace(ASSIGNMENT_QUOTED, redactQuoted);
   out = out.replace(ASSIGNMENT, (_match, prefix: string) => `${prefix}${REDACTED}`);
   out = out.replace(OPAQUE_TOKEN, (candidate) => (opaqueToken(candidate) ? REDACTED : candidate));
   return out;
 }
 
-/** Scrub, then cap at `max` characters (grapheme-safe, with an ellipsis). */
+/** `key="value"` → `key="[redacted]"`: the quotes stay so the text still reads as an assignment. */
+function redactQuoted(match: string, prefix: string): string {
+  const quote = match.charAt(prefix.length);
+  return `${prefix}${quote}${REDACTED}${quote}`;
+}
+
+/**
+ * Scrub, then cap at `max` characters (grapheme-safe, with an ellipsis).
+ * The scrub passes run over at most four times the cap: a huge input is cut
+ * first, generously enough that a secret straddling the final cut is still
+ * matched in full before the exact cap is applied.
+ */
 export function scrubText(text: string, max: number = MAX_FREE_TEXT): string {
-  const scrubbed = scrubSecrets(text);
-  if (scrubbed.length <= max) return scrubbed;
+  const bounded = text.length > max * 4 ? text.slice(0, max * 4) : text;
+  const scrubbed = scrubSecrets(bounded);
+  if (scrubbed.length <= max && bounded === text) return scrubbed;
   return `${[...scrubbed].slice(0, Math.max(0, max - 1)).join('')}…`;
+}
+
+/**
+ * Identifiers that come from configuration rather than prose — model ids,
+ * roles, providers: key-shaped substrings go, but a long mixed-case id such as
+ * `anthropic/Claude-Sonnet-4-5-20250929` is not an opaque token and stays.
+ */
+export function scrubIdentifier(text: string, max: number = 200): string {
+  let out = text;
+  for (const pattern of KEY_PATTERNS) out = out.replace(pattern, REDACTED);
+  out = out.replace(ASSIGNMENT_QUOTED, redactQuoted);
+  out = out.replace(ASSIGNMENT, (_match, prefix: string) => `${prefix}${REDACTED}`);
+  return out.length <= max ? out : `${[...out].slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
 export function scrubOptional(text: string | undefined, max: number = MAX_FREE_TEXT): string | undefined {
@@ -78,10 +112,28 @@ export function scrubDeep<T>(value: T): T {
 }
 
 /**
- * Drop fenced code blocks (backtick or tilde fences of three or more, closed
- * or not) — a malformed model answer can echo the prompt, and the prompt
- * contains the diff.
+ * Drop fenced code blocks — a malformed model answer can echo the prompt,
+ * and the prompt contains the diff. Fences follow CommonMark: a run of three
+ * or more backticks or tildes opens a block, and it closes at the next run
+ * of the same character at least as long; an unclosed block runs to the end.
+ * Fences may sit mid-line (a model rarely starts a new line for them).
  */
 export function stripFencedCode(text: string): string {
-  return text.replace(/(`{3,}|~{3,})[\s\S]*?(?:\1|$)/g, '[code omitted]');
+  const fence = /(`{3,}|~{3,})/g;
+  let out = '';
+  let cursor = 0;
+  let open: { char: string; length: number } | undefined;
+  let match: RegExpExecArray | null;
+  while ((match = fence.exec(text)) !== null) {
+    const run = match[1]!;
+    if (!open) {
+      out += `${text.slice(cursor, match.index)}[code omitted]`;
+      open = { char: run[0]!, length: run.length };
+      cursor = match.index + run.length;
+    } else if (run[0] === open.char && run.length >= open.length) {
+      open = undefined;
+      cursor = match.index + run.length;
+    }
+  }
+  return open ? out : out + text.slice(cursor);
 }

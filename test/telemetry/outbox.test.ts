@@ -231,13 +231,16 @@ describe('Outbox', () => {
     await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, events: [first] });
     const late = buildEvent({ kind: 'resolution', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} });
     const { sink } = fakeSink({});
-    // Another process spools an event for the same run while the events POST is in flight.
+    // Another process (a second Outbox over the same directory) spools an
+    // event for the same run while the events POST is in flight.
+    const other = new Outbox(dir);
     const original = sink.postEvents.bind(sink);
     sink.postEvents = async (events: WireEvent[]) => {
-      await outbox.spoolRun({ runId: envelope.run.id, envelope, events: [late], envelopeDelivered: true });
+      await other.spoolRun({ runId: envelope.run.id, envelope, events: [late], envelopeDelivered: true });
       return original(events);
     };
-    expect(await outbox.flush(sink)).toMatchObject({ delivered: [envelope.run.id] });
+    // The late event keeps the entry: this pass delivered its snapshot, the entry itself remains.
+    expect(await outbox.flush(sink)).toMatchObject({ delivered: [], remaining: [envelope.run.id] });
     const [kept] = await outbox.list();
     expect(kept).toMatchObject({ id: envelope.run.id, events: 1, artifacts: [], meta: { envelope_delivered: true } });
     const remaining = JSON.parse(await readFile(join(dir, envelope.run.id, 'events.json'), 'utf8')) as WireEvent[];
@@ -276,6 +279,77 @@ describe('Outbox', () => {
     await outbox.spoolRun({ runId: OTHER_RUN, envelope: { ...envelope, run: { ...envelope.run, id: OTHER_RUN } } });
     clock += 1;
     expect((await outbox.list())[0]!.failed).toBeUndefined();
+  });
+
+  it('refuses an envelope whose run id differs from the entry id', async () => {
+    const outbox = new Outbox(dir);
+    await expect(outbox.spoolRun({ runId: OTHER_RUN, envelope })).rejects.toThrow(/does not match the entry id/);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('never turns a crafted loss file into a path, and lists refused reports', async () => {
+    const outbox = new Outbox(dir, { capBytes: 1 });
+    await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, envelopeDelivered: true });
+    const [loss] = await outbox.pendingLoss();
+    // A file whose name and id disagree, and one with a traversal id, are ignored.
+    await writeFile(join(dir, 'loss', `${OTHER_RUN}.json`), JSON.stringify({ ...loss, id: '../../escape' }), 'utf8');
+    await writeFile(join(dir, 'loss', 'escape.json'), JSON.stringify({ ...loss, id: '../escape' }), 'utf8');
+    expect((await outbox.pendingLoss()).map((e) => e.id)).toEqual([loss!.id]);
+
+    const refused = fakeSink({ postEvents: [{ kind: 'rejected', httpStatus: 422, error: 'validation_error', message: 'bad' }] });
+    const summary = await outbox.flush(refused.sink);
+    expect(summary.lossReported).toBeUndefined();
+    expect(summary.lossPending).toBeUndefined();
+    expect(await outbox.refusedLoss()).toEqual([`${loss!.id}.json.refused`]);
+    expect(await readdir(join(dir, '..'))).not.toContain('escape');
+    // The ignored files are left exactly where they were.
+    expect(await readdir(join(dir, 'loss'))).toEqual(expect.arrayContaining([`${OTHER_RUN}.json`, 'escape.json']));
+  });
+
+  it('reports loss delivery that could not finish in the flush summary', async () => {
+    const outbox = new Outbox(dir, { capBytes: 1 });
+    await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, envelopeDelivered: true });
+    await outbox.spoolRun({ runId: OTHER_RUN, envelope: { ...envelope, run: { ...envelope.run, id: OTHER_RUN } }, artifacts: ARTIFACTS, envelopeDelivered: true });
+    expect(await outbox.pendingLoss()).toHaveLength(2);
+
+    // Unreachable for the loss report: nothing removed, the flush says so.
+    const down = fakeSink({ postEvents: [{ kind: 'unavailable', reason: 'HTTP 503' }] });
+    expect(await outbox.flush(down.sink)).toMatchObject({ delivered: [envelope.run.id, OTHER_RUN], stopped: 'unavailable', lossPending: 2 });
+
+    // The server accounts for one of two: both files stay for the next flush.
+    const partial = fakeSink({ postEvents: [{ kind: 'ok', value: { inserted: 1, duplicates: 0 }, httpStatus: 201 }] });
+    expect(await outbox.flush(partial.sink)).toMatchObject({ lossPending: 2 });
+    expect(await outbox.pendingLoss()).toHaveLength(2);
+
+    const up = fakeSink({ postEvents: [{ kind: 'ok', value: { inserted: 1, duplicates: 1 }, httpStatus: 201 }] });
+    expect(await outbox.flush(up.sink)).toMatchObject({ lossReported: 2 });
+    expect(await outbox.pendingLoss()).toEqual([]);
+  });
+
+  it('still delivers the events queued with an envelope the server holds under a different digest', async () => {
+    const outbox = new Outbox(dir);
+    const event = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} });
+    await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, events: [event] });
+    const conflict = fakeSink({ postRun: [{ kind: 'conflict', message: 'different digest' }] });
+    const summary = await outbox.flush(conflict.sink);
+    expect(summary.failed).toEqual([{ id: envelope.run.id, reason: 'conflict: different digest' }]);
+    expect(conflict.calls.map((c) => c.method)).toEqual(['postRun', 'postEvents']);
+    expect((conflict.calls[1]!.args[0] as WireEvent[])[0]!.id).toBe(event.id);
+  });
+
+  it('bounds every request by what remains of the flush deadline', async () => {
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: envelope.run.id, envelope });
+    const timeouts: Array<number | undefined> = [];
+    const { sink } = fakeSink({});
+    const original = sink.postRun.bind(sink);
+    sink.postRun = async (posted: RunEnvelope, options?: { timeoutMs?: number }) => {
+      timeouts.push(options?.timeoutMs);
+      return original(posted);
+    };
+    let tick = 0;
+    await outbox.flush(sink, { deadlineMs: 5_000, now: () => (tick++ === 0 ? 0 : 1_200) });
+    expect(timeouts).toEqual([3_800]);
   });
 
   it('marks an entry of unknown kind failed instead of deleting it', async () => {

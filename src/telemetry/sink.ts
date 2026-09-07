@@ -15,6 +15,13 @@ import type { WireEvent } from './events.js';
  */
 
 export const REQUEST_TIMEOUT_MS = 10_000;
+/** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
+export const MAX_RESPONSE_BYTES = 64 * 1024;
+
+export interface RequestOptions {
+  /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
+  timeoutMs?: number;
+}
 
 export interface RunReceipt {
   id: string;
@@ -98,18 +105,26 @@ export class HarnessSink {
     method: 'GET' | 'POST' | 'PUT',
     path: string,
     body: string | undefined,
-    contentType: string
+    contentType: string,
+    options: RequestOptions = {}
   ): Promise<{ status: number; body: unknown } | { failure: string }> {
+    const timeoutMs = Math.max(1, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
     try {
       const response = await this.fetchImpl(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
         redirect: 'manual',
       });
+      // Node returns a manual redirect as the 3xx itself; a WHATWG client
+      // returns an opaque redirect with status 0. Both read as "redirected".
+      if (response.type === 'opaqueredirect') return { status: 302, body: null };
+      const text = await readBounded(response, MAX_RESPONSE_BYTES);
+      if (text === null) {
+        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' } };
+      }
       let parsed: unknown = null;
-      const text = await response.text();
       if (text !== '') {
         try {
           parsed = JSON.parse(text);
@@ -132,6 +147,7 @@ export class HarnessSink {
     const error = (body as ErrorBody | null)?.error ?? '';
     const message = (body as ErrorBody | null)?.message ?? '';
     if (status >= 200 && status < 300) {
+      if (error === 'malformed_response') return { kind: 'rejected', httpStatus: status, error, message };
       const value = onOk(body, status);
       if (value === null) return { kind: 'rejected', httpStatus: status, error: 'malformed_response', message: 'unexpected response body' };
       return { kind: 'ok', value, httpStatus: status };
@@ -155,8 +171,8 @@ export class HarnessSink {
   }
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
-  async postRun(envelope: RunEnvelope): Promise<SinkOutcome<RunReceipt>> {
-    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json');
+  async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
+    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       if (!data || typeof data['id'] !== 'string' || typeof data['url'] !== 'string') return null;
@@ -176,7 +192,12 @@ export class HarnessSink {
   }
 
   /** `PUT /api/v1/reviews/runs/:id/artifacts/:kind` — the raw bytes, never JSON. */
-  async putArtifact(runId: string, kind: ArtifactKind, bytes: string): Promise<SinkOutcome<ArtifactReceipt>> {
+  async putArtifact(
+    runId: string,
+    kind: ArtifactKind,
+    bytes: string,
+    options: RequestOptions = {}
+  ): Promise<SinkOutcome<ArtifactReceipt>> {
     if (kind !== 'report_json' && kind !== 'report_md') {
       return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: String(kind) };
     }
@@ -184,7 +205,8 @@ export class HarnessSink {
       'PUT',
       `/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}`,
       bytes,
-      'application/octet-stream'
+      'application/octet-stream',
+      options
     );
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
@@ -200,12 +222,13 @@ export class HarnessSink {
   }
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
-  async postEvents(events: WireEvent[]): Promise<SinkOutcome<EventsReceipt>> {
+  async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
     const result = await this.request(
       'POST',
       '/api/v1/reviews/converge/events',
       JSON.stringify({ events }),
-      'application/json'
+      'application/json',
+      options
     );
     return this.classify(result, (body) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
@@ -213,6 +236,28 @@ export class HarnessSink {
       return { inserted: data['inserted'], duplicates: typeof data['duplicates'] === 'number' ? data['duplicates'] : 0 };
     });
   }
+}
+
+/**
+ * The body as text, or `null` once it exceeds `limit` bytes — the stream is
+ * cancelled there, so a runaway response never fills memory.
+ */
+async function readBounded(response: Response, limit: number): Promise<string | null> {
+  if (!response.body) return response.text();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks.map((c) => Buffer.from(c))));
 }
 
 /** One phrase for a non-ok outcome, safe to print (no token, no body dump). */

@@ -144,7 +144,10 @@ export function fakeFetch(
     if (outcome === 'hang') {
       return new Promise<Response>((_resolve, reject) => {
         const signal = init?.signal;
-        if (!signal) return;
+        if (!signal) {
+          reject(new Error('fakeFetch: a hanging request needs an abort signal from the client, or the test would never end'));
+          return;
+        }
         if (signal.aborted) reject(signal.reason);
         else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       });

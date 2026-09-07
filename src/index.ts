@@ -110,6 +110,7 @@ import {
   createTelemetryRuntime,
   deliverRun,
   emitConvergeEvents,
+  flushOutbox,
   flushOutboxAtStart,
   type DeliveryOutcome,
   type TelemetryRuntime,
@@ -153,12 +154,23 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** `--evidence-required` with telemetry switched off cannot be honored; say so before spending the council. */
-function assertEvidenceCanBeRequired(opts: { evidenceRequired?: boolean; telemetry?: boolean }): void {
+/**
+ * `--evidence-required` with telemetry switched off cannot be honored; say so
+ * before spending the council. The flag and the environment are known up
+ * front; the project config's `harness.telemetry: off` is checked again once
+ * the config is loaded, still before any reviewer call.
+ */
+function assertEvidenceCanBeRequired(
+  opts: { evidenceRequired?: boolean; telemetry?: boolean },
+  config?: Pick<Config, 'harness'>
+): void {
   if (!opts.evidenceRequired) return;
   if (opts.telemetry === false) throw new Error('--evidence-required contradicts --no-telemetry: evidence cannot be required and withheld.');
   if ((process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') {
     throw new Error('--evidence-required contradicts RCL_TELEMETRY=off: evidence cannot be required and withheld.');
+  }
+  if (config?.harness?.telemetry === 'off') {
+    throw new Error('--evidence-required contradicts harness.telemetry: off in the project config: evidence cannot be required and withheld.');
   }
 }
 
@@ -330,7 +342,8 @@ program
             kind: 'attempt_claimed',
             convergeTarget: claim.target,
             attempt: claim.attempt,
-            payload: { attempt: claim.attempt, cap: claim.cap, pid: process.pid, state_file: claim.stateFile },
+            // The claim's local state path and process id stay on this machine.
+            payload: { attempt: claim.attempt, cap: claim.cap },
           }),
           // An explicit --max-attempts is consent evidence, whatever it was before.
           ...(maxAttempts !== undefined
@@ -619,7 +632,14 @@ program
             `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
           );
         }
-        const roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
+        // The run id binding is advisory: an unreadable state file must not
+        // fail a command whose verdicts are already recorded.
+        let roundRun: string | undefined;
+        try {
+          roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
+        } catch {
+          roundRun = undefined;
+        }
         await reportConvergeEvents([
           buildEvent({
             kind: 'verdicts_recorded',
@@ -713,13 +733,14 @@ telemetry
     const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
     const entries = await runtime.outbox.list();
     const loss = await runtime.outbox.pendingLoss();
+    const refused = await runtime.outbox.refusedLoss();
     const status = {
       level: runtime.level,
       credential: runtime.credential
         ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
         : null,
       note: runtime.note ?? null,
-      outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss },
+      outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss, refusedLoss: refused },
     };
     if (opts.json) {
       console.log(JSON.stringify(status, null, 2));
@@ -743,6 +764,11 @@ telemetry
     if (loss.length > 0) {
       console.log(chalk.yellow(`Artifacts not spooled (outbox over its cap) for ${loss.length} run(s); reported on the next flush.`));
     }
+    if (refused.length > 0) {
+      console.log(
+        chalk.yellow(`${refused.length} loss report(s) the server refused are kept under ${runtime.outbox.dir}/loss (*.refused); they are not retried.`)
+      );
+    }
   });
 
 telemetry
@@ -758,13 +784,14 @@ telemetry
       process.exitCode = 1;
       return;
     }
-    const summary = await runtime.outbox.flush(runtime.sink, opts.run ? { runId: opts.run } : {});
+    const summary = await flushOutbox(runtime, opts.run ? { runId: opts.run } : {});
     if (opts.json) {
       console.log(JSON.stringify(summary, null, 2));
     } else {
       console.log(
         `Delivered ${summary.delivered.length}, remaining ${summary.remaining.length}, failed ${summary.failed.length}` +
-          (summary.stopped ? ` (stopped: ${summary.stopped})` : '')
+          (summary.stopped ? ` (stopped: ${summary.stopped})` : '') +
+          (summary.lossPending ? `; ${summary.lossPending} loss report(s) still pending` : '')
       );
       for (const id of summary.delivered) console.log(`  delivered ${id}`);
       for (const f of summary.failed) console.log(chalk.red(`  failed ${f.id}: ${f.reason}`));
@@ -1214,6 +1241,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
 
     const prepared = await prepareCouncil(spinner, opts);
     const { config } = prepared;
+    assertEvidenceCanBeRequired(opts, config);
 
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
@@ -1879,6 +1907,7 @@ async function runPlanReview(
     }
 
     const prepared = await prepareCouncil(spinner, opts, PLAN_DEFAULT_ROLES);
+    assertEvidenceCanBeRequired(opts, prepared.config);
 
     spinner.text = `Loading plan: ${file}`;
     const diff = await loadPlanAsDiff(file);

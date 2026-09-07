@@ -101,6 +101,32 @@ describe('HarnessSink.postRun', () => {
     expect(build('http://harness.infraone.localhost:4110')).not.toThrow();
   });
 
+  it('reads a WHATWG opaque redirect as redirected and refuses an oversized response', async () => {
+    const opaque = new HarnessSink({
+      credential: CREDENTIAL,
+      rclVersion: '3.0.0',
+      fetchImpl: (async () => Object.defineProperty(new Response(null, { status: 200 }), 'type', { value: 'opaqueredirect' })) as typeof fetch,
+    });
+    expect(await opaque.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })])).toMatchObject({ kind: 'rejected', error: 'redirected' });
+
+    const huge = new HarnessSink({
+      credential: CREDENTIAL,
+      rclVersion: '3.0.0',
+      fetchImpl: (async () => new Response(`{"data":{"inserted":1,"pad":"${'x'.repeat(70_000)}"}}`, { status: 201 })) as typeof fetch,
+    });
+    const outcome = await huge.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })]);
+    expect(outcome).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    expect(describeOutcome(outcome)).toContain('receipt limit');
+  });
+
+  it('honors a shorter per-request timeout than its own', async () => {
+    const { fetch } = fakeFetch(() => 'hang');
+    const s = new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.0.0', fetchImpl: fetch, timeoutMs: 60_000 });
+    const started = Date.now();
+    expect(await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })], { timeoutMs: 50 })).toMatchObject({ kind: 'unavailable' });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   it('gives up on a hung request after the timeout and calls it unavailable', async () => {
     const { sink: s } = sink(() => 'hang');
     const outcome = await s.putArtifact('run-1', 'report_md', '# r');

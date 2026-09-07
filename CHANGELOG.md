@@ -31,9 +31,12 @@ report field is additive and pre-3.0 reports load unchanged.
 - **`--evidence-required`** exits 4 when the evidence is incomplete — the
   envelope was not acknowledged (spooled, refused, or the org has evidence
   off), or a declared artifact was spooled or refused — and refuses a patch
-  file without `--head-sha` and a run with `--no-telemetry` or
-  `RCL_TELEMETRY=off`. Under `--ci` the gate's exit code wins; the evidence
-  failure is printed beside it.
+  file without `--head-sha` and a run with `--no-telemetry`,
+  `RCL_TELEMETRY=off` or `harness.telemetry: off`. Under `--ci` the gate's
+  exit code wins; the evidence failure is printed beside it. At the
+  `envelope` and `findings` levels the declared artifact digests still
+  describe the reports rcl wrote — the server shows them as declared, not
+  received — and evidence is complete once the envelope is acknowledged.
 - **Consent.** The first delivery from a machine to a host prints a one-time
   notice; `~/.rcl/telemetry-notice` records it.
 - **Status line.** `Evidence recorded: <url>` · `Evidence spooled (Harness
@@ -44,7 +47,18 @@ report field is additive and pre-3.0 reports load unchanged.
   `round_processed` (and `cap_changed` under `--max-rounds`) and persists the
   round's run id in the run state, `converge-verdict` emits
   `verdicts_recorded` and `resolution` bound to that run id.
-- **`rcl telemetry status | flush [--run <id>]`** for operators.
+- **`rcl telemetry status | flush [--run <id>]`** for operators. Loss
+  reports go out in batches and are only removed once the server accounts
+  for every event; a refused batch is kept as `loss/<id>.json.refused`,
+  listed by `status`, never retried. A flush bounded by a deadline bounds
+  each request by what remains of it, and reports loss reports still
+  pending.
+- **Transport hardening.** Receipts larger than 64 KB are refused unread; a
+  WHATWG opaque redirect reads as a redirect; the credential's URL is
+  re-validated when the sink is built (`https`, or `http` to `localhost`,
+  `127.0.0.0/8`, `::1` and `*.localhost` — the host comes from the login or
+  the environment, never from the repository). The consent notice precedes
+  the first transmission of any kind, converge events and flushes included.
 - **Scrubbing.** Every free-text field that leaves the process (errors,
   warnings, runner claims, finding prose, consensus excerpts) is truncated and
   scrubbed for bearer/key-shaped substrings. The reports written to

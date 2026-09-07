@@ -7,7 +7,7 @@ import { credentialHost, resolveHarnessCredential, type HarnessCredential } from
 import { buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type TelemetryLevel } from './envelope.js';
 import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
-import { Outbox } from './outbox.js';
+import { Outbox, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink } from './sink.js';
 
@@ -120,13 +120,35 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
   return runtime;
 }
 
+/**
+ * The consent notice precedes the first transmission from this machine to a
+ * host, whatever the transmission is — a run, a converge event, or a flush of
+ * something spooled earlier. A notice that cannot be recorded shows again
+ * next time; it is never a failure.
+ */
+async function noticeBefore(runtime: TelemetryRuntime): Promise<void> {
+  if (!runtime.credential) return;
+  try {
+    await ensureNoticeShown(credentialHost(runtime.credential), runtime.dataDir, runtime.stderr);
+  } catch {
+    // Shown, not recorded — the safe side.
+  }
+}
+
+/** Flush the outbox through the runtime's sink, the notice shown first. */
+export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptions = {}): Promise<FlushSummary> {
+  if (!runtime.sink) throw new Error('No Harness credential to flush with.');
+  await noticeBefore(runtime);
+  return runtime.outbox.flush(runtime.sink, options);
+}
+
 /** Bounded: an offline machine must never stall a command. Fail-soft. */
 export async function flushOutboxAtStart(runtime: TelemetryRuntime, deadlineMs = STARTUP_FLUSH_DEADLINE_MS): Promise<void> {
   if (!runtime.sink) return;
   try {
     const entries = await runtime.outbox.list();
     if (entries.length === 0) return;
-    const summary = await runtime.outbox.flush(runtime.sink, { deadlineMs });
+    const summary = await flushOutbox(runtime, { deadlineMs });
     if (summary.delivered.length > 0) {
       runtime.stderr(
         `Delivered ${summary.delivered.length} spooled evidence entr${summary.delivered.length === 1 ? 'y' : 'ies'} to ${credentialHost(runtime.credential!)}.`
@@ -242,12 +264,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     }
   }
   const host = credentialHost(runtime.credential);
-
-  try {
-    await ensureNoticeShown(host, runtime.dataDir, runtime.stderr);
-  } catch {
-    // A notice that cannot be recorded shows again next time; never a failure.
-  }
+  await noticeBefore(runtime);
 
   const posted = await runtime.sink.postRun(envelope);
   switch (posted.kind) {
@@ -387,6 +404,7 @@ export async function emitConvergeEvents(
   if (runtime.level === 'off' || !runtime.sink) return 'skipped';
   const sendable = events.filter(deliverable);
   if (sendable.length === 0) return 'skipped';
+  await noticeBefore(runtime);
   const outcome = await runtime.sink.postEvents(sendable);
   switch (outcome.kind) {
     case 'ok':

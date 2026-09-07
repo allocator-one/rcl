@@ -245,6 +245,8 @@ export async function processRoundReport(options: {
 }): Promise<RoundReport> {
   const target = options.target.trim();
   if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
+  // A blank id is no binding at all; only a real one is persisted.
+  const runId = options.runId?.trim() || undefined;
   if (!Number.isSafeInteger(options.round) || options.round < 1) {
     throw new ConvergeRunStateError('round must be a positive integer.');
   }
@@ -366,7 +368,7 @@ export async function processRoundReport(options: {
 
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts, ...(options.runId !== undefined ? { runId: options.runId } : {}) },
+    { round: options.round, counts, ...(runId !== undefined ? { runId } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,

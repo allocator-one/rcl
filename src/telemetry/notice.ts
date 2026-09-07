@@ -35,7 +35,8 @@ export function noticeText(host: string): string {
   return [
     `Review Council now records evidence of this review on ${host}: the run header (commit, roster,`,
     'settings digests), consensus findings and reviewer call statistics, plus the JSON and Markdown',
-    'reports as written. Never sent: API keys, tokens, prompts or raw model answers. Switch it off with',
+    'reports as written. Never sent: API keys, tokens, prompts or raw model answers (with `harness.parseFailures`',
+    'on, a parse-failed answer travels with code blocks and key-shaped strings removed). Switch it off with',
     '`harness.telemetry: off` in .rclrc, `--no-telemetry`, or RCL_TELEMETRY=off. This notice shows once per host.',
   ].join('\n');
 }

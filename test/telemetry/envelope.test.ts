@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildRunEnvelope, declareArtifacts, sanitizeForDelivery } from '../../src/telemetry/envelope.js';
 import { REDACTED } from '../../src/telemetry/scrub.js';
 import { sampleResult } from './fixtures.js';
@@ -71,6 +71,15 @@ describe('buildRunEnvelope', () => {
     const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     expect(envelope.calls[1]!.error).toBe('JSON parse error at position 12');
 
+    // Opting in sends the answer outside its fences, scrubbed and capped.
+    const chatty = sampleResult();
+    chatty.reviews[1]!.error = `parse error\nThe model said: use sk-ant-${'k'.repeat(30)} here\n\`\`\`\n{"diff": true}\n\`\`\`\n${'tail '.repeat(20_000)}`;
+    const optIn = buildRunEnvelope(chatty, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' }, parseFailures: true });
+    expect(optIn.calls[1]!.error).toContain(`The model said: use ${REDACTED} here`);
+    expect(optIn.calls[1]!.error).toContain('[code omitted]');
+    expect(optIn.calls[1]!.error).not.toContain('"diff"');
+    expect(optIn.calls[1]!.error!.length).toBeLessThanOrEqual(32 * 1024);
+
     const verbose = buildRunEnvelope(sampleResult(), ARTIFACTS, {
       level: 'full',
       delivery: { mode: 'direct' },
@@ -129,6 +138,17 @@ describe('buildRunEnvelope', () => {
     expect(envelope.run.roster[0]!.role).toBe(`reviewer token=${REDACTED}`);
   });
 
+  it('keeps long mixed-case model ids in the roster and the calls', () => {
+    const result = sampleResult();
+    const model = 'anthropic/Claude-Sonnet-4-5-20250929-preview';
+    result.run!.roster[0]!.model = model;
+    result.reviews[0]!.model = model;
+    const envelope = buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    expect(envelope.run.roster[0]!.model).toBe(model);
+    expect(envelope.calls[0]!.model).toBe(model);
+    expect(sanitizeForDelivery(result).reviews[0]!.model).toBe(model);
+  });
+
   it('scrubs a verification verdict like any other free text', () => {
     const result = sampleResult();
     result.findings[0]!.gating = { reason: 'verified', verification: { verdict: 'confirmed', note: 'echoes sk-ant-abcdefghijklmnopqrstuvwxyz' } } as never;
@@ -137,7 +157,7 @@ describe('buildRunEnvelope', () => {
     expect(envelope.findings[0]!.verification_verdict).toBe(`confirmed after seeing ${REDACTED}`);
   });
 
-  it('never contains environment values (poisoned-env negative test)', () => {
+  it('never contains environment values (poisoned-env negative test)', async () => {
     const poison = {
       ANTHROPIC_API_KEY: 'poison-anthropic-9f8e7d6c',
       OPENAI_API_KEY: 'poison-openai-1a2b3c4d',
@@ -148,8 +168,12 @@ describe('buildRunEnvelope', () => {
     const before = { ...process.env };
     Object.assign(process.env, poison);
     try {
+      // The module is loaded with the environment already poisoned, so a
+      // value captured at import time would show up here too.
+      vi.resetModules();
+      const fresh = await import('../../src/telemetry/envelope.js');
       const json = JSON.stringify(
-        buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'retried', spooled_at: '2026-09-07T09:00:00Z' } })
+        fresh.buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'retried', spooled_at: '2026-09-07T09:00:00Z' } })
       );
       for (const value of Object.values(poison)) expect(json).not.toContain(value);
     } finally {

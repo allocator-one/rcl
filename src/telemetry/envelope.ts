@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
-import { scrubDeep, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
+import { scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
 
 /**
  * The transport envelope rcl posts to `POST /api/v1/reviews/runs` (epic
@@ -166,9 +166,9 @@ function laneFor(review: ModelReview, run: RunHeader): RosterLane {
 function wireCall(review: ModelReview, run: RunHeader, parseFailures: boolean): WireCall {
   const error = callError(review, parseFailures);
   return {
-    model: review.model,
-    role: review.role,
-    provider: review.provider,
+    model: scrubIdentifier(review.model),
+    role: scrubIdentifier(review.role),
+    provider: scrubIdentifier(review.provider),
     lane: laneFor(review, run),
     // Chunks are merged before the report is written; one call row stands
     // for a reviewer's work on the whole diff.
@@ -239,6 +239,9 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
     const { error: _dropped, ...rest } = r;
     return {
       ...rest,
+      model: scrubIdentifier(r.model),
+      role: scrubIdentifier(r.role),
+      provider: scrubIdentifier(r.provider),
       findings: r.findings.map((f) => ({
         ...f,
         file: scrubText(f.file),
@@ -269,6 +272,14 @@ function scrubRunHeader(run: RunHeader): RunHeader {
   const scrubbed = scrubDeep(run);
   return {
     ...scrubbed,
+    // Roster values are configured identifiers, not prose: a long mixed-case
+    // model id must survive, so only key-shaped substrings are removed.
+    roster: run.roster.map((seat) => ({
+      ...seat,
+      model: scrubIdentifier(seat.model),
+      role: scrubIdentifier(seat.role),
+      provider: scrubIdentifier(seat.provider),
+    })),
     runner: {
       ...scrubbed.runner,
       ...(run.runner.agent !== undefined ? { agent: scrubText(run.runner.agent, 200) } : {}),

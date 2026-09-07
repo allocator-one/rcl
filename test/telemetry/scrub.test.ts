@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REDACTED, scrubDeep, scrubSecrets, scrubText, stripFencedCode } from '../../src/telemetry/scrub.js';
+import { REDACTED, scrubDeep, scrubIdentifier, scrubSecrets, scrubText, stripFencedCode } from '../../src/telemetry/scrub.js';
 
 describe('scrubSecrets', () => {
   it('redacts provider, GitHub, Google, Harness and bearer tokens', () => {
@@ -15,6 +15,21 @@ describe('scrubSecrets', () => {
     const scrubbed = scrubSecrets(text);
     expect(scrubbed).not.toMatch(/sk-|ghp_|github_pat_|AIza|aone_|eyJ/);
     expect(scrubbed.split(REDACTED).length - 1).toBe(7);
+  });
+
+  it('redacts temporary AWS key ids, quoted passphrases with spaces and short quoted values', () => {
+    expect(scrubSecrets('key ASIAABCDEFGHIJKLMNOP used')).toBe(`key ${REDACTED} used`);
+    expect(scrubSecrets('password="correct horse battery staple" next')).toBe(`password="${REDACTED}" next`);
+    expect(scrubSecrets("token: 'abc' rest")).toBe(`token: '${REDACTED}' rest`);
+    expect(scrubSecrets('api_key="a,b;c d" tail')).toBe(`api_key="${REDACTED}" tail`);
+    // Unquoted short runs read as prose (a type name), not a value.
+    expect(scrubSecrets('the token: string field')).toBe('the token: string field');
+  });
+
+  it('keeps long mixed-case identifiers when asked to scrub an identifier', () => {
+    expect(scrubIdentifier('anthropic/Claude-Sonnet-4-5-20250929-preview')).toBe('anthropic/Claude-Sonnet-4-5-20250929-preview');
+    expect(scrubIdentifier(`model ghp_${'A'.repeat(30)}`)).toBe(`model ${REDACTED}`);
+    expect(scrubSecrets('anthropic/Claude-Sonnet-4-5-20250929-preview')).toBe(REDACTED);
   });
 
   it('redacts JWTs, AWS key ids and key=value assignments, keeping the key name', () => {
@@ -57,5 +72,31 @@ describe('stripFencedCode', () => {
     expect(stripFencedCode('open ```\nnever closed')).toBe('open [code omitted]');
     expect(stripFencedCode('tilde ~~~json\n{"prompt":"raw"}\n~~~ done')).toBe('tilde [code omitted] done');
     expect(stripFencedCode('long ````\nx\n```` end')).toBe('long [code omitted] end');
+  });
+
+  it('closes a fence only with the same character at least as long, and strips every block', () => {
+    // A shorter run inside the block does not close it; a longer one does.
+    expect(stripFencedCode('a ````\ninner ``` still code\n```` b')).toBe('a [code omitted] b');
+    expect(stripFencedCode('a ```\ncode\n```` b')).toBe('a [code omitted] b');
+    // Tildes never close a backtick fence.
+    expect(stripFencedCode('a ```\ncode ~~~ more\n``` b')).toBe('a [code omitted] b');
+    // Several blocks, mixed styles, with a final unclosed one.
+    expect(stripFencedCode('x ```\none\n``` y ~~~\ntwo\n~~~ z ```\nthree')).toBe('x [code omitted] y [code omitted] z [code omitted]');
+  });
+});
+
+describe('scrubbing is idempotent and bounded', () => {
+  it('applies the same result twice', () => {
+    const noisy = `token="a very long passphrase" ghp_${'A'.repeat(30)} ${'x'.repeat(3_000)}`;
+    const once = scrubText(noisy, 500);
+    expect(scrubText(once, 500)).toBe(once);
+    expect(scrubSecrets(scrubSecrets(noisy))).toBe(scrubSecrets(noisy));
+    expect(stripFencedCode(stripFencedCode('a ```\nb\n``` c'))).toBe(stripFencedCode('a ```\nb\n``` c'));
+  });
+
+  it('redacts a secret that sits right at the pre-scrub cut', () => {
+    const secret = `sk-${'q'.repeat(40)}`;
+    const text = `${'p'.repeat(2_000 * 4 - 10)}${secret}`;
+    expect(scrubText(text)).not.toContain(secret.slice(0, 20));
   });
 });
