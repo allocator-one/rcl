@@ -34,10 +34,9 @@ function sumUsage(parts: readonly ModelReview[]): TokenUsage | undefined {
  * results remain opportunistic: any arrived success may contribute, while an
  * async result can neither rescue nor poison a same-key blocking reviewer.
  *
- * Dropped-finding counts and parser warnings are summed across ALL chunks,
- * including the ones that failed: a reviewer that parsed cleanly on chunk 1
- * and lost everything on chunk 2 is only partially covered, and the merged
- * review is the last place that can still say so.
+ * Accounting and diagnostics cover ALL returned parts, including failed and
+ * async ones: those calls still consumed time and tokens even when they do
+ * not affect the blocking reviewer's status or findings.
  */
 export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
   const byReviewer = new Map<string, ModelReview[]>();
@@ -65,10 +64,10 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
     const successful = requireComplete
       ? successes.length === outcomeParts.length
       : successes.length > 0;
-    const durationMs = outcomeParts.reduce((sum, part) => sum + part.durationMs, 0);
-    const dropped = outcomeParts.reduce((sum, part) => sum + (part.droppedFindings ?? 0), 0);
-    const warnings = outcomeParts.flatMap((part) => part.warnings ?? []);
-    const usage = sumUsage(outcomeParts);
+    const durationMs = parts.reduce((sum, part) => sum + part.durationMs, 0);
+    const dropped = parts.reduce((sum, part) => sum + (part.droppedFindings ?? 0), 0);
+    const warnings = parts.flatMap((part) => part.warnings ?? []);
+    const usage = sumUsage(parts);
     const degraded = {
       ...(usage ? { usage } : {}),
       ...(dropped > 0 ? { droppedFindings: dropped } : {}),

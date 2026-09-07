@@ -92,13 +92,31 @@ describe('mergeChunkReviews', () => {
 
   it('does not let an async failure poison complete blocking coverage', () => {
     const [merged] = mergeChunkReviews([
-      review({ findings: [finding('blocking-a')] }),
-      review({ async: true, status: 'error', error: 'async failed' }),
+      review({
+        findings: [finding('blocking-a')],
+        durationMs: 10,
+        droppedFindings: 1,
+        warnings: ['blocking warning'],
+        usage: { inputTokens: 100, outputTokens: 10 },
+      }),
+      review({
+        async: true,
+        status: 'error',
+        error: 'async failed',
+        durationMs: 20,
+        droppedFindings: 2,
+        warnings: ['async warning'],
+        usage: { inputTokens: 200, outputTokens: 20 },
+      }),
     ]);
 
     expect(merged!.status).toBe('success');
     expect(merged!.findings.map((item) => item.id)).toEqual(['blocking-a']);
     expect(merged!.async).toBeUndefined();
+    expect(merged!.durationMs).toBe(30);
+    expect(merged!.droppedFindings).toBe(3);
+    expect(merged!.warnings).toEqual(['blocking warning', 'async warning']);
+    expect(merged!.usage).toEqual({ inputTokens: 300, outputTokens: 30 });
   });
 
   it('preserves the failure when no chunk succeeded', () => {
