@@ -370,3 +370,53 @@ describe('round-1 hardening', () => {
     expect(parseInt(uuidv7(at + 0.75).slice(0, 8) + uuidv7(at + 0.75).slice(9, 13), 16)).toBe(at);
   });
 });
+
+describe('round-2 hardening', () => {
+  it('stableStringify is key-order independent at every level and always returns a string', async () => {
+    const { stableStringify } = await import('../../src/report/run-header.js');
+    expect(stableStringify({ a: { y: 1, x: [3, { q: 1, p: 2 }] }, b: 2 })).toBe(
+      stableStringify({ b: 2, a: { x: [3, { p: 2, q: 1 }], y: 1 } })
+    );
+    // undefined object values are dropped; undefined array elements become null, like JSON.stringify
+    expect(stableStringify({ a: undefined, b: [undefined, 1] })).toBe('{"b":[null,1]}');
+    expect(stableStringify(undefined)).toBe('null');
+    expect(stableStringify(() => 1)).toBe('null');
+    expect(stableStringify('quote " backslash \\ ünï  ')).toBe(JSON.stringify('quote " backslash \\ ünï  '));
+    expect(stableStringify(null)).toBe('null');
+  });
+
+  it('diffDigest normalizes a missing previousFilename to null and tracks patch-only changes', () => {
+    const a = file({ filename: 'a.ts', previousFilename: undefined });
+    const b = { ...file({ filename: 'a.ts' }) };
+    delete (b as { previousFilename?: string }).previousFilename;
+    expect(diffDigest([a])).toBe(diffDigest([b]));
+    expect(diffDigest([file({ filename: 'a","b' })])).not.toBe(diffDigest([file({ filename: 'a' }), file({ filename: 'b' })]));
+  });
+
+  it('configDigest covers only allow-listed fields', () => {
+    const base: Config = { models: ['m1'] };
+    const withUnknown = { ...base, futureSecret: 'sk-live' } as unknown as Config;
+    expect(configDigest(withUnknown)).toBe(configDigest(base));
+    expect(JSON.stringify(configDigest(withUnknown))).not.toContain('sk-live');
+    expect(configDigest({ ...base, gating: { minModels: 3 } })).not.toBe(configDigest(base));
+  });
+
+  it('detectRunner: CI wins over agent markers, blank values are unset, run id is optional', () => {
+    expect(detectRunner({ GITHUB_ACTIONS: 'true', CLAUDECODE: '1' }, 'h')).toMatchObject({ kind: 'ci' });
+    expect(detectRunner({ GITHUB_ACTIONS: 'true' }, 'h')).toEqual({ kind: 'ci', host: 'h' });
+    expect(detectRunner({ GITHUB_ACTIONS: '   ', CLAUDECODE: ' ' }, 'h')).toEqual({ kind: 'human', host: 'h' });
+    expect(detectRunner({ CURSOR_AGENT: '1', CLAUDECODE: '1' }, 'h').agent).toBe('claude-code');
+  });
+
+  it('validateSha accepts SHA-256 repository object ids (64 hex) and rejects 41–63', () => {
+    expect(validateSha('F'.repeat(64), '--head-sha')).toBe('f'.repeat(64));
+    expect(() => validateSha('f'.repeat(50), '--head-sha')).toThrow(/--head-sha/);
+  });
+
+  it('resolveConvergeContext rejects every non-positive-integer round shape with the flag name', () => {
+    for (const bad of ['0', '-1', '1.5', 'abc', '1e400', '9007199254740993']) {
+      expect(() => resolveConvergeContext({ convergeTarget: 't', round: bad }, {})).toThrow(/--round/);
+    }
+    expect(resolveConvergeContext({ convergeTarget: 't', round: '' }, { RCL_CONVERGE_ROUND: '4' })).toEqual({ target: 't' });
+  });
+});

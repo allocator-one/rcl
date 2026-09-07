@@ -43,11 +43,14 @@ export interface GitHeads {
   baseSha?: string;
 }
 
+/** A full object id in either repository format: SHA-1 (40 hex) or SHA-256 (64 hex). */
+const FULL_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 async function revParse(cwd: string, ...args: string[]): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync('git', args, { cwd });
     const sha = stdout.trim();
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+    return FULL_OBJECT_ID.test(sha) ? sha : undefined;
   } catch {
     return undefined;
   }

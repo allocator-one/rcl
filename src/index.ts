@@ -99,6 +99,7 @@ import {
   parseSpecSource,
   resolveConvergeContext,
   sha256Hex,
+  validateSha,
   type ConvergeContext,
   type RunHeaderInput,
   type SpecSource,
@@ -867,6 +868,15 @@ async function prepareCouncil(
       spinner.warn(`Could not read spec file: ${specPath}`);
     }
   }
+  // Provenance was claimed explicitly: refuse to run with nothing to attach
+  // it to, rather than dropping the claim from the header without a word.
+  if (opts.specSource !== undefined && spec === undefined) {
+    throw new Error(
+      specPath
+        ? `--spec-source was given but the spec file could not be read: ${specPath}`
+        : '--spec-source was given without a spec; pass --spec <path> (or set spec in the config).'
+    );
+  }
 
   // A resolved spec makes the spec-compliance role useful for plan review
   // too — the plan gets checked against the higher-level spec.
@@ -969,10 +979,30 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       process.exit(1);
     }
 
+    const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
+    const patchTarget =
+      !gitMode &&
+      (target!.endsWith('.patch') ||
+        target!.endsWith('.diff') ||
+        target!.startsWith('./') ||
+        target!.startsWith('/'));
+
+    // Validate the head-binding flags BEFORE any config, key, network, or
+    // git work: a bad flag must fail before anything is spent or fetched.
+    if ((opts.headSha !== undefined || opts.baseSha !== undefined) && !patchTarget) {
+      throw new Error(
+        `--head-sha and --base-sha apply to patch files only; ${
+          gitMode ? `--${gitMode} resolves HEAD itself` : 'a PR target resolves its heads from GitHub'
+        }.`
+      );
+    }
+    if (opts.headSha !== undefined) validateSha(opts.headSha, '--head-sha');
+    if (opts.baseSha !== undefined) validateSha(opts.baseSha, '--base-sha');
+    if (opts.expectHeadSha !== undefined) validateSha(opts.expectHeadSha, '--expect-head-sha');
+
     const prepared = await prepareCouncil(spinner, opts);
     const { config } = prepared;
 
-    const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
     // Resolve diff. Git modes bracket the read with two HEAD resolutions: a
@@ -983,10 +1013,14 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     if (gitMode) {
       gitHeads = await resolveGitHeads();
       diff = await loadGitDiff(gitMode);
+      // Both ends of the binding must hold still: HEAD (what the diff is
+      // relative to) and the merge-base (what the header records as base).
+      // Index or worktree edits during the read are not guarded — the
+      // diff_sha256 describes exactly the bytes that were read.
       const after = await resolveGitHeads();
-      if (after.headSha !== gitHeads.headSha) {
+      if (after.headSha !== gitHeads.headSha || after.baseSha !== gitHeads.baseSha) {
         throw new Error(
-          `HEAD moved from ${gitHeads.headSha ?? 'unknown'} to ${after.headSha ?? 'unknown'} while the diff was being read — refusing to review; rerun once the tree is quiet.`
+          `HEAD or its merge-base moved (${gitHeads.headSha ?? 'unknown'}/${gitHeads.baseSha ?? 'unknown'} → ${after.headSha ?? 'unknown'}/${after.baseSha ?? 'unknown'}) while the diff was being read — refusing to review; rerun once the tree is quiet.`
         );
       }
     } else if (
@@ -1546,6 +1580,15 @@ async function runPlanReview(
   const spinner = ora('Loading configuration...').start();
 
   try {
+    // A plan is not a commit: the review-plan command declares none of the
+    // head-binding flags, and this guard keeps any future path that shares
+    // the option type from carrying one that would then be silently ignored.
+    if (opts.headSha !== undefined || opts.baseSha !== undefined || opts.expectHeadSha !== undefined) {
+      throw new Error(
+        '--head-sha, --base-sha and --expect-head-sha do not apply to plan reviews; a plan is bound by its content digest.'
+      );
+    }
+
     let focus: PlanFocus | undefined;
     if (opts.focus) {
       if (!isPlanFocus(opts.focus)) {

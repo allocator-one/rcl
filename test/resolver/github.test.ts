@@ -92,4 +92,20 @@ describe('fetchPRDiff', () => {
       mergeCommitSha: 'mergesha789',
     });
   });
+
+  it('refuses to bind when the PR head moves between the metadata read and the file listing', async () => {
+    const moved = fakePr();
+    moved.data.head.sha = 'headsha999';
+    const fakeOctokit = {
+      pulls: {
+        get: vi.fn().mockResolvedValueOnce(fakePr()).mockResolvedValueOnce(moved),
+        listFiles: { endpoint: 'pulls.listFiles' },
+      },
+      paginate: vi.fn().mockResolvedValue([]),
+    } as unknown as Octokit;
+
+    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit)).rejects.toThrow(
+      /head moved from headsha123 to headsha999/
+    );
+  });
 });

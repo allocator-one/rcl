@@ -174,10 +174,39 @@ export function diffDigest(files: readonly FileChange[]): string {
   return sha256Hex(stableStringify(canonical));
 }
 
-/** Digest of the resolved config with the GitHub token removed. */
+/**
+ * The config fields the digest covers — an explicit allow-list, so a future
+ * credential field is excluded until someone deliberately adds it here. Every
+ * non-secret key of `ConfigSchema` is listed; `githubToken` is not.
+ */
+const DIGESTED_CONFIG_FIELDS = [
+  'models',
+  'secondaryModels',
+  'asyncModels',
+  'roles',
+  'reviewers',
+  'customRoles',
+  'thresholds',
+  'gating',
+  'output',
+  'timeout',
+  'asyncTimeout',
+  'quorumFraction',
+  'maxRetries',
+  'concurrency',
+  'reasoningEffort',
+  'context',
+  'spec',
+  'focus',
+] as const satisfies ReadonlyArray<Exclude<keyof Config, 'githubToken'>>;
+
+/** Digest of the allow-listed, resolved config fields (never a credential). */
 export function configDigest(config: Config): string {
-  const { githubToken: _token, ...rest } = config;
-  return sha256Hex(stableStringify(rest));
+  const projection: Record<string, unknown> = {};
+  for (const key of DIGESTED_CONFIG_FIELDS) {
+    if (config[key] !== undefined) projection[key] = config[key];
+  }
+  return sha256Hex(stableStringify(projection));
 }
 
 export function buildRoster(input: {
@@ -255,13 +284,16 @@ export function parseSpecSource(value: string): SpecSource {
   );
 }
 
-const FULL_SHA = /^[0-9a-f]{40}$/;
+/** A full Git object id: SHA-1 (40 hex) or SHA-256 repositories (64 hex). */
+export const FULL_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /** Exact-head binding needs the full object id; abbreviations are ambiguous. */
 export function validateSha(value: string, flag: string): string {
   const sha = value.trim().toLowerCase();
-  if (!FULL_SHA.test(sha)) {
-    throw new Error(`${flag} must be a full 40-character hex commit SHA, got "${value}".`);
+  if (!FULL_OBJECT_ID.test(sha)) {
+    throw new Error(
+      `${flag} must be a full 40- or 64-character hex commit SHA, got "${value}".`
+    );
   }
   return sha;
 }

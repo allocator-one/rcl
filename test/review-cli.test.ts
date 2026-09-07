@@ -86,6 +86,22 @@ describe('rcl review — exact-head binding flags', () => {
     expect(result.stderr).toMatch(/--head-sha.*patch file/);
   });
 
+  it('--spec-source without a spec is an error, not a silently dropped claim', () => {
+    const repo = tempRepository();
+    const result = runRcl(['review', '--staged', '--spec-source', 'harness_issue:IO-12475'], repo);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/--spec-source was given without a spec/);
+  });
+
+  it('--head-sha with a git target fails before any configuration or diff work', () => {
+    const repo = tempRepository();
+    const result = runRcl(['review', '--working-tree', '--base-sha', 'a'.repeat(40)], repo);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/patch files only.*--working-tree resolves HEAD itself/);
+  });
+
   it('--spec-source rejects an unknown source', () => {
     const repo = tempRepository();
     const result = runRcl(['review', '--staged', '--spec-source', 'linear:ABC-1'], repo);
