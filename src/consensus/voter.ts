@@ -9,6 +9,7 @@ import type {
 import type { Role } from '../roles/types.js';
 import { CONFIDENCE_THRESHOLDS, DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import { linesOverlap, hasOpposingSentiment, combinedSimilarity } from './deduper.js';
+import { stableFindingKey } from '../converge/finding-identity.js';
 
 /** Thresholds shared with the deduper so both layers use the same geometry. */
 export interface ConsensusThresholds {
@@ -471,6 +472,9 @@ export function computeConsensus(
       ...rep,
       severity: finalSeverity,
       consensus,
+      // Identity exists in the report itself, not only in the converge
+      // state, so a stored report can be matched across rounds and heads.
+      identity: stableFindingKey(rep),
     };
   });
 }

@@ -17,6 +17,10 @@ export interface PRMetadata {
   author: string;
   base: string;
   head: string;
+  /** Exact commit ids from `pulls.get` — the evidence ledger's head binding. */
+  headSha?: string;
+  baseSha?: string;
+  mergeCommitSha?: string;
   url: string;
   labels: string[];
   draft: boolean;

@@ -86,9 +86,16 @@ Review a PR, a local diff, or uncommitted work.
 | `--json-file <path>` | Write JSON output to a file |
 | `--markdown <path>` | Write Markdown report to a file |
 | `--ci` | Exit non-zero if critical/important findings exist |
+| `--head-sha <sha>` | Exact head commit a patch file was taken from (patch files only) |
+| `--base-sha <sha>` | Exact base commit a patch file was taken from (patch files only) |
+| `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
+| `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` |
+| `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
 | `--config <path>` | Path to a config file |
 
 `--role`, `--roles`, and `--reviewer` are mutually exclusive. So are a positional target, `--staged`, and `--working-tree` — pick exactly one review source. Untracked files are invisible to `git diff` and therefore not reviewed.
+
+**Self-describing reports (3.0).** Every report carries a `run` header: a client run id (UUIDv7), the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub for PRs, from `git rev-parse HEAD` and the merge-base with the remote default branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for patch files) and a `diff_sha256`, the roster with each seat's lane (`blocking`, `secondary`, `async`, `verification`), a config digest with thresholds and gating inline, spec and context-file digests, a best-effort `runner` claim (`agent` / `ci` / `human`), timing, the CI verdict (computed even without `--ci`), and the converge context when run under rcl-converge. Every finding carries its stable converge `identity`, and every reviewer call records token `usage` where the provider reports it. Reports without a `run` header (pre-3.0) still load everywhere.
 
 **Examples:**
 

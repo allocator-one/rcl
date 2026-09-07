@@ -3,6 +3,7 @@ import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
 import { readFile } from 'fs/promises';
+import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { loadConfig } from './config/loader.js';
@@ -19,7 +20,7 @@ import {
 } from './config/defaults.js';
 import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
-import { loadGitDiff } from './resolver/git.js';
+import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
 import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
 import { chunkDiff } from './prepare/chunker.js';
@@ -90,17 +91,30 @@ import {
   MIN_OUTCOMES_FOR_WEIGHT,
 } from './models/stats-store.js';
 import { buildSeedRecords } from './models/seed.js';
+import {
+  buildRoster,
+  buildRunHeader,
+  describeRunTarget,
+  detectRunner,
+  parseSpecSource,
+  resolveConvergeContext,
+  sha256Hex,
+  validateSha,
+  type ConvergeContext,
+  type RunHeaderInput,
+  type SpecSource,
+} from './report/run-header.js';
+
+const RCL_VERSION: string = JSON.parse(
+  await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
+).version;
 
 const program = new Command();
 
 program
   .name('rcl')
   .description('Review Council — multi-model AI code review')
-  .version(
-    JSON.parse(
-      await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
-    ).version
-  );
+  .version(RCL_VERSION);
 
 // review command
 program
@@ -140,6 +154,13 @@ program
   .option('--json-file <path>', 'Write JSON output to file')
   .option('--markdown <path>', 'Write Markdown report to file')
   .option('--ci', 'CI mode: exit non-zero if critical/important findings')
+  .option('--head-sha <sha>', 'Exact head commit a patch file was taken from (patch files only)')
+  .option('--base-sha <sha>', 'Exact base commit a patch file was taken from (patch files only)')
+  .option('--expect-head-sha <sha>', 'Fail fast unless the resolved head commit equals this SHA')
+  .option('--spec-source <source>', 'Where --spec came from: flag | repo_file | harness_issue:<ID>')
+  .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
+  .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
+  .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--config <path>', 'Path to config file')
   .action(async (target: string | undefined, opts) => {
     await runReview(target, opts);
@@ -177,6 +198,10 @@ program
   .option('--json', 'Output JSON to stdout')
   .option('--json-file <path>', 'Write JSON output to file')
   .option('--markdown <path>', 'Write Markdown report to file')
+  .option('--spec-source <source>', 'Where --spec came from: flag | repo_file | harness_issue:<ID>')
+  .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
+  .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
+  .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--config <path>', 'Path to config file')
   .action(async (file: string, opts) => {
     await runPlanReview(file, opts);
@@ -706,6 +731,17 @@ interface CouncilCliOpts {
   markdown?: string;
   ci?: boolean;
   config?: string;
+  /** Exact-head binding for patch files (IO-12475 section 8.1). */
+  headSha?: string;
+  baseSha?: string;
+  /** Fail fast when the resolved head is not the one the caller expects. */
+  expectHeadSha?: string;
+  /** flag | repo_file | harness_issue:<ID> — recorded in the run header. */
+  specSource?: string;
+  /** Converge context, or the RCL_CONVERGE_* environment the skill exports. */
+  convergeTarget?: string;
+  round?: string;
+  attempt?: string;
 }
 
 interface PreparedCouncil {
@@ -717,6 +753,15 @@ interface PreparedCouncil {
   /** Resolved early so a bad gating config fails BEFORE the council spends. */
   gatingConfig: ReturnType<typeof resolveGatingConfig>;
   contextFiles: string[];
+  /** Digest and provenance of the spec the spec-compliance role was given. */
+  spec?: { source: SpecSource; sha256: string };
+  /** Explicit --reviewer pairs: every seat is blocking, none is secondary. */
+  explicit: boolean;
+  /** The blocking council's own models — the roster's `blocking` lane. */
+  coreModels: string[];
+  converge?: ConvergeContext;
+  /** When the command started; the run header records the full wall time. */
+  startedAt: Date;
 }
 
 /**
@@ -742,6 +787,13 @@ async function prepareCouncil(
   opts: CouncilCliOpts,
   fallbackRoles?: string[]
 ): Promise<PreparedCouncil> {
+  const startedAt = new Date();
+  // Validate the converge context first: a bad --round must fail before any
+  // model time is spent, not after the council has run.
+  const converge = resolveConvergeContext(
+    { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
+    process.env
+  );
   await fetchHarnessKeys(spinner);
   const config = await loadConfig(opts.config);
 
@@ -796,10 +848,21 @@ async function prepareCouncil(
 
   // Load spec file
   let specContent: string | undefined;
+  let spec: PreparedCouncil['spec'];
   const specPath = opts.spec ?? config.spec;
+  // Validated before any file is read so a typo fails fast, spec or not.
+  const specSource: SpecSource | undefined =
+    opts.specSource !== undefined
+      ? parseSpecSource(opts.specSource)
+      : specPath
+        ? opts.spec
+          ? 'flag'
+          : 'repo_file'
+        : undefined;
   if (specPath) {
     try {
       specContent = await readFile(specPath, 'utf-8');
+      spec = { source: specSource ?? 'flag', sha256: sha256Hex(specContent) };
     } catch {
       spinner.warn(`Could not read spec file: ${specPath}`);
     }
@@ -872,7 +935,81 @@ async function prepareCouncil(
     ...(config.asyncModels ?? []),
   ]);
 
-  return { config, roleMap, assignments, asyncAssignments, gatingConfig, contextFiles };
+  return {
+    config,
+    roleMap,
+    assignments,
+    asyncAssignments,
+    gatingConfig,
+    contextFiles,
+    ...(spec ? { spec } : {}),
+    explicit: explicitReviewers !== undefined,
+    coreModels: models,
+    ...(converge ? { converge } : {}),
+    startedAt,
+  };
+}
+
+/**
+ * Exact-head binding (IO-12475 section 8.1): which commit this diff belongs
+ * to. PR mode takes the SHAs GitHub returned with the PR; git modes resolve
+ * HEAD and the merge-base; a patch file carries only its digest unless the
+ * caller vouches for its head with --head-sha (the file could have come from
+ * anywhere, so rcl never guesses from the working directory).
+ */
+async function resolveReviewTarget(
+  diff: Diff,
+  gitMode: 'staged' | 'working-tree' | undefined,
+  opts: { headSha?: string; baseSha?: string }
+): Promise<RunHeaderInput['target']> {
+  const overrideGiven = opts.headSha !== undefined || opts.baseSha !== undefined;
+  if (diff.metadata) {
+    if (overrideGiven) {
+      throw new Error(
+        '--head-sha and --base-sha apply to patch files only; a PR target resolves its heads from GitHub.'
+      );
+    }
+    const m = diff.metadata;
+    return {
+      kind: 'pr',
+      repo: `${m.owner}/${m.repo}`,
+      prNumber: m.number,
+      url: m.url,
+      ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
+      ...(m.baseSha !== undefined ? { baseSha: m.baseSha } : {}),
+      headRef: m.head,
+      baseRef: m.base,
+    };
+  }
+  if (gitMode) {
+    if (overrideGiven) {
+      throw new Error(
+        `--head-sha and --base-sha apply to patch files only; --${gitMode} resolves HEAD itself.`
+      );
+    }
+    const heads = await resolveGitHeads();
+    return { kind: gitMode === 'staged' ? 'staged' : 'working_tree', ...heads };
+  }
+  return {
+    kind: 'patch',
+    ...(opts.headSha !== undefined ? { headSha: validateSha(opts.headSha, '--head-sha') } : {}),
+    ...(opts.baseSha !== undefined ? { baseSha: validateSha(opts.baseSha, '--base-sha') } : {}),
+  };
+}
+
+/** Digests of the context files the prompt actually included (unreadable paths are skipped there too). */
+async function digestContextFiles(
+  paths: readonly string[]
+): Promise<Array<{ path: string; sha256: string }>> {
+  const digests: Array<{ path: string; sha256: string }> = [];
+  for (const path of paths) {
+    try {
+      digests.push({ path, sha256: sha256Hex(await readFile(path)) });
+    } catch {
+      // A directory or missing file never reached the prompt either.
+    }
+  }
+  return digests;
 }
 
 async function runReview(target: string | undefined, opts: CouncilCliOpts & {
@@ -916,6 +1053,24 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       diff = await fetchPRDiff(prTarget, config.githubToken);
     }
 
+    // Resolve the head BEFORE the empty-diff exit so --expect-head-sha is
+    // honored even when there is nothing to review: a moved target must
+    // never read as a clean round.
+    const runTarget = await resolveReviewTarget(diff, gitMode, opts);
+    if (opts.expectHeadSha !== undefined) {
+      const expected = validateSha(opts.expectHeadSha, '--expect-head-sha');
+      if (runTarget.headSha === undefined) {
+        throw new Error(
+          '--expect-head-sha was given but no head SHA could be resolved for this target; pass --head-sha with a patch file.'
+        );
+      }
+      if (runTarget.headSha !== expected) {
+        throw new Error(
+          `Resolved head ${runTarget.headSha} does not match --expect-head-sha ${expected}; the target has moved — refusing to review.`
+        );
+      }
+    }
+
     if (diff.files.length === 0) {
       spinner.warn(
         gitMode === 'staged'
@@ -934,7 +1089,11 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       ? `${diff.metadata.owner}/${diff.metadata.repo}#${diff.metadata.number}`
       : (target ?? `git-${gitMode}-${await currentBranchLabel()}`);
 
-    await executeCouncil(spinner, prepared, diff, opts, { asyncTargetLabel });
+    await executeCouncil(spinner, prepared, diff, opts, {
+      command: 'review',
+      target: runTarget,
+      asyncTargetLabel,
+    });
   } catch (err) {
     spinner.fail(String(err));
     if (process.env['RCL_DEBUG']) {
@@ -953,10 +1112,15 @@ async function executeCouncil(
   prepared: PreparedCouncil,
   diff: Diff,
   opts: CouncilCliOpts,
-  extra?: { focus?: PlanFocus; asyncTargetLabel?: string }
+  extra: {
+    command: 'review' | 'review-plan';
+    target: RunHeaderInput['target'];
+    focus?: PlanFocus;
+    asyncTargetLabel?: string;
+  }
 ): Promise<void> {
   const { config, roleMap, assignments, asyncAssignments, contextFiles } = prepared;
-  const planContext = extra?.focus !== undefined ? { focus: extra.focus } : undefined;
+  const planContext = extra.focus !== undefined ? { focus: extra.focus } : undefined;
 
   // Chunk the diff
   const chunks = chunkDiff(diff.files);
@@ -983,7 +1147,7 @@ async function executeCouncil(
   // await them; collect whatever arrived from earlier rounds after the
   // blocking council returns. Best-effort by design — a broken lane must
   // never fail or slow the blocking round.
-  const asyncTargetLabel = extra?.asyncTargetLabel;
+  const asyncTargetLabel = extra.asyncTargetLabel;
   let asyncStoreDir: string | undefined;
   let asyncKey: string | undefined;
   let asyncLaunched = 0;
@@ -1204,7 +1368,7 @@ async function executeCouncil(
 
   const keepAppendix = config.output?.belowThresholdAppendix ?? true;
   const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
-  const result: ReviewResult = {
+  const body: ReviewResult = {
     reviews,
     findings: finalFindings,
     ...(keepAppendix && gatedAppendix.length > 0
@@ -1246,7 +1410,45 @@ async function executeCouncil(
     },
   };
 
+  // Self-describing run header (IO-12475 section 5.1), built once the body
+  // exists so the CI verdict is recorded uniformly — with or without --ci.
+  const run = buildRunHeader({
+    rclVersion: RCL_VERSION,
+    command: extra.command,
+    target: extra.target,
+    diff,
+    roster: buildRoster({
+      assignments,
+      asyncAssignments,
+      coreModels: prepared.coreModels,
+      explicit: prepared.explicit,
+      gating: prepared.gatingConfig,
+    }),
+    config,
+    thresholds: {
+      minConsensusScore: config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
+      minConfidence: config.thresholds?.minConfidence ?? DEFAULT_THRESHOLDS.minConfidence,
+      dedupeLineWindow: config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
+      jaccardThreshold: config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
+    },
+    gating: prepared.gatingConfig,
+    ...(prepared.spec ? { spec: prepared.spec } : {}),
+    contextFiles: await digestContextFiles(contextFiles),
+    runner: detectRunner(process.env, hostname()),
+    startedAt: prepared.startedAt,
+    finishedAt: new Date(),
+    ciExitCode: evaluateCiGate(body).exitCode,
+    ...(prepared.converge ? { converge: prepared.converge } : {}),
+  });
+  const result: ReviewResult = { run, ...body };
+
   spinner.succeed('Review complete');
+  process.stderr.write(
+    chalk.dim(
+      `Reviewed ${describeRunTarget(run.target)} · run ${run.id}` +
+        (run.converge ? ` · converge ${run.converge.target} round ${run.converge.round ?? '?'}` : '')
+    ) + '\n'
+  );
   // Status lines go to stderr: stdout may be a machine-read JSON stream
   // (`--json | jq`), which a stray status line would corrupt.
   if (asyncLaunched > 0) {
@@ -1420,6 +1622,8 @@ async function runPlanReview(
     // Plan reviews get an async lane too: re-reviewing the same plan file
     // collects what the previous run fired.
     await executeCouncil(spinner, prepared, diff, opts, {
+      command: 'review-plan',
+      target: { kind: 'plan' },
       focus,
       asyncTargetLabel: `plan:${file}`,
     });

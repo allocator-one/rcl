@@ -1,5 +1,62 @@
 import type { ParseResult } from '../consensus/parser.js';
-import type { ModelReview } from '../consensus/types.js';
+import type { ModelReview, TokenUsage } from '../consensus/types.js';
+
+/**
+ * Token usage extractors — one per SDK response shape (IO-12475 section
+ * 8.3). Each returns undefined when the provider sent no usage block, so a
+ * review never carries an empty `usage: {}`; non-numeric fields are dropped
+ * rather than coerced.
+ */
+function compactUsage(usage: TokenUsage): TokenUsage | undefined {
+  const out: TokenUsage = {};
+  if (typeof usage.inputTokens === 'number') out.inputTokens = usage.inputTokens;
+  if (typeof usage.outputTokens === 'number') out.outputTokens = usage.outputTokens;
+  if (typeof usage.reasoningTokens === 'number') out.reasoningTokens = usage.reasoningTokens;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function usageFromAnthropic(
+  usage: { input_tokens?: number | null; output_tokens?: number | null } | null | undefined
+): TokenUsage | undefined {
+  if (!usage) return undefined;
+  return compactUsage({
+    inputTokens: usage.input_tokens ?? undefined,
+    outputTokens: usage.output_tokens ?? undefined,
+  });
+}
+
+/** OpenAI Chat Completions shape; OpenRouter passes the same block through. */
+export function usageFromOpenAI(
+  usage:
+    | {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        completion_tokens_details?: { reasoning_tokens?: number } | null;
+      }
+    | null
+    | undefined
+): TokenUsage | undefined {
+  if (!usage) return undefined;
+  return compactUsage({
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+  });
+}
+
+export function usageFromGoogle(
+  usage:
+    | { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number }
+    | null
+    | undefined
+): TokenUsage | undefined {
+  if (!usage) return undefined;
+  return compactUsage({
+    inputTokens: usage.promptTokenCount,
+    outputTokens: usage.candidatesTokenCount,
+    reasoningTokens: usage.thoughtsTokenCount,
+  });
+}
 
 const KNOWN_PROVIDER_PREFIXES = [
   'anthropic/',
@@ -46,6 +103,8 @@ export function failedReview(opts: {
   startedAt: number;
   error: string;
   status?: 'error' | 'timeout';
+  /** Tokens the failed attempt still consumed (a truncated answer is billed). */
+  usage?: TokenUsage;
 }): ModelReview {
   return {
     model: opts.model,
@@ -55,6 +114,7 @@ export function failedReview(opts: {
     durationMs: Date.now() - opts.startedAt,
     status: opts.status ?? 'error',
     error: opts.error,
+    ...(opts.usage ? { usage: opts.usage } : {}),
   };
 }
 
@@ -85,6 +145,7 @@ export function reviewFromParse(opts: {
   provider: string;
   startedAt: number;
   parsed: ParseResult;
+  usage?: TokenUsage;
 }): ModelReview {
   const { findings, warnings, dropped, unusable } = opts.parsed;
   const base = {
@@ -93,6 +154,7 @@ export function reviewFromParse(opts: {
     provider: opts.provider,
     findings,
     durationMs: Date.now() - opts.startedAt,
+    ...(opts.usage ? { usage: opts.usage } : {}),
     ...(dropped > 0 ? { droppedFindings: dropped } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };

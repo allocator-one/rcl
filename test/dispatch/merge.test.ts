@@ -110,3 +110,20 @@ describe('mergeChunkReviews — degraded coverage', () => {
     expect(merged!.warnings).toBeUndefined();
   });
 });
+
+describe('mergeChunkReviews — token usage', () => {
+  it('sums usage across chunks and tolerates chunks without it', () => {
+    const merged = mergeChunkReviews([
+      review({ usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5 } }),
+      review({ usage: { inputTokens: 200, outputTokens: 20 } }),
+      review({ status: 'timeout', error: 'Request timed out' }),
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.usage).toEqual({ inputTokens: 300, outputTokens: 30, reasoningTokens: 5 });
+  });
+
+  it('leaves usage absent when no chunk reported it', () => {
+    const merged = mergeChunkReviews([review({}), review({})]);
+    expect(merged[0]).not.toHaveProperty('usage');
+  });
+});

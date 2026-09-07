@@ -1,4 +1,16 @@
-import type { ModelReview } from '../consensus/types.js';
+import type { ModelReview, TokenUsage } from '../consensus/types.js';
+
+/** Total usage across chunks; absent when no chunk reported any. */
+function sumUsage(parts: readonly ModelReview[]): TokenUsage | undefined {
+  const reported = parts.map((p) => p.usage).filter((u): u is TokenUsage => u !== undefined);
+  if (reported.length === 0) return undefined;
+  const total: TokenUsage = {};
+  for (const key of ['inputTokens', 'outputTokens', 'reasoningTokens'] as const) {
+    const values = reported.map((u) => u[key]).filter((v): v is number => typeof v === 'number');
+    if (values.length > 0) total[key] = values.reduce((sum, v) => sum + v, 0);
+  }
+  return total;
+}
 
 /**
  * A large diff is reviewed as multiple chunks, so each (model, role)
@@ -38,7 +50,9 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
     const durationMs = parts.reduce((sum, p) => sum + p.durationMs, 0);
     const dropped = parts.reduce((sum, p) => sum + (p.droppedFindings ?? 0), 0);
     const warnings = parts.flatMap((p) => p.warnings ?? []);
+    const usage = sumUsage(parts);
     const degraded = {
+      ...(usage ? { usage } : {}),
       ...(dropped > 0 ? { droppedFindings: dropped } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
       // A reviewer is homogeneous across chunks, so any async part means the

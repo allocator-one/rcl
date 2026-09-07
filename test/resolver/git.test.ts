@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { loadGitDiff } from '../../src/resolver/git.js';
+import { loadGitDiff, resolveGitHeads } from '../../src/resolver/git.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -107,5 +107,45 @@ describe('loadGitDiff', () => {
       await git(repo, 'rm', '--cached', '-q', 'ünïcode.ts');
       await rm(join(repo, 'ünïcode.ts'), { force: true });
     }
+  });
+});
+
+describe('resolveGitHeads', () => {
+  let repo: string;
+  let notARepo: string;
+  let firstCommit: string;
+  let secondCommit: string;
+
+  beforeAll(async () => {
+    repo = await mkdtemp(join(tmpdir(), 'rcl-git-heads-'));
+    notARepo = await mkdtemp(join(tmpdir(), 'rcl-git-heads-plain-'));
+    await git(repo, 'init');
+    await git(repo, 'config', 'user.email', 'test@example.com');
+    await git(repo, 'config', 'user.name', 'Test');
+    await writeFile(join(repo, 'a.ts'), 'export const a = 1;\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'first');
+    firstCommit = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+    // Fake the remote default branch at the first commit, then move on.
+    await git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    await writeFile(join(repo, 'b.ts'), 'export const b = 2;\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-m', 'second');
+    secondCommit = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repo })).stdout.trim();
+  });
+
+  afterAll(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(notARepo, { recursive: true, force: true });
+  });
+
+  it('resolves HEAD and the merge-base with the remote default branch', async () => {
+    const heads = await resolveGitHeads(repo);
+    expect(heads.headSha).toBe(secondCommit);
+    expect(heads.baseSha).toBe(firstCommit);
+  });
+
+  it('returns nothing outside a repository instead of throwing', async () => {
+    expect(await resolveGitHeads(notARepo)).toEqual({});
   });
 });

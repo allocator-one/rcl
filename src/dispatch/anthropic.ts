@@ -12,6 +12,7 @@ import {
   isBlankOutput,
   linkAbortSignal,
   reviewFromParse,
+  usageFromAnthropic,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -101,6 +102,7 @@ export class AnthropicAdapter implements ReviewAdapter {
             // timeout as a generic error.
             { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
           );
+          const usage = usageFromAnthropic(response.usage);
 
           if (response.stop_reason === 'max_tokens') {
             return failedReview({
@@ -108,6 +110,7 @@ export class AnthropicAdapter implements ReviewAdapter {
               role,
               provider: 'anthropic',
               startedAt: start,
+              usage,
               error: 'Response truncated at max_tokens; findings would be incomplete',
             });
           }
@@ -125,6 +128,7 @@ export class AnthropicAdapter implements ReviewAdapter {
               role,
               provider: 'anthropic',
               startedAt: start,
+              usage,
               error: `Model refused this review${category ? ` (${category})` : ''} — the diff was not reviewed`,
             });
           }
@@ -147,6 +151,7 @@ export class AnthropicAdapter implements ReviewAdapter {
               role,
               provider: 'anthropic',
               startedAt: start,
+              usage,
               error: 'Model returned an empty response; the diff was not reviewed',
             });
           }
@@ -161,6 +166,7 @@ export class AnthropicAdapter implements ReviewAdapter {
             provider: 'anthropic',
             startedAt: start,
             parsed,
+            usage,
           });
         } catch (err) {
           lastErr = err;

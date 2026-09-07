@@ -1,6 +1,7 @@
 import { writeFile } from 'fs/promises';
 import type { AgreementTier, ConsensusFinding, ReviewResult } from '../consensus/types.js';
 import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
+import { describeRunTarget } from '../report/run-header.js';
 
 function severityEmoji(severity: ConsensusFinding['severity']): string {
   return { critical: '🔴', important: '🟡', minor: '🔵', nitpick: '⚪' }[severity];
@@ -144,6 +145,15 @@ export function toMarkdown(result: ReviewResult): string {
   const sections: string[] = [
     '# Review Council Report',
     '',
+    // Self-describing header (rcl ≥ 3.0): what was reviewed, by which
+    // version, under which run id — the Markdown must answer it too.
+    ...(result.run
+      ? [
+          `**Reviewed:** \`${sanitizeInline(describeRunTarget(result.run.target))}\` · ` +
+            `rcl ${sanitizeInline(result.run.rcl_version)} · run \`${result.run.id}\``,
+          '',
+        ]
+      : []),
     `**Completed:** ${stats.successfulReviews}/${stats.totalReviews} reviewers · ` +
       `**${stats.totalDeduped}** unique findings (${stats.totalRawFindings} raw) · ` +
       `${(stats.durationMs / 1000).toFixed(1)}s`,
@@ -229,8 +239,8 @@ export function toMarkdown(result: ReviewResult): string {
 
   // Reviewers table
   sections.push('## Reviewers', '');
-  sections.push('| Model | Role | Status | Findings | Duration |');
-  sections.push('|-------|------|--------|----------|----------|');
+  sections.push('| Model | Role | Status | Findings | Duration | Tokens (in / out / reasoning) |');
+  sections.push('|-------|------|--------|----------|----------|-------------------------------|');
   for (const review of result.reviews) {
     const status =
       review.status === 'success'
@@ -247,8 +257,14 @@ export function toMarkdown(result: ReviewResult): string {
     const dropped = review.droppedFindings ?? 0;
     const findingsCell =
       dropped > 0 ? `${review.findings.length} (${dropped} dropped)` : `${review.findings.length}`;
+    const u = review.usage;
+    const tokensCell = u
+      ? [u.inputTokens, u.outputTokens, u.reasoningTokens]
+          .map((n) => (n === undefined ? '—' : String(n)))
+          .join(' / ')
+      : '—';
     sections.push(
-      `| ${review.model} | ${review.role} | ${status} | ${findingsCell} | ${(review.durationMs / 1000).toFixed(1)}s |`
+      `| ${review.model} | ${review.role} | ${status} | ${findingsCell} | ${(review.durationMs / 1000).toFixed(1)}s | ${tokensCell} |`
     );
   }
   sections.push('');

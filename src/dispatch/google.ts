@@ -11,6 +11,7 @@ import {
   isBlankOutput,
   linkAbortSignal,
   reviewFromParse,
+  usageFromGoogle,
 } from './utils.js';
 
 /**
@@ -88,6 +89,7 @@ export class GoogleAdapter implements ReviewAdapter {
               httpOptions: { timeout: options.timeoutMs + 30_000 },
             },
           });
+          const usage = usageFromGoogle(response.usageMetadata);
 
           const finishReason = response.candidates?.[0]?.finishReason;
           if (finishReason === 'MAX_TOKENS') {
@@ -96,6 +98,7 @@ export class GoogleAdapter implements ReviewAdapter {
               role,
               provider: 'google',
               startedAt: start,
+              usage,
               error: 'Response truncated at maxOutputTokens; findings would be incomplete',
             });
           }
@@ -108,6 +111,7 @@ export class GoogleAdapter implements ReviewAdapter {
               role,
               provider: 'google',
               startedAt: start,
+              usage,
               error: `Model refused this review (${finishReason}) — the diff was not reviewed`,
             });
           }
@@ -119,6 +123,7 @@ export class GoogleAdapter implements ReviewAdapter {
               role,
               provider: 'google',
               startedAt: start,
+              usage,
               error: 'Model returned an empty response; the diff was not reviewed',
             });
           }
@@ -132,6 +137,7 @@ export class GoogleAdapter implements ReviewAdapter {
             provider: 'google',
             startedAt: start,
             parsed,
+            usage,
           });
         } catch (err) {
           lastErr = err;
