@@ -1,4 +1,4 @@
-import { Octokit } from '@octokit/rest';
+import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 
@@ -13,7 +13,7 @@ export interface GitHubTarget {
 // owner/repo#N form with single-segment owner and repo. A local path that
 // merely contains "github.com/…/pull/N" or ends in "#2" is not a PR.
 const PR_URL =
-  /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s#?]+)\/([^/\s#?]+)\/pull\/(\d+)(?:\/[^\s?#]*)?(?:[?#].*)?$/i;
+  /^(?:https?:\/\/)?(?:www\.)?github\.com(?::\d+)?\/([^/\s#?]+)\/([^/\s#?]+)\/pull\/(\d+)(?:\/[^\s?#]*)?(?:[?#].*)?$/i;
 const PR_SHORT = /^([^/#\s]+)\/([^/#\s]+)#(\d+)$/;
 
 /**
@@ -51,6 +51,45 @@ export function parseGitHubTarget(target: string): GitHubTarget {
   );
 }
 
+/** Files per compare page; GitHub caps the parameter at 100. */
+const COMPARE_PAGE_SIZE = 100;
+/** A PR lists at most 3,000 changed files; more pages than that is a loop bug. */
+const MAX_COMPARE_PAGES = 30;
+
+type ComparedFile = NonNullable<
+  RestEndpointMethodTypes['repos']['compareCommitsWithBasehead']['response']['data']['files']
+>[number];
+
+/**
+ * The changed files between two immutable object ids, via
+ * `GET /repos/{owner}/{repo}/compare/{base}...{head}` — the same merge-base
+ * comparison a PR shows, but addressed by SHA rather than by PR number, so
+ * the result cannot change underneath the caller while it paginates.
+ */
+async function fetchComparedFiles(
+  octokit: Octokit,
+  target: GitHubTarget,
+  baseSha: string,
+  headSha: string
+): Promise<ComparedFile[]> {
+  const files: ComparedFile[] = [];
+  for (let page = 1; page <= MAX_COMPARE_PAGES; page++) {
+    const { data } = await octokit.repos.compareCommitsWithBasehead({
+      owner: target.owner,
+      repo: target.repo,
+      basehead: `${baseSha}...${headSha}`,
+      per_page: COMPARE_PAGE_SIZE,
+      page,
+    });
+    const batch = data.files ?? [];
+    files.push(...batch);
+    if (batch.length < COMPARE_PAGE_SIZE) return files;
+  }
+  throw new Error(
+    `PR #${target.number} changes more than ${MAX_COMPARE_PAGES * COMPARE_PAGE_SIZE} files — too large to review in one council pass.`
+  );
+}
+
 export async function fetchPRDiff(
   target: GitHubTarget,
   token?: string,
@@ -62,44 +101,20 @@ export async function fetchPRDiff(
       auth: token ?? process.env['GITHUB_TOKEN'],
     });
 
-  const [prResponse, files] = await Promise.all([
-    octokit.pulls.get({
+  const pr = (
+    await octokit.pulls.get({
       owner: target.owner,
       repo: target.repo,
       pull_number: target.number,
-    }),
-    // paginate: PRs can exceed 100 changed files; a single page would
-    // silently drop the rest of the diff.
-    octokit.paginate(octokit.pulls.listFiles, {
-      owner: target.owner,
-      repo: target.repo,
-      pull_number: target.number,
-      per_page: 100,
-    }),
-  ]);
+    })
+  ).data;
 
-  const pr = prResponse.data;
-
-  // Exact-head binding: the file listing is a separate request, so a push
-  // (or a base-branch advance, which changes the comparison) landing between
-  // the two would pair one pair of SHAs with another comparison's patches.
-  // Both requests above have settled here; re-read the PR and refuse to bind
-  // if either end moved.
-  const recheck = await octokit.pulls.get({
-    owner: target.owner,
-    repo: target.repo,
-    pull_number: target.number,
-  });
-  if (recheck.data.head.sha !== pr.head.sha) {
-    throw new Error(
-      `PR #${target.number} head moved from ${pr.head.sha} to ${recheck.data.head.sha} while its files were being fetched — rerun the review.`
-    );
-  }
-  if (recheck.data.base.sha !== pr.base.sha) {
-    throw new Error(
-      `PR #${target.number} base moved from ${pr.base.sha} to ${recheck.data.base.sha} while its files were being fetched — rerun the review.`
-    );
-  }
+  // Exact-head binding: the changed files are fetched by a compare pinned to
+  // the base and head object ids this very response named, so the patches
+  // provably belong to `head_sha`. A push, a base advance, or an A→B→A move
+  // during pagination cannot mix revisions into the listing — object ids are
+  // immutable, unlike the PR-number-addressed files endpoint.
+  const files = await fetchComparedFiles(octokit, target, pr.base.sha, pr.head.sha);
 
   const metadata: PRMetadata = {
     owner: target.owner,
@@ -110,8 +125,8 @@ export async function fetchPRDiff(
     author: pr.user?.login ?? 'unknown',
     base: pr.base.ref,
     head: pr.head.ref,
-    headSha: recheck.data.head.sha,
-    baseSha: recheck.data.base.sha,
+    headSha: pr.head.sha,
+    baseSha: pr.base.sha,
     ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
     url: pr.html_url,
     labels: pr.labels.map((l) => l.name),

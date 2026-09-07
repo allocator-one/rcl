@@ -18,6 +18,31 @@ function fakePr() {
   };
 }
 
+function compareFile(i: number) {
+  return {
+    filename: `src/file-${i}.ts`,
+    status: 'modified',
+    additions: 1,
+    deletions: 0,
+    patch: `@@ -1 +1 @@\n-old\n+new-${i}`,
+  };
+}
+
+/** A compare endpoint fake that serves `total` files in pages of 100. */
+function compareServing(total: number) {
+  return vi.fn(async ({ page, per_page }: { page: number; per_page: number }) => {
+    const start = (page - 1) * per_page;
+    const files = Array.from({ length: Math.max(0, Math.min(per_page, total - start)) }, (_, i) =>
+      compareFile(start + i)
+    );
+    return { data: { files } };
+  });
+}
+
+function octokitWith(compare: ReturnType<typeof vi.fn>, get = vi.fn().mockResolvedValue(fakePr())) {
+  return { pulls: { get }, repos: { compareCommitsWithBasehead: compare } } as unknown as Octokit;
+}
+
 describe('parseGitHubTarget', () => {
   it('parses owner/repo#N', () => {
     expect(parseGitHubTarget('allocator-one/rcl#7')).toEqual({
@@ -58,6 +83,7 @@ describe('isGitHubTarget', () => {
       'https://github.com/o/r/pull/7#discussion_r123',
       'http://github.com/o/r/pull/7',
       'https://www.github.com/o/r/pull/7',
+      'https://github.com:443/o/r/pull/7',
       'HTTPS://GitHub.com/o/r/pull/7',
       'github.com/o/r/pull/7',
     ]) {
@@ -76,6 +102,7 @@ describe('isGitHubTarget', () => {
       'notes#1.diff',
       'o/r#abc',
       'https://gitlab.com/o/r/pull/7',
+      'https://github.com/o/r/issues/5',
     ]) {
       expect(isGitHubTarget(local)).toBe(false);
     }
@@ -84,50 +111,27 @@ describe('isGitHubTarget', () => {
 });
 
 describe('fetchPRDiff', () => {
-  it('paginates the PR file listing beyond 100 files', async () => {
-    const manyFiles = Array.from({ length: 250 }, (_, i) => ({
-      filename: `src/file-${i}.ts`,
-      status: 'modified',
-      additions: 1,
-      deletions: 0,
-      patch: `@@ -1 +1 @@\n-old\n+new-${i}`,
-    }));
+  it('fetches the changed files through a compare pinned to the PR base and head SHAs, paging past 100 files', async () => {
+    const compare = compareServing(250);
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(compare));
 
-    const listFiles = { endpoint: 'pulls.listFiles' };
-    const paginate = vi.fn().mockResolvedValue(manyFiles);
-    const fakeOctokit = {
-      pulls: {
-        get: vi.fn().mockResolvedValue(fakePr()),
-        listFiles,
-      },
-      paginate,
-    } as unknown as Octokit;
-
-    const diff = await fetchPRDiff(
-      { owner: 'o', repo: 'r', number: 1 },
-      'token',
-      fakeOctokit
-    );
-
-    expect(paginate).toHaveBeenCalledWith(
-      listFiles,
-      expect.objectContaining({ owner: 'o', repo: 'r', pull_number: 1, per_page: 100 })
-    );
+    expect(compare).toHaveBeenCalledTimes(3);
+    for (const [page, call] of compare.mock.calls.entries()) {
+      expect(call[0]).toEqual({
+        owner: 'o',
+        repo: 'r',
+        basehead: 'basesha456...headsha123',
+        per_page: 100,
+        page: page + 1,
+      });
+    }
     expect(diff.files).toHaveLength(250);
     expect(diff.files[249]!.filename).toBe('src/file-249.ts');
     expect(diff.metadata?.title).toBe('A big PR');
   });
 
-  it('captures the exact head, base and merge-commit SHAs the API already returns', async () => {
-    const fakeOctokit = {
-      pulls: {
-        get: vi.fn().mockResolvedValue(fakePr()),
-        listFiles: { endpoint: 'pulls.listFiles' },
-      },
-      paginate: vi.fn().mockResolvedValue([]),
-    } as unknown as Octokit;
-
-    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit);
+  it('binds the metadata to the same SHAs the compare was pinned to', async () => {
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(compareServing(0)));
 
     expect(diff.metadata).toMatchObject({
       headSha: 'headsha123',
@@ -136,56 +140,17 @@ describe('fetchPRDiff', () => {
     });
   });
 
-  it('refuses to bind when the PR head moves between the metadata read and the file listing', async () => {
-    const moved = fakePr();
-    moved.data.head.sha = 'headsha999';
-    const fakeOctokit = {
-      pulls: {
-        get: vi.fn().mockResolvedValueOnce(fakePr()).mockResolvedValueOnce(moved),
-        listFiles: { endpoint: 'pulls.listFiles' },
-      },
-      paginate: vi.fn().mockResolvedValue([]),
-    } as unknown as Octokit;
-
-    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit)).rejects.toThrow(
-      /head moved from headsha123 to headsha999/
-    );
+  it('reads the PR exactly once — the immutable object ids make a re-read unnecessary', async () => {
+    const get = vi.fn().mockResolvedValue(fakePr());
+    await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(compareServing(3), get));
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses to bind when the PR base moves while its files are being fetched', async () => {
-    const moved = fakePr();
-    moved.data.base.sha = 'basesha999';
-    const fakeOctokit = {
-      pulls: {
-        get: vi.fn().mockResolvedValueOnce(fakePr()).mockResolvedValueOnce(moved),
-        listFiles: { endpoint: 'pulls.listFiles' },
-      },
-      paginate: vi.fn().mockResolvedValue([]),
-    } as unknown as Octokit;
-
-    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit)).rejects.toThrow(
-      /base moved from basesha456 to basesha999/
+  it('refuses an absurdly large comparison instead of paging forever', async () => {
+    const endless = vi.fn(async () => ({ data: { files: Array.from({ length: 100 }, (_, i) => compareFile(i)) } }));
+    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(endless))).rejects.toThrow(
+      /more than 3000 files/
     );
-  });
-
-  it('re-reads the PR only after the file listing has settled', async () => {
-    const order: string[] = [];
-    const fakeOctokit = {
-      pulls: {
-        get: vi.fn(async () => {
-          order.push('get');
-          return fakePr();
-        }),
-        listFiles: { endpoint: 'pulls.listFiles' },
-      },
-      paginate: vi.fn(async () => {
-        order.push('files');
-        return [];
-      }),
-    } as unknown as Octokit;
-
-    await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit);
-    expect(order.indexOf('files')).toBeLessThan(order.lastIndexOf('get'));
-    expect(order.filter((o) => o === 'get')).toHaveLength(2);
+    expect(endless).toHaveBeenCalledTimes(30);
   });
 });

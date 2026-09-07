@@ -4,9 +4,11 @@
 
 Phase 0 of the Review Council evidence ledger (RCL-36, epic IO-12475): the
 report now says what it reviewed. Nothing leaves the machine yet — the
-telemetry sink is the next child. The one network change: PR mode re-reads
-the PR (one extra `pulls.get`) after listing its files and refuses to bind
-the report when the head or base moved in between.
+telemetry sink is the next child. The one network change: PR mode now
+fetches the changed files through a compare pinned to the PR's base and head
+object ids (`GET /compare/{base}...{head}`, paged by 100) instead of the
+PR-number-addressed files listing, so the report's `head_sha` provably
+identifies the reviewed patches even if the PR moves mid-fetch.
 
 - **Self-describing `run` header** on every report (`ReviewResult.run`):
   client run id (UUIDv7), rcl version, command, target with exact
