@@ -51,43 +51,64 @@ export function parseGitHubTarget(target: string): GitHubTarget {
   );
 }
 
-/** Files per compare page; GitHub caps the parameter at 100. */
-const COMPARE_PAGE_SIZE = 100;
-/** A PR lists at most 3,000 changed files; more pages than that is a loop bug. */
-const MAX_COMPARE_PAGES = 30;
+/**
+ * GitHub's compare endpoint returns the changed files only in its first
+ * response and caps them at 300 (paging applies to commits, not files).
+ */
+const COMPARE_FILE_CAP = 300;
 
-type ComparedFile = NonNullable<
+type ChangedFile = NonNullable<
   RestEndpointMethodTypes['repos']['compareCommitsWithBasehead']['response']['data']['files']
 >[number];
+type PullRequest = RestEndpointMethodTypes['pulls']['get']['response']['data'];
 
 /**
- * The changed files between two immutable object ids, via
- * `GET /repos/{owner}/{repo}/compare/{base}...{head}` — the same merge-base
- * comparison a PR shows, but addressed by SHA rather than by PR number, so
- * the result cannot change underneath the caller while it paginates.
+ * The PR's changed files, bound to the SHAs the PR response named.
+ *
+ * Preferred path: `GET /compare/{base}...{head}` — the same merge-base
+ * comparison a PR shows, addressed by immutable object ids, so nothing that
+ * happens to the PR after `pulls.get` can change what comes back. GitHub
+ * includes at most 300 files in that response, so it is authoritative only
+ * below the cap.
+ *
+ * Large PRs fall back to the PR-number-addressed listing (paged to 3,000
+ * files), bracketed by PR reads: if the head or base moved while the pages
+ * were fetched, the report is not bound. A move-and-move-back inside that
+ * window is not detectable here; every PR up to the compare cap takes the
+ * pinned path and has no such window.
  */
-async function fetchComparedFiles(
+async function fetchChangedFiles(
   octokit: Octokit,
   target: GitHubTarget,
-  baseSha: string,
-  headSha: string
-): Promise<ComparedFile[]> {
-  const files: ComparedFile[] = [];
-  for (let page = 1; page <= MAX_COMPARE_PAGES; page++) {
+  pr: PullRequest
+): Promise<ChangedFile[]> {
+  if (pr.changed_files <= COMPARE_FILE_CAP) {
     const { data } = await octokit.repos.compareCommitsWithBasehead({
       owner: target.owner,
       repo: target.repo,
-      basehead: `${baseSha}...${headSha}`,
-      per_page: COMPARE_PAGE_SIZE,
-      page,
+      basehead: `${pr.base.sha}...${pr.head.sha}`,
     });
-    const batch = data.files ?? [];
-    files.push(...batch);
-    if (batch.length < COMPARE_PAGE_SIZE) return files;
+    const files = data.files ?? [];
+    // Exactly at the cap the list may be truncated; only a shorter list is
+    // known to be complete.
+    if (files.length < COMPARE_FILE_CAP) return files;
   }
-  throw new Error(
-    `PR #${target.number} changes more than ${MAX_COMPARE_PAGES * COMPARE_PAGE_SIZE} files — too large to review in one council pass.`
-  );
+
+  const listed: ChangedFile[] = await octokit.paginate(octokit.pulls.listFiles, {
+    owner: target.owner,
+    repo: target.repo,
+    pull_number: target.number,
+    per_page: 100,
+  });
+  const recheck = (
+    await octokit.pulls.get({ owner: target.owner, repo: target.repo, pull_number: target.number })
+  ).data;
+  if (recheck.head.sha !== pr.head.sha || recheck.base.sha !== pr.base.sha) {
+    throw new Error(
+      `PR #${target.number} moved (${pr.base.sha}...${pr.head.sha} → ${recheck.base.sha}...${recheck.head.sha}) while its ${listed.length} files were being listed — rerun the review.`
+    );
+  }
+  return listed;
 }
 
 export async function fetchPRDiff(
@@ -109,12 +130,10 @@ export async function fetchPRDiff(
     })
   ).data;
 
-  // Exact-head binding: the changed files are fetched by a compare pinned to
-  // the base and head object ids this very response named, so the patches
-  // provably belong to `head_sha`. A push, a base advance, or an A→B→A move
-  // during pagination cannot mix revisions into the listing — object ids are
-  // immutable, unlike the PR-number-addressed files endpoint.
-  const files = await fetchComparedFiles(octokit, target, pr.base.sha, pr.head.sha);
+  // Exact-head binding: the files come from a compare pinned to the base and
+  // head object ids this very response named (see fetchChangedFiles for the
+  // large-PR fallback and its bracket), so the patches belong to `head_sha`.
+  const files = await fetchChangedFiles(octokit, target, pr);
 
   const metadata: PRMetadata = {
     owner: target.owner,

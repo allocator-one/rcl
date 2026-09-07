@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { Octokit } from '@octokit/rest';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from '../../src/resolver/github.js';
 
-function fakePr() {
+function fakePr(changedFiles = 3) {
   return {
     data: {
       title: 'A big PR',
@@ -14,11 +14,12 @@ function fakePr() {
       html_url: 'https://github.com/o/r/pull/1',
       labels: [{ name: 'big' }],
       draft: false,
+      changed_files: changedFiles,
     },
   };
 }
 
-function compareFile(i: number) {
+function changedFile(i: number) {
   return {
     filename: `src/file-${i}.ts`,
     status: 'modified',
@@ -28,28 +29,25 @@ function compareFile(i: number) {
   };
 }
 
-/** A compare endpoint fake that serves `total` files in pages of 100. */
-function compareServing(total: number) {
-  return vi.fn(async ({ page, per_page }: { page: number; per_page: number }) => {
-    const start = (page - 1) * per_page;
-    const files = Array.from({ length: Math.max(0, Math.min(per_page, total - start)) }, (_, i) =>
-      compareFile(start + i)
-    );
-    return { data: { files } };
-  });
-}
+const files = (n: number) => Array.from({ length: n }, (_, i) => changedFile(i));
 
-function octokitWith(compare: ReturnType<typeof vi.fn>, get = vi.fn().mockResolvedValue(fakePr())) {
-  return { pulls: { get }, repos: { compareCommitsWithBasehead: compare } } as unknown as Octokit;
+/** An Octokit fake: compare serves `compareFiles` on one response; the PR listing serves `listed`. */
+function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number }) {
+  const pr = opts.pr ?? fakePr();
+  const get = vi.fn().mockResolvedValueOnce(pr).mockResolvedValueOnce(opts.recheck ?? pr);
+  const compare = vi.fn(async () => ({ data: { files: files(opts.compareFiles ?? pr.data.changed_files) } }));
+  const paginate = vi.fn(async () => files(opts.listed ?? pr.data.changed_files));
+  const octokit = {
+    pulls: { get, listFiles: { endpoint: 'pulls.listFiles' } },
+    repos: { compareCommitsWithBasehead: compare },
+    paginate,
+  } as unknown as Octokit;
+  return { octokit, get, compare, paginate };
 }
 
 describe('parseGitHubTarget', () => {
   it('parses owner/repo#N', () => {
-    expect(parseGitHubTarget('allocator-one/rcl#7')).toEqual({
-      owner: 'allocator-one',
-      repo: 'rcl',
-      number: 7,
-    });
+    expect(parseGitHubTarget('allocator-one/rcl#7')).toEqual({ owner: 'allocator-one', repo: 'rcl', number: 7 });
   });
 
   it('parses a PR URL', () => {
@@ -111,46 +109,60 @@ describe('isGitHubTarget', () => {
 });
 
 describe('fetchPRDiff', () => {
-  it('fetches the changed files through a compare pinned to the PR base and head SHAs, paging past 100 files', async () => {
-    const compare = compareServing(250);
-    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(compare));
+  it('fetches the files through ONE compare pinned to the PR base and head SHAs (no paging params)', async () => {
+    const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(31) });
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
 
-    expect(compare).toHaveBeenCalledTimes(3);
-    for (const [page, call] of compare.mock.calls.entries()) {
-      expect(call[0]).toEqual({
-        owner: 'o',
-        repo: 'r',
-        basehead: 'basesha456...headsha123',
-        per_page: 100,
-        page: page + 1,
-      });
-    }
-    expect(diff.files).toHaveLength(250);
-    expect(diff.files[249]!.filename).toBe('src/file-249.ts');
-    expect(diff.metadata?.title).toBe('A big PR');
-  });
-
-  it('binds the metadata to the same SHAs the compare was pinned to', async () => {
-    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(compareServing(0)));
-
+    expect(compare).toHaveBeenCalledTimes(1);
+    expect(compare.mock.calls[0]![0]).toEqual({ owner: 'o', repo: 'r', basehead: 'basesha456...headsha123' });
+    expect(paginate).not.toHaveBeenCalled();
+    // Immutable object ids make a re-read unnecessary on the pinned path.
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(diff.files).toHaveLength(31);
+    expect(diff.files[30]!.filename).toBe('src/file-30.ts');
     expect(diff.metadata).toMatchObject({
+      title: 'A big PR',
       headSha: 'headsha123',
       baseSha: 'basesha456',
       mergeCommitSha: 'mergesha789',
     });
   });
 
-  it('reads the PR exactly once — the immutable object ids make a re-read unnecessary', async () => {
-    const get = vi.fn().mockResolvedValue(fakePr());
-    await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(compareServing(3), get));
-    expect(get).toHaveBeenCalledTimes(1);
+  it('treats a compare response at the 300-file cap as possibly truncated and falls back to the paged listing', async () => {
+    const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(300), compareFiles: 300, listed: 300 });
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
+
+    expect(compare).toHaveBeenCalledTimes(1);
+    expect(paginate).toHaveBeenCalledWith(
+      octokit.pulls.listFiles,
+      expect.objectContaining({ owner: 'o', repo: 'r', pull_number: 1, per_page: 100 })
+    );
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(diff.files).toHaveLength(300);
   });
 
-  it('refuses an absurdly large comparison instead of paging forever', async () => {
-    const endless = vi.fn(async () => ({ data: { files: Array.from({ length: 100 }, (_, i) => compareFile(i)) } }));
-    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith(endless))).rejects.toThrow(
-      /more than 3000 files/
-    );
-    expect(endless).toHaveBeenCalledTimes(30);
+  it('skips the compare for PRs above the cap and brackets the paged listing with PR reads', async () => {
+    const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(500), listed: 500 });
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
+
+    expect(compare).not.toHaveBeenCalled();
+    expect(paginate).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(diff.files).toHaveLength(500);
+    expect(diff.files[499]!.filename).toBe('src/file-499.ts');
+  });
+
+  it('refuses to bind a large PR whose head or base moved while its files were listed', async () => {
+    const movedHead = fakePr(500);
+    movedHead.data.head.sha = 'headsha999';
+    await expect(
+      fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith({ pr: fakePr(500), recheck: movedHead, listed: 500 }).octokit)
+    ).rejects.toThrow(/moved .*headsha999/);
+
+    const movedBase = fakePr(500);
+    movedBase.data.base.sha = 'basesha999';
+    await expect(
+      fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokitWith({ pr: fakePr(500), recheck: movedBase, listed: 500 }).octokit)
+    ).rejects.toThrow(/moved .*basesha999/);
   });
 });
