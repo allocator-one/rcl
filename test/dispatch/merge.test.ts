@@ -110,3 +110,45 @@ describe('mergeChunkReviews — degraded coverage', () => {
     expect(merged!.warnings).toBeUndefined();
   });
 });
+
+describe('mergeChunkReviews — token usage', () => {
+  it('sums each counter only when every chunk reported that counter', () => {
+    const merged = mergeChunkReviews([
+      review({ usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5 } }),
+      review({ usage: { inputTokens: 200, outputTokens: 20 } }),
+    ]);
+    expect(merged).toHaveLength(1);
+    // reasoningTokens was reported by one chunk only, so its total is unknown.
+    expect(merged[0]!.usage).toEqual({ inputTokens: 300, outputTokens: 30 });
+    expect(
+      mergeChunkReviews([
+        review({ usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 5 } }),
+        review({ usage: { inputTokens: 200, outputTokens: 20, reasoningTokens: 7 } }),
+      ])[0]!.usage
+    ).toEqual({ inputTokens: 300, outputTokens: 30, reasoningTokens: 12 });
+  });
+
+  it('never presents a per-counter lower bound as a total', () => {
+    const merged = mergeChunkReviews([
+      review({ usage: { inputTokens: 100, outputTokens: 10 } }),
+      review({ usage: { inputTokens: 200 } }),
+    ]);
+    expect(merged[0]!.usage).toEqual({ inputTokens: 300 });
+  });
+
+  it('omits usage rather than reporting a silent lower bound when a chunk did not report it', () => {
+    const merged = mergeChunkReviews([
+      review({ usage: { inputTokens: 100, outputTokens: 10 } }),
+      review({ status: 'timeout', error: 'Request timed out' }),
+    ]);
+    expect(merged[0]!.status).toBe('success');
+    expect(merged[0]).not.toHaveProperty('usage');
+  });
+
+  it('never emits an empty usage object', () => {
+    expect(mergeChunkReviews([review({}), review({})])[0]).not.toHaveProperty('usage');
+    expect(mergeChunkReviews([review({ usage: {} }), review({ usage: {} })])[0]).not.toHaveProperty(
+      'usage'
+    );
+  });
+});

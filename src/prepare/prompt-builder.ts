@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'fs/promises';
 import { stat } from 'fs/promises';
 import { buildBasePrompt } from '../prompts/base.js';
@@ -27,9 +28,57 @@ function getLanguageAdditions(languages: Set<string>): string {
 }
 
 export interface PromptContext {
+  /** Paths read at prompt-build time; prefer `contextDocs` when the caller needs digests. */
   contextFiles?: string[];
+  /**
+   * Context read ONCE by the caller (see `loadContextDocs`) so every prompt
+   * and the run header's digests describe the same bytes. Takes precedence
+   * over `contextFiles`.
+   */
+  contextDocs?: ContextDoc[];
   /** Plan-review mode: the "diff" is a plan document, not code. */
   plan?: { focus?: PlanFocus };
+}
+
+export interface ContextDoc {
+  /** The path as the caller gave it — what the prompt labels the document. */
+  label: string;
+  /** The exact text placed in the prompt. */
+  content: string;
+  /** SHA-256 of `content` — the bytes reviewers saw, not a later re-read. */
+  sha256: string;
+}
+
+export interface LoadedContext {
+  docs: ContextDoc[];
+  /** Requested paths that could not be read (missing, a directory, denied). */
+  skipped: string[];
+}
+
+/**
+ * Read context files exactly once. Unreadable paths (or directories) are
+ * skipped, as `buildPrompt` always did, and reported in `skipped` so the
+ * caller can say so — a renamed rules file must not silently become a
+ * review without rules. An oversized file is included as the same
+ * placeholder the prompt carries, and its digest is of that placeholder —
+ * the header must describe what reviewers saw, not what sat on disk.
+ */
+export async function loadContextDocs(paths: readonly string[]): Promise<LoadedContext> {
+  const docs: ContextDoc[] = [];
+  const skipped: string[] = [];
+  for (const path of paths) {
+    const content = await loadFile(path);
+    if (content) {
+      docs.push({
+        label: path,
+        content,
+        sha256: createHash('sha256').update(content).digest('hex'),
+      });
+    } else {
+      skipped.push(path);
+    }
+  }
+  return { docs, skipped };
 }
 
 export interface BuiltPrompt {
@@ -85,17 +134,10 @@ export async function buildPrompt(
     (languageAdditions ? '\n\n' + languageAdditions : '') +
     (severityBiasNote ? '\n\n' + severityBiasNote : '');
 
-  // Load context files
-  const contextDocs: Array<{ label: string; content: string }> = [];
-
-  if (context?.contextFiles) {
-    for (const filePath of context.contextFiles) {
-      const content = await loadFile(filePath);
-      if (content) {
-        contextDocs.push({ label: filePath, content });
-      }
-    }
-  }
+  // Context: pre-read docs when the caller supplied them (one read, shared
+  // digests), otherwise load the paths here as before.
+  const contextDocs: Array<{ label: string; content: string }> =
+    context?.contextDocs ?? (await loadContextDocs(context?.contextFiles ?? [])).docs;
 
   // Build user prompt
   const basePrompt = context?.plan ? buildPlanPrompt(context.plan.focus) : buildBasePrompt();

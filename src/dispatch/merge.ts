@@ -1,4 +1,26 @@
-import type { ModelReview } from '../consensus/types.js';
+import type { ModelReview, TokenUsage } from '../consensus/types.js';
+
+/**
+ * Total usage across chunks, complete per counter: a counter is summed only
+ * when EVERY chunk reported it. A chunk that timed out or errored consumed
+ * tokens nobody counted, and a provider that omitted a counter on one chunk
+ * leaves that counter unknown for the reviewer — a silent lower bound would
+ * read as the total in the evidence ledger. Absent (never `{}`) when no
+ * counter is complete.
+ */
+function sumUsage(parts: readonly ModelReview[]): TokenUsage | undefined {
+  const reported = parts.map((p) => p.usage);
+  if (reported.length === 0 || reported.some((u) => u === undefined)) return undefined;
+  const usages = reported as TokenUsage[];
+  const total: TokenUsage = {};
+  for (const key of ['inputTokens', 'outputTokens', 'reasoningTokens'] as const) {
+    const values = usages.map((u) => u[key]);
+    if (values.every((v): v is number => typeof v === 'number')) {
+      total[key] = values.reduce((sum, v) => sum + v, 0);
+    }
+  }
+  return Object.keys(total).length > 0 ? total : undefined;
+}
 
 /**
  * A large diff is reviewed as multiple chunks, so each (model, role)
@@ -38,7 +60,9 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
     const durationMs = parts.reduce((sum, p) => sum + p.durationMs, 0);
     const dropped = parts.reduce((sum, p) => sum + (p.droppedFindings ?? 0), 0);
     const warnings = parts.flatMap((p) => p.warnings ?? []);
+    const usage = sumUsage(parts);
     const degraded = {
+      ...(usage ? { usage } : {}),
       ...(dropped > 0 ? { droppedFindings: dropped } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
       // A reviewer is homogeneous across chunks, so any async part means the

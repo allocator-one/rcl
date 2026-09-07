@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { computeConsensus, applyReportThresholds } from '../../src/consensus/voter.js';
 import { getRoleByName } from '../../src/roles/builtin.js';
+import { stableFindingKey } from '../../src/converge/finding-identity.js';
 import type { Finding, ModelReview, DeduplicatedGroup } from '../../src/consensus/types.js';
 import type { Role } from '../../src/roles/types.js';
 
@@ -763,5 +764,45 @@ describe('computeConsensus — precision-weighted votes (RCL-27)', () => {
     const weights = new Map([['somebody-else', 0.5]]);
     const [result] = computeConsensus(groups, reviews, ROLES, {}, weights);
     expect(result!.consensus.weightedScore).toBeCloseTo(2);
+  });
+});
+
+describe('computeConsensus — finding identity', () => {
+  it('stamps every consensus finding with its stable converge identity', () => {
+    const f1 = mkF({ id: 'a', file: 'src/a.ts', startLine: 10, endLine: 12 });
+    const f2 = mkF({ id: 'b', file: 'src/b.ts', startLine: 200, endLine: 201, category: 'tests', severity: 'nitpick' });
+    const reviews = [mkReview('m1', 'general', [f1, f2])];
+    const findings = computeConsensus(
+      [mkGroup(f1, [{ finding: f1, model: 'm1', role: 'general' }]), mkGroup(f2, [{ finding: f2, model: 'm1', role: 'general' }])],
+      reviews,
+      ROLES
+    );
+    expect(findings.map((f) => f.identity)).toEqual([stableFindingKey(f1), stableFindingKey(f2)]);
+    expect(findings.every((f) => /^[0-9a-f]{16}$/.test(f.identity!))).toBe(true);
+  });
+
+  it('keeps the identity on findings the report thresholds drop', () => {
+    const f = mkF({ id: 'n', severity: 'nitpick' });
+    const reviews = [mkReview('m1', 'general', [f]), mkReview('m2', 'general', []), mkReview('m3', 'general', [])];
+    const findings = computeConsensus([mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }])], reviews, ROLES);
+    const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.9 });
+    expect(kept).toHaveLength(0);
+    expect(dropped[0]!.identity).toBe(stableFindingKey(f));
+  });
+
+  it('stamps a multi-model group with the representative location identity and keeps it on kept findings', () => {
+    const rep = mkF({ id: 'a', file: 'src/a.ts', startLine: 10, endLine: 12, severity: 'important' });
+    const echo = mkF({ id: 'b', file: 'src/a.ts', startLine: 11, endLine: 13, severity: 'important', title: 'Same issue, other words' });
+    const reviews = [mkReview('m1', 'general', [rep]), mkReview('m2', 'general', [echo])];
+    const findings = computeConsensus(
+      [mkGroup(rep, [{ finding: rep, model: 'm1', role: 'general' }, { finding: echo, model: 'm2', role: 'general' }])],
+      reviews,
+      ROLES
+    );
+    expect(findings[0]!.consensus.models).toEqual(['m1', 'm2']);
+    expect(findings[0]!.identity).toBe(stableFindingKey(rep));
+    const { kept } = applyReportThresholds(findings, {});
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.identity).toBe(stableFindingKey(rep));
   });
 });

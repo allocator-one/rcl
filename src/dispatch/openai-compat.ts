@@ -12,6 +12,7 @@ import {
   isBlankOutput,
   linkAbortSignal,
   reviewFromParse,
+  usageFromOpenAI,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -104,6 +105,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             // as the sole owner of timeout classification.
             { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
           ) as OpenAI.ChatCompletion;
+          const usage = usageFromOpenAI(response.usage);
 
           const choice = response.choices[0];
           if (choice?.finish_reason === 'length') {
@@ -112,6 +114,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
               role,
               provider: this.provider,
               startedAt: start,
+              usage,
               error: 'Response truncated at token limit; findings would be incomplete',
             });
           }
@@ -126,6 +129,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
               role,
               provider: this.provider,
               startedAt: start,
+              usage,
               error: `Model refused this review — the diff was not reviewed${refusal ? `: ${refusal}` : ''}`,
             });
           }
@@ -137,6 +141,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
               role,
               provider: this.provider,
               startedAt: start,
+              usage,
               error: 'Model returned an empty response; the diff was not reviewed',
             });
           }
@@ -150,6 +155,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             provider: this.provider,
             startedAt: start,
             parsed,
+            usage,
           });
         } catch (err) {
           lastErr = err;

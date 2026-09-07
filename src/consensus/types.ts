@@ -10,12 +10,34 @@ export interface Finding {
   suggestedFix?: string;
 }
 
+/**
+ * Token usage one reviewer call consumed, normalized across providers
+ * (evidence ledger, IO-12475 section 5.2):
+ *
+ * - `inputTokens`: every prompt token the call processed, including
+ *   prompt-cache reads and writes where the provider bills them separately.
+ * - `outputTokens`: every generated token, reasoning included.
+ * - `reasoningTokens`: the reasoning/thinking SUBSET of `outputTokens`, for
+ *   providers that break it out (OpenAI, Google); Anthropic does not.
+ *
+ * So `inputTokens + outputTokens` is the call's total, and the three fields
+ * are never summed together. Cost is computed server-side from a price
+ * table — never here.
+ */
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+}
+
 export interface ModelReview {
   model: string;
   role: string;
   provider: string;
   findings: Finding[];
   durationMs: number;
+  /** Token usage where the SDK exposes it; absent otherwise. */
+  usage?: TokenUsage;
   /**
    * `parse_failed` is distinct from `error`: the model answered, but its
    * output could not be turned into findings. Both are excluded from
@@ -90,6 +112,14 @@ export interface ConsensusInfo {
 export interface ConsensusFinding extends Finding {
   consensus: ConsensusInfo;
   /**
+   * Stable cross-round identity — the converge `stableFindingKey` (file,
+   * category, line bucket) computed at review time, so identity exists in
+   * the report itself and not only inside the converge state (IO-12475
+   * section 8.2). Always set on findings rcl ≥ 3.0 produces; optional in the
+   * type so pre-3.0 reports still load.
+   */
+  identity?: string;
+  /**
    * Why this finding does (or does not) block convergence — see
    * `consensus/gating.ts` (RCL-23). Absent in `all-findings` fallback mode,
    * where severity alone decides.
@@ -103,6 +133,12 @@ export interface DeduplicatedGroup {
 }
 
 export interface ReviewResult {
+  /**
+   * Self-describing run header (rcl ≥ 3.0): what was reviewed (exact head
+   * and base SHA, diff digest), by which roster and settings, when, by whom.
+   * Optional so every reader of pre-3.0 reports keeps working.
+   */
+  run?: import('../report/run-header.js').RunHeader;
   reviews: ModelReview[];
   findings: ConsensusFinding[];
   /**

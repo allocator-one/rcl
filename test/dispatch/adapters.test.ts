@@ -719,3 +719,95 @@ describe('a response that is not a review at all', () => {
     expect(review.findings).toEqual([]);
   });
 });
+
+describe('token usage passthrough', () => {
+  it('anthropic: records input and output tokens from the SDK usage block', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: async () => ({
+          ...anthropicToolResponse(),
+          usage: { input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0 },
+        }),
+      },
+    });
+    const review = await adapter.review('claude-opus-4-8', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('success');
+    expect(review.usage).toEqual({ inputTokens: 1200, outputTokens: 300 });
+  });
+
+  it('anthropic: a truncated answer still records the tokens it consumed', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: async () => ({
+          ...anthropicToolResponse('max_tokens'),
+          usage: { input_tokens: 50, output_tokens: 16384 },
+        }),
+      },
+    });
+    const review = await adapter.review('claude-opus-4-8', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('error');
+    expect(review.usage).toEqual({ inputTokens: 50, outputTokens: 16384 });
+  });
+
+  it('openai: records prompt, completion and reasoning tokens', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: async () => ({
+            ...openaiResponse(),
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 20,
+              total_tokens: 30,
+              completion_tokens_details: { reasoning_tokens: 5 },
+            },
+          }),
+        },
+      },
+    });
+    const review = await adapter.review('gpt-5.5', 'general', 's', 'u', OPTS);
+    expect(review.usage).toEqual({ inputTokens: 10, outputTokens: 20, reasoningTokens: 5 });
+  });
+
+  it('openai-compat (OpenRouter passthrough): reads the OpenAI-shaped usage block', async () => {
+    const adapter = new OpenAICompatAdapter({ apiKey: 'k', provider: 'openrouter' });
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: async () => ({
+            ...openaiResponse(),
+            usage: { prompt_tokens: 7, completion_tokens: 8, completion_tokens_details: { reasoning_tokens: 2 } },
+          }),
+        },
+      },
+    });
+    const review = await adapter.review('openrouter/moonshotai/kimi-k3', 'general', 's', 'u', OPTS);
+    expect(review.usage).toEqual({ inputTokens: 7, outputTokens: 8, reasoningTokens: 2 });
+  });
+
+  it('google: reads usageMetadata including thought tokens', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, {
+      models: {
+        generateContent: async () => ({
+          ...googleResponse(),
+          usageMetadata: { promptTokenCount: 70, candidatesTokenCount: 80, thoughtsTokenCount: 90, totalTokenCount: 240 },
+        }),
+      },
+    });
+    const review = await adapter.review('gemini-3.8-flash', 'general', 's', 'u', OPTS);
+    // candidates + thoughts = everything generated; thoughts are the reasoning subset
+    expect(review.usage).toEqual({ inputTokens: 70, outputTokens: 170, reasoningTokens: 90 });
+  });
+
+  it('leaves usage absent when the SDK returns none', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, { chat: { completions: { create: async () => openaiResponse() } } });
+    const review = await adapter.review('gpt-5.5', 'general', 's', 'u', OPTS);
+    expect(review.status).toBe('success');
+    expect(review).not.toHaveProperty('usage');
+  });
+});

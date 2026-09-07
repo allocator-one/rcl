@@ -6,6 +6,12 @@ export interface FileChange {
   patch: string;
   language: string;
   previousFilename?: string;
+  /**
+   * Git blob id of the file after the change, when the source provides it
+   * (GitHub does). It binds a patchless file — binary, or too large for a
+   * patch — to its content in the diff digest.
+   */
+  blobSha?: string;
 }
 
 export interface PRMetadata {
@@ -17,6 +23,13 @@ export interface PRMetadata {
   author: string;
   base: string;
   head: string;
+  /**
+   * Exact commit ids from `pulls.get` — the evidence ledger's head binding.
+   * GitHub always returns both, so a PR is never bound without them.
+   */
+  headSha: string;
+  baseSha: string;
+  mergeCommitSha?: string;
   url: string;
   labels: string[];
   draft: boolean;

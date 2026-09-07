@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+Phase 0 of the Review Council evidence ledger (RCL-36, epic IO-12475): the
+report now says what it reviewed. Nothing leaves the machine yet — the
+telemetry sink is the next child. The one network change: PR mode now
+fetches the changed files through a compare pinned to the PR's base and head
+object ids (`GET /compare/{base}...{head}`) for PRs up to GitHub's 300-file
+compare cap, so the report's `head_sha` provably identifies the reviewed
+patches even if the PR moves mid-fetch; larger PRs use the paged files
+listing bracketed by PR reads and refuse to bind if the head or base moved.
+
+- **Self-describing `run` header** on every report (`ReviewResult.run`):
+  client run id (UUIDv7), rcl version, command, target with exact
+  `head_sha`/`base_sha`/refs and a `diff_sha256`, roster with lanes
+  (`blocking` / `secondary` / `async` / `verification`), config digest with
+  thresholds and gating inline, spec and context-file digests, a best-effort
+  `runner` claim, timing, `ci_exit_code` (computed even without `--ci`), and
+  the converge context. The Markdown report gains a matching **Reviewed** line.
+- **Exact-head binding.** `PRMetadata` gains `headSha`, `baseSha` and
+  `mergeCommitSha` from the PR response GitHub already returns; `--staged` /
+  `--working-tree` resolve `HEAD` and the merge-base with the remote default
+  branch; `--head-sha` / `--base-sha` vouch for a patch file's commits;
+  `--expect-head-sha` fails fast when the resolved head is not the expected
+  one — checked before the empty-diff exit, so a moved target never reads as a
+  clean round.
+- **`--spec-source`** (`flag` | `repo_file` | `harness_issue:<ID>`) and
+  `--converge-target` / `--round` / `--attempt` (or `RCL_CONVERGE_*`) are
+  recorded in the header.
+- **Identity on every finding.** `ConsensusFinding.identity` carries the
+  converge `stableFindingKey` at review time, on kept and below-threshold
+  findings alike.
+- **Token usage on calls.** Adapters record `usage`
+  (`inputTokens` / `outputTokens` / `reasoningTokens`) where the SDK exposes
+  it — Anthropic `usage`, OpenAI and OpenRouter `usage` (with
+  `completion_tokens_details.reasoning_tokens`), Google `usageMetadata` —
+  including on truncated or refused answers; chunked reviews sum it.
+- Pre-3.0 reports (no `run`, no `identity`) load unchanged in
+  `converge-report`, `discuss`, and `models seed`.
+
 ## 2.1.3
 
 - Fix trusted-publishing tag validation when Actions checkout has materialized
