@@ -113,10 +113,12 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    GITHUB_TOKEN=$(gh auth token) rcl review <target> \
      --markdown <RCL_TMP>/rcl-report-<TARGET>-r<R>.md \
      --json-file <RCL_TMP>/rcl-report-<TARGET>-r<R>.json \
+     --evidence-required \
      [--spec <SPEC>] [--roles <roles>]
    ```
 
    Never pass `--post` or `--inline` mid-loop. If the run exits non-zero or the JSON report is missing or empty, read the run output, release the target lock, report the failure, and stop. It does not count as an evidence round, but its foreground claim remains spent.
+2a. **Confirm the evidence landed.** Every converge round runs with `--evidence-required` (rcl ≥ 3.0): the review is recorded on Harness as the round's evidence before anything is triaged, and its exit code says whether Harness acknowledged it. Read the run log's evidence line. `Evidence recorded: <url>` → note the URL in the ledger entry and continue. Exit code 4 (`Evidence spooled …`, `Evidence not sent …`) → the council run is not lost: retry delivery with `rcl telemetry flush --run <run id>` (the run id is `run.id` in the JSON report) in short, repeated tool calls for up to five minutes. If Harness acknowledges, continue the round; if it still has not after five minutes, stop the loop and report the blocker — an unreachable Harness means the gate cannot be evidenced, and a human decides. Never re-run the review to retry delivery (that spends the council again), never pass `--no-telemetry` or set `RCL_TELEMETRY=off` inside the loop, and never `--evidence-required` a patch file without `--head-sha`. The converge commands (`converge-attempt`, `converge-report`, `converge-verdict`) report their own events to Harness automatically and fail-soft; they need no action.
 3. **Check reviewer health first, then parse findings from the JSON file**, never from console scrollback. `stats.successfulReviews` / `stats.totalReviews` gates the whole round: a report is produced even when most model calls time out or error, so a near-empty finding list can mean 'nothing found' or 'nobody looked'. Full-fleet completion is not required. Let `N = stats.totalReviews`; a round is conclusive only when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Otherwise it is **inconclusive** — never counted as converged. Disclose every timeout or error and the successful/total count. Report the failure pattern (which models, timeout vs error), fix the cause if it is under your control (timeouts, missing keys, reasoning budget), and re-run only if the machine attempt budget permits it. Re-runs are budgeted: at most two per evidence-round number, while every review attempt counts toward the configured cap. Raising that cap requires a new, explicit, user-approved `--max-attempts` invocation, so a permanently broken fleet cannot spin unattended. Split by the report's gating annotations: a finding **gates convergence** when its `gating.reason` is `consensus`, `critical`, or `verified`; findings with `gating.reason: "none"` (refuted single-model claims and everything below important) are opportunistic — fix them when cheap, never loop on them. A `gating.verification.verdict` of `unavailable` means the verification pass could not check that finding: it still gates, but read its `note` — a persistently broken verifier is a fixable cause, like a missing key. Legacy reports without `gating` fields fall back to the severity split (critical/important gate).
 4. **Dedup against the run state with the identity tool.** Run once per round — this call also consumes/validates the round against the machine round cap (default 15, hard max 99; exit 2 means the cap is reached — treat it exactly like the attempt-cap consent boundary):
    ```bash
@@ -149,6 +151,7 @@ Consequences:
 1. If `--post-final` (PR mode, converged only): post a convergence summary as a PR comment (`gh pr comment`) built from the ledger — rounds run, fixed/dismissed counts with reasons, final verdict. This is a summary comment, not another council run.
 2. Report to the user:
    - Converged or capped, with evidence rounds, attempts used, and the configured cap
+   - The Harness run URL of every evidence round (from the `Evidence recorded:` lines)
    - Per round: new findings, fixed vs dismissed (with the load-bearing dismissal reasons)
    - Commits pushed
    - Reminder: auto-merge was disarmed / left unarmed — it is now safe to arm it.
@@ -177,6 +180,7 @@ Consequences:
 - Execute the host variant's claim exactly once: Claude runs its claim block in the foreground and its review block separately; Codex runs its combined claim-and-launch block once. Never repeat `rcl converge-attempt`, because each successful call spends another attempt.
 - Never terminate a live council merely because its log contains one model/parser warning. Let RCL finish and assess reviewer health from the completed JSON report; killing the process destroys the evidence needed for that decision.
 - Read reports from files, never console scrollback; every round gets its own report files.
+- Every round is evidence: run the review with `--evidence-required`, retry an unacknowledged delivery with `rcl telemetry flush --run <id>` for up to five minutes, and stop the loop (a blocker, not a dismissal) if Harness never acknowledges. Never switch telemetry off inside a converge loop.
 
 ## Examples
 

@@ -175,6 +175,17 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 
 **Always launch the run in the background** (`run_in_background: true`) after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs, and continue when the task-completion notification arrives — never block on a foreground wait or sleep loop. Then confirm the JSON report file exists and is non-empty before parsing it. RCL prints a run-specific call/wave estimate; multi-chunk councils can take much longer than one provider timeout. A plain foreground Bash call can be killed at the tool cap with no report files written and the whole model spend wasted.
 
+### 5a. Evidence (rcl ≥ 3.0)
+
+In a Harness-managed repository (one carrying `.harness-cli/config.json`) with a `harness login`, rcl records every review as evidence on Harness after writing the report files: the run header, findings, reviewer calls and both report files. It never blocks a review on the network — a failed delivery is spooled to `~/.rcl/outbox/` and retried at the start of the next rcl command or by `rcl telemetry flush`. Read the one dim status line rcl prints and relay it:
+
+- `Evidence recorded: <url>` — the run is on Harness; include the URL in the report back.
+- `Evidence spooled (Harness unreachable); run rcl telemetry flush` — retry with `rcl telemetry flush` (never by re-running the review, which would spend the council again).
+- `Evidence not sent: <host> has not enabled review evidence for this organization` — expected until the org switches it on; nothing to do.
+- `Evidence not sent: not logged in to Harness …` — tell the user to run `harness login` (CI sets `HARNESS_API_TOKEN` + `HARNESS_API_URL` instead).
+
+The first delivery from a machine prints a one-time notice naming the host and what is sent. Opt out per run with `--no-telemetry`, per machine with `RCL_TELEMETRY=off`, or per project with `harness.telemetry: off` in the config; `harness.telemetry: findings` keeps the raw reports on the machine. Never pass `--no-telemetry` inside `/rcl-converge`. A patch-file review can only be evidence when `--head-sha` binds it to a commit.
+
 ### 6. Report back
 
 Read the full report **from the files**, never from console scrollback:
@@ -185,6 +196,7 @@ Then tell the user:
 - Whether this was a PR review or a local diff review
 - Which PR was reviewed (if PR mode), or which branch and merge-base range (if diff mode)
 - Which spec was used (if any) and where it came from (Harness issue, file, explicit flag)
+- The evidence status line (recorded with its URL, spooled, or not sent and why)
 - Reviewer completion as `stats.successfulReviews` / `stats.totalReviews`, plus every timeout or error. Full-fleet completion is not required. If `stats.successfulReviews < max(2, ceil(2 × stats.totalReviews / 3))`, warn that coverage is partial; a report used by `rcl-converge` is inconclusive below that threshold.
 - Which models ran and how many findings each returned
 - Link to the posted review comment (from rcl output) only if `--post` or `--inline` was used in PR mode

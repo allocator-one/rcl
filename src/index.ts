@@ -2,7 +2,7 @@
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -47,8 +47,8 @@ import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { applyGating, resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
-import { toJson, writeJsonOutput } from './output/json.js';
-import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
+import { toJson } from './output/json.js';
+import { toMarkdown } from './output/markdown.js';
 import {
   assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
@@ -106,6 +106,16 @@ import {
   type SpecSource,
 } from './report/run-header.js';
 import { assertExpectedHead, resolveReviewTarget } from './resolver/target.js';
+import {
+  createTelemetryRuntime,
+  deliverRun,
+  emitConvergeEvents,
+  flushOutboxAtStart,
+} from './telemetry/deliver.js';
+import type { ArtifactBytes } from './telemetry/envelope.js';
+import { buildEvent, type WireEvent } from './telemetry/events.js';
+import { credentialHost } from './telemetry/credentials.js';
+import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -117,6 +127,29 @@ program
   .name('rcl')
   .description('Review Council — multi-model AI code review')
   .version(RCL_VERSION);
+
+// Every command first delivers what an earlier one could not, bounded to
+// five seconds so an offline machine never stalls (IO-12475 section 8.4).
+// The telemetry commands manage the outbox themselves; the detached async
+// worker is not a user command.
+program.hook('preAction', async (_thisCommand, actionCommand) => {
+  const name = actionCommand.name();
+  if (name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  try {
+    await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
+  } catch {
+    // Never let the outbox stop the command the user asked for.
+  }
+});
+
+/** Converge commands report their events fail-soft; nothing they do depends on it. */
+async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
+  try {
+    await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
+  } catch {
+    // Evidence of the loop is advisory next to the loop's own durable state.
+  }
+}
 
 // review command
 program
@@ -163,6 +196,8 @@ program
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
+  .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
+  .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
   .action(async (target: string | undefined, opts) => {
     await runReview(target, opts);
@@ -204,6 +239,8 @@ program
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
+  .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
+  .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
   .action(async (file: string, opts) => {
     await runPlanReview(file, opts);
@@ -268,6 +305,18 @@ program
           target: opts.target,
           maxAttempts,
         });
+        await reportConvergeEvents([
+          buildEvent({
+            kind: 'attempt_claimed',
+            convergeTarget: claim.target,
+            attempt: claim.attempt,
+            payload: { attempt: claim.attempt, cap: claim.cap, pid: process.pid, state_file: claim.stateFile },
+          }),
+          // An explicit --max-attempts is consent evidence, whatever it was before.
+          ...(maxAttempts !== undefined
+            ? [buildEvent({ kind: 'cap_changed', convergeTarget: claim.target, attempt: claim.attempt, payload: { kind: 'attempts', to: claim.cap } })]
+            : []),
+        ]);
         if (opts.json) {
           console.log(JSON.stringify(claim));
         } else {
@@ -363,12 +412,14 @@ program
           throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
         }
 
+        const runId = typeof report.run?.id === 'string' ? report.run.id : undefined;
         const result = await processRoundReport({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
           findings: report.findings,
           ...(maxRounds !== undefined ? { maxRounds } : {}),
+          ...(runId !== undefined ? { runId } : {}),
         });
 
         const classified = result.findings.map((f) => ({
@@ -385,6 +436,18 @@ program
         const actionable = classified.filter(
           (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
         );
+        await reportConvergeEvents([
+          buildEvent({
+            kind: 'round_processed',
+            convergeTarget: opts.target,
+            round,
+            ...(runId !== undefined ? { runId } : {}),
+            payload: { round, round_cap: result.roundCap, counts: result.counts, actionable_gating: actionable.length },
+          }),
+          ...(maxRounds !== undefined
+            ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target, round, payload: { kind: 'rounds', to: result.roundCap } })]
+            : []),
+        ]);
 
         if (opts.json) {
           console.log(
@@ -524,6 +587,40 @@ program
             `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
           );
         }
+        const roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
+        await reportConvergeEvents([
+          buildEvent({
+            kind: 'verdicts_recorded',
+            convergeTarget: opts.target,
+            round,
+            ...(roundRun !== undefined ? { runId: roundRun } : {}),
+            payload: {
+              verdicts: updated.map((e) => ({
+                identity_key: e.key,
+                verdict: e.verdict,
+                ...(e.verdictReason !== undefined ? { reason: e.verdictReason } : {}),
+                severity: e.verdictSeverity ?? e.severity,
+                models: e.models,
+              })),
+            },
+          }),
+          ...(resolution
+            ? [
+                buildEvent({
+                  kind: 'resolution',
+                  convergeTarget: opts.target,
+                  round,
+                  ...(roundRun !== undefined ? { runId: roundRun } : {}),
+                  payload: {
+                    status: resolution.status,
+                    actionable: resolution.actionable,
+                    unresolved: resolution.unresolved.length,
+                    fixed_this_round: resolution.fixedThisRound,
+                  },
+                }),
+              ]
+            : []),
+        ]);
         if (opts.json) {
           console.log(
             JSON.stringify({
@@ -570,6 +667,79 @@ program
       }
     }
   );
+
+// Evidence delivery operations (IO-12475 section 8.10).
+const telemetry = program
+  .command('telemetry')
+  .description('Evidence delivery to Harness: the credential in use and the spooled deliveries waiting in the outbox');
+
+telemetry
+  .command('status')
+  .description('Show the telemetry level, the credential source and every spooled delivery')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { json?: boolean }) => {
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
+    const entries = await runtime.outbox.list();
+    const loss = await runtime.outbox.pendingLoss();
+    const status = {
+      level: runtime.level,
+      credential: runtime.credential
+        ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
+        : null,
+      note: runtime.note ?? null,
+      outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss },
+    };
+    if (opts.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(`Telemetry level: ${status.level}`);
+    console.log(
+      status.credential
+        ? `Credential: ${status.credential.source} → ${status.credential.host}`
+        : `Credential: none${status.note ? ` (${status.note})` : ''}`
+    );
+    console.log(`Outbox: ${runtime.outbox.dir} — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
+    for (const entry of entries) {
+      console.log(
+        `  ${entry.id} ${entry.meta.kind} spooled ${entry.meta.spooled_at} attempts ${entry.meta.attempts} ` +
+          `${entry.bytes} bytes artifacts [${entry.artifacts.join(', ')}] events ${entry.events}` +
+          (entry.meta.envelope_delivered ? ' (envelope delivered)' : '') +
+          (entry.failed ? chalk.red(` FAILED: ${entry.failed.reason}`) : '')
+      );
+    }
+    if (loss.length > 0) {
+      console.log(chalk.yellow(`Artifacts not spooled (outbox over its cap) for ${loss.length} run(s); reported on the next flush.`));
+    }
+  });
+
+telemetry
+  .command('flush')
+  .description('Deliver every spooled envelope, artifact and event batch (runs to completion)')
+  .option('--run <id>', 'Flush one spooled run only')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { run?: string; json?: boolean }) => {
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
+    if (!runtime.sink) {
+      const reason = runtime.level === 'off' ? 'telemetry is off' : runtime.note ?? 'no Harness credential';
+      console.error(chalk.red(`Cannot flush: ${reason}.`));
+      process.exitCode = 1;
+      return;
+    }
+    const summary = await runtime.outbox.flush(runtime.sink, opts.run ? { runId: opts.run } : {});
+    if (opts.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      console.log(
+        `Delivered ${summary.delivered.length}, remaining ${summary.remaining.length}, failed ${summary.failed.length}` +
+          (summary.stopped ? ` (stopped: ${summary.stopped})` : '')
+      );
+      for (const id of summary.delivered) console.log(`  delivered ${id}`);
+      for (const f of summary.failed) console.log(chalk.red(`  failed ${f.id}: ${f.reason}`));
+      for (const id of summary.remaining) console.log(chalk.yellow(`  remaining ${id}`));
+    }
+    if (summary.remaining.length > 0 || summary.failed.length > 0) process.exitCode = 1;
+  });
 
 // Detached async-lane worker (RCL-25) — launched by the review process for
 // each async (non-blocking) reviewer call; not for interactive use.
@@ -744,6 +914,10 @@ interface CouncilCliOpts {
   convergeTarget?: string;
   round?: string;
   attempt?: string;
+  /** commander: `--no-telemetry` sets this false. */
+  telemetry?: boolean;
+  /** Exit 4 unless the evidence envelope was acknowledged. */
+  evidenceRequired?: boolean;
 }
 
 interface PreparedCouncil {
@@ -999,6 +1173,11 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     if (opts.headSha !== undefined) validateSha(opts.headSha, '--head-sha');
     if (opts.baseSha !== undefined) validateSha(opts.baseSha, '--base-sha');
     if (opts.expectHeadSha !== undefined) validateSha(opts.expectHeadSha, '--expect-head-sha');
+    if (opts.evidenceRequired && patchTarget && opts.headSha === undefined) {
+      throw new Error(
+        '--evidence-required needs --head-sha for a patch file: evidence must bind to the commit it reviewed.'
+      );
+    }
 
     const prepared = await prepareCouncil(spinner, opts);
     const { config } = prepared;
@@ -1458,20 +1637,24 @@ async function executeCouncil(
     );
   }
 
+  // The artifact bytes are rendered once: what --json-file and --markdown
+  // receive is exactly what the evidence declaration digests and uploads.
+  const artifacts: ArtifactBytes = { report_json: toJson(result), report_md: toMarkdown(result) };
+
   // Output
   if (opts.json) {
-    console.log(toJson(result));
+    console.log(artifacts.report_json);
   } else {
     printReviewSummary(result);
   }
 
   if (opts.jsonFile) {
-    await writeJsonOutput(result, opts.jsonFile);
+    await writeFile(opts.jsonFile, artifacts.report_json, 'utf-8');
     console.log(chalk.dim(`JSON written to: ${opts.jsonFile}`));
   }
 
   if (opts.markdown) {
-    await writeMarkdownOutput(result, opts.markdown);
+    await writeFile(opts.markdown, artifacts.report_md ?? '', 'utf-8');
     console.log(chalk.dim(`Markdown written to: ${opts.markdown}`));
   }
 
@@ -1488,14 +1671,41 @@ async function executeCouncil(
     }
   }
 
+  // Evidence delivery (IO-12475 section 8): after the report is on disk and
+  // before any exit code, so a review is never lost to the network.
+  const runtime = await createTelemetryRuntime({
+    rclVersion: RCL_VERSION,
+    config,
+    noTelemetry: opts.telemetry === false,
+  });
+  const delivery = await deliverRun(runtime, {
+    result,
+    artifacts,
+    evidenceRequired: opts.evidenceRequired === true,
+  });
+  if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
+  const retryHint = `rcl telemetry flush${delivery.runId ? ` --run ${delivery.runId}` : ''}`;
+
   // CI mode: fail on a fully-failed run or on blocking findings
   if (opts.ci) {
     const verdict = evaluateCiGate(result);
     if (verdict.exitCode !== 0) {
       console.error(chalk.red(`\n${verdict.message}`));
+      if (delivery.exitCode !== 0) {
+        console.error(chalk.red(`Evidence was not recorded (--evidence-required); retry delivery with \`${retryHint}\`.`));
+        process.exit(delivery.exitCode);
+      }
       process.exit(verdict.exitCode);
     }
-    }
+  }
+  if (delivery.exitCode !== 0) {
+    console.error(
+      chalk.red(
+        `Evidence was not recorded (--evidence-required). Retry delivery with \`${retryHint}\` rather than re-running the review.`
+      )
+    );
+    process.exit(delivery.exitCode);
+  }
 }
 
 async function runDiscuss(

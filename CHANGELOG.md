@@ -1,10 +1,55 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 — 2026-09-07
+
+Review Council evidence (epic IO-12475). **Behavior change:** in a
+Harness-managed repository (one carrying `.harness-cli/config.json`) with a
+`harness login`, a review now records itself on Harness by default — the run
+header, consensus findings (which quote code), reviewer call statistics and
+the JSON and Markdown reports as written. Hence the major version; every
+report field is additive and pre-3.0 reports load unchanged.
+
+- **`src/telemetry/`** (RCL-37): a pure, allow-listed `buildRunEnvelope`
+  wraps the report's `run` header with wire-shaped findings and calls, the
+  report's `stats`, the SHA-256 digests of the exact bytes written to
+  `--json-file` / `--markdown`, and how the delivery came about. `HarnessSink`
+  posts the envelope, PUTs each declared artifact and posts converge events
+  under a 10 s timeout per request, sending the token only to the host that
+  minted it. An `Outbox` at `~/.rcl/outbox/<run id>/` keeps what Harness could
+  not take and retries it — same run id, `delivery: {mode: retried,
+  spooled_at}` — at the start of every command (five-second bound) or via
+  `rcl telemetry flush`; above 1 GB it stops spooling artifacts and reports the
+  affected runs as a `loss` event on the next successful flush.
+- **Credentials.** The stored `harness login` is the default; `HARNESS_API_TOKEN`
+  + `HARNESS_API_URL` serve CI, and an environment token never pairs with the
+  stored host.
+- **Configuration.** `harness.telemetry: off | envelope | findings | full`
+  (default `full`), `--no-telemetry`, `RCL_TELEMETRY=off`;
+  `harness.parseFailures` opts in to a parse-failed call's raw answer (fenced
+  code and key-shaped strings removed, 32 KB cap) — by default only the parser
+  message travels.
+- **`--evidence-required`** exits 4 after spooling when Harness did not
+  acknowledge the envelope, and refuses a patch file without `--head-sha`.
+- **Consent.** The first delivery from a machine to a host prints a one-time
+  notice; `~/.rcl/telemetry-notice.json` records it.
+- **Status line.** `Evidence recorded: <url>` · `Evidence spooled (Harness
+  unreachable); run rcl telemetry flush` · `Evidence not sent: <host> has not
+  enabled review evidence for this organization`.
+- **Converge events.** `converge-attempt` emits `attempt_claimed` (and
+  `cap_changed` under `--max-attempts`), `converge-report` emits
+  `round_processed` (and `cap_changed` under `--max-rounds`) and persists the
+  round's run id in the run state, `converge-verdict` emits
+  `verdicts_recorded` and `resolution` bound to that run id.
+- **`rcl telemetry status | flush [--run <id>]`** for operators.
+- **Scrubbing.** Every free-text field that leaves the process (errors,
+  warnings, runner claims, finding prose, consensus excerpts) is truncated and
+  scrubbed for bearer/key-shaped substrings.
+- The rcl and rcl-converge skills document the evidence line, the
+  `--evidence-required` flush-retry rule (five minutes, then stop the loop),
+  and the opt-outs.
 
 Phase 0 of the Review Council evidence ledger (RCL-36, epic IO-12475): the
-report now says what it reviewed. Nothing leaves the machine yet — the
-telemetry sink is the next child. The one network change: PR mode now
+report now says what it reviewed. The one network change: PR mode now
 fetches the changed files through a compare pinned to the PR's base and head
 object ids (`GET /compare/{base}...{head}`) for PRs up to GitHub's 300-file
 compare cap, so the report's `head_sha` provably identifies the reviewed

@@ -102,7 +102,8 @@ export interface ConvergeRunState {
   version: typeof STATE_VERSION;
   target: string;
   roundCap: number;
-  rounds: Array<{ round: number; counts: RoundCounts }>;
+  /** `runId` is the report's `run.id` (rcl ≥ 3.0), which converge-verdict sends with every verdict. */
+  rounds: Array<{ round: number; counts: RoundCounts; runId?: string }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
   /**
@@ -204,6 +205,11 @@ export async function loadConvergeRunState(
   return readState(gitCommonDir, target.trim());
 }
 
+/** The run id recorded for a round, when its report carried one. */
+export function roundRunId(state: ConvergeRunState | undefined, round: number): string | undefined {
+  return state?.rounds.find((r) => r.round === round)?.runId;
+}
+
 /**
  * Gating reason for a finding, tolerating legacy reports without RCL-23
  * annotations. Shared with the CLI so classification and display agree.
@@ -234,6 +240,8 @@ export async function processRoundReport(options: {
   findings: ConsensusFinding[];
   maxRounds?: number;
   lineWindow?: number;
+  /** The report's own run id, kept so verdicts can be bound to the round's run. */
+  runId?: string;
 }): Promise<RoundReport> {
   const target = options.target.trim();
   if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
@@ -358,7 +366,7 @@ export async function processRoundReport(options: {
 
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts },
+    { round: options.round, counts, ...(options.runId !== undefined ? { runId: options.runId } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,

@@ -199,7 +199,7 @@ export function diffDigest(files: readonly FileChange[]): string {
 }
 
 /** Config fields that are credentials: never part of any digest. */
-export const EXCLUDED_CONFIG_FIELDS = ['githubToken'] as const satisfies ReadonlyArray<keyof Config>;
+export const EXCLUDED_CONFIG_FIELDS = ['githubToken', 'harness'] as const satisfies ReadonlyArray<keyof Config>;
 
 /**
  * The config fields the digest covers — an explicit allow-list. Every key of

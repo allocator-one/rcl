@@ -552,7 +552,7 @@ describe('round-7 hardening', () => {
     const { DIGESTED_CONFIG_FIELDS, EXCLUDED_CONFIG_FIELDS } = await import('../../src/report/run-header.js');
     const decided = new Set<string>([...DIGESTED_CONFIG_FIELDS, ...EXCLUDED_CONFIG_FIELDS]);
     expect(Object.keys(ConfigSchema.shape).sort()).toEqual([...decided].sort());
-    expect(EXCLUDED_CONFIG_FIELDS).toEqual(['githubToken']);
+    expect(EXCLUDED_CONFIG_FIELDS).toEqual(['githubToken', 'harness']);
   });
 });
 

@@ -245,6 +245,48 @@ rcl converge-verdict --target rcl-30 --round 2 \
 
 ---
 
+### `rcl telemetry status` and `rcl telemetry flush`
+
+Evidence delivery to Harness (epic IO-12475). In a repository that carries
+`.harness-cli/config.json` and with a `harness login` (or `HARNESS_API_TOKEN` +
+`HARNESS_API_URL` in CI), every `rcl review` / `rcl review-plan` records the
+run on Harness after the report is written: the self-describing `run` header,
+one row per consensus finding (with its stable identity), one row per reviewer
+call (status, latency, token usage), the report's `stats`, and — at the default
+`full` level — the JSON and Markdown reports exactly as written, digest-checked
+by the server. The converge commands report their events (attempt claims, cap
+changes, processed rounds, verdicts, resolutions) the same way. Never sent:
+provider API keys, `GITHUB_TOKEN`, the Harness credential, environment
+variables, prompts or raw model answers; every free-text field is truncated
+and scrubbed for key-shaped strings before it leaves the process.
+
+The review never blocks on the network. A delivery Harness could not take is
+spooled to `~/.rcl/outbox/<run id>/` and retried, with its original run id,
+at the start of every rcl command (bounded to five seconds) or by
+`rcl telemetry flush`. One dim status line says what happened:
+`Evidence recorded: <url>`, `Evidence spooled (Harness unreachable); run rcl
+telemetry flush`, or `Evidence not sent: <host> has not enabled review
+evidence for this organization`. `--evidence-required` makes an
+unacknowledged delivery exit 4 after spooling (a patch file then needs
+`--head-sha`). The first delivery from a machine prints a one-time notice
+naming the host and what is sent.
+
+```bash
+rcl telemetry status                # level, credential source, what waits in the outbox
+rcl telemetry flush                 # deliver everything spooled, to completion
+rcl telemetry flush --run <run id>  # one run only
+rcl review owner/repo#7 --no-telemetry   # keep this review on the machine
+```
+
+```yaml
+# .review-council.yml
+harness:
+  telemetry: full        # off | envelope | findings | full (default)
+  parseFailures: false   # send a parse-failed call's raw answer (scrubbed, 32 KB cap)
+```
+
+---
+
 ### `rcl models`
 
 The tool's own memory of which reviewers earn their seat. Every reviewer call
@@ -397,6 +439,9 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
 | `RCL_NO_HARNESS_KEYS` | Set to any value to disable Harness key distribution (below) |
+| `RCL_TELEMETRY` | `off` keeps every review on the machine (see `rcl telemetry`) |
+| `HARNESS_API_TOKEN` | CI credential for evidence delivery; requires `HARNESS_API_URL` — never pairs with the stored login host |
+| `HARNESS_API_URL` | The Harness host `HARNESS_API_TOKEN` was minted by |
 
 The default blocking council is direct-API only (Anthropic, OpenAI, Google) —
 no default review round ever waits on an OpenRouter-routed call. The default
