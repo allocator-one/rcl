@@ -43,7 +43,7 @@ function makeFinding(
 
 import type { FileChange } from '../../src/resolver/types.js';
 
-function diffFile(filename: string, patch = '@@ -1,3 +1,4 @@\n+const x = 1;\n'): FileChange {
+function diffFile(filename: string, patch = '@@ -0,0 +1 @@\n+const x = 1;'): FileChange {
   return { filename, status: 'modified', additions: 1, deletions: 0, patch, language: 'ts' };
 }
 
@@ -305,11 +305,11 @@ describe('precision-weighted consensus gating (RCL-27)', () => {
 
 describe('relevantPatchExcerpt', () => {
   const patch = [
-    '@@ -1,3 +1,4 @@',
+    '@@ -1,2 +1,3 @@',
     ' a',
     '+added early',
     ' b',
-    '@@ -200,3 +300,4 @@',
+    '@@ -200,2 +300,3 @@',
     ' x',
     '+added late',
     ' y',
@@ -330,6 +330,31 @@ describe('relevantPatchExcerpt', () => {
       'plain plan text'
     );
   });
+
+  it('keeps distant ranges from one oversized hunk within the verifier bound', () => {
+    const patch = [
+      '@@ -1,398 +1,400 @@ twoTargets',
+      ...Array.from({ length: 49 }, (_, index) => ` before ${index} ${'padding '.repeat(8)}`),
+      '+EARLY_TARGET',
+      ...Array.from({ length: 299 }, (_, index) => ` middle ${index} ${'padding '.repeat(8)}`),
+      '+LATE_TARGET',
+      ...Array.from({ length: 50 }, (_, index) => ` after ${index} ${'padding '.repeat(8)}`),
+    ].join('\n');
+
+    const excerpt = relevantPatchExcerpt(patch, [
+      { start: 50, end: 50 },
+      { start: 350, end: 350 },
+    ]);
+
+    expect(excerpt.length).toBeLessThanOrEqual(4_000);
+    expect(excerpt).toContain('+EARLY_TARGET');
+    expect(excerpt).toContain('+LATE_TARGET');
+    expect(excerpt).toMatch(/@@ -\d+,\d+ \+\d+,\d+ @@ twoTargets/);
+  });
+
+  it('fails closed for oversized content without unified-diff headers', () => {
+    expect(relevantPatchExcerpt('x'.repeat(4_001), [{ start: 1, end: 1 }])).toBe('');
+  });
 });
 
 describe('applyGating hunk scoping', () => {
@@ -345,6 +370,55 @@ describe('applyGating hunk scoping', () => {
       verification: { verdict: 'unavailable' },
     });
     expect(findings[0]!.gating!.verification!.note).toMatch(/no hunk/i);
+  });
+
+  it('keeps a late changed line inside the bounded verifier excerpt', async () => {
+    const patch = [
+      '@@ -1,300 +1,301 @@ lateTarget',
+      ...Array.from(
+        { length: 300 },
+        (_, index) => ` context ${index} ${'padding '.repeat(8)}`
+      ),
+      '+LATE_TARGET',
+    ].join('\n');
+    let verifierPrompt = '';
+    const ask = vi.fn(async (_model: string, _system: string, user: string): Promise<ModelAnswer> => {
+      verifierPrompt = user;
+      return {
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[{"id":"F1","verdict":"confirmed"}]',
+        durationMs: 5,
+        status: 'success',
+      };
+    });
+
+    await applyGating([makeFinding({ startLine: 301, endLine: 301, models: ['m1'] })], {
+      ...baseOpts,
+      diffFiles: [diffFile('src/a.ts', patch)],
+      ask,
+    });
+
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(verifierPrompt).toContain('+LATE_TARGET');
+    expect(verifierPrompt).toContain('@@ -285,16 +285,17 @@ lateTarget');
+    expect(verifierPrompt).not.toContain('… (truncated)');
+  });
+
+  it('does not invoke the verifier when one referenced diff line exceeds its bound', async () => {
+    const patch = `@@ -0,0 +1 @@\n+${'x'.repeat(4_001)}`;
+    const ask = vi.fn();
+
+    const { findings } = await applyGating(
+      [makeFinding({ startLine: 1, endLine: 1, models: ['m1'] })],
+      { ...baseOpts, diffFiles: [diffFile('src/a.ts', patch)], ask }
+    );
+
+    expect(ask).not.toHaveBeenCalled();
+    expect(findings[0]!.gating).toMatchObject({
+      reason: 'verified',
+      verification: { verdict: 'unavailable' },
+    });
   });
 });
 

@@ -1,7 +1,24 @@
 import type { FileChange } from '../resolver/types.js';
+import {
+  formatSyntheticHunkHeader,
+  NO_NEWLINE_MARKER,
+  parseUnifiedDiff,
+  splitPatchLines,
+  type UnifiedDiffLine,
+} from './unified-diff.js';
+
+interface PatchFragment {
+  index: number;
+  total: number;
+  promptPatch: string;
+}
+
+interface ChunkFile extends FileChange {
+  patchFragment?: PatchFragment;
+}
 
 export interface Chunk {
-  files: FileChange[];
+  files: ChunkFile[];
   totalLines: number;
   index: number;
   total: number;
@@ -9,42 +26,138 @@ export interface Chunk {
 
 const MAX_CHUNK_LINES = 2000;
 const MAX_CHUNK_FILES = 20;
+// Every blocking reviewer receives every chunk. This leaves ample headroom
+// above the 18-chunk lossless dogfood case without letting an adversarial
+// 10MB patch create an unbounded paid-call fanout.
+const MAX_CHUNKS_PER_REVIEW = 32;
 
 function countDiffLines(patch: string): number {
-  return patch.split('\n').length;
+  return splitPatchLines(patch).lines.length;
+}
+
+function invalidOversizedPatch(file: FileChange, line: number, reason: string): never {
+  throw new Error(
+    `Cannot safely split oversized patch for ${file.filename}: ${reason} at patch line ${line}`
+  );
+}
+
+function formatFragmentPatch(
+  lines: string[],
+  positions: Array<UnifiedDiffLine | undefined>,
+  start: number,
+  end: number
+): string {
+  const formatted: string[] = [];
+  let originalHeader: string | undefined;
+  let body: UnifiedDiffLine[] = [];
+
+  const flushHunk = (): void => {
+    if (body.length > 0) {
+      const header = formatSyntheticHunkHeader(body);
+      if (!header) throw new Error('Cannot format a patch fragment that starts with a marker');
+      formatted.push(header, ...body.map((line) => line.text));
+    } else if (originalHeader) {
+      formatted.push(originalHeader);
+    }
+    originalHeader = undefined;
+    body = [];
+  };
+
+  for (let index = start; index < end; index += 1) {
+    const line = positions[index];
+    if (line) {
+      body.push(line);
+    } else {
+      flushHunk();
+      originalHeader = lines[index]!;
+    }
+  }
+  flushHunk();
+  return formatted.join('\n');
+}
+
+function slicePatch(
+  lines: string[],
+  start: number,
+  end: number,
+  trailingNewline: boolean
+): string {
+  const needsTrailingNewline = end < lines.length || trailingNewline;
+  return lines.slice(start, end).join('\n') + (needsTrailingNewline ? '\n' : '');
+}
+
+function countChanges(
+  positions: Array<UnifiedDiffLine | undefined>,
+  start: number,
+  end: number
+): Pick<FileChange, 'additions' | 'deletions'> {
+  let additions = 0;
+  let deletions = 0;
+  for (let index = start; index < end; index += 1) {
+    const line = positions[index];
+    if (!line) continue;
+    additions += line.newCount === 1 && line.oldCount === 0 ? 1 : 0;
+    deletions += line.oldCount === 1 && line.newCount === 0 ? 1 : 0;
+  }
+  return { additions, deletions };
+}
+
+function splitPatch(file: FileChange): ChunkFile[] {
+  const parsed = parseUnifiedDiff(file.patch);
+  if (!parsed.ok) invalidOversizedPatch(file, parsed.line, parsed.reason);
+  const { lines, trailingNewline, positions } = parsed.diff;
+  const ranges: Array<{ start: number; end: number; promptPatch: string }> = [];
+  let start = 0;
+
+  while (start < lines.length) {
+    const hasContinuationHeader = positions[start] !== undefined;
+    const lineBudget = MAX_CHUNK_LINES - (hasContinuationHeader ? 1 : 0);
+    let end = Math.min(start + lineBudget, lines.length);
+
+    if (end < lines.length) {
+      // Keep Git's no-newline marker attached to the content line it describes.
+      if (lines[end] === NO_NEWLINE_MARKER && end - start > 1) end -= 1;
+      // Do not strand a hunk header as the final line of a fragment.
+      if (positions[end - 1] === undefined && end - start > 1) end -= 1;
+    }
+
+    ranges.push({
+      start,
+      end,
+      promptPatch: formatFragmentPatch(lines, positions, start, end),
+    });
+    start = end;
+  }
+
+  return ranges.map(({ start, end, promptPatch }, index) => ({
+    ...file,
+    ...countChanges(positions, start, end),
+    patch: slicePatch(lines, start, end, trailingNewline),
+    patchFragment: {
+      index,
+      total: ranges.length,
+      promptPatch,
+    },
+  }));
+}
+
+function promptDiffLines(file: ChunkFile): number {
+  return countDiffLines(file.patchFragment?.promptPatch ?? file.patch);
 }
 
 export function chunkDiff(files: FileChange[]): Chunk[] {
   if (files.length === 0) return [];
 
-  const chunks: FileChange[][] = [];
-  let currentChunk: FileChange[] = [];
+  const expandedFiles: ChunkFile[] = files.flatMap((file) =>
+    countDiffLines(file.patch) > MAX_CHUNK_LINES ? splitPatch(file) : [file]
+  );
+  const chunks: ChunkFile[][] = [];
+  let currentChunk: ChunkFile[] = [];
   let currentLines = 0;
 
-  for (const file of files) {
-    const fileLines = countDiffLines(file.patch);
+  for (const file of expandedFiles) {
+    const fileLines = promptDiffLines(file);
 
-    // If a single file is huge, it gets its own chunk — capped, so a
-    // generated 100k-line patch can't blow the model context window.
-    if (fileLines > MAX_CHUNK_LINES) {
-      if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
-        currentChunk = [];
-        currentLines = 0;
-      }
-      const omitted = fileLines - MAX_CHUNK_LINES;
-      console.warn(
-        `Warning: ${file.filename} has a ${fileLines}-line patch; truncating to ${MAX_CHUNK_LINES} lines (${omitted} omitted)`
-      );
-      const truncatedPatch = [
-        ...file.patch.split('\n').slice(0, MAX_CHUNK_LINES),
-        `[rcl: patch truncated after ${MAX_CHUNK_LINES} lines — ${omitted} lines omitted]`,
-      ].join('\n');
-      chunks.push([{ ...file, patch: truncatedPatch }]);
-      continue;
-    }
-
-    // Start a new chunk if limits exceeded
     if (
       currentChunk.length >= MAX_CHUNK_FILES ||
       (currentLines + fileLines > MAX_CHUNK_LINES && currentChunk.length > 0)
@@ -58,13 +171,18 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
     currentLines += fileLines;
   }
 
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk);
+  if (currentChunk.length > 0) chunks.push(currentChunk);
+
+  if (chunks.length > MAX_CHUNKS_PER_REVIEW) {
+    throw new Error(
+      `Diff requires ${chunks.length} review chunks, exceeding the paid-work safety limit of ` +
+        `${MAX_CHUNKS_PER_REVIEW}. Split the diff into smaller review targets.`
+    );
   }
 
-  return chunks.map((files, index) => ({
-    files,
-    totalLines: files.reduce((sum, f) => sum + countDiffLines(f.patch), 0),
+  return chunks.map((chunkFiles, index) => ({
+    files: chunkFiles,
+    totalLines: chunkFiles.reduce((sum, file) => sum + promptDiffLines(file), 0),
     index,
     total: chunks.length,
   }));
@@ -73,15 +191,18 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
 export function formatChunkForPrompt(chunk: Chunk): string {
   const parts: string[] = [];
 
-  if (chunk.total > 1) {
-    parts.push(`[Chunk ${chunk.index + 1} of ${chunk.total}]`);
-  }
+  if (chunk.total > 1) parts.push(`[Chunk ${chunk.index + 1} of ${chunk.total}]`);
 
   for (const file of chunk.files) {
-    parts.push(`\n### File: ${file.filename} (${file.language}, ${file.status})`);
+    const fragment = file.patchFragment;
+    const fragmentLabel = fragment
+      ? `; patch fragment ${fragment.index + 1} of ${fragment.total}`
+      : '';
+    parts.push(`\n### File: ${file.filename} (${file.language}, ${file.status}${fragmentLabel})`);
     if (file.patch) {
       parts.push('```diff');
-      parts.push(file.patch);
+      const promptPatch = fragment?.promptPatch ?? file.patch;
+      parts.push(promptPatch.endsWith('\n') ? promptPatch.slice(0, -1) : promptPatch);
       parts.push('```');
     } else {
       parts.push('*(no diff available — file may be binary or too large)*');

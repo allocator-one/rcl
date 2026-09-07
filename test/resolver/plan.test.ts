@@ -45,6 +45,21 @@ describe('loadPlanAsDiff', () => {
     expect(rendered).toContain('+line two');
   });
 
+  it('keeps every line and new-file coordinate when an oversized plan is chunked', async () => {
+    const path = join(dir, 'large-plan.md');
+    const content = Array.from({ length: 2500 }, (_, index) => `plan line ${index + 1}`).join('\n');
+    await writeFile(path, content);
+    const diff = await loadPlanAsDiff(path);
+    const chunks = chunkDiff(diff.files);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.flatMap((chunk) => chunk.files).map((file) => file.patch).join('')).toBe(
+      diff.files[0]!.patch
+    );
+    expect(formatChunkForPrompt(chunks[1]!)).toContain('@@ -0,0 +2000,501 @@');
+    expect(chunks.every((chunk) => chunk.totalLines <= 2000)).toBe(true);
+  });
+
   it('rejects an empty plan file', async () => {
     const path = join(dir, 'empty.md');
     await writeFile(path, '  \n\n');

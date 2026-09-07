@@ -28,9 +28,11 @@ function sumUsage(parts: readonly ModelReview[]): TokenUsage | undefined {
  * review per reviewer before consensus, or a single reviewer would be
  * counted once per chunk — inflating `total`, diversity, and vote counts.
  *
- * A reviewer counts as successful if it succeeded on at least one chunk;
- * findings from every successful chunk are concatenated. When no chunk
- * succeeded, the first non-success status and error are preserved.
+ * A blocking reviewer counts as successful only when every returned chunk
+ * succeeded. One failed or canceled part makes its coverage incomplete, so
+ * findings from its successful parts must not vote in consensus. Async-only
+ * results remain opportunistic: any arrived success may contribute, while an
+ * async result can neither rescue nor poison a same-key blocking reviewer.
  *
  * Dropped-finding counts and parser warnings are summed across ALL chunks,
  * including the ones that failed: a reviewer that parsed cleanly on chunk 1
@@ -56,21 +58,25 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
     if (parts.length === 1) return parts[0]!;
 
     const first = parts[0]!;
-    const successes = parts.filter((p) => p.status === 'success');
-    const durationMs = parts.reduce((sum, p) => sum + p.durationMs, 0);
-    const dropped = parts.reduce((sum, p) => sum + (p.droppedFindings ?? 0), 0);
-    const warnings = parts.flatMap((p) => p.warnings ?? []);
-    const usage = sumUsage(parts);
+    const blockingParts = parts.filter((part) => part.async !== true);
+    const outcomeParts = blockingParts.length > 0 ? blockingParts : parts;
+    const successes = outcomeParts.filter((part) => part.status === 'success');
+    const requireComplete = blockingParts.length > 0;
+    const successful = requireComplete
+      ? successes.length === outcomeParts.length
+      : successes.length > 0;
+    const durationMs = outcomeParts.reduce((sum, part) => sum + part.durationMs, 0);
+    const dropped = outcomeParts.reduce((sum, part) => sum + (part.droppedFindings ?? 0), 0);
+    const warnings = outcomeParts.flatMap((part) => part.warnings ?? []);
+    const usage = sumUsage(outcomeParts);
     const degraded = {
       ...(usage ? { usage } : {}),
       ...(dropped > 0 ? { droppedFindings: dropped } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
-      // A reviewer is homogeneous across chunks, so any async part means the
-      // whole merged review came from the async lane.
-      ...(parts.some((p) => p.async) ? { async: true } : {}),
+      ...(blockingParts.length === 0 ? { async: true } : {}),
     };
 
-    if (successes.length > 0) {
+    if (successful) {
       return {
         model: first.model,
         role: first.role,
@@ -82,7 +88,14 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
       };
     }
 
-    const failed = parts.find((p) => p.error) ?? first;
+    const failed = outcomeParts.find((part) => part.status !== 'success' && part.error) ??
+      outcomeParts.find((part) => part.status !== 'success') ??
+      first;
+    const incompleteError =
+      requireComplete && successes.length > 0
+        ? `Incomplete chunk coverage: ${successes.length}/${outcomeParts.length} parts succeeded; ` +
+          `${failed.status}${failed.error ? `: ${failed.error}` : ''}`
+        : failed.error;
     return {
       model: first.model,
       role: first.role,
@@ -90,7 +103,7 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
       findings: [],
       durationMs,
       status: failed.status,
-      error: failed.error,
+      ...(incompleteError ? { error: incompleteError } : {}),
       ...degraded,
     };
   });

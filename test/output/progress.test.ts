@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModelReview } from '../../src/consensus/types.js';
 import {
+  assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
   CouncilProgressReporter,
   formatCouncilRunPlan,
@@ -22,6 +23,13 @@ afterEach(() => {
 });
 
 describe('council run planning', () => {
+  it('fails before blocking call fanout exceeds the paid-work bound', () => {
+    expect(() => assertReviewWorkWithinLimit(18, 17)).not.toThrow();
+    expect(() => assertReviewWorkWithinLimit(31, 17)).toThrow(
+      /527 blocking calls.*safety limit of 512/i
+    );
+  });
+
   it('makes the 18 reviewer × 6 chunk queue and timeout bound explicit', () => {
     const plan = buildCouncilRunPlan({
       totalCalls: 108,
