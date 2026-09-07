@@ -240,10 +240,16 @@ function windowForMatches(
 
   let start = first;
   let end = last + 1;
+  let processedBlockEnd = 0;
   for (const index of matches) {
+    // requiredWindow collects matches in body order. Once one changed line
+    // expands to its contiguous replacement block, later matches inside that
+    // block cannot widen the required evidence and must not rescan it.
+    if (index < processedBlockEnd) continue;
     const line = hunk.body[index]!;
     if (!isChangedLine(line)) continue;
     const block = replacementBlock(hunk.body, index);
+    processedBlockEnd = block.end;
     if (block.hasDeletion) {
       start = Math.min(start, block.start);
       end = Math.max(end, block.end);
