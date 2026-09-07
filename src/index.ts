@@ -49,6 +49,7 @@ import { postGitHubReview } from './output/github.js';
 import { toJson, writeJsonOutput } from './output/json.js';
 import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
 import {
+  assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
   CouncilProgressReporter,
   formatCouncilRunPlan,
@@ -960,6 +961,7 @@ async function executeCouncil(
 
   // Chunk the diff
   const chunks = chunkDiff(diff.files);
+  assertReviewWorkWithinLimit(chunks.length, assignments.length);
 
   spinner.text = `Building prompts (${chunks.length} chunk(s), ${assignments.length} reviewer(s))...`;
 

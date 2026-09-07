@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.4
+
+- **Oversized single-file patches are reviewed losslessly.** The chunker now
+  emits sequential fragments with accurate unified-diff continuation headers
+  instead of dropping every line after the first 2,000; malformed oversized
+  patches fail closed rather than producing incomplete review evidence. A
+  blocking reviewer contributes only after every fragment succeeds, and hard
+  32-chunk / 512-call limits stop pathological paid-work fanout before dispatch.
+- **Verification keeps the reported lines in view.** Large hunks are excerpted
+  around every finding with accurate synthetic coordinates instead of blindly
+  keeping the first 4,000 characters. If all referenced ranges cannot fit, the
+  finding remains gating and is marked unavailable to the verifier.
+
 ## 2.1.3
 
 - Fix trusted-publishing tag validation when Actions checkout has materialized

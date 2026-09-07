@@ -1,5 +1,30 @@
 import type { ModelReview } from '../consensus/types.js';
 
+// The active lossless dogfood review is 18 chunks × 17 reviewers = 306
+// blocking calls. Keep useful headroom while refusing accidental or hostile
+// fanout before prompts are built or any paid provider call is launched.
+const MAX_BLOCKING_CALLS_PER_REVIEW = 512;
+
+export function assertReviewWorkWithinLimit(chunks: number, reviewers: number): void {
+  const totalCalls = chunks * reviewers;
+  if (
+    !Number.isSafeInteger(chunks) ||
+    !Number.isSafeInteger(reviewers) ||
+    chunks < 0 ||
+    reviewers < 0 ||
+    !Number.isSafeInteger(totalCalls)
+  ) {
+    throw new Error(`Invalid review work dimensions: ${chunks} chunks × ${reviewers} reviewers`);
+  }
+  if (totalCalls > MAX_BLOCKING_CALLS_PER_REVIEW) {
+    throw new Error(
+      `Review requires ${totalCalls} blocking calls (${chunks} chunks × ${reviewers} reviewers), ` +
+        `exceeding the paid-work safety limit of ${MAX_BLOCKING_CALLS_PER_REVIEW}. ` +
+        'Split the diff or reduce the blocking reviewer roster.'
+    );
+  }
+}
+
 export interface CouncilRunPlan {
   totalCalls: number;
   reviewers: number;
