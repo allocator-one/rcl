@@ -153,6 +153,15 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** `--evidence-required` with telemetry switched off cannot be honored; say so before spending the council. */
+function assertEvidenceCanBeRequired(opts: { evidenceRequired?: boolean; telemetry?: boolean }): void {
+  if (!opts.evidenceRequired) return;
+  if (opts.telemetry === false) throw new Error('--evidence-required contradicts --no-telemetry: evidence cannot be required and withheld.');
+  if ((process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') {
+    throw new Error('--evidence-required contradicts RCL_TELEMETRY=off: evidence cannot be required and withheld.');
+  }
+}
+
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
 async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
   try {
@@ -1201,6 +1210,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         '--evidence-required needs --head-sha for a patch file: evidence must bind to the commit it reviewed.'
       );
     }
+    assertEvidenceCanBeRequired(opts);
 
     const prepared = await prepareCouncil(spinner, opts);
     const { config } = prepared;
@@ -1721,7 +1731,12 @@ async function executeCouncil(
         exitCode: evidenceRequired ? (4 as const) : (0 as const),
         spooled: false,
       }))
-    : { status: 'off', line: '', exitCode: evidenceRequired ? 4 : 0, spooled: false };
+    : {
+        status: 'off',
+        line: evidenceRequired ? 'Evidence not sent: telemetry could not be set up' : '',
+        exitCode: evidenceRequired ? 4 : 0,
+        spooled: false,
+      };
   if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
   // The flush hint is honest only when something was spooled to flush.
   const evidenceFailure = delivery.spooled
@@ -1850,6 +1865,7 @@ async function runPlanReview(
         '--head-sha, --base-sha and --expect-head-sha do not apply to plan reviews; a plan is bound by its content digest.'
       );
     }
+    assertEvidenceCanBeRequired(opts);
 
     let focus: PlanFocus | undefined;
     if (opts.focus) {

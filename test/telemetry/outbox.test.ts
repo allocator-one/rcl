@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -81,6 +81,10 @@ describe('Outbox', () => {
     await expect(outbox.remove('events-not-a-uuid')).rejects.toBeInstanceOf(OutboxError);
     await expect(outbox.spoolEvents([{ ...buildEvent({ kind: 'loss' }), id: 'evil/../id' }])).rejects.toBeInstanceOf(OutboxError);
     expect(await readdir(dir)).toEqual([]);
+    // Nothing landed outside the outbox either.
+    const parent = await readdir(join(dir, '..'));
+    expect(parent).not.toContain('escape');
+    expect(parent).not.toContain('id');
   });
 
   it('merges events by id when a run is spooled again and drops artifacts already delivered', async () => {
@@ -149,16 +153,16 @@ describe('Outbox', () => {
   it('never treats an unreadable or malformed file as delivered', async () => {
     const outbox = new Outbox(dir);
     await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, envelopeDelivered: true });
+    // A directory where the file should be fails every read, on every platform and as any user.
     const artifactPath = join(dir, envelope.run.id, 'artifacts', 'report_json.json');
-    await chmod(artifactPath, 0o000);
-    try {
-      const summary = await outbox.flush(fakeSink({}).sink);
-      expect(summary.delivered).toEqual([]);
-      expect(summary.remaining).toEqual([envelope.run.id]);
-      expect((await outbox.list())[0]!.meta.last_error).toMatch(/report_json unreadable/);
-    } finally {
-      await chmod(artifactPath, 0o600);
-    }
+    await rm(artifactPath);
+    await mkdir(artifactPath);
+    const summary0 = await outbox.flush(fakeSink({}).sink);
+    expect(summary0.delivered).toEqual([]);
+    expect(summary0.remaining).toEqual([envelope.run.id]);
+    expect((await outbox.list())[0]!.meta.last_error).toMatch(/report_json unreadable/);
+    await rm(artifactPath, { recursive: true });
+    await writeFile(artifactPath, ARTIFACTS.report_json, 'utf8');
 
     const eventsId = await outbox.spoolEvents([buildEvent({ kind: 'loss' })]);
     await writeFile(join(dir, eventsId, 'events.json'), '{not json', 'utf8');
@@ -169,9 +173,12 @@ describe('Outbox', () => {
 
   it('stops spooling artifacts above the cap, keeps the envelope, and reports each loss with a stable id on any later flush', async () => {
     const outbox = new Outbox(dir, { capBytes: 64 });
-    const result = await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS });
+    const event = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} });
+    const result = await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, events: [event] });
     expect(result.artifactsDropped).toEqual(['report_json', 'report_md']);
-    expect((await outbox.list())[0]!.artifacts).toEqual([]);
+    // Envelope and events are always kept; only the artifacts were dropped.
+    expect((await outbox.list())[0]).toMatchObject({ artifacts: [], events: 1, meta: { kind: 'run' } });
+    expect(JSON.parse(await readFile(join(dir, envelope.run.id, 'envelope.json'), 'utf8')).run.id).toBe(envelope.run.id);
     const [loss] = await outbox.pendingLoss();
     expect(loss).toMatchObject({ kind: 'loss', payload: { reason: 'outbox_over_cap', run_id: envelope.run.id, kinds: ['report_json', 'report_md'] } });
 
@@ -184,9 +191,101 @@ describe('Outbox', () => {
     const up = fakeSink({});
     const summary = await outbox.flush(up.sink);
     expect(summary.lossReported).toBe(1);
-    const sent = up.calls.find((c) => c.method === 'postEvents')!.args[0] as WireEvent[];
+    // The run's own events go first; the loss report is the last events batch.
+    const sent = up.calls.filter((c) => c.method === 'postEvents').at(-1)!.args[0] as WireEvent[];
     expect(sent[0]!.id).toBe(loss!.id);
     expect(await outbox.pendingLoss()).toEqual([]);
+  });
+
+  it('spools the artifact that fits when only the next one crosses the cap', async () => {
+    // The cap counts the envelope file as written plus what this entry will hold.
+    const envelopeBytes = Buffer.byteLength(JSON.stringify(envelope, null, 2), 'utf8');
+    const room = 100;
+    const outbox = new Outbox(dir, { capBytes: envelopeBytes + Buffer.byteLength(ARTIFACTS.report_json) + room });
+    const result = await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: { report_json: ARTIFACTS.report_json, report_md: '#'.repeat(room + 1) } });
+    expect(result.artifactsDropped).toEqual(['report_md']);
+    expect((await outbox.list())[0]!.artifacts).toEqual(['report_json']);
+    expect((await outbox.pendingLoss())[0]!.payload).toMatchObject({ kinds: ['report_md'] });
+  });
+
+  it('keeps a loss report the server refuses on disk, uncounted, instead of pretending it was reported', async () => {
+    const outbox = new Outbox(dir, { capBytes: 1 });
+    await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, envelopeDelivered: true });
+    const [loss] = await outbox.pendingLoss();
+    const refused = fakeSink({ postEvents: [{ kind: 'rejected', httpStatus: 422, error: 'validation_error', message: 'bad' }] });
+    const summary = await outbox.flush(refused.sink);
+    expect(summary.lossReported).toBeUndefined();
+    expect(await outbox.pendingLoss()).toEqual([]);
+    expect(await readdir(join(dir, 'loss'))).toEqual([`${loss!.id}.json.refused`]);
+
+    // An org that switched evidence off has nobody to report to: the file goes, nothing is counted.
+    await outbox.spoolRun({ runId: OTHER_RUN, envelope: { ...envelope, run: { ...envelope.run, id: OTHER_RUN } }, artifacts: ARTIFACTS, envelopeDelivered: true });
+    const off = fakeSink({ postEvents: [{ kind: 'disabled', reason: 'reviews_disabled', message: 'off' }] });
+    expect((await outbox.flush(off.sink)).lossReported).toBeUndefined();
+    expect(await outbox.pendingLoss()).toEqual([]);
+  });
+
+  it('removes only what it delivered, so events another process queued mid-flush survive', async () => {
+    const outbox = new Outbox(dir);
+    const first = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} });
+    await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, events: [first] });
+    const late = buildEvent({ kind: 'resolution', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} });
+    const { sink } = fakeSink({});
+    // Another process spools an event for the same run while the events POST is in flight.
+    const original = sink.postEvents.bind(sink);
+    sink.postEvents = async (events: WireEvent[]) => {
+      await outbox.spoolRun({ runId: envelope.run.id, envelope, events: [late], envelopeDelivered: true });
+      return original(events);
+    };
+    expect(await outbox.flush(sink)).toMatchObject({ delivered: [envelope.run.id] });
+    const [kept] = await outbox.list();
+    expect(kept).toMatchObject({ id: envelope.run.id, events: 1, artifacts: [], meta: { envelope_delivered: true } });
+    const remaining = JSON.parse(await readFile(join(dir, envelope.run.id, 'events.json'), 'utf8')) as WireEvent[];
+    expect(remaining.map((e) => e.id)).toEqual([late.id]);
+  });
+
+  it('counts an entry another process removed mid-flush as delivered, not as a crash', async () => {
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS });
+    const { sink } = fakeSink({});
+    const original = sink.postRun.bind(sink);
+    sink.postRun = async (posted: RunEnvelope) => {
+      await outbox.remove(envelope.run.id);
+      return original(posted);
+    };
+    expect(await outbox.flush(sink)).toEqual({ delivered: [envelope.run.id], remaining: [], failed: [] });
+  });
+
+  it('shows an interrupted spool as failed once it is old enough, never hiding its bytes', async () => {
+    let clock = Date.now();
+    const outbox = new Outbox(dir, { now: () => clock });
+    const orphan = join(dir, OTHER_RUN);
+    await mkdir(join(orphan, 'artifacts'), { recursive: true });
+    await writeFile(join(orphan, 'envelope.json'), JSON.stringify(envelope), 'utf8');
+    // Young: a spool in progress, not yet listed.
+    expect(await outbox.list()).toEqual([]);
+    const old = new Date(clock - 60 * 60 * 1000);
+    await utimes(orphan, old, old);
+    const [entry] = await outbox.list();
+    expect(entry).toMatchObject({ id: OTHER_RUN, failed: { reason: expect.stringContaining('spool interrupted') }, meta: { kind: 'run' } });
+    expect(entry!.bytes).toBeGreaterThan(0);
+    const { sink, calls } = fakeSink({});
+    expect((await outbox.flush(sink)).failed).toEqual([{ id: OTHER_RUN, reason: expect.stringContaining('spool interrupted') }]);
+    expect(calls).toEqual([]);
+    // Re-spooling the run repairs the entry.
+    await outbox.spoolRun({ runId: OTHER_RUN, envelope: { ...envelope, run: { ...envelope.run, id: OTHER_RUN } } });
+    clock += 1;
+    expect((await outbox.list())[0]!.failed).toBeUndefined();
+  });
+
+  it('marks an entry of unknown kind failed instead of deleting it', async () => {
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: envelope.run.id, envelope });
+    await writeFile(join(dir, envelope.run.id, 'meta.json'), JSON.stringify({ kind: 'mystery', spooled_at: 'x', attempts: 0 }), 'utf8');
+    const { sink, calls } = fakeSink({});
+    expect((await outbox.flush(sink)).failed).toEqual([{ id: envelope.run.id, reason: expect.stringContaining('unknown entry kind') }]);
+    expect(calls).toEqual([]);
+    expect(await readdir(join(dir, envelope.run.id))).toContain('envelope.json');
   });
 
   it('stops at the deadline and leaves the rest for next time', async () => {

@@ -118,10 +118,13 @@ export interface RecordedRequest {
   method: string;
   headers: Record<string, string>;
   body?: string;
+  /** The `redirect` mode the caller asked for. */
+  redirect?: RequestRedirect;
 }
 
+/** `'hang'` never answers: the promise settles only when the caller's abort signal fires (a timeout). */
 export function fakeFetch(
-  handler: (request: RecordedRequest) => { status: number; body?: unknown } | Error
+  handler: (request: RecordedRequest) => { status: number; body?: unknown } | Error | 'hang'
 ): { fetch: typeof fetch; requests: RecordedRequest[] } {
   const requests: RecordedRequest[] = [];
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -134,9 +137,18 @@ export function fakeFetch(
       method: init?.method ?? 'GET',
       headers,
       ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      ...(init?.redirect !== undefined ? { redirect: init.redirect } : {}),
     };
     requests.push(request);
     const outcome = handler(request);
+    if (outcome === 'hang') {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    }
     if (outcome instanceof Error) throw outcome;
     return new Response(outcome.body === undefined ? '' : JSON.stringify(outcome.body), { status: outcome.status });
   }) as typeof fetch;

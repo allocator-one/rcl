@@ -4,11 +4,11 @@ import { join } from 'path';
 /**
  * The individual consent notice (epic IO-12475, section 8.7): the first
  * delivery from a machine to a given Harness host prints what is sent and
- * where; `<data dir>/telemetry-notice.json` records that it was shown. The
+ * where; `<data dir>/telemetry-notice` records that it was shown. The
  * org-level switch is the organizational consent; this is the personal one.
  */
 
-export const NOTICE_FILE = 'telemetry-notice.json';
+export const NOTICE_FILE = 'telemetry-notice';
 
 interface NoticeRecord {
   shown: Record<string, string>;

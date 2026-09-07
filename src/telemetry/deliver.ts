@@ -155,7 +155,10 @@ export interface DeliveryOutcome {
   runId?: string;
   /** Something waits in the outbox for `rcl telemetry flush`. */
   spooled: boolean;
-  /** 4 when `--evidence-required` and the envelope was not acknowledged. */
+  /**
+   * 4 when `--evidence-required` and the evidence is incomplete: the envelope
+   * was not acknowledged, or a declared artifact was spooled or refused.
+   */
   exitCode: 0 | typeof EVIDENCE_REQUIRED_EXIT_CODE;
 }
 
@@ -301,6 +304,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
   const notes: string[] = [];
   const pendingArtifacts: Partial<Record<ArtifactKind, string>> = {};
   let unreachable = false;
+  let artifactsRefused = 0;
   for (const [kind, bytes] of Object.entries(artifactsToSend) as Array<[ArtifactKind, string]>) {
     if (!receipt.artifacts_expected.includes(kind)) continue;
     if (unreachable) {
@@ -320,6 +324,9 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
       pendingArtifacts[kind] = bytes;
       continue;
     }
+    // A refusal is final — retrying the same bytes cannot help — so it is
+    // not spooled; under --evidence-required it makes the evidence incomplete.
+    artifactsRefused += 1;
     notes.push(`${kind} refused: ${describeOutcome(outcome)}`);
   }
 
@@ -356,13 +363,16 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     }
   }
 
+  // The run is recorded; the evidence is complete only when every artifact
+  // the server expected has landed (or the org caps artifacts).
+  const artifactsOutstanding = Object.keys(pendingArtifacts).length + artifactsRefused;
   return {
     status: 'recorded',
     runId,
     url: receipt.url,
     spooled,
     line: `Evidence recorded: ${receipt.url}${notes.length > 0 ? ` (${notes.join('; ')})` : ''}`,
-    exitCode: 0,
+    exitCode: evidenceRequired && artifactsOutstanding > 0 ? EVIDENCE_REQUIRED_EXIT_CODE : 0,
   };
 }
 

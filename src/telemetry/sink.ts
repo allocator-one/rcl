@@ -1,4 +1,4 @@
-import type { HarnessCredential } from './credentials.js';
+import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
 
@@ -68,6 +68,11 @@ export class HarnessSink {
   private readonly timeoutMs: number;
 
   constructor(options: SinkOptions) {
+    // The token travels to the host that minted it, over TLS (loopback
+    // excepted) — re-checked here so no caller can pair it with another URL.
+    if (normalizeUrl(options.credential.url) !== options.credential.url) {
+      throw new Error(`Harness credential URL is not a deliverable base URL: ${options.credential.url}`);
+    }
     this.credential = options.credential;
     this.rclVersion = options.rclVersion;
     this.fetchImpl = options.fetchImpl ?? fetch;

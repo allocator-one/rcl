@@ -266,10 +266,15 @@ at the start of every rcl command (bounded to five seconds) or by
 `rcl telemetry flush`. One dim status line says what happened:
 `Evidence recorded: <url>`, `Evidence spooled (Harness unreachable); run rcl
 telemetry flush`, or `Evidence not sent: <host> has not enabled review
-evidence for this organization`. `--evidence-required` makes an
-unacknowledged delivery exit 4 after spooling (a patch file then needs
-`--head-sha`). The first delivery from a machine prints a one-time notice
-naming the host and what is sent.
+evidence for this organization`. `--evidence-required` exits 4 when the
+evidence is incomplete: the envelope was spooled or refused, the organization
+has evidence off, or a declared artifact did not land (a patch file then needs
+`--head-sha`, and the flag contradicts `--no-telemetry` / `RCL_TELEMETRY=off`).
+Only a spooled delivery is worth `rcl telemetry flush --run <id>`; the status
+line says which. Under `--ci` the gate verdict keeps its exit code and the
+evidence failure is printed beside it. The first delivery from a machine
+prints a one-time notice naming the host and what is sent
+(`~/.rcl/telemetry-notice` records it).
 
 ```bash
 rcl telemetry status                # level, credential source, what waits in the outbox

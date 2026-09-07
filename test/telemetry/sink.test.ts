@@ -78,12 +78,59 @@ describe('HarnessSink.postRun', () => {
     expect(down).toEqual({ kind: 'unavailable', reason: 'TypeError: fetch failed' });
   });
 
-  it('never sends the token anywhere but the credential host', async () => {
+  it('never sends the token anywhere but the credential host, and never follows a redirect with it', async () => {
     const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { id: 'x', url: 'u', artifacts_expected: [] } } }));
     await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
     await s.putArtifact('x', 'report_json', '{}');
     await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })]);
-    for (const request of requests) expect(request.url.startsWith(`${CREDENTIAL.url}/api/v1/reviews/`)).toBe(true);
+    expect(requests).toHaveLength(3);
+    for (const request of requests) {
+      expect(request.url.startsWith(`${CREDENTIAL.url}/api/v1/reviews/`)).toBe(true);
+      expect(request.headers['authorization']).toBe(`Bearer ${CREDENTIAL.token}`);
+      // A 3xx to another host would otherwise carry the header along.
+      expect(request.redirect).toBe('manual');
+    }
+  });
+
+  it('refuses a credential whose URL the token must not travel to', () => {
+    const build = (url: string) => () => new HarnessSink({ credential: { url, token: 't', source: 'env' }, rclVersion: '3.0.0' });
+    expect(build('http://harness.example.test')).toThrow(/not a deliverable base URL/);
+    expect(build('https://harness.example.test/')).toThrow(/not a deliverable base URL/);
+    expect(build('not a url')).toThrow(/not a deliverable base URL/);
+    expect(build('https://harness.example.test')).not.toThrow();
+    expect(build('http://harness.infraone.localhost:4110')).not.toThrow();
+  });
+
+  it('gives up on a hung request after the timeout and calls it unavailable', async () => {
+    const { sink: s } = sink(() => 'hang');
+    const outcome = await s.putArtifact('run-1', 'report_md', '# r');
+    expect(outcome).toMatchObject({ kind: 'unavailable' });
+    expect((outcome as { reason: string }).reason).toMatch(/TimeoutError/);
+  });
+
+  it('sends nothing from the environment but the credential it was given (poisoned env)', async () => {
+    const poison = {
+      ANTHROPIC_API_KEY: 'poison-anthropic-9f8e7d6c',
+      OPENAI_API_KEY: 'poison-openai-1a2b3c4d',
+      GITHUB_TOKEN: 'poison-github-5e6f7a8b',
+      HARNESS_API_TOKEN: 'poison-harness-9c0d1e2f',
+    };
+    const before = { ...process.env };
+    Object.assign(process.env, poison);
+    try {
+      const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { id: 'x', url: 'u', artifacts_expected: [] } } }));
+      await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
+      await s.putArtifact('x', 'report_md', '# r');
+      await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1, payload: { note: 'clean' } })]);
+      const wire = JSON.stringify(requests);
+      for (const value of Object.values(poison)) expect(wire).not.toContain(value);
+      expect(wire).toContain(CREDENTIAL.token);
+    } finally {
+      for (const key of Object.keys(poison)) {
+        if (before[key] === undefined) delete process.env[key];
+        else process.env[key] = before[key];
+      }
+    }
   });
 });
 

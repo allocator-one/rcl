@@ -221,9 +221,30 @@ describe('telemetry delivery', () => {
     const outcome = await deliverRun(flaky.rt, { result: sampleResult(), artifacts: ARTIFACTS });
     expect(outcome.status).toBe('recorded');
     expect(outcome.spooled).toBe(true);
+    expect(outcome.exitCode).toBe(0);
     expect(outcome.line).toContain('artifacts spooled; run rcl telemetry flush');
     expect(puts).toBe(1);
     expect((await flaky.rt.outbox.list())[0]).toMatchObject({ artifacts: ['report_json', 'report_md'], meta: { envelope_delivered: true } });
+  });
+
+  it('treats a recorded run with an artifact still outstanding as incomplete evidence under --evidence-required', async () => {
+    const refuseMarkdown = (request: RecordedRequest) =>
+      request.url.endsWith('/artifacts/report_md') ? { status: 422, body: { error: 'validation_error', message: 'digest mismatch' } } : acceptEverything(request);
+    const refusing = await runtime(refuseMarkdown);
+    const refused = await deliverRun(refusing.rt, { result: sampleResult(), artifacts: ARTIFACTS, evidenceRequired: true });
+    expect(refused).toMatchObject({ status: 'recorded', spooled: false, exitCode: EVIDENCE_REQUIRED_EXIT_CODE });
+    expect(refused.line).toContain('report_md refused');
+    // A refusal is final: nothing is spooled for it.
+    expect(await refusing.rt.outbox.list()).toEqual([]);
+
+    // Without the flag the run counts as recorded either way.
+    const relaxed = await runtime(refuseMarkdown);
+    expect((await deliverRun(relaxed.rt, { result: sampleResult(), artifacts: ARTIFACTS })).exitCode).toBe(0);
+
+    const flaky = await runtime((request) => (request.url.includes('/artifacts/') ? new TypeError('fetch failed') : acceptEverything(request)));
+    const spooled = await deliverRun(flaky.rt, { result: sampleResult(), artifacts: ARTIFACTS, evidenceRequired: true });
+    expect(spooled).toMatchObject({ status: 'recorded', spooled: true, exitCode: EVIDENCE_REQUIRED_EXIT_CODE });
+    expect((await flaky.rt.outbox.list()).map((e) => e.id)).toEqual([spooled.runId]);
   });
 
   it('emits converge events, spooling them when unreachable and skipping undeliverable ones', async () => {

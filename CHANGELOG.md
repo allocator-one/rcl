@@ -28,10 +28,14 @@ report field is additive and pre-3.0 reports load unchanged.
   `harness.parseFailures` opts in to a parse-failed call's raw answer (fenced
   code and key-shaped strings removed, 32 KB cap) — by default only the parser
   message travels.
-- **`--evidence-required`** exits 4 after spooling when Harness did not
-  acknowledge the envelope, and refuses a patch file without `--head-sha`.
+- **`--evidence-required`** exits 4 when the evidence is incomplete — the
+  envelope was not acknowledged (spooled, refused, or the org has evidence
+  off), or a declared artifact was spooled or refused — and refuses a patch
+  file without `--head-sha` and a run with `--no-telemetry` or
+  `RCL_TELEMETRY=off`. Under `--ci` the gate's exit code wins; the evidence
+  failure is printed beside it.
 - **Consent.** The first delivery from a machine to a host prints a one-time
-  notice; `~/.rcl/telemetry-notice.json` records it.
+  notice; `~/.rcl/telemetry-notice` records it.
 - **Status line.** `Evidence recorded: <url>` · `Evidence spooled (Harness
   unreachable); run rcl telemetry flush` · `Evidence not sent: <host> has not
   enabled review evidence for this organization`.

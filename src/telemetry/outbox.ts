@@ -1,5 +1,5 @@
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises';
-import { join, resolve } from 'path';
+import { mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'fs/promises';
+import { join, resolve, sep } from 'path';
 import { resolveDataDir } from '../models/stats-store.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import { buildEvent, type WireEvent } from './events.js';
@@ -22,8 +22,12 @@ import type { HarnessSink } from './sink.js';
  *
  * Concurrency: two rcl processes may touch the outbox at once (a review
  * finishing while another command flushes). Files are written atomically
- * (temp + rename) and re-read before use; the size cap is best-effort
- * across processes, which is what a client-side courtesy cap needs to be.
+ * (temp + rename) and re-read before use; a flush removes only the files it
+ * delivered and never a directory that gained content meanwhile; an entry
+ * another process removed first counts as delivered by that process. The
+ * size cap is best-effort across processes, which is what a client-side
+ * courtesy cap needs to be. An entry whose spool was interrupted (no
+ * `meta.json` after a grace period) is listed as failed, never hidden.
  */
 
 export const OUTBOX_DIR = 'outbox';
@@ -34,6 +38,10 @@ const EVENTS_FILE = 'events.json';
 const ARTIFACTS_DIR = 'artifacts';
 const LOSS_DIR = 'loss';
 const FAILED_MARKER = 'failed.json';
+/** A loss report the server refused stays on disk under this suffix; it is never retried or counted as reported. */
+const LOSS_REFUSED_SUFFIX = '.refused';
+/** A directory without `meta.json` older than this is an interrupted spool, not one in progress. */
+export const INTERRUPTED_SPOOL_MS = 10 * 60 * 1000;
 
 const ARTIFACT_FILES: Record<ArtifactKind, string> = { report_json: 'report_json.json', report_md: 'report_md.md' };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -101,7 +109,19 @@ export interface FlushSummary {
   lossReported?: number;
 }
 
-type ReadResult<T> = { kind: 'ok'; value: T } | { kind: 'missing' } | { kind: 'malformed' } | { kind: 'error'; reason: string };
+type ReadResult<T> =
+  | { kind: 'ok'; value: T; raw: string }
+  | { kind: 'missing' }
+  | { kind: 'malformed' }
+  | { kind: 'error'; reason: string };
+
+/** The entry vanished under us: another process delivered or dropped it. */
+class EntryGone extends Error {
+  constructor() {
+    super('outbox entry removed concurrently');
+    this.name = 'EntryGone';
+  }
+}
 
 async function readJson<T>(path: string): Promise<ReadResult<T>> {
   let raw: string;
@@ -112,10 +132,43 @@ async function readJson<T>(path: string): Promise<ReadResult<T>> {
     return { kind: 'error', reason: err instanceof Error ? err.message : String(err) };
   }
   try {
-    return { kind: 'ok', value: JSON.parse(raw) as T };
+    return { kind: 'ok', value: JSON.parse(raw) as T, raw };
   } catch {
     return { kind: 'malformed' };
   }
+}
+
+/**
+ * The events file after a successful POST: gone when it still holds exactly
+ * what was sent; otherwise (another process queued more meanwhile) only the
+ * delivered ids leave it and the rest waits for the next flush.
+ */
+async function dropDeliveredEvents(path: string, raw: string, delivered: WireEvent[]): Promise<void> {
+  let current: string;
+  try {
+    current = await readFile(path, 'utf8');
+  } catch {
+    return;
+  }
+  if (current === raw) {
+    await rm(path, { force: true });
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(current);
+  } catch {
+    return; // Mid-write or torn: leave it for the next flush to judge.
+  }
+  if (!validEvents(parsed)) return;
+  const sent = new Set(delivered.map((e) => e.id));
+  const remaining = parsed.filter((e) => !sent.has(e.id));
+  if (remaining.length === 0) await rm(path, { force: true });
+  else await writeJsonAtomic(path, remaining);
+}
+
+function isEnoent(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 async function readOptionalJson<T>(path: string): Promise<T | undefined> {
@@ -136,6 +189,11 @@ async function writeTextAtomic(path: string, text: string): Promise<void> {
   await rename(tmp, path);
 }
 
+/**
+ * Bytes under `dir`, walked one entry at a time (never one `stat` per file in
+ * flight — a large outbox must not exhaust descriptors). A file that vanishes
+ * mid-walk (a concurrent rename) counts as zero; the cap is a courtesy.
+ */
 async function directorySize(dir: string): Promise<number> {
   let names: string[];
   try {
@@ -143,15 +201,14 @@ async function directorySize(dir: string): Promise<number> {
   } catch {
     return 0;
   }
-  const sizes = await Promise.all(
-    names.map(async (name) => {
-      const path = join(dir, name);
-      const info = await stat(path).catch(() => undefined);
-      if (!info) return 0;
-      return info.isDirectory() ? directorySize(path) : info.size;
-    })
-  );
-  return sizes.reduce((total, size) => total + size, 0);
+  let total = 0;
+  for (const name of names) {
+    const path = join(dir, name);
+    const info = await stat(path).catch(() => undefined);
+    if (!info) continue;
+    total += info.isDirectory() ? await directorySize(path) : info.size;
+  }
+  return total;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -165,10 +222,12 @@ function validEvents(value: unknown): value is WireEvent[] {
 export class Outbox {
   readonly dir: string;
   private readonly capBytes: number;
+  private readonly now: () => number;
 
-  constructor(dir: string = join(resolveDataDir(), OUTBOX_DIR), options: { capBytes?: number } = {}) {
+  constructor(dir: string = join(resolveDataDir(), OUTBOX_DIR), options: { capBytes?: number; now?: () => number } = {}) {
     this.dir = resolve(dir);
     this.capBytes = options.capBytes ?? DEFAULT_OUTBOX_CAP_BYTES;
+    this.now = options.now ?? Date.now;
   }
 
   async totalBytes(): Promise<number> {
@@ -179,7 +238,7 @@ export class Outbox {
   private entryDir(id: string): string {
     if (!ENTRY_ID.test(id)) throw new OutboxError(`Not an outbox entry id: ${JSON.stringify(id)}`);
     const dir = resolve(this.dir, id);
-    if (!dir.startsWith(`${this.dir}/`)) throw new OutboxError(`Entry escapes the outbox: ${id}`);
+    if (!dir.startsWith(`${this.dir}${sep}`)) throw new OutboxError(`Entry escapes the outbox: ${id}`);
     return dir;
   }
 
@@ -284,11 +343,18 @@ export class Outbox {
     const entries: OutboxEntry[] = [];
     for (const id of names.sort()) {
       const dir = this.entryDir(id);
-      const meta = await readOptionalJson<OutboxMeta>(join(dir, META_FILE));
-      if (!meta) continue;
+      let meta = await readOptionalJson<OutboxMeta>(join(dir, META_FILE));
+      let failed = await readOptionalJson<{ at: string; reason: string }>(join(dir, FAILED_MARKER));
+      if (!meta) {
+        // `meta.json` is written last: a young directory is a spool in
+        // progress; an old one was interrupted and is shown, not hidden.
+        const info = await stat(dir).catch(() => undefined);
+        if (!info || this.now() - info.mtimeMs < INTERRUPTED_SPOOL_MS) continue;
+        meta = { kind: id.startsWith('events-') ? 'events' : 'run', spooled_at: info.mtime.toISOString(), attempts: 0 };
+        failed = { at: new Date(this.now()).toISOString(), reason: 'spool interrupted before meta.json was written' };
+      }
       const files = new Set(await readdir(join(dir, ARTIFACTS_DIR)).catch(() => [] as string[]));
       const events = await readOptionalJson<unknown>(join(dir, EVENTS_FILE));
-      const failed = await readOptionalJson<{ at: string; reason: string }>(join(dir, FAILED_MARKER));
       entries.push({
         id,
         meta,
@@ -330,7 +396,10 @@ export class Outbox {
         summary.remaining.push(entry.id);
         continue;
       }
-      const result = await this.flushEntry(sink, entry, pastDeadline);
+      const result = await this.flushEntry(sink, entry, pastDeadline).catch((err: unknown) => {
+        if (err instanceof EntryGone) return { kind: 'delivered' as const };
+        throw err;
+      });
       switch (result.kind) {
         case 'delivered':
           summary.delivered.push(entry.id);
@@ -371,10 +440,18 @@ export class Outbox {
     | { kind: 'deadline' }
   > {
     const dir = this.entryDir(entry.id);
+    if (entry.meta.kind !== 'run' && entry.meta.kind !== 'events') {
+      return this.markFailed(dir, `meta.json: unknown entry kind ${JSON.stringify(entry.meta.kind)}`);
+    }
     const meta: OutboxMeta = { ...entry.meta, attempts: entry.meta.attempts + 1 };
     const remember = async (error?: string) => {
       if (error !== undefined) meta.last_error = error;
-      await writeJsonAtomic(join(dir, META_FILE), meta);
+      try {
+        await writeJsonAtomic(join(dir, META_FILE), meta);
+      } catch (err) {
+        if (isEnoent(err)) throw new EntryGone();
+        throw err;
+      }
     };
     await remember();
 
@@ -401,7 +478,7 @@ export class Outbox {
           return { kind: 'unavailable' };
         case 'disabled':
           // The organization switched evidence off; there is nothing to keep waiting for.
-          await rm(dir, { recursive: true, force: true });
+          await this.drop(dir);
           return { kind: 'failed', reason: outcome.message || outcome.reason };
         case 'conflict':
           return this.markFailed(dir, `conflict: ${outcome.message}`);
@@ -429,7 +506,7 @@ export class Outbox {
             break;
           case 'disabled':
             if (outcome.reason === 'reviews_disabled') {
-              await rm(dir, { recursive: true, force: true });
+              await this.drop(dir);
               return { kind: 'failed', reason: outcome.message || outcome.reason };
             }
             // Artifacts are capped for the org; the envelope stands.
@@ -464,12 +541,13 @@ export class Outbox {
       const outcome = await sink.postEvents(events.value);
       switch (outcome.kind) {
         case 'ok':
+          await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, events.value);
           break;
         case 'unavailable':
           await remember(outcome.reason);
           return { kind: 'unavailable' };
         case 'disabled':
-          await rm(dir, { recursive: true, force: true });
+          await this.drop(dir);
           return { kind: 'failed', reason: outcome.message || outcome.reason };
         case 'conflict':
         case 'rejected':
@@ -480,23 +558,81 @@ export class Outbox {
       }
     }
 
-    await rm(dir, { recursive: true, force: true });
+    if (events.kind === 'ok' && Array.isArray(events.value) && events.value.length === 0) {
+      await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, []);
+    }
+
+    await this.finish(dir, meta);
     return { kind: 'delivered' };
   }
 
+  /**
+   * Everything this flush read has been delivered: remove exactly those
+   * files, then the directory — which stays, listed, if another process
+   * put something new into it meanwhile.
+   */
+  private async finish(dir: string, meta: OutboxMeta): Promise<void> {
+    await rm(join(dir, ENVELOPE_FILE), { force: true });
+    await rm(join(dir, FAILED_MARKER), { force: true });
+    await this.sweepTempFiles(dir);
+    await rmdir(join(dir, ARTIFACTS_DIR)).catch(() => undefined);
+    await rm(join(dir, META_FILE), { force: true });
+    try {
+      await rmdir(dir);
+    } catch (err) {
+      if (isEnoent(err)) return;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw err;
+      // Something arrived while flushing: keep the entry visible for the next flush.
+      await writeJsonAtomic(join(dir, META_FILE), { ...meta, envelope_delivered: true }).catch(() => undefined);
+    }
+  }
+
+  /** Temp files a crashed writer left behind (a live writer's are younger than the grace period). */
+  private async sweepTempFiles(dir: string): Promise<void> {
+    for (const sub of [dir, join(dir, ARTIFACTS_DIR)]) {
+      const names = await readdir(sub).catch(() => [] as string[]);
+      for (const name of names.filter((n) => n.endsWith('.tmp'))) {
+        const path = join(sub, name);
+        const info = await stat(path).catch(() => undefined);
+        if (info && this.now() - info.mtimeMs >= INTERRUPTED_SPOOL_MS) await rm(path, { force: true });
+      }
+    }
+  }
+
+  /** The organization switched evidence off: nothing in this entry will ever be wanted. */
+  private async drop(dir: string): Promise<void> {
+    await rm(dir, { recursive: true, force: true });
+  }
+
   private async markFailed(dir: string, reason: string): Promise<{ kind: 'failed'; reason: string }> {
-    await writeJsonAtomic(join(dir, FAILED_MARKER), { at: new Date().toISOString(), reason });
+    try {
+      await writeJsonAtomic(join(dir, FAILED_MARKER), { at: new Date().toISOString(), reason });
+    } catch (err) {
+      if (isEnoent(err)) throw new EntryGone();
+      throw err;
+    }
     return { kind: 'failed', reason };
   }
 
-  /** Report pending losses with their stable ids; each file goes once the server has taken it. */
+  /**
+   * Report pending losses with their stable ids. A file goes once the server
+   * has taken it, or when the organization has switched evidence off (there
+   * is nobody to report to). One the server refuses is kept under a
+   * `.refused` suffix — visible on disk, never retried, never counted.
+   */
   private async reportLoss(sink: HarnessSink, pastDeadline: () => boolean): Promise<number> {
     const events = await this.pendingLoss();
     if (events.length === 0 || pastDeadline()) return 0;
     const outcome = await sink.postEvents(events);
-    if (outcome.kind === 'ok' || outcome.kind === 'disabled' || outcome.kind === 'rejected') {
+    if (outcome.kind === 'ok' || outcome.kind === 'disabled') {
       for (const event of events) await rm(join(this.dir, LOSS_DIR, `${event.id}.json`), { force: true });
-      return events.length;
+      return outcome.kind === 'ok' ? events.length : 0;
+    }
+    if (outcome.kind === 'rejected' || outcome.kind === 'conflict') {
+      for (const event of events) {
+        const path = join(this.dir, LOSS_DIR, `${event.id}.json`);
+        await rename(path, `${path}${LOSS_REFUSED_SUFFIX}`).catch(() => undefined);
+      }
     }
     return 0;
   }

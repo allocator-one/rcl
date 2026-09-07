@@ -137,7 +137,7 @@ function wireFinding(finding: ConsensusFinding, index: number, belowThreshold: b
     consensus: scrubDeep(finding.consensus),
     gating_reason: finding.gating?.reason ?? 'none',
     ...(finding.gating?.verification?.verdict !== undefined
-      ? { verification_verdict: finding.gating.verification.verdict }
+      ? { verification_verdict: scrubText(finding.gating.verification.verdict) }
       : {}),
     below_threshold: belowThreshold,
   };
@@ -259,12 +259,18 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
   };
 }
 
-/** The header is already allow-listed; its free-text runner claims still pass the scrubber. */
+/**
+ * The header is allow-listed when built, but every string in it — target
+ * URLs and refs, roster values, context-file paths, runner claims — came
+ * from the environment or the repository, so all of them pass the scrubber
+ * (hex digests and UUIDs survive it); the runner claims are capped as well.
+ */
 function scrubRunHeader(run: RunHeader): RunHeader {
+  const scrubbed = scrubDeep(run);
   return {
-    ...run,
+    ...scrubbed,
     runner: {
-      ...run.runner,
+      ...scrubbed.runner,
       ...(run.runner.agent !== undefined ? { agent: scrubText(run.runner.agent, 200) } : {}),
       ...(run.runner.host !== undefined ? { host: scrubText(run.runner.host, 64) } : {}),
       ...(run.runner.ci_run_id !== undefined ? { ci_run_id: scrubSecrets(run.runner.ci_run_id).slice(0, 200) } : {}),

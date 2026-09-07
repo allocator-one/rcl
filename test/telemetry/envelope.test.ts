@@ -113,6 +113,30 @@ describe('buildRunEnvelope', () => {
     expect(envelope.findings[0]!.consensus.disputeDetails).toBe(`${REDACTED} was quoted`);
   });
 
+  it('scrubs the run header everywhere a string came from the environment, keeping digests', () => {
+    const result = sampleResult();
+    result.run!.target.url = 'https://x-access-token:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123@github.com/allocator-one/rcl/pull/42';
+    result.run!.target.head_ref = 'feature/aone_ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    result.run!.roster[0]!.role = 'reviewer token=SuperSecretValue123456';
+    result.run!.context_files = [{ path: 'docs/sk-ant-abcdefghijklmnopqrstuvwxyz.md', sha256: 'e'.repeat(64) }];
+    const envelope = buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const json = JSON.stringify(envelope.run);
+    expect(json).not.toMatch(/ghp_|aone_|SuperSecretValue|sk-ant-/);
+    expect(envelope.run.target.head_sha).toBe('a'.repeat(40));
+    expect(envelope.run.config_sha256).toBe('c'.repeat(64));
+    expect(envelope.run.context_files[0]!.sha256).toBe('e'.repeat(64));
+    expect(envelope.run.id).toBe(result.run!.id);
+    expect(envelope.run.roster[0]!.role).toBe(`reviewer token=${REDACTED}`);
+  });
+
+  it('scrubs a verification verdict like any other free text', () => {
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'verified', verification: { verdict: 'confirmed', note: 'echoes sk-ant-abcdefghijklmnopqrstuvwxyz' } } as never;
+    result.findings[0]!.gating!.verification!.verdict = 'confirmed after seeing sk-ant-abcdefghijklmnopqrstuvwxyz' as never;
+    const envelope = buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    expect(envelope.findings[0]!.verification_verdict).toBe(`confirmed after seeing ${REDACTED}`);
+  });
+
   it('never contains environment values (poisoned-env negative test)', () => {
     const poison = {
       ANTHROPIC_API_KEY: 'poison-anthropic-9f8e7d6c',
