@@ -70,6 +70,10 @@ describe('telemetry delivery', () => {
       expect(resolveTelemetryLevel(undefined, {}, {})).toBe('full');
       expect(resolveTelemetryLevel({ harness: { telemetry: 'findings' } }, {}, {})).toBe('findings');
       expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'off' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'false' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: '0' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'findings' })).toBe('findings');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'envelope' } }, {}, { RCL_TELEMETRY: 'nonsense' })).toBe('envelope');
       expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, { noTelemetry: true }, {})).toBe('off');
     });
   });

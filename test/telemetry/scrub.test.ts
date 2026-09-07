@@ -68,20 +68,22 @@ describe('scrubDeep', () => {
 
 describe('stripFencedCode', () => {
   it('drops backtick and tilde fences, closed or not', () => {
-    expect(stripFencedCode('before ```json\n{"a":1}\n``` after')).toBe('before [code omitted] after');
+    expect(stripFencedCode('before ```json\n{"a":1}\n```\nafter')).toBe('before [code omitted]\nafter');
     expect(stripFencedCode('open ```\nnever closed')).toBe('open [code omitted]');
-    expect(stripFencedCode('tilde ~~~json\n{"prompt":"raw"}\n~~~ done')).toBe('tilde [code omitted] done');
-    expect(stripFencedCode('long ````\nx\n```` end')).toBe('long [code omitted] end');
+    expect(stripFencedCode('tilde ~~~json\n{"prompt":"raw"}\n~~~\ndone')).toBe('tilde [code omitted]\ndone');
+    expect(stripFencedCode('long ````\nx\n````\nend')).toBe('long [code omitted]\nend');
   });
 
-  it('closes a fence only with the same character at least as long, and strips every block', () => {
+  it('closes only at a line start with the same character at least as long, and strips every block', () => {
     // A shorter run inside the block does not close it; a longer one does.
-    expect(stripFencedCode('a ````\ninner ``` still code\n```` b')).toBe('a [code omitted] b');
-    expect(stripFencedCode('a ```\ncode\n```` b')).toBe('a [code omitted] b');
-    // Tildes never close a backtick fence.
-    expect(stripFencedCode('a ```\ncode ~~~ more\n``` b')).toBe('a [code omitted] b');
+    expect(stripFencedCode('a ````\ninner ``` still code\n````\nb')).toBe('a [code omitted]\nb');
+    expect(stripFencedCode('a ```\ncode\n````\nb')).toBe('a [code omitted]\nb');
+    // A same-length run mid-line, or one followed by text, is part of the block.
+    expect(stripFencedCode('a ```\nx = "```"; still code\n``` not a close\n```\nb')).toBe('a [code omitted]\nb');
+    // Tildes never close a backtick fence; up to three leading spaces are allowed.
+    expect(stripFencedCode('a ```\ncode ~~~ more\n   ```  \nb')).toBe('a [code omitted]\nb');
     // Several blocks, mixed styles, with a final unclosed one.
-    expect(stripFencedCode('x ```\none\n``` y ~~~\ntwo\n~~~ z ```\nthree')).toBe('x [code omitted] y [code omitted] z [code omitted]');
+    expect(stripFencedCode('x ```\none\n```\ny ~~~\ntwo\n~~~\nz ```\nthree')).toBe('x [code omitted]\ny [code omitted]\nz [code omitted]');
   });
 });
 
@@ -91,12 +93,34 @@ describe('scrubbing is idempotent and bounded', () => {
     const once = scrubText(noisy, 500);
     expect(scrubText(once, 500)).toBe(once);
     expect(scrubSecrets(scrubSecrets(noisy))).toBe(scrubSecrets(noisy));
-    expect(stripFencedCode(stripFencedCode('a ```\nb\n``` c'))).toBe(stripFencedCode('a ```\nb\n``` c'));
+    expect(stripFencedCode(stripFencedCode('a ```\nb\n```\nc'))).toBe(stripFencedCode('a ```\nb\n```\nc'));
   });
 
-  it('redacts a secret that sits right at the pre-scrub cut', () => {
+  it('never leaves half a secret at the pre-scrub cut', () => {
     const secret = `sk-${'q'.repeat(40)}`;
-    const text = `${'p'.repeat(2_000 * 4 - 10)}${secret}`;
-    expect(scrubText(text)).not.toContain(secret.slice(0, 20));
+    const text = `${'p'.repeat(2_000 * 4 - 10)} ${secret} tail`;
+    const out = scrubText(text);
+    expect(out).not.toContain('sk-');
+    expect(out).not.toContain('qqqq');
+  });
+
+  it('keeps distinct keys distinct after scrubbing and drops prototype keys', () => {
+    const scrubbed = scrubDeep({ 'token=abcdefgh': 1, 'token=ijklmnop': 2, plain: 3 }) as Record<string, unknown>;
+    expect(Object.keys(scrubbed).sort()).toEqual([`token=${REDACTED}`, `token=${REDACTED}#2`, 'plain'].sort());
+    expect(scrubbed[`token=${REDACTED}`]).toBe(1);
+    expect(scrubbed[`token=${REDACTED}#2`]).toBe(2);
+
+    const hostile = JSON.parse('{"__proto__": {"polluted": true}, "constructor": 1, "ok": "x"}') as Record<string, unknown>;
+    const safe = scrubDeep(hostile) as Record<string, unknown>;
+    expect(Object.keys(safe)).toEqual(['ok']);
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+
+  it('redacts JSON-quoted keys, compound key names and values with escaped quotes', () => {
+    expect(scrubSecrets('{"password":"lowercasecredential"}')).toBe(`{"password":"${REDACTED}"}`);
+    expect(scrubSecrets('client_secret=lowercasecredential')).toBe(`client_secret=${REDACTED}`);
+    expect(scrubSecrets('GITHUB_TOKEN=abcdefghij')).toBe(`GITHUB_TOKEN=${REDACTED}`);
+    expect(scrubSecrets('private_key: "-----BEGIN"')).toBe(`private_key: "${REDACTED}"`);
+    expect(scrubSecrets('api_key: "abc\\"def" rest')).toBe(`api_key: "${REDACTED}" rest`);
   });
 });

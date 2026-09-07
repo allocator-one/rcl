@@ -48,6 +48,21 @@ describe('resolveHarnessCredential', () => {
     });
     expect(malformed.credential).toBeUndefined();
     expect(malformed.note).toMatch(/absolute https URL/);
+
+    // Half a pair the other way round is an error too, never a fallback to the login.
+    const urlOnly = await resolveHarnessCredential({ env: { HARNESS_API_URL: 'https://ci.example.test' }, cwd: repo, credentialsPath });
+    expect(urlOnly.credential).toBeUndefined();
+    expect(urlOnly.note).toMatch(/HARNESS_API_URL is set without HARNESS_API_TOKEN/);
+
+    // User-info, query or fragment never make a base URL, and the note names only the host.
+    const loaded = await resolveHarnessCredential({
+      env: { HARNESS_API_TOKEN: 'aone_ci', HARNESS_API_URL: 'https://user:ghp_secret@ci.example.test/?token=x#f' },
+      cwd: repo,
+      credentialsPath,
+    });
+    expect(loaded.credential).toBeUndefined();
+    expect(loaded.note).toContain('ci.example.test');
+    expect(loaded.note).not.toContain('ghp_secret');
   });
 
   it('sends the token over TLS only, except to loopback hosts', async () => {

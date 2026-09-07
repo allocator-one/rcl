@@ -1,4 +1,5 @@
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
+import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
 
@@ -77,10 +78,12 @@ export class HarnessSink {
   constructor(options: SinkOptions) {
     // The token travels to the host that minted it, over TLS (loopback
     // excepted) — re-checked here so no caller can pair it with another URL.
-    if (normalizeUrl(options.credential.url) !== options.credential.url) {
-      throw new Error(`Harness credential URL is not a deliverable base URL: ${options.credential.url}`);
+    // A trailing slash is the same origin and is normalized away.
+    const url = normalizeUrl(options.credential.url);
+    if (url === null) {
+      throw new Error(`Harness credential URL is not a deliverable base URL: ${hostOnly(options.credential.url)}`);
     }
-    this.credential = options.credential;
+    this.credential = { ...options.credential, url };
     this.rclVersion = options.rclVersion;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
@@ -175,7 +178,10 @@ export class HarnessSink {
     const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
-      if (!data || typeof data['id'] !== 'string' || typeof data['url'] !== 'string') return null;
+      // A receipt names the run that was posted and says which artifacts the
+      // server expects; anything else is not a receipt.
+      if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string') return null;
+      if (!Array.isArray(data['artifacts_expected']) || !data['artifacts_expected'].every((k) => typeof k === 'string')) return null;
       const meta = (body as { meta?: { status?: string } }).meta;
       return {
         id: data['id'],
@@ -183,9 +189,7 @@ export class HarnessSink {
         ...(typeof data['received_at'] === 'string' ? { received_at: data['received_at'] } : {}),
         ...(typeof data['repo_verified'] === 'boolean' ? { repo_verified: data['repo_verified'] } : {}),
         ...(typeof data['head_verified'] === 'string' ? { head_verified: data['head_verified'] } : {}),
-        artifacts_expected: Array.isArray(data['artifacts_expected'])
-          ? (data['artifacts_expected'] as unknown[]).filter((k): k is string => typeof k === 'string')
-          : [],
+        artifacts_expected: data['artifacts_expected'] as string[],
         status: meta?.status === 'existing' || status === 200 ? 'existing' : 'created',
       };
     });
@@ -260,7 +264,20 @@ async function readBounded(response: Response, limit: number): Promise<string | 
   return new TextDecoder().decode(Buffer.concat(chunks.map((c) => Buffer.from(c))));
 }
 
-/** One phrase for a non-ok outcome, safe to print (no token, no body dump). */
+function hostOnly(raw: string): string {
+  try {
+    return new URL(raw).host || '(no host)';
+  } catch {
+    return '(unparseable URL)';
+  }
+}
+
+/** Server or network text made safe for a terminal: scrubbed, control characters removed, bounded. */
+function printable(text: string): string {
+  return scrubText(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), 300);
+}
+
+/** One phrase for a non-ok outcome, safe to print (no token, no body dump, no control characters). */
 export function describeOutcome(outcome: SinkOutcome<unknown>): string {
   switch (outcome.kind) {
     case 'ok':
@@ -270,10 +287,10 @@ export function describeOutcome(outcome: SinkOutcome<unknown>): string {
         ? 'the organization has not enabled review evidence'
         : 'the organization caps review evidence at findings';
     case 'conflict':
-      return `conflict: ${outcome.message || 'run id already recorded with a different report'}`;
+      return `conflict: ${outcome.message ? printable(outcome.message) : 'run id already recorded with a different report'}`;
     case 'rejected':
-      return `refused (HTTP ${outcome.httpStatus} ${outcome.error}${outcome.message ? `: ${outcome.message}` : ''})`;
+      return `refused (HTTP ${outcome.httpStatus} ${printable(outcome.error)}${outcome.message ? `: ${printable(outcome.message)}` : ''})`;
     case 'unavailable':
-      return `unreachable (${outcome.reason})`;
+      return `unreachable (${printable(outcome.reason)})`;
   }
 }

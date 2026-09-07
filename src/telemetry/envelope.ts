@@ -233,6 +233,7 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
     description: scrubText(f.description),
     ...(f.suggestedFix !== undefined ? { suggestedFix: scrubText(f.suggestedFix) } : {}),
     consensus: scrubDeep(f.consensus),
+    ...(f.gating !== undefined ? { gating: scrubDeep(f.gating) } : {}),
   });
   const review = (r: ModelReview): ModelReview => {
     const error = callError(r, parseFailures);

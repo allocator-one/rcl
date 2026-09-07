@@ -36,9 +36,12 @@ const KEY_PATTERNS: RegExp[] = [
  * more non-delimiter characters — shorter unquoted runs are left alone so
  * that prose such as `token: string` keeps its type name.
  */
-const SENSITIVE_KEY = String.raw`(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token)`;
-const ASSIGNMENT_QUOTED = new RegExp(String.raw`\b(${SENSITIVE_KEY}\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*')`, 'gi');
-const ASSIGNMENT = new RegExp(String.raw`\b(${SENSITIVE_KEY}\s*[:=]\s*)([^\s"',;]{8,})`, 'gi');
+// The key may be a compound (`client_secret`, `GITHUB_TOKEN`, `private_key`)
+// and may itself be quoted, as in JSON.
+const SENSITIVE_KEY = String.raw`["']?[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token|private[_-]?key)["']?`;
+// A quoted value runs to its closing quote, escaped quotes included.
+const ASSIGNMENT_QUOTED = new RegExp(String.raw`(${SENSITIVE_KEY}\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')`, 'gi');
+const ASSIGNMENT = new RegExp(String.raw`(${SENSITIVE_KEY}\s*[:=]\s*)([^\s"',;]{8,})`, 'gi');
 
 /**
  * Any long opaque token mixing upper, lower and digits — never a pure hex
@@ -69,15 +72,25 @@ function redactQuoted(match: string, prefix: string): string {
 
 /**
  * Scrub, then cap at `max` characters (grapheme-safe, with an ellipsis).
- * The scrub passes run over at most four times the cap: a huge input is cut
- * first, generously enough that a secret straddling the final cut is still
- * matched in full before the exact cap is applied.
+ * The scrub passes run over at most about four times the cap: a huge input
+ * is cut first — at the next whitespace, so no token is split and a secret
+ * straddling the cut is still matched in full — before the exact cap applies.
  */
 export function scrubText(text: string, max: number = MAX_FREE_TEXT): string {
-  const bounded = text.length > max * 4 ? text.slice(0, max * 4) : text;
+  const bounded = preCut(text, max * 4);
   const scrubbed = scrubSecrets(bounded);
   if (scrubbed.length <= max && bounded === text) return scrubbed;
   return `${[...scrubbed].slice(0, Math.max(0, max - 1)).join('')}…`;
+}
+
+function preCut(text: string, at: number): string {
+  if (text.length <= at) return text;
+  // Cut at the last whitespace shortly before the mark, so a token that
+  // straddles it is dropped whole rather than left as a half-secret; only a
+  // whitespace-free stretch longer than the window is cut mid-token.
+  const window = text.slice(Math.max(0, at - 512), at);
+  const back = window.search(/\s\S*$/);
+  return text.slice(0, back === -1 ? at : Math.max(0, at - 512) + back);
 }
 
 /**
@@ -97,14 +110,25 @@ export function scrubOptional(text: string | undefined, max: number = MAX_FREE_T
   return text === undefined ? undefined : scrubText(text, max);
 }
 
-/** Scrub every string nested inside a JSON-like value — keys included (structure untouched). */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * Scrub every string nested inside a JSON-like value — keys included. The
+ * structure survives: two keys that scrub to the same name stay distinct
+ * (`[redacted]`, `[redacted]#2`, …), and the keys that would reach into the
+ * object's prototype are dropped rather than assigned.
+ */
 export function scrubDeep<T>(value: T): T {
   if (typeof value === 'string') return scrubText(value) as unknown as T;
   if (Array.isArray(value)) return value.map((item) => scrubDeep(item)) as unknown as T;
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      out[scrubSecrets(key)] = scrubDeep(item);
+      if (UNSAFE_KEYS.has(key)) continue;
+      const base = scrubSecrets(key);
+      let name = base;
+      for (let n = 2; Object.prototype.hasOwnProperty.call(out, name); n += 1) name = `${base}#${n}`;
+      out[name] = scrubDeep(item);
     }
     return out as T;
   }
@@ -113,10 +137,13 @@ export function scrubDeep<T>(value: T): T {
 
 /**
  * Drop fenced code blocks — a malformed model answer can echo the prompt,
- * and the prompt contains the diff. Fences follow CommonMark: a run of three
- * or more backticks or tildes opens a block, and it closes at the next run
- * of the same character at least as long; an unclosed block runs to the end.
- * Fences may sit mid-line (a model rarely starts a new line for them).
+ * and the prompt contains the diff. A run of three or more backticks or
+ * tildes opens a block wherever it stands (models often open one mid-line,
+ * "here is the JSON: ```json"). It closes, as in CommonMark, only at a line
+ * start: up to three spaces, a run of the same character at least as long,
+ * then nothing but spaces to the end of the line. A same-length run inside
+ * the block's own lines therefore never ends it early, and an unclosed
+ * block runs to the end of the text.
  */
 export function stripFencedCode(text: string): string {
   const fence = /(`{3,}|~{3,})/g;
@@ -130,10 +157,19 @@ export function stripFencedCode(text: string): string {
       out += `${text.slice(cursor, match.index)}[code omitted]`;
       open = { char: run[0]!, length: run.length };
       cursor = match.index + run.length;
-    } else if (run[0] === open.char && run.length >= open.length) {
+    } else if (run[0] === open.char && run.length >= open.length && closesAtLineStart(text, match.index, run.length)) {
       open = undefined;
-      cursor = match.index + run.length;
+      // The closing line is the fence's own; resume at its line break.
+      const lineEnd = text.indexOf('\n', match.index + run.length);
+      cursor = lineEnd === -1 ? text.length : lineEnd;
     }
   }
   return open ? out : out + text.slice(cursor);
+}
+
+function closesAtLineStart(text: string, index: number, length: number): boolean {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+  if (!/^ {0,3}$/.test(text.slice(lineStart, index))) return false;
+  const lineEnd = text.indexOf('\n', index + length);
+  return /^ *$/.test(text.slice(index + length, lineEnd === -1 ? undefined : lineEnd));
 }

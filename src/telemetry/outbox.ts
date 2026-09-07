@@ -496,10 +496,6 @@ export class Outbox {
     };
     await remember();
 
-    // A 409 means the server already holds this run id with a different
-    // report: the envelope is refused for good, but the events queued with
-    // it are independent (idempotent by id) and still go out first.
-    let conflict: string | undefined;
 
     if (meta.kind === 'run' && !meta.envelope_delivered) {
       const read = await readJson<RunEnvelope>(join(dir, ENVELOPE_FILE));
@@ -527,14 +523,16 @@ export class Outbox {
           await this.drop(dir);
           return { kind: 'failed', reason: outcome.message || outcome.reason };
         case 'conflict':
-          conflict = `conflict: ${outcome.message}`;
-          break;
+          // The server holds this run id with a different report. The events
+          // queued here name that run id too, so they must not be attached to
+          // whatever the server has; the whole entry stays for inspection.
+          return this.markFailed(dir, `conflict: ${outcome.message}`);
         case 'rejected':
           return this.markFailed(dir, `HTTP ${outcome.httpStatus} ${outcome.error} ${outcome.message}`.trim());
       }
     }
 
-    if (meta.kind === 'run' && conflict === undefined) {
+    if (meta.kind === 'run') {
       for (const kind of entry.artifacts) {
         if (pastDeadline()) return { kind: 'deadline' };
         const path = join(dir, ARTIFACTS_DIR, ARTIFACT_FILES[kind]);
@@ -608,8 +606,6 @@ export class Outbox {
     if (events.kind === 'ok' && Array.isArray(events.value) && events.value.length === 0) {
       await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, []);
     }
-
-    if (conflict !== undefined) return this.markFailed(dir, conflict);
 
     // Whatever arrived while flushing stays for the next flush; the entry
     // is only "delivered" once nothing of it remains.

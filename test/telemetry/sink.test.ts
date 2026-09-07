@@ -7,6 +7,11 @@ import { fakeFetch, sampleResult } from './fixtures.js';
 const CREDENTIAL = { url: 'https://harness.example.test', token: 'aone_TESTTOKEN0123456789', source: 'login' as const };
 const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
 
+/** The run id a posted envelope carries, so a fixture can answer with a matching receipt. */
+function runIdOf(request: { body?: string }): string {
+  return (JSON.parse(request.body ?? '{}') as { run?: { id?: string } }).run?.id ?? 'not-a-run';
+}
+
 function sink(handler: Parameters<typeof fakeFetch>[0]) {
   const { fetch, requests } = fakeFetch(handler);
   return { sink: new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.0.0', fetchImpl: fetch, timeoutMs: 500 }), requests };
@@ -14,17 +19,17 @@ function sink(handler: Parameters<typeof fakeFetch>[0]) {
 
 describe('HarnessSink.postRun', () => {
   it('posts the envelope with the client handshake to the credential host and reads the receipt', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     const { sink: s, requests } = sink(() => ({
       status: 201,
       body: {
-        data: { id: 'run-1', url: 'https://harness.example.test/api/v1/reviews/runs/run-1', artifacts_expected: ['report_json', 'report_md'], head_verified: 'current' },
+        data: { id: envelope.run.id, url: `https://harness.example.test/api/v1/reviews/runs/${envelope.run.id}`, artifacts_expected: ['report_json', 'report_md'], head_verified: 'current' },
         meta: { status: 'created' },
       },
     }));
-    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     const outcome = await s.postRun(envelope);
 
-    expect(outcome).toMatchObject({ kind: 'ok', httpStatus: 201, value: { id: 'run-1', status: 'created', artifacts_expected: ['report_json', 'report_md'], head_verified: 'current' } });
+    expect(outcome).toMatchObject({ kind: 'ok', httpStatus: 201, value: { id: envelope.run.id, status: 'created', artifacts_expected: ['report_json', 'report_md'], head_verified: 'current' } });
     const [request] = requests;
     expect(request!.url).toBe('https://harness.example.test/api/v1/reviews/runs');
     expect(request!.method).toBe('POST');
@@ -39,9 +44,29 @@ describe('HarnessSink.postRun', () => {
   });
 
   it('reads an idempotent 200 as existing', async () => {
-    const { sink: s } = sink(() => ({ status: 200, body: { data: { id: 'run-1', url: 'u', artifacts_expected: [] }, meta: { status: 'existing' } } }));
+    const { sink: s } = sink((request) => ({ status: 200, body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] }, meta: { status: 'existing' } } }));
     const outcome = await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
     expect(outcome).toMatchObject({ kind: 'ok', value: { status: 'existing' } });
+  });
+
+  it('refuses a receipt that names another run or forgets which artifacts it expects', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const other = await sink(() => ({ status: 201, body: { data: { id: 'run-1', url: 'u', artifacts_expected: [] } } })).sink.postRun(envelope);
+    expect(other).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    const forgetful = await sink(() => ({ status: 201, body: { data: { id: envelope.run.id, url: 'u' } } })).sink.postRun(envelope);
+    expect(forgetful).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+  });
+
+  it('prints server text scrubbed and without control characters', () => {
+    const line = describeOutcome({
+      kind: 'rejected',
+      httpStatus: 422,
+      error: 'validation_error',
+      message: `Bearer ${'a'.repeat(30)} rejected\u001b[31m boo\r\n`,
+    });
+    expect(line).not.toContain('aaaa');
+    expect(line).not.toMatch(/[\u0000-\u001f]/);
+    expect(line).toContain('rejected');
   });
 
   it('classifies 409 as conflict, 403 reviews_disabled as disabled, 422 as rejected', async () => {
@@ -79,7 +104,7 @@ describe('HarnessSink.postRun', () => {
   });
 
   it('never sends the token anywhere but the credential host, and never follows a redirect with it', async () => {
-    const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { id: 'x', url: 'u', artifacts_expected: [] } } }));
+    const { sink: s, requests } = sink((request) => ({ status: 201, body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] } } }));
     await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
     await s.putArtifact('x', 'report_json', '{}');
     await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })]);
@@ -92,13 +117,17 @@ describe('HarnessSink.postRun', () => {
     }
   });
 
-  it('refuses a credential whose URL the token must not travel to', () => {
+  it('refuses a credential whose URL the token must not travel to, and normalizes a trailing slash', () => {
     const build = (url: string) => () => new HarnessSink({ credential: { url, token: 't', source: 'env' }, rclVersion: '3.0.0' });
     expect(build('http://harness.example.test')).toThrow(/not a deliverable base URL/);
-    expect(build('https://harness.example.test/')).toThrow(/not a deliverable base URL/);
+    expect(build('https://user:pw@harness.example.test')).toThrow(/not a deliverable base URL/);
+    expect(build('https://harness.example.test/?x=1')).toThrow(/not a deliverable base URL/);
     expect(build('not a url')).toThrow(/not a deliverable base URL/);
     expect(build('https://harness.example.test')).not.toThrow();
     expect(build('http://harness.infraone.localhost:4110')).not.toThrow();
+    expect(new HarnessSink({ credential: { url: 'https://harness.example.test/', token: 't', source: 'env' }, rclVersion: '3.0.0' }).baseUrl).toBe(
+      'https://harness.example.test'
+    );
   });
 
   it('reads a WHATWG opaque redirect as redirected and refuses an oversized response', async () => {
@@ -144,7 +173,7 @@ describe('HarnessSink.postRun', () => {
     const before = { ...process.env };
     Object.assign(process.env, poison);
     try {
-      const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { id: 'x', url: 'u', artifacts_expected: [] } } }));
+      const { sink: s, requests } = sink((request) => ({ status: 201, body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] } } }));
       await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
       await s.putArtifact('x', 'report_md', '# r');
       await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1, payload: { note: 'clean' } })]);

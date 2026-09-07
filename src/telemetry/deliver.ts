@@ -1,4 +1,5 @@
 import { cosmiconfig } from 'cosmiconfig';
+import { join } from 'path';
 import { SEARCH_PLACES } from '../config/loader.js';
 import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
@@ -7,7 +8,7 @@ import { credentialHost, resolveHarnessCredential, type HarnessCredential } from
 import { buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type TelemetryLevel } from './envelope.js';
 import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
-import { Outbox, type FlushOptions, type FlushSummary } from './outbox.js';
+import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink } from './sink.js';
 
@@ -26,6 +27,8 @@ export const EVIDENCE_REQUIRED_EXIT_CODE = 4;
 
 export interface TelemetryRuntime {
   level: TelemetryLevel;
+  /** Whether the working tree carries `.harness-cli/config.json`. */
+  repoManaged: boolean;
   parseFailures: boolean;
   credential?: HarnessCredential;
   /** Why there is no credential, when telemetry would otherwise apply. */
@@ -53,15 +56,25 @@ export interface RuntimeOptions {
   requireRepo?: boolean;
 }
 
-/** `RCL_TELEMETRY=off` and `--no-telemetry` win; then `harness.telemetry`; default `full`. */
+const ENV_OFF = new Set(['off', '0', 'false', 'no', 'none', 'disabled']);
+const LEVELS = new Set<TelemetryLevel>(['off', 'envelope', 'findings', 'full']);
+
+/** What `RCL_TELEMETRY` asks for: `off` (also `0`, `false`, `no`), a level name, or nothing. */
+export function envTelemetryLevel(env: Record<string, string | undefined>): TelemetryLevel | undefined {
+  const raw = (env['RCL_TELEMETRY'] ?? '').trim().toLowerCase();
+  if (raw === '') return undefined;
+  if (ENV_OFF.has(raw)) return 'off';
+  return LEVELS.has(raw as TelemetryLevel) ? (raw as TelemetryLevel) : undefined;
+}
+
+/** `--no-telemetry` wins, then `RCL_TELEMETRY`, then `harness.telemetry`; default `full`. */
 export function resolveTelemetryLevel(
   config: Pick<Config, 'harness'> | undefined,
   flags: { noTelemetry?: boolean },
   env: Record<string, string | undefined>
 ): TelemetryLevel {
   if (flags.noTelemetry) return 'off';
-  if ((env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return 'off';
-  return config?.harness?.telemetry ?? 'full';
+  return envTelemetryLevel(env) ?? config?.harness?.telemetry ?? 'full';
 }
 
 /**
@@ -90,8 +103,9 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
   const level = resolveTelemetryLevel(config, { noTelemetry: options.noTelemetry }, env);
   const runtime: TelemetryRuntime = {
     level,
+    repoManaged: false,
     parseFailures: config?.harness?.parseFailures === true,
-    outbox: new Outbox(`${dataDir}/outbox`),
+    outbox: new Outbox(join(dataDir, OUTBOX_DIR)),
     dataDir,
     rclVersion: options.rclVersion,
     stderr: options.stderr ?? ((line) => process.stderr.write(`${line}\n`)),
@@ -104,6 +118,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}),
     ...(options.requireRepo !== undefined ? { requireRepo: options.requireRepo } : {}),
   });
+  runtime.repoManaged = resolved.repoManaged;
   if (!resolved.repoManaged && options.requireRepo !== false) {
     // Not a Harness-managed repository: there is nowhere the evidence belongs.
     return { ...runtime, level: 'off' };
@@ -146,8 +161,7 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
 export async function flushOutboxAtStart(runtime: TelemetryRuntime, deadlineMs = STARTUP_FLUSH_DEADLINE_MS): Promise<void> {
   if (!runtime.sink) return;
   try {
-    const entries = await runtime.outbox.list();
-    if (entries.length === 0) return;
+    // One listing, inside the deadline: flush scans the outbox itself.
     const summary = await flushOutbox(runtime, { deadlineMs });
     if (summary.delivered.length > 0) {
       runtime.stderr(
@@ -365,7 +379,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
       pendingEvents.length > 0 ? 'events' : undefined,
     ].filter((p): p is string => p !== undefined);
     try {
-      await runtime.outbox.spoolRun({
+      const result = await runtime.outbox.spoolRun({
         runId,
         envelope,
         artifacts: pendingArtifacts,
@@ -373,8 +387,15 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
         envelopeDelivered: true,
         runUrl: receipt.url,
       });
-      spooled = true;
-      notes.push(`${parts.join(' and ')} spooled; run rcl telemetry flush`);
+      const kept = Object.keys(pendingArtifacts).filter((kind) => !result.artifactsDropped.includes(kind as ArtifactKind));
+      spooled = kept.length > 0 || pendingEvents.length > 0;
+      const retained = [kept.length > 0 ? 'artifacts' : undefined, pendingEvents.length > 0 ? 'events' : undefined].filter(
+        (p): p is string => p !== undefined
+      );
+      if (retained.length > 0) notes.push(`${retained.join(' and ')} spooled; run rcl telemetry flush`);
+      if (result.artifactsDropped.length > 0) {
+        notes.push(`${result.artifactsDropped.join(', ')} not spooled: outbox over its cap`);
+      }
     } catch (err) {
       notes.push(`${parts.join(' and ')} not delivered and could not be spooled: ${localFailure(err)}`);
     }

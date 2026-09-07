@@ -1,5 +1,5 @@
 import { uuidv7 } from '../report/uuid.js';
-import { scrubDeep } from './scrub.js';
+import { scrubDeep, scrubIdentifier } from './scrub.js';
 
 /**
  * Converge events (epic IO-12475, section 5.4): the rcl-converge commands
@@ -55,7 +55,8 @@ export function buildEvent(input: EventInput): WireEvent {
   return {
     id: uuidv7(now.getTime()),
     kind: input.kind,
-    ...(input.convergeTarget !== undefined ? { converge_target: input.convergeTarget } : {}),
+    // The target is a slug the loop chose; it still passes the key scrubber.
+    ...(input.convergeTarget !== undefined ? { converge_target: scrubIdentifier(input.convergeTarget) } : {}),
     ...(input.runId !== undefined ? { run_id: input.runId } : {}),
     ...(input.round !== undefined ? { round: input.round } : {}),
     ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
@@ -72,7 +73,12 @@ export function buildEvent(input: EventInput): WireEvent {
 export function deliverable(event: WireEvent): boolean {
   const counter = (n: number | undefined) => n === undefined || (Number.isSafeInteger(n) && n >= 1);
   if (!counter(event.round) || !counter(event.attempt)) return false;
+  // A run id that is not a UUID would be refused by the server and could
+  // poison the batch it travels in.
+  if (event.run_id !== undefined && !UUID.test(event.run_id)) return false;
   if (event.kind === 'attempt_claimed') return event.attempt !== undefined;
   if (!RUN_BOUND_KINDS.has(event.kind)) return true;
-  return typeof event.run_id === 'string' && event.run_id !== '' && event.round !== undefined;
+  return event.run_id !== undefined && event.round !== undefined;
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -26,11 +26,26 @@ describe('buildEvent', () => {
   });
 });
 
+describe('buildEvent scrubbing', () => {
+  it('passes the converge target through the key scrubber', () => {
+    const event = buildEvent({ kind: 'attempt_claimed', convergeTarget: `repo-ghp_${'A'.repeat(30)}`, attempt: 1 });
+    expect(event.converge_target).toBe('repo-[redacted]');
+    expect(buildEvent({ kind: 'attempt_claimed', convergeTarget: 'allocator-one-8503', attempt: 1 }).converge_target).toBe('allocator-one-8503');
+  });
+});
+
 describe('deliverable', () => {
+  it('refuses a run id that is not a UUID', () => {
+    const bad = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: 'not-a-uuid', payload: {} });
+    expect(deliverable(bad)).toBe(false);
+    const good = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: '019921a0-0000-7000-8000-000000000001', payload: {} });
+    expect(deliverable(good)).toBe(true);
+  });
+
   it('requires run_id and round for round-bound kinds, attempt for a claim, nothing for loss', () => {
-    expect(deliverable(buildEvent({ kind: 'verdicts_recorded', round: 1, runId: 'r' }))).toBe(true);
+    expect(deliverable(buildEvent({ kind: 'verdicts_recorded', round: 1, runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(true);
     expect(deliverable(buildEvent({ kind: 'verdicts_recorded', round: 1 }))).toBe(false);
-    expect(deliverable(buildEvent({ kind: 'resolution', runId: 'r' }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'resolution', runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(false);
     expect(deliverable(buildEvent({ kind: 'attempt_claimed', attempt: 2 }))).toBe(true);
     expect(deliverable(buildEvent({ kind: 'attempt_claimed' }))).toBe(false);
     expect(deliverable(buildEvent({ kind: 'cap_changed' }))).toBe(true);

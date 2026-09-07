@@ -182,9 +182,10 @@ describe('Outbox', () => {
     const [loss] = await outbox.pendingLoss();
     expect(loss).toMatchObject({ kind: 'loss', payload: { reason: 'outbox_over_cap', run_id: envelope.run.id, kinds: ['report_json', 'report_md'] } });
 
-    // The server is unreachable for the loss report: it stays, id unchanged.
-    const down = fakeSink({ postEvents: [{ kind: 'unavailable', reason: 'HTTP 503' }] });
-    await outbox.flush(down.sink);
+    // The run's own events go through; the server is unreachable for the
+    // loss report: it stays, id unchanged, and the flush says so.
+    const down = fakeSink({ postEvents: [{ kind: 'ok', value: { inserted: 1, duplicates: 0 }, httpStatus: 201 }, { kind: 'unavailable', reason: 'HTTP 503' }] });
+    expect(await outbox.flush(down.sink)).toMatchObject({ delivered: [envelope.run.id], stopped: 'unavailable', lossPending: 1 });
     expect((await outbox.pendingLoss())[0]!.id).toBe(loss!.id);
 
     // An otherwise empty flush still reports it, with the same id.
@@ -326,15 +327,16 @@ describe('Outbox', () => {
     expect(await outbox.pendingLoss()).toEqual([]);
   });
 
-  it('still delivers the events queued with an envelope the server holds under a different digest', async () => {
+  it('keeps the whole entry, events included, when the server holds the run under a different digest', async () => {
     const outbox = new Outbox(dir);
     const event = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} });
     await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, events: [event] });
     const conflict = fakeSink({ postRun: [{ kind: 'conflict', message: 'different digest' }] });
     const summary = await outbox.flush(conflict.sink);
     expect(summary.failed).toEqual([{ id: envelope.run.id, reason: 'conflict: different digest' }]);
-    expect(conflict.calls.map((c) => c.method)).toEqual(['postRun', 'postEvents']);
-    expect((conflict.calls[1]!.args[0] as WireEvent[])[0]!.id).toBe(event.id);
+    // The events name that run id too: attaching them to whatever the server holds would corrupt it.
+    expect(conflict.calls.map((c) => c.method)).toEqual(['postRun']);
+    expect((await outbox.list())[0]).toMatchObject({ events: 1, artifacts: ['report_json', 'report_md'], failed: { reason: 'conflict: different digest' } });
   });
 
   it('bounds every request by what remains of the flush deadline', async () => {

@@ -174,6 +174,21 @@ function assertEvidenceCanBeRequired(
   }
 }
 
+/**
+ * With `--evidence-required`, resolve where the evidence would go before any
+ * reviewer is paid: an unmanaged repository or a missing credential makes
+ * delivery impossible, and that is worth knowing at once.
+ */
+async function assertEvidenceDeliverable(opts: { evidenceRequired?: boolean; telemetry?: boolean }, config: Config): Promise<void> {
+  if (!opts.evidenceRequired) return;
+  const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
+  if (!runtime.repoManaged) {
+    throw new Error('--evidence-required needs a Harness-managed repository (one carrying .harness-cli/config.json); this one is not.');
+  }
+  if (runtime.level === 'off') throw new Error('--evidence-required contradicts the resolved telemetry level off.');
+  if (!runtime.sink) throw new Error(`--evidence-required needs a Harness credential: ${runtime.note ?? 'none available'}.`);
+}
+
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
 async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
   try {
@@ -450,12 +465,15 @@ program
         // from another target must not bind its run to this loop).
         const reportRunId =
           typeof report.run?.id === 'string' && UUID_PATTERN.test(report.run.id) ? report.run.id : undefined;
+        // A report without a converge target (a plain `rcl review`, or one
+        // copied in) is not this loop's evidence either.
         const reportTarget = report.run?.converge?.target;
-        const runId =
-          reportRunId !== undefined && (reportTarget === undefined || reportTarget === opts.target) ? reportRunId : undefined;
+        const runId = reportRunId !== undefined && reportTarget === opts.target.trim() ? reportRunId : undefined;
         if (reportRunId !== undefined && runId === undefined) {
           console.error(
-            chalk.yellow(`Report run ${reportRunId} belongs to converge target ${reportTarget}, not ${opts.target}; the round keeps no run id.`)
+            chalk.yellow(
+              `Report run ${reportRunId} ${reportTarget === undefined ? 'carries no converge target' : `belongs to converge target ${reportTarget}`}, not ${opts.target}; the round keeps no run id.`
+            )
           );
         }
         const result = await processRoundReport({
@@ -736,6 +754,7 @@ telemetry
     const refused = await runtime.outbox.refusedLoss();
     const status = {
       level: runtime.level,
+      repoManaged: runtime.repoManaged,
       credential: runtime.credential
         ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
         : null,
@@ -747,6 +766,11 @@ telemetry
       return;
     }
     console.log(`Telemetry level: ${status.level}`);
+    console.log(
+      status.repoManaged
+        ? 'Repository: Harness-managed (.harness-cli/config.json found) — reviews here are delivered'
+        : 'Repository: not Harness-managed — reviews here are not delivered; the outbox still flushes'
+    );
     console.log(
       status.credential
         ? `Credential: ${status.credential.source} → ${status.credential.host}`
@@ -1242,6 +1266,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     const prepared = await prepareCouncil(spinner, opts);
     const { config } = prepared;
     assertEvidenceCanBeRequired(opts, config);
+    await assertEvidenceDeliverable(opts, config);
 
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
@@ -1908,6 +1933,7 @@ async function runPlanReview(
 
     const prepared = await prepareCouncil(spinner, opts, PLAN_DEFAULT_ROLES);
     assertEvidenceCanBeRequired(opts, prepared.config);
+    await assertEvidenceDeliverable(opts, prepared.config);
 
     spinner.text = `Loading plan: ${file}`;
     const diff = await loadPlanAsDiff(file);

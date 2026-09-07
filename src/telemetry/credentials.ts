@@ -46,16 +46,27 @@ const LOOPBACK = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|[a-z0-9.-]+\.localho
 
 /**
  * The token travels only over TLS, except to loopback hosts (a local
- * development server). Returns the base URL without a trailing slash.
+ * development server). A base URL carries no user-info, query or fragment;
+ * the result is the canonical origin plus path, without a trailing slash.
  */
 export function normalizeUrl(raw: string): string | null {
   try {
-    const url = new URL(raw);
-    if (url.protocol === 'https:') return raw.replace(/\/+$/, '');
-    if (url.protocol === 'http:' && LOOPBACK.test(url.hostname)) return raw.replace(/\/+$/, '');
-    return null;
+    const url = new URL(raw.trim());
+    if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') return null;
+    const plain = url.protocol === 'http:' && LOOPBACK.test(url.hostname);
+    if (url.protocol !== 'https:' && !plain) return null;
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
   } catch {
     return null;
+  }
+}
+
+/** The host of a URL for a note — never its user-info or query. */
+function hostOf(raw: string): string {
+  try {
+    return new URL(raw.trim()).host || '(no host)';
+  } catch {
+    return '(unparseable)';
   }
 }
 
@@ -68,16 +79,26 @@ export async function resolveHarnessCredential(
 
   const envToken = (env['HARNESS_API_TOKEN'] ?? '').trim();
   const envUrl = (env['HARNESS_API_URL'] ?? '').trim();
-  if (envToken !== '') {
+  if (envToken !== '' || envUrl !== '') {
+    // Half a pair is a configuration error, never a fallback to the login.
     if (envUrl === '') {
       return {
         repoManaged,
         note: 'HARNESS_API_TOKEN is set without HARNESS_API_URL — an environment token never pairs with the stored login host.',
       };
     }
+    if (envToken === '') {
+      return {
+        repoManaged,
+        note: 'HARNESS_API_URL is set without HARNESS_API_TOKEN — the environment names a host but no token; the stored login is not used in its place.',
+      };
+    }
     const url = normalizeUrl(envUrl);
     if (url === null) {
-      return { repoManaged, note: `HARNESS_API_URL must be an absolute https URL (http only for loopback hosts): ${envUrl}` };
+      return {
+        repoManaged,
+        note: `HARNESS_API_URL must be an absolute https URL without user-info, query or fragment (http only for loopback hosts): ${hostOf(envUrl)}`,
+      };
     }
     return { repoManaged, credential: { url, token: envToken, source: 'env' } };
   }
@@ -91,7 +112,7 @@ export async function resolveHarnessCredential(
   }
   const storedUrl = normalizeUrl(stored.url);
   if (storedUrl === null) {
-    return { repoManaged, note: `the stored Harness login names a host the token must not travel to in plain text: ${stored.url}` };
+    return { repoManaged, note: `the stored Harness login names a host the token must not travel to in plain text: ${hostOf(stored.url)}` };
   }
   return { repoManaged, credential: { url: storedUrl, token: stored.token, source: 'login' } };
 }

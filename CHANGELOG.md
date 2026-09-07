@@ -22,9 +22,11 @@ report field is additive and pre-3.0 reports load unchanged.
   affected runs as a `loss` event on the next successful flush.
 - **Credentials.** The stored `harness login` is the default; `HARNESS_API_TOKEN`
   + `HARNESS_API_URL` serve CI, and an environment token never pairs with the
-  stored host.
+  stored host (half a pair is an error, not a fallback). A base URL carries no
+  user-info, query or fragment; a trailing slash is normalized away.
 - **Configuration.** `harness.telemetry: off | envelope | findings | full`
-  (default `full`), `--no-telemetry`, `RCL_TELEMETRY=off`;
+  (default `full`), `--no-telemetry`, `RCL_TELEMETRY` (`off`, `0`, `false`,
+  `no`, or a level name);
   `harness.parseFailures` opts in to a parse-failed call's raw answer (fenced
   code and key-shaped strings removed, 32 KB cap) — by default only the parser
   message travels.
