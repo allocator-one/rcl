@@ -195,12 +195,17 @@ export function diffDigest(files: readonly FileChange[]): string {
   return hash.digest('hex');
 }
 
+/** Config fields that are credentials: never part of any digest. */
+export const EXCLUDED_CONFIG_FIELDS = ['githubToken'] as const satisfies ReadonlyArray<keyof Config>;
+
 /**
- * The config fields the digest covers — an explicit allow-list, so a future
- * credential field is excluded until someone deliberately adds it here. Every
- * non-secret key of `ConfigSchema` is listed; `githubToken` is not.
+ * The config fields the digest covers — an explicit allow-list. Every key of
+ * `ConfigSchema` must appear either here or in `EXCLUDED_CONFIG_FIELDS`: the
+ * exhaustiveness assertion below turns a new field into a compile error until
+ * someone decides which list it belongs to, so a new setting can neither be
+ * silently dropped from the digest nor a new credential silently hashed.
  */
-const DIGESTED_CONFIG_FIELDS = [
+export const DIGESTED_CONFIG_FIELDS = [
   'models',
   'secondaryModels',
   'asyncModels',
@@ -219,7 +224,15 @@ const DIGESTED_CONFIG_FIELDS = [
   'context',
   'spec',
   'focus',
-] as const satisfies ReadonlyArray<Exclude<keyof Config, 'githubToken'>>;
+] as const satisfies ReadonlyArray<Exclude<keyof Config, (typeof EXCLUDED_CONFIG_FIELDS)[number]>>;
+
+// Compile-time exhaustiveness: a Config key in neither list fails the build.
+type UndecidedConfigField = Exclude<
+  keyof Config,
+  (typeof DIGESTED_CONFIG_FIELDS)[number] | (typeof EXCLUDED_CONFIG_FIELDS)[number]
+>;
+const _everyConfigFieldDecided: [UndecidedConfigField] extends [never] ? true : never = true;
+void _everyConfigFieldDecided;
 
 /** Digest of the allow-listed, resolved config fields (never a credential). */
 export function configDigest(config: Config): string {
@@ -279,14 +292,29 @@ const AGENT_MARKERS: ReadonlyArray<[envVar: string, agent: string]> = [
  * OIDC claims). Pure: reads only the allow-listed variables of the `env`
  * it is handed.
  */
+/**
+ * CI markers → the variable carrying that provider's run id (when it has
+ * one). Provider-specific markers come first; the generic `CI` flag most
+ * providers also set is the last resort and carries no run id.
+ */
+const CI_MARKERS: ReadonlyArray<[envVar: string, runIdVar: string | undefined]> = [
+  ['GITHUB_ACTIONS', 'GITHUB_RUN_ID'],
+  ['GITLAB_CI', 'CI_PIPELINE_ID'],
+  ['CIRCLECI', 'CIRCLE_WORKFLOW_ID'],
+  ['BUILDKITE', 'BUILDKITE_BUILD_ID'],
+  ['JENKINS_URL', 'BUILD_ID'],
+  ['CI', undefined],
+];
+
 export function detectRunner(
   env: Readonly<Record<string, string | undefined>>,
   hostname: string
 ): RunnerClaim {
   const host = hostname.slice(0, MAX_HOST_CHARS);
   const isSet = (name: string): boolean => (env[name] ?? '').trim() !== '';
-  if (isSet('GITHUB_ACTIONS')) {
-    const runId = env['GITHUB_RUN_ID']?.trim();
+  for (const [envVar, runIdVar] of CI_MARKERS) {
+    if (!isSet(envVar)) continue;
+    const runId = runIdVar !== undefined ? env[runIdVar]?.trim() : undefined;
     return { kind: 'ci', ...(runId ? { ci_run_id: runId } : {}), host };
   }
   for (const [envVar, agent] of AGENT_MARKERS) {

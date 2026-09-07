@@ -536,3 +536,21 @@ describe('round-6 hardening', () => {
     expect(() => validateSha('0'.repeat(64), '--expect-head-sha')).toThrow(/null object id/);
   });
 });
+
+describe('round-7 hardening', () => {
+  it('detectRunner recognizes the common CI providers and the generic CI flag', () => {
+    expect(detectRunner({ GITLAB_CI: 'true', CI_PIPELINE_ID: '77' }, 'h')).toEqual({ kind: 'ci', ci_run_id: '77', host: 'h' });
+    expect(detectRunner({ CIRCLECI: 'true', CIRCLE_WORKFLOW_ID: 'w1' }, 'h')).toEqual({ kind: 'ci', ci_run_id: 'w1', host: 'h' });
+    expect(detectRunner({ BUILDKITE: 'true', BUILDKITE_BUILD_ID: 'b1' }, 'h')).toEqual({ kind: 'ci', ci_run_id: 'b1', host: 'h' });
+    expect(detectRunner({ JENKINS_URL: 'https://ci', BUILD_ID: '5' }, 'h')).toEqual({ kind: 'ci', ci_run_id: '5', host: 'h' });
+    expect(detectRunner({ CI: 'true', CLAUDECODE: '1' }, 'h')).toEqual({ kind: 'ci', host: 'h' });
+  });
+
+  it('every ConfigSchema key is either digested or explicitly excluded', async () => {
+    const { ConfigSchema } = await import('../../src/config/schema.js');
+    const { DIGESTED_CONFIG_FIELDS, EXCLUDED_CONFIG_FIELDS } = await import('../../src/report/run-header.js');
+    const decided = new Set<string>([...DIGESTED_CONFIG_FIELDS, ...EXCLUDED_CONFIG_FIELDS]);
+    expect(Object.keys(ConfigSchema.shape).sort()).toEqual([...decided].sort());
+    expect(EXCLUDED_CONFIG_FIELDS).toEqual(['githubToken']);
+  });
+});
