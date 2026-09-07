@@ -1,5 +1,9 @@
 import type { FileChange } from '../resolver/types.js';
 import {
+  MAX_SECURED_DIFF_BYTES,
+  securedDiffByteLength,
+} from '../prompts/hardening.js';
+import {
   formatSyntheticHunkHeader,
   NO_NEWLINE_MARKER,
   parseUnifiedDiff,
@@ -31,6 +35,7 @@ const MAX_CHUNK_FILES = 20;
 const MAX_CHUNKS_PER_REVIEW = 32;
 const MAX_SOURCE_PATCH_LINES = MAX_CHUNK_LINES * MAX_CHUNKS_PER_REVIEW;
 const MAX_SOURCE_FILES = MAX_CHUNK_FILES * MAX_CHUNKS_PER_REVIEW;
+const MAX_SOURCE_PATCH_BYTES = 4 * 1024 * 1024;
 
 function countDiffLines(patch: string): number {
   if (patch.length === 0) return 0;
@@ -51,12 +56,22 @@ function assertSourceFitsExpansionBounds(files: readonly FileChange[]): void {
   }
 
   let sourceLines = 0;
+  let sourceBytes = 0;
   for (const file of files) {
     sourceLines += countDiffLines(file.patch);
     if (sourceLines > MAX_SOURCE_PATCH_LINES) {
       throw new Error(
         `Diff source exceeds the lossless safety capacity of ` +
           `${MAX_SOURCE_PATCH_LINES.toLocaleString('en-US')} patch lines before expansion. ` +
+          `Split the diff into smaller review targets.`
+      );
+    }
+
+    sourceBytes += Buffer.byteLength(file.patch, 'utf8');
+    if (sourceBytes > MAX_SOURCE_PATCH_BYTES) {
+      throw new Error(
+        `Diff source exceeds the lossless safety capacity of ` +
+          `${MAX_SOURCE_PATCH_BYTES.toLocaleString('en-US')} patch bytes before expansion. ` +
           `Split the diff into smaller review targets.`
       );
     }
@@ -130,31 +145,214 @@ function countChanges(
   return { additions, deletions };
 }
 
-function splitPatch(file: FileChange): ChunkFile[] {
-  const parsed = parseUnifiedDiff(file.patch);
-  if (!parsed.ok) invalidOversizedPatch(file, parsed.line, parsed.reason);
-  const { lines, trailingNewline, positions } = parsed.diff;
+function promptDiffLines(file: ChunkFile): number {
+  return countDiffLines(file.patchFragment?.promptPatch ?? file.patch);
+}
+
+function probeChunk(files: ChunkFile[]): Chunk {
+  return {
+    files,
+    totalLines: files.reduce((sum, file) => sum + promptDiffLines(file), 0),
+    // Reserve the widest legal chunk label while sizing. Accepted reviews can
+    // never use an index or total above this bound.
+    index: MAX_CHUNKS_PER_REVIEW - 1,
+    total: MAX_CHUNKS_PER_REVIEW,
+  };
+}
+
+function securedDiffBytes(files: ChunkFile[]): number {
+  return securedDiffByteLength(formatChunkForPrompt(probeChunk(files)));
+}
+
+function probeFragment(
+  file: FileChange,
+  promptPatch: string,
+  fragmentIndex: number,
+  totalDigits: number
+): ChunkFile {
+  return {
+    ...file,
+    patchFragment: {
+      index: fragmentIndex,
+      // Only the decimal width affects the label size. The allocation loop
+      // widens this placeholder if its result crosses 10 or 100 fragments.
+      total: 10 ** totalDigits - 1,
+      promptPatch,
+    },
+  };
+}
+
+function isLegalFragmentEnd(
+  lines: readonly string[],
+  positions: ReadonlyArray<UnifiedDiffLine | undefined>,
+  end: number
+): boolean {
+  if (end === lines.length) return true;
+  // Keep Git's no-newline marker attached to the content line it describes.
+  if (lines[end] === NO_NEWLINE_MARKER) return false;
+  // Do not strand a non-empty hunk header. After a successful full parse, two
+  // adjacent headers imply that the first has a complete zero-length body.
+  return positions[end - 1] !== undefined || positions[end] === undefined;
+}
+
+interface FragmentCandidate {
+  end: number;
+  promptPatch: string;
+  securedBytes: number;
+}
+
+function fragmentCandidate(
+  file: FileChange,
+  lines: string[],
+  positions: Array<UnifiedDiffLine | undefined>,
+  start: number,
+  end: number,
+  fragmentIndex: number,
+  totalDigits: number
+): FragmentCandidate {
+  const promptPatch = formatFragmentPatch(lines, positions, start, end);
+  return {
+    end,
+    promptPatch,
+    securedBytes: securedDiffBytes([
+      probeFragment(file, promptPatch, fragmentIndex, totalDigits),
+    ]),
+  };
+}
+
+function largestFittingFragment(
+  file: FileChange,
+  lines: string[],
+  positions: Array<UnifiedDiffLine | undefined>,
+  start: number,
+  legalEnds: number[],
+  fragmentIndex: number,
+  totalDigits: number
+): FragmentCandidate | undefined {
+  let low = 0;
+  let high = legalEnds.length - 1;
+  let best: FragmentCandidate | undefined;
+
+  // Adding a legal range can only append body lines or complete hunks; the
+  // synthetic header counts and secured byte length are therefore monotonic.
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = fragmentCandidate(
+      file,
+      lines,
+      positions,
+      start,
+      legalEnds[middle]!,
+      fragmentIndex,
+      totalDigits
+    );
+    if (candidate.securedBytes <= MAX_SECURED_DIFF_BYTES) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return best;
+}
+
+interface PatchRange {
+  start: number;
+  end: number;
+  promptPatch: string;
+}
+
+function allocatePatchRanges(
+  file: FileChange,
+  lines: string[],
+  positions: Array<UnifiedDiffLine | undefined>,
+  totalDigits: number
+): PatchRange[] {
   const ranges: Array<{ start: number; end: number; promptPatch: string }> = [];
   let start = 0;
 
   while (start < lines.length) {
     const hasContinuationHeader = positions[start] !== undefined;
     const lineBudget = MAX_CHUNK_LINES - (hasContinuationHeader ? 1 : 0);
-    let end = Math.min(start + lineBudget, lines.length);
-
-    if (end < lines.length) {
-      // Keep Git's no-newline marker attached to the content line it describes.
-      if (lines[end] === NO_NEWLINE_MARKER && end - start > 1) end -= 1;
-      // Do not strand a hunk header as the final line of a fragment.
-      if (positions[end - 1] === undefined && end - start > 1) end -= 1;
+    const maximumEnd = Math.min(start + lineBudget, lines.length);
+    const legalEnds: number[] = [];
+    for (let end = start + 1; end <= maximumEnd; end += 1) {
+      if (isLegalFragmentEnd(lines, positions, end)) legalEnds.push(end);
     }
 
+    if (legalEnds.length === 0) {
+      invalidOversizedPatch(
+        file,
+        start + 1,
+        `the smallest valid fragment exceeds the ${MAX_CHUNK_LINES.toLocaleString('en-US')} ` +
+          `patch-line limit`
+      );
+    }
+
+    const selected = largestFittingFragment(
+      file,
+      lines,
+      positions,
+      start,
+      legalEnds,
+      ranges.length,
+      totalDigits
+    );
+    if (!selected) {
+      const smallest = fragmentCandidate(
+        file,
+        lines,
+        positions,
+        start,
+        legalEnds[0]!,
+        ranges.length,
+        totalDigits
+      );
+      invalidOversizedPatch(
+        file,
+        start + 1,
+        `the smallest valid fragment exceeds the ` +
+          `${MAX_SECURED_DIFF_BYTES.toLocaleString('en-US')} secured diff bytes limit ` +
+          `(requires ${smallest.securedBytes.toLocaleString('en-US')} bytes)`
+      );
+    }
+
+    const { end, promptPatch } = selected;
     ranges.push({
       start,
       end,
-      promptPatch: formatFragmentPatch(lines, positions, start, end),
+      promptPatch,
     });
+    if (ranges.length > MAX_SOURCE_FILES) {
+      throw new Error(
+        `Diff requires more than ${MAX_SOURCE_FILES} file fragments, exceeding the paid-work ` +
+          `safety capacity. Split the diff into smaller review targets.`
+      );
+    }
     start = end;
+  }
+
+  return ranges;
+}
+
+function splitPatch(file: FileChange): ChunkFile[] {
+  const parsed = parseUnifiedDiff(file.patch);
+  if (!parsed.ok) invalidOversizedPatch(file, parsed.line, parsed.reason);
+  const { lines, trailingNewline, positions } = parsed.diff;
+
+  let totalDigits = 1;
+  let ranges: PatchRange[];
+  while (true) {
+    ranges = allocatePatchRanges(
+      file,
+      lines,
+      positions,
+      totalDigits
+    );
+    const requiredDigits = ranges.length.toString().length;
+    if (requiredDigits <= totalDigits) break;
+    totalDigits = requiredDigits;
   }
 
   return ranges.map(({ start, end, promptPatch }, index) => ({
@@ -169,10 +367,6 @@ function splitPatch(file: FileChange): ChunkFile[] {
   }));
 }
 
-function promptDiffLines(file: ChunkFile): number {
-  return countDiffLines(file.patchFragment?.promptPatch ?? file.patch);
-}
-
 export function chunkDiff(files: FileChange[]): Chunk[] {
   if (files.length === 0) return [];
   // More source lines/files than every allowed chunk can hold cannot possibly
@@ -181,19 +375,59 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
   // duplicate strings.
   assertSourceFitsExpansionBounds(files);
 
-  const expandedFiles: ChunkFile[] = files.flatMap((file) =>
-    countDiffLines(file.patch) > MAX_CHUNK_LINES ? splitPatch(file) : [file]
-  );
+  const sourceLines = files.reduce((sum, file) => sum + countDiffLines(file.patch), 0);
+  if (files.length <= MAX_CHUNK_FILES && sourceLines <= MAX_CHUNK_LINES) {
+    const singleChunk: Chunk = {
+      files,
+      totalLines: sourceLines,
+      index: 0,
+      total: 1,
+    };
+    if (securedDiffByteLength(formatChunkForPrompt(singleChunk)) <= MAX_SECURED_DIFF_BYTES) {
+      return [singleChunk];
+    }
+  }
+
+  const expandedFiles: ChunkFile[] = [];
+  for (const file of files) {
+    const fileLines = countDiffLines(file.patch);
+    if (fileLines <= MAX_CHUNK_LINES && securedDiffBytes([file]) <= MAX_SECURED_DIFF_BYTES) {
+      expandedFiles.push(file);
+    } else if (file.patch.length === 0) {
+      throw new Error(
+        `Cannot safely review ${file.filename}: its rendered file metadata exceeds the ` +
+          `${MAX_SECURED_DIFF_BYTES.toLocaleString('en-US')} secured diff bytes limit.`
+      );
+    } else {
+      expandedFiles.push(...splitPatch(file));
+    }
+
+    if (expandedFiles.length > MAX_SOURCE_FILES) {
+      throw new Error(
+        `Diff expands to more than ${MAX_SOURCE_FILES} file entries, exceeding the paid-work ` +
+          `safety capacity. Split the diff into smaller review targets.`
+      );
+    }
+  }
   const chunks: ChunkFile[][] = [];
   let currentChunk: ChunkFile[] = [];
   let currentLines = 0;
 
   for (const file of expandedFiles) {
     const fileLines = promptDiffLines(file);
+    const singleFileBytes = securedDiffBytes([file]);
+    if (fileLines > MAX_CHUNK_LINES || singleFileBytes > MAX_SECURED_DIFF_BYTES) {
+      throw new Error(
+        `Cannot safely review ${file.filename}: one file entry requires ` +
+          `${singleFileBytes.toLocaleString('en-US')} secured diff bytes.`
+      );
+    }
 
     if (
       currentChunk.length >= MAX_CHUNK_FILES ||
-      (currentLines + fileLines > MAX_CHUNK_LINES && currentChunk.length > 0)
+      (currentLines + fileLines > MAX_CHUNK_LINES && currentChunk.length > 0) ||
+      (currentChunk.length > 0 &&
+        securedDiffBytes([...currentChunk, file]) > MAX_SECURED_DIFF_BYTES)
     ) {
       chunks.push(currentChunk);
       currentChunk = [];
@@ -213,12 +447,25 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
     );
   }
 
-  return chunks.map((chunkFiles, index) => ({
+  const result = chunks.map((chunkFiles, index) => ({
     files: chunkFiles,
     totalLines: chunkFiles.reduce((sum, file) => sum + promptDiffLines(file), 0),
     index,
     total: chunks.length,
   }));
+
+  for (const chunk of result) {
+    const bytes = securedDiffByteLength(formatChunkForPrompt(chunk));
+    if (bytes > MAX_SECURED_DIFF_BYTES) {
+      throw new Error(
+        `Internal chunking error: chunk ${chunk.index + 1} requires ` +
+          `${bytes.toLocaleString('en-US')} secured diff bytes, exceeding the ` +
+          `${MAX_SECURED_DIFF_BYTES.toLocaleString('en-US')} byte limit.`
+      );
+    }
+  }
+
+  return result;
 }
 
 export function formatChunkForPrompt(chunk: Chunk): string {

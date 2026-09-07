@@ -427,6 +427,23 @@ describe('relevantPatchExcerpt', () => {
     expect(excerpt).toContain('+new next');
     expect(parseUnifiedDiff(excerpt).ok).toBe(true);
   });
+
+  it('includes a trailing deletion beside a following hunk at the same coordinate', () => {
+    const patch = [
+      '@@ -1,2 +1,1 @@ trailingDeletion',
+      ' context',
+      '-REMOVED_GUARD',
+      '@@ -3,1 +2,1 @@ followingReplacement',
+      '-old next',
+      '+new next',
+    ].join('\n');
+
+    const excerpt = relevantPatchExcerpt(patch, [{ start: 2, end: 2 }]);
+
+    expect(excerpt).toContain('-REMOVED_GUARD');
+    expect(excerpt).toContain('+new next');
+    expect(parseUnifiedDiff(excerpt).ok).toBe(true);
+  });
 });
 
 describe('applyGating hunk scoping', () => {

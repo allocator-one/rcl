@@ -261,7 +261,13 @@ function hunkDistance(
   // that boundary as adjacent so either conventional line reference keeps
   // the complete removal in view.
   const hunkStart = hunk.newStart;
-  const hunkEnd = hunk.newCount === 0 ? hunk.newStart + 1 : hunk.newStart + hunk.newCount - 1;
+  let hunkEnd = hunk.newCount === 0 ? hunk.newStart + 1 : hunk.newStart + hunk.newCount - 1;
+  // A deletion after the hunk's final new-file line is anchored at the next
+  // coordinate. Parsed body coordinates are monotonic; only a legal trailing
+  // no-newline marker can follow the last real line.
+  const last = hunk.body.at(-1);
+  const lastBodyLine = last?.marker ? hunk.body.at(-2) : last;
+  if (lastBodyLine) hunkEnd = Math.max(hunkEnd, lastBodyLine.newLine);
   if (range.end < hunkStart) return hunkStart - range.end;
   if (range.start > hunkEnd) return range.start - hunkEnd;
   return 0;
