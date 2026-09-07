@@ -1023,7 +1023,18 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         );
       }
     } else if (patchTarget) {
-      diff = await loadLocalDiff(target!);
+      try {
+        diff = await loadLocalDiff(target!);
+      } catch (err) {
+        // A mistyped PR reference lands here too; say what a target can be
+        // instead of a bare ENOENT.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error(
+            `No such patch file: ${target}. A review target is a local patch file, owner/repo#N, or a GitHub PR URL.`
+          );
+        }
+        throw err;
+      }
     } else {
       const prTarget = parseGitHubTarget(target!);
       diff = await fetchPRDiff(prTarget, config.githubToken);

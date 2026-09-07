@@ -88,6 +88,15 @@ describe('rcl review — exact-head binding flags', () => {
     }
   });
 
+  it('a mistyped PR reference explains what a target can be instead of a bare file error', () => {
+    const repo = tempRepository();
+    for (const typo of ['owner/repo#12x', 'owner/repo/pull/123']) {
+      const result = runRcl(['review', typo], repo);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/No such patch file: .*owner\/repo#N, or a GitHub PR URL/);
+    }
+  });
+
   it('--head-sha and --base-sha apply to patch files only', () => {
     const repo = tempRepository();
     const result = runRcl(['review', '--staged', '--head-sha', 'a'.repeat(40)], repo);

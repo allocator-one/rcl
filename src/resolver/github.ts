@@ -83,15 +83,23 @@ async function fetchChangedFiles(
   pr: PullRequest
 ): Promise<ChangedFile[]> {
   if (pr.changed_files <= COMPARE_FILE_CAP) {
-    const { data } = await octokit.repos.compareCommitsWithBasehead({
-      owner: target.owner,
-      repo: target.repo,
-      basehead: `${pr.base.sha}...${pr.head.sha}`,
-    });
-    const files = data.files ?? [];
+    let files: ChangedFile[] | undefined;
+    try {
+      const { data } = await octokit.repos.compareCommitsWithBasehead({
+        owner: target.owner,
+        repo: target.repo,
+        basehead: `${pr.base.sha}...${pr.head.sha}`,
+      });
+      files = data.files ?? [];
+    } catch {
+      // A compare the API refuses (e.g. an object id it cannot resolve for
+      // this repository) must not fail the review: the bracketed listing
+      // below still binds the files, just less tightly.
+      files = undefined;
+    }
     // Exactly at the cap the list may be truncated; only a shorter list is
     // known to be complete.
-    if (files.length < COMPARE_FILE_CAP) return files;
+    if (files !== undefined && files.length < COMPARE_FILE_CAP) return files;
   }
 
   const listed: ChangedFile[] = await octokit.paginate(octokit.pulls.listFiles, {

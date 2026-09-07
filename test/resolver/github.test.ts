@@ -152,6 +152,16 @@ describe('fetchPRDiff', () => {
     expect(diff.files[499]!.filename).toBe('src/file-499.ts');
   });
 
+  it('falls back to the bracketed listing when the compare request itself fails', async () => {
+    const fake = octokitWith({ pr: fakePr(31), listed: 31 });
+    (fake.compare as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('HttpError: Not Found'));
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fake.octokit);
+
+    expect(fake.paginate).toHaveBeenCalledTimes(1);
+    expect(fake.get).toHaveBeenCalledTimes(2);
+    expect(diff.files).toHaveLength(31);
+  });
+
   it('refuses to bind a large PR whose head or base moved while its files were listed', async () => {
     const movedHead = fakePr(500);
     movedHead.data.head.sha = 'headsha999';
