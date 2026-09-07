@@ -420,3 +420,19 @@ describe('round-2 hardening', () => {
     expect(resolveConvergeContext({ convergeTarget: 't', round: '' }, { RCL_CONVERGE_ROUND: '4' })).toEqual({ target: 't' });
   });
 });
+
+describe('round-3 hardening', () => {
+  it('records the effective plan focus for plan reviews and nothing for code reviews', () => {
+    expect(buildRunHeader(baseInput())).not.toHaveProperty('plan');
+    const run = buildRunHeader({ ...baseInput(), command: 'review-plan', plan: { focus: 'risks' } });
+    expect(run.plan).toEqual({ focus: 'risks' });
+  });
+
+  it('diffDigest: stable for an empty list and sensitive to every recorded field', () => {
+    expect(diffDigest([])).toBe(diffDigest([]));
+    const base = file({ filename: 'a.ts', status: 'modified' });
+    expect(diffDigest([{ ...base, status: 'added' }])).not.toBe(diffDigest([base]));
+    expect(diffDigest([{ ...base, previousFilename: 'old.ts' }])).not.toBe(diffDigest([base]));
+    expect(diffDigest([{ ...base, filename: 'b.ts' }])).not.toBe(diffDigest([base]));
+  });
+});

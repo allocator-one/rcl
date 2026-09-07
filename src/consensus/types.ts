@@ -11,11 +11,18 @@ export interface Finding {
 }
 
 /**
- * Token usage one reviewer call consumed, as the provider SDK reported it
- * (evidence ledger, IO-12475 section 5.2). Reasoning tokens are present only
- * for providers that account them separately (OpenAI, Google); Anthropic
- * folds thinking into output tokens. Cost is computed server-side from a
- * price table — never here.
+ * Token usage one reviewer call consumed, normalized across providers
+ * (evidence ledger, IO-12475 section 5.2):
+ *
+ * - `inputTokens`: every prompt token the call processed, including
+ *   prompt-cache reads and writes where the provider bills them separately.
+ * - `outputTokens`: every generated token, reasoning included.
+ * - `reasoningTokens`: the reasoning/thinking SUBSET of `outputTokens`, for
+ *   providers that break it out (OpenAI, Google); Anthropic does not.
+ *
+ * So `inputTokens + outputTokens` is the call's total, and the three fields
+ * are never summed together. Cost is computed server-side from a price
+ * table — never here.
  */
 export interface TokenUsage {
   inputTokens?: number;

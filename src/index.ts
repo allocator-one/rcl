@@ -1023,12 +1023,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
           `HEAD or its merge-base moved (${gitHeads.headSha ?? 'unknown'}/${gitHeads.baseSha ?? 'unknown'} → ${after.headSha ?? 'unknown'}/${after.baseSha ?? 'unknown'}) while the diff was being read — refusing to review; rerun once the tree is quiet.`
         );
       }
-    } else if (
-      target!.endsWith('.patch') ||
-      target!.endsWith('.diff') ||
-      target!.startsWith('./') ||
-      target!.startsWith('/')
-    ) {
+    } else if (patchTarget) {
       diff = await loadLocalDiff(target!);
     } else {
       const prTarget = parseGitHubTarget(target!);
@@ -1411,6 +1406,9 @@ async function executeCouncil(
     gating: prepared.gatingConfig,
     ...(prepared.spec ? { spec: prepared.spec } : {}),
     contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
+    // The plan focus shapes the prompts, so the header records the effective
+    // mode (the prompt builder treats an unset focus as comprehensive).
+    ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
     runner: detectRunner(process.env, hostname()),
     startedAt: prepared.startedAt,
     finishedAt: new Date(),

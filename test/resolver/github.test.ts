@@ -108,4 +108,41 @@ describe('fetchPRDiff', () => {
       /head moved from headsha123 to headsha999/
     );
   });
+
+  it('refuses to bind when the PR base moves while its files are being fetched', async () => {
+    const moved = fakePr();
+    moved.data.base.sha = 'basesha999';
+    const fakeOctokit = {
+      pulls: {
+        get: vi.fn().mockResolvedValueOnce(fakePr()).mockResolvedValueOnce(moved),
+        listFiles: { endpoint: 'pulls.listFiles' },
+      },
+      paginate: vi.fn().mockResolvedValue([]),
+    } as unknown as Octokit;
+
+    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit)).rejects.toThrow(
+      /base moved from basesha456 to basesha999/
+    );
+  });
+
+  it('re-reads the PR only after the file listing has settled', async () => {
+    const order: string[] = [];
+    const fakeOctokit = {
+      pulls: {
+        get: vi.fn(async () => {
+          order.push('get');
+          return fakePr();
+        }),
+        listFiles: { endpoint: 'pulls.listFiles' },
+      },
+      paginate: vi.fn(async () => {
+        order.push('files');
+        return [];
+      }),
+    } as unknown as Octokit;
+
+    await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fakeOctokit);
+    expect(order.indexOf('files')).toBeLessThan(order.lastIndexOf('get'));
+    expect(order.filter((o) => o === 'get')).toHaveLength(2);
+  });
 });

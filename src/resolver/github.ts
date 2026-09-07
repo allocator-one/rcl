@@ -65,8 +65,10 @@ export async function fetchPRDiff(
   const pr = prResponse.data;
 
   // Exact-head binding: the file listing is a separate request, so a push
-  // landing between the two would pair one head's SHA with another head's
-  // patches. Re-read the PR and refuse to bind if the head moved.
+  // (or a base-branch advance, which changes the comparison) landing between
+  // the two would pair one pair of SHAs with another comparison's patches.
+  // Both requests above have settled here; re-read the PR and refuse to bind
+  // if either end moved.
   const recheck = await octokit.pulls.get({
     owner: target.owner,
     repo: target.repo,
@@ -75,6 +77,11 @@ export async function fetchPRDiff(
   if (recheck.data.head.sha !== pr.head.sha) {
     throw new Error(
       `PR #${target.number} head moved from ${pr.head.sha} to ${recheck.data.head.sha} while its files were being fetched — rerun the review.`
+    );
+  }
+  if (recheck.data.base.sha !== pr.base.sha) {
+    throw new Error(
+      `PR #${target.number} base moved from ${pr.base.sha} to ${recheck.data.base.sha} while its files were being fetched — rerun the review.`
     );
   }
 

@@ -83,6 +83,8 @@ export interface RunHeader {
   };
   spec?: { source: SpecSource; sha256: string };
   context_files: Array<{ path: string; sha256: string }>;
+  /** review-plan only: the effective focus mode, which shapes the prompts. */
+  plan?: { focus: string };
   /** Best-effort environment claim; the credential's user is the authority. */
   runner: RunnerClaim;
   started_at: string;
@@ -121,6 +123,7 @@ export interface RunHeaderInput {
   gating: ResolvedGatingConfig;
   spec?: { source: SpecSource; sha256: string };
   contextFiles?: Array<{ path: string; sha256: string }>;
+  plan?: { focus: string };
   runner: RunnerClaim;
   startedAt: Date;
   finishedAt: Date;
@@ -387,6 +390,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),
+    ...(input.plan ? { plan: { focus: input.plan.focus } } : {}),
     runner: { ...input.runner },
     started_at: input.startedAt.toISOString(),
     finished_at: input.finishedAt.toISOString(),

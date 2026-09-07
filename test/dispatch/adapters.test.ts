@@ -799,7 +799,8 @@ describe('token usage passthrough', () => {
       },
     });
     const review = await adapter.review('gemini-3.8-flash', 'general', 's', 'u', OPTS);
-    expect(review.usage).toEqual({ inputTokens: 70, outputTokens: 80, reasoningTokens: 90 });
+    // candidates + thoughts = everything generated; thoughts are the reasoning subset
+    expect(review.usage).toEqual({ inputTokens: 70, outputTokens: 170, reasoningTokens: 90 });
   });
 
   it('leaves usage absent when the SDK returns none', async () => {

@@ -15,17 +15,44 @@ function compactUsage(usage: TokenUsage): TokenUsage | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function sumPresent(...values: Array<number | null | undefined>): number | undefined {
+  const present = values.filter((v): v is number => typeof v === 'number');
+  return present.length > 0 ? present.reduce((sum, v) => sum + v, 0) : undefined;
+}
+
+/**
+ * Anthropic bills prompt-cache reads and writes separately from
+ * `input_tokens`; all three are prompt tokens the call processed, so they
+ * are summed into `inputTokens`. Thinking is already inside `output_tokens`
+ * and is not broken out.
+ */
 export function usageFromAnthropic(
-  usage: { input_tokens?: number | null; output_tokens?: number | null } | null | undefined
+  usage:
+    | {
+        input_tokens?: number | null;
+        output_tokens?: number | null;
+        cache_read_input_tokens?: number | null;
+        cache_creation_input_tokens?: number | null;
+      }
+    | null
+    | undefined
 ): TokenUsage | undefined {
   if (!usage) return undefined;
   return compactUsage({
-    inputTokens: usage.input_tokens ?? undefined,
+    inputTokens: sumPresent(
+      usage.input_tokens,
+      usage.cache_read_input_tokens,
+      usage.cache_creation_input_tokens
+    ),
     outputTokens: usage.output_tokens ?? undefined,
   });
 }
 
-/** OpenAI Chat Completions shape; OpenRouter passes the same block through. */
+/**
+ * OpenAI Chat Completions shape; OpenRouter passes the same block through.
+ * `completion_tokens` already contains the reasoning tokens, so
+ * `outputTokens` is the total and `reasoningTokens` its subset.
+ */
 export function usageFromOpenAI(
   usage:
     | {
@@ -44,6 +71,12 @@ export function usageFromOpenAI(
   });
 }
 
+/**
+ * Google reports answer tokens (`candidatesTokenCount`) and thinking tokens
+ * (`thoughtsTokenCount`) disjointly. `outputTokens` is their sum so it means
+ * the same thing as for every other provider — everything generated — and
+ * `reasoningTokens` is the thinking subset.
+ */
 export function usageFromGoogle(
   usage:
     | { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number }
@@ -53,7 +86,7 @@ export function usageFromGoogle(
   if (!usage) return undefined;
   return compactUsage({
     inputTokens: usage.promptTokenCount,
-    outputTokens: usage.candidatesTokenCount,
+    outputTokens: sumPresent(usage.candidatesTokenCount, usage.thoughtsTokenCount),
     reasoningTokens: usage.thoughtsTokenCount,
   });
 }
