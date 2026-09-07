@@ -4,7 +4,7 @@ import type { Diff } from './types.js';
 /**
  * Plans beyond this size are not reviewable in one council pass anyway;
  * failing loudly beats silently truncating what the models see. (The
- * chunker additionally splits/truncates at its own line limits.)
+ * chunker additionally splits large plans at its own line limits.)
  */
 const MAX_PLAN_BYTES = 400_000;
 

@@ -47,13 +47,76 @@ describe('mergeChunkReviews', () => {
     expect(merged).toHaveLength(2);
   });
 
-  it('counts a reviewer successful if any chunk succeeded, keeping its findings', () => {
+  it('does not let a reviewer vote when any expected chunk failed', () => {
     const merged = mergeChunkReviews([
       review({ findings: [finding('a')], status: 'success' }),
       review({ findings: [], status: 'timeout', error: 'timed out' }),
     ]);
-    expect(merged[0]!.status).toBe('success');
-    expect(merged[0]!.findings.map((f) => f.id)).toEqual(['a']);
+    expect(merged[0]!.status).toBe('timeout');
+    expect(merged[0]!.findings).toEqual([]);
+    expect(merged[0]!.error).toMatch(/incomplete chunk coverage.*1\/2.*timed out/i);
+  });
+
+  it('does not report success when an expected chunk was canceled', () => {
+    const [merged] = mergeChunkReviews([
+      review({ findings: [finding('a')] }),
+      review({ status: 'canceled', error: 'Canceled at quorum round closure' }),
+    ]);
+
+    expect(merged!.status).toBe('canceled');
+    expect(merged!.findings).toEqual([]);
+    expect(merged!.error).toMatch(/incomplete chunk coverage/i);
+  });
+
+  it('keeps async-only arrivals best-effort when one returned part failed', () => {
+    const [merged] = mergeChunkReviews([
+      review({ async: true, findings: [finding('async-a')] }),
+      review({ async: true, status: 'timeout', error: 'late async part' }),
+    ]);
+
+    expect(merged!.status).toBe('success');
+    expect(merged!.findings.map((item) => item.id)).toEqual(['async-a']);
+    expect(merged!.async).toBe(true);
+  });
+
+  it('does not let an async success rescue incomplete blocking coverage', () => {
+    const [merged] = mergeChunkReviews([
+      review({ status: 'timeout', error: 'blocking timeout' }),
+      review({ async: true, findings: [finding('async-a')] }),
+    ]);
+
+    expect(merged!.status).toBe('timeout');
+    expect(merged!.findings).toEqual([]);
+    expect(merged!.async).toBeUndefined();
+  });
+
+  it('does not let an async failure poison complete blocking coverage', () => {
+    const [merged] = mergeChunkReviews([
+      review({
+        findings: [finding('blocking-a')],
+        durationMs: 10,
+        droppedFindings: 1,
+        warnings: ['blocking warning'],
+        usage: { inputTokens: 100, outputTokens: 10 },
+      }),
+      review({
+        async: true,
+        status: 'error',
+        error: 'async failed',
+        durationMs: 20,
+        droppedFindings: 2,
+        warnings: ['async warning'],
+        usage: { inputTokens: 200, outputTokens: 20 },
+      }),
+    ]);
+
+    expect(merged!.status).toBe('success');
+    expect(merged!.findings.map((item) => item.id)).toEqual(['blocking-a']);
+    expect(merged!.async).toBeUndefined();
+    expect(merged!.durationMs).toBe(30);
+    expect(merged!.droppedFindings).toBe(3);
+    expect(merged!.warnings).toEqual(['blocking warning', 'async warning']);
+    expect(merged!.usage).toEqual({ inputTokens: 300, outputTokens: 30 });
   });
 
   it('preserves the failure when no chunk succeeded', () => {
@@ -74,16 +137,14 @@ describe('mergeChunkReviews', () => {
 // RCL-14: chunked reviews are merged before consensus, so the merge is the
 // last place that can still say "this reviewer's coverage was degraded".
 describe('mergeChunkReviews — degraded coverage', () => {
-  it('sums dropped counts across chunks, including ones that wholly failed', () => {
+  it('preserves degraded metadata while excluding findings from partial coverage', () => {
     const [merged] = mergeChunkReviews([
       review({ findings: [finding('a')], droppedFindings: 1, warnings: ['w1'] }),
       review({ status: 'parse_failed', droppedFindings: 3, warnings: ['w2'], error: 'lost' }),
     ]);
 
-    // One chunk parsed, so the reviewer still contributed — but four findings
-    // were lost and the report must be able to say so.
-    expect(merged!.status).toBe('success');
-    expect(merged!.findings).toHaveLength(1);
+    expect(merged!.status).toBe('parse_failed');
+    expect(merged!.findings).toEqual([]);
     expect(merged!.droppedFindings).toBe(4);
     expect(merged!.warnings).toEqual(['w1', 'w2']);
   });
@@ -141,7 +202,7 @@ describe('mergeChunkReviews — token usage', () => {
       review({ usage: { inputTokens: 100, outputTokens: 10 } }),
       review({ status: 'timeout', error: 'Request timed out' }),
     ]);
-    expect(merged[0]!.status).toBe('success');
+    expect(merged[0]!.status).toBe('timeout');
     expect(merged[0]).not.toHaveProperty('usage');
   });
 
