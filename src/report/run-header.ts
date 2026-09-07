@@ -132,7 +132,13 @@ export function sha256Hex(data: string | Buffer): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
-/** JSON with object keys sorted at every level, so digests ignore key order. */
+/**
+ * JSON with object keys sorted at every level, so digests ignore key order.
+ * Values JSON cannot express (undefined, functions, symbols) serialize as
+ * `null` — the same as `JSON.stringify` does for them inside arrays — so the
+ * result is always a string and never the bare `undefined` JSON.stringify
+ * returns for a top-level non-value.
+ */
 export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((v) => stableStringify(v)).join(',')}]`;
@@ -144,20 +150,28 @@ export function stableStringify(value: unknown): string {
       .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`);
     return `{${entries.join(',')}}`;
   }
-  return JSON.stringify(value);
+  const encoded: string | undefined = JSON.stringify(value);
+  return encoded === undefined ? 'null' : encoded;
 }
 
 /**
- * Digest of what the council actually read: every file's name, status and
- * patch, sorted by filename so the value is independent of listing order.
- * Uniform across PR, patch, git and plan modes (PR mode has no raw diff).
+ * Digest of what the council actually read: every file's name, status,
+ * previous name and patch, sorted by filename so the value is independent of
+ * listing order. The serialization is JSON — every field delimited and
+ * escaped — so two distinct diffs cannot collide by sharing a separator
+ * character in a filename or patch line. Uniform across PR, patch, git and
+ * plan modes (PR mode has no raw diff).
  */
 export function diffDigest(files: readonly FileChange[]): string {
   const canonical = [...files]
     .sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0))
-    .map((f) => `${f.filename} ${f.status} ${f.previousFilename ?? ''} ${f.patch}`)
-    .join('\n');
-  return sha256Hex(canonical);
+    .map((f) => ({
+      filename: f.filename,
+      status: f.status,
+      previousFilename: f.previousFilename ?? null,
+      patch: f.patch,
+    }));
+  return sha256Hex(stableStringify(canonical));
 }
 
 /** Digest of the resolved config with the GitHub token removed. */
@@ -271,9 +285,19 @@ export function resolveConvergeContext(
   env: Readonly<Record<string, string | undefined>>
 ): ConvergeContext | undefined {
   const target = (flags.convergeTarget ?? env['RCL_CONVERGE_TARGET'] ?? '').trim();
-  if (target === '') return undefined;
+  // Validate before deciding whether a context exists at all: a bad --round
+  // must fail fast even when the target is missing, and a round or attempt
+  // without a target is a mistake, not something to drop silently.
   const round = positiveInt(flags.round ?? env['RCL_CONVERGE_ROUND'], '--round');
   const attempt = positiveInt(flags.attempt ?? env['RCL_CONVERGE_ATTEMPT'], '--attempt');
+  if (target === '') {
+    if (round !== undefined || attempt !== undefined) {
+      throw new Error(
+        '--round / --attempt (or RCL_CONVERGE_ROUND / RCL_CONVERGE_ATTEMPT) need a converge target: pass --converge-target <key> or RCL_CONVERGE_TARGET.'
+      );
+    }
+    return undefined;
+  }
   return {
     target,
     ...(round !== undefined ? { round } : {}),

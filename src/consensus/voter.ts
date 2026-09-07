@@ -9,7 +9,7 @@ import type {
 import type { Role } from '../roles/types.js';
 import { CONFIDENCE_THRESHOLDS, DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import { linesOverlap, hasOpposingSentiment, combinedSimilarity } from './deduper.js';
-import { stableFindingKey } from '../converge/finding-identity.js';
+import { stableFindingKey } from './finding-identity.js';
 
 /** Thresholds shared with the deduper so both layers use the same geometry. */
 export interface ConsensusThresholds {

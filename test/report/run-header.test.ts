@@ -333,15 +333,40 @@ describe('resolveConvergeContext', () => {
     ).toEqual({ target: 'o/r#1', round: 3, attempt: 4 });
   });
 
-  it('falls back to the environment and is absent without a target', () => {
+  it('falls back to the environment and is absent without any converge input', () => {
     expect(
       resolveConvergeContext({}, { RCL_CONVERGE_TARGET: 'o/r#2', RCL_CONVERGE_ROUND: '1' })
     ).toEqual({ target: 'o/r#2', round: 1 });
-    expect(resolveConvergeContext({}, { RCL_CONVERGE_ROUND: '1' })).toBeUndefined();
+    expect(resolveConvergeContext({}, {})).toBeUndefined();
   });
 
   it('rejects a non-positive or non-integer round or attempt', () => {
     expect(() => resolveConvergeContext({ convergeTarget: 't', round: '0' }, {})).toThrow(/--round/);
     expect(() => resolveConvergeContext({ convergeTarget: 't', attempt: 'x' }, {})).toThrow(/--attempt/);
+  });
+});
+
+describe('round-1 hardening', () => {
+  it('diffDigest is injective across separator-shaped filenames and patches', () => {
+    // Under naive space/newline joining these two serialize identically.
+    const a = [file({ filename: 'x', status: 'renamed', previousFilename: 'b c', patch: 'd' })];
+    const b = [file({ filename: 'x', status: 'renamed', previousFilename: 'b', patch: 'c d' })];
+    expect(diffDigest(a)).not.toBe(diffDigest(b));
+    const c = [file({ filename: 'a b', patch: 'p' }), file({ filename: 'c', patch: 'q' })];
+    const d = [file({ filename: 'a', patch: 'b p' }), file({ filename: 'c', patch: 'q' })];
+    expect(diffDigest(c)).not.toBe(diffDigest(d));
+  });
+
+  it('a round or attempt without a converge target is an error, not a silent drop', () => {
+    expect(() => resolveConvergeContext({ round: '2' }, {})).toThrow(/converge target/);
+    expect(() => resolveConvergeContext({}, { RCL_CONVERGE_ATTEMPT: '1' })).toThrow(/converge target/);
+    expect(() => resolveConvergeContext({ round: 'abc' }, {})).toThrow(/--round/);
+  });
+
+  it('uuidv7 clamps a pre-epoch or fractional clock into the unsigned timestamp field', () => {
+    expect(uuidv7(-5)).toMatch(UUID_V7);
+    expect(uuidv7(-5).slice(0, 13)).toBe('00000000-0000');
+    const at = Date.UTC(2026, 8, 7, 10, 0, 0);
+    expect(parseInt(uuidv7(at + 0.75).slice(0, 8) + uuidv7(at + 0.75).slice(9, 13), 16)).toBe(at);
   });
 });

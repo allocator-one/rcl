@@ -8,7 +8,11 @@ import { randomBytes } from 'node:crypto';
  */
 export function uuidv7(now: number = Date.now()): string {
   const bytes = randomBytes(16);
-  const ts = BigInt(now);
+  // The timestamp field is an unsigned 48-bit integer: clamp a pre-epoch or
+  // fractional clock reading rather than letting BigInt two's-complement
+  // bits scramble the sort order (or throw on a non-integer).
+  const millis = Number.isFinite(now) ? Math.max(0, Math.floor(now)) : 0;
+  const ts = BigInt(millis) & 0xffffffffffffn;
   for (let i = 5; i >= 0; i--) {
     bytes[i] = Number((ts >> BigInt(8 * (5 - i))) & 0xffn);
   }

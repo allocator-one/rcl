@@ -54,6 +54,13 @@ async function revParse(cwd: string, ...args: string[]): Promise<string | undefi
 }
 
 /**
+ * The remote default branch: `origin/HEAD` when the clone recorded it, else
+ * the conventional names in order. Shallow CI checkouts and `git remote add`
+ * clones have no `origin/HEAD`, so the fallbacks carry real weight.
+ */
+const DEFAULT_BRANCH_FALLBACKS = ['origin/main', 'origin/master'] as const;
+
+/**
  * Best-effort exact-head binding for local review modes (IO-12475 section
  * 8.1). Never throws: outside a repository, on an unborn branch, or without
  * a remote default branch the corresponding field is simply absent and the
@@ -62,9 +69,11 @@ async function revParse(cwd: string, ...args: string[]): Promise<string | undefi
 export async function resolveGitHeads(cwd = process.cwd()): Promise<GitHeads> {
   const headSha = await revParse(cwd, 'rev-parse', 'HEAD');
   if (headSha === undefined) return {};
-  const baseSha =
-    (await revParse(cwd, 'merge-base', 'HEAD', 'origin/HEAD')) ??
-    (await revParse(cwd, 'merge-base', 'HEAD', 'origin/main'));
+  let baseSha: string | undefined;
+  for (const ref of ['origin/HEAD', ...DEFAULT_BRANCH_FALLBACKS]) {
+    baseSha = await revParse(cwd, 'merge-base', 'HEAD', ref);
+    if (baseSha !== undefined) break;
+  }
   return { headSha, ...(baseSha !== undefined ? { baseSha } : {}) };
 }
 

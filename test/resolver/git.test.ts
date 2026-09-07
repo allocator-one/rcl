@@ -8,8 +8,13 @@ import { loadGitDiff, resolveGitHeads } from '../../src/resolver/git.js';
 
 const execFileAsync = promisify(execFile);
 
+// Isolate from the developer's global/system git config (init.defaultBranch,
+// hooks, external diff) so the fixtures behave the same on every machine.
+const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+
 async function git(cwd: string, ...args: string[]): Promise<void> {
-  await execFileAsync('git', args, { cwd });
+  await execFileAsync('git', args, { cwd, env: GIT_ENV });
 }
 
 describe('loadGitDiff', () => {
@@ -147,5 +152,48 @@ describe('resolveGitHeads', () => {
 
   it('returns nothing outside a repository instead of throwing', async () => {
     expect(await resolveGitHeads(notARepo)).toEqual({});
+  });
+});
+
+describe('resolveGitHeads — default-branch detection', () => {
+  const repos: string[] = [];
+
+  async function repoWithTwoCommits(): Promise<{ dir: string; first: string; second: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-git-default-'));
+    repos.push(dir);
+    await git(dir, 'init', '-q', '-b', 'trunk');
+    await git(dir, 'config', 'user.email', 'test@example.com');
+    await git(dir, 'config', 'user.name', 'Test');
+    await writeFile(join(dir, 'a.ts'), 'export const a = 1;\n');
+    await git(dir, 'add', '.');
+    await git(dir, 'commit', '-q', '-m', 'first');
+    const first = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV })).stdout.trim();
+    await writeFile(join(dir, 'b.ts'), 'export const b = 2;\n');
+    await git(dir, 'add', '.');
+    await git(dir, 'commit', '-q', '-m', 'second');
+    const second = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV })).stdout.trim();
+    return { dir, first, second };
+  }
+
+  afterAll(async () => {
+    for (const dir of repos) await rm(dir, { recursive: true, force: true });
+  });
+
+  it('prefers the remote default branch recorded in origin/HEAD, whatever its name', async () => {
+    const { dir, first, second } = await repoWithTwoCommits();
+    await git(dir, 'update-ref', 'refs/remotes/origin/trunk', first);
+    await git(dir, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
+    expect(await resolveGitHeads(dir)).toEqual({ headSha: second, baseSha: first });
+  });
+
+  it('falls back to origin/master when origin/HEAD and origin/main are absent', async () => {
+    const { dir, first, second } = await repoWithTwoCommits();
+    await git(dir, 'update-ref', 'refs/remotes/origin/master', first);
+    expect(await resolveGitHeads(dir)).toEqual({ headSha: second, baseSha: first });
+  });
+
+  it('records only HEAD when no remote default branch can be found', async () => {
+    const { dir, second } = await repoWithTwoCommits();
+    expect(await resolveGitHeads(dir)).toEqual({ headSha: second });
   });
 });

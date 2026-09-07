@@ -1,15 +1,21 @@
 import type { ModelReview, TokenUsage } from '../consensus/types.js';
 
-/** Total usage across chunks; absent when no chunk reported any. */
+/**
+ * Total usage across chunks. Present only when EVERY chunk reported usage:
+ * a chunk that timed out or errored consumed tokens nobody counted, and a
+ * silent lower bound would read as the total in the evidence ledger.
+ * Absent (never `{}`) when the sum has nothing to say.
+ */
 function sumUsage(parts: readonly ModelReview[]): TokenUsage | undefined {
-  const reported = parts.map((p) => p.usage).filter((u): u is TokenUsage => u !== undefined);
-  if (reported.length === 0) return undefined;
+  const reported = parts.map((p) => p.usage);
+  if (reported.length === 0 || reported.some((u) => u === undefined)) return undefined;
+  const usages = reported as TokenUsage[];
   const total: TokenUsage = {};
   for (const key of ['inputTokens', 'outputTokens', 'reasoningTokens'] as const) {
-    const values = reported.map((u) => u[key]).filter((v): v is number => typeof v === 'number');
+    const values = usages.map((u) => u[key]).filter((v): v is number => typeof v === 'number');
     if (values.length > 0) total[key] = values.reduce((sum, v) => sum + v, 0);
   }
-  return total;
+  return Object.keys(total).length > 0 ? total : undefined;
 }
 
 /**

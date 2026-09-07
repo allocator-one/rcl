@@ -24,7 +24,7 @@ import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
 import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
 import { chunkDiff } from './prepare/chunker.js';
-import { buildPrompt } from './prepare/prompt-builder.js';
+import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
@@ -99,11 +99,11 @@ import {
   parseSpecSource,
   resolveConvergeContext,
   sha256Hex,
-  validateSha,
   type ConvergeContext,
   type RunHeaderInput,
   type SpecSource,
 } from './report/run-header.js';
+import { assertExpectedHead, resolveReviewTarget } from './resolver/target.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -950,68 +950,6 @@ async function prepareCouncil(
   };
 }
 
-/**
- * Exact-head binding (IO-12475 section 8.1): which commit this diff belongs
- * to. PR mode takes the SHAs GitHub returned with the PR; git modes resolve
- * HEAD and the merge-base; a patch file carries only its digest unless the
- * caller vouches for its head with --head-sha (the file could have come from
- * anywhere, so rcl never guesses from the working directory).
- */
-async function resolveReviewTarget(
-  diff: Diff,
-  gitMode: 'staged' | 'working-tree' | undefined,
-  opts: { headSha?: string; baseSha?: string }
-): Promise<RunHeaderInput['target']> {
-  const overrideGiven = opts.headSha !== undefined || opts.baseSha !== undefined;
-  if (diff.metadata) {
-    if (overrideGiven) {
-      throw new Error(
-        '--head-sha and --base-sha apply to patch files only; a PR target resolves its heads from GitHub.'
-      );
-    }
-    const m = diff.metadata;
-    return {
-      kind: 'pr',
-      repo: `${m.owner}/${m.repo}`,
-      prNumber: m.number,
-      url: m.url,
-      ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
-      ...(m.baseSha !== undefined ? { baseSha: m.baseSha } : {}),
-      headRef: m.head,
-      baseRef: m.base,
-    };
-  }
-  if (gitMode) {
-    if (overrideGiven) {
-      throw new Error(
-        `--head-sha and --base-sha apply to patch files only; --${gitMode} resolves HEAD itself.`
-      );
-    }
-    const heads = await resolveGitHeads();
-    return { kind: gitMode === 'staged' ? 'staged' : 'working_tree', ...heads };
-  }
-  return {
-    kind: 'patch',
-    ...(opts.headSha !== undefined ? { headSha: validateSha(opts.headSha, '--head-sha') } : {}),
-    ...(opts.baseSha !== undefined ? { baseSha: validateSha(opts.baseSha, '--base-sha') } : {}),
-  };
-}
-
-/** Digests of the context files the prompt actually included (unreadable paths are skipped there too). */
-async function digestContextFiles(
-  paths: readonly string[]
-): Promise<Array<{ path: string; sha256: string }>> {
-  const digests: Array<{ path: string; sha256: string }> = [];
-  for (const path of paths) {
-    try {
-      digests.push({ path, sha256: sha256Hex(await readFile(path)) });
-    } catch {
-      // A directory or missing file never reached the prompt either.
-    }
-  }
-  return digests;
-}
-
 async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   staged?: boolean;
   workingTree?: boolean;
@@ -1037,10 +975,20 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
-    // Resolve diff
+    // Resolve diff. Git modes bracket the read with two HEAD resolutions: a
+    // commit landing between them would bind the diff to a commit it was
+    // not taken against, and --expect-head-sha would then vouch for it.
     let diff;
+    let gitHeads: Awaited<ReturnType<typeof resolveGitHeads>> | undefined;
     if (gitMode) {
+      gitHeads = await resolveGitHeads();
       diff = await loadGitDiff(gitMode);
+      const after = await resolveGitHeads();
+      if (after.headSha !== gitHeads.headSha) {
+        throw new Error(
+          `HEAD moved from ${gitHeads.headSha ?? 'unknown'} to ${after.headSha ?? 'unknown'} while the diff was being read — refusing to review; rerun once the tree is quiet.`
+        );
+      }
     } else if (
       target!.endsWith('.patch') ||
       target!.endsWith('.diff') ||
@@ -1056,19 +1004,9 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     // Resolve the head BEFORE the empty-diff exit so --expect-head-sha is
     // honored even when there is nothing to review: a moved target must
     // never read as a clean round.
-    const runTarget = await resolveReviewTarget(diff, gitMode, opts);
+    const runTarget = await resolveReviewTarget(diff, gitMode, opts, { gitHeads });
     if (opts.expectHeadSha !== undefined) {
-      const expected = validateSha(opts.expectHeadSha, '--expect-head-sha');
-      if (runTarget.headSha === undefined) {
-        throw new Error(
-          '--expect-head-sha was given but no head SHA could be resolved for this target; pass --head-sha with a patch file.'
-        );
-      }
-      if (runTarget.headSha !== expected) {
-        throw new Error(
-          `Resolved head ${runTarget.headSha} does not match --expect-head-sha ${expected}; the target has moved — refusing to review.`
-        );
-      }
+      assertExpectedHead(runTarget, opts.expectHeadSha);
     }
 
     if (diff.files.length === 0) {
@@ -1134,10 +1072,15 @@ async function executeCouncil(
   const chunkAssignments = chunks.flatMap((chunk) =>
     assignments.map((assignment) => ({ assignment, chunk }))
   );
+  // Context files are read exactly once, here: every prompt (blocking and
+  // async) carries these bytes, and the run header digests the same bytes —
+  // a file edited mid-review can never make the header describe content the
+  // reviewers did not see.
+  const contextDocs = await loadPromptContextDocs(contextFiles);
   const prompts = await Promise.all(
     chunkAssignments.map(({ assignment, chunk }) =>
       buildPrompt(chunk, assignment.role, {
-        contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
+        contextDocs,
         plan: planContext,
       })
     )
@@ -1172,7 +1115,7 @@ async function executeCouncil(
         const asyncPrompts = await Promise.all(
           asyncChunkAssignments.map(({ assignment, chunk }) =>
             buildPrompt(chunk, assignment.role, {
-              contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
+              contextDocs,
               plan: planContext,
             })
           )
@@ -1433,7 +1376,7 @@ async function executeCouncil(
     },
     gating: prepared.gatingConfig,
     ...(prepared.spec ? { spec: prepared.spec } : {}),
-    contextFiles: await digestContextFiles(contextFiles),
+    contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
     runner: detectRunner(process.env, hostname()),
     startedAt: prepared.startedAt,
     finishedAt: new Date(),

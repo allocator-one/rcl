@@ -64,7 +64,9 @@ describe('rcl review — exact-head binding flags', () => {
     const result = runRcl(['review', '--staged', '--expect-head-sha', head], repo);
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toMatch(/No staged changes/);
+    // The notice may land on either stream depending on the spinner's TTY
+    // detection; the exit status is the primary assertion.
+    expect(result.stderr + result.stdout).toMatch(/No staged changes/);
   });
 
   it('--head-sha rejects anything but a full 40-hex SHA', () => {

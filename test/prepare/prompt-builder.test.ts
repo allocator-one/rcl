@@ -49,3 +49,32 @@ describe('buildPrompt — severity bias', () => {
     expect(systemPrompt).not.toContain('Severity calibration');
   });
 });
+
+describe('context documents', () => {
+  it('loadContextDocs reads once and digests the exact bytes the prompt carries', async () => {
+    const { mkdtemp, writeFile, rm } = await import('fs/promises');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const { createHash } = await import('node:crypto');
+    const { loadContextDocs } = await import('../../src/prepare/prompt-builder.js');
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-ctx-'));
+    try {
+      const path = join(dir, 'rules.md');
+      await writeFile(path, '# Rules\nNever.\n');
+      const docs = await loadContextDocs([path, join(dir, 'missing.md'), dir]);
+      expect(docs).toHaveLength(1);
+      expect(docs[0]).toMatchObject({
+        label: path,
+        content: '# Rules\nNever.\n',
+        sha256: createHash('sha256').update('# Rules\nNever.\n').digest('hex'),
+      });
+      // The prompt is built from the pre-read docs, so a later edit cannot change it.
+      await writeFile(path, 'changed');
+      const { userPrompt } = await buildPrompt(makeChunk(), makeRole(), { contextDocs: docs });
+      expect(userPrompt).toContain('Never.');
+      expect(userPrompt).not.toContain('changed');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
