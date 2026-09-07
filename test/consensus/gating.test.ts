@@ -400,22 +400,38 @@ describe('relevantPatchExcerpt', () => {
     expect(relevantPatchExcerpt(patch, [{ start: 1, end: 1 }])).toBe('');
   });
 
-  it(
-    'does not rescan a maximum-cap replacement for every matching line',
-    { timeout: 15_000 },
-    () => {
-      const sideLines = 31_980;
-      const patch = [
-        `@@ -1,${sideLines} +1,${sideLines} @@ replacement`,
-        ...Array.from({ length: sideLines }, (_, index) => `-old ${index}`),
-        ...Array.from({ length: sideLines }, (_, index) => `+new ${index}`),
-      ].join('\n');
-      const started = performance.now();
+  it('scans a matching replacement block only once', () => {
+    const sideLines = 128;
+    const bodyLines = sideLines * 2;
+    const patch = [
+      `@@ -1,${sideLines} +1,${sideLines} @@ replacement`,
+      ...Array.from({ length: sideLines }, (_, index) => `-old ${index}`),
+      ...Array.from({ length: sideLines }, (_, index) => `+new ${index}`),
+    ].join('\n');
+    const sliceSpy = vi.spyOn(Array.prototype, 'slice');
+    let excerpt = '';
+    let replacementScans = 0;
 
-      expect(relevantPatchExcerpt(patch, [{ start: 1, end: sideLines }])).toBe('');
-      expect(performance.now() - started).toBeLessThan(2_000);
+    try {
+      excerpt = relevantPatchExcerpt(patch, [{ start: 1, end: sideLines }]);
+      replacementScans = sliceSpy.mock.calls.filter(([start, end], index) => {
+        const receiver = sliceSpy.mock.contexts[index];
+        return (
+          Array.isArray(receiver) &&
+          receiver.length === bodyLines &&
+          receiver[0]?.text === '-old 0' &&
+          start === 0 &&
+          end === bodyLines
+        );
+      }).length;
+    } finally {
+      sliceSpy.mockRestore();
     }
-  );
+
+    expect(excerpt).toContain('-old 0');
+    expect(excerpt).toContain('+new 127');
+    expect(replacementScans).toBe(1);
+  });
 
   it.each([100, 101])(
     'keeps an oversized mid-file deletion unavailable at coordinate %i',
