@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -24,8 +25,15 @@ function acceptEverything(request: RecordedRequest): { status: number; body?: un
       body: { data: { id: envelope.run.id, url: `https://harness.example.test/api/v1/reviews/runs/${envelope.run.id}`, artifacts_expected: ['report_json', 'report_md'] }, meta: { status: 'created' } },
     };
   }
-  if (request.url.includes('/artifacts/')) return { status: 201, body: { data: { kind: 'report_json', sha256: 'x' } } };
-  if (request.url.endsWith('/converge/events')) return { status: 201, body: { data: { inserted: 1, duplicates: 0 } } };
+  if (request.url.includes('/artifacts/')) {
+    // A receipt names the uploaded kind and the digest of exactly those bytes.
+    const kind = request.url.slice(request.url.lastIndexOf('/') + 1);
+    return { status: 201, body: { data: { kind, sha256: createHash('sha256').update(request.body ?? '', 'utf8').digest('hex') } } };
+  }
+  if (request.url.endsWith('/converge/events')) {
+    const sent = (JSON.parse(request.body ?? '{"events":[]}') as { events: unknown[] }).events.length;
+    return { status: 201, body: { data: { inserted: sent, duplicates: 0 } } };
+  }
   return { status: 404, body: { error: 'not_found' } };
 }
 
@@ -181,7 +189,7 @@ describe('telemetry delivery', () => {
     const noLogin = await runtime(acceptEverything, { credentialsPath: join(repo, 'missing.json') });
     const result = sampleResult();
     const outcome = await deliverRun(noLogin.rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
-    expect(outcome).toMatchObject({ status: 'skipped', spooled: true, exitCode: EVIDENCE_REQUIRED_EXIT_CODE });
+    expect(outcome).toMatchObject({ status: 'spooled', spooled: true, exitCode: EVIDENCE_REQUIRED_EXIT_CODE });
     expect(outcome.line).toMatch(/^Evidence spooled \(not logged in to Harness/);
     expect((await noLogin.rt.outbox.list()).map((e) => e.id)).toEqual([result.run!.id]);
 
@@ -191,6 +199,19 @@ describe('telemetry delivery', () => {
       line: 'Evidence not sent: telemetry is off, or this repository is not Harness-managed',
       exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
     });
+  });
+
+  it('fails closed when the harness section of the project config does not parse', async () => {
+    await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n  parseFailures: sometimes\n', 'utf8');
+    const { rt } = await runtime(acceptEverything);
+    expect(rt.level).toBe('off');
+    // An unknown level name is invalid too; unknown keys are ignored as elsewhere in the config.
+    await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: loud\n', 'utf8');
+    const strict = await runtime(acceptEverything);
+    expect(strict.rt.level).toBe('off');
+    await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: findings\n  unknownSetting: 1\n', 'utf8');
+    const lenient = await runtime(acceptEverything);
+    expect(lenient.rt.level).toBe('findings');
   });
 
   it('reads the harness section of the project config when none is passed, and serves the outbox from anywhere on request', async () => {

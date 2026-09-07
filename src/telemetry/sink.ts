@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
@@ -212,12 +213,15 @@ export class HarnessSink {
       'application/octet-stream',
       options
     );
+    // The receipt must name the artifact that was sent and carry the digest
+    // of exactly those bytes; anything else is not a receipt for this upload.
+    const digest = createHash('sha256').update(bytes, 'utf8').digest('hex');
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
-      if (!data || typeof data['sha256'] !== 'string') return null;
+      if (!data || data['kind'] !== kind || typeof data['sha256'] !== 'string' || data['sha256'].toLowerCase() !== digest) return null;
       const meta = (body as { meta?: { status?: string } }).meta;
       return {
-        kind: typeof data['kind'] === 'string' ? data['kind'] : kind,
+        kind,
         sha256: data['sha256'],
         ...(typeof data['url'] === 'string' ? { url: data['url'] } : {}),
         status: meta?.status === 'existing' || status === 200 ? 'existing' : 'created',
@@ -236,8 +240,12 @@ export class HarnessSink {
     );
     return this.classify(result, (body) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
-      if (!data || typeof data['inserted'] !== 'number') return null;
-      return { inserted: data['inserted'], duplicates: typeof data['duplicates'] === 'number' ? data['duplicates'] : 0 };
+      const inserted = data?.['inserted'];
+      const duplicates = data?.['duplicates'];
+      const count = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+      // Every event sent must be accounted for, inserted or already known.
+      if (!count(inserted) || !count(duplicates) || inserted + duplicates !== events.length) return null;
+      return { inserted, duplicates };
     });
   }
 }
@@ -247,7 +255,10 @@ export class HarnessSink {
  * cancelled there, so a runaway response never fills memory.
  */
 async function readBounded(response: Response, limit: number): Promise<string | null> {
-  if (!response.body) return response.text();
+  if (!response.body) {
+    const text = await response.text();
+    return Buffer.byteLength(text, 'utf8') > limit ? null : text;
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;

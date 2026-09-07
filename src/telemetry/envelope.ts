@@ -274,12 +274,14 @@ function scrubRunHeader(run: RunHeader): RunHeader {
   return {
     ...scrubbed,
     // Roster values are configured identifiers, not prose: a long mixed-case
-    // model id must survive, so only key-shaped substrings are removed.
-    roster: run.roster.map((seat) => ({
+    // model id must survive, so those three fields take the identifier
+    // scrubber over the original values; everything else on a seat keeps
+    // the deep-scrubbed form.
+    roster: scrubbed.roster.map((seat, i) => ({
       ...seat,
-      model: scrubIdentifier(seat.model),
-      role: scrubIdentifier(seat.role),
-      provider: scrubIdentifier(seat.provider),
+      model: scrubIdentifier(run.roster[i]!.model),
+      role: scrubIdentifier(run.roster[i]!.role),
+      provider: scrubIdentifier(run.roster[i]!.provider),
     })),
     runner: {
       ...scrubbed.runner,

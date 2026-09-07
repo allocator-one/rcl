@@ -171,5 +171,5 @@ function closesAtLineStart(text: string, index: number, length: number): boolean
   const lineStart = text.lastIndexOf('\n', index - 1) + 1;
   if (!/^ {0,3}$/.test(text.slice(lineStart, index))) return false;
   const lineEnd = text.indexOf('\n', index + length);
-  return /^ *$/.test(text.slice(index + length, lineEnd === -1 ? undefined : lineEnd));
+  return /^ *\r?$/.test(text.slice(index + length, lineEnd === -1 ? undefined : lineEnd));
 }

@@ -686,12 +686,12 @@ export class Outbox {
           const accounted = outcome.value.inserted + outcome.value.duplicates;
           // Anything the server did not account for stays for the next flush; it dedupes by id.
           if (accounted < batch.length) return { kind: 'done', reported };
-          for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true });
+          for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true }).catch(() => undefined);
           reported += batch.length;
           break;
         }
         case 'disabled':
-          for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true });
+          for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true }).catch(() => undefined);
           break;
         case 'conflict':
         case 'rejected':

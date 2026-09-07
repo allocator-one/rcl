@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
@@ -191,11 +192,22 @@ describe('HarnessSink.postRun', () => {
 
 describe('HarnessSink.putArtifact', () => {
   it('sends the raw bytes as octet-stream and reads the digest back', async () => {
-    const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { kind: 'report_json', sha256: 'abc', url: 'u' }, meta: { status: 'created' } } }));
+    const digest = createHash('sha256').update('{"r":1}', 'utf8').digest('hex');
+    const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { kind: 'report_json', sha256: digest, url: 'u' }, meta: { status: 'created' } } }));
     const outcome = await s.putArtifact('run-1', 'report_json', '{"r":1}');
-    expect(outcome).toMatchObject({ kind: 'ok', value: { kind: 'report_json', sha256: 'abc', status: 'created' } });
+    expect(outcome).toMatchObject({ kind: 'ok', value: { kind: 'report_json', sha256: digest, status: 'created' } });
     expect(requests[0]).toMatchObject({ method: 'PUT', url: 'https://harness.example.test/api/v1/reviews/runs/run-1/artifacts/report_json', body: '{"r":1}' });
     expect(requests[0]!.headers['content-type']).toBe('application/octet-stream');
+  });
+
+  it('refuses a receipt for another kind or another digest', async () => {
+    const digest = createHash('sha256').update('#', 'utf8').digest('hex');
+    const wrongKind = await sink(() => ({ status: 201, body: { data: { kind: 'report_json', sha256: digest } } })).sink.putArtifact('r', 'report_md', '#');
+    expect(wrongKind).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    const wrongDigest = await sink(() => ({ status: 201, body: { data: { kind: 'report_md', sha256: 'f'.repeat(64) } } })).sink.putArtifact('r', 'report_md', '#');
+    expect(wrongDigest).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    const upper = await sink(() => ({ status: 200, body: { data: { kind: 'report_md', sha256: digest.toUpperCase() }, meta: { status: 'existing' } } })).sink.putArtifact('r', 'report_md', '#');
+    expect(upper).toMatchObject({ kind: 'ok', value: { status: 'existing' } });
   });
 
   it('reads artifacts_disabled as disabled and a digest mismatch as rejected', async () => {
@@ -205,10 +217,25 @@ describe('HarnessSink.putArtifact', () => {
 });
 
 describe('HarnessSink.postEvents', () => {
-  it('posts the batch and reads the counts', async () => {
+  it('posts the batch and reads the counts, which must account for every event', async () => {
     const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { inserted: 1, duplicates: 1 } } }));
-    const events = [buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } })];
+    const events = [
+      buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } }),
+      buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 2, payload: { cap: 20 } }),
+    ];
     expect(await s.postEvents(events)).toMatchObject({ kind: 'ok', value: { inserted: 1, duplicates: 1 } });
     expect(JSON.parse(requests[0]!.body!)).toEqual({ events });
+
+    const short = await sink(() => ({ status: 201, body: { data: { inserted: 1, duplicates: 0 } } })).sink.postEvents(events);
+    expect(short).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    const vague = await sink(() => ({ status: 201, body: { data: { inserted: 2 } } })).sink.postEvents(events);
+    expect(vague).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+  });
+
+  it('bounds a body it cannot stream as well', async () => {
+    const fake = (async () =>
+      ({ type: 'basic', status: 201, body: null, text: async () => `{"pad":"${'x'.repeat(70_000)}"}` }) as unknown as Response) as typeof fetch;
+    const s = new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.0.0', fetchImpl: fake });
+    expect(await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })])).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
   });
 });

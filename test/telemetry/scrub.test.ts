@@ -82,6 +82,8 @@ describe('stripFencedCode', () => {
     expect(stripFencedCode('a ```\nx = "```"; still code\n``` not a close\n```\nb')).toBe('a [code omitted]\nb');
     // Tildes never close a backtick fence; up to three leading spaces are allowed.
     expect(stripFencedCode('a ```\ncode ~~~ more\n   ```  \nb')).toBe('a [code omitted]\nb');
+    // Windows line endings still close a fence.
+    expect(stripFencedCode('a ```\r\ncode\r\n```\r\nb')).toBe('a [code omitted]\nb');
     // Several blocks, mixed styles, with a final unclosed one.
     expect(stripFencedCode('x ```\none\n```\ny ~~~\ntwo\n~~~\nz ```\nthree')).toBe('x [code omitted]\ny [code omitted]\nz [code omitted]');
   });

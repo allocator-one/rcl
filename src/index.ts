@@ -468,7 +468,10 @@ program
         // A report without a converge target (a plain `rcl review`, or one
         // copied in) is not this loop's evidence either.
         const reportTarget = report.run?.converge?.target;
-        const runId = reportRunId !== undefined && reportTarget === opts.target.trim() ? reportRunId : undefined;
+        const runId =
+          reportRunId !== undefined && typeof reportTarget === 'string' && reportTarget.trim() === opts.target.trim()
+            ? reportRunId
+            : undefined;
         if (reportRunId !== undefined && runId === undefined) {
           console.error(
             chalk.yellow(

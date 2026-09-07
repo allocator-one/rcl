@@ -89,7 +89,9 @@ export async function loadHarnessSettings(cwd: string): Promise<Pick<Config, 'ha
     const harness = (found.config as { harness?: unknown }).harness;
     if (harness === undefined) return {};
     const parsed = HarnessSchema.safeParse(harness);
-    return parsed.success ? { harness: parsed.data } : undefined;
+    // A harness section that does not parse fails closed: an opt-out the
+    // user wrote next to a typo must still hold.
+    return parsed.success ? { harness: parsed.data } : { harness: { telemetry: 'off' } };
   } catch {
     return undefined;
   }
@@ -261,7 +263,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     try {
       await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
       return {
-        status: 'skipped',
+        status: 'spooled',
         line: `Evidence spooled (${reason}); run rcl telemetry flush once a credential is available`,
         runId,
         spooled: true,
@@ -441,7 +443,9 @@ export async function emitConvergeEvents(
       return 'skipped';
     case 'conflict':
     case 'rejected':
-      runtime.stderr(`Converge events refused by ${credentialHost(runtime.credential!)}: ${describeOutcome(outcome)}`);
+      runtime.stderr(
+        `Converge events refused by ${runtime.credential ? credentialHost(runtime.credential) : 'Harness'}: ${describeOutcome(outcome)}`
+      );
       return 'refused';
   }
 }
