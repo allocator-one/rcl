@@ -38,6 +38,9 @@ listing bracketed by PR reads and refuse to bind if the head or base moved.
   including on truncated or refused answers; chunked reviews sum it.
 - Pre-3.0 reports (no `run`, no `identity`) load unchanged in
   `converge-report`, `discuss`, and `models seed`.
+
+## 2.1.4
+
 - **Oversized single-file patches are reviewed losslessly.** The chunker now
   emits sequential fragments with accurate unified-diff continuation headers
   instead of dropping every line after the first 2,000; malformed oversized
