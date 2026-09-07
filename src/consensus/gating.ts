@@ -202,14 +202,22 @@ function requiredWindow(
   hunkIndex: number,
   range: { start: number; end: number }
 ): HunkWindow | undefined {
-  const exact: number[] = [];
+  const exactNewLines: number[] = [];
+  const exactDeletions: number[] = [];
   for (let index = 0; index < hunk.body.length; index += 1) {
     const line = hunk.body[index]!;
     if (!line.marker && line.newLine >= range.start && line.newLine <= range.end) {
-      exact.push(index);
+      (line.newCount === 1 ? exactNewLines : exactDeletions).push(index);
     }
   }
 
+  // Finding ranges use new-file coordinates. A deletion and the following
+  // new-file line share the same coordinate, so prefer lines that actually
+  // exist in the new file; otherwise a long deletion run can make a tiny
+  // target impossible to excerpt. For deletion-only hunks, keep every
+  // matching deletion together so verification never sees a misleading
+  // partial removal.
+  const exact = exactNewLines.length > 0 ? exactNewLines : exactDeletions;
   if (exact.length > 0) {
     return { hunkIndex, start: exact[0]!, end: exact.at(-1)! + 1 };
   }

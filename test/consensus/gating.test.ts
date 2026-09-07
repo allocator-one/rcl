@@ -6,6 +6,7 @@ import {
 } from '../../src/consensus/gating.js';
 import type { ConsensusFinding, ConsensusInfo } from '../../src/consensus/types.js';
 import type { ModelAnswer } from '../../src/dispatch/adapter.js';
+import { parseUnifiedDiff } from '../../src/prepare/unified-diff.js';
 
 function makeConsensus(models: string[]): ConsensusInfo {
   return {
@@ -354,6 +355,29 @@ describe('relevantPatchExcerpt', () => {
 
   it('fails closed for oversized content without unified-diff headers', () => {
     expect(relevantPatchExcerpt('x'.repeat(4_001), [{ start: 1, end: 1 }])).toBe('');
+  });
+
+  it('does not let a long deletion run hide a fitting new-file target line', () => {
+    const patch = [
+      '@@ -1,100 +1,1 @@ deletionRun',
+      ...Array.from({ length: 100 }, (_, index) => `-${index} ${'deleted '.repeat(8)}`),
+      '+TARGET',
+    ].join('\n');
+
+    const excerpt = relevantPatchExcerpt(patch, [{ start: 1, end: 1 }]);
+
+    expect(excerpt.length).toBeLessThanOrEqual(4_000);
+    expect(excerpt).toContain('+TARGET');
+    expect(parseUnifiedDiff(excerpt).ok).toBe(true);
+  });
+
+  it('does not excerpt an unsafe subset of an oversized deletion-only target', () => {
+    const patch = [
+      '@@ -1,100 +0,0 @@ deletionOnly',
+      ...Array.from({ length: 100 }, (_, index) => `-${index} ${'deleted '.repeat(8)}`),
+    ].join('\n');
+
+    expect(relevantPatchExcerpt(patch, [{ start: 1, end: 1 }])).toBe('');
   });
 });
 
