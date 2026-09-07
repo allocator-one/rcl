@@ -3,7 +3,6 @@ import {
   formatSyntheticHunkHeader,
   NO_NEWLINE_MARKER,
   parseUnifiedDiff,
-  splitPatchLines,
   type UnifiedDiffLine,
 } from './unified-diff.js';
 
@@ -30,9 +29,38 @@ const MAX_CHUNK_FILES = 20;
 // above the 18-chunk lossless dogfood case without letting an adversarial
 // 10MB patch create an unbounded paid-call fanout.
 const MAX_CHUNKS_PER_REVIEW = 32;
+const MAX_SOURCE_PATCH_LINES = MAX_CHUNK_LINES * MAX_CHUNKS_PER_REVIEW;
+const MAX_SOURCE_FILES = MAX_CHUNK_FILES * MAX_CHUNKS_PER_REVIEW;
 
 function countDiffLines(patch: string): number {
-  return splitPatchLines(patch).lines.length;
+  if (patch.length === 0) return 0;
+
+  let count = 1;
+  for (let index = 0; index < patch.length; index += 1) {
+    if (patch.charCodeAt(index) === 10) count += 1;
+  }
+  return patch.endsWith('\n') ? count - 1 : count;
+}
+
+function assertSourceFitsExpansionBounds(files: readonly FileChange[]): void {
+  if (files.length > MAX_SOURCE_FILES) {
+    throw new Error(
+      `Diff source exceeds the lossless safety capacity of ${MAX_SOURCE_FILES} files before ` +
+        `expansion. Split the diff into smaller review targets.`
+    );
+  }
+
+  let sourceLines = 0;
+  for (const file of files) {
+    sourceLines += countDiffLines(file.patch);
+    if (sourceLines > MAX_SOURCE_PATCH_LINES) {
+      throw new Error(
+        `Diff source exceeds the lossless safety capacity of ` +
+          `${MAX_SOURCE_PATCH_LINES.toLocaleString('en-US')} patch lines before expansion. ` +
+          `Split the diff into smaller review targets.`
+      );
+    }
+  }
 }
 
 function invalidOversizedPatch(file: FileChange, line: number, reason: string): never {
@@ -147,6 +175,11 @@ function promptDiffLines(file: ChunkFile): number {
 
 export function chunkDiff(files: FileChange[]): Chunk[] {
   if (files.length === 0) return [];
+  // More source lines/files than every allowed chunk can hold cannot possibly
+  // pass the final exact packing check. Reject that lower bound before the
+  // strict parser and fragment renderer amplify it into per-line objects and
+  // duplicate strings.
+  assertSourceFitsExpansionBounds(files);
 
   const expandedFiles: ChunkFile[] = files.flatMap((file) =>
     countDiffLines(file.patch) > MAX_CHUNK_LINES ? splitPatch(file) : [file]

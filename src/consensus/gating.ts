@@ -8,6 +8,7 @@ import {
   formatSyntheticHunkHeader,
   parseUnifiedDiff,
   type UnifiedDiffHunk,
+  type UnifiedDiffLine,
 } from '../prepare/unified-diff.js';
 
 /**
@@ -187,12 +188,81 @@ interface HunkWindow {
   end: number;
 }
 
+function isChangedLine(line: UnifiedDiffLine): boolean {
+  return !line.marker && line.oldCount !== line.newCount;
+}
+
+function replacementBlock(
+  body: readonly UnifiedDiffLine[],
+  index: number
+): { start: number; end: number; hasDeletion: boolean } {
+  let start = index;
+  while (start > 0) {
+    const previous = body[start - 1]!;
+    if (isChangedLine(previous)) {
+      start -= 1;
+    } else if (previous.marker && start > 1 && isChangedLine(body[start - 2]!)) {
+      start -= 2;
+    } else {
+      break;
+    }
+  }
+
+  let end = index + 1;
+  while (end < body.length) {
+    const next = body[end]!;
+    if (isChangedLine(next)) {
+      end += 1;
+    } else if (next.marker && end > start && isChangedLine(body[end - 1]!)) {
+      end += 1;
+    } else {
+      break;
+    }
+  }
+
+  return {
+    start,
+    end,
+    hasDeletion: body
+      .slice(start, end)
+      .some((line) => line.oldCount === 1 && line.newCount === 0),
+  };
+}
+
+function windowForMatches(
+  hunk: UnifiedDiffHunk,
+  hunkIndex: number,
+  matches: readonly number[]
+): HunkWindow | undefined {
+  const first = matches[0];
+  const last = matches.at(-1);
+  if (first === undefined || last === undefined) return undefined;
+
+  let start = first;
+  let end = last + 1;
+  for (const index of matches) {
+    const line = hunk.body[index]!;
+    if (!isChangedLine(line)) continue;
+    const block = replacementBlock(hunk.body, index);
+    if (block.hasDeletion) {
+      start = Math.min(start, block.start);
+      end = Math.max(end, block.end);
+    }
+  }
+  return { hunkIndex, start, end };
+}
+
 function hunkDistance(
   hunk: UnifiedDiffHunk,
   range: { start: number; end: number }
 ): number {
-  const hunkEnd = hunk.newCount === 0 ? hunk.newStart : hunk.newStart + hunk.newCount - 1;
-  if (range.end < hunk.newStart) return hunk.newStart - range.end;
+  // A zero-count range is anchored after newStart and its deletion body uses
+  // newStart + 1 as the effective new-file coordinate. Treat both sides of
+  // that boundary as adjacent so either conventional line reference keeps
+  // the complete removal in view.
+  const hunkStart = hunk.newStart;
+  const hunkEnd = hunk.newCount === 0 ? hunk.newStart + 1 : hunk.newStart + hunk.newCount - 1;
+  if (range.end < hunkStart) return hunkStart - range.end;
   if (range.start > hunkEnd) return range.start - hunkEnd;
   return 0;
 }
@@ -202,27 +272,23 @@ function requiredWindow(
   hunkIndex: number,
   range: { start: number; end: number }
 ): HunkWindow | undefined {
-  const exactNewLines: number[] = [];
-  const exactDeletions: number[] = [];
+  const exact: number[] = [];
   for (let index = 0; index < hunk.body.length; index += 1) {
     const line = hunk.body[index]!;
     if (!line.marker && line.newLine >= range.start && line.newLine <= range.end) {
-      (line.newCount === 1 ? exactNewLines : exactDeletions).push(index);
+      exact.push(index);
     }
   }
 
-  // Finding ranges use new-file coordinates. A deletion and the following
-  // new-file line share the same coordinate, so prefer lines that actually
-  // exist in the new file; otherwise a long deletion run can make a tiny
-  // target impossible to excerpt. For deletion-only hunks, keep every
-  // matching deletion together so verification never sees a misleading
-  // partial removal.
-  const exact = exactNewLines.length > 0 ? exactNewLines : exactDeletions;
+  // Deletions and the following new-file line share a coordinate. Keep the
+  // whole span: omitting either side can let a verifier refute a finding from
+  // incomplete replacement evidence. If it cannot fit, the caller fails
+  // closed instead of sending a partial removal.
   if (exact.length > 0) {
-    return { hunkIndex, start: exact[0]!, end: exact.at(-1)! + 1 };
+    return windowForMatches(hunk, hunkIndex, exact);
   }
 
-  let closestIndex: number | undefined;
+  const closest: number[] = [];
   let closestDistance = Number.POSITIVE_INFINITY;
   for (let index = 0; index < hunk.body.length; index += 1) {
     const line = hunk.body[index]!;
@@ -234,13 +300,14 @@ function requiredWindow(
           ? line.newLine - range.end
           : 0;
     if (distance < closestDistance) {
-      closestIndex = index;
       closestDistance = distance;
+      closest.length = 0;
+      closest.push(index);
+    } else if (distance === closestDistance) {
+      closest.push(index);
     }
   }
-  return closestIndex === undefined
-    ? undefined
-    : { hunkIndex, start: closestIndex, end: closestIndex + 1 };
+  return windowForMatches(hunk, hunkIndex, closest);
 }
 
 function mergeWindows(windows: HunkWindow[]): HunkWindow[] {

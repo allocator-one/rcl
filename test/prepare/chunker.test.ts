@@ -134,9 +134,17 @@ describe('chunkDiff', () => {
   });
 
   it('fails loudly before chunk fanout exceeds the paid-work safety bound', () => {
-    const files = Array.from({ length: 33 }, (_, index) => makeFile(`large-${index}.ts`, 2000));
+    const files = Array.from({ length: 33 }, (_, index) => makeFile(`large-${index}.ts`, 1900));
 
     expect(() => chunkDiff(files)).toThrow(/requires 33 review chunks.*safety limit of 32/i);
+  });
+
+  it('rejects a source that cannot fit the chunk cap before expanding it', () => {
+    const file = makeAddedFile('too-many-lines.ts', 64_000);
+
+    expect(() => chunkDiff([file])).toThrow(
+      /source exceeds.*64,000 patch lines.*before expansion/i
+    );
   });
 
   it('uses unified-diff anchor coordinates for one-sided continuation ranges', () => {
