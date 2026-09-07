@@ -8,11 +8,22 @@ export interface GitHubTarget {
   number: number;
 }
 
+const PR_URL = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
+const PR_SHORT = /^([^/]+)\/([^#]+)#(\d+)$/;
+
+/**
+ * Whether a positional target names a GitHub PR (`owner/repo#N` or a PR
+ * URL). Everything else a caller passes is a local patch file — by shape,
+ * not by extension, so `fix.DIFF`, `patches/fix` and `changes.txt` all route
+ * to the patch loader instead of failing as an "invalid GitHub target".
+ */
+export function isGitHubTarget(target: string): boolean {
+  return PR_URL.test(target) || PR_SHORT.test(target);
+}
+
 export function parseGitHubTarget(target: string): GitHubTarget {
   // Supports: owner/repo#123 or https://github.com/owner/repo/pull/123
-  const prUrlMatch = target.match(
-    /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/
-  );
+  const prUrlMatch = target.match(PR_URL);
   if (prUrlMatch) {
     return {
       owner: prUrlMatch[1]!,
@@ -21,7 +32,7 @@ export function parseGitHubTarget(target: string): GitHubTarget {
     };
   }
 
-  const shortMatch = target.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+  const shortMatch = target.match(PR_SHORT);
   if (shortMatch) {
     return {
       owner: shortMatch[1]!,

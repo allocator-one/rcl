@@ -177,12 +177,17 @@ export function diffDigest(files: readonly FileChange[]): string {
   hash.update('[');
   sorted.forEach((f, i) => {
     if (i > 0) hash.update(',');
+    // additions/deletions are part of the record: for a binary or oversized
+    // file GitHub sends no patch, and the counts are then the only thing
+    // that distinguishes two different changes to it.
     hash.update(
       stableStringify({
         filename: f.filename,
         status: f.status,
         previousFilename: f.previousFilename ?? null,
         patch: f.patch,
+        additions: f.additions,
+        deletions: f.deletions,
       })
     );
   });
@@ -332,12 +337,16 @@ export function resolveConvergeContext(
   flags: { convergeTarget?: string; round?: string; attempt?: string },
   env: Readonly<Record<string, string | undefined>>
 ): ConvergeContext | undefined {
-  const target = (flags.convergeTarget ?? env['RCL_CONVERGE_TARGET'] ?? '').trim();
+  // A blank flag is "unset", so the environment still applies — a shell
+  // expanding an empty variable into --round "" must not erase the round.
+  const flag = (value: string | undefined): string | undefined =>
+    value === undefined || value.trim() === '' ? undefined : value.trim();
+  const target = (flag(flags.convergeTarget) ?? env['RCL_CONVERGE_TARGET'] ?? '').trim();
   // Validate before deciding whether a context exists at all: a bad --round
   // must fail fast even when the target is missing, and a round or attempt
   // without a target is a mistake, not something to drop silently.
-  const round = positiveInt(flags.round ?? env['RCL_CONVERGE_ROUND'], '--round');
-  const attempt = positiveInt(flags.attempt ?? env['RCL_CONVERGE_ATTEMPT'], '--attempt');
+  const round = positiveInt(flag(flags.round) ?? env['RCL_CONVERGE_ROUND'], '--round');
+  const attempt = positiveInt(flag(flags.attempt) ?? env['RCL_CONVERGE_ATTEMPT'], '--attempt');
   if (target === '') {
     if (round !== undefined || attempt !== undefined) {
       throw new Error(

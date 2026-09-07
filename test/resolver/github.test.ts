@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Octokit } from '@octokit/rest';
-import { parseGitHubTarget, fetchPRDiff } from '../../src/resolver/github.js';
+import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from '../../src/resolver/github.js';
 
 function fakePr() {
   return {
@@ -37,6 +37,16 @@ describe('parseGitHubTarget', () => {
 
   it('rejects garbage', () => {
     expect(() => parseGitHubTarget('nonsense')).toThrow(/Invalid GitHub target/);
+  });
+});
+
+describe('isGitHubTarget', () => {
+  it('recognizes PR references by shape and nothing else', () => {
+    expect(isGitHubTarget('allocator-one/rcl#7')).toBe(true);
+    expect(isGitHubTarget('https://github.com/allocator-one/rcl/pull/7')).toBe(true);
+    for (const local of ['fix.DIFF', 'patches/fix', 'changes.txt', './x.patch', '/tmp/x.diff', 'owner/repo']) {
+      expect(isGitHubTarget(local)).toBe(false);
+    }
   });
 });
 

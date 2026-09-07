@@ -417,7 +417,11 @@ describe('round-2 hardening', () => {
     for (const bad of ['0', '-1', '1.5', 'abc', '1e400', '9007199254740993']) {
       expect(() => resolveConvergeContext({ convergeTarget: 't', round: bad }, {})).toThrow(/--round/);
     }
-    expect(resolveConvergeContext({ convergeTarget: 't', round: '' }, { RCL_CONVERGE_ROUND: '4' })).toEqual({ target: 't' });
+    // A blank flag is unset, so the environment still applies.
+    expect(resolveConvergeContext({ convergeTarget: 't', round: '' }, { RCL_CONVERGE_ROUND: '4' })).toEqual({
+      target: 't',
+      round: 4,
+    });
   });
 });
 
@@ -452,7 +456,72 @@ describe('round-4 hardening', () => {
     const files = [file({ filename: 'b.ts', patch: 'q' }), file({ filename: 'a.ts', status: 'renamed', previousFilename: 'z.ts' })];
     const canonical = [...files]
       .sort((x, y) => (x.filename < y.filename ? -1 : 1))
-      .map((f) => ({ filename: f.filename, status: f.status, previousFilename: f.previousFilename ?? null, patch: f.patch }));
+      .map((f) => ({
+        filename: f.filename,
+        status: f.status,
+        previousFilename: f.previousFilename ?? null,
+        patch: f.patch,
+        additions: f.additions,
+        deletions: f.deletions,
+      }));
     expect(diffDigest(files)).toBe(sha256Hex(stableStringify(canonical)));
+  });
+});
+
+describe('round-5 hardening', () => {
+  function keysDeep(value: unknown, acc: string[] = []): string[] {
+    if (Array.isArray(value)) value.forEach((v) => keysDeep(v, acc));
+    else if (typeof value === 'object' && value !== null) {
+      for (const [k, v] of Object.entries(value)) {
+        acc.push(k);
+        keysDeep(v, acc);
+      }
+    }
+    return acc;
+  }
+
+  it('wire contract: every key is snake_case, no undefined survives serialization, optional blocks are absent not null', () => {
+    const full = buildRunHeader({
+      ...baseInput(),
+      spec: { source: 'flag', sha256: 'c'.repeat(64) },
+      contextFiles: [{ path: 'x.md', sha256: 'd'.repeat(64) }],
+      plan: { focus: 'risks' },
+      converge: { target: 't', round: 1, attempt: 2 },
+      runner: { kind: 'ci', ci_run_id: '9', host: 'h' },
+    });
+    const minimal = buildRunHeader({ ...baseInput(), target: { kind: 'patch' } });
+    for (const header of [full, minimal]) {
+      const json = JSON.stringify(header);
+      expect(json).not.toContain('undefined');
+      expect(json).not.toContain(':null');
+      for (const key of keysDeep(JSON.parse(json))) expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
+    }
+    expect(minimal).not.toHaveProperty('spec');
+    expect(minimal).not.toHaveProperty('plan');
+    expect(minimal).not.toHaveProperty('converge');
+    expect(Object.keys(minimal.target)).toEqual(['kind', 'diff_sha256', 'files', 'additions', 'deletions']);
+  });
+
+  it('copies roster, runner and converge so later mutation of the input cannot alter the header', () => {
+    const input = { ...baseInput(), converge: { target: 't', round: 1 } };
+    const run = buildRunHeader(input);
+    input.roster[0]!.model = 'changed';
+    input.runner.kind = 'ci';
+    input.converge.round = 99;
+    expect(run.roster[0]!.model).toBe('anthropic/claude-fable-5');
+    expect(run.runner.kind).toBe('human');
+    expect(run.converge!.round).toBe(1);
+  });
+
+  it('configDigest is independent of the GitHub token value', () => {
+    const base: Config = { models: ['m1'], githubToken: 'ghp_A' };
+    expect(configDigest(base)).toBe(configDigest({ ...base, githubToken: 'ghp_B' }));
+    expect(configDigest(base)).toBe(configDigest({ models: ['m1'] }));
+  });
+
+  it('diffDigest distinguishes two patchless (binary) changes by their counts', () => {
+    const a = file({ filename: 'app.bin', patch: '', additions: 0, deletions: 0 });
+    const b = file({ filename: 'app.bin', patch: '', additions: 12, deletions: 3 });
+    expect(diffDigest([a])).not.toBe(diffDigest([b]));
   });
 });

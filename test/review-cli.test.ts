@@ -78,6 +78,16 @@ describe('rcl review — exact-head binding flags', () => {
     expect(result.stderr).toMatch(/--head-sha.*40/);
   });
 
+  it('classifies any non-PR-shaped target as a patch file, whatever its case or path form', () => {
+    const repo = tempRepository();
+    // Reaches the SHA format check, which only a patch-classified target does.
+    for (const name of ['fix.DIFF', 'patches/fix', 'changes.txt']) {
+      const result = runRcl(['review', name, '--head-sha', 'abc123'], repo);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/--head-sha.*40/);
+    }
+  });
+
   it('--head-sha and --base-sha apply to patch files only', () => {
     const repo = tempRepository();
     const result = runRcl(['review', '--staged', '--head-sha', 'a'.repeat(40)], repo);

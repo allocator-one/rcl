@@ -18,7 +18,7 @@ import {
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
 } from './config/defaults.js';
-import { parseGitHubTarget, fetchPRDiff } from './resolver/github.js';
+import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
@@ -980,12 +980,11 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     }
 
     const gitMode = opts.staged ? 'staged' : opts.workingTree ? 'working-tree' : undefined;
-    const patchTarget =
-      !gitMode &&
-      (target!.endsWith('.patch') ||
-        target!.endsWith('.diff') ||
-        target!.startsWith('./') ||
-        target!.startsWith('/'));
+    // Classify the positional target ONCE by shape: a GitHub PR reference is
+    // a PR, anything else is a local patch file (whatever its extension or
+    // path form). Both the flag gate below and the diff resolution use this
+    // single decision, so they cannot diverge.
+    const patchTarget = !gitMode && target !== undefined && !isGitHubTarget(target);
 
     // Validate the head-binding flags BEFORE any config, key, network, or
     // git work: a bad flag must fail before anything is spent or fetched.
