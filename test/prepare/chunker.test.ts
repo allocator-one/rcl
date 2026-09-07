@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { chunkDiff, formatChunkForPrompt } from '../../src/prepare/chunker.js';
+import {
+  chunkDiff,
+  formatChunkForPrompt,
+} from '../../src/prepare/chunker.js';
+import { parseUnifiedDiff } from '../../src/prepare/unified-diff.js';
+import {
+  MAX_SECURED_DIFF_BYTES,
+  wrapDiff,
+} from '../../src/prompts/hardening.js';
 import type { FileChange } from '../../src/resolver/types.js';
+
+function securedDiffBytes(chunk: ReturnType<typeof chunkDiff>[number]): number {
+  return Buffer.byteLength(wrapDiff(formatChunkForPrompt(chunk)), 'utf8');
+}
 
 function makeFile(filename: string, lineCount: number): FileChange {
   const lines = Array.from({ length: lineCount }, (_, index) => `+line ${index}`);
@@ -49,6 +61,216 @@ describe('chunkDiff', () => {
   it('splits at the line budget', () => {
     const files = [makeFile('a.ts', 1500), makeFile('b.ts', 1500)];
     expect(chunkDiff(files)).toHaveLength(2);
+  });
+
+  it('splits a byte-heavy patch losslessly at valid diff-line boundaries', () => {
+    const additions = 50;
+    const patch = [
+      `@@ -0,0 +1,${additions} @@ byteHeavy`,
+      ...Array.from({ length: additions }, (_, index) => `+${index} ${'x'.repeat(2_000)}`),
+    ].join('\n');
+    const original = {
+      ...makeFile('character-heavy.ts', 1),
+      patch,
+      additions,
+    };
+
+    const chunks = chunkDiff([original]);
+    const fragments = chunks.flatMap((chunk) => chunk.files);
+
+    expect(chunks).toHaveLength(2);
+    expect(fragments.map((fragment) => fragment.patch).join('')).toBe(original.patch);
+    expect(
+      fragments.every((fragment) =>
+        parseUnifiedDiff(fragment.patchFragment?.promptPatch ?? fragment.patch).ok
+      )
+    ).toBe(true);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('packs separate files under the secured diff byte budget', () => {
+    const files = ['a.ts', 'b.ts'].map((filename) => ({
+      ...makeFile(filename, 1),
+      patch: `@@ -0,0 +1,1 @@\n+${'x'.repeat(40_000)}`,
+      additions: 1,
+    }));
+
+    const chunks = chunkDiff(files);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('accepts the largest line needed by the lossless allocator review', () => {
+    const file = {
+      ...makeFile('large-line.ts', 1),
+      patch: `@@ -0,0 +1,1 @@\n+${'x'.repeat(33_052)}`,
+      additions: 1,
+    };
+
+    const chunks = chunkDiff([file]);
+
+    expect(chunks).toHaveLength(1);
+    expect(securedDiffBytes(chunks[0]!)).toBeLessThanOrEqual(MAX_SECURED_DIFF_BYTES);
+  });
+
+  it('accepts a one-chunk diff that exactly fills the secured byte budget', () => {
+    const file = {
+      ...makeFile('edge.ts', 1),
+      patch: `@@ -0,0 +1,1 @@\n+${'x'.repeat(65_433)}`,
+      additions: 1,
+    };
+
+    const chunks = chunkDiff([file]);
+
+    expect(chunks).toHaveLength(1);
+    expect(securedDiffBytes(chunks[0]!)).toBe(MAX_SECURED_DIFF_BYTES);
+  });
+
+  it('rejects a one-chunk diff one byte above the secured byte budget', () => {
+    const file = {
+      ...makeFile('edge.ts', 1),
+      patch: `@@ -0,0 +1,1 @@\n+${'x'.repeat(65_434)}`,
+      additions: 1,
+    };
+
+    expect(() => chunkDiff([file])).toThrow(/65,536 secured diff bytes limit/i);
+  });
+
+  it('uses UTF-8 bytes rather than JavaScript string length when splitting', () => {
+    const patch = `@@ -0,0 +1,2 @@\n+${'€'.repeat(17_000)}\n+${'€'.repeat(17_000)}`;
+    const file = { ...makeFile('multibyte.ts', 1), patch, additions: 2 };
+    const chunks = chunkDiff([file]);
+
+    expect(patch.length).toBeLessThan(MAX_SECURED_DIFF_BYTES);
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('includes delimiter neutralization growth in the secured diff byte budget', () => {
+    const injected = '<<<DIFF_END>>>'.repeat(2_000);
+    const patch = `@@ -0,0 +1,2 @@\n+${injected}\n+${injected}`;
+    const file = { ...makeFile('delimiters.ts', 1), patch, additions: 2 };
+    const chunks = chunkDiff([file]);
+
+    expect(
+      Buffer.byteLength(
+        formatChunkForPrompt({
+          files: [file],
+          totalLines: 3,
+          index: 0,
+          total: 1,
+        }),
+        'utf8'
+      )
+    ).toBeLessThan(MAX_SECURED_DIFF_BYTES);
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('rejects a single diff line that cannot fit the secured diff byte budget', () => {
+    const file = {
+      ...makeFile('one-huge-line.ts', 1),
+      patch: `@@ -0,0 +1,1 @@\n+${'x'.repeat(MAX_SECURED_DIFF_BYTES)}`,
+      additions: 1,
+    };
+
+    expect(() => chunkDiff([file])).toThrow(
+      /smallest valid fragment.*65,536 secured diff bytes/i
+    );
+  });
+
+  it('keeps a no-newline marker with its body line at a byte boundary', () => {
+    const marker = '\\ No newline at end of file';
+    const patch = [
+      '@@ -0,0 +1,2 @@ markerBoundary',
+      `+${'a'.repeat(20_000)}`,
+      `+${'b'.repeat(47_000)}`,
+      marker,
+    ].join('\n');
+    const file = { ...makeFile('marker-boundary.ts', 1), patch, additions: 2 };
+    const chunks = chunkDiff([file]);
+    const fragments = chunks.flatMap((chunk) => chunk.files);
+
+    expect(chunks).toHaveLength(2);
+    expect(fragments[1]!.patch.endsWith(`\n${marker}`)).toBe(true);
+    expect(fragments.map((fragment) => fragment.patch).join('')).toBe(patch);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('starts a byte-split fragment at the next hunk header', () => {
+    const patch = [
+      '@@ -0,0 +1,1 @@ firstHunk',
+      `+${'a'.repeat(40_000)}`,
+      '@@ -0,0 +2,1 @@ secondHunk',
+      `+${'b'.repeat(40_000)}`,
+    ].join('\n');
+    const file = { ...makeFile('hunk-boundary.ts', 1), patch, additions: 2 };
+    const chunks = chunkDiff([file]);
+    const fragments = chunks.flatMap((chunk) => chunk.files);
+
+    expect(chunks).toHaveLength(2);
+    expect(fragments[1]!.patch.startsWith('@@ -0,0 +2,1 @@ secondHunk')).toBe(true);
+    expect(fragments.map((fragment) => fragment.patch).join('')).toBe(patch);
+  });
+
+  it('splits between complete zero-body hunks', () => {
+    const patch = [
+      `@@ -0,0 +0,0 @@ ${'a'.repeat(33_000)}`,
+      `@@ -0,0 +0,0 @@ ${'b'.repeat(33_000)}`,
+    ].join('\n');
+    const file = {
+      ...makeFile('zero-body-hunks.ts', 1),
+      patch,
+      additions: 0,
+    };
+    const chunks = chunkDiff([file]);
+    const fragments = chunks.flatMap((chunk) => chunk.files);
+
+    expect(chunks).toHaveLength(2);
+    expect(fragments.map((fragment) => fragment.patch).join('')).toBe(patch);
+    expect(
+      fragments.every((fragment) =>
+        parseUnifiedDiff(fragment.patchFragment?.promptPatch ?? fragment.patch).ok
+      )
+    ).toBe(true);
+  });
+
+  it('sizes fragment labels from the actual fragment-count width', () => {
+    const patch = `@@ -0,0 +1,2 @@\n+${'x'.repeat(65_386)}\n+${'x'.repeat(65_386)}`;
+    const file = { ...makeFile('label-width.ts', 1), patch, additions: 2 };
+    const chunks = chunkDiff([file]);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('widens the fragment-count reservation when the total reaches two digits', () => {
+    const additions = 10;
+    const patch = [
+      `@@ -0,0 +1,${additions} @@`,
+      ...Array.from({ length: additions }, () => `+${'x'.repeat(40_000)}`),
+    ].join('\n');
+    const file = { ...makeFile('ten-fragments.ts', 1), patch, additions };
+    const chunks = chunkDiff([file]);
+    const fragments = chunks.flatMap((chunk) => chunk.files);
+
+    expect(chunks).toHaveLength(10);
+    expect(fragments.map((fragment) => fragment.patchFragment?.total)).toEqual(
+      Array<number>(10).fill(10)
+    );
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('rejects an oversized source before parsing or rendering it', () => {
+    const file = {
+      ...makeFile('source-too-large.ts', 1),
+      patch: 'x'.repeat(4 * 1024 * 1024 + 1),
+    };
+
+    expect(() => chunkDiff([file])).toThrow(
+      /source exceeds.*4,194,304 patch bytes.*before expansion/i
+    );
   });
 
   it('splits an oversized single-file patch without losing any patch content', () => {
@@ -134,9 +356,17 @@ describe('chunkDiff', () => {
   });
 
   it('fails loudly before chunk fanout exceeds the paid-work safety bound', () => {
-    const files = Array.from({ length: 33 }, (_, index) => makeFile(`large-${index}.ts`, 2000));
+    const files = Array.from({ length: 33 }, (_, index) => makeFile(`large-${index}.ts`, 1900));
 
     expect(() => chunkDiff(files)).toThrow(/requires 33 review chunks.*safety limit of 32/i);
+  });
+
+  it('rejects a source that cannot fit the chunk cap before expanding it', () => {
+    const file = makeAddedFile('too-many-lines.ts', 64_000);
+
+    expect(() => chunkDiff([file])).toThrow(
+      /source exceeds.*64,000 patch lines.*before expansion/i
+    );
   });
 
   it('uses unified-diff anchor coordinates for one-sided continuation ranges', () => {

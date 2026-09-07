@@ -3,6 +3,10 @@ const DIFF_END_DELIMITER = '<<<DIFF_END>>>';
 const CONTEXT_START_DELIMITER = '<<<CONTEXT_START>>>';
 const CONTEXT_END_DELIMITER = '<<<CONTEXT_END>>>';
 
+// Bound the exact delimiter-wrapped, neutralized diff sent in each review call.
+// Trusted context and reviewer instructions have their own independent limits.
+export const MAX_SECURED_DIFF_BYTES = 64 * 1024;
+
 const ALL_DELIMITERS = [
   DIFF_START_DELIMITER,
   DIFF_END_DELIMITER,
@@ -31,6 +35,21 @@ export function wrapDiff(diff: string): string {
   return `${DIFF_START_DELIMITER}\n${neutralizeDelimiters(diff)}\n${DIFF_END_DELIMITER}`;
 }
 
+export function securedDiffByteLength(diff: string): number {
+  return Buffer.byteLength(wrapDiff(diff), 'utf8');
+}
+
+export function assertSecuredDiffFits(diff: string): void {
+  const bytes = securedDiffByteLength(diff);
+  if (bytes > MAX_SECURED_DIFF_BYTES) {
+    throw new Error(
+      `Secured diff requires ${bytes.toLocaleString('en-US')} bytes, exceeding the limit of ` +
+        `${MAX_SECURED_DIFF_BYTES.toLocaleString('en-US')} bytes. Split the diff into smaller ` +
+        `review chunks.`
+    );
+  }
+}
+
 export function wrapContext(context: string, label?: string): string {
   const header = label ? `[${label}]` : '[context]';
   return `${CONTEXT_START_DELIMITER} ${header}\n${neutralizeDelimiters(context)}\n${CONTEXT_END_DELIMITER}`;
@@ -47,6 +66,7 @@ export function buildSecureDiffSection(
   diff: string,
   contextFiles?: Array<{ label: string; content: string }>
 ): string {
+  assertSecuredDiffFits(diff);
   const parts: string[] = [SECURITY_BOUNDARY_INSTRUCTIONS];
 
   if (contextFiles && contextFiles.length > 0) {

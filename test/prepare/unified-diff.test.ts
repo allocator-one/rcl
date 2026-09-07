@@ -43,6 +43,17 @@ describe('parseUnifiedDiff', () => {
     ]);
   });
 
+  it('tracks deletion anchors at their effective new-file coordinates', () => {
+    const deletion = parseUnifiedDiff('@@ -3,1 +2,0 @@ removed\n-old');
+    const replacement = parseUnifiedDiff('@@ -3,1 +3,1 @@ replaced\n-old\n+new');
+    expect(deletion.ok).toBe(true);
+    expect(replacement.ok).toBe(true);
+    if (!deletion.ok || !replacement.ok) return;
+
+    expect(deletion.diff.hunks[0]!.body.map((line) => line.newLine)).toEqual([3]);
+    expect(replacement.diff.hunks[0]!.body.map((line) => line.newLine)).toEqual([3, 3]);
+  });
+
   it.each([
     ['headerless content', 'plain text', 1, 'expected a unified-diff hunk header'],
     ['positive-count line zero', '@@ -0,1 +1,1 @@\n-old\n+new', 1, 'starts at line zero'],
