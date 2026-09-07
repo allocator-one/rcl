@@ -59,6 +59,15 @@ describe('usage extractors', () => {
     expect(usageFromGoogle({})).toBeUndefined();
   });
 
+  it('accept the nullable counters the SDK types allow', () => {
+    expect(
+      usageFromOpenAI({ prompt_tokens: 1, completion_tokens: null, completion_tokens_details: { reasoning_tokens: null } })
+    ).toEqual({ inputTokens: 1 });
+    expect(usageFromGoogle({ promptTokenCount: null, candidatesTokenCount: 2, thoughtsTokenCount: null })).toEqual({
+      outputTokens: 2,
+    });
+  });
+
   it('preserve zero counts and drop non-numeric values', () => {
     expect(usageFromAnthropic({ input_tokens: 0, output_tokens: 0 })).toEqual({ inputTokens: 0, outputTokens: 0 });
     expect(

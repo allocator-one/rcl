@@ -17,9 +17,12 @@ export interface PRMetadata {
   author: string;
   base: string;
   head: string;
-  /** Exact commit ids from `pulls.get` — the evidence ledger's head binding. */
-  headSha?: string;
-  baseSha?: string;
+  /**
+   * Exact commit ids from `pulls.get` — the evidence ledger's head binding.
+   * GitHub always returns both, so a PR is never bound without them.
+   */
+  headSha: string;
+  baseSha: string;
   mergeCommitSha?: string;
   url: string;
   labels: string[];

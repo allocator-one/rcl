@@ -49,15 +49,23 @@ export interface ContextDoc {
   sha256: string;
 }
 
+export interface LoadedContext {
+  docs: ContextDoc[];
+  /** Requested paths that could not be read (missing, a directory, denied). */
+  skipped: string[];
+}
+
 /**
  * Read context files exactly once. Unreadable paths (or directories) are
- * skipped, as `buildPrompt` always did; an oversized file is included as
- * the same placeholder the prompt carries, and its digest is of that
- * placeholder — the header must describe what reviewers saw, not what sat
- * on disk.
+ * skipped, as `buildPrompt` always did, and reported in `skipped` so the
+ * caller can say so — a renamed rules file must not silently become a
+ * review without rules. An oversized file is included as the same
+ * placeholder the prompt carries, and its digest is of that placeholder —
+ * the header must describe what reviewers saw, not what sat on disk.
  */
-export async function loadContextDocs(paths: readonly string[]): Promise<ContextDoc[]> {
+export async function loadContextDocs(paths: readonly string[]): Promise<LoadedContext> {
   const docs: ContextDoc[] = [];
+  const skipped: string[] = [];
   for (const path of paths) {
     const content = await loadFile(path);
     if (content) {
@@ -66,9 +74,11 @@ export async function loadContextDocs(paths: readonly string[]): Promise<Context
         content,
         sha256: createHash('sha256').update(content).digest('hex'),
       });
+    } else {
+      skipped.push(path);
     }
   }
-  return docs;
+  return { docs, skipped };
 }
 
 export interface BuiltPrompt {
@@ -127,7 +137,7 @@ export async function buildPrompt(
   // Context: pre-read docs when the caller supplied them (one read, shared
   // digests), otherwise load the paths here as before.
   const contextDocs: Array<{ label: string; content: string }> =
-    context?.contextDocs ?? (await loadContextDocs(context?.contextFiles ?? []));
+    context?.contextDocs ?? (await loadContextDocs(context?.contextFiles ?? [])).docs;
 
   // Build user prompt
   const basePrompt = context?.plan ? buildPlanPrompt(context.plan.focus) : buildBasePrompt();

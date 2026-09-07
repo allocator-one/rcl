@@ -1105,7 +1105,12 @@ async function executeCouncil(
   // async) carries these bytes, and the run header digests the same bytes —
   // a file edited mid-review can never make the header describe content the
   // reviewers did not see.
-  const contextDocs = await loadPromptContextDocs(contextFiles);
+  const { docs: contextDocs, skipped: skippedContext } = await loadPromptContextDocs(contextFiles);
+  for (const path of skippedContext) {
+    // Say so before the council runs: a renamed rules file must not turn
+    // into a review that quietly lacked its context.
+    console.warn(`Context file not readable, not included in the review: ${path}`);
+  }
   const prompts = await Promise.all(
     chunkAssignments.map(({ assignment, chunk }) =>
       buildPrompt(chunk, assignment.role, {

@@ -436,3 +436,23 @@ describe('round-3 hardening', () => {
     expect(diffDigest([{ ...base, filename: 'b.ts' }])).not.toBe(diffDigest([base]));
   });
 });
+
+describe('round-4 hardening', () => {
+  it('clamps duration_ms at zero when the clock runs backwards between start and finish', () => {
+    const run = buildRunHeader({
+      ...baseInput(),
+      startedAt: new Date('2026-09-07T10:02:30.500Z'),
+      finishedAt: new Date('2026-09-07T10:00:00.000Z'),
+    });
+    expect(run.duration_ms).toBe(0);
+  });
+
+  it('diffDigest equals the digest of the whole canonical array (streaming changes nothing)', async () => {
+    const { stableStringify, sha256Hex } = await import('../../src/report/run-header.js');
+    const files = [file({ filename: 'b.ts', patch: 'q' }), file({ filename: 'a.ts', status: 'renamed', previousFilename: 'z.ts' })];
+    const canonical = [...files]
+      .sort((x, y) => (x.filename < y.filename ? -1 : 1))
+      .map((f) => ({ filename: f.filename, status: f.status, previousFilename: f.previousFilename ?? null, patch: f.patch }));
+    expect(diffDigest(files)).toBe(sha256Hex(stableStringify(canonical)));
+  });
+});

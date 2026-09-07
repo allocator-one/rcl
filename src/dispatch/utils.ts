@@ -56,18 +56,18 @@ export function usageFromAnthropic(
 export function usageFromOpenAI(
   usage:
     | {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        completion_tokens_details?: { reasoning_tokens?: number } | null;
+        prompt_tokens?: number | null;
+        completion_tokens?: number | null;
+        completion_tokens_details?: { reasoning_tokens?: number | null } | null;
       }
     | null
     | undefined
 ): TokenUsage | undefined {
   if (!usage) return undefined;
   return compactUsage({
-    inputTokens: usage.prompt_tokens,
-    outputTokens: usage.completion_tokens,
-    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+    inputTokens: usage.prompt_tokens ?? undefined,
+    outputTokens: usage.completion_tokens ?? undefined,
+    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? undefined,
   });
 }
 
@@ -79,15 +79,19 @@ export function usageFromOpenAI(
  */
 export function usageFromGoogle(
   usage:
-    | { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number }
+    | {
+        promptTokenCount?: number | null;
+        candidatesTokenCount?: number | null;
+        thoughtsTokenCount?: number | null;
+      }
     | null
     | undefined
 ): TokenUsage | undefined {
   if (!usage) return undefined;
   return compactUsage({
-    inputTokens: usage.promptTokenCount,
+    inputTokens: usage.promptTokenCount ?? undefined,
     outputTokens: sumPresent(usage.candidatesTokenCount, usage.thoughtsTokenCount),
-    reasoningTokens: usage.thoughtsTokenCount,
+    reasoningTokens: usage.thoughtsTokenCount ?? undefined,
   });
 }
 

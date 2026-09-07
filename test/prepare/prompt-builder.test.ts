@@ -61,8 +61,10 @@ describe('context documents', () => {
     try {
       const path = join(dir, 'rules.md');
       await writeFile(path, '# Rules\nNever.\n');
-      const docs = await loadContextDocs([path, join(dir, 'missing.md'), dir]);
+      const { docs, skipped } = await loadContextDocs([path, join(dir, 'missing.md'), dir]);
       expect(docs).toHaveLength(1);
+      // Skips are reported, never silent: the caller warns per path.
+      expect(skipped).toEqual([join(dir, 'missing.md'), dir]);
       expect(docs[0]).toMatchObject({
         label: path,
         content: '# Rules\nNever.\n',

@@ -166,15 +166,28 @@ export function stableStringify(value: unknown): string {
  * plan modes (PR mode has no raw diff).
  */
 export function diffDigest(files: readonly FileChange[]): string {
-  const canonical = [...files]
-    .sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0))
-    .map((f) => ({
-      filename: f.filename,
-      status: f.status,
-      previousFilename: f.previousFilename ?? null,
-      patch: f.patch,
-    }));
-  return sha256Hex(stableStringify(canonical));
+  // Streamed file by file — the bytes hashed are exactly
+  // stableStringify(array of records), but only one record's patch is ever
+  // serialized at a time, so a very large diff never needs a second full
+  // copy of itself in memory.
+  const hash = createHash('sha256');
+  const sorted = [...files].sort((a, b) =>
+    a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0
+  );
+  hash.update('[');
+  sorted.forEach((f, i) => {
+    if (i > 0) hash.update(',');
+    hash.update(
+      stableStringify({
+        filename: f.filename,
+        status: f.status,
+        previousFilename: f.previousFilename ?? null,
+        patch: f.patch,
+      })
+    );
+  });
+  hash.update(']');
+  return hash.digest('hex');
 }
 
 /**

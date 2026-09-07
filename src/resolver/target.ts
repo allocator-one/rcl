@@ -39,8 +39,8 @@ export async function resolveReviewTarget(
       repo: `${m.owner}/${m.repo}`,
       prNumber: m.number,
       url: m.url,
-      ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
-      ...(m.baseSha !== undefined ? { baseSha: m.baseSha } : {}),
+      headSha: m.headSha,
+      baseSha: m.baseSha,
       headRef: m.head,
       baseRef: m.base,
     };
@@ -69,12 +69,12 @@ export async function resolveReviewTarget(
 export function assertExpectedHead(target: ReviewTarget, expected: string): void {
   const sha = validateSha(expected, '--expect-head-sha');
   if (target.headSha === undefined) {
+    // A PR target always carries its head (PRMetadata requires it); only a
+    // patch file or a git mode outside a repository can lack one.
     const hint =
       target.kind === 'patch'
         ? 'pass --head-sha with the patch file'
-        : target.kind === 'pr'
-          ? 'GitHub returned no head SHA for this PR'
-          : 'HEAD could not be resolved (not a git repository, or an unborn branch)';
+        : 'HEAD could not be resolved (not a git repository, or an unborn branch)';
     throw new Error(
       `--expect-head-sha was given but this ${describeKind(target.kind)} has no head SHA: ${hint}.`
     );

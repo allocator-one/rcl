@@ -90,8 +90,12 @@ describe('assertExpectedHead', () => {
     expect(() => assertExpectedHead(patch, HEAD)).toThrow(/pass --head-sha/);
     const staged = await resolveReviewTarget(localDiff, 'staged', {}, { gitHeads: {} });
     expect(() => assertExpectedHead(staged, HEAD)).toThrow(/HEAD could not be resolved/);
-    const pr = await resolveReviewTarget(prDiff({ headSha: undefined }), undefined, {});
-    expect(() => assertExpectedHead(pr, HEAD)).toThrow(/no head SHA for this PR/);
+  });
+
+  it('a PR target always carries both SHAs (the metadata type requires them)', async () => {
+    const target = await resolveReviewTarget(prDiff(), undefined, {});
+    expect(target.headSha).toBe(HEAD);
+    expect(target.baseSha).toBe(BASE);
   });
 
   it('rejects an abbreviated expectation', async () => {
