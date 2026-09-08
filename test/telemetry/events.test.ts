@@ -55,7 +55,9 @@ describe('deliverable', () => {
   it('refuses counters that are not positive integers', () => {
     expect(deliverable(buildEvent({ kind: 'attempt_claimed', attempt: Number.NaN }))).toBe(false);
     expect(deliverable(buildEvent({ kind: 'attempt_claimed', attempt: 0 }))).toBe(false);
-    expect(deliverable(buildEvent({ kind: 'round_processed', round: 1.5, runId: 'r' }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'round_processed', round: 1.5, runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'round_processed', round: 0, runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(false);
+    expect(deliverable(buildEvent({ kind: 'round_processed', round: 2, runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(true);
     expect(deliverable(buildEvent({ kind: 'round_processed', round: 2, runId: '' }))).toBe(false);
   });
 });

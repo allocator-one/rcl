@@ -198,6 +198,7 @@ In a Harness-managed repository (one carrying `.harness-cli/config.json`) with a
 
 - `Evidence recorded: <url>` — the run is on Harness; include the URL in the report back.
 - `Evidence spooled (Harness unreachable); run rcl telemetry flush` — retry with `rcl telemetry flush` (never by re-running the review, which would spend the council again).
+- `Evidence recorded: <url> (artifacts spooled; run rcl telemetry flush)` — the run landed but an artifact did not: the evidence is incomplete until `rcl telemetry flush --run <run id>` succeeds; report it as such, not as recorded.
 - `Evidence not sent: <host> has not enabled review evidence for this organization` — expected until the org switches it on; nothing to do.
 - `Evidence not sent: not logged in to Harness …` — tell the user to run `harness login` (CI sets `HARNESS_API_TOKEN` + `HARNESS_API_URL` instead).
 

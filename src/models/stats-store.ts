@@ -61,10 +61,9 @@ export const MIN_OUTCOMES_FOR_WEIGHT = 20;
 const OUTCOMES_FILE = 'outcomes.jsonl';
 const CALLS_FILE = 'calls.jsonl';
 
-export function resolveDataDir(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env['RCL_DATA_DIR']?.trim();
-  return override && override.length > 0 ? override : join(homedir(), '.rcl');
-}
+import { resolveDataDir } from '../config/data-dir.js';
+
+export { resolveDataDir };
 
 /**
  * Keep each write() below this size and aligned to line boundaries, so two

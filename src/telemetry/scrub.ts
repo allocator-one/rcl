@@ -79,8 +79,9 @@ function redactQuoted(match: string, prefix: string): string {
 export function scrubText(text: string, max: number = MAX_FREE_TEXT): string {
   const bounded = preCut(text, max * 4);
   const scrubbed = scrubSecrets(bounded);
-  if (scrubbed.length <= max && bounded === text) return scrubbed;
-  return `${[...scrubbed].slice(0, Math.max(0, max - 1)).join('')}…`;
+  const points = [...scrubbed];
+  if (points.length <= max && bounded === text) return scrubbed;
+  return `${points.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
 function preCut(text: string, at: number): string {
@@ -103,7 +104,8 @@ export function scrubIdentifier(text: string, max: number = 200): string {
   for (const pattern of KEY_PATTERNS) out = out.replace(pattern, REDACTED);
   out = out.replace(ASSIGNMENT_QUOTED, redactQuoted);
   out = out.replace(ASSIGNMENT, (_match, prefix: string) => `${prefix}${REDACTED}`);
-  return out.length <= max ? out : `${[...out].slice(0, Math.max(0, max - 1)).join('')}…`;
+  const points = [...out];
+  return points.length <= max ? out : `${points.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
 export function scrubOptional(text: string | undefined, max: number = MAX_FREE_TEXT): string | undefined {

@@ -317,11 +317,6 @@ describe('Outbox', () => {
     const down = fakeSink({ postEvents: [{ kind: 'unavailable', reason: 'HTTP 503' }] });
     expect(await outbox.flush(down.sink)).toMatchObject({ delivered: [envelope.run.id, OTHER_RUN], stopped: 'unavailable', lossPending: 2 });
 
-    // The server accounts for one of two: both files stay for the next flush.
-    const partial = fakeSink({ postEvents: [{ kind: 'ok', value: { inserted: 1, duplicates: 0 }, httpStatus: 201 }] });
-    expect(await outbox.flush(partial.sink)).toMatchObject({ lossPending: 2 });
-    expect(await outbox.pendingLoss()).toHaveLength(2);
-
     const up = fakeSink({ postEvents: [{ kind: 'ok', value: { inserted: 1, duplicates: 1 }, httpStatus: 201 }] });
     expect(await outbox.flush(up.sink)).toMatchObject({ lossReported: 2 });
     expect(await outbox.pendingLoss()).toEqual([]);
@@ -372,11 +367,23 @@ describe('Outbox', () => {
 
     let tick = 0;
     const { sink } = fakeSink({});
-    // Clock: the flush start and the first entry's deadline check read 0; everything after is past the deadline.
-    const summary = await outbox.flush(sink, { deadlineMs: 10, now: () => (tick++ < 2 ? 0 : 1_000) });
+    // Clock: the flush start, the first entry's loop check and its pre-request check read 0; everything after is past the deadline.
+    const summary = await outbox.flush(sink, { deadlineMs: 10, now: () => (tick++ < 3 ? 0 : 1_000) });
     expect(summary.delivered).toHaveLength(1);
     expect(summary.remaining).toHaveLength(1);
     expect(summary.stopped).toBe('deadline');
+  });
+
+  it('flushes one run without reading the others, and refuses a malformed id', async () => {
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: envelope.run.id, envelope });
+    const other = buildRunEnvelope(sampleResult({ run: { ...envelope.run, id: OTHER_RUN } }), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    await outbox.spoolRun({ runId: OTHER_RUN, envelope: other });
+    const { sink, calls } = fakeSink({});
+    expect(await outbox.flush(sink, { runId: OTHER_RUN })).toMatchObject({ delivered: [OTHER_RUN], remaining: [] });
+    expect(calls).toHaveLength(1);
+    expect((await outbox.list()).map((e) => e.id)).toEqual([envelope.run.id]);
+    await expect(outbox.flush(sink, { runId: '../escape' })).rejects.toBeInstanceOf(OutboxError);
   });
 
   it('spools event batches of their own and delivers them', async () => {

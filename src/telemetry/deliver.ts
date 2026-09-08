@@ -3,7 +3,7 @@ import { join } from 'path';
 import { SEARCH_PLACES } from '../config/loader.js';
 import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
-import { resolveDataDir } from '../models/stats-store.js';
+import { resolveDataDir } from '../config/data-dir.js';
 import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
 import { buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type TelemetryLevel } from './envelope.js';
 import { deliverable, type WireEvent } from './events.js';
@@ -59,12 +59,16 @@ export interface RuntimeOptions {
 const ENV_OFF = new Set(['off', '0', 'false', 'no', 'none', 'disabled']);
 const LEVELS = new Set<TelemetryLevel>(['off', 'envelope', 'findings', 'full']);
 
-/** What `RCL_TELEMETRY` asks for: `off` (also `0`, `false`, `no`), a level name, or nothing. */
+/**
+ * What `RCL_TELEMETRY` asks for: `off` (also `0`, `false`, `no`), a level
+ * name, or nothing when unset. A value that is set but not understood is a
+ * failed opt-out and reads as `off` — never as the default.
+ */
 export function envTelemetryLevel(env: Record<string, string | undefined>): TelemetryLevel | undefined {
   const raw = (env['RCL_TELEMETRY'] ?? '').trim().toLowerCase();
   if (raw === '') return undefined;
   if (ENV_OFF.has(raw)) return 'off';
-  return LEVELS.has(raw as TelemetryLevel) ? (raw as TelemetryLevel) : undefined;
+  return LEVELS.has(raw as TelemetryLevel) ? (raw as TelemetryLevel) : 'off';
 }
 
 /** `--no-telemetry` wins, then `RCL_TELEMETRY`, then `harness.telemetry`; default `full`. */

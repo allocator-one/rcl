@@ -81,7 +81,12 @@ describe('telemetry delivery', () => {
       expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'false' })).toBe('off');
       expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: '0' })).toBe('off');
       expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'findings' })).toBe('findings');
-      expect(resolveTelemetryLevel({ harness: { telemetry: 'envelope' } }, {}, { RCL_TELEMETRY: 'nonsense' })).toBe('envelope');
+      // A value that is set but not understood is a failed opt-out: off, never the default.
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'envelope' } }, {}, { RCL_TELEMETRY: 'nonsense' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'OFF' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: ' off ' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'False' })).toBe('off');
+      expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, {}, { RCL_TELEMETRY: 'Findings' })).toBe('findings');
       expect(resolveTelemetryLevel({ harness: { telemetry: 'full' } }, { noTelemetry: true }, {})).toBe('off');
     });
   });

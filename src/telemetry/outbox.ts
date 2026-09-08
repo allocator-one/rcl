@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'fs/promises';
 import { join, resolve, sep } from 'path';
-import { resolveDataDir } from '../models/stats-store.js';
+import { resolveDataDir } from '../config/data-dir.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import { buildEvent, type WireEvent } from './events.js';
 import type { HarnessSink, RequestOptions } from './sink.js';
@@ -364,14 +364,21 @@ export class Outbox {
     return files;
   }
 
-  async list(): Promise<OutboxEntry[]> {
+  /** Every entry, or — given `only` — that one entry when it exists (a targeted flush reads nothing else). */
+  async list(only?: string): Promise<OutboxEntry[]> {
     let names: string[];
-    try {
-      names = (await readdir(this.dir, { withFileTypes: true }))
-        .filter((d) => d.isDirectory() && ENTRY_ID.test(d.name))
-        .map((d) => d.name);
-    } catch {
-      return [];
+    if (only !== undefined) {
+      const dir = this.entryDir(only);
+      const exists = await stat(dir).then((info) => info.isDirectory()).catch(() => false);
+      names = exists ? [only] : [];
+    } else {
+      try {
+        names = (await readdir(this.dir, { withFileTypes: true }))
+          .filter((d) => d.isDirectory() && ENTRY_ID.test(d.name))
+          .map((d) => d.name);
+      } catch {
+        return [];
+      }
     }
     const entries: OutboxEntry[] = [];
     for (const id of names.sort()) {
@@ -418,7 +425,7 @@ export class Outbox {
       options.deadlineMs === undefined ? {} : { timeoutMs: Math.max(1, options.deadlineMs - (now() - started)) };
     const summary: FlushSummary = { delivered: [], remaining: [], failed: [] };
 
-    const entries = (await this.list()).filter((e) => options.runId === undefined || e.id === options.runId);
+    const entries = await this.list(options.runId);
     for (const entry of entries) {
       if (entry.failed) {
         summary.failed.push({ id: entry.id, reason: entry.failed.reason });
@@ -508,6 +515,7 @@ export class Outbox {
       }
       const envelope = read.value;
       envelope.delivery = { mode: 'retried', spooled_at: meta.spooled_at };
+      if (pastDeadline()) return { kind: 'deadline' };
       const outcome = await sink.postRun(envelope, request());
       switch (outcome.kind) {
         case 'ok':
@@ -546,9 +554,12 @@ export class Outbox {
         }
         const outcome = await sink.putArtifact(entry.id, kind, bytes, request());
         switch (outcome.kind) {
-          case 'ok':
-            await rm(path, { force: true });
+          case 'ok': {
+            // Remove exactly the bytes that were uploaded; a re-spool meanwhile stays.
+            const current = await readFile(path, 'utf8').catch(() => undefined);
+            if (current === bytes) await rm(path, { force: true });
             break;
+          }
           case 'disabled':
             if (outcome.reason === 'reviews_disabled') {
               await this.drop(dir);
@@ -682,14 +693,12 @@ export class Outbox {
         request()
       );
       switch (outcome.kind) {
-        case 'ok': {
-          const accounted = outcome.value.inserted + outcome.value.duplicates;
-          // Anything the server did not account for stays for the next flush; it dedupes by id.
-          if (accounted < batch.length) return { kind: 'done', reported };
+        case 'ok':
+          // The sink only reads `ok` when the receipt accounts for every event
+          // sent (inserted or already known), so the whole batch is done.
           for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true }).catch(() => undefined);
           reported += batch.length;
           break;
-        }
         case 'disabled':
           for (const f of batch) await rm(join(this.dir, LOSS_DIR, f.name), { force: true }).catch(() => undefined);
           break;

@@ -128,10 +128,11 @@ export function fakeFetch(
 ): { fetch: typeof fetch; requests: RecordedRequest[] } {
   const requests: RecordedRequest[] = [];
   const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    // Every HeadersInit shape (record, tuple array, Headers) normalizes the same way.
     const headers: Record<string, string> = {};
-    for (const [key, value] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
+    new Headers(init?.headers ?? {}).forEach((value, key) => {
       headers[key.toLowerCase()] = value;
-    }
+    });
     const request: RecordedRequest = {
       url: String(input),
       method: init?.method ?? 'GET',
