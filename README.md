@@ -337,8 +337,10 @@ same for patch files): the run is bound to that pull request and its
 request's head. Owner and repository are lower-cased, as GitHub reads them. Counting the round for that pull request's
 gate is the server half (IO-12585); until it lands, `rcl evidence status`
 still reads `stale`/`none` for patch-file loops. The flag is refused on PR and
-git-mode targets, which name their own pull request or checkout. `rcl-converge` passes it on every round of a pull request loop
-together with `--converge-target`, `--round` and `--attempt`. A converge
+git-mode targets, which name their own pull request or checkout. `rcl-converge` passes `--converge-target`, `--round`
+and `--attempt` on every round and adds `--for-pr` when a pull request loop
+reviews a patch file taken from the pull request (a pull request target names
+its own). A converge
 target of the `owner/repo#N` form attributes the run the same way; a slug such
 as `rcl-7` does not.
 

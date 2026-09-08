@@ -3,7 +3,7 @@ import type { GitHeads } from './git.js';
 import { resolveGitHeads } from './git.js';
 import { validateSha, type RunHeaderInput } from '../report/run-header.js';
 import { isGitHubTarget, parseGitHubTarget } from './github.js';
-import { parseRepoName } from '../evidence/target.js';
+import { parseRepoName } from './github.js';
 
 /**
  * Exact-head binding (IO-12475 section 8.1): which commit a diff belongs

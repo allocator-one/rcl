@@ -13,7 +13,9 @@
   git-mode targets, which name their own (`RCL_FOR_PR` only ever attributes a
   patch file). The
   `rcl-converge` skill passes `--converge-target '<TARGET>' --round <R>
-  --attempt <ATTEMPT> --for-pr <owner/repo#N>` on every launch, counts a
+  --attempt <ATTEMPT>` on every launch and adds `--for-pr <owner/repo#N>` when
+  the round reviews a patch file taken from the pull request (a pull request or
+  git-mode target names its own), counts a
   spooled round as evidence only once its flush is acknowledged (ledger
   `evidence: pending` until then), reads `rcl evidence status` after the loop
   next to the machine resolution, and records that the converge ledger is
