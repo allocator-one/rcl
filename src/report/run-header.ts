@@ -93,6 +93,8 @@ export interface RunHeader {
   /** Computed even without --ci so the gate verdict is recorded uniformly. */
   ci_exit_code: number;
   converge?: ConvergeContext;
+  /** `backfill` for recovered history (`rcl telemetry backfill`); absent means live. */
+  provenance?: 'live' | 'backfill';
 }
 
 export interface ResolvedThresholds {

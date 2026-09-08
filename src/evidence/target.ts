@@ -37,6 +37,13 @@ function legalRepo(owner: string, repo: string): RepoRef | null {
   return { owner, repo };
 }
 
+/** An `owner/repo` argument as a repository, or `null` when it is not one GitHub would accept. */
+export function parseRepoName(text: string): RepoRef | null {
+  const parts = text.trim().split('/');
+  if (parts.length !== 2) return null;
+  return legalRepo(parts[0]!, parts[1]!);
+}
+
 /** The GitHub repository a remote URL names, or `null` for anything else. */
 export function parseRemoteUrl(url: string): RepoRef | null {
   const trimmed = url.trim();

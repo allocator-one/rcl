@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 /**
  * RFC 9562 UUID version 7: 48-bit Unix millisecond timestamp, then version
@@ -20,4 +20,23 @@ export function uuidv7(now: number = Date.now()): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80; // RFC variant
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** The namespace `rcl telemetry backfill` derives run ids in (RCL-38). */
+export const UUID_NAMESPACE_RCL_BACKFILL = '7d3b1c2e-8a4f-4b6d-9c1e-2f3a4b5c6d7e';
+
+/**
+ * RFC 4122 version 5: SHA-1 of the namespace UUID's bytes followed by the
+ * name, with the version and variant bits set. Deterministic — the same name
+ * in the same namespace is the same id, which is what makes a backfill
+ * re-run a no-op on the server.
+ */
+export function uuidv5(name: string, namespace: string): string {
+  const ns = Buffer.from(namespace.replace(/-/g, ''), 'hex');
+  if (ns.length !== 16) throw new Error('uuidv5 namespace must be a UUID');
+  const hash = createHash('sha1').update(ns).update(Buffer.from(name, 'utf8')).digest();
+  hash[6] = (hash[6]! & 0x0f) | 0x50;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }

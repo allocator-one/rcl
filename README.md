@@ -350,6 +350,43 @@ rcl models seed --from ~/recovered-rcl-artifacts   # backfill from reports + con
 
 ---
 
+Since 3.1 the table merges the organization's window from Harness
+(`GET /api/v1/reviews/model-stats`, the server-side `rcl models` over every run
+the org recorded, backfilled history included) with this machine's store: for a
+model the server holds at least 20 outcomes for, the server's weight is used
+(`source: server`); below that the local store decides (`local`); a model
+neither knows enough about keeps the neutral weight (`neutral`). Reviews weight
+consensus the same way, asking the server with a three-second bound and falling
+back to the local store when it cannot answer. `--local` shows this machine's
+view alone; `--json` carries `server` (host, window, rows) and `weights` with
+their `source`.
+
+```bash
+rcl models                       # org-wide where Harness has enough history, local otherwise
+rcl models show --local          # this machine's store only
+rcl models show --window 30 --json
+```
+
+### `rcl telemetry backfill`
+
+Recovered history becomes day-one evidence on Harness. `rcl telemetry backfill
+--from <dir> --repo <owner/repo>` reads the pre-3.0 `rcl-report-*.json`
+reports and `rcl-converge-*-ledger.md` ledgers in a directory (the same layout
+`rcl models seed` reads) and posts each report as a run with `provenance:
+backfill`: a synthesized header bound to the named repository (target `patch`,
+the report bytes as the digest, a runner claim naming this command), the
+report's findings with their stable identities, its reviewer calls, and the
+report files as artifacts. Ledger bullets matched to a round's findings become
+`verdicts_recorded` events. Run ids are UUIDv5 of `(host, repo, sha256 of the
+report)` and event ids derive from them, so running the backfill twice reports
+the second run as `0 new` — nothing is duplicated. Backfilled runs count for
+model stats and analytics and never enter a gate decision.
+
+```bash
+rcl telemetry backfill --from ~/recovered-rcl-artifacts --repo allocator-one/allocator-one --dry-run
+rcl telemetry backfill --from ~/recovered-rcl-artifacts --repo allocator-one/allocator-one
+```
+
 ## Config File
 
 Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.

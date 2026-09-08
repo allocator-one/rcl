@@ -86,7 +86,6 @@ import {
   appendCalls,
   appendOutcomes,
   loadModelStats,
-  loadModelWeights,
   resolveDataDir,
   DEFAULT_WINDOW_DAYS,
   MIN_OUTCOMES_FOR_WEIGHT,
@@ -115,6 +114,8 @@ import {
   flushOutboxAtStart,
   type DeliveryOutcome,
   type TelemetryRuntime,
+  loadHarnessSettings,
+  resolveTelemetryLevel,
 } from './telemetry/deliver.js';
 import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
 import { scrubText } from './telemetry/scrub.js';
@@ -122,6 +123,10 @@ import { buildEvent, type WireEvent } from './telemetry/events.js';
 import { credentialHost } from './telemetry/credentials.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
+import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
+import { runBackfill } from './telemetry/backfill.js';
+import { parseRepoName } from './evidence/target.js';
+import { text } from './evidence/format.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
@@ -861,6 +866,72 @@ evidenceCmd
     process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
   });
 
+telemetry
+  .command('backfill')
+  .description('Post recovered pre-3.0 reports and converge ledgers as backfill evidence (deterministic ids: running twice adds nothing)')
+  .requiredOption('--from <dir>', 'Directory of rcl-report-*.json reports and rcl-converge-*-ledger.md ledgers')
+  .requiredOption('--repo <owner/repo>', 'The GitHub repository the reports reviewed')
+  .option('--dry-run', 'Build the runs and report counts without posting')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { from: string; repo: string; dryRun?: boolean; json?: boolean }) => {
+    const repo = parseRepoName(opts.repo);
+    if (repo === null) {
+      console.error(chalk.red('--repo must be a GitHub owner/repo.'));
+      process.exitCode = 2;
+      return;
+    }
+    // A dry run builds and counts; it needs no credential and sends nothing.
+    // The ids still depend on the host, so a credential is used for them when
+    // there is one and a placeholder named otherwise.
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
+    let host: string;
+    if (runtime.sink && runtime.credential) {
+      host = credentialHost(runtime.credential);
+    } else if (opts.dryRun) {
+      host = 'no-credential';
+    } else {
+      const reason = runtime.level === 'off' ? 'telemetry is off' : runtime.note ?? 'no Harness credential';
+      console.error(chalk.red(`Cannot backfill: ${reason}.`));
+      process.exitCode = 1;
+      return;
+    }
+    let summary;
+    try {
+      summary = await runBackfill(
+        { dir: opts.from, repo: `${repo.owner}/${repo.repo}`, rclVersion: RCL_VERSION, ...(opts.dryRun ? { dryRun: true } : {}) },
+        {
+          ...(runtime.sink ? { sink: runtime.sink } : {}),
+          host,
+          placeholderHost: host === 'no-credential',
+          ...(opts.json ? {} : { progress: (line: string) => console.log(chalk.dim(text(line, 400))) }),
+        }
+      );
+    } catch (err) {
+      console.error(chalk.red(`Cannot backfill: ${scrubText(err instanceof Error ? err.message : String(err), 300)}`));
+      process.exitCode = 1;
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else if (summary.dryRun) {
+      console.log(
+        `Would post ${summary.runs} run(s) with ${summary.planned.artifacts} artifact(s) and ${summary.planned.events} verdict event(s) ` +
+          `(${summary.planned.verdicts} verdicts)${host === 'no-credential' ? ' — ids shown for a placeholder host; log in for the real ones' : ''}; ` +
+          `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched}, unmatched ${summary.bulletsUnmatched}.`
+      );
+      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${text(f.file, 200)}: ${text(f.reason, 300)}`));
+    } else {
+      console.log(
+        `Posted ${summary.runs} run(s): ${summary.created} new, ${summary.existing} already recorded; ` +
+          `${summary.artifacts} artifact(s) uploaded for the new runs; verdict events ${summary.events.inserted} new, ${summary.events.duplicates} already recorded; ` +
+          `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched} (at build), unmatched ${summary.bulletsUnmatched}.`
+      );
+      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${text(f.file, 200)}: ${text(f.reason, 300)}`));
+      for (const f of summary.failed) console.log(chalk.red(`  failed ${text(f.file, 200)}: ${text(f.reason, 300)}`));
+    }
+    if (summary.failed.length > 0) process.exitCode = 1;
+  });
+
 // Detached async-lane worker (RCL-25) — launched by the review process for
 // each async (non-blocking) reviewer call; not for interactive use.
 program
@@ -886,8 +957,9 @@ modelsCmd
   .command('show', { isDefault: true })
   .description(`Print per-model stats over the trailing window (default ${DEFAULT_WINDOW_DAYS} days)`)
   .option('--window <days>', 'Trailing window in days', String(DEFAULT_WINDOW_DAYS))
+  .option('--local', 'This machine’s store only; do not ask Harness for the org-wide window')
   .option('--json', 'Output JSON')
-  .action(async (opts: { window: string; json?: boolean }) => {
+  .action(async (opts: { window: string; local?: boolean; json?: boolean }) => {
     const windowDays = Number(opts.window);
     if (!Number.isFinite(windowDays) || windowDays <= 0) {
       console.error(chalk.red('--window must be a positive number of days.'));
@@ -895,19 +967,57 @@ modelsCmd
       return;
     }
     const stats = await loadModelStats({ windowDays });
+    // The org-wide window (RCL-38): Harness's `model-stats` over every run the
+    // organization recorded. Its weight wins for a model it has the outcome
+    // floor for; this machine's store decides below that. The same window is
+    // asked of both; the server answers up to 366 days.
+    const server = opts.local
+      ? ({ kind: 'none', reason: '--local' } as const)
+      : !Number.isInteger(windowDays) || windowDays > 366
+        ? ({ kind: 'none', reason: `the server window is whole days up to 366 (asked for ${windowDays})` } as const)
+        : await fetchServerModelStats({ rclVersion: RCL_VERSION, windowDays });
+    const merged = mergeWeights(stats, server.kind === 'ok' ? server.value : undefined);
     if (opts.json) {
-      console.log(JSON.stringify({ windowDays, dataDir: resolveDataDir(), models: stats }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            windowDays,
+            dataDir: resolveDataDir(),
+            models: stats,
+            server: server.kind === 'ok' ? { host: server.host, ...server.value } : null,
+            serverNote: server.kind === 'ok' ? null : server.reason,
+            weights: merged.map(({ model, weight, source, serverOutcomes, localOutcomes }) => ({
+              model,
+              weight,
+              source,
+              ...(serverOutcomes !== undefined ? { serverOutcomes } : {}),
+              ...(localOutcomes !== undefined ? { localOutcomes } : {}),
+            })),
+          },
+          null,
+          2
+        )
+      );
       return;
     }
-    if (stats.length === 0) {
+    if (merged.length === 0) {
       console.log(
-        `No model history in ${resolveDataDir()} yet. Converge runs record it automatically; ` +
-          'seed from recovered artifacts with `rcl models seed --from <dir>`.'
+        `No model history in ${resolveDataDir()} yet` +
+          (server.kind === 'ok' ? ` and none on ${server.host} for this window.` : ` (org-wide: ${server.reason}).`) +
+          ' Converge runs record it automatically; seed from recovered artifacts with `rcl models seed --from <dir>`,' +
+          ' or backfill the organization with `rcl telemetry backfill --from <dir> --repo <owner/repo>`.'
       );
       return;
     }
     console.log('\n' + chalk.bold(`Model history — trailing ${windowDays} days`) + '\n');
-    const pct = (v: number | undefined): string => (v === undefined ? '—' : `${(v * 100).toFixed(0)}%`);
+    console.log(
+      chalk.dim(
+        server.kind === 'ok'
+          ? `Org-wide from ${server.host}: ${server.value.models.length} model(s), window ${server.value.window_days} days, computed ${server.value.computed_at}.`
+          : `Org-wide window not used (${server.reason}); weights are this machine’s.`
+      )
+    );
+    const pct = (v: number | null | undefined): string => (v === undefined || v === null ? '—' : `${(v * 100).toFixed(0)}%`);
     console.log(
       chalk.dim(
         'model'.padEnd(46) +
@@ -915,27 +1025,34 @@ modelsCmd
           'calls'.padEnd(8) +
           'dead'.padEnd(7) +
           'p50'.padEnd(8) +
-          'weight'
+          'weight'.padEnd(8) +
+          'source'
       )
     );
-    for (const s of stats) {
-      const precision =
-        s.outcomes > 0 ? `${pct(s.precision)} (${s.outcomes})` : '— (0)';
-      const weightNote = s.outcomes < MIN_OUTCOMES_FOR_WEIGHT ? ' (neutral)' : '';
+    for (const row of merged) {
+      // Every column of a row comes from one record: the server's when the
+      // server weighs it, else this machine's, else the server's thin row.
+      const fromServer = row.source === 'server' || (row.local === undefined && row.server !== undefined);
+      const outcomes = fromServer ? (row.server?.outcomes ?? 0) : (row.local?.outcomes ?? 0);
+      const precision = fromServer ? pct(row.server?.precision) : pct(row.local?.precision);
+      const calls = fromServer ? (row.server?.calls ?? 0) : (row.local?.calls ?? 0);
+      const dead = fromServer ? pct(row.server?.dead_rate) : pct(row.local?.deadRate);
+      const p50 = fromServer ? (row.server?.p50_ms ?? null) : (row.local?.p50Ms ?? null);
       console.log(
-        s.model.padEnd(46) +
-          precision.padEnd(16) +
-          String(s.calls).padEnd(8) +
-          pct(s.deadRate).padEnd(7) +
-          (s.p50Ms !== undefined ? `${(s.p50Ms / 1000).toFixed(0)}s` : '—').padEnd(8) +
-          s.weight.toFixed(2) +
-          chalk.dim(weightNote)
+        text(row.model, 46).padEnd(46) +
+          `${outcomes > 0 ? precision : '—'} (${outcomes})`.padEnd(16) +
+          String(calls).padEnd(8) +
+          dead.padEnd(7) +
+          (typeof p50 === 'number' ? `${(p50 / 1000).toFixed(0)}s` : '—').padEnd(8) +
+          row.weight.toFixed(2).padEnd(8) +
+          row.source
       );
     }
     console.log(
       chalk.dim(
         `\nWeights (0.5 + precision, clamped to [0.5, 1.5]; neutral 1 under ${MIN_OUTCOMES_FOR_WEIGHT} outcomes) ` +
-          'scale each model’s consensus vote in reviews and gating.\n'
+          'scale each model’s consensus vote in reviews and gating. Source: server = the organization’s window on Harness, ' +
+          'local = this machine’s store, neutral = neither holds enough.\n'
       )
     );
   });
@@ -1588,11 +1705,20 @@ async function executeCouncil(
 
   // Trailing-precision weights scale each model's consensus vote. An empty
   // history means no weighting (and no weight noise in the report).
+  // Org-wide history from Harness outranks this machine's store for a model
+  // the org has enough outcomes for (RCL-38); the server is asked with a
+  // short bound and the local store stands in when it cannot answer.
+  // Telemetry off means nothing leaves the machine for weights either. The
+  // server side is bounded to three seconds; the settings file and the local
+  // store are read as local files.
   let modelWeights: Map<string, number> | undefined;
   try {
-    const loaded = await loadModelWeights();
+    const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd()), { noTelemetry: opts.telemetry === false }, process.env);
+    const loaded = await loadMergedWeights({ rclVersion: RCL_VERSION, timeoutMs: 3_000, serverEnabled: level !== 'off' });
     if (loaded.size > 0) modelWeights = loaded;
-  } catch {
+  } catch (err) {
+    // Weights are advisory; the review runs unweighted, but not silently.
+    console.warn(`Model weights unavailable (consensus unweighted): ${scrubText(err instanceof Error ? err.message : String(err), 300)}`);
     modelWeights = undefined;
   }
 

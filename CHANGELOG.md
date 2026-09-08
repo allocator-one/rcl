@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Org-wide model weights** (RCL-38): `rcl models` merges Harness's
+  `GET /api/v1/reviews/model-stats` (the organization's window over every run
+  it recorded, backfilled history included) with this machine's store — the
+  server's weight for a model it holds ≥ 20 outcomes for, the local weight
+  below that, neutral for a model neither knows enough about — and shows each
+  row's `source`; `--local` keeps to the machine. Reviews weight consensus the
+  same way (`loadMergedWeights`, three-second bound, local fallback).
+- **`rcl telemetry backfill --from <dir> --repo <owner/repo> [--dry-run] [--json]`**
+  (RCL-38): pre-3.0 reports and converge ledgers become runs with
+  `provenance: backfill` (synthesized header bound to the repository, findings
+  with stable identities, reviewer calls, both report files as artifacts) and
+  `verdicts_recorded` events; ids are UUIDv5 of `(host, repo, sha256 of the
+  report)` so a second run adds nothing. `RunHeader.provenance` and `uuidv5`
+  are new; `openReadSink` is the shared credential-only sink for reads.
+
 - **`rcl evidence status [<pr>]` and `rcl evidence show <run id>`** (RCL-41):
   the read side of the evidence ledger. `status` fetches
   `GET /api/v1/reviews/prs/:owner/:repo/:number` — a bare `N` or `#N` is read
