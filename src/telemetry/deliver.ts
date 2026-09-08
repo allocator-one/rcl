@@ -97,7 +97,9 @@ export async function loadHarnessSettings(cwd: string): Promise<Pick<Config, 'ha
     // user wrote next to a typo must still hold.
     return parsed.success ? { harness: parsed.data } : { harness: { telemetry: 'off' } };
   } catch {
-    return undefined;
+    // A file that exists but cannot be read or parsed may hold an opt-out
+    // behind a syntax error: fail closed, as for an unparseable section.
+    return { harness: { telemetry: 'off' } };
   }
 }
 

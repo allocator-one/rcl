@@ -200,6 +200,19 @@ describe('HarnessSink.putArtifact', () => {
     expect(requests[0]!.headers['content-type']).toBe('application/octet-stream');
   });
 
+  it('never lets a run id reshape the request path', async () => {
+    const digest = createHash('sha256').update('#', 'utf8').digest('hex');
+    for (const hostile of ['../events', 'a/b', 'a?x=1', 'a#frag', '%2e%2e%2fevents']) {
+      const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { kind: 'report_md', sha256: digest } } }));
+      await s.putArtifact(hostile, 'report_md', '#');
+      const url = new URL(requests[0]!.url);
+      expect(url.search).toBe('');
+      expect(url.hash).toBe('');
+      expect(url.pathname).toBe(`/api/v1/reviews/runs/${encodeURIComponent(hostile)}/artifacts/report_md`);
+      expect(url.pathname.split('/')).toHaveLength(8);
+    }
+  });
+
   it('refuses a receipt for another kind or another digest', async () => {
     const digest = createHash('sha256').update('#', 'utf8').digest('hex');
     const wrongKind = await sink(() => ({ status: 201, body: { data: { kind: 'report_json', sha256: digest } } })).sink.putArtifact('r', 'report_md', '#');
@@ -230,6 +243,17 @@ describe('HarnessSink.postEvents', () => {
     expect(short).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
     const vague = await sink(() => ({ status: 201, body: { data: { inserted: 2 } } })).sink.postEvents(events);
     expect(vague).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+
+    // Counts are non-negative integers that add up exactly — nothing else reads as a receipt.
+    for (const data of [
+      { inserted: -1, duplicates: 3 },
+      { inserted: 1.5, duplicates: 0.5 },
+      { inserted: '2', duplicates: 0 },
+      { inserted: null, duplicates: 2 },
+      { inserted: 3, duplicates: 0 },
+    ]) {
+      expect(await sink(() => ({ status: 201, body: { data } })).sink.postEvents(events)).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    }
   });
 
   it('bounds a body it cannot stream as well', async () => {

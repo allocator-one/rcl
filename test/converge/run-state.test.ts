@@ -363,6 +363,16 @@ describe('cross-round identity and suppression (RCL-24)', () => {
     expect(result.resolution).toBeUndefined();
   });
 
+  it('keeps a round\'s run id when the round is re-processed without one', async () => {
+    await processRoundReport({ gitCommonDir: dir, target: 't6', round: 1, findings: [finding()], runId: '11111111-1111-4111-8111-111111111111' });
+    await processRoundReport({ gitCommonDir: dir, target: 't6', round: 1, findings: [finding()] });
+    expect((await loadConvergeRunState(dir, 't6'))!.rounds[0]!.runId).toBe('11111111-1111-4111-8111-111111111111');
+
+    // A real id from a later pass replaces it.
+    await processRoundReport({ gitCommonDir: dir, target: 't6', round: 1, findings: [finding()], runId: '22222222-2222-4222-8222-222222222222' });
+    expect((await loadConvergeRunState(dir, 't6'))!.rounds[0]!.runId).toBe('22222222-2222-4222-8222-222222222222');
+  });
+
   it('persists per-round counts and verdicts in the state file', async () => {
     const r1 = await processRoundReport({
       gitCommonDir: dir,

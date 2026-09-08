@@ -27,6 +27,12 @@ const KEY_PATTERNS: RegExp[] = [
   /\b(?:aone|hcli)_[A-Za-z0-9]{16,}/g,
   // Slack.
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  // Stripe secret and restricted keys.
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  // GitLab personal access tokens, npm access tokens, Hugging Face tokens.
+  /\bglpat-[A-Za-z0-9_-]{16,}/g,
+  /\bnpm_[A-Za-z0-9]{30,}/g,
+  /\bhf_[A-Za-z0-9]{30,}/g,
 ];
 
 /**

@@ -416,7 +416,7 @@ export class Outbox {
    * loss reports go out on every flush that reached the server.
    */
   async flush(sink: HarnessSink, options: FlushOptions = {}): Promise<FlushSummary> {
-    const now = options.now ?? Date.now;
+    const now = options.now ?? this.now;
     const started = now();
     const pastDeadline = () => options.deadlineMs !== undefined && now() - started >= options.deadlineMs;
     // Every request is bounded by what remains of the deadline, so a flush

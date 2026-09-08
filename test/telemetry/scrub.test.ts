@@ -116,6 +116,29 @@ describe('scrubbing is idempotent and bounded', () => {
     const safe = scrubDeep(hostile) as Record<string, unknown>;
     expect(Object.keys(safe)).toEqual(['ok']);
     expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+
+    // At every depth, inside arrays too.
+    const nested = JSON.parse(
+      '{"a": {"__proto__": {"deep": true}, "prototype": 1, "keep": [{"constructor": 2, "ok": 1}]}}'
+    ) as Record<string, unknown>;
+    const nestedSafe = scrubDeep(nested) as { a: { keep: Array<Record<string, unknown>> } };
+    expect(Object.keys(nestedSafe.a)).toEqual(['keep']);
+    expect(Object.keys(nestedSafe.a.keep[0]!)).toEqual(['ok']);
+    expect(({} as Record<string, unknown>)['deep']).toBeUndefined();
+  });
+
+  it('redacts Stripe, GitLab, npm and Hugging Face token shapes', () => {
+    // Assembled at runtime so no key-shaped literal sits in the repository.
+    const body = 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0';
+    for (const token of [
+      ['sk', 'live', body.slice(0, 24)].join('_'),
+      ['rk', 'test', body.slice(0, 24)].join('_'),
+      ['glpat', body.slice(0, 20)].join('-'),
+      ['npm', body.slice(0, 36)].join('_'),
+      ['hf', body.slice(0, 34)].join('_'),
+    ]) {
+      expect(scrubSecrets(`key ${token} used`)).toBe(`key ${REDACTED} used`);
+    }
   });
 
   it('redacts JSON-quoted keys, compound key names and values with escaped quotes', () => {

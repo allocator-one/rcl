@@ -123,7 +123,13 @@ describe('telemetry delivery', () => {
 
     const envelopeOnly = await runtime(acceptEverything, { config: { harness: { telemetry: 'envelope' } } });
     await deliverRun(envelopeOnly.rt, { result: sampleResult(), artifacts: ARTIFACTS });
-    expect((JSON.parse(envelopeOnly.requests[0]!.body!) as { findings: unknown[] }).findings).toEqual([]);
+    // One request: the header alone — no report rows, no artifact uploads.
+    expect(envelopeOnly.requests).toHaveLength(1);
+    expect(envelopeOnly.requests.some((r) => r.url.includes('/artifacts/'))).toBe(false);
+    const header = JSON.parse(envelopeOnly.requests[0]!.body!) as { findings: unknown[]; calls: unknown[]; run: unknown };
+    expect(header.findings).toEqual([]);
+    expect(header.calls).toEqual([]);
+    expect(header.run).toBeDefined();
   });
 
   it('spools when Harness is unreachable and exits 4 under --evidence-required; a later flush delivers it as retried', async () => {
@@ -217,6 +223,10 @@ describe('telemetry delivery', () => {
     await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: findings\n  unknownSetting: 1\n', 'utf8');
     const lenient = await runtime(acceptEverything);
     expect(lenient.rt.level).toBe('findings');
+    // A file that does not parse at all may hide an opt-out behind the typo.
+    await writeFile(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n   broken: [\n', 'utf8');
+    const malformed = await runtime(acceptEverything);
+    expect(malformed.rt.level).toBe('off');
   });
 
   it('reads the harness section of the project config when none is passed, and serves the outbox from anywhere on request', async () => {
@@ -278,7 +288,12 @@ describe('telemetry delivery', () => {
   });
 
   it('emits converge events, spooling them when unreachable and skipping undeliverable ones', async () => {
-    const up = await runtime(acceptEverything);
+    // The consent notice must already be on stderr when the first request leaves.
+    let noticeBeforeFirstRequest: boolean | undefined;
+    const up = await runtime((request) => {
+      noticeBeforeFirstRequest ??= lines.some((line) => line.includes('records evidence of this review on harness.example.test'));
+      return acceptEverything(request);
+    });
     const events = [
       buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } }),
       buildEvent({ kind: 'verdicts_recorded', convergeTarget: 't', round: 1, payload: { verdicts: [] } }), // no run id: not deliverable
@@ -286,7 +301,7 @@ describe('telemetry delivery', () => {
     expect(await emitConvergeEvents(up.rt, events)).toBe('sent');
     expect((JSON.parse(up.requests[0]!.body!) as { events: unknown[] }).events).toHaveLength(1);
     // The consent notice precedes the first transmission of any kind.
-    expect(lines.join('\n')).toContain('records evidence of this review on harness.example.test');
+    expect(noticeBeforeFirstRequest).toBe(true);
 
     const down = await runtime(() => new TypeError('fetch failed'));
     expect(await emitConvergeEvents(down.rt, [events[0]!])).toBe('spooled');

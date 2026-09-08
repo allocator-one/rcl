@@ -366,9 +366,12 @@ export async function processRoundReport(options: {
     });
   }
 
+  // Re-processing a round without a report id (a legacy or mismatched
+  // report) must not erase the binding an earlier pass persisted.
+  const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts, ...(runId !== undefined ? { runId } : {}) },
+    { round: options.round, counts, ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,
