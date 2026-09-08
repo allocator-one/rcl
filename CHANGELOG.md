@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **`round_processed` carries the round's classification** (RCL-47):
+  `identities: [{identity_key, matched_identity, status, suppress_reason?}]`
+  — each sighting's own report key, the identity `converge-report` matched it
+  to by location, and whether it was `new`, `repeat`, `suppressed` or
+  `regating`. Harness applies a standing verdict to a key that moved with the
+  code only when it knows the matched identity (IO-12601); without it a
+  re-sighted fixed or dismissed finding reads as actionable and the gate says
+  `unresolved` for a loop rcl judged converged. One entry per key; text goes
+  through the usual scrubber.
 ## 3.1.0 — 2026-09-08
 
 - **`rcl evidence status` reports a pull request nothing has been judged for**

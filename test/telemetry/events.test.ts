@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildEvent, deliverable } from '../../src/telemetry/events.js';
+import { buildEvent, deliverable, roundIdentities } from '../../src/telemetry/events.js';
 
 describe('buildEvent', () => {
   it('mints a UUIDv7 id and an ISO timestamp, and scrubs the payload', () => {
@@ -59,5 +59,61 @@ describe('deliverable', () => {
     expect(deliverable(buildEvent({ kind: 'round_processed', round: 0, runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(false);
     expect(deliverable(buildEvent({ kind: 'round_processed', round: 2, runId: '019921a0-0000-7000-8000-000000000001' }))).toBe(true);
     expect(deliverable(buildEvent({ kind: 'round_processed', round: 2, runId: '' }))).toBe(false);
+  });
+});
+
+describe('roundIdentities', () => {
+  const finding = (identity: string | undefined) => ({ identity, file: 'src/a.ts', startLine: 1, endLine: 1 });
+
+  it('reports each sighting under its own key with the identity it was matched to, its status and any suppress reason', () => {
+    const list = roundIdentities([
+      { identity: 'deadbeefcafe0001', status: 'repeat', finding: finding('0000000000moved1') },
+      { identity: 'aaaaaaaaaaaaaaaa', status: 'new', finding: finding('aaaaaaaaaaaaaaaa') },
+      {
+        identity: 'bbbbbbbbbbbbbbbb',
+        status: 'suppressed',
+        suppressReason: 'dismissed in round 1 — a dismissal is terminal on its evidence',
+        finding: finding('bbbbbbbbbbbbbbb2'),
+      },
+    ]);
+    expect(list).toEqual([
+      { identity_key: '0000000000moved1', matched_identity: 'deadbeefcafe0001', status: 'repeat' },
+      { identity_key: 'aaaaaaaaaaaaaaaa', matched_identity: 'aaaaaaaaaaaaaaaa', status: 'new' },
+      {
+        identity_key: 'bbbbbbbbbbbbbbb2',
+        matched_identity: 'bbbbbbbbbbbbbbbb',
+        status: 'suppressed',
+        suppress_reason: 'dismissed in round 1 — a dismissal is terminal on its evidence',
+      },
+    ]);
+  });
+
+  it('falls back to the matched identity for a pre-3.0 finding without a key, and keeps one entry per key', () => {
+    const list = roundIdentities([
+      { identity: 'cccccccccccccccc', status: 'new', finding: finding(undefined) },
+      { identity: 'ffffffffffffffff', status: 'new', finding: finding('   ') },
+      { identity: 'dddddddddddddddd', status: 'repeat', finding: finding('samekey000000001') },
+      { identity: 'eeeeeeeeeeeeeeee', status: 'repeat', finding: finding('samekey000000001') },
+    ]);
+    expect(list.map((e) => e.identity_key)).toEqual(['cccccccccccccccc', 'ffffffffffffffff', 'samekey000000001']);
+    expect(list[2]!.matched_identity).toBe('dddddddddddddddd');
+  });
+
+  it('travels through buildEvent with the rest of the payload, scrubbed like any text', () => {
+    const event = buildEvent({
+      kind: 'round_processed',
+      round: 2,
+      runId: '019921a0-0000-7000-8000-000000000001',
+      payload: {
+        counts: { new: 0, repeat: 1 },
+        identities: roundIdentities([
+          { identity: 'f1', status: 'suppressed', suppressReason: 'token sk-ant-abcdefghijklmnopqrstuvwxyz seen', finding: finding('k1') },
+        ]),
+      },
+    });
+    expect(event.payload).toEqual({
+      counts: { new: 0, repeat: 1 },
+      identities: [{ identity_key: 'k1', matched_identity: 'f1', status: 'suppressed', suppress_reason: 'token [redacted] seen' }],
+    });
   });
 });
