@@ -14,7 +14,7 @@ allowed-tools:
   - Bash(rcl converge-verdict:*)
   - Bash(rcl roles:*)
   - Bash(rcl telemetry status:*)
-  - Bash(rcl telemetry flush:*)
+  - Bash(rcl telemetry flush --run:*)
   - Bash(rcl evidence status:*)
   - Bash(git status:*)
   - Bash(git merge-base:*)
