@@ -126,6 +126,7 @@ import { runEvidenceShow } from './evidence/show.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
 import { parseRepoName } from './evidence/target.js';
+import { text } from './evidence/format.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
@@ -902,7 +903,7 @@ telemetry
           ...(runtime.sink ? { sink: runtime.sink } : {}),
           host,
           placeholderHost: host === 'no-credential',
-          ...(opts.json ? {} : { progress: (line: string) => console.log(chalk.dim(line)) }),
+          ...(opts.json ? {} : { progress: (line: string) => console.log(chalk.dim(text(line, 400))) }),
         }
       );
     } catch (err) {
@@ -918,15 +919,15 @@ telemetry
           `(${summary.planned.verdicts} verdicts)${host === 'no-credential' ? ' — ids shown for a placeholder host; log in for the real ones' : ''}; ` +
           `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched}, unmatched ${summary.bulletsUnmatched}.`
       );
-      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${f.file}: ${f.reason}`));
+      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${text(f.file, 200)}: ${text(f.reason, 300)}`));
     } else {
       console.log(
         `Posted ${summary.runs} run(s): ${summary.created} new, ${summary.existing} already recorded; ` +
           `${summary.artifacts} artifact(s) uploaded for the new runs; verdict events ${summary.events.inserted} new, ${summary.events.duplicates} already recorded; ` +
           `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched} (at build), unmatched ${summary.bulletsUnmatched}.`
       );
-      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${f.file}: ${f.reason}`));
-      for (const f of summary.failed) console.log(chalk.red(`  failed ${f.file}: ${f.reason}`));
+      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${text(f.file, 200)}: ${text(f.reason, 300)}`));
+      for (const f of summary.failed) console.log(chalk.red(`  failed ${text(f.file, 200)}: ${text(f.reason, 300)}`));
     }
     if (summary.failed.length > 0) process.exitCode = 1;
   });
@@ -1029,15 +1030,16 @@ modelsCmd
       )
     );
     for (const row of merged) {
-      const shown = row.source === 'server' && row.server ? row.server : undefined;
-      const local = row.local;
-      const outcomes = shown ? shown.outcomes : (local?.outcomes ?? row.serverOutcomes ?? 0);
-      const precision = shown ? pct(shown.precision) : pct(local?.precision ?? row.server?.precision);
-      const calls = shown ? shown.calls : (local?.calls ?? row.server?.calls ?? 0);
-      const dead = shown ? pct(shown.dead_rate) : pct(local?.deadRate ?? row.server?.dead_rate);
-      const p50 = shown ? shown.p50_ms : (local?.p50Ms ?? row.server?.p50_ms ?? null);
+      // Every column of a row comes from one record: the server's when the
+      // server weighs it, else this machine's, else the server's thin row.
+      const fromServer = row.source === 'server' || (row.local === undefined && row.server !== undefined);
+      const outcomes = fromServer ? (row.server?.outcomes ?? 0) : (row.local?.outcomes ?? 0);
+      const precision = fromServer ? pct(row.server?.precision) : pct(row.local?.precision);
+      const calls = fromServer ? (row.server?.calls ?? 0) : (row.local?.calls ?? 0);
+      const dead = fromServer ? pct(row.server?.dead_rate) : pct(row.local?.deadRate);
+      const p50 = fromServer ? (row.server?.p50_ms ?? null) : (row.local?.p50Ms ?? null);
       console.log(
-        row.model.padEnd(46) +
+        text(row.model, 46).padEnd(46) +
           `${outcomes > 0 ? precision : '—'} (${outcomes})`.padEnd(16) +
           String(calls).padEnd(8) +
           dead.padEnd(7) +
@@ -1706,17 +1708,17 @@ async function executeCouncil(
   // Org-wide history from Harness outranks this machine's store for a model
   // the org has enough outcomes for (RCL-38); the server is asked with a
   // short bound and the local store stands in when it cannot answer.
-  // Telemetry off means nothing leaves the machine for weights either.
+  // Telemetry off means nothing leaves the machine for weights either. The
+  // server side is bounded to three seconds; the settings file and the local
+  // store are read as local files.
   let modelWeights: Map<string, number> | undefined;
   try {
-    const level = resolveTelemetryLevel(
-      await loadHarnessSettings(process.cwd()),
-      { noTelemetry: (opts as { telemetry?: boolean }).telemetry === false },
-      process.env
-    );
+    const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd()), { noTelemetry: opts.telemetry === false }, process.env);
     const loaded = await loadMergedWeights({ rclVersion: RCL_VERSION, timeoutMs: 3_000, serverEnabled: level !== 'off' });
     if (loaded.size > 0) modelWeights = loaded;
-  } catch {
+  } catch (err) {
+    // Weights are advisory; the review runs unweighted, but not silently.
+    console.warn(`Model weights unavailable (consensus unweighted): ${scrubText(err instanceof Error ? err.message : String(err), 300)}`);
     modelWeights = undefined;
   }
 

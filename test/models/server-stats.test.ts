@@ -39,11 +39,16 @@ describe('mergeWeights', () => {
     expect(by.get('only/server')).toMatchObject({ weight: 1, source: 'neutral' });
   });
 
-  it('judges server rows by the floor the server states', () => {
+  it('lets the server raise the outcome floor but never lower it below 20', () => {
     const strict = { ...serverStats([serverRow('a', 30, 1.3)]), min_outcomes_for_weight: 50 };
     expect(mergeWeights([local('a', 40, 0.9)], strict)).toEqual([expect.objectContaining({ model: 'a', weight: 1.4, source: 'local' })]);
     const lenient = { ...serverStats([serverRow('b', 10, 1.3)]), min_outcomes_for_weight: 5 };
-    expect(mergeWeights([], lenient)).toEqual([expect.objectContaining({ model: 'b', weight: 1.3, source: 'server' })]);
+    expect(mergeWeights([], lenient)).toEqual([expect.objectContaining({ model: 'b', weight: 1, source: 'neutral' })]);
+  });
+
+  it('refuses a model name carrying control characters', async () => {
+    const { fetch } = fakeFetch(() => ({ status: 200, body: { data: serverStats([serverRow('evil\u001b[31m/model', 30, 1)]) } }));
+    expect(await fetchServerModelStats({ windowDays: 90, rclVersion: '3.1.0', fetchImpl: fetch, env: ENV, cwd: '/nowhere', credentialsPath: '/nowhere/credentials.json' })).toMatchObject({ kind: 'none' });
   });
 
   it('is the local view when the server has nothing to say', () => {

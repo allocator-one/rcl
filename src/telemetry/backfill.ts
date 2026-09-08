@@ -94,12 +94,16 @@ const MIN_MTIME_MS = Date.UTC(2020, 0, 1);
  * from the same handle so the id (from the bytes) and the timing (from the
  * mtime) describe one version of it.
  */
-async function readRegular(path: string): Promise<{ bytes: string; mtime: Date }> {
+async function readRegular(path: string): Promise<{ bytes: string; raw: Buffer; mtime: Date }> {
+  // Without O_NOFOLLOW the platform cannot refuse a planted link; then nothing is read.
+  if (fsConstants.O_NOFOLLOW === undefined) throw new Error('this platform cannot refuse symbolic links');
   const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw new Error('not a regular file');
-    return { bytes: await handle.readFile('utf8'), mtime: info.mtime };
+    const raw = await handle.readFile();
+    // The digest is of the bytes as found; the text is a strict decoding of them.
+    return { bytes: new TextDecoder('utf-8', { fatal: true }).decode(raw), raw, mtime: info.mtime };
   } finally {
     await handle.close();
   }
@@ -129,8 +133,8 @@ function int(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : fallback;
 }
 
-function sha256(bytes: string): string {
-  return createHash('sha256').update(bytes, 'utf8').digest('hex');
+function sha256(bytes: string | Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 function providerOf(review: RawReview, model: string): string {
@@ -272,7 +276,7 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
 
   for (const name of reportNames) {
     try {
-      const { bytes, mtime } = await readRegular(join(dir, name));
+      const { bytes, raw, mtime } = await readRegular(join(dir, name));
       const report = JSON.parse(bytes) as RawReport;
       if (typeof report !== 'object' || report === null || !Array.isArray(report.reviews)) {
         skipped.push({ file: name, reason: 'no reviews array — not an rcl report' });
@@ -302,7 +306,7 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
         skipped.push({ file: name, reason: `file time ${finishedAt.toISOString()} is not a plausible finishing time` });
         continue;
       }
-      const digest = sha256(bytes);
+      const digest = sha256(raw);
       const id = uuidv5(`${hostKey}|${repoKey}|${digest}`, UUID_NAMESPACE_RCL_BACKFILL);
       const run: RunHeader = {
         id,

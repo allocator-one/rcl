@@ -68,6 +68,7 @@ export function isServerModelStats(value: unknown): value is ServerModelStats {
         isRecord(m) &&
         typeof m['model'] === 'string' &&
         m['model'] !== '' &&
+        !/[\u0000-\u001f\u007f-\u009f]/.test(m['model']) &&
         count(m['outcomes']) &&
         count(m['fixed']) &&
         count(m['calls']) &&
@@ -117,8 +118,9 @@ export function mergeWeights(
     const source = stat.outcomes >= minOutcomes ? 'local' : 'neutral';
     rows.set(stat.model, { model: stat.model, weight: stat.weight, source, localOutcomes: stat.outcomes, local: stat });
   }
-  // The server states the floor it applied; its rows are judged by it.
-  const serverFloor = server?.min_outcomes_for_weight ?? minOutcomes;
+  // The server states the floor it applied; it may raise this client's
+  // floor, never lower it below the 20 outcomes the contract promises.
+  const serverFloor = Math.max(minOutcomes, server?.min_outcomes_for_weight ?? minOutcomes);
   for (const stat of server?.models ?? []) {
     const existing = rows.get(stat.model);
     if (stat.outcomes >= serverFloor) {
@@ -149,9 +151,9 @@ export interface MergedWeightsOptions extends ServerStatsOptions {
 /**
  * Model → weight for the voter: server-backed where the org has enough
  * history, local otherwise; local alone when the server is switched off or
- * cannot answer. The whole server side — credential resolution included —
- * is bounded by `timeoutMs` (default 3 s), so a review's start never waits
- * on a slow disk or host.
+ * cannot answer. The server side — credential lookup and the request — is
+ * bounded by `timeoutMs` (default 3 s); the request itself is aborted by the
+ * sink at that deadline, and the local store is read as any local file is.
  */
 export async function loadMergedWeights(options: MergedWeightsOptions): Promise<Map<string, number>> {
   const windowDays = options.windowDays ?? DEFAULT_WINDOW_DAYS;

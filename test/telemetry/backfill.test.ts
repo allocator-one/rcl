@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { UUID_NAMESPACE_RCL_BACKFILL, uuidv5 } from '../../src/report/uuid.js';
 import { buildBackfillRuns, runBackfill } from '../../src/telemetry/backfill.js';
 import { HarnessSink } from '../../src/telemetry/sink.js';
 import { fakeFetch } from './fixtures.js';
@@ -75,7 +77,9 @@ describe('buildBackfillRuns', () => {
     expect(built.runs).toHaveLength(2);
     expect(built.skipped).toEqual([{ file: 'rcl-report-broken.json', reason: expect.stringMatching(/reviews/) }]);
     const [r1, r2] = built.runs;
-    expect(r1!.envelope.run.id).toMatch(/^[0-9a-f-]{36}$/);
+    // The id is the UUIDv5 of (host, repo, sha256 of the file's bytes), computed here independently.
+    const digest = createHash('sha256').update(readFileSync(join(dir, 'rcl-report-allocator-one-42-r1.json'))).digest('hex');
+    expect(r1!.envelope.run.id).toBe(uuidv5(`harness.example.test|allocator-one/allocator-one|${digest}`, UUID_NAMESPACE_RCL_BACKFILL));
     expect(r1!.envelope.run.id).not.toBe(r2!.envelope.run.id);
     expect(r1!.envelope.run).toMatchObject({
       provenance: 'backfill',
@@ -130,12 +134,13 @@ describe('buildBackfillRuns', () => {
 
   it('skips what is not a regular readable report — symlinks, absurd durations, unreadable ledgers — and keeps going', async () => {
     const dir = corpus();
-    symlinkSync('/etc/hosts', join(dir, 'rcl-report-allocator-one-42-r2.md'));
-    symlinkSync('/etc/hosts', join(dir, 'rcl-report-linked.json'));
+    writeFileSync(join(dir, 'notes.txt'), 'a regular file a link could point at');
+    symlinkSync(join(dir, 'notes.txt'), join(dir, 'rcl-report-allocator-one-42-r2.md'));
+    symlinkSync(join(dir, 'notes.txt'), join(dir, 'rcl-report-linked.json'));
     const long = report(['anthropic/claude'], []);
     long.stats.durationMs = 1e15;
     writeFileSync(join(dir, 'rcl-report-long.json'), JSON.stringify(long));
-    symlinkSync('/etc/hosts', join(dir, 'rcl-converge-linked-ledger.md'));
+    symlinkSync(join(dir, 'notes.txt'), join(dir, 'rcl-converge-linked-ledger.md'));
     writeFileSync(
       join(dir, 'rcl-converge-allocator-one-42b-ledger.md'),
       '## Round 1 — report `/tmp/rcl-report-allocator-one-42-r1.json` — 2 findings\n* [Fixed] lib/foo.ex — pagination misses tiebreak on inserted_at\n'
@@ -155,8 +160,7 @@ describe('buildBackfillRuns', () => {
   });
 });
 
-describe('runBackfill', () => {
-  function server(state: { existing: Set<string>; missing?: Set<string> }) {
+function server(state: { existing: Set<string>; missing?: Set<string> }) {
     return fakeFetch((request) => {
       if (request.method === 'POST' && request.url.endsWith('/api/v1/reviews/runs')) {
         const id = (JSON.parse(request.body!) as { run: { id: string } }).run.id;
@@ -202,6 +206,7 @@ describe('runBackfill', () => {
     });
   }
 
+describe('runBackfill', () => {
   it('posts every run, its artifacts and its verdicts once; a second run finds everything existing', async () => {
     const dir = corpus();
     const state = { existing: new Set<string>() };
@@ -253,6 +258,15 @@ describe('runBackfill', () => {
     expect(leak.envelope.artifacts_declared[0]!.sha256).toBe(createHash('sha256').update(leak.artifacts.report_json, 'utf8').digest('hex'));
     expect(leak.events).toHaveLength(1);
     expect(built.skipped).toEqual(expect.arrayContaining([{ file: 'rcl-report-old.json', reason: expect.stringMatching(/plausible finishing time/) }]));
+
+    // What is PUT is the scrubbed text, and its digest is the one the run declared.
+    const state = { existing: new Set<string>() };
+    const srv = server(state);
+    await runBackfill({ dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0' }, { sink: new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.1.0', fetchImpl: srv.fetch }), host: 'harness.example.test' });
+    const put = srv.requests.find((r) => r.method === 'PUT' && r.url.includes(leak.envelope.run.id) && r.url.endsWith('report_json'))!;
+    expect(put.body).toContain('[redacted]');
+    expect(put.body).not.toContain('ghp_' + 'A'.repeat(36));
+    expect(createHash('sha256').update(put.body!, 'utf8').digest('hex')).toBe(leak.envelope.artifacts_declared[0]!.sha256);
   });
 
   it('sends one verdict per identity in a round and keeps NUL out of the text it synthesizes', async () => {
