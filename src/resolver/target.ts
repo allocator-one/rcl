@@ -69,12 +69,15 @@ export async function resolveReviewTarget(
     const heads = deps.gitHeads ?? (await (deps.resolveGitHeads ?? resolveGitHeads)());
     return { kind: gitMode === 'staged' ? 'staged' : 'working_tree', ...heads };
   }
-  const pr = pullRequestFor(opts);
+  const attributed = pullRequestFor(opts);
   // Evidence for a pull request binds to a commit: an attributed patch without
   // its head could be any bytes presented against that pull request's gate.
-  if (pr && opts.headSha === undefined) {
-    throw new Error('A patch review bound to a pull request needs --head-sha: evidence binds to the commit it reviewed.');
+  // The explicit flag is refused without one; a converge target only
+  // attributes when the head is there, since it is a bookkeeping key first.
+  if (attributed && opts.headSha === undefined && attributed.source === '--for-pr') {
+    throw new Error('A patch review bound to a pull request by --for-pr needs --head-sha: evidence binds to the commit it reviewed.');
   }
+  const pr = attributed && opts.headSha !== undefined ? attributed : undefined;
   return {
     kind: 'patch',
     ...(pr ? { repo: `${pr.owner}/${pr.repo}`, prNumber: pr.number, url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}` } : {}),
@@ -83,31 +86,37 @@ export async function resolveReviewTarget(
   };
 }
 
+interface Attribution {
+  owner: string;
+  repo: string;
+  number: number;
+  source: '--for-pr' | '--converge-target';
+}
+
 /**
- * The pull request a patch review stands for: `--for-pr` when given, else a
- * converge target that has the `owner/repo#N` form (a converge slug such as
- * `rcl-7` names nothing and attributes nothing).
+ * The pull request a patch review stands for: `--for-pr` when given (an
+ * invalid value is an error), else a converge target that parses cleanly as
+ * `owner/repo#N` (anything else — a slug such as `rcl-7`, a malformed
+ * reference — is a bookkeeping key and attributes nothing).
  */
-function pullRequestFor(opts: TargetOverrides): { owner: string; repo: string; number: number } | undefined {
+function pullRequestFor(opts: TargetOverrides): Attribution | undefined {
   if (opts.forPr !== undefined) {
     const text = opts.forPr.trim();
     if (!isGitHubTarget(text)) throw new Error(`--for-pr must name a pull request as owner/repo#N or a pull request URL, got "${text}".`);
-    return checked(parseGitHubTarget(text), '--for-pr');
+    const pr = checked(parseGitHubTarget(text));
+    if (!pr) throw new Error('--for-pr does not name a GitHub pull request.');
+    return { ...pr, source: '--for-pr' };
   }
   if (opts.convergeTarget !== undefined && isGitHubTarget(opts.convergeTarget.trim())) {
-    return checked(parseGitHubTarget(opts.convergeTarget.trim()), '--converge-target');
+    const pr = checked(parseGitHubTarget(opts.convergeTarget.trim()));
+    return pr ? { ...pr, source: '--converge-target' } : undefined;
   }
   return undefined;
 }
 
-// GitHub's segment rules (owner: alphanumerics and single hyphens; repository:
-// alphanumerics, `-`, `_`, `.`, never `.` or `..`) for both segments, and a
-// positive number — the values reach a URL and a request path.
-function checked(pr: { owner: string; repo: string; number: number }, flag: string): { owner: string; repo: string; number: number } {
-  if (parseRepoName(`${pr.owner}/${pr.repo}`) === null || !Number.isSafeInteger(pr.number) || pr.number <= 0) {
-    throw new Error(`${flag} does not name a GitHub pull request.`);
-  }
-  // GitHub names are case-insensitive; one spelling keeps one key on the server.
+/** GitHub's segment rules for both names and a positive number, lower-cased (one spelling, one key on the server); `null` otherwise. */
+function checked(pr: { owner: string; repo: string; number: number }): { owner: string; repo: string; number: number } | null {
+  if (parseRepoName(`${pr.owner}/${pr.repo}`) === null || !Number.isSafeInteger(pr.number) || pr.number <= 0) return null;
   return { owner: pr.owner.toLowerCase(), repo: pr.repo.toLowerCase(), number: pr.number };
 }
 
