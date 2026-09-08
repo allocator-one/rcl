@@ -61,6 +61,19 @@ export const GatingSchema = z.object({
   verificationTimeout: z.number().positive().optional(),
 });
 
+/**
+ * Evidence delivery to Harness (epic IO-12475, section 8.6). `telemetry`
+ * is the payload tier: `off` sends nothing, `envelope` the run header and
+ * stats, `findings` adds findings and calls, `full` (default) also uploads
+ * the JSON and Markdown reports. `parseFailures` opts in to sending a
+ * parse-failed call's raw model answer (fenced code and key-shaped strings
+ * removed, 32 KB cap).
+ */
+export const HarnessSchema = z.object({
+  telemetry: z.enum(['off', 'envelope', 'findings', 'full']).optional(),
+  parseFailures: z.boolean().optional(),
+});
+
 export const ConfigSchema = z.object({
   models: z.array(z.string()).optional(),
   secondaryModels: z.array(z.string()).optional(),
@@ -94,6 +107,7 @@ export const ConfigSchema = z.object({
   context: z.array(z.string()).optional(),
   spec: z.string().optional(),
   focus: z.array(z.string()).optional(),
+  harness: HarnessSchema.optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

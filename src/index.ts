@@ -2,7 +2,7 @@
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
-import { readFile } from 'fs/promises';
+import { readdir, readFile, writeFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -47,8 +47,8 @@ import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { applyGating, resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
-import { toJson, writeJsonOutput } from './output/json.js';
-import { toMarkdown, writeMarkdownOutput } from './output/markdown.js';
+import { toJson } from './output/json.js';
+import { toMarkdown } from './output/markdown.js';
 import {
   assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
@@ -106,6 +106,21 @@ import {
   type SpecSource,
 } from './report/run-header.js';
 import { assertExpectedHead, resolveReviewTarget } from './resolver/target.js';
+import {
+  createTelemetryRuntime,
+  deliverRun,
+  evidenceRequirementConflict,
+  emitConvergeEvents,
+  flushOutbox,
+  flushOutboxAtStart,
+  type DeliveryOutcome,
+  type TelemetryRuntime,
+} from './telemetry/deliver.js';
+import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { scrubText } from './telemetry/scrub.js';
+import { buildEvent, type WireEvent } from './telemetry/events.js';
+import { credentialHost } from './telemetry/credentials.js';
+import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -117,6 +132,66 @@ program
   .name('rcl')
   .description('Review Council — multi-model AI code review')
   .version(RCL_VERSION);
+
+// Every command first delivers what an earlier one could not, bounded to
+// five seconds so an offline machine never stalls (IO-12475 section 8.4).
+// The telemetry commands manage the outbox themselves; the detached async
+// worker is not a user command.
+program.hook('preAction', async (_thisCommand, actionCommand) => {
+  const name = actionCommand.name();
+  if (name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  const flags = actionCommand.opts<{ telemetry?: boolean }>();
+  if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
+  try {
+    // One cheap readdir before any credential or config work: most commands
+    // find an empty outbox and pay nothing.
+    const entries = await readdir(join(resolveDataDir(), 'outbox')).catch(() => [] as string[]);
+    if (entries.length === 0) return;
+    await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
+  } catch {
+    // Never let the outbox stop the command the user asked for.
+  }
+});
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `--evidence-required` with telemetry switched off cannot be honored; say so
+ * before spending the council. The flag and the environment are known up
+ * front; the project config's `harness.telemetry: off` is checked again once
+ * the config is loaded, still before any reviewer call.
+ */
+function assertEvidenceCanBeRequired(
+  opts: { evidenceRequired?: boolean; telemetry?: boolean },
+  config?: Pick<Config, 'harness'>
+): void {
+  const conflict = evidenceRequirementConflict(opts, config, process.env);
+  if (conflict !== undefined) throw new Error(conflict);
+}
+
+/**
+ * With `--evidence-required`, resolve where the evidence would go before any
+ * reviewer is paid: an unmanaged repository or a missing credential makes
+ * delivery impossible, and that is worth knowing at once.
+ */
+async function assertEvidenceDeliverable(opts: { evidenceRequired?: boolean; telemetry?: boolean }, config: Config): Promise<void> {
+  if (!opts.evidenceRequired) return;
+  const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
+  if (!runtime.repoManaged) {
+    throw new Error('--evidence-required needs a Harness-managed repository (one carrying .harness-cli/config.json); this one is not.');
+  }
+  if (runtime.level === 'off') throw new Error('--evidence-required contradicts the resolved telemetry level off.');
+  if (!runtime.sink) throw new Error(`--evidence-required needs a Harness credential: ${runtime.note ?? 'none available'}.`);
+}
+
+/** Converge commands report their events fail-soft; nothing they do depends on it. */
+async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
+  try {
+    await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
+  } catch {
+    // Evidence of the loop is advisory next to the loop's own durable state.
+  }
+}
 
 // review command
 program
@@ -163,6 +238,8 @@ program
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
+  .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
+  .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
   .action(async (target: string | undefined, opts) => {
     await runReview(target, opts);
@@ -204,6 +281,8 @@ program
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
+  .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
+  .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
   .action(async (file: string, opts) => {
     await runPlanReview(file, opts);
@@ -268,6 +347,19 @@ program
           target: opts.target,
           maxAttempts,
         });
+        await reportConvergeEvents([
+          buildEvent({
+            kind: 'attempt_claimed',
+            convergeTarget: claim.target,
+            attempt: claim.attempt,
+            // The claim's local state path and process id stay on this machine.
+            payload: { attempt: claim.attempt, cap: claim.cap },
+          }),
+          // An explicit --max-attempts is consent evidence, whatever it was before.
+          ...(maxAttempts !== undefined
+            ? [buildEvent({ kind: 'cap_changed', convergeTarget: claim.target, attempt: claim.attempt, payload: { kind: 'attempts', to: claim.cap } })]
+            : []),
+        ]);
         if (opts.json) {
           console.log(JSON.stringify(claim));
         } else {
@@ -363,12 +455,32 @@ program
           throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
         }
 
+        // The round remembers the report's run id only when it is a UUID and
+        // the report was produced for this converge target (a report copied
+        // from another target must not bind its run to this loop).
+        const reportRunId =
+          typeof report.run?.id === 'string' && UUID_PATTERN.test(report.run.id) ? report.run.id : undefined;
+        // A report without a converge target (a plain `rcl review`, or one
+        // copied in) is not this loop's evidence either.
+        const reportTarget = report.run?.converge?.target;
+        const runId =
+          reportRunId !== undefined && typeof reportTarget === 'string' && reportTarget.trim() === opts.target.trim()
+            ? reportRunId
+            : undefined;
+        if (reportRunId !== undefined && runId === undefined) {
+          console.error(
+            chalk.yellow(
+              `Report run ${reportRunId} ${reportTarget === undefined ? 'carries no converge target' : `belongs to converge target ${reportTarget}`}, not ${opts.target}; the round keeps no run id.`
+            )
+          );
+        }
         const result = await processRoundReport({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
           findings: report.findings,
           ...(maxRounds !== undefined ? { maxRounds } : {}),
+          ...(runId !== undefined ? { runId } : {}),
         });
 
         const classified = result.findings.map((f) => ({
@@ -385,6 +497,18 @@ program
         const actionable = classified.filter(
           (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
         );
+        await reportConvergeEvents([
+          buildEvent({
+            kind: 'round_processed',
+            convergeTarget: opts.target,
+            round,
+            ...(runId !== undefined ? { runId } : {}),
+            payload: { round, round_cap: result.roundCap, counts: result.counts, actionable_gating: actionable.length },
+          }),
+          ...(maxRounds !== undefined
+            ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target, round, payload: { kind: 'rounds', to: result.roundCap } })]
+            : []),
+        ]);
 
         if (opts.json) {
           console.log(
@@ -524,6 +648,48 @@ program
             `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
           );
         }
+        // The run id binding is advisory: an unreadable state file must not
+        // fail a command whose verdicts are already recorded.
+        let roundRun: string | undefined;
+        try {
+          roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
+        } catch {
+          roundRun = undefined;
+        }
+        await reportConvergeEvents([
+          buildEvent({
+            kind: 'verdicts_recorded',
+            convergeTarget: opts.target,
+            round,
+            ...(roundRun !== undefined ? { runId: roundRun } : {}),
+            payload: {
+              verdicts: updated.map((e) => ({
+                identity_key: e.key,
+                verdict: e.verdict,
+                // A dismissal reason is user-authored prose: scrubbed like every other free text that leaves the machine.
+                ...(e.verdictReason !== undefined ? { reason: scrubText(e.verdictReason, 500) } : {}),
+                severity: e.verdictSeverity ?? e.severity,
+                models: e.models,
+              })),
+            },
+          }),
+          ...(resolution
+            ? [
+                buildEvent({
+                  kind: 'resolution',
+                  convergeTarget: opts.target,
+                  round,
+                  ...(roundRun !== undefined ? { runId: roundRun } : {}),
+                  payload: {
+                    status: resolution.status,
+                    actionable: resolution.actionable,
+                    unresolved: resolution.unresolved.length,
+                    fixed_this_round: resolution.fixedThisRound,
+                  },
+                }),
+              ]
+            : []),
+        ]);
         if (opts.json) {
           console.log(
             JSON.stringify({
@@ -570,6 +736,93 @@ program
       }
     }
   );
+
+// Evidence delivery operations (IO-12475 section 8.10).
+const telemetry = program
+  .command('telemetry')
+  .description('Evidence delivery to Harness: the credential in use and the spooled deliveries waiting in the outbox');
+
+telemetry
+  .command('status')
+  .description('Show the telemetry level, the credential source and every spooled delivery')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { json?: boolean }) => {
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
+    const entries = await runtime.outbox.list();
+    const loss = await runtime.outbox.pendingLoss();
+    const refused = await runtime.outbox.refusedLoss();
+    const status = {
+      level: runtime.level,
+      repoManaged: runtime.repoManaged,
+      credential: runtime.credential
+        ? { source: runtime.credential.source, host: credentialHost(runtime.credential) }
+        : null,
+      note: runtime.note ?? null,
+      outbox: { dir: runtime.outbox.dir, entries, pendingLoss: loss, refusedLoss: refused },
+    };
+    if (opts.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(`Telemetry level: ${status.level}`);
+    console.log(
+      status.repoManaged
+        ? 'Repository: Harness-managed (.harness-cli/config.json found) — reviews here are delivered'
+        : 'Repository: not Harness-managed — reviews here are not delivered; the outbox still flushes'
+    );
+    console.log(
+      status.credential
+        ? `Credential: ${status.credential.source} → ${status.credential.host}`
+        : `Credential: none${status.note ? ` (${status.note})` : ''}`
+    );
+    console.log(`Outbox: ${runtime.outbox.dir} — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
+    for (const entry of entries) {
+      console.log(
+        `  ${entry.id} ${entry.meta.kind} spooled ${entry.meta.spooled_at} attempts ${entry.meta.attempts} ` +
+          `${entry.bytes} bytes artifacts [${entry.artifacts.join(', ')}] events ${entry.events}` +
+          (entry.meta.envelope_delivered ? ' (envelope delivered)' : '') +
+          (entry.failed ? chalk.red(` FAILED: ${entry.failed.reason}`) : '')
+      );
+    }
+    if (loss.length > 0) {
+      console.log(chalk.yellow(`Artifacts not spooled (outbox over its cap) for ${loss.length} run(s); reported on the next flush.`));
+    }
+    if (refused.length > 0) {
+      console.log(
+        chalk.yellow(`${refused.length} loss report(s) the server refused are kept under ${runtime.outbox.dir}/loss (*.refused); they are not retried.`)
+      );
+    }
+  });
+
+telemetry
+  .command('flush')
+  .description('Deliver every spooled envelope, artifact and event batch (runs to completion)')
+  .option('--run <id>', 'Flush one spooled run only')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { run?: string; json?: boolean }) => {
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
+    if (!runtime.sink) {
+      const reason = runtime.level === 'off' ? 'telemetry is off' : runtime.note ?? 'no Harness credential';
+      console.error(chalk.red(`Cannot flush: ${reason}.`));
+      process.exitCode = 1;
+      return;
+    }
+    const summary = await flushOutbox(runtime, opts.run ? { runId: opts.run } : {});
+    if (opts.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      console.log(
+        `Delivered ${summary.delivered.length}, remaining ${summary.remaining.length}, failed ${summary.failed.length}, dropped ${summary.dropped.length}` +
+          (summary.stopped ? ` (stopped: ${summary.stopped})` : '') +
+          (summary.lossPending ? `; ${summary.lossPending} loss report(s) still pending` : '')
+      );
+      for (const id of summary.delivered) console.log(`  delivered ${id}`);
+      for (const f of summary.failed) console.log(chalk.red(`  failed ${f.id}: ${f.reason}`));
+      for (const d of summary.dropped) console.log(chalk.dim(`  dropped ${d.id}: ${d.reason}`));
+      for (const id of summary.remaining) console.log(chalk.yellow(`  remaining ${id}`));
+    }
+    if (summary.remaining.length > 0 || summary.failed.length > 0) process.exitCode = 1;
+  });
 
 // Detached async-lane worker (RCL-25) — launched by the review process for
 // each async (non-blocking) reviewer call; not for interactive use.
@@ -744,6 +997,10 @@ interface CouncilCliOpts {
   convergeTarget?: string;
   round?: string;
   attempt?: string;
+  /** commander: `--no-telemetry` sets this false. */
+  telemetry?: boolean;
+  /** Exit 4 unless the evidence envelope was acknowledged. */
+  evidenceRequired?: boolean;
 }
 
 interface PreparedCouncil {
@@ -999,9 +1256,17 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     if (opts.headSha !== undefined) validateSha(opts.headSha, '--head-sha');
     if (opts.baseSha !== undefined) validateSha(opts.baseSha, '--base-sha');
     if (opts.expectHeadSha !== undefined) validateSha(opts.expectHeadSha, '--expect-head-sha');
+    if (opts.evidenceRequired && patchTarget && opts.headSha === undefined) {
+      throw new Error(
+        '--evidence-required needs --head-sha for a patch file: evidence must bind to the commit it reviewed.'
+      );
+    }
+    assertEvidenceCanBeRequired(opts);
 
     const prepared = await prepareCouncil(spinner, opts);
     const { config } = prepared;
+    assertEvidenceCanBeRequired(opts, config);
+    await assertEvidenceDeliverable(opts, config);
 
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
@@ -1458,20 +1723,44 @@ async function executeCouncil(
     );
   }
 
+  // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
+  // turn a finished review into a failure unless --evidence-required asks.
+  let runtime: TelemetryRuntime | undefined;
+  let runtimeError: string | undefined;
+  try {
+    runtime = await createTelemetryRuntime({
+      rclVersion: RCL_VERSION,
+      config,
+      noTelemetry: opts.telemetry === false,
+    });
+  } catch (err) {
+    // Kept for the --evidence-required verdict below, which names the cause.
+    runtimeError = scrubText(String(err), 200);
+    process.stderr.write(chalk.dim(`Evidence delivery unavailable: ${runtimeError}`) + '\n');
+  }
+  // The report as it may leave the machine — free text scrubbed, a parse
+  // failure reduced to the parser message unless harness.parseFailures opts
+  // in. --json-file and --markdown are written from the same view, so the
+  // declared digests match the files and nothing raw travels. With
+  // telemetry off the raw report is written as before.
+  const delivered =
+    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+  const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
+
   // Output
   if (opts.json) {
-    console.log(toJson(result));
+    console.log(artifacts.report_json);
   } else {
     printReviewSummary(result);
   }
 
   if (opts.jsonFile) {
-    await writeJsonOutput(result, opts.jsonFile);
+    await writeFile(opts.jsonFile, artifacts.report_json, 'utf-8');
     console.log(chalk.dim(`JSON written to: ${opts.jsonFile}`));
   }
 
   if (opts.markdown) {
-    await writeMarkdownOutput(result, opts.markdown);
+    await writeFile(opts.markdown, artifacts.report_md ?? '', 'utf-8');
     console.log(chalk.dim(`Markdown written to: ${opts.markdown}`));
   }
 
@@ -1488,14 +1777,43 @@ async function executeCouncil(
     }
   }
 
-  // CI mode: fail on a fully-failed run or on blocking findings
+  // Deliver after the report is on disk and before any exit code, so a
+  // review is never lost to the network.
+  const evidenceRequired = opts.evidenceRequired === true;
+  const delivery: DeliveryOutcome = runtime
+    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired }).catch((err: unknown) => ({
+        status: 'error' as const,
+        line: `Evidence delivery failed: ${scrubText(String(err), 300)}`,
+        exitCode: evidenceRequired ? (4 as const) : (0 as const),
+        spooled: false,
+      }))
+    : {
+        status: 'off',
+        line: evidenceRequired ? `Evidence not sent: telemetry could not be set up (${runtimeError ?? 'unknown cause'})` : '',
+        exitCode: evidenceRequired ? 4 : 0,
+        spooled: false,
+      };
+  if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
+  // The flush hint is honest only when something was spooled to flush.
+  const evidenceFailure = delivery.spooled
+    ? `Evidence was not recorded (--evidence-required). Retry delivery with \`rcl telemetry flush --run ${delivery.runId}\` rather than re-running the review.`
+    : `Evidence was not recorded (--evidence-required): ${delivery.line || delivery.status}.`;
+
+  // CI mode: fail on a fully-failed run or on blocking findings. The gate
+  // verdict keeps its exit code — pipelines branch on it — and an evidence
+  // failure is reported beside it.
   if (opts.ci) {
     const verdict = evaluateCiGate(result);
     if (verdict.exitCode !== 0) {
       console.error(chalk.red(`\n${verdict.message}`));
+      if (delivery.exitCode !== 0) console.error(chalk.red(evidenceFailure));
       process.exit(verdict.exitCode);
     }
-    }
+  }
+  if (delivery.exitCode !== 0) {
+    console.error(chalk.red(evidenceFailure));
+    process.exit(delivery.exitCode);
+  }
 }
 
 async function runDiscuss(
@@ -1603,6 +1921,7 @@ async function runPlanReview(
         '--head-sha, --base-sha and --expect-head-sha do not apply to plan reviews; a plan is bound by its content digest.'
       );
     }
+    assertEvidenceCanBeRequired(opts);
 
     let focus: PlanFocus | undefined;
     if (opts.focus) {
@@ -1616,6 +1935,8 @@ async function runPlanReview(
     }
 
     const prepared = await prepareCouncil(spinner, opts, PLAN_DEFAULT_ROLES);
+    assertEvidenceCanBeRequired(opts, prepared.config);
+    await assertEvidenceDeliverable(opts, prepared.config);
 
     spinner.text = `Loading plan: ${file}`;
     const diff = await loadPlanAsDiff(file);

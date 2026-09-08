@@ -1,10 +1,82 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 — 2026-09-07
+
+Review Council evidence (epic IO-12475). **Behavior change:** in a
+Harness-managed repository (one carrying `.harness-cli/config.json`) with a
+`harness login`, a review now records itself on Harness by default — the run
+header, consensus findings (which quote code), reviewer call statistics and
+the JSON and Markdown reports as written. Hence the major version; every
+report field is additive and pre-3.0 reports load unchanged.
+
+- **`src/telemetry/`** (RCL-37): a pure, allow-listed `buildRunEnvelope`
+  wraps the report's `run` header with wire-shaped findings and calls, the
+  report's `stats`, the SHA-256 digests of the exact bytes written to
+  `--json-file` / `--markdown`, and how the delivery came about. `HarnessSink`
+  posts the envelope, PUTs each declared artifact and posts converge events
+  under a 10 s timeout per request, sending the token only to the host that
+  minted it. An `Outbox` at `~/.rcl/outbox/<run id>/` keeps what Harness could
+  not take and retries it — same run id, `delivery: {mode: retried,
+  spooled_at}` — at the start of every command (five-second bound) or via
+  `rcl telemetry flush`; above 1 GB it stops spooling artifacts and reports the
+  affected runs as a `loss` event on the next successful flush.
+- **Credentials.** The stored `harness login` is the default; `HARNESS_API_TOKEN`
+  + `HARNESS_API_URL` serve CI, and an environment token never pairs with the
+  stored host (half a pair is an error, not a fallback). A base URL carries no
+  user-info, query or fragment; a trailing slash is normalized away.
+- **Configuration.** `harness.telemetry: off | envelope | findings | full`
+  (default `full`), `--no-telemetry`, `RCL_TELEMETRY` (`off`, `0`, `false`,
+  `no`, or a level name);
+  `harness.parseFailures` opts in to a parse-failed call's raw answer (fenced
+  code and key-shaped strings removed, 32 KB cap) — by default only the parser
+  message travels.
+- **`--evidence-required`** exits 4 when the evidence is incomplete — the
+  envelope was not acknowledged (spooled, refused, or the org has evidence
+  off), or a declared artifact was spooled or refused — and refuses a patch
+  file without `--head-sha` and a run with `--no-telemetry`,
+  `RCL_TELEMETRY=off` or `harness.telemetry: off`. Under `--ci` the gate's
+  exit code wins; the evidence failure is printed beside it. At the
+  `envelope` and `findings` levels the declared artifact digests still
+  describe the reports rcl wrote — the server shows them as declared, not
+  received — and evidence is complete once the envelope is acknowledged.
+- **Consent.** The first delivery from a machine to a host prints a one-time
+  notice; `~/.rcl/telemetry-notice` records it.
+- **Status line.** `Evidence recorded: <url>` · `Evidence spooled (Harness
+  unreachable); run rcl telemetry flush` · `Evidence not sent: <host> has not
+  enabled review evidence for this organization`.
+- **Converge events.** `converge-attempt` emits `attempt_claimed` (and
+  `cap_changed` under `--max-attempts`), `converge-report` emits
+  `round_processed` (and `cap_changed` under `--max-rounds`) and persists the
+  round's run id in the run state, `converge-verdict` emits
+  `verdicts_recorded` and `resolution` bound to that run id.
+- **`rcl telemetry status | flush [--run <id>]`** for operators. Loss
+  reports go out in batches and are only removed once the server accounts
+  for every event; a refused batch is kept as `loss/<id>.json.refused`,
+  listed by `status`, never retried. A flush bounded by a deadline bounds
+  each request by what remains of it, and reports loss reports still
+  pending.
+- **Transport hardening.** Receipts larger than 64 KB are refused unread; a
+  WHATWG opaque redirect reads as a redirect; the credential's URL is
+  re-validated when the sink is built (`https`, or `http` to `localhost`,
+  `127.0.0.0/8`, `::1` and `*.localhost` — the host comes from the login or
+  the environment, never from the repository). The consent notice precedes
+  the first transmission of any kind, converge events and flushes included.
+- **Scrubbing.** Every free-text field that leaves the process (errors,
+  warnings, runner claims, finding prose, consensus excerpts) is truncated and
+  scrubbed for bearer/key-shaped substrings. The reports written to
+  `--json-file` / `--markdown` are that same delivery view (a `parse_failed`
+  call keeps only the parser message unless `harness.parseFailures` is set),
+  so the uploaded artifacts are byte-identical to the files; with telemetry
+  off the raw report is written as before.
+- **Transport.** The Harness credential travels over TLS only, except to
+  loopback hosts (a local development server); a 401 keeps a spooled entry
+  for retry after re-login instead of failing it for good.
+- The rcl and rcl-converge skills document the evidence line, the
+  `--evidence-required` flush-retry rule (five minutes, then stop the loop),
+  and the opt-outs.
 
 Phase 0 of the Review Council evidence ledger (RCL-36, epic IO-12475): the
-report now says what it reviewed. Nothing leaves the machine yet — the
-telemetry sink is the next child. The one network change: PR mode now
+report now says what it reviewed. The one network change: PR mode now
 fetches the changed files through a compare pinned to the PR's base and head
 object ids (`GET /compare/{base}...{head}`) for PRs up to GitHub's 300-file
 compare cap, so the report's `head_sha` provably identifies the reviewed

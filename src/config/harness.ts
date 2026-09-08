@@ -77,7 +77,7 @@ export function defaultCredentialsPath(env: Record<string, string | undefined>):
   return join(base, 'harness', 'credentials.json');
 }
 
-async function readStoredCredentials(path: string): Promise<{ url: string; token: string } | null> {
+export async function readStoredCredentials(path: string): Promise<{ url: string; token: string } | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf-8'));
     if (typeof parsed === 'object' && parsed !== null) {

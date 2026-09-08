@@ -29,7 +29,7 @@ export class ConfigError extends Error {
 // unsupported for discovery: rcl is routinely run inside untrusted
 // checkouts, and search-loading attacker-controlled JS would execute it
 // with the user's API keys in env.
-const SEARCH_PLACES = [
+export const SEARCH_PLACES = [
   '.review-council.yml',
   '.review-council.yaml',
   '.review-council.json',
