@@ -113,6 +113,30 @@ describe('telemetry delivery', () => {
     expect(lines).toEqual([]);
   });
 
+  it('never puts the Harness token, provider keys or the GitHub token in any payload', async () => {
+    const poison = {
+      ANTHROPIC_API_KEY: `sk-ant-${'p'.repeat(40)}`,
+      OPENAI_API_KEY: `sk-${'q'.repeat(40)}`,
+      GEMINI_API_KEY: `AIza${'r'.repeat(35)}`,
+      GITHUB_TOKEN: `ghp_${'s'.repeat(36)}`,
+    };
+    const { rt, requests } = await runtime(acceptEverything, { env: poison });
+    const result = sampleResult();
+    // A finding that quotes the environment, as a careless model might. (The
+    // Harness token never reaches a model: it is not in any prompt.)
+    result.findings[0]!.description = `Leaked: ${Object.values(poison).join(' ')}`;
+    await deliverRun(rt, { result, artifacts: ARTIFACTS });
+
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    for (const request of requests) {
+      const body = request.body ?? '';
+      for (const secret of [...Object.values(poison), 'aone_login']) expect(body).not.toContain(secret);
+      // The credential travels in the Authorization header alone.
+      expect(request.headers['authorization']).toBe('Bearer aone_login');
+      expect(request.url).not.toContain('aone_login');
+    }
+  });
+
   it('uploads no artifacts at the findings level and none of the report rows at envelope level', async () => {
     const { rt, requests } = await runtime(acceptEverything, { config: { harness: { telemetry: 'findings' } } });
     await deliverRun(rt, { result: sampleResult(), artifacts: ARTIFACTS });

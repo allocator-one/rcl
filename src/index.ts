@@ -1729,6 +1729,7 @@ async function executeCouncil(
   // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
   // turn a finished review into a failure unless --evidence-required asks.
   let runtime: TelemetryRuntime | undefined;
+  let runtimeError: string | undefined;
   try {
     runtime = await createTelemetryRuntime({
       rclVersion: RCL_VERSION,
@@ -1736,7 +1737,9 @@ async function executeCouncil(
       noTelemetry: opts.telemetry === false,
     });
   } catch (err) {
-    process.stderr.write(chalk.dim(`Evidence delivery unavailable: ${scrubText(String(err), 200)}`) + '\n');
+    // Kept for the --evidence-required verdict below, which names the cause.
+    runtimeError = scrubText(String(err), 200);
+    process.stderr.write(chalk.dim(`Evidence delivery unavailable: ${runtimeError}`) + '\n');
   }
   // The report as it may leave the machine — free text scrubbed, a parse
   // failure reduced to the parser message unless harness.parseFailures opts
@@ -1789,7 +1792,7 @@ async function executeCouncil(
       }))
     : {
         status: 'off',
-        line: evidenceRequired ? 'Evidence not sent: telemetry could not be set up' : '',
+        line: evidenceRequired ? `Evidence not sent: telemetry could not be set up (${runtimeError ?? 'unknown cause'})` : '',
         exitCode: evidenceRequired ? 4 : 0,
         spooled: false,
       };
