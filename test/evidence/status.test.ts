@@ -107,6 +107,21 @@ describe('rcl evidence status', () => {
     expect(text).not.toContain('malformed_response');
   });
 
+  it('renders an unjudged projection that still carries rounds and a run — stale, unverified — without an inconclusive label', async () => {
+    for (const status of ['stale', 'unverified']) {
+      const data = gateStatus(status);
+      data.advisory.conclusive = null;
+      data.enforced.conclusive = null;
+      const { code, out } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data } }));
+      expect(await code, status).toBe(EVIDENCE_EXIT.notConverged);
+      const text = out.join('\n');
+      expect(text, status).toContain(`advisory: ${status}`);
+      expect(text, status).toContain('round 2');
+      expect(text, status).toContain('01a08032');
+      expect(text, status).not.toContain('inconclusive');
+    }
+  });
+
   it('does not open the gate on a converged projection the server marks inconclusive', async () => {
     const data = gateStatus('converged');
     data.advisory.conclusive = false;
