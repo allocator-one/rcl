@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.1.0 — 2026-09-08
 
 - **`rcl evidence status` reports a pull request nothing has been judged for**
   (RCL-44). Harness sends `conclusive: null` for a projection without a
