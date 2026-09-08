@@ -203,12 +203,12 @@ describe('telemetry delivery', () => {
     const down = await runtime(() => new TypeError('fetch failed'));
     await deliverRun(down.rt, { result: sampleResult(), artifacts: ARTIFACTS });
     const hanging = await runtime(() => 'hang');
-    const started = Date.now();
+    // The 300 ms deadline is what lets this settle at all: a hanging request
+    // with no bound would hit the test's own timeout instead.
     await flushOutboxAtStart(hanging.rt, 300);
-    expect(Date.now() - started).toBeLessThan(3_000);
     // Nothing was delivered and nothing was lost: the entry waits for the next flush.
     expect((await hanging.rt.outbox.list()).map((e) => e.failed)).toEqual([undefined]);
-  });
+  }, 4_000);
 
   it('keeps an event id across a spool and its retried delivery', async () => {
     const event = buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } });

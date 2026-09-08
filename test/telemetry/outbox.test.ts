@@ -75,16 +75,44 @@ describe('Outbox', () => {
   });
 
   it('refuses ids that are not run or event entry ids, so no id becomes a path', async () => {
-    const outbox = new Outbox(dir);
+    // Nested under a root of its own, so every traversal tried here would
+    // still land inside a directory this test owns and inspects.
+    const nested = join(dir, 'a', 'b', 'outbox');
+    await mkdir(nested, { recursive: true });
+    const outbox = new Outbox(nested);
     await expect(outbox.spoolRun({ runId: '../../escape', envelope })).rejects.toBeInstanceOf(OutboxError);
     await expect(outbox.remove('..')).rejects.toBeInstanceOf(OutboxError);
     await expect(outbox.remove('events-not-a-uuid')).rejects.toBeInstanceOf(OutboxError);
     await expect(outbox.spoolEvents([{ ...buildEvent({ kind: 'loss' }), id: 'evil/../id' }])).rejects.toBeInstanceOf(OutboxError);
-    expect(await readdir(dir)).toEqual([]);
-    // Nothing landed outside the outbox either.
-    const parent = await readdir(join(dir, '..'));
-    expect(parent).not.toContain('escape');
-    expect(parent).not.toContain('id');
+    expect(await readdir(nested)).toEqual([]);
+    // Nothing landed anywhere under the root either.
+    expect(await readdir(join(dir, 'a', 'b'))).toEqual(['outbox']);
+    expect(await readdir(join(dir, 'a'))).toEqual(['b']);
+    expect(await readdir(dir)).toEqual(['a']);
+  });
+
+  it('merges an event batch spooled again and treats one id spelt two ways as one entry', async () => {
+    const outbox = new Outbox(dir);
+    const first = buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } });
+    const second = buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 2, payload: { cap: 20 } });
+    const id = await outbox.spoolEvents([first]);
+    // The same batch again, grown by one: the entry keeps both, once each.
+    expect(await outbox.spoolEvents([first, second])).toBe(id);
+    const [entry] = await outbox.list();
+    expect(entry!.id).toBe(id);
+    expect(entry!.events).toBe(2);
+    expect(await readdir(dir)).toEqual([id]);
+
+    // A run id spelt in upper case is the same entry as its lower-case self.
+    const upper = envelope.run.id.toUpperCase();
+    await outbox.spoolRun({ runId: upper, envelope: { ...envelope, run: { ...envelope.run, id: upper } } });
+    expect((await readdir(dir)).sort()).toEqual([id, envelope.run.id.toLowerCase()].sort());
+
+    const { sink, calls } = fakeSink({});
+    const summary = await outbox.flush(sink);
+    expect(summary.delivered.sort()).toEqual([id, envelope.run.id.toLowerCase()].sort());
+    const postedEvents = calls.find((c) => c.method === 'postEvents')!.args[0] as WireEvent[];
+    expect(postedEvents.map((e) => e.id).sort()).toEqual([first.id, second.id].sort());
   });
 
   it('merges events by id when a run is spooled again and drops artifacts already delivered', async () => {

@@ -168,13 +168,12 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
  * something spooled earlier. A notice that cannot be recorded shows again
  * next time; it is never a failure.
  */
+// Persistence failures are absorbed inside `ensureNoticeShown` (shown, not
+// recorded — it shows again next time); anything that escapes means the
+// notice itself could not be written, and nothing is transmitted then.
 async function noticeBefore(runtime: TelemetryRuntime): Promise<void> {
   if (!runtime.credential) return;
-  try {
-    await ensureNoticeShown(credentialHost(runtime.credential), runtime.dataDir, runtime.stderr);
-  } catch {
-    // Shown, not recorded — the safe side.
-  }
+  await ensureNoticeShown(credentialHost(runtime.credential), runtime.dataDir, runtime.stderr);
 }
 
 /** Flush the outbox through the runtime's sink, the notice shown first. */

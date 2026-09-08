@@ -243,10 +243,13 @@ export class Outbox {
     return directorySize(this.dir);
   }
 
-  /** Entry ids are run UUIDs or `events-<uuid>`; nothing else becomes a path. */
+  /**
+   * Entry ids are run UUIDs or `events-<uuid>`, lower-cased so one id spelt
+   * two ways is one entry; nothing else becomes a path.
+   */
   private entryDir(id: string): string {
     if (!ENTRY_ID.test(id)) throw new OutboxError(`Not an outbox entry id: ${JSON.stringify(id)}`);
-    const dir = resolve(this.dir, id);
+    const dir = resolve(this.dir, id.toLowerCase());
     if (!dir.startsWith(`${this.dir}${sep}`)) throw new OutboxError(`Entry escapes the outbox: ${id}`);
     return dir;
   }
@@ -254,7 +257,7 @@ export class Outbox {
   /** Spool a run whose delivery failed (or whose artifacts could not be uploaded). */
   async spoolRun(input: SpoolRunInput): Promise<SpoolResult> {
     if (!UUID.test(input.runId)) throw new OutboxError(`Not a run id: ${JSON.stringify(input.runId)}`);
-    if (input.envelope.run?.id !== input.runId) {
+    if (input.envelope.run?.id?.toLowerCase() !== input.runId.toLowerCase()) {
       throw new OutboxError(`Envelope run id ${JSON.stringify(input.envelope.run?.id)} does not match the entry id ${input.runId}.`);
     }
     const dir = this.entryDir(input.runId);
@@ -308,14 +311,21 @@ export class Outbox {
   async spoolEvents(events: WireEvent[]): Promise<string> {
     const first = events[0];
     if (!first || !UUID.test(first.id)) throw new OutboxError('Events to spool must carry UUID ids.');
-    const id = `events-${first.id}`;
+    const id = `events-${first.id.toLowerCase()}`;
     const dir = this.entryDir(id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    await writeJsonAtomic(join(dir, EVENTS_FILE), events);
+    // A batch spooled again lands on the same entry: merge by event id so
+    // nothing already waiting is lost, and keep the entry's own history.
+    const existing = await readOptionalJson<OutboxMeta>(join(dir, META_FILE));
+    const previous = await readOptionalJson<unknown>(join(dir, EVENTS_FILE));
+    const merged = new Map<string, WireEvent>();
+    for (const event of validEvents(previous) ? previous : []) merged.set(event.id, event);
+    for (const event of events) merged.set(event.id, event);
+    await writeJsonAtomic(join(dir, EVENTS_FILE), [...merged.values()]);
     await writeJsonAtomic(join(dir, META_FILE), {
       kind: 'events',
-      spooled_at: new Date().toISOString(),
-      attempts: 0,
+      spooled_at: existing?.spooled_at ?? new Date().toISOString(),
+      attempts: existing?.attempts ?? 0,
     } satisfies OutboxMeta);
     return id;
   }

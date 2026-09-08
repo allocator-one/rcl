@@ -116,9 +116,7 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    ATTEMPT_STATUS=$?
    [ "$ATTEMPT_STATUS" -eq 0 ] || exit "$ATTEMPT_STATUS"
    nohup sh -c 'umask 077
-   GITHUB_TOKEN=$(gh auth token)
-   export GITHUB_TOKEN
-   rcl review <target> \
+   GITHUB_TOKEN="$(gh auth token)" rcl review <target> \
      --markdown <RCL_TMP>/rcl-report-<TARGET>-r<R>.md \
      --json-file <RCL_TMP>/rcl-report-<TARGET>-r<R>.json \
      <EVIDENCE_ARG> <HEAD_SHA_ARG> [--spec <SPEC>] [--roles <roles>] &

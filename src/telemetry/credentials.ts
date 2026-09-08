@@ -114,7 +114,11 @@ export async function resolveHarnessCredential(
   if (storedUrl === null) {
     return { repoManaged, note: `the stored Harness login names a host the token must not travel to in plain text: ${hostOf(stored.url)}` };
   }
-  return { repoManaged, credential: { url: storedUrl, token: stored.token, source: 'login' } };
+  const token = typeof stored.token === 'string' ? stored.token.trim() : '';
+  if (token === '') {
+    return { repoManaged, note: 'the stored Harness login carries no token — run `harness login` again.' };
+  }
+  return { repoManaged, credential: { url: storedUrl, token, source: 'login' } };
 }
 
 /** The host name a status line may name (never the token). */

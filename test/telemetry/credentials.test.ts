@@ -107,6 +107,13 @@ describe('resolveHarnessCredential', () => {
     }
   });
 
+  it('treats a blank stored token as no login', async () => {
+    await writeFile(credentialsPath, JSON.stringify({ url: 'https://harness.example.test', token: '   ' }));
+    const resolved = await resolveHarnessCredential({ env: {}, cwd: repo, credentialsPath });
+    expect(resolved.credential).toBeUndefined();
+    expect(resolved.note).toMatch(/carries no token/);
+  });
+
   it('explains a missing login', async () => {
     const resolved = await resolveHarnessCredential({ env: {}, cwd: repo, credentialsPath: join(repo, 'missing.json') });
     expect(resolved.credential).toBeUndefined();
