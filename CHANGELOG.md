@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.2.0 — 2026-09-08
 
 - **`rcl review … --attest`** (RCL-40): inside the organization's gate
   workflow on GitHub Actions, rcl asks the runner for the job's OIDC token
