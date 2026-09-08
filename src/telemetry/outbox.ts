@@ -364,8 +364,12 @@ export class Outbox {
     return files;
   }
 
-  /** Every entry, or — given `only` — that one entry when it exists (a targeted flush reads nothing else). */
-  async list(only?: string): Promise<OutboxEntry[]> {
+  /**
+   * Every entry, or — given `only` — that one entry when it exists (a targeted
+   * flush reads nothing else). Sizes are walked only when asked for: a flush
+   * never reads them, `rcl telemetry status` does.
+   */
+  async list(only?: string, options: { sizes?: boolean } = {}): Promise<OutboxEntry[]> {
     let names: string[];
     if (only !== undefined) {
       const dir = this.entryDir(only);
@@ -398,7 +402,7 @@ export class Outbox {
       entries.push({
         id,
         meta,
-        bytes: await directorySize(dir),
+        bytes: options.sizes === false ? 0 : await directorySize(dir),
         artifacts: (Object.entries(ARTIFACT_FILES) as Array<[ArtifactKind, string]>)
           .filter(([, file]) => files.has(file))
           .map(([kind]) => kind),
@@ -425,7 +429,7 @@ export class Outbox {
       options.deadlineMs === undefined ? {} : { timeoutMs: Math.max(1, options.deadlineMs - (now() - started)) };
     const summary: FlushSummary = { delivered: [], remaining: [], failed: [] };
 
-    const entries = await this.list(options.runId);
+    const entries = await this.list(options.runId, { sizes: false });
     for (const entry of entries) {
       if (entry.failed) {
         summary.failed.push({ id: entry.id, reason: entry.failed.reason });

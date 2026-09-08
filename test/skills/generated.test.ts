@@ -83,7 +83,12 @@ describe('generated skill files', () => {
         const cleanup = content.indexOf(
           `rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json ${pidFile}`
         );
-        expect(content, path).toContain(`printf "%s\\n" "$$" > ${pidFile} || exit 125`);
+        // The file records RCL's own PID: the wrapper backgrounds RCL, records it,
+        // forwards signals, and waits — a killed wrapper cannot orphan a review.
+        expect(content, path).toContain(`printf "%s\\n" "$rcl_pid" > ${pidFile} || { kill -TERM "$rcl_pid" 2>/dev/null; exit 125; }`);
+        expect(content, path).toContain('trap "kill -TERM $rcl_pid 2>/dev/null" INT TERM HUP');
+        expect(content, path).toContain('wait "$rcl_pid"; status=$?');
+        expect(content, path).not.toMatch(/<HEAD_SHA_ARG> \\\n/);
         expect(content, path).toContain('for no more than 30 seconds');
         expect(cleanup, path).toBeGreaterThan(-1);
         expect(cleanup, path).toBeLessThan(claim);
