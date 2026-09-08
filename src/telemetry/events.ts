@@ -70,7 +70,8 @@ export function roundIdentities(
   const seen = new Set<string>();
   const out: RoundIdentity[] = [];
   for (const f of findings) {
-    const key = f.finding.identity ?? f.identity;
+    // An absent or blank report key (a pre-3.0 report) falls back to the matched identity.
+    const key = f.finding.identity?.trim() || f.identity;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({

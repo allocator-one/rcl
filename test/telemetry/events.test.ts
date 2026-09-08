@@ -91,11 +91,12 @@ describe('roundIdentities', () => {
   it('falls back to the matched identity for a pre-3.0 finding without a key, and keeps one entry per key', () => {
     const list = roundIdentities([
       { identity: 'cccccccccccccccc', status: 'new', finding: finding(undefined) },
+      { identity: 'ffffffffffffffff', status: 'new', finding: finding('   ') },
       { identity: 'dddddddddddddddd', status: 'repeat', finding: finding('samekey000000001') },
       { identity: 'eeeeeeeeeeeeeeee', status: 'repeat', finding: finding('samekey000000001') },
     ]);
-    expect(list.map((e) => e.identity_key)).toEqual(['cccccccccccccccc', 'samekey000000001']);
-    expect(list[1]!.matched_identity).toBe('dddddddddddddddd');
+    expect(list.map((e) => e.identity_key)).toEqual(['cccccccccccccccc', 'ffffffffffffffff', 'samekey000000001']);
+    expect(list[2]!.matched_identity).toBe('dddddddddddddddd');
   });
 
   it('travels through buildEvent with the rest of the payload, scrubbed like any text', () => {
