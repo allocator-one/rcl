@@ -3,7 +3,6 @@ import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
-import { isGateStatus, isRunDetail, type GateStatus, type RunDetail } from '../evidence/types.js';
 
 /**
  * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
@@ -255,28 +254,16 @@ export class HarnessSink {
     });
   }
 
-  /** `GET /api/v1/reviews/prs/:owner/:repo/:number` — the gate status Harness computed for a pull request. */
-  async getGateStatus(owner: string, repo: string, number: number, options: RequestOptions = {}): Promise<SinkOutcome<GateStatus>> {
-    const path = `/api/v1/reviews/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}`;
+  /**
+   * `GET <path>` — a read under the same timeout, handshake and host binding
+   * as deliveries. `validate` says what the caller asked for: it returns the
+   * typed value when `data` is about that thing and `null` otherwise, which
+   * is reported as `malformed_response` rather than trusted. Reads allow a
+   * larger body than a receipt (`MAX_READ_RESPONSE_BYTES`) unless told otherwise.
+   */
+  async getJson<T>(path: string, validate: (data: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
     const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
-    // The answer must be about the pull request that was asked for, with both
-    // projections; anything else is not a gate status.
-    return this.classify(result, (body) => {
-      const data = (body as { data?: unknown } | null)?.data;
-      return isGateStatus(data, `${owner}/${repo}`, number) ? data : null;
-    });
-  }
-
-  /** `GET /api/v1/reviews/runs/:id` — one recorded run with its findings, calls and artifact state. */
-  async getRun(id: string, options: RequestOptions = {}): Promise<SinkOutcome<RunDetail>> {
-    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(id)}`, undefined, 'application/json', {
-      maxResponseBytes: MAX_READ_RESPONSE_BYTES,
-      ...options,
-    });
-    return this.classify(result, (body) => {
-      const data = (body as { data?: unknown } | null)?.data;
-      return isRunDetail(data, id) ? data : null;
-    });
+    return this.classify(result, (body) => validate((body as { data?: unknown } | null)?.data));
   }
 }
 

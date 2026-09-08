@@ -184,7 +184,9 @@ function optional(value: unknown, check: (v: unknown) => boolean): boolean {
 
 const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean';
 
-/** The pull request head: absent, or a record whose flags the renderer reads are booleans and whose shas are strings. */
+const isPositiveInteger = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+
+/** The pull request head: absent, or a record with its two flags as booleans and its shas as strings or null. */
 function isHead(value: unknown): boolean {
   return (
     value === null ||
@@ -193,8 +195,8 @@ function isHead(value: unknown): boolean {
       optional(value['sha'], isString) &&
       optional(value['merge_commit_sha'], isString) &&
       optional(value['source'], isString) &&
-      optional(value['merged'], isBoolean) &&
-      optional(value['is_cross_repository'], isBoolean))
+      isBoolean(value['merged']) &&
+      isBoolean(value['is_cross_repository']))
   );
 }
 
@@ -238,6 +240,11 @@ export function isRunDetail(value: unknown, id: string): value is RunDetail {
     value['id'].toLowerCase() === id.toLowerCase() &&
     isRecord(value['target']) &&
     isString(value['target']['kind']) &&
+    optional(value['target']['pr_number'], isPositiveInteger) &&
+    optional(value['target']['repo'], isString) &&
+    optional(value['target']['head_sha'], isString) &&
+    optional(value['repo_verified'], isBoolean) &&
+    optional(value['is_cross_repository'], isBoolean) &&
     nullableRecord(value['runner']) &&
     nullableRecord(value['stats']) &&
     (value['converge'] === null || value['converge'] === undefined || (isRecord(value['converge']) && isString(value['converge']['target']))) &&

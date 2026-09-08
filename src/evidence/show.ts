@@ -1,5 +1,6 @@
 import { describeOutcome } from '../telemetry/sink.js';
 import { formatRun, safeJson, text } from './format.js';
+import { getRun } from './reads.js';
 
 // Run ids are UUIDs (v7 live, v5 backfill); anything else never reaches the network or the terminal raw.
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -26,7 +27,7 @@ export async function runEvidenceShow(runId: string, options: { json?: boolean }
   const sink = await openSink(deps);
   if (!sink) return EVIDENCE_EXIT.unanswered;
 
-  const outcome = await sink.getRun(id);
+  const outcome = await getRun(sink, id);
   if (outcome.kind !== 'ok') {
     deps.stderr(`Cannot read run ${id}: ${describeOutcome(outcome)}`);
     return EVIDENCE_EXIT.unanswered;

@@ -50,7 +50,8 @@ export function parseRemoteUrl(url: string): RepoRef | null {
   } catch {
     return null;
   }
-  if (!/^(?:ssh|https?|git):$/i.test(parsed.protocol) || parsed.hostname.toLowerCase() !== 'github.com') return null;
+  const host = parsed.hostname.toLowerCase();
+  if (!/^(?:ssh|https?|git):$/i.test(parsed.protocol) || (host !== 'github.com' && host !== 'www.github.com')) return null;
   const path = parsed.pathname.match(REPO_PATH);
   return path ? legalRepo(path[1]!, path[2]!) : null;
 }

@@ -1,6 +1,7 @@
 import { resolveHarnessCredential } from '../telemetry/credentials.js';
 import { describeOutcome, HarnessSink } from '../telemetry/sink.js';
 import { formatGateStatus, safeJson, text } from './format.js';
+import { getGateStatus } from './reads.js';
 import { needsRemote, parsePullRequestArg, resolveRemoteRepo, type RepoRef } from './target.js';
 
 /**
@@ -81,7 +82,7 @@ export async function runEvidenceStatus(
   const sink = await openSink(deps);
   if (!sink) return EVIDENCE_EXIT.unanswered;
 
-  const outcome = await sink.getGateStatus(target.owner, target.repo, target.number);
+  const outcome = await getGateStatus(sink, target.owner, target.repo, target.number);
   const name = text(`${target.owner}/${target.repo}#${target.number}`, 200);
   if (outcome.kind !== 'ok') {
     deps.stderr(`Cannot read the gate status of ${name}: ${describeOutcome(outcome)}`);
@@ -95,5 +96,8 @@ export async function runEvidenceStatus(
   } else {
     for (const line of formatGateStatus(status, judged)) deps.stdout(line);
   }
-  return status[judged].status === 'converged' ? EVIDENCE_EXIT.converged : EVIDENCE_EXIT.notConverged;
+  // Converged is only ever conclusive on the server; a payload saying
+  // otherwise does not open the gate.
+  const projection = status[judged];
+  return projection.status === 'converged' && projection.conclusive ? EVIDENCE_EXIT.converged : EVIDENCE_EXIT.notConverged;
 }

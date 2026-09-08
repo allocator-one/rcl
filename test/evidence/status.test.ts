@@ -94,6 +94,39 @@ describe('rcl evidence status', () => {
     }
   });
 
+  it('does not open the gate on a converged projection the server marks inconclusive', async () => {
+    const data = gateStatus('converged');
+    data.advisory.conclusive = false;
+    const { code, out } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data } }));
+    expect(await code).toBe(EVIDENCE_EXIT.notConverged);
+    expect(out.join('\n')).toContain('converged (inconclusive)');
+  });
+
+  it('renders a merged fork head and the merge decision', async () => {
+    const data = gateStatus('converged');
+    data.head = { ...data.head!, merged: true, merge_commit_sha: 'f'.repeat(40), is_cross_repository: true, merged_at: '2026-09-08T09:28:58.000Z' };
+    (data as Record<string, unknown>)['decision'] = {
+      decision: 'converged',
+      reviewed_head_sha: HEAD,
+      merge_commit_sha: 'f'.repeat(40),
+      merged_by_login: 'mstroeck',
+      merged_at: '2026-09-08T09:28:58.000Z',
+      source: 'webhook',
+      decided_at: '2026-09-08T09:29:00.000Z',
+      evidence: {},
+    };
+    const { code, out } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data } }));
+    expect(await code).toBe(EVIDENCE_EXIT.converged);
+    expect(out[0]).toContain('merged as ffffffffff');
+    expect(out[0]).toContain('fork');
+    expect(out.at(-1)).toBe('decision: converged at 25c4fed693 (webhook, merged 2026-09-08T09:28:58.000Z)');
+
+    // A head record missing its flags is not a head.
+    const flagless = gateStatus('converged');
+    delete (flagless.head as Record<string, unknown>)['merged'];
+    expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: flagless } })).code).toBe(EVIDENCE_EXIT.unanswered);
+  });
+
   it('judges the enforced projection with --enforced', async () => {
     const body = { data: gateStatus('converged', 'unverified') };
     expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body })).code).toBe(EVIDENCE_EXIT.converged);

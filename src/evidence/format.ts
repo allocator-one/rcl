@@ -56,7 +56,7 @@ function projectionLines(name: string, projection: Projection, judged: boolean):
 
 export function formatGateStatus(status: GateStatus, judged: 'advisory' | 'enforced'): string[] {
   const head = status.head;
-  const name = `${text(status.repo, 200)}#${status.pr_number}`;
+  const name = `${text(status.repo, 200)}#${text(status.pr_number, 20)}`;
   const headLine = !head
     ? `${name} — no head known to Harness`
     : `${name} — head ${short(head.sha)}${head.source ? ` (${text(head.source, 40)})` : ''}` +
@@ -87,7 +87,7 @@ export function formatRun(run: RunDetail): string[] {
   const runnerKind = typeof runner['kind'] === 'string' ? text(runner['kind'], 40) : '—';
   const ciRunId = typeof runner['ci_run_id'] === 'string' ? ` ${text(runner['ci_run_id'], 40)}` : '';
   const target = run.target;
-  const named = target.repo && target.pr_number ? `${text(target.repo, 200)}#${target.pr_number}` : text(target.kind, 40);
+  const named = target.repo && target.pr_number ? `${text(target.repo, 200)}#${text(target.pr_number, 20)}` : text(target.kind, 40);
   const converge = run.converge;
   const lines = [
     `run ${text(run.id, 64)}${run.url ? ` ${text(run.url)}` : ''}`,

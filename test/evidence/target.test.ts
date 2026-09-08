@@ -14,6 +14,7 @@ describe('parseRemoteUrl', () => {
       'https://x-access-token:ghs_secret@github.com/allocator-one/rcl.git',
       'ssh://git@github.com:22/allocator-one/rcl.git',
       'https://GitHub.com/allocator-one/rcl',
+      'https://www.github.com/allocator-one/rcl.git',
     ]) {
       expect(parseRemoteUrl(url), url).toEqual({ owner: 'allocator-one', repo: 'rcl' });
     }
@@ -29,6 +30,7 @@ describe('parseRemoteUrl', () => {
       'https://github.com/allocator-one/..',
       'https://github.com/-bad-/rcl',
       'https://github.com/allocator-one/rcl/extra',
+      'https://api.github.com/allocator-one/rcl',
     ]) {
       expect(parseRemoteUrl(url), JSON.stringify(url)).toBeNull();
     }

@@ -228,6 +228,13 @@ describe('rcl evidence show', () => {
 
     const stringy = runDetail({ artifacts: [{ kind: 'report_md', stored: 'false' }] });
     expect(await run(RUN_ID, () => ({ status: 200, body: { data: stringy } })).code).toBe(EVIDENCE_EXIT.unanswered);
+
+    const stringyFlag = runDetail({ repo_verified: 'false' });
+    expect(await run(RUN_ID, () => ({ status: 200, body: { data: stringyFlag } })).code).toBe(EVIDENCE_EXIT.unanswered);
+
+    const base = runDetail();
+    const oddNumber = runDetail({ target: { ...base.target, pr_number: '42\u001b[2J' } });
+    expect(await run(RUN_ID, () => ({ status: 200, body: { data: oddNumber } })).code).toBe(EVIDENCE_EXIT.unanswered);
   });
 
   it('accepts a run whose artifacts are null and escapes C1 characters in --json', async () => {
