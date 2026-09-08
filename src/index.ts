@@ -120,6 +120,8 @@ import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, type WireEvent } from './telemetry/events.js';
 import { credentialHost } from './telemetry/credentials.js';
+import { runEvidenceStatus } from './evidence/status.js';
+import { runEvidenceShow } from './evidence/show.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
@@ -822,6 +824,41 @@ telemetry
       for (const id of summary.remaining) console.log(chalk.yellow(`  remaining ${id}`));
     }
     if (summary.remaining.length > 0 || summary.failed.length > 0) process.exitCode = 1;
+  });
+
+// Evidence reads (RCL-41): what Harness holds about a pull request's gate
+// and about one run. The skills gate on `evidence status`'s exit code: 0 only
+// when the judged projection is converged, 1 for any other status, 2 when the
+// pull request cannot be named, 3 when the read could not be answered.
+const evidenceCmd = program
+  .command('evidence')
+  .description('Read Review Council evidence on Harness: a pull request’s gate status, one run’s record');
+
+function evidenceDeps() {
+  return {
+    rclVersion: RCL_VERSION,
+    stdout: (line: string) => console.log(line),
+    stderr: (line: string) => console.error(chalk.red(line)),
+  };
+}
+
+evidenceCmd
+  .command('status [pr]')
+  .description(
+    'Gate status of a pull request — N or #N against the current remote, owner/repo#N, or a URL; exit 0 only when the judged projection is converged'
+  )
+  .option('--enforced', 'Judge the enforced projection instead of the advisory one')
+  .option('--json', 'Print the API status object')
+  .action(async (pr: string | undefined, opts: { enforced?: boolean; json?: boolean }) => {
+    process.exitCode = await runEvidenceStatus(pr, opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('show <run-id>')
+  .description('One recorded run: header, reviewer health, artifacts, findings with identity, gating reason and verdict')
+  .option('--json', 'Print the API run object')
+  .action(async (runId: string, opts: { json?: boolean }) => {
+    process.exitCode = await runEvidenceShow(runId, opts, evidenceDeps());
   });
 
 // Detached async-lane worker (RCL-25) — launched by the review process for

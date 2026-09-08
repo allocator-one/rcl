@@ -3,10 +3,12 @@ import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
+import { isGateStatus, isRunDetail, type GateStatus, type RunDetail } from '../evidence/types.js';
 
 /**
- * The HTTP side of evidence delivery (epic IO-12475, section 8.4): POST the
- * envelope, PUT each declared artifact, POST converge events. Every request
+ * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
+ * envelope, PUT each declared artifact, POST converge events, and GET what
+ * Harness holds (a pull request's gate status, one run). Every request
  * runs under a 10 s timeout, carries the client handshake the server's
  * version floor reads, and sends the token only to the host that minted it
  * (the credential is a `{url, token}` pair resolved elsewhere).
@@ -19,10 +21,14 @@ import type { WireEvent } from './events.js';
 export const REQUEST_TIMEOUT_MS = 10_000;
 /** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
 export const MAX_RESPONSE_BYTES = 64 * 1024;
+/** A read carries a run's findings and calls (a 2 MB envelope's worth at most) or a gate status; anything past this is not one. */
+export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
   /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
   timeoutMs?: number;
+  /** The most the response body may hold (default: a receipt's worth). */
+  maxResponseBytes?: number;
 }
 
 export interface RunReceipt {
@@ -124,7 +130,7 @@ export class HarnessSink {
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
       // returns an opaque redirect with status 0. Both read as "redirected".
       if (response.type === 'opaqueredirect') return { status: 302, body: null };
-      const text = await readBounded(response, MAX_RESPONSE_BYTES);
+      const text = await readBounded(response, options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
       if (text === null) {
         return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' } };
       }
@@ -246,6 +252,30 @@ export class HarnessSink {
       // Every event sent must be accounted for, inserted or already known.
       if (!count(inserted) || !count(duplicates) || inserted + duplicates !== events.length) return null;
       return { inserted, duplicates };
+    });
+  }
+
+  /** `GET /api/v1/reviews/prs/:owner/:repo/:number` — the gate status Harness computed for a pull request. */
+  async getGateStatus(owner: string, repo: string, number: number, options: RequestOptions = {}): Promise<SinkOutcome<GateStatus>> {
+    const path = `/api/v1/reviews/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}`;
+    const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
+    // The answer must be about the pull request that was asked for, with both
+    // projections; anything else is not a gate status.
+    return this.classify(result, (body) => {
+      const data = (body as { data?: unknown } | null)?.data;
+      return isGateStatus(data, number) ? data : null;
+    });
+  }
+
+  /** `GET /api/v1/reviews/runs/:id` — one recorded run with its findings, calls and artifact state. */
+  async getRun(id: string, options: RequestOptions = {}): Promise<SinkOutcome<RunDetail>> {
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(id)}`, undefined, 'application/json', {
+      maxResponseBytes: MAX_READ_RESPONSE_BYTES,
+      ...options,
+    });
+    return this.classify(result, (body) => {
+      const data = (body as { data?: unknown } | null)?.data;
+      return isRunDetail(data, id) ? data : null;
     });
   }
 }

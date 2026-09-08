@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **`rcl evidence status [<pr>]` and `rcl evidence show <run id>`** (RCL-41):
+  the read side of the evidence ledger. `status` fetches
+  `GET /api/v1/reviews/prs/:owner/:repo/:number` — a bare `N` or `#N` is read
+  against the checkout's `origin` remote, `owner/repo#N` and pull request URLs
+  stand alone — and prints both projections, their rounds, the open actionable
+  findings and the merge decision; `--json` prints the API object. Exit 0 only
+  when the judged projection (`--enforced` or the default advisory) is
+  `converged`, 1 for any other status, 2 when the pull request cannot be
+  named, 3 when the read could not be answered (no credential, evidence off,
+  unknown pull request, refused credential, unreachable host). `show` fetches
+  `GET /api/v1/reviews/runs/:id` and lists the run's header, reviewer health,
+  artifact state and findings with identity, gating reason and verdict. Reads
+  use the delivery credential rules (`reviews:read`) and ignore the telemetry
+  level. `HarnessSink` gained `getGateStatus` and `getRun`, each refusing an
+  answer that is not about what was asked.
+
 ## 3.0.0 — 2026-09-07
 
 Review Council evidence (epic IO-12475). **Behavior change:** in a
