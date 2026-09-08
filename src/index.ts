@@ -812,12 +812,13 @@ telemetry
       console.log(JSON.stringify(summary, null, 2));
     } else {
       console.log(
-        `Delivered ${summary.delivered.length}, remaining ${summary.remaining.length}, failed ${summary.failed.length}` +
+        `Delivered ${summary.delivered.length}, remaining ${summary.remaining.length}, failed ${summary.failed.length}, dropped ${summary.dropped.length}` +
           (summary.stopped ? ` (stopped: ${summary.stopped})` : '') +
           (summary.lossPending ? `; ${summary.lossPending} loss report(s) still pending` : '')
       );
       for (const id of summary.delivered) console.log(`  delivered ${id}`);
       for (const f of summary.failed) console.log(chalk.red(`  failed ${f.id}: ${f.reason}`));
+      for (const d of summary.dropped) console.log(chalk.dim(`  dropped ${d.id}: ${d.reason}`));
       for (const id of summary.remaining) console.log(chalk.yellow(`  remaining ${id}`));
     }
     if (summary.remaining.length > 0 || summary.failed.length > 0) process.exitCode = 1;

@@ -195,8 +195,10 @@ export async function flushOutboxAtStart(runtime: TelemetryRuntime, deadlineMs =
         `Delivered ${summary.delivered.length} spooled evidence entr${summary.delivered.length === 1 ? 'y' : 'ies'} to ${credentialHost(runtime.credential!)}.`
       );
     }
-  } catch {
-    // The outbox is a convenience; a broken data dir must not stop the command.
+  } catch (err) {
+    // The outbox is a convenience; a broken data dir must not stop the
+    // command — but a spooled entry that never leaves deserves a trace.
+    runtime.stderr(`Outbox flush skipped: ${scrubText(String(err), 200)}`);
   }
 }
 
@@ -247,7 +249,10 @@ function localFailure(err: unknown): string {
  */
 export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInput): Promise<DeliveryOutcome> {
   const evidenceRequired = input.evidenceRequired === true;
-  if (runtime.level === 'off') {
+  // A runtime built for the outbox commands (`requireRepo: false`) may carry
+  // a level and a sink outside a Harness-managed repository; new evidence
+  // still never leaves one.
+  if (runtime.level === 'off' || !runtime.repoManaged) {
     return {
       status: 'off',
       line: evidenceRequired ? 'Evidence not sent: telemetry is off, or this repository is not Harness-managed' : '',
@@ -449,7 +454,7 @@ export async function emitConvergeEvents(
   runtime: TelemetryRuntime,
   events: WireEvent[]
 ): Promise<'sent' | 'spooled' | 'skipped' | 'refused'> {
-  if (runtime.level === 'off' || !runtime.sink) return 'skipped';
+  if (runtime.level === 'off' || !runtime.sink || !runtime.repoManaged) return 'skipped';
   const sendable = events.filter(deliverable);
   if (sendable.length === 0) return 'skipped';
   await noticeBefore(runtime);

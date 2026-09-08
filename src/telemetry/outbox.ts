@@ -106,6 +106,8 @@ export interface FlushSummary {
   remaining: string[];
   /** Entries the server refused for good, left in place with a marker. */
   failed: Array<{ id: string; reason: string }>;
+  /** Entries removed because the organization has switched review evidence off: nothing to keep. */
+  dropped: Array<{ id: string; reason: string }>;
   /** Flushing stopped early: the server was unreachable or the deadline passed. */
   stopped?: 'unavailable' | 'deadline';
   /** Pending loss reports delivered in this flush. */
@@ -427,7 +429,7 @@ export class Outbox {
     // given five seconds cannot sit in one ten-second request.
     const request = (): RequestOptions =>
       options.deadlineMs === undefined ? {} : { timeoutMs: Math.max(1, options.deadlineMs - (now() - started)) };
-    const summary: FlushSummary = { delivered: [], remaining: [], failed: [] };
+    const summary: FlushSummary = { delivered: [], remaining: [], failed: [], dropped: [] };
 
     const entries = await this.list(options.runId, { sizes: false });
     for (const entry of entries) {
@@ -454,6 +456,9 @@ export class Outbox {
           break;
         case 'failed':
           summary.failed.push({ id: entry.id, reason: result.reason });
+          break;
+        case 'dropped':
+          summary.dropped.push({ id: entry.id, reason: result.reason });
           break;
         case 'retry':
           summary.remaining.push(entry.id);
@@ -487,6 +492,7 @@ export class Outbox {
   ): Promise<
     | { kind: 'delivered' }
     | { kind: 'failed'; reason: string }
+    | { kind: 'dropped'; reason: string }
     | { kind: 'retry' }
     | { kind: 'unavailable' }
     | { kind: 'deadline' }
@@ -533,7 +539,7 @@ export class Outbox {
         case 'disabled':
           // The organization switched evidence off; there is nothing to keep waiting for.
           await this.drop(dir);
-          return { kind: 'failed', reason: outcome.message || outcome.reason };
+          return { kind: 'dropped', reason: outcome.message || outcome.reason };
         case 'conflict':
           // The server holds this run id with a different report. The events
           // queued here name that run id too, so they must not be attached to
@@ -567,7 +573,7 @@ export class Outbox {
           case 'disabled':
             if (outcome.reason === 'reviews_disabled') {
               await this.drop(dir);
-              return { kind: 'failed', reason: outcome.message || outcome.reason };
+              return { kind: 'dropped', reason: outcome.message || outcome.reason };
             }
             // Artifacts are capped for the org; the envelope stands.
             await rm(path, { force: true });
@@ -611,7 +617,7 @@ export class Outbox {
           return { kind: 'unavailable' };
         case 'disabled':
           await this.drop(dir);
-          return { kind: 'failed', reason: outcome.message || outcome.reason };
+          return { kind: 'dropped', reason: outcome.message || outcome.reason };
         case 'conflict':
         case 'rejected':
           return this.markFailed(

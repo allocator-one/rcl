@@ -124,6 +124,8 @@ describe('scrubbing is idempotent and bounded', () => {
     const hostile = JSON.parse('{"__proto__": {"polluted": true}, "constructor": 1, "ok": "x"}') as Record<string, unknown>;
     const safe = scrubDeep(hostile) as Record<string, unknown>;
     expect(Object.keys(safe)).toEqual(['ok']);
+    expect(safe['polluted']).toBeUndefined();
+    expect(Object.getPrototypeOf(safe)).toBe(Object.prototype);
     expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
 
     // At every depth, inside arrays too.
@@ -133,6 +135,8 @@ describe('scrubbing is idempotent and bounded', () => {
     const nestedSafe = scrubDeep(nested) as { a: { keep: Array<Record<string, unknown>> } };
     expect(Object.keys(nestedSafe.a)).toEqual(['keep']);
     expect(Object.keys(nestedSafe.a.keep[0]!)).toEqual(['ok']);
+    expect((nestedSafe.a as Record<string, unknown>)['deep']).toBeUndefined();
+    expect(Object.getPrototypeOf(nestedSafe.a)).toBe(Object.prototype);
     expect(({} as Record<string, unknown>)['deep']).toBeUndefined();
   });
 

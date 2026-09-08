@@ -250,6 +250,19 @@ describe('telemetry delivery', () => {
       await rm(plain, { recursive: true, force: true });
     }
 
+    // A runtime built for the outbox commands keeps its sink outside a managed
+    // repository, but new evidence still never leaves one.
+    const anywhere = await mkdtemp(join(tmpdir(), 'rcl-deliver-anywhere-'));
+    try {
+      const { rt, requests } = await runtime(acceptEverything, { cwd: anywhere, requireRepo: false });
+      expect(rt.sink).toBeDefined();
+      expect(await deliverRun(rt, { result: sampleResult(), artifacts: ARTIFACTS })).toMatchObject({ status: 'off' });
+      expect(await emitConvergeEvents(rt, [buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } })])).toBe('skipped');
+      expect(requests).toEqual([]);
+    } finally {
+      await rm(anywhere, { recursive: true, force: true });
+    }
+
     const noLogin = await runtime(acceptEverything, { credentialsPath: join(repo, 'missing.json') });
     const outcome = await deliverRun(noLogin.rt, { result: sampleResult(), artifacts: ARTIFACTS });
     expect(outcome).toMatchObject({ status: 'skipped', spooled: false, exitCode: 0 });
@@ -324,6 +337,7 @@ describe('telemetry delivery', () => {
     expect(outcome.spooled).toBe(true);
     expect(outcome.exitCode).toBe(0);
     expect(outcome.line).toContain('artifacts spooled; run rcl telemetry flush');
+    // Artifacts upload one after another (a failed upload spools the rest), so exactly one PUT was attempted.
     expect(puts).toBe(1);
     expect((await flaky.rt.outbox.list())[0]).toMatchObject({ artifacts: ['report_json', 'report_md'], meta: { envelope_delivered: true } });
   });

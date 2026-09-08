@@ -62,7 +62,7 @@ describe('Outbox', () => {
 
     const { sink, calls } = fakeSink({});
     const summary = await outbox.flush(sink);
-    expect(summary).toEqual({ delivered: [envelope.run.id], remaining: [], failed: [] });
+    expect(summary).toEqual({ delivered: [envelope.run.id], remaining: [], failed: [], dropped: [] });
     expect(calls.map((c) => c.method)).toEqual(['postRun', 'putArtifact', 'putArtifact', 'postEvents']);
 
     const retried = calls[0]!.args[0] as RunEnvelope;
@@ -257,7 +257,7 @@ describe('Outbox', () => {
       await outbox.remove(envelope.run.id);
       return original(posted);
     };
-    expect(await outbox.flush(sink)).toEqual({ delivered: [envelope.run.id], remaining: [], failed: [] });
+    expect(await outbox.flush(sink)).toEqual({ delivered: [envelope.run.id], remaining: [], failed: [], dropped: [] });
   });
 
   it('shows an interrupted spool as failed once it is old enough, never hiding its bytes', async () => {
@@ -394,11 +394,11 @@ describe('Outbox', () => {
     await rm(join(dir, id, 'events.json'));
     await writeFile(join(dir, id, 'stray.tmp'), '');
     const { sink, calls } = fakeSink({});
-    expect(await outbox.flush(sink)).toMatchObject({ delivered: [], failed: [] });
+    expect(await outbox.flush(sink)).toMatchObject({ delivered: [], failed: [], dropped: [] });
     expect(calls).toEqual([]);
     // Once the stray file is gone the entry is finished and counted delivered.
     await rm(join(dir, id, 'stray.tmp'));
-    expect(await outbox.flush(sink)).toMatchObject({ delivered: [id], failed: [] });
+    expect(await outbox.flush(sink)).toMatchObject({ delivered: [id], failed: [], dropped: [] });
     expect(await readdir(dir)).not.toContain(id);
   });
 
