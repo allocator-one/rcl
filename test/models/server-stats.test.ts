@@ -42,6 +42,8 @@ describe('mergeWeights', () => {
   it('is the local view when the server has nothing to say', () => {
     const merged = mergeWeights([local('a', 30, 0.9)], undefined);
     expect(merged).toEqual([expect.objectContaining({ model: 'a', weight: 1.4, source: 'local' })]);
+    // Below the floor the local store's weight is neutral and the row says so.
+    expect(mergeWeights([local('thin', 3, 1)], undefined)).toEqual([expect.objectContaining({ model: 'thin', weight: 1, source: 'neutral' })]);
   });
 });
 
@@ -57,6 +59,18 @@ describe('fetchServerModelStats', () => {
     expect(await outcome).toMatchObject({ kind: 'ok', value: { window_days: 90, models: [{ model: 'anthropic/claude', weight: 1.35 }] }, host: 'harness.example.test' });
     expect(requests[0]!.url).toBe('https://harness.example.test/api/v1/reviews/model-stats?window_days=90');
     expect(requests[0]!.headers.authorization).toBe(`Bearer ${ENV.HARNESS_API_TOKEN}`);
+  });
+
+  it('refuses rows outside the documented ranges rather than voting with them', async () => {
+    for (const bad of [
+      serverRow('a', -1, 1),
+      { ...serverRow('a', 30, 1), weight: 5 },
+      { ...serverRow('a', 30, 1), weight: 0 },
+      { ...serverRow('a', 30, 1), precision: 2 },
+      { ...serverRow('a', 30, 1), calls: 1.5 },
+    ]) {
+      expect(await fetchWith(() => ({ status: 200, body: { data: serverStats([bad]) } })).outcome, JSON.stringify(bad)).toMatchObject({ kind: 'none', reason: expect.stringMatching(/malformed/) });
+    }
   });
 
   it('reports why there are no server stats: no credential, evidence off, malformed, unreachable', async () => {
@@ -79,6 +93,33 @@ describe('loadMergedWeights', () => {
       localStats: async () => [local('a', 30, 0.9)],
     });
     expect(weights.get('a')).toBe(1.4);
+  });
+
+  it('asks nothing of the server when it is switched off, and gives up on a slow one', async () => {
+    const { fetch, requests } = fakeFetch(() => ({ status: 200, body: { data: serverStats([serverRow('a', 200, 0.7)]) } }));
+    const off = await loadMergedWeights({
+      rclVersion: '3.1.0',
+      fetchImpl: fetch,
+      env: ENV,
+      cwd: '/nowhere',
+      credentialsPath: '/nowhere/credentials.json',
+      serverEnabled: false,
+      localStats: async () => [local('a', 30, 0.9)],
+    });
+    expect(off.get('a')).toBe(1.4);
+    expect(requests).toHaveLength(0);
+
+    const slow = fakeFetch(() => 'hang');
+    const bounded = await loadMergedWeights({
+      rclVersion: '3.1.0',
+      fetchImpl: slow.fetch,
+      env: ENV,
+      cwd: '/nowhere',
+      credentialsPath: '/nowhere/credentials.json',
+      timeoutMs: 50,
+      localStats: async () => [local('a', 30, 0.9)],
+    });
+    expect(bounded.get('a')).toBe(1.4);
   });
 
   it('takes the server weight for a model with enough outcomes there', async () => {

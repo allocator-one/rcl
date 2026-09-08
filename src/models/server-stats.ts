@@ -49,20 +49,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const count = (v: unknown): boolean => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+const rate = (v: unknown): boolean => v === null || (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1);
+const latency = (v: unknown): boolean => v === null || (typeof v === 'number' && Number.isFinite(v) && v >= 0);
+/** The voter's range; a row outside it is not a weight this client will apply. */
+const weightInRange = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v) && v >= 0.5 && v <= 1.5;
+
+/** Every field the merge and the table read, in the ranges the server documents; one bad row refuses the answer. */
 export function isServerModelStats(value: unknown): value is ServerModelStats {
   return (
     isRecord(value) &&
-    typeof value['window_days'] === 'number' &&
+    count(value['window_days']) &&
     typeof value['computed_at'] === 'string' &&
-    typeof value['min_outcomes_for_weight'] === 'number' &&
+    count(value['min_outcomes_for_weight']) &&
     Array.isArray(value['models']) &&
     value['models'].every(
       (m) =>
         isRecord(m) &&
         typeof m['model'] === 'string' &&
-        typeof m['outcomes'] === 'number' &&
-        typeof m['weight'] === 'number' &&
-        Number.isFinite(m['weight'])
+        m['model'] !== '' &&
+        count(m['outcomes']) &&
+        count(m['fixed']) &&
+        count(m['calls']) &&
+        count(m['dead']) &&
+        rate(m['precision'] ?? null) &&
+        rate(m['dead_rate'] ?? null) &&
+        latency(m['p50_ms'] ?? null) &&
+        weightInRange(m['weight'])
     )
   );
 }
@@ -99,12 +112,15 @@ export function mergeWeights(
 ): MergedStat[] {
   const rows = new Map<string, MergedStat>();
   for (const stat of local) {
-    rows.set(stat.model, { model: stat.model, weight: stat.weight, source: 'local', localOutcomes: stat.outcomes, local: stat });
+    // The local store's own floor: below it the weight is neutral and says so.
+    const source = stat.outcomes >= minOutcomes ? 'local' : 'neutral';
+    rows.set(stat.model, { model: stat.model, weight: stat.weight, source, localOutcomes: stat.outcomes, local: stat });
   }
   for (const stat of server?.models ?? []) {
     const existing = rows.get(stat.model);
     if (stat.outcomes >= minOutcomes) {
-      rows.set(stat.model, { ...(existing ?? { model: stat.model }), weight: stat.weight, source: 'server', serverOutcomes: stat.outcomes, server: stat });
+      const weight = Math.min(1.5, Math.max(0.5, stat.weight));
+      rows.set(stat.model, { ...(existing ?? { model: stat.model }), weight, source: 'server', serverOutcomes: stat.outcomes, server: stat });
     } else if (existing) {
       existing.server = stat;
       existing.serverOutcomes = stat.outcomes;
@@ -120,18 +136,40 @@ export function mergeWeights(
 export interface MergedWeightsOptions extends ServerStatsOptions {
   /** The local store's rows; injected by tests. */
   localStats?: () => Promise<ModelStats[]>;
+  /**
+   * Whether to ask the server at all. A review passes the resolved telemetry
+   * level here: `off` means no request leaves the machine for weights either.
+   */
+  serverEnabled?: boolean;
 }
 
-/** Model → weight for the voter: server-backed where the org has enough history, local otherwise; local alone when the server cannot be read. */
+/**
+ * Model → weight for the voter: server-backed where the org has enough
+ * history, local otherwise; local alone when the server is switched off or
+ * cannot answer. The whole server side — credential resolution included —
+ * is bounded by `timeoutMs` (default 3 s), so a review's start never waits
+ * on a slow disk or host.
+ */
 export async function loadMergedWeights(options: MergedWeightsOptions): Promise<Map<string, number>> {
   const windowDays = options.windowDays ?? DEFAULT_WINDOW_DAYS;
   const local = await (options.localStats ?? (() => loadModelStats({ windowDays })))();
   let server: ServerModelStats | undefined;
-  try {
-    const fetched = await fetchServerModelStats({ ...options, windowDays, timeoutMs: options.timeoutMs ?? 3_000 });
-    if (fetched.kind === 'ok') server = fetched.value;
-  } catch {
-    server = undefined;
+  if (options.serverEnabled !== false) {
+    const timeoutMs = options.timeoutMs ?? 3_000;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const fetched = await Promise.race([
+        fetchServerModelStats({ ...options, windowDays, timeoutMs }),
+        new Promise<ServerStatsOutcome>((resolve) => {
+          timer = setTimeout(() => resolve({ kind: 'none', reason: `no answer within ${timeoutMs} ms` }), timeoutMs);
+        }),
+      ]);
+      if (fetched.kind === 'ok') server = fetched.value;
+    } catch {
+      server = undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
   return new Map(mergeWeights(local, server).map((row) => [row.model, row.weight]));
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -122,6 +122,35 @@ describe('buildBackfillRuns', () => {
     expect(again.runs.map((r) => r.events[0]!.id)).toEqual(built.runs.map((r) => r.events[0]!.id));
     const elsewhere = await buildBackfillRuns({ dir, repo: 'allocator-one/rcl', host: 'harness.example.test', rclVersion: '3.1.0' });
     expect(elsewhere.runs[0]!.envelope.run.id).not.toBe(r1!.envelope.run.id);
+    // GitHub names are case-insensitive; so is the id.
+    const cased = await buildBackfillRuns({ dir, repo: 'Allocator-One/Allocator-One', host: 'Harness.Example.Test', rclVersion: '3.1.0' });
+    expect(cased.runs.map((r) => r.envelope.run.id)).toEqual(built.runs.map((r) => r.envelope.run.id));
+  });
+
+  it('skips what is not a regular readable report — symlinks, absurd durations, unreadable ledgers — and keeps going', async () => {
+    const dir = corpus();
+    symlinkSync('/etc/hosts', join(dir, 'rcl-report-allocator-one-42-r2.md'));
+    symlinkSync('/etc/hosts', join(dir, 'rcl-report-linked.json'));
+    const long = report(['anthropic/claude'], []);
+    long.stats.durationMs = 1e15;
+    writeFileSync(join(dir, 'rcl-report-long.json'), JSON.stringify(long));
+    symlinkSync('/etc/hosts', join(dir, 'rcl-converge-linked-ledger.md'));
+    writeFileSync(
+      join(dir, 'rcl-converge-allocator-one-42b-ledger.md'),
+      '## Round 1 — report `/tmp/rcl-report-allocator-one-42-r1.json` — 2 findings\n* [Fixed] lib/foo.ex — pagination misses tiebreak on inserted_at\n'
+    );
+
+    const built = await buildBackfillRuns({ dir, repo: 'allocator-one/allocator-one', host: 'harness.example.test', rclVersion: '3.1.0' });
+    expect(built.runs.map((r) => r.file)).toEqual(['rcl-report-allocator-one-42-r1.json', 'rcl-report-allocator-one-42-r2.json']);
+    const reasons = Object.fromEntries(built.skipped.map((s) => [s.file, s.reason]));
+    expect(reasons['rcl-report-allocator-one-42-r2.md']).toMatch(/symbolic link/);
+    expect(reasons['rcl-report-linked.json']).toMatch(/symbolic link/);
+    expect(reasons['rcl-report-long.json']).toMatch(/durationMs/);
+    expect(reasons['rcl-converge-linked-ledger.md']).toMatch(/symbolic link/);
+    expect(built.runs[1]!.artifacts.report_md).toBeUndefined();
+    // A backticked report path, a `*` bullet and an upper-case verdict still parse.
+    const r1 = built.runs[0]!;
+    expect(r1.events.map((e) => e.converge_target).sort()).toEqual(['allocator-one-42', 'allocator-one-42b']);
   });
 });
 
@@ -160,7 +189,7 @@ describe('runBackfill', () => {
     const sink = new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.1.0', fetchImpl: first.fetch });
     const summary = await runBackfill({ dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0' }, { sink, host: 'harness.example.test' });
 
-    expect(summary).toMatchObject({ runs: 2, created: 2, existing: 0, skipped: 1, artifacts: 3, events: { inserted: 2, duplicates: 0 }, failed: [] });
+    expect(summary).toMatchObject({ runs: 2, created: 2, existing: 0, skipped: 1, artifacts: 3, planned: { artifacts: 3, events: 2, verdicts: 3 }, events: { inserted: 2, duplicates: 0 }, failed: [] });
     expect(first.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/reviews/runs'))).toHaveLength(2);
     expect(first.requests.filter((r) => r.method === 'PUT')).toHaveLength(3);
     const posted = JSON.parse(first.requests[0]!.body!) as { run: { provenance: string } };
@@ -171,7 +200,9 @@ describe('runBackfill', () => {
       { dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0' },
       { sink: new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.1.0', fetchImpl: second.fetch }), host: 'harness.example.test' }
     );
-    expect(again).toMatchObject({ runs: 2, created: 0, existing: 2, events: { inserted: 0, duplicates: 2 } });
+    expect(again).toMatchObject({ runs: 2, created: 0, existing: 2, artifacts: 0, events: { inserted: 0, duplicates: 2 } });
+    // Already-recorded runs keep their artifacts: no report body moves twice.
+    expect(second.requests.filter((r) => r.method === 'PUT')).toHaveLength(0);
   });
 
   it('builds without posting in dry-run mode and reports a refused run without stopping the others', async () => {
@@ -179,7 +210,7 @@ describe('runBackfill', () => {
     const dry = fakeFetch(() => ({ status: 500, body: {} }));
     const sink = new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.1.0', fetchImpl: dry.fetch });
     const summary = await runBackfill({ dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0', dryRun: true }, { sink, host: 'harness.example.test' });
-    expect(summary).toMatchObject({ runs: 2, created: 0, existing: 0, dryRun: true });
+    expect(summary).toMatchObject({ runs: 2, created: 0, existing: 0, dryRun: true, planned: { artifacts: 3, events: 2 } });
     expect(dry.requests).toHaveLength(0);
 
     let calls = 0;

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { open, readdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { ConsensusFinding, ModelReview } from '../consensus/types.js';
@@ -78,8 +79,34 @@ interface RawReport {
 
 const SEVERITIES = new Set(['critical', 'important', 'minor']);
 const STATUSES = new Set(['success', 'timeout', 'error', 'parse_failed', 'canceled']);
-const BULLET_RE = /^-\s*\[(?:[a-z]+\/)?(fixed|dismissed)\]\s*(.*)$/;
-const ROUND_RE = /^##\s+Round\s+(\d+)\b.*?report\s+(\S+\.json)/;
+// Ledgers were written by hand: any bullet marker, any case for the verdict.
+const BULLET_RE = /^[-*+]\s*\[(?:[a-z]+\/)?(fixed|dismissed)\]\s*(.*)$/i;
+const ROUND_RE = /^##\s+Round\s+(\d+)\b.*?report\s+(\S+\.json)/i;
+/** A report cannot have run longer than a week; anything past it is not a duration. */
+const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Read one file as the recovered artifact it claims to be: opened without
+ * following a symlink, required to be a regular file, bytes and mtime taken
+ * from the same handle so the id (from the bytes) and the timing (from the
+ * mtime) describe one version of it.
+ */
+async function readRegular(path: string): Promise<{ bytes: string; mtime: Date }> {
+  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error('not a regular file');
+    return { bytes: await handle.readFile('utf8'), mtime: info.mtime };
+  } finally {
+    await handle.close();
+  }
+}
+
+function reason(err: unknown): string {
+  const code = (err as { code?: string }).code;
+  if (code === 'ELOOP') return 'is a symbolic link';
+  return err instanceof Error ? err.message : String(err);
+}
 
 function str(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
@@ -110,9 +137,20 @@ function wireFindings(raw: unknown, belowThreshold: boolean, offset: number): Ar
     const category = str(f.category, 'other') as ConsensusFinding['category'];
     const startLine = int(f.startLine);
     const endLine = Math.max(startLine, int(f.endLine, startLine));
-    const models = Array.isArray(f.consensus?.models) ? (f.consensus!.models as unknown[]).filter((m): m is string => typeof m === 'string') : [];
+    const raw = (f.consensus ?? {}) as Record<string, unknown>;
+    const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const models = strings(raw['models']);
     const index = offset + out.length;
-    const consensus = (f.consensus ?? { score: 0, total: 0, models, roles: [], crossRole: false, crossModel: false, elevated: false }) as unknown as ConsensusFinding['consensus'];
+    // Rebuilt field by field: a recovered file is not trusted for its shape.
+    const consensus = {
+      score: typeof raw['score'] === 'number' && Number.isFinite(raw['score']) ? raw['score'] : 0,
+      total: typeof raw['total'] === 'number' && Number.isFinite(raw['total']) ? raw['total'] : models.length,
+      models,
+      roles: strings(raw['roles']),
+      crossRole: raw['crossRole'] === true,
+      crossModel: raw['crossModel'] === true,
+      elevated: raw['elevated'] === true,
+    } as unknown as ConsensusFinding['consensus'];
     const gatingReason = str(f.gating?.reason);
     out.push({
       models,
@@ -177,7 +215,9 @@ function parseLedgerRounds(ledger: string): LedgerRound[] {
   for (const line of ledger.split('\n')) {
     const round = ROUND_RE.exec(line);
     if (round) {
-      current = { round: Number(round[1]), reportBase: basename(round[2]!), bullets: [] };
+      // The path may sit in backticks or quotes and carry trailing punctuation.
+      const path = round[2]!.replace(/^[`"'(]+/, '').replace(/[`"',.)]+$/, '');
+      current = { round: Number(round[1]), reportBase: basename(path), bullets: [] };
       rounds.push(current);
       bullet = undefined;
       continue;
@@ -185,7 +225,7 @@ function parseLedgerRounds(ledger: string): LedgerRound[] {
     if (!current) continue;
     const match = BULLET_RE.exec(line.trim());
     if (match) {
-      bullet = { verdict: match[1] as 'fixed' | 'dismissed', text: match[2]!, reportBase: current.reportBase };
+      bullet = { verdict: match[1]!.toLowerCase() as 'fixed' | 'dismissed', text: match[2]!, reportBase: current.reportBase };
       current.bullets.push(bullet);
       continue;
     }
@@ -209,87 +249,97 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
   const findingsByBase = new Map<string, Array<{ file: string; title: string; description: string; severity?: string; models: string[]; identity: string }>>();
   const runByBase = new Map<string, BackfillRun>();
 
+  const hostKey = host.toLowerCase();
+  // GitHub names are case-insensitive; the id must not depend on how the
+  // caller spelled the repository.
+  const repoKey = repo.toLowerCase();
+
   for (const name of reportNames) {
-    const path = join(dir, name);
-    let bytes: string;
-    let report: RawReport;
-    let mtime: Date;
     try {
-      bytes = await readFile(path, 'utf8');
-      report = JSON.parse(bytes) as RawReport;
-      mtime = (await stat(path)).mtime;
+      const { bytes, mtime } = await readRegular(join(dir, name));
+      const report = JSON.parse(bytes) as RawReport;
+      if (typeof report !== 'object' || report === null || !Array.isArray(report.reviews)) {
+        skipped.push({ file: name, reason: 'no reviews array — not an rcl report' });
+        continue;
+      }
+      if (report.run !== undefined) {
+        skipped.push({ file: name, reason: 'carries a run header (rcl ≥ 3.0) — it was delivered when written; use rcl telemetry flush for a spooled one' });
+        continue;
+      }
+      const { calls, roster } = wireCalls(report.reviews as RawReview[]);
+      const kept = wireFindings(report.findings, false, 0);
+      const below = wireFindings(report.belowThresholdFindings, true, kept.length);
+      const stats = report.stats ?? {};
+      const durationMs = int(stats['durationMs']);
+      if (durationMs > MAX_DURATION_MS) {
+        skipped.push({ file: name, reason: `stats.durationMs ${durationMs} is not a review duration` });
+        continue;
+      }
+      const finishedAt = mtime;
+      const startedAt = new Date(finishedAt.getTime() - durationMs);
+      if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(finishedAt.getTime())) {
+        skipped.push({ file: name, reason: 'file time does not yield a valid timestamp' });
+        continue;
+      }
+      const digest = sha256(bytes);
+      const id = uuidv5(`${hostKey}|${repoKey}|${digest}`, UUID_NAMESPACE_RCL_BACKFILL);
+      const run: RunHeader = {
+        id,
+        rcl_version: 'pre-3.0',
+        command: 'review',
+        target: { kind: 'patch', repo, diff_sha256: digest, files: 0, additions: 0, deletions: 0 },
+        roster,
+        config_sha256: sha256('rcl telemetry backfill'),
+        thresholds: { min_consensus_score: 0, min_confidence: 0, dedupe_line_window: 0, jaccard_threshold: 0 },
+        // Pre-gating reports carried every finding; no verification pass ran.
+        gating: { mode: 'all-findings', min_models: 0, verification_timeout_ms: 0 },
+        context_files: [],
+        runner: { kind: 'agent', agent: 'rcl telemetry backfill', host: scrubText(host, 64) },
+        started_at: startedAt.toISOString(),
+        finished_at: finishedAt.toISOString(),
+        duration_ms: durationMs,
+        ci_exit_code: 0,
+        provenance: 'backfill',
+      };
+      const reviews = report.reviews as RawReview[];
+      const envelopeStats: RunEnvelope['stats'] = {
+        totalReviews: int(stats['totalReviews'], reviews.length),
+        successfulReviews: int(stats['successfulReviews'], calls.filter((c) => c.status === 'success').length),
+        totalRawFindings: int(stats['totalRawFindings'], kept.length + below.length),
+        totalDeduped: int(stats['totalDeduped'], kept.length),
+        belowThreshold: int(stats['belowThreshold'], below.length),
+        durationMs,
+      };
+      const mdName = name.replace(/\.json$/, '.md');
+      let reportMd: string | undefined;
+      if (entries.includes(mdName)) {
+        try {
+          reportMd = (await readRegular(join(dir, mdName))).bytes;
+        } catch (err) {
+          skipped.push({ file: mdName, reason: `companion markdown not read: ${reason(err)}` });
+        }
+      }
+      const artifacts: ArtifactBytes = { report_json: bytes, ...(reportMd !== undefined ? { report_md: reportMd } : {}) };
+      const envelope: RunEnvelope = {
+        run,
+        findings: [...kept, ...below].map((f) => f.wire),
+        calls,
+        stats: envelopeStats,
+        artifacts_declared: declareArtifacts(artifacts),
+        delivery: { mode: 'direct' },
+      };
+      const built: BackfillRun = { file: name, envelope, artifacts, events: [] };
+      runs.push(built);
+      runByBase.set(name, built);
+      findingsByBase.set(
+        name,
+        [...kept, ...below].map((f) => ({ file: f.wire.file, title: f.wire.title, description: f.wire.description, severity: f.wire.severity, models: f.models, identity: f.wire.identity_key }))
+      );
     } catch (err) {
-      skipped.push({ file: name, reason: `unreadable: ${err instanceof Error ? err.message : String(err)}` });
-      continue;
+      skipped.push({ file: name, reason: `not read as a report: ${reason(err)}` });
     }
-    if (typeof report !== 'object' || report === null || !Array.isArray(report.reviews)) {
-      skipped.push({ file: name, reason: 'no reviews array — not an rcl report' });
-      continue;
-    }
-    if (report.run !== undefined) {
-      skipped.push({ file: name, reason: 'carries a run header (rcl ≥ 3.0) — it was delivered when written; use rcl telemetry flush for a spooled one' });
-      continue;
-    }
-    const { calls, roster } = wireCalls(report.reviews as RawReview[]);
-    const kept = wireFindings(report.findings, false, 0);
-    const below = wireFindings(report.belowThresholdFindings, true, kept.length);
-    const stats = report.stats ?? {};
-    const durationMs = int(stats['durationMs']);
-    const finishedAt = mtime;
-    const startedAt = new Date(finishedAt.getTime() - durationMs);
-    const digest = sha256(bytes);
-    const id = uuidv5(`${host}|${repo}|${digest}`, UUID_NAMESPACE_RCL_BACKFILL);
-    const run: RunHeader = {
-      id,
-      rcl_version: 'pre-3.0',
-      command: 'review',
-      target: { kind: 'patch', repo, diff_sha256: digest, files: 0, additions: 0, deletions: 0 },
-      roster,
-      config_sha256: sha256('rcl telemetry backfill'),
-      thresholds: { min_consensus_score: 0, min_confidence: 0, dedupe_line_window: 0, jaccard_threshold: 0 },
-      gating: { mode: 'legacy' as RunHeader['gating']['mode'], min_models: 0, verification_timeout_ms: 0 },
-      context_files: [],
-      runner: { kind: 'agent', agent: 'rcl telemetry backfill', host: scrubText(host, 64) },
-      started_at: startedAt.toISOString(),
-      finished_at: finishedAt.toISOString(),
-      duration_ms: durationMs,
-      ci_exit_code: 0,
-      provenance: 'backfill',
-    };
-    const reviews = report.reviews as RawReview[];
-    const envelopeStats: RunEnvelope['stats'] = {
-      totalReviews: int(stats['totalReviews'], reviews.length),
-      successfulReviews: int(stats['successfulReviews'], calls.filter((c) => c.status === 'success').length),
-      totalRawFindings: int(stats['totalRawFindings'], kept.length + below.length),
-      totalDeduped: int(stats['totalDeduped'], kept.length),
-      belowThreshold: int(stats['belowThreshold'], below.length),
-      durationMs,
-    };
-    const mdPath = join(dir, name.replace(/\.json$/, '.md'));
-    let reportMd: string | undefined;
-    try {
-      reportMd = await readFile(mdPath, 'utf8');
-    } catch {
-      reportMd = undefined;
-    }
-    const artifacts: ArtifactBytes = { report_json: bytes, ...(reportMd !== undefined ? { report_md: reportMd } : {}) };
-    const envelope: RunEnvelope = {
-      run,
-      findings: [...kept, ...below].map((f) => f.wire),
-      calls,
-      stats: envelopeStats,
-      artifacts_declared: declareArtifacts(artifacts),
-      delivery: { mode: 'direct' },
-    };
-    const built: BackfillRun = { file: name, envelope, artifacts, events: [] };
-    runs.push(built);
-    runByBase.set(name, built);
-    findingsByBase.set(
-      name,
-      [...kept, ...below].map((f) => ({ file: f.wire.file, title: f.wire.title, description: f.wire.description, severity: f.wire.severity, models: f.models, identity: f.wire.identity_key }))
-    );
-    void rclVersion;
   }
+  void rclVersion;
 
   let bulletsMatched = 0;
   let bulletsUnmatched = 0;
@@ -298,9 +348,9 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
     let ledger: string;
     let mtime: Date;
     try {
-      ledger = await readFile(join(dir, name), 'utf8');
-      mtime = (await stat(join(dir, name))).mtime;
-    } catch {
+      ({ bytes: ledger, mtime } = await readRegular(join(dir, name)));
+    } catch (err) {
+      skipped.push({ file: name, reason: `ledger not read: ${reason(err)}` });
       continue;
     }
     ledgersScanned++;
@@ -366,6 +416,9 @@ export interface BackfillSummary {
   created: number;
   existing: number;
   skipped: number;
+  /** What the build holds, whether or not it was posted (the dry run's whole answer). */
+  planned: { artifacts: number; events: number; verdicts: number };
+  /** Artifacts uploaded for runs created by this invocation; an already-recorded run keeps what it has. */
   artifacts: number;
   events: { inserted: number; duplicates: number };
   failed: Array<{ file: string; reason: string }>;
@@ -384,6 +437,11 @@ export async function runBackfill(options: BackfillOptions, deps: BackfillDeps):
     created: 0,
     existing: 0,
     skipped: built.skipped.length,
+    planned: {
+      artifacts: built.runs.reduce((n, r) => n + r.envelope.artifacts_declared.length, 0),
+      events: built.runs.reduce((n, r) => n + r.events.length, 0),
+      verdicts: built.runs.reduce((n, r) => n + r.events.reduce((m, e) => m + ((e.payload['verdicts'] as unknown[] | undefined)?.length ?? 0), 0), 0),
+    },
     artifacts: 0,
     events: { inserted: 0, duplicates: 0 },
     failed: [],
@@ -403,12 +461,16 @@ export async function runBackfill(options: BackfillOptions, deps: BackfillDeps):
     }
     if (posted.value.status === 'created') summary.created++;
     else summary.existing++;
-    for (const kind of ['report_json', 'report_md'] as const) {
-      const bytes = run.artifacts[kind];
-      if (bytes === undefined) continue;
-      const put = await deps.sink.putArtifact(run.envelope.run.id, kind, bytes);
-      if (put.kind === 'ok') summary.artifacts++;
-      else summary.failed.push({ file: `${run.file} (${kind})`, reason: describeOutcome(put) });
+    // A run the server already holds keeps its artifacts; only a run created
+    // here gets its bytes, so a second pass moves no report bodies.
+    if (posted.value.status === 'created') {
+      for (const kind of ['report_json', 'report_md'] as const) {
+        const bytes = run.artifacts[kind];
+        if (bytes === undefined) continue;
+        const put = await deps.sink.putArtifact(run.envelope.run.id, kind, bytes);
+        if (put.kind === 'ok') summary.artifacts++;
+        else summary.failed.push({ file: `${run.file} (${kind})`, reason: describeOutcome(put) });
+      }
     }
     const events = run.events.filter(deliverable);
     if (events.length > 0) {

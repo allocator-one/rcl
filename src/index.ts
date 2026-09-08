@@ -114,6 +114,8 @@ import {
   flushOutboxAtStart,
   type DeliveryOutcome,
   type TelemetryRuntime,
+  loadHarnessSettings,
+  resolveTelemetryLevel,
 } from './telemetry/deliver.js';
 import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
 import { scrubText } from './telemetry/scrub.js';
@@ -123,6 +125,7 @@ import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
+import { HarnessSink } from './telemetry/sink.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
@@ -875,28 +878,51 @@ telemetry
       process.exitCode = 2;
       return;
     }
+    // A dry run builds and counts; it needs no credential and sends nothing.
+    // The ids still depend on the host, so a credential is used for them when
+    // there is one and a placeholder named otherwise.
     const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
-    if (!runtime.sink || !runtime.credential) {
+    let host: string;
+    if (runtime.sink && runtime.credential) {
+      host = credentialHost(runtime.credential);
+    } else if (opts.dryRun) {
+      host = 'no-credential';
+    } else {
       const reason = runtime.level === 'off' ? 'telemetry is off' : runtime.note ?? 'no Harness credential';
       console.error(chalk.red(`Cannot backfill: ${reason}.`));
       process.exitCode = 1;
       return;
     }
-    const summary = await runBackfill(
-      { dir: opts.from, repo: opts.repo, rclVersion: RCL_VERSION, ...(opts.dryRun ? { dryRun: true } : {}) },
-      {
-        sink: runtime.sink,
-        host: credentialHost(runtime.credential),
-        ...(opts.json ? {} : { progress: (line: string) => console.log(chalk.dim(line)) }),
-      }
-    );
+    let summary;
+    try {
+      summary = await runBackfill(
+        { dir: opts.from, repo: opts.repo, rclVersion: RCL_VERSION, ...(opts.dryRun ? { dryRun: true } : {}) },
+        {
+          // In a dry run the sink is never called; a credential-less one is a stand-in for the type.
+          sink: runtime.sink ?? new HarnessSink({ credential: { url: 'https://no-credential.invalid', token: 'none', source: 'env' }, rclVersion: RCL_VERSION }),
+          host,
+          ...(opts.json ? {} : { progress: (line: string) => console.log(chalk.dim(line)) }),
+        }
+      );
+    } catch (err) {
+      console.error(chalk.red(`Cannot backfill: ${scrubText(err instanceof Error ? err.message : String(err), 300)}`));
+      process.exitCode = 1;
+      return;
+    }
     if (opts.json) {
       console.log(JSON.stringify(summary, null, 2));
+    } else if (summary.dryRun) {
+      console.log(
+        `Would post ${summary.runs} run(s) with ${summary.planned.artifacts} artifact(s) and ${summary.planned.events} verdict event(s) ` +
+          `(${summary.planned.verdicts} verdicts)${host === 'no-credential' ? ' — ids shown for a placeholder host; log in for the real ones' : ''}; ` +
+          `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched}, unmatched ${summary.bulletsUnmatched}.`
+      );
+      for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${f.file}: ${f.reason}`));
     } else {
       console.log(
-        `${summary.dryRun ? 'Would post' : 'Posted'} ${summary.runs} run(s): ${summary.created} new, ${summary.existing} already recorded; ` +
-          `${summary.artifacts} artifact(s); verdict events ${summary.events.inserted} new, ${summary.events.duplicates} already recorded; ` +
-          `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched}, unmatched ${summary.bulletsUnmatched}.`
+        `Posted ${summary.runs} run(s): ${summary.created} new, ${summary.existing} already recorded; ` +
+          `${summary.artifacts} artifact(s) uploaded for the new runs; verdict events ${summary.events.inserted} new, ${summary.events.duplicates} already recorded; ` +
+          `${summary.skipped} file(s) skipped; ledgers ${summary.ledgersScanned}, bullets matched ${summary.bulletsMatched} (at build), unmatched ${summary.bulletsUnmatched}.`
       );
       for (const f of summary.skippedFiles) console.log(chalk.dim(`  skipped ${f.file}: ${f.reason}`));
       for (const f of summary.failed) console.log(chalk.red(`  failed ${f.file}: ${f.reason}`));
@@ -933,18 +959,21 @@ modelsCmd
   .option('--json', 'Output JSON')
   .action(async (opts: { window: string; local?: boolean; json?: boolean }) => {
     const windowDays = Number(opts.window);
-    if (!Number.isFinite(windowDays) || windowDays <= 0) {
-      console.error(chalk.red('--window must be a positive number of days.'));
+    if (!Number.isSafeInteger(windowDays) || windowDays <= 0) {
+      console.error(chalk.red('--window must be a positive whole number of days.'));
       process.exitCode = 1;
       return;
     }
     const stats = await loadModelStats({ windowDays });
     // The org-wide window (RCL-38): Harness's `model-stats` over every run the
     // organization recorded. Its weight wins for a model it has the outcome
-    // floor for; this machine's store decides below that.
+    // floor for; this machine's store decides below that. The same window is
+    // asked of both; the server answers up to 366 days.
     const server = opts.local
       ? ({ kind: 'none', reason: '--local' } as const)
-      : await fetchServerModelStats({ rclVersion: RCL_VERSION, windowDays: Math.min(366, Math.round(windowDays)) });
+      : windowDays > 366
+        ? ({ kind: 'none', reason: `the server window is at most 366 days (asked for ${windowDays})` } as const)
+        : await fetchServerModelStats({ rclVersion: RCL_VERSION, windowDays });
     const merged = mergeWeights(stats, server.kind === 'ok' ? server.value : undefined);
     if (opts.json) {
       console.log(
@@ -1002,7 +1031,7 @@ modelsCmd
       const shown = row.source === 'server' && row.server ? row.server : undefined;
       const local = row.local;
       const outcomes = shown ? shown.outcomes : (local?.outcomes ?? row.serverOutcomes ?? 0);
-      const precision = shown ? pct(shown.precision) : pct(local?.precision);
+      const precision = shown ? pct(shown.precision) : pct(local?.precision ?? row.server?.precision);
       const calls = shown ? shown.calls : (local?.calls ?? row.server?.calls ?? 0);
       const dead = shown ? pct(shown.dead_rate) : pct(local?.deadRate ?? row.server?.dead_rate);
       const p50 = shown ? shown.p50_ms : (local?.p50Ms ?? row.server?.p50_ms ?? null);
@@ -1678,9 +1707,15 @@ async function executeCouncil(
   // Org-wide history from Harness outranks this machine's store for a model
   // the org has enough outcomes for (RCL-38); the server is asked with a
   // short bound and the local store stands in when it cannot answer.
+  // Telemetry off means nothing leaves the machine for weights either.
   let modelWeights: Map<string, number> | undefined;
   try {
-    const loaded = await loadMergedWeights({ rclVersion: RCL_VERSION, timeoutMs: 3_000 });
+    const level = resolveTelemetryLevel(
+      await loadHarnessSettings(process.cwd()),
+      { noTelemetry: (opts as { telemetry?: boolean }).telemetry === false },
+      process.env
+    );
+    const loaded = await loadMergedWeights({ rclVersion: RCL_VERSION, timeoutMs: 3_000, serverEnabled: level !== 'off' });
     if (loaded.size > 0) modelWeights = loaded;
   } catch {
     modelWeights = undefined;
