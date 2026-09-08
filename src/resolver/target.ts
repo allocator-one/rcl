@@ -70,6 +70,11 @@ export async function resolveReviewTarget(
     return { kind: gitMode === 'staged' ? 'staged' : 'working_tree', ...heads };
   }
   const pr = pullRequestFor(opts);
+  // Evidence for a pull request binds to a commit: an attributed patch without
+  // its head could be any bytes presented against that pull request's gate.
+  if (pr && opts.headSha === undefined) {
+    throw new Error('A patch review bound to a pull request needs --head-sha: evidence binds to the commit it reviewed.');
+  }
   return {
     kind: 'patch',
     ...(pr ? { repo: `${pr.owner}/${pr.repo}`, prNumber: pr.number, url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}` } : {}),
@@ -102,7 +107,8 @@ function checked(pr: { owner: string; repo: string; number: number }, flag: stri
   if (parseRepoName(`${pr.owner}/${pr.repo}`) === null || !Number.isSafeInteger(pr.number) || pr.number <= 0) {
     throw new Error(`${flag} does not name a GitHub pull request.`);
   }
-  return pr;
+  // GitHub names are case-insensitive; one spelling keeps one key on the server.
+  return { owner: pr.owner.toLowerCase(), repo: pr.repo.toLowerCase(), number: pr.number };
 }
 
 /**

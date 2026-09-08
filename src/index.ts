@@ -1472,7 +1472,13 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       {
         ...opts,
         convergeTarget: opts.convergeTarget ?? process.env['RCL_CONVERGE_TARGET'],
-        ...((opts.forPr ?? process.env['RCL_FOR_PR']) !== undefined ? { forPr: opts.forPr ?? process.env['RCL_FOR_PR'] } : {}),
+        // The flag is the user's word and is refused off a patch file; a value
+        // left in the environment only ever attributes a patch file.
+        ...(opts.forPr !== undefined
+          ? { forPr: opts.forPr }
+          : !diff.metadata && !gitMode && (process.env['RCL_FOR_PR'] ?? '').trim() !== ''
+            ? { forPr: process.env['RCL_FOR_PR'] }
+            : {}),
       },
       { gitHeads }
     );

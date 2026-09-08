@@ -8,8 +8,10 @@
   verify its `--head-sha` against that pull request's head; counting such a
   round for the pull request's gate is the server half, IO-12585 — until it
   lands, `rcl evidence status` still reads `stale`/`none` for patch-file loops.
-  A `--converge-target` of the same form attributes the run too; the flag is
-  refused on PR and git-mode targets, which name their own. The
+  A `--converge-target` of the same form attributes the run too; the flag
+  needs `--head-sha`, lower-cases the names, and is refused on PR and
+  git-mode targets, which name their own (`RCL_FOR_PR` only ever attributes a
+  patch file). The
   `rcl-converge` skill passes `--converge-target '<TARGET>' --round <R>
   --attempt <ATTEMPT> --for-pr <owner/repo#N>` on every launch, counts a
   spooled round as evidence only once its flush is acknowledged (ledger

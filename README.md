@@ -332,8 +332,9 @@ A patch-file review (`rcl review changes.patch`) carries no repository or pull
 request, so Harness records it as a `patch` run it cannot verify or count for
 any gate. `--for-pr owner/repo#N` (or a pull request URL) names the pull
 request the patch was taken from (`RCL_FOR_PR` in the environment does the
-same): the run is bound to that pull request and its `--head-sha` is verified
-against the pull request's head. Counting the round for that pull request's
+same for patch files): the run is bound to that pull request and its
+`--head-sha` — required with the flag — is verified against the pull
+request's head. Owner and repository are lower-cased, as GitHub reads them. Counting the round for that pull request's
 gate is the server half (IO-12585); until it lands, `rcl evidence status`
 still reads `stale`/`none` for patch-file loops. The flag is refused on PR and
 git-mode targets, which name their own pull request or checkout. `rcl-converge` passes it on every round of a pull request loop
