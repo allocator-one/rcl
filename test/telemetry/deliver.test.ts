@@ -8,6 +8,7 @@ import {
   deliverRun,
   emitConvergeEvents,
   EVIDENCE_REQUIRED_EXIT_CODE,
+  flushOutbox,
   flushOutboxAtStart,
   resolveTelemetryLevel,
 } from '../../src/telemetry/deliver.js';
@@ -182,6 +183,28 @@ describe('telemetry delivery', () => {
     await flushOutboxAtStart(up.rt, 5_000);
     expect(lines).toEqual(['Delivered 1 spooled evidence entry to harness.example.test.']);
     expect(await up.rt.outbox.list()).toEqual([]);
+  });
+
+  it('settles a startup flush against an endpoint that never answers, within the deadline', async () => {
+    const down = await runtime(() => new TypeError('fetch failed'));
+    await deliverRun(down.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    const hanging = await runtime(() => 'hang');
+    const started = Date.now();
+    await flushOutboxAtStart(hanging.rt, 300);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    // Nothing was delivered and nothing was lost: the entry waits for the next flush.
+    expect((await hanging.rt.outbox.list()).map((e) => e.failed)).toEqual([undefined]);
+  });
+
+  it('keeps an event id across a spool and its retried delivery', async () => {
+    const event = buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } });
+    const down = await runtime(() => new TypeError('fetch failed'));
+    expect(await emitConvergeEvents(down.rt, [event])).toBe('spooled');
+    const up = await runtime(acceptEverything);
+    const summary = await flushOutbox(up.rt);
+    expect(summary.delivered).toHaveLength(1);
+    const posted = up.requests.find((r) => r.url.endsWith('/converge/events'));
+    expect((JSON.parse(posted!.body!) as { events: Array<{ id: string }> }).events.map((e) => e.id)).toEqual([event.id]);
   });
 
   it('reports an org that has not enabled evidence without spooling', async () => {

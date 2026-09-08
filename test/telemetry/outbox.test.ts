@@ -386,6 +386,22 @@ describe('Outbox', () => {
     await expect(outbox.flush(sink, { runId: '../escape' })).rejects.toBeInstanceOf(OutboxError);
   });
 
+  it('finishes an events entry whose events were already delivered instead of failing it', async () => {
+    const outbox = new Outbox(dir);
+    const id = await outbox.spoolEvents([buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 1, payload: { cap: 20 } })]);
+    // An earlier pass delivered and dropped events.json but could not remove
+    // the directory: a stray file was in it at the time.
+    await rm(join(dir, id, 'events.json'));
+    await writeFile(join(dir, id, 'stray.tmp'), '');
+    const { sink, calls } = fakeSink({});
+    expect(await outbox.flush(sink)).toMatchObject({ delivered: [], failed: [] });
+    expect(calls).toEqual([]);
+    // Once the stray file is gone the entry is finished and counted delivered.
+    await rm(join(dir, id, 'stray.tmp'));
+    expect(await outbox.flush(sink)).toMatchObject({ delivered: [id], failed: [] });
+    expect(await readdir(dir)).not.toContain(id);
+  });
+
   it('spools event batches of their own and delivers them', async () => {
     const outbox = new Outbox(dir);
     const events = [buildEvent({ kind: 'attempt_claimed', convergeTarget: 't', attempt: 3, payload: { cap: 20 } })];

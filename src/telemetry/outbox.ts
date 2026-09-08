@@ -594,7 +594,10 @@ export class Outbox {
       return this.markFailed(dir, 'events.json malformed');
     }
     if (events.kind === 'missing' && meta.kind === 'events') {
-      return this.markFailed(dir, 'events.json missing');
+      // events.json is written before meta.json, so a missing file means an
+      // earlier pass delivered and dropped it and only the directory stayed
+      // (something else was in it at the time): finish, do not fail it.
+      return (await this.finish(dir, meta)) ? { kind: 'delivered' } : { kind: 'retry' };
     }
     if (events.kind === 'ok' && validEvents(events.value) && events.value.length > 0) {
       if (pastDeadline()) return { kind: 'deadline' };

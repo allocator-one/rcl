@@ -96,6 +96,9 @@ export function sampleResult(overrides: Partial<ReviewResult> = {}): ReviewResul
         warnings: ['schema salvaged 3 findings'],
       }),
     ],
+    // The envelope carries findings and belowThresholdFindings as one list
+    // (the second flagged below_threshold), which is what stats.totalDeduped
+    // counts: two here.
     findings: [sampleFinding()],
     belowThresholdFindings: [
       sampleFinding({ id: 'F2', identity: 'fedcba9876543210', severity: 'minor', title: 'Naming', gating: { reason: 'none' } }),
