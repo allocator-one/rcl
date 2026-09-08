@@ -2,11 +2,14 @@
 
 ## Unreleased
 
-- **`rcl review … --for-pr owner/repo#N`** (RCL-39): a patch-file review is
-  bound to the pull request it was taken from (`target.repo`, `pr_number`,
-  `url` on the `patch` target), so Harness can verify its `--head-sha` against
-  the pull request's head and count the round for that pull request's gate; a
-  `--converge-target` of the same form attributes the run too. The
+- **`rcl review … --for-pr owner/repo#N`** (RCL-39; `RCL_FOR_PR`): a
+  patch-file review is bound to the pull request it was taken from
+  (`target.repo`, `pr_number`, `url` on the `patch` target), so Harness can
+  verify its `--head-sha` against that pull request's head; counting such a
+  round for the pull request's gate is the server half, IO-12585 — until it
+  lands, `rcl evidence status` still reads `stale`/`none` for patch-file loops.
+  A `--converge-target` of the same form attributes the run too; the flag is
+  refused on PR and git-mode targets, which name their own. The
   `rcl-converge` skill passes `--converge-target '<TARGET>' --round <R>
   --attempt <ATTEMPT> --for-pr <owner/repo#N>` on every launch, counts a
   spooled round as evidence only once its flush is acknowledged (ledger

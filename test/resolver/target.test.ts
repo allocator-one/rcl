@@ -127,8 +127,16 @@ describe('a patch review attributed to its pull request (RCL-39)', () => {
     expect(await resolveReviewTarget(patch, undefined, { forPr: 'allocator-one/rcl#7', convergeTarget: 'allocator-one/rcl#42' })).toMatchObject({ prNumber: 7 });
   });
 
-  it('refuses --for-pr that does not name a pull request', async () => {
+  it('refuses --for-pr that does not name a pull request, on either segment', async () => {
     await expect(resolveReviewTarget(patch, undefined, { forPr: 'feature-branch' })).rejects.toThrow(/--for-pr/);
-    await expect(resolveReviewTarget(patch, undefined, { forPr: 'allocator-one/../x#1' })).rejects.toThrow();
+    for (const bad of ['allocator-one/..#1', '../rcl#1', '-bad-/rcl#1', 'allocator-one/rcl#0']) {
+      await expect(resolveReviewTarget(patch, undefined, { forPr: bad }), bad).rejects.toThrow(/--for-pr/);
+    }
+    await expect(resolveReviewTarget(patch, undefined, { headSha: HEAD, convergeTarget: 'allocator-one/..#1' })).rejects.toThrow(/--converge-target/);
+  });
+
+  it('refuses --for-pr on a PR or git-mode target, which name their own', async () => {
+    await expect(resolveReviewTarget(prDiff(), undefined, { forPr: 'allocator-one/rcl#42' })).rejects.toThrow(/patch files only/);
+    await expect(resolveReviewTarget(patch, 'staged', { forPr: 'allocator-one/rcl#42' }, { gitHeads: { headSha: HEAD } })).rejects.toThrow(/patch files only/);
   });
 });

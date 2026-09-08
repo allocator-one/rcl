@@ -3,6 +3,7 @@ import type { GitHeads } from './git.js';
 import { resolveGitHeads } from './git.js';
 import { validateSha, type RunHeaderInput } from '../report/run-header.js';
 import { isGitHubTarget, parseGitHubTarget } from './github.js';
+import { parseRepoName } from '../evidence/target.js';
 
 /**
  * Exact-head binding (IO-12475 section 8.1): which commit a diff belongs
@@ -36,6 +37,11 @@ export async function resolveReviewTarget(
   deps: { gitHeads?: GitHeads; resolveGitHeads?: () => Promise<GitHeads> } = {}
 ): Promise<ReviewTarget> {
   const overrideGiven = opts.headSha !== undefined || opts.baseSha !== undefined;
+  // `--for-pr` names the pull request a patch file stands for; a PR target
+  // names its own, and a git mode reviews a checkout, not a pull request.
+  if (opts.forPr !== undefined && (diff.metadata || gitMode)) {
+    throw new Error('--for-pr applies to patch files only; a PR target names its pull request itself and a git mode reviews the checkout.');
+  }
   if (diff.metadata) {
     if (overrideGiven) {
       throw new Error(
@@ -72,8 +78,6 @@ export async function resolveReviewTarget(
   };
 }
 
-const GITHUB_NAME = /^[A-Za-z0-9_.-]+$/;
-
 /**
  * The pull request a patch review stands for: `--for-pr` when given, else a
  * converge target that has the `owner/repo#N` form (a converge slug such as
@@ -91,8 +95,11 @@ function pullRequestFor(opts: TargetOverrides): { owner: string; repo: string; n
   return undefined;
 }
 
+// GitHub's segment rules (owner: alphanumerics and single hyphens; repository:
+// alphanumerics, `-`, `_`, `.`, never `.` or `..`) for both segments, and a
+// positive number — the values reach a URL and a request path.
 function checked(pr: { owner: string; repo: string; number: number }, flag: string): { owner: string; repo: string; number: number } {
-  if (!GITHUB_NAME.test(pr.owner) || !GITHUB_NAME.test(pr.repo) || pr.repo === '.' || pr.repo === '..' || !Number.isSafeInteger(pr.number) || pr.number <= 0) {
+  if (parseRepoName(`${pr.owner}/${pr.repo}`) === null || !Number.isSafeInteger(pr.number) || pr.number <= 0) {
     throw new Error(`${flag} does not name a GitHub pull request.`);
   }
   return pr;
