@@ -11,13 +11,25 @@ describe('parseRemoteUrl', () => {
       'https://github.com/allocator-one/rcl',
       'git://github.com/allocator-one/rcl.git',
       'https://user@github.com/allocator-one/rcl/',
+      'https://x-access-token:ghs_secret@github.com/allocator-one/rcl.git',
+      'ssh://git@github.com:22/allocator-one/rcl.git',
+      'https://GitHub.com/allocator-one/rcl',
     ]) {
       expect(parseRemoteUrl(url), url).toEqual({ owner: 'allocator-one', repo: 'rcl' });
     }
   });
 
   it('refuses remotes that are not a GitHub repository, or that carry characters GitHub does not allow', () => {
-    for (const url of ['https://gitlab.com/a/b.git', 'git@github.com:onlyowner', '/local/path.git', '', 'git@github.com:allocator-one/r\u001b[31mcl.git']) {
+    for (const url of [
+      'https://gitlab.com/a/b.git',
+      'git@github.com:onlyowner',
+      '/local/path.git',
+      '',
+      'git@github.com:allocator-one/r\u001b[31mcl.git',
+      'https://github.com/allocator-one/..',
+      'https://github.com/-bad-/rcl',
+      'https://github.com/allocator-one/rcl/extra',
+    ]) {
       expect(parseRemoteUrl(url), JSON.stringify(url)).toBeNull();
     }
   });
@@ -44,5 +56,6 @@ describe('parsePullRequestArg', () => {
     expect(() => parsePullRequestArg('42', null)).toThrow(/owner\/repo#42/);
     expect(() => parsePullRequestArg('0', remote)).toThrow(/positive/);
     expect(() => parsePullRequestArg('feature-branch', remote)).toThrow(/owner\/repo#N/);
+    expect(() => parsePullRequestArg('../x#1', null)).toThrow();
   });
 });

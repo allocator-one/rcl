@@ -215,6 +215,11 @@ describe('rcl evidence status', () => {
     // Case only differs in the repository name: the same repository to GitHub.
     const cased = { ...gateStatus('converged'), repo: 'Allocator-One/Allocator-One' };
     expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: cased } })).code).toBe(EVIDENCE_EXIT.converged);
+
+    // A head whose flags are not booleans could read as merged; it is refused instead.
+    const stringyHead = gateStatus('converged');
+    (stringyHead.head as Record<string, unknown>)['merged'] = 'false';
+    expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: stringyHead } })).code).toBe(EVIDENCE_EXIT.unanswered);
   });
 
   it('renders a pull request Harness holds no head for, and strips control characters from server text', async () => {

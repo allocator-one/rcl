@@ -14,7 +14,7 @@ import { needsRemote, parsePullRequestArg, resolveRemoteRepo, type RepoRef } fro
  * never "not converged".
  */
 
-export const EVIDENCE_EXIT = { converged: 0, notConverged: 1, usage: 2, unanswered: 3 } as const;
+export const EVIDENCE_EXIT = { converged: 0, ok: 0, notConverged: 1, usage: 2, unanswered: 3 } as const;
 
 export interface EvidenceDeps {
   rclVersion: string;

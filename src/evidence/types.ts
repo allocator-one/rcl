@@ -178,6 +178,26 @@ function nullableRecord(value: unknown): boolean {
   return value === null || value === undefined || isRecord(value);
 }
 
+function optional(value: unknown, check: (v: unknown) => boolean): boolean {
+  return value === null || value === undefined || check(value);
+}
+
+const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean';
+
+/** The pull request head: absent, or a record whose flags the renderer reads are booleans and whose shas are strings. */
+function isHead(value: unknown): boolean {
+  return (
+    value === null ||
+    value === undefined ||
+    (isRecord(value) &&
+      optional(value['sha'], isString) &&
+      optional(value['merge_commit_sha'], isString) &&
+      optional(value['source'], isString) &&
+      optional(value['merged'], isBoolean) &&
+      optional(value['is_cross_repository'], isBoolean))
+  );
+}
+
 /**
  * A projection as the server shapes it: status and conclusiveness, every
  * round a record with its id and tier, every actionable finding a record with
@@ -203,24 +223,28 @@ export function isGateStatus(value: unknown, repo: string, number: number): valu
     isString(value['repo']) &&
     value['repo'].toLowerCase() === repo.toLowerCase() &&
     value['pr_number'] === number &&
-    nullableRecord(value['head']) &&
+    isHead(value['head']) &&
     nullableRecord(value['decision']) &&
     isProjection(value['advisory']) &&
     isProjection(value['enforced'])
   );
 }
 
-/** A run record about the run that was asked for, with a target, and findings, calls and artifacts shaped as the renderer reads them. */
+/** A run record about the run that was asked for (UUID text is case-insensitive), with a target, and findings, calls and artifacts shaped as the renderer reads them. */
 export function isRunDetail(value: unknown, id: string): value is RunDetail {
   return (
     isRecord(value) &&
-    value['id'] === id &&
+    isString(value['id']) &&
+    value['id'].toLowerCase() === id.toLowerCase() &&
     isRecord(value['target']) &&
     isString(value['target']['kind']) &&
     nullableRecord(value['runner']) &&
     nullableRecord(value['stats']) &&
     (value['converge'] === null || value['converge'] === undefined || (isRecord(value['converge']) && isString(value['converge']['target']))) &&
-    (value['artifacts'] === undefined || value['artifacts'] === null || (isRecordArray(value['artifacts']) && value['artifacts'].every((a) => isString(a['kind'])))) &&
+    (value['artifacts'] === undefined ||
+      value['artifacts'] === null ||
+      (isRecordArray(value['artifacts']) &&
+        value['artifacts'].every((a) => isString(a['kind']) && isBoolean(a['stored']) && optional(a['url'], isString)))) &&
     isRecordArray(value['findings']) &&
     value['findings'].every((f) => isString(f['severity']) && isString(f['title']) && nullableRecord(f['verdict'])) &&
     isRecordArray(value['calls']) &&

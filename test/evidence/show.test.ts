@@ -221,6 +221,15 @@ describe('rcl evidence show', () => {
     for (const line of hostile.err) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
   });
 
+  it('reads an uppercase run id as the same run the server echoes in lowercase, and refuses a non-boolean artifact state', async () => {
+    const upper = run(RUN_ID.toUpperCase(), () => ({ status: 200, body: { data: runDetail() } }));
+    expect(await upper.code).toBe(0);
+    expect(upper.requests[0]!.url).toBe(`https://harness.example.test/api/v1/reviews/runs/${RUN_ID}`);
+
+    const stringy = runDetail({ artifacts: [{ kind: 'report_md', stored: 'false' }] });
+    expect(await run(RUN_ID, () => ({ status: 200, body: { data: stringy } })).code).toBe(EVIDENCE_EXIT.unanswered);
+  });
+
   it('accepts a run whose artifacts are null and escapes C1 characters in --json', async () => {
     const data = runDetail({ artifacts: null, findings: [{ ref: 'F1', identity_key: 'k', file: 'f', start_line: 1, end_line: 1, severity: 'minor', title: 'x\u0085y', gating_reason: 'none' }] });
     const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data } }), { json: true });

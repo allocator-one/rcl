@@ -19,25 +19,40 @@ export interface PullRequestRef extends RepoRef {
 
 const execFileAsync = promisify(execFile);
 
-// Anchored: the whole remote must be a GitHub repository in the scp-like,
-// ssh, https or git form, with or without a `.git` suffix or trailing slash.
-// Owner and repository are limited to the characters GitHub allows, so a
-// crafted remote cannot carry control or escape characters into a message.
-const NAME = '[A-Za-z0-9_.-]+';
-const REMOTE_PATTERNS = [
-  new RegExp(`^(?:ssh://)?git@github\\.com[:/](${NAME})/(${NAME}?)(?:\\.git)?/?$`, 'i'),
-  new RegExp(`^(?:https?|git)://(?:[A-Za-z0-9_.%-]+@)?github\\.com/(${NAME})/(${NAME}?)(?:\\.git)?/?$`, 'i'),
-];
-const LEGAL_NAME = new RegExp(`^${NAME}$`);
+// GitHub's segment rules: an owner is alphanumerics and single hyphens (no
+// leading or trailing hyphen); a repository is alphanumerics, `-`, `_` and
+// `.`, never `.` or `..` — so neither can carry a control character, a path
+// separator or a dot-segment into a request path.
+const OWNER = '[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*';
+const REPO = '[A-Za-z0-9_.-]+';
+const OWNER_RE = new RegExp(`^${OWNER}$`);
+const REPO_RE = new RegExp(`^${REPO}$`);
+// The scp-like form has no scheme to hand to `URL`; the repository is matched
+// lazily (`+?`) so an optional `.git` suffix is not swallowed into the name.
+const SCP_REMOTE = new RegExp(`^git@github\\.com:(${OWNER})/(${REPO}?)(?:\\.git)?/?$`, 'i');
+const REPO_PATH = new RegExp(`^/(${OWNER})/(${REPO}?)(?:\\.git)?/?$`, 'i');
+
+function legalRepo(owner: string, repo: string): RepoRef | null {
+  if (!OWNER_RE.test(owner) || !REPO_RE.test(repo) || repo === '.' || repo === '..') return null;
+  return { owner, repo };
+}
 
 /** The GitHub repository a remote URL names, or `null` for anything else. */
 export function parseRemoteUrl(url: string): RepoRef | null {
   const trimmed = url.trim();
-  for (const pattern of REMOTE_PATTERNS) {
-    const match = trimmed.match(pattern);
-    if (match) return { owner: match[1]!, repo: match[2]! };
+  const scp = trimmed.match(SCP_REMOTE);
+  if (scp) return legalRepo(scp[1]!, scp[2]!);
+  // Scheme forms (ssh, https, git) go through `URL`, so user-info (a token,
+  // `user:password`) and a port never take part in the match.
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
   }
-  return null;
+  if (!/^(?:ssh|https?|git):$/i.test(parsed.protocol) || parsed.hostname.toLowerCase() !== 'github.com') return null;
+  const path = parsed.pathname.match(REPO_PATH);
+  return path ? legalRepo(path[1]!, path[2]!) : null;
 }
 
 /** The repository `origin` points at, or `null` outside a checkout with a GitHub remote. Never throws. */
@@ -61,8 +76,8 @@ export function parsePullRequestArg(arg: string, remote: RepoRef | null): PullRe
     const target = parseGitHubTarget(trimmed);
     // The GitHub parser is shared with `rcl review`; the read side re-checks
     // what it hands back so no other target shape passes as a pull request.
-    if (!LEGAL_NAME.test(target.owner) || !LEGAL_NAME.test(target.repo)) {
-      throw new Error('The repository in the pull request target carries characters GitHub does not allow.');
+    if (legalRepo(target.owner, target.repo) === null) {
+      throw new Error('The repository in the pull request target is not a GitHub owner/repository name.');
     }
     if (!Number.isSafeInteger(target.number) || target.number <= 0) {
       throw new Error(`Cannot read a pull request number from "${trimmed}": use N, #N, owner/repo#N or a pull request URL.`);
