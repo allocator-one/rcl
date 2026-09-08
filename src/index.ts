@@ -119,7 +119,7 @@ import {
 } from './telemetry/deliver.js';
 import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
 import { scrubText } from './telemetry/scrub.js';
-import { buildEvent, type WireEvent } from './telemetry/events.js';
+import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
 import { credentialHost } from './telemetry/credentials.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
@@ -512,7 +512,15 @@ program
             convergeTarget: opts.target,
             round,
             ...(runId !== undefined ? { runId } : {}),
-            payload: { round, round_cap: result.roundCap, counts: result.counts, actionable_gating: actionable.length },
+            payload: {
+              round,
+              round_cap: result.roundCap,
+              counts: result.counts,
+              actionable_gating: actionable.length,
+              // Which identity each sighting was matched to, so the server
+              // can apply standing verdicts to keys that moved (IO-12601).
+              identities: roundIdentities(result.findings),
+            },
           }),
           ...(maxRounds !== undefined
             ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target, round, payload: { kind: 'rounds', to: result.roundCap } })]

@@ -46,6 +46,43 @@ export interface EventInput {
   now?: Date;
 }
 
+/** One classified sighting of a round, as `round_processed` reports it (RCL-47). */
+export interface RoundIdentity {
+  /** The finding's own key as the report carries it — what the server stored for the finding. */
+  identity_key: string;
+  /** The identity `converge-report` matched the sighting to (its own key when new). */
+  matched_identity: string;
+  status: 'new' | 'repeat' | 'suppressed' | 'regating';
+  suppress_reason?: string;
+}
+
+/**
+ * The per-finding classification of a round for the `round_processed`
+ * payload: the server applies a standing verdict to a sighting whose key
+ * moved with the code only when it knows which identity rcl matched it to
+ * (IO-12601). A finding without an identity in the report (pre-3.0) is
+ * reported under the matched identity itself. One entry per report key —
+ * the server refuses a key classified twice — keeping the first sighting.
+ */
+export function roundIdentities(
+  findings: ReadonlyArray<{ identity: string; status: RoundIdentity['status']; suppressReason?: string; finding: { identity?: string } }>
+): RoundIdentity[] {
+  const seen = new Set<string>();
+  const out: RoundIdentity[] = [];
+  for (const f of findings) {
+    const key = f.finding.identity ?? f.identity;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      identity_key: key,
+      matched_identity: f.identity,
+      status: f.status,
+      ...(f.suppressReason ? { suppress_reason: f.suppressReason } : {}),
+    });
+  }
+  return out;
+}
+
 /**
  * Build one event. Ids are minted here and travel with the event into the
  * outbox, so a spooled retry re-sends the same id.
