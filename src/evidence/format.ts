@@ -36,7 +36,7 @@ function where(file: string | null | undefined, line: number | null | undefined)
 
 function projectionLines(name: string, projection: Projection, judged: boolean): string[] {
   const lines = [
-    `${name}: ${text(projection.status, 40)}${projection.conclusive ? '' : ' (inconclusive)'}${judged ? ' ← judged' : ''}` +
+    `${name}: ${text(projection.status, 40)}${projection.conclusive === false ? ' (inconclusive)' : ''}${judged ? ' ← judged' : ''}` +
       (projection.run_id ? ` — run ${short(projection.run_id)}${projection.run_url ? ` ${text(projection.run_url)}` : ''}` : ''),
   ];
   for (const round of projection.rounds) {

@@ -41,7 +41,8 @@ export interface ProjectionRound {
 export interface Projection {
   status: ProjectionStatus | string;
   head_sha: string | null;
-  conclusive: boolean;
+  /** `null` until a current-head run has been judged (status `none`, `stale`, `unverified`). */
+  conclusive: boolean | null;
   run_id: string | null;
   run_url: string | null;
   actionable: ActionableFinding[];
@@ -210,7 +211,7 @@ export function isProjection(value: unknown): value is Projection {
   return (
     isRecord(value) &&
     isString(value['status']) &&
-    typeof value['conclusive'] === 'boolean' &&
+    (typeof value['conclusive'] === 'boolean' || value['conclusive'] === null) &&
     isRecordArray(value['actionable']) &&
     value['actionable'].every((f) => isString(f['severity']) && isString(f['gating_reason']) && isString(f['title'])) &&
     isRecordArray(value['rounds']) &&
