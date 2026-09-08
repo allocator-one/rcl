@@ -9,8 +9,9 @@ import type { RosterEntry, RunHeader } from '../report/run-header.js';
 import { UUID_NAMESPACE_RCL_BACKFILL, uuidv5 } from '../report/uuid.js';
 import { declareArtifacts, type ArtifactBytes, type RunEnvelope, type WireCall, type WireFinding } from './envelope.js';
 import { deliverable, type WireEvent } from './events.js';
-import { scrubDeep, scrubIdentifier, scrubText } from './scrub.js';
+import { scrubDeep, scrubIdentifier, scrubSecrets, scrubText } from './scrub.js';
 import { describeOutcome, type HarnessSink } from './sink.js';
+import { getRun } from '../evidence/reads.js';
 
 /**
  * `rcl telemetry backfill` (epic IO-12475, sections 8.9–8.10; RCL-38): the
@@ -81,9 +82,11 @@ const SEVERITIES = new Set(['critical', 'important', 'minor']);
 const STATUSES = new Set(['success', 'timeout', 'error', 'parse_failed', 'canceled']);
 // Ledgers were written by hand: any bullet marker, any case for the verdict.
 const BULLET_RE = /^[-*+]\s*\[(?:[a-z]+\/)?(fixed|dismissed)\]\s*(.*)$/i;
-const ROUND_RE = /^##\s+Round\s+(\d+)\b.*?report\s+(\S+\.json)/i;
+const ROUND_RE = /^##\s+Round\s+(\d+)\b.*?report:?\s+(\S+\.json)/i;
 /** A report cannot have run longer than a week; anything past it is not a duration. */
 const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+/** rcl did not exist before 2020; a file time outside [then, tomorrow] is not a finishing time. */
+const MIN_MTIME_MS = Date.UTC(2020, 0, 1);
 
 /**
  * Read one file as the recovered artifact it claims to be: opened without
@@ -112,6 +115,16 @@ function str(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
 }
 
+/**
+ * Text bound for a Postgres column: NUL and the other C0 controls (except
+ * tab, newline, carriage return) become spaces before the scrubber sees them
+ * — a recovered report may carry a `\\u0000` a live run never could.
+ */
+function textField(value: unknown, max?: number): string {
+  const cleaned = str(value).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ');
+  return max === undefined ? scrubText(cleaned) : scrubText(cleaned, max);
+}
+
 function int(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : fallback;
 }
@@ -138,7 +151,8 @@ function wireFindings(raw: unknown, belowThreshold: boolean, offset: number): Ar
     const startLine = int(f.startLine);
     const endLine = Math.max(startLine, int(f.endLine, startLine));
     const raw = (f.consensus ?? {}) as Record<string, unknown>;
-    const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.replace(/[\u0000-\u001f\u007f]/g, ' ')) : [];
     const models = strings(raw['models']);
     const index = offset + out.length;
     // Rebuilt field by field: a recovered file is not trusted for its shape.
@@ -157,17 +171,17 @@ function wireFindings(raw: unknown, belowThreshold: boolean, offset: number): Ar
       wire: {
         ref: `f${String(index + 1).padStart(3, '0')}`,
         identity_key: stableFindingKey({ file: f.file, category, startLine, endLine }),
-        file: scrubText(f.file),
+        file: textField(f.file),
         start_line: startLine,
         end_line: endLine,
         severity,
         category,
-        title: scrubText(f.title, 500),
-        description: scrubText(str(f.description)),
-        ...(typeof f.suggestedFix === 'string' ? { suggested_fix: scrubText(f.suggestedFix) } : {}),
+        title: textField(f.title, 500),
+        description: textField(f.description),
+        ...(typeof f.suggestedFix === 'string' ? { suggested_fix: textField(f.suggestedFix) } : {}),
         consensus: scrubDeep(consensus),
         gating_reason: (['consensus', 'critical', 'verified'].includes(gatingReason) ? gatingReason : 'none') as WireFinding['gating_reason'],
-        ...(typeof f.gating?.verification?.verdict === 'string' ? { verification_verdict: scrubText(f.gating.verification.verdict) } : {}),
+        ...(typeof f.gating?.verification?.verdict === 'string' ? { verification_verdict: textField(f.gating.verification.verdict, 200) } : {}),
         below_threshold: belowThreshold,
       },
     });
@@ -184,6 +198,8 @@ function wireCalls(reviews: RawReview[]): { calls: WireCall[]; roster: RosterEnt
     const role = scrubIdentifier(str(review.role, 'general'));
     const provider = scrubIdentifier(providerOf(review, review.model));
     const key = `${model} ${role}`;
+    // Identifiers pass the identifier scrubber; a NUL inside one is not an identifier.
+    if (/[\u0000-\u001f\u007f]/.test(model + role + provider)) continue;
     if (!roster.has(key)) roster.set(key, { model, role, provider, lane: 'blocking' });
     calls.push({
       model,
@@ -277,8 +293,13 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
       }
       const finishedAt = mtime;
       const startedAt = new Date(finishedAt.getTime() - durationMs);
-      if (!Number.isFinite(startedAt.getTime()) || !Number.isFinite(finishedAt.getTime())) {
-        skipped.push({ file: name, reason: 'file time does not yield a valid timestamp' });
+      if (
+        !Number.isFinite(finishedAt.getTime()) ||
+        finishedAt.getTime() < MIN_MTIME_MS ||
+        finishedAt.getTime() > Date.now() + 24 * 60 * 60 * 1000 ||
+        !Number.isFinite(startedAt.getTime())
+      ) {
+        skipped.push({ file: name, reason: `file time ${finishedAt.toISOString()} is not a plausible finishing time` });
         continue;
       }
       const digest = sha256(bytes);
@@ -319,7 +340,10 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
           skipped.push({ file: mdName, reason: `companion markdown not read: ${reason(err)}` });
         }
       }
-      const artifacts: ArtifactBytes = { report_json: bytes, ...(reportMd !== undefined ? { report_md: reportMd } : {}) };
+      // What leaves the machine is scrubbed as a live report would be; the run
+      // id keeps the digest of the file as found, so it names the same file
+      // whatever the scrubber removes.
+      const artifacts: ArtifactBytes = { report_json: scrubSecrets(bytes), ...(reportMd !== undefined ? { report_md: scrubSecrets(reportMd) } : {}) };
       const envelope: RunEnvelope = {
         run,
         findings: [...kept, ...below].map((f) => f.wire),
@@ -374,13 +398,19 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
           verdicts.push({
             identity_key: finding.identity,
             verdict: bullet.verdict,
-            reason: scrubText(bullet.text, 500),
+            reason: textField(bullet.text, 500),
             ...(finding.severity !== undefined ? { severity: finding.severity } : {}),
             models: finding.models,
           });
         }
       }
       if (verdicts.length === 0) continue;
+      // The server takes one verdict per identity in an event; when two bullets
+      // of a round name the same finding, the later one is the round's verdict.
+      const byIdentity = new Map<string, Record<string, unknown>>();
+      for (const v of verdicts) byIdentity.set(String(v['identity_key']), v);
+      verdicts.length = 0;
+      verdicts.push(...byIdentity.values());
       const fingerprint = verdicts.map((v) => `${v['identity_key']}:${v['verdict']}`).sort().join(',');
       run.events.push({
         id: uuidv5(`${run.envelope.run.id}|verdicts|${round.round}|${fingerprint}`, UUID_NAMESPACE_RCL_BACKFILL),
@@ -405,13 +435,18 @@ export interface BackfillOptions {
 }
 
 export interface BackfillDeps {
-  sink: HarnessSink;
+  /** Required to post; a dry run builds without one. */
+  sink?: HarnessSink;
   host: string;
+  /** The host is a stand-in (no credential): ids differ from the real backfill's. */
+  placeholderHost?: boolean;
   progress?: (line: string) => void;
 }
 
 export interface BackfillSummary {
   dryRun: boolean;
+  host: string;
+  placeholderHost: boolean;
   runs: number;
   created: number;
   existing: number;
@@ -433,6 +468,8 @@ export async function runBackfill(options: BackfillOptions, deps: BackfillDeps):
   const built = await buildBackfillRuns({ dir: options.dir, repo: options.repo, host: deps.host, rclVersion: options.rclVersion });
   const summary: BackfillSummary = {
     dryRun: options.dryRun === true,
+    host: deps.host,
+    placeholderHost: deps.placeholderHost === true,
     runs: built.runs.length,
     created: 0,
     existing: 0,
@@ -451,9 +488,11 @@ export async function runBackfill(options: BackfillOptions, deps: BackfillDeps):
     skippedFiles: built.skipped,
   };
   if (summary.dryRun) return summary;
+  const sink = deps.sink;
+  if (!sink) throw new Error('a Harness sink is required to post a backfill; only a dry run builds without one');
 
   for (const run of built.runs) {
-    const posted = await deps.sink.postRun(run.envelope);
+    const posted = await sink.postRun(run.envelope);
     if (posted.kind !== 'ok') {
       summary.failed.push({ file: run.file, reason: describeOutcome(posted) });
       deps.progress?.(`${run.file}: ${describeOutcome(posted)}`);
@@ -461,20 +500,36 @@ export async function runBackfill(options: BackfillOptions, deps: BackfillDeps):
     }
     if (posted.value.status === 'created') summary.created++;
     else summary.existing++;
-    // A run the server already holds keeps its artifacts; only a run created
-    // here gets its bytes, so a second pass moves no report bodies.
+    // A run created here gets every artifact. A run the server already holds
+    // gets only what it is missing — the server's own artifact state says
+    // which — so a second pass moves no report body it already has, and a
+    // first pass that lost an upload is healed by the next.
+    let wanted: ReadonlySet<'report_json' | 'report_md'>;
     if (posted.value.status === 'created') {
-      for (const kind of ['report_json', 'report_md'] as const) {
-        const bytes = run.artifacts[kind];
-        if (bytes === undefined) continue;
-        const put = await deps.sink.putArtifact(run.envelope.run.id, kind, bytes);
-        if (put.kind === 'ok') summary.artifacts++;
-        else summary.failed.push({ file: `${run.file} (${kind})`, reason: describeOutcome(put) });
+      wanted = new Set(['report_json', 'report_md']);
+    } else {
+      const known = await getRun(sink, run.envelope.run.id);
+      if (known.kind !== 'ok') {
+        summary.failed.push({ file: `${run.file} (artifact state)`, reason: describeOutcome(known) });
+        wanted = new Set();
+      } else {
+        wanted = new Set(
+          (known.value.artifacts ?? [])
+            .filter((a) => !a.stored && (a.kind === 'report_json' || a.kind === 'report_md'))
+            .map((a) => a.kind as 'report_json' | 'report_md')
+        );
       }
+    }
+    for (const kind of ['report_json', 'report_md'] as const) {
+      const bytes = run.artifacts[kind];
+      if (bytes === undefined || !wanted.has(kind)) continue;
+      const put = await sink.putArtifact(run.envelope.run.id, kind, bytes);
+      if (put.kind === 'ok') summary.artifacts++;
+      else summary.failed.push({ file: `${run.file} (${kind})`, reason: describeOutcome(put) });
     }
     const events = run.events.filter(deliverable);
     if (events.length > 0) {
-      const sent = await deps.sink.postEvents(events);
+      const sent = await sink.postEvents(events);
       if (sent.kind === 'ok') {
         summary.events.inserted += sent.value.inserted;
         summary.events.duplicates += sent.value.duplicates;

@@ -1,4 +1,5 @@
-import { mkdtempSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -63,7 +64,7 @@ function corpus(): string {
 }
 
 afterEach(() => {
-  // Temp dirs are small; leave cleanup to the OS if a test failed mid-way.
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe('buildBackfillRuns', () => {
@@ -155,7 +156,7 @@ describe('buildBackfillRuns', () => {
 });
 
 describe('runBackfill', () => {
-  function server(state: { existing: Set<string> }) {
+  function server(state: { existing: Set<string>; missing?: Set<string> }) {
     return fakeFetch((request) => {
       if (request.method === 'POST' && request.url.endsWith('/api/v1/reviews/runs')) {
         const id = (JSON.parse(request.body!) as { run: { id: string } }).run.id;
@@ -168,7 +169,6 @@ describe('runBackfill', () => {
       }
       if (request.method === 'PUT') {
         const kind = request.url.split('/').pop()!;
-        const { createHash } = require('node:crypto') as typeof import('node:crypto');
         const sha256 = createHash('sha256').update(request.body!, 'utf8').digest('hex');
         return { status: 201, body: { data: { kind, sha256 }, meta: { status: 'created' } } };
       }
@@ -177,6 +177,26 @@ describe('runBackfill', () => {
         const inserted = events.filter((e) => !state.existing.has(e.id)).length;
         for (const e of events) state.existing.add(e.id);
         return { status: 201, body: { data: { inserted, duplicates: events.length - inserted } } };
+      }
+      if (request.method === 'GET' && /\/api\/v1\/reviews\/runs\/[0-9a-f-]+$/.test(request.url)) {
+        const id = request.url.split('/').pop()!;
+        // The server holds every artifact except the one the test marks missing.
+        const missing = state.missing ?? new Set<string>();
+        return {
+          status: 200,
+          body: {
+            data: {
+              id,
+              target: { kind: 'patch' },
+              findings: [],
+              calls: [],
+              artifacts: [
+                { kind: 'report_json', stored: !missing.has(`${id}:report_json`) },
+                { kind: 'report_md', stored: !missing.has(`${id}:report_md`) },
+              ],
+            },
+          },
+        };
       }
       return { status: 404, body: { error: 'not_found', message: 'no' } };
     });
@@ -203,6 +223,62 @@ describe('runBackfill', () => {
     expect(again).toMatchObject({ runs: 2, created: 0, existing: 2, artifacts: 0, events: { inserted: 0, duplicates: 2 } });
     // Already-recorded runs keep their artifacts: no report body moves twice.
     expect(second.requests.filter((r) => r.method === 'PUT')).toHaveLength(0);
+
+    // A run whose first upload was lost gets exactly that artifact on the next pass.
+    const r1Id = (JSON.parse(first.requests[0]!.body!) as { run: { id: string } }).run.id;
+    const healing = server({ existing: state.existing, missing: new Set([`${r1Id}:report_md`]) });
+    const healed = await runBackfill(
+      { dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0' },
+      { sink: new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.1.0', fetchImpl: healing.fetch }), host: 'harness.example.test' }
+    );
+    expect(healed).toMatchObject({ existing: 2, artifacts: 1 });
+    const puts = healing.requests.filter((r) => r.method === 'PUT');
+    expect(puts.map((r) => r.url)).toEqual([`https://harness.example.test/api/v1/reviews/runs/${r1Id}/artifacts/report_md`]);
+  });
+
+  it('scrubs secrets from the report bytes it uploads, matches `report:` headings, and refuses implausible file times', async () => {
+    const dir = corpus();
+    const leaky = report(['anthropic/claude'], [{ file: 'lib/leak.ex', title: 'Token in code', models: ['anthropic/claude'] }]);
+    (leaky.findings[0] as { description: string }).description = 'Authorization: Bearer ghp_' + 'A'.repeat(36);
+    writeFileSync(join(dir, 'rcl-report-leak.json'), JSON.stringify(leaky));
+    writeFileSync(join(dir, 'rcl-converge-leak-ledger.md'), '## Round 1 — report: rcl-report-leak.json — 1 finding\n- [fixed] lib/leak.ex — token in code\n');
+    const old = report(['anthropic/claude'], []);
+    writeFileSync(join(dir, 'rcl-report-old.json'), JSON.stringify(old));
+    utimesSync(join(dir, 'rcl-report-old.json'), new Date('1999-01-01T00:00:00Z'), new Date('1999-01-01T00:00:00Z'));
+
+    const built = await buildBackfillRuns({ dir, repo: 'allocator-one/allocator-one', host: 'harness.example.test', rclVersion: '3.1.0' });
+    const leak = built.runs.find((r) => r.file === 'rcl-report-leak.json')!;
+    expect(leak.artifacts.report_json).not.toContain('ghp_' + 'A'.repeat(36));
+    expect(leak.artifacts.report_json).toContain('[redacted]');
+    expect(leak.envelope.artifacts_declared[0]!.sha256).toBe(createHash('sha256').update(leak.artifacts.report_json, 'utf8').digest('hex'));
+    expect(leak.events).toHaveLength(1);
+    expect(built.skipped).toEqual(expect.arrayContaining([{ file: 'rcl-report-old.json', reason: expect.stringMatching(/plausible finishing time/) }]));
+  });
+
+  it('sends one verdict per identity in a round and keeps NUL out of the text it synthesizes', async () => {
+    const dir = corpus();
+    writeFileSync(
+      join(dir, 'rcl-converge-allocator-one-42-ledger.md'),
+      [
+        '## Round 1 — report /tmp/rcl-report-allocator-one-42-r1.json — 2 findings',
+        '- [dismissed] lib/foo.ex — pagination misses tiebreak — first look',
+        '- [fixed] lib/foo.ex — pagination misses tiebreak on inserted_at — second look, fixed after all',
+        '',
+      ].join('\n')
+    );
+    const nul = report(['anthropic/claude\u0000x'], [{ file: 'lib/nul.ex', title: 'Title with \u0000 NUL and \u0007 bell', models: ['anthropic/claude'] }]);
+    writeFileSync(join(dir, 'rcl-report-nul.json'), JSON.stringify(nul));
+
+    const built = await buildBackfillRuns({ dir, repo: 'allocator-one/allocator-one', host: 'harness.example.test', rclVersion: '3.1.0' });
+    const r1 = built.runs.find((r) => r.file === 'rcl-report-allocator-one-42-r1.json')!;
+    const verdicts = r1.events[0]!.payload['verdicts'] as Array<Record<string, unknown>>;
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatchObject({ verdict: 'fixed' });
+
+    const nulRun = built.runs.find((r) => r.file === 'rcl-report-nul.json')!;
+    expect(JSON.stringify(nulRun.envelope)).not.toMatch(/\\u0000|\\u0007/);
+    expect(nulRun.envelope.findings[0]!.title).toBe('Title with   NUL and   bell');
+    expect(nulRun.envelope.run.roster).toEqual([]);
   });
 
   it('builds without posting in dry-run mode and reports a refused run without stopping the others', async () => {
@@ -210,8 +286,13 @@ describe('runBackfill', () => {
     const dry = fakeFetch(() => ({ status: 500, body: {} }));
     const sink = new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.1.0', fetchImpl: dry.fetch });
     const summary = await runBackfill({ dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0', dryRun: true }, { sink, host: 'harness.example.test' });
-    expect(summary).toMatchObject({ runs: 2, created: 0, existing: 0, dryRun: true, planned: { artifacts: 3, events: 2 } });
+    expect(summary).toMatchObject({ runs: 2, created: 0, existing: 0, dryRun: true, planned: { artifacts: 3, events: 2 }, host: 'harness.example.test', placeholderHost: false });
     expect(dry.requests).toHaveLength(0);
+
+    // Without a credential a dry run still builds, says its host is a stand-in, and a real run refuses.
+    const noCredential = await runBackfill({ dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0', dryRun: true }, { host: 'no-credential', placeholderHost: true });
+    expect(noCredential).toMatchObject({ runs: 2, placeholderHost: true });
+    await expect(runBackfill({ dir, repo: 'allocator-one/allocator-one', rclVersion: '3.1.0' }, { host: 'no-credential' })).rejects.toThrow(/sink/);
 
     let calls = 0;
     const flaky = fakeFetch((request) => {
@@ -221,7 +302,7 @@ describe('runBackfill', () => {
         const id = (JSON.parse(request.body!) as { run: { id: string } }).run.id;
         return { status: 201, body: { data: { id, url: 'u', artifacts_expected: [] }, meta: { status: 'created' } } };
       }
-      if (request.method === 'PUT') return { status: 201, body: { data: { kind: request.url.split('/').pop(), sha256: (require('node:crypto') as typeof import('node:crypto')).createHash('sha256').update(request.body!, 'utf8').digest('hex') }, meta: { status: 'created' } } };
+      if (request.method === 'PUT') return { status: 201, body: { data: { kind: request.url.split('/').pop(), sha256: createHash('sha256').update(request.body!, 'utf8').digest('hex') }, meta: { status: 'created' } } };
       return { status: 201, body: { data: { inserted: 1, duplicates: 0 } } };
     });
     const partial = await runBackfill(

@@ -125,7 +125,7 @@ import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
-import { HarnessSink } from './telemetry/sink.js';
+import { parseRepoName } from './evidence/target.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
@@ -873,7 +873,8 @@ telemetry
   .option('--dry-run', 'Build the runs and report counts without posting')
   .option('--json', 'Output JSON')
   .action(async (opts: { from: string; repo: string; dryRun?: boolean; json?: boolean }) => {
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*\/[A-Za-z0-9_.-]+$/.test(opts.repo) || opts.repo.endsWith('/.') || opts.repo.endsWith('/..')) {
+    const repo = parseRepoName(opts.repo);
+    if (repo === null) {
       console.error(chalk.red('--repo must be a GitHub owner/repo.'));
       process.exitCode = 2;
       return;
@@ -896,11 +897,11 @@ telemetry
     let summary;
     try {
       summary = await runBackfill(
-        { dir: opts.from, repo: opts.repo, rclVersion: RCL_VERSION, ...(opts.dryRun ? { dryRun: true } : {}) },
+        { dir: opts.from, repo: `${repo.owner}/${repo.repo}`, rclVersion: RCL_VERSION, ...(opts.dryRun ? { dryRun: true } : {}) },
         {
-          // In a dry run the sink is never called; a credential-less one is a stand-in for the type.
-          sink: runtime.sink ?? new HarnessSink({ credential: { url: 'https://no-credential.invalid', token: 'none', source: 'env' }, rclVersion: RCL_VERSION }),
+          ...(runtime.sink ? { sink: runtime.sink } : {}),
           host,
+          placeholderHost: host === 'no-credential',
           ...(opts.json ? {} : { progress: (line: string) => console.log(chalk.dim(line)) }),
         }
       );
@@ -959,8 +960,8 @@ modelsCmd
   .option('--json', 'Output JSON')
   .action(async (opts: { window: string; local?: boolean; json?: boolean }) => {
     const windowDays = Number(opts.window);
-    if (!Number.isSafeInteger(windowDays) || windowDays <= 0) {
-      console.error(chalk.red('--window must be a positive whole number of days.'));
+    if (!Number.isFinite(windowDays) || windowDays <= 0) {
+      console.error(chalk.red('--window must be a positive number of days.'));
       process.exitCode = 1;
       return;
     }
@@ -971,8 +972,8 @@ modelsCmd
     // asked of both; the server answers up to 366 days.
     const server = opts.local
       ? ({ kind: 'none', reason: '--local' } as const)
-      : windowDays > 366
-        ? ({ kind: 'none', reason: `the server window is at most 366 days (asked for ${windowDays})` } as const)
+      : !Number.isInteger(windowDays) || windowDays > 366
+        ? ({ kind: 'none', reason: `the server window is whole days up to 366 (asked for ${windowDays})` } as const)
         : await fetchServerModelStats({ rclVersion: RCL_VERSION, windowDays });
     const merged = mergeWeights(stats, server.kind === 'ok' ? server.value : undefined);
     if (opts.json) {
@@ -1035,7 +1036,6 @@ modelsCmd
       const calls = shown ? shown.calls : (local?.calls ?? row.server?.calls ?? 0);
       const dead = shown ? pct(shown.dead_rate) : pct(local?.deadRate ?? row.server?.dead_rate);
       const p50 = shown ? shown.p50_ms : (local?.p50Ms ?? row.server?.p50_ms ?? null);
-      const note = row.source === 'neutral' ? ' (neutral)' : '';
       console.log(
         row.model.padEnd(46) +
           `${outcomes > 0 ? precision : '—'} (${outcomes})`.padEnd(16) +
@@ -1043,8 +1043,7 @@ modelsCmd
           dead.padEnd(7) +
           (typeof p50 === 'number' ? `${(p50 / 1000).toFixed(0)}s` : '—').padEnd(8) +
           row.weight.toFixed(2).padEnd(8) +
-          row.source +
-          chalk.dim(note)
+          row.source
       );
     }
     console.log(

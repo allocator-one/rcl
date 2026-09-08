@@ -102,7 +102,8 @@ export async function fetchServerModelStats(options: ServerStatsOptions): Promis
 
 /**
  * One row per model known anywhere: the server's weight where it holds at
- * least `minOutcomes` outcomes for the model, else the local weight, else
+ * least its own floor (`min_outcomes_for_weight`) of outcomes for the model,
+ * else the local weight (at least `minOutcomes` local outcomes), else
  * neutral. Ordered by the evidence behind the row, most first.
  */
 export function mergeWeights(
@@ -116,9 +117,11 @@ export function mergeWeights(
     const source = stat.outcomes >= minOutcomes ? 'local' : 'neutral';
     rows.set(stat.model, { model: stat.model, weight: stat.weight, source, localOutcomes: stat.outcomes, local: stat });
   }
+  // The server states the floor it applied; its rows are judged by it.
+  const serverFloor = server?.min_outcomes_for_weight ?? minOutcomes;
   for (const stat of server?.models ?? []) {
     const existing = rows.get(stat.model);
-    if (stat.outcomes >= minOutcomes) {
+    if (stat.outcomes >= serverFloor) {
       const weight = Math.min(1.5, Math.max(0.5, stat.weight));
       rows.set(stat.model, { ...(existing ?? { model: stat.model }), weight, source: 'server', serverOutcomes: stat.outcomes, server: stat });
     } else if (existing) {

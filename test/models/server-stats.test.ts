@@ -39,6 +39,13 @@ describe('mergeWeights', () => {
     expect(by.get('only/server')).toMatchObject({ weight: 1, source: 'neutral' });
   });
 
+  it('judges server rows by the floor the server states', () => {
+    const strict = { ...serverStats([serverRow('a', 30, 1.3)]), min_outcomes_for_weight: 50 };
+    expect(mergeWeights([local('a', 40, 0.9)], strict)).toEqual([expect.objectContaining({ model: 'a', weight: 1.4, source: 'local' })]);
+    const lenient = { ...serverStats([serverRow('b', 10, 1.3)]), min_outcomes_for_weight: 5 };
+    expect(mergeWeights([], lenient)).toEqual([expect.objectContaining({ model: 'b', weight: 1.3, source: 'server' })]);
+  });
+
   it('is the local view when the server has nothing to say', () => {
     const merged = mergeWeights([local('a', 30, 0.9)], undefined);
     expect(merged).toEqual([expect.objectContaining({ model: 'a', weight: 1.4, source: 'local' })]);
