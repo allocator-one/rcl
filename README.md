@@ -309,15 +309,19 @@ branch, re-reads the pull request through its GitHub App and stores the run
 only if the reviewed head is the pull request's current head and the PR is
 not from a fork — the run is then `credential_kind: attested`.
 
-`--attest` fails loudly, before any reviewer is paid: outside Actions (no
-`ACTIONS_ID_TOKEN_REQUEST_URL` / `_TOKEN`), without `HARNESS_API_URL`, off a
-pull request target, with telemetry off, or when Harness refuses the exchange
-(the refusal names the reason: `workflow_not_allowed`, `reviews_disabled`,
+`--attest` fails loudly, before any token is requested or any reviewer is
+paid: outside Actions (no `ACTIONS_ID_TOKEN_REQUEST_URL` / `_TOKEN`), without
+`HARNESS_API_URL`, off a pull request target, with a telemetry level other
+than `full` (from `RCL_TELEMETRY` or the project config — an attested run
+carries its full report), or when Harness refuses the exchange (the refusal
+names the reason: `workflow_not_allowed`, `reviews_disabled`,
 `run_not_in_progress`, …). It never falls back to `HARNESS_API_TOKEN` or the
 stored login, it implies `--evidence-required`, and nothing recorded under the
 run-bound credential is ever spooled — the credential does not outlive the
-workflow run. Pair it with `--expect-head-sha` so a moved pull request fails
-fast instead of being refused at ingest.
+workflow run. A review that outlasts most of the credential's thirty minutes
+mints it again for the same run id before delivery. Pair it with
+`--expect-head-sha` so a moved pull request fails fast instead of being
+refused at ingest.
 
 ```yaml
 # .github/workflows/review_gate.yml (dispatched by Harness for one pull request)
@@ -331,7 +335,13 @@ jobs:
       HARNESS_API_URL: https://harness.infra.one
     steps:
       - run: npm i -g review-council
-      - run: rcl review ${{ inputs.repo }}#${{ inputs.pr }} --attest --expect-head-sha ${{ inputs.head_sha }} --ci
+      # Inputs reach the shell through the environment, never by expression
+      # interpolation into the command line.
+      - env:
+          REPO: ${{ inputs.repo }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: rcl review "$REPO#$PR" --attest --expect-head-sha "$HEAD_SHA" --ci
 ```
 
 ---

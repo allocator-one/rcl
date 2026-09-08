@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ATTEST_RETRIES, AttestError, attestRun } from '../../src/telemetry/attest.js';
+import { ATTEST_RETRIES, AttestError, attestRun, RENEW_BEFORE_MS, renewAttestation } from '../../src/telemetry/attest.js';
 import { fakeFetch, type RecordedRequest } from './fixtures.js';
 
 const RUN_ID = '019921a0-0000-7000-8000-000000000042';
@@ -50,6 +50,7 @@ describe('rcl review --attest', () => {
     expect(oidc.method).toBe('GET');
     expect(oidc.url).toBe(`${OIDC_URL}&audience=${encodeURIComponent('https://harness.example.test')}`);
     expect(oidc.headers['authorization']).toBe('bearer runner-request-token-SECRET');
+    expect(oidc.redirect).toBe('manual');
     expect(exchange.method).toBe('POST');
     expect(exchange.headers['authorization']).toBe('Bearer oidc.jwt.SECRET');
     expect(exchange.headers['x-harness-client']).toBe('rcl');
@@ -146,6 +147,17 @@ describe('rcl review --attest', () => {
     const empty = await attest({ ...ACTIONS, ...HOST }, server({ oidc: () => ({ status: 200, body: { count: 1 } }) }));
     expect((empty.error as AttestError).code).toBe('oidc_request_failed');
     expect(empty.requests).toHaveLength(1);
+
+    const redirected = await attest({ ...ACTIONS, ...HOST }, server({ oidc: () => ({ status: 302 }) }));
+    expect((redirected.error as AttestError).code).toBe('oidc_request_failed');
+    expect((redirected.error as Error).message).toMatch(/redirect/);
+    expect(redirected.requests).toHaveLength(1);
+  });
+
+  it('bounds the answer it reads: an oversized body is a malformed answer, not a buffer', async () => {
+    const huge = await attest({ ...ACTIONS, ...HOST }, server({ attest: () => ({ status: 201, body: { pad: 'x'.repeat(70_000) } }) }));
+    expect((huge.error as AttestError).code).toBe('malformed_response');
+    expect((huge.error as Error).message).toMatch(/larger than the answer limit/);
   });
 
   it('refuses a credential answer that is not the run-bound credential for this run', async () => {
@@ -171,5 +183,56 @@ describe('rcl review --attest', () => {
       server({ attest: () => ({ status: 401, body: { error: 'invalid_attestation', reason: 'invalid_token', message: 'token oidc.jwt.SECRET refused' } }) })
     );
     expect((refused.error as Error).message).not.toContain('SECRET');
+  });
+
+  describe('renewAttestation', () => {
+    const current = {
+      credential: { url: 'https://harness.example.test', token: 'rbc_first', source: 'attest' as const },
+      runId: RUN_ID,
+      expiresAt: '2026-09-08T20:00:00Z',
+      audience: 'https://harness.example.test',
+    };
+    const at = (iso: string) => () => Date.parse(iso);
+
+    it('keeps a credential with more than the renewal margin left, without a request', async () => {
+      const { fetch, requests } = fakeFetch(server());
+      const renewal = await renewAttestation(current, {
+        rclVersion: '3.2.0',
+        env: { ...ACTIONS, ...HOST },
+        fetchImpl: fetch,
+        now: at('2026-09-08T19:40:00Z'),
+      });
+      expect(renewal).toEqual({ attestation: current, renewed: false });
+      expect(requests).toHaveLength(0);
+      expect(Date.parse(current.expiresAt) - Date.parse('2026-09-08T19:40:00Z')).toBeGreaterThan(RENEW_BEFORE_MS);
+    });
+
+    it('mints again for the same run id when little remains, and keeps the old one when the renewal fails', async () => {
+      const fresh = { ...MINTED, body: { data: { ...MINTED.body.data, credential: 'rbc_second', expires_at: '2026-09-08T20:25:00Z' } } };
+      const ok = fakeFetch(server({ attest: () => fresh }));
+      const renewed = await renewAttestation(current, {
+        rclVersion: '3.2.0',
+        env: { ...ACTIONS, ...HOST },
+        fetchImpl: ok.fetch,
+        sleep: async () => {},
+        now: at('2026-09-08T19:55:00Z'),
+      });
+      expect(renewed.renewed).toBe(true);
+      expect(renewed.attestation.credential.token).toBe('rbc_second');
+      expect(renewed.attestation.runId).toBe(RUN_ID);
+      expect(JSON.parse(attestRequests(ok.requests)[0]!.body!)).toEqual({ run_id: RUN_ID });
+
+      const down = fakeFetch(server({ attest: () => ({ status: 503, body: { error: 'github_unavailable' } }) }));
+      const kept = await renewAttestation(current, {
+        rclVersion: '3.2.0',
+        env: { ...ACTIONS, ...HOST },
+        fetchImpl: down.fetch,
+        sleep: async () => {},
+        now: at('2026-09-08T19:55:00Z'),
+      });
+      expect(kept.renewed).toBe(false);
+      expect(kept.attestation).toBe(current);
+      expect(kept.failure).toMatch(/could not attest this run/);
+    });
   });
 });

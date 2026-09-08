@@ -116,13 +116,13 @@ import {
   type TelemetryRuntime,
   loadHarnessSettings,
   resolveTelemetryLevel,
-  envTelemetryLevel,
 } from './telemetry/deliver.js';
 import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
 import { credentialHost, type HarnessCredential } from './telemetry/credentials.js';
-import { attestRun, type Attestation } from './telemetry/attest.js';
+import { attestRun, renewAttestation, type Attestation } from './telemetry/attest.js';
+import type { TelemetryLevel } from './telemetry/envelope.js';
 import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
@@ -201,6 +201,11 @@ async function assertEvidenceDeliverable(
   }
   if (runtime.level === 'off') throw new Error('--evidence-required contradicts the resolved telemetry level off.');
   if (!runtime.sink) throw new Error(`--evidence-required needs a Harness credential: ${runtime.note ?? 'none available'}.`);
+}
+
+/** `--attest` records the full report or nothing: the resolved telemetry level must be `full`. */
+function attestLevelMessage(level: TelemetryLevel): string {
+  return `--attest needs the telemetry level full (resolved: ${level}): an attested run carries its full report as evidence. Check RCL_TELEMETRY and harness.telemetry in the project config.`;
 }
 
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
@@ -1458,9 +1463,10 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       if (opts.telemetry === false) {
         throw new Error('--attest contradicts --no-telemetry: an attested review is recorded or it does not run.');
       }
-      if (envTelemetryLevel(process.env) === 'off') {
-        throw new Error('--attest contradicts RCL_TELEMETRY=off: an attested review is recorded or it does not run.');
-      }
+      // The environment and the project's own opt-out are read before the
+      // exchange: no token leaves the runner for a review that will not record.
+      const levelBefore = resolveTelemetryLevel(await loadHarnessSettings(process.cwd()), { noTelemetry: false }, process.env);
+      if (levelBefore !== 'full') throw new Error(attestLevelMessage(levelBefore));
       opts.evidenceRequired = true;
       spinner.text = 'Attesting to Harness as this GitHub Actions run...';
       attestation = await attestRun({ runId: uuidv7(), rclVersion: RCL_VERSION });
@@ -1473,8 +1479,10 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
 
     const prepared = await prepareCouncil(spinner, opts, undefined, attestation);
     const { config } = prepared;
-    if (attestation && config.harness?.telemetry === 'off') {
-      throw new Error('--attest contradicts harness.telemetry: off in the project config: an attested review is recorded or it does not run.');
+    if (attestation) {
+      // The loaded config may come from --config, a file the pre-check did not see.
+      const level = resolveTelemetryLevel(config, { noTelemetry: opts.telemetry === false }, process.env);
+      if (level !== 'full') throw new Error(attestLevelMessage(level));
     }
     assertEvidenceCanBeRequired(opts, config);
     await assertEvidenceDeliverable(opts, config, attestation?.credential);
@@ -1968,6 +1976,19 @@ async function executeCouncil(
     );
   }
 
+  // An attested review may outlast its credential: renew it for the same run
+  // id before delivery when little of it remains (RCL-40).
+  let attestation = extra.attestation;
+  if (attestation) {
+    const renewal = await renewAttestation(attestation, { rclVersion: RCL_VERSION });
+    attestation = renewal.attestation;
+    if (renewal.renewed) {
+      process.stderr.write(chalk.dim(`Attestation renewed for run ${attestation.runId} (expires ${attestation.expiresAt})`) + '\n');
+    } else if (renewal.failure !== undefined) {
+      process.stderr.write(chalk.dim(`Attestation not renewed (${renewal.failure}); delivering with the credential in hand`) + '\n');
+    }
+  }
+
   // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
   // turn a finished review into a failure unless --evidence-required asks.
   let runtime: TelemetryRuntime | undefined;
@@ -1977,7 +1998,7 @@ async function executeCouncil(
       rclVersion: RCL_VERSION,
       config,
       noTelemetry: opts.telemetry === false,
-      ...(extra.attestation ? { credential: extra.attestation.credential } : {}),
+      ...(attestation ? { credential: attestation.credential } : {}),
     });
   } catch (err) {
     // Kept for the --evidence-required verdict below, which names the cause.

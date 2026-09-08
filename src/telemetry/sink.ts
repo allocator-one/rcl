@@ -271,7 +271,8 @@ export class HarnessSink {
  * The body as text, or `null` once it exceeds `limit` bytes — the stream is
  * cancelled there, so a runaway response never fills memory.
  */
-async function readBounded(response: Response, limit: number): Promise<string | null> {
+/** The body up to `limit` bytes, or null once it exceeds them — the stream is cancelled, never buffered whole. */
+export async function readBounded(response: Response, limit: number): Promise<string | null> {
   if (!response.body) {
     const text = await response.text();
     return Buffer.byteLength(text, 'utf8') > limit ? null : text;

@@ -24,12 +24,13 @@ function tempRepository(): string {
   return directory;
 }
 
-function runRcl(args: string[], cwd: string) {
+function runRcl(args: string[], cwd: string, extraEnv: Record<string, string> = {}) {
   return spawnSync(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
     cwd,
     encoding: 'utf8',
     env: {
       ...process.env,
+      ...extraEnv,
       NODE_NO_WARNINGS: '1',
       // Never reach a provider or Harness from this test.
       RCL_NO_HARNESS_KEYS: '1',
@@ -214,5 +215,17 @@ describe('rcl review — --attest (RCL-40)', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/--attest contradicts --no-telemetry/);
+  });
+
+  it('needs the full telemetry level, read from the environment and the project config before any token is requested', () => {
+    const repo = tempRepository();
+    const reduced = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo, { RCL_TELEMETRY: 'findings' });
+    expect(reduced.status).toBe(1);
+    expect(reduced.stderr).toMatch(/--attest needs the telemetry level full \(resolved: findings\)/);
+
+    writeFileSync(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n');
+    const off = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo);
+    expect(off.status).toBe(1);
+    expect(off.stderr).toMatch(/--attest needs the telemetry level full \(resolved: off\)/);
   });
 });
