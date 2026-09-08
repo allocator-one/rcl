@@ -157,10 +157,10 @@ Consequences:
 ### 4. After the loop
 
 1. If `--post-final` (PR mode, converged only): post a convergence summary as a PR comment (`gh pr comment`) built from the ledger — rounds run, fixed/dismissed counts with reasons, final verdict. This is a summary comment, not another council run.
-2. **Read the server's view** (PR mode, when the pre-check passed): `rcl evidence status <owner>/<repo>#<N>` prints the gate status Harness computed for the pull request — its projections, the rounds it counts and the open actionable findings — and exits 0 only when the judged projection is converged. Report it next to the machine resolution. Where the two disagree, the server's is the one the gate enforces: a round it does not count (an unbound run, a stale head, a run whose delivery was never acknowledged) is not evidence, whatever the ledger says. Until Harness counts patch-file rounds bound with `--for-pr` (IO-12585), a loop run this way reads `stale` or `none` there; say so rather than treating it as a failure.
+2. **Read the server's view** (PR mode, when the pre-check passed): `rcl evidence status <owner>/<repo>#<N>` prints the gate status Harness computed for the pull request — its projections, the rounds it counts and the open actionable findings — and exits 0 only when the judged projection is converged — after a capped or non-converged loop a non-zero exit is the status being reported, not a failure. Report it next to the machine resolution. Where the two disagree, the server's is the one the gate enforces: a round it does not count (an unbound run, a stale head, a run whose delivery was never acknowledged) is not evidence, whatever the ledger says. Until Harness counts patch-file rounds bound with `--for-pr` (IO-12585), a loop run this way reads `stale` or `none` there; say so rather than treating it as a failure.
 3. Report to the user:
    - Converged or capped, with evidence rounds, attempts used, and the configured cap
-   - The Harness run URL of every evidence round (from the `Evidence recorded:` lines) and the `rcl evidence status` line
+   - Every round attempted, with its Harness run URL (from the `Evidence recorded:` lines) and its evidence state — `recorded`, `pending (flush timed out)`, `none (<reason>)`, `off for the organization` — and the `rcl evidence status` line
    - Per round: new findings, fixed vs dismissed (with the load-bearing dismissal reasons)
    - Commits pushed
    - Reminder: auto-merge was disarmed / left unarmed — it is now safe to arm it.
