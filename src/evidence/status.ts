@@ -1,5 +1,5 @@
-import { resolveHarnessCredential } from '../telemetry/credentials.js';
-import { describeOutcome, HarnessSink } from '../telemetry/sink.js';
+import { openReadSink } from '../telemetry/read-sink.js';
+import { describeOutcome, type HarnessSink } from '../telemetry/sink.js';
 import { formatGateStatus, safeJson, text } from './format.js';
 import { getGateStatus } from './reads.js';
 import { needsRemote, parsePullRequestArg, resolveRemoteRepo, type RepoRef } from './target.js';
@@ -34,28 +34,20 @@ export interface StatusOptions {
   enforced?: boolean;
 }
 
-/**
- * A sink for reads, from the same credential rules as delivery — the stored
- * login or the `HARNESS_API_TOKEN` + `HARNESS_API_URL` pair, the token sent
- * to its own host only — but independent of the telemetry level: switching
- * delivery off does not blind the reads.
- */
+/** The read sink, or `null` after telling the user why there is none. */
 export async function openSink(deps: EvidenceDeps): Promise<HarnessSink | null> {
-  const resolved = await resolveHarnessCredential({
-    env: deps.env ?? process.env,
-    cwd: deps.cwd ?? process.cwd(),
-    ...(deps.credentialsPath !== undefined ? { credentialsPath: deps.credentialsPath } : {}),
-    requireRepo: false,
-  });
-  if (!resolved.credential) {
-    deps.stderr(`Cannot read evidence: ${resolved.note ?? 'no Harness credential'}`);
-    return null;
-  }
-  return new HarnessSink({
-    credential: resolved.credential,
+  const opened = await openReadSink({
     rclVersion: deps.rclVersion,
+    ...(deps.env !== undefined ? { env: deps.env } : {}),
+    ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
+    ...(deps.credentialsPath !== undefined ? { credentialsPath: deps.credentialsPath } : {}),
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
   });
+  if (!opened.sink) {
+    deps.stderr(`Cannot read evidence: ${opened.note}`);
+    return null;
+  }
+  return opened.sink;
 }
 
 export async function runEvidenceStatus(
