@@ -109,6 +109,7 @@ import { assertExpectedHead, resolveReviewTarget } from './resolver/target.js';
 import {
   createTelemetryRuntime,
   deliverRun,
+  evidenceRequirementConflict,
   emitConvergeEvents,
   flushOutbox,
   flushOutboxAtStart,
@@ -164,14 +165,8 @@ function assertEvidenceCanBeRequired(
   opts: { evidenceRequired?: boolean; telemetry?: boolean },
   config?: Pick<Config, 'harness'>
 ): void {
-  if (!opts.evidenceRequired) return;
-  if (opts.telemetry === false) throw new Error('--evidence-required contradicts --no-telemetry: evidence cannot be required and withheld.');
-  if ((process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') {
-    throw new Error('--evidence-required contradicts RCL_TELEMETRY=off: evidence cannot be required and withheld.');
-  }
-  if (config?.harness?.telemetry === 'off') {
-    throw new Error('--evidence-required contradicts harness.telemetry: off in the project config: evidence cannot be required and withheld.');
-  }
+  const conflict = evidenceRequirementConflict(opts, config, process.env);
+  if (conflict !== undefined) throw new Error(conflict);
 }
 
 /**
@@ -671,7 +666,8 @@ program
               verdicts: updated.map((e) => ({
                 identity_key: e.key,
                 verdict: e.verdict,
-                ...(e.verdictReason !== undefined ? { reason: e.verdictReason } : {}),
+                // A dismissal reason is user-authored prose: scrubbed like every other free text that leaves the machine.
+                ...(e.verdictReason !== undefined ? { reason: scrubText(e.verdictReason, 500) } : {}),
                 severity: e.verdictSeverity ?? e.severity,
                 models: e.models,
               })),

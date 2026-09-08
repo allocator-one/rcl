@@ -8,6 +8,7 @@ import {
   deliverRun,
   emitConvergeEvents,
   EVIDENCE_REQUIRED_EXIT_CODE,
+  evidenceRequirementConflict,
   flushOutbox,
   flushOutboxAtStart,
   resolveTelemetryLevel,
@@ -72,6 +73,19 @@ describe('telemetry delivery', () => {
   afterEach(async () => {
     await rm(repo, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
+  });
+
+  describe('evidenceRequirementConflict', () => {
+    it('names each way evidence could be required and withheld at once, and is silent otherwise', () => {
+      const wanted = { evidenceRequired: true };
+      expect(evidenceRequirementConflict({}, undefined, {})).toBeUndefined();
+      expect(evidenceRequirementConflict(wanted, undefined, {})).toBeUndefined();
+      expect(evidenceRequirementConflict(wanted, { harness: { telemetry: 'findings' } }, {})).toBeUndefined();
+      expect(evidenceRequirementConflict({ ...wanted, telemetry: false }, undefined, {})).toMatch(/--no-telemetry/);
+      expect(evidenceRequirementConflict(wanted, undefined, { RCL_TELEMETRY: 'OFF' })).toMatch(/RCL_TELEMETRY=off/);
+      expect(evidenceRequirementConflict(wanted, undefined, { RCL_TELEMETRY: 'loud' })).toMatch(/RCL_TELEMETRY=off/);
+      expect(evidenceRequirementConflict(wanted, { harness: { telemetry: 'off' } }, {})).toMatch(/harness\.telemetry: off/);
+    });
   });
 
   describe('resolveTelemetryLevel', () => {

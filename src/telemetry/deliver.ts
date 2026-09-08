@@ -71,6 +71,25 @@ export function envTelemetryLevel(env: Record<string, string | undefined>): Tele
   return LEVELS.has(raw as TelemetryLevel) ? (raw as TelemetryLevel) : 'off';
 }
 
+/**
+ * Why `--evidence-required` cannot be honored, or undefined when it can:
+ * evidence cannot be required and withheld at the same time. The flag and
+ * the environment are known up front; the project config once loaded.
+ */
+export function evidenceRequirementConflict(
+  opts: { evidenceRequired?: boolean; telemetry?: boolean },
+  config: Pick<Config, 'harness'> | undefined,
+  env: Record<string, string | undefined>
+): string | undefined {
+  if (!opts.evidenceRequired) return undefined;
+  if (opts.telemetry === false) return '--evidence-required contradicts --no-telemetry: evidence cannot be required and withheld.';
+  if (envTelemetryLevel(env) === 'off') return '--evidence-required contradicts RCL_TELEMETRY=off: evidence cannot be required and withheld.';
+  if (config?.harness?.telemetry === 'off') {
+    return '--evidence-required contradicts harness.telemetry: off in the project config: evidence cannot be required and withheld.';
+  }
+  return undefined;
+}
+
 /** `--no-telemetry` wins, then `RCL_TELEMETRY`, then `harness.telemetry`; default `full`. */
 export function resolveTelemetryLevel(
   config: Pick<Config, 'harness'> | undefined,

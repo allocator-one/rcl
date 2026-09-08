@@ -90,6 +90,15 @@ describe('stripFencedCode', () => {
 });
 
 describe('scrubbing is idempotent and bounded', () => {
+  it('is a fixed point at every cap, truncated or not', () => {
+    const text = `token=abcdefghijklmnop and ${'x'.repeat(300)} sk-${'k'.repeat(30)} end`;
+    for (const max of [20, 100, 500, undefined]) {
+      const once = scrubText(text, max);
+      expect(scrubText(once, max)).toBe(once);
+    }
+    expect(scrubSecrets(REDACTED)).toBe(REDACTED);
+  });
+
   it('applies the same result twice', () => {
     const noisy = `token="a very long passphrase" ghp_${'A'.repeat(30)} ${'x'.repeat(3_000)}`;
     const once = scrubText(noisy, 500);

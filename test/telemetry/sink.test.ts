@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { describeOutcome, HarnessSink } from '../../src/telemetry/sink.js';
@@ -171,8 +171,7 @@ describe('HarnessSink.postRun', () => {
       GITHUB_TOKEN: 'poison-github-5e6f7a8b',
       HARNESS_API_TOKEN: 'poison-harness-9c0d1e2f',
     };
-    const before = { ...process.env };
-    Object.assign(process.env, poison);
+    for (const [key, value] of Object.entries(poison)) vi.stubEnv(key, value);
     try {
       const { sink: s, requests } = sink((request) => ({ status: 201, body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] } } }));
       await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
@@ -182,10 +181,7 @@ describe('HarnessSink.postRun', () => {
       for (const value of Object.values(poison)) expect(wire).not.toContain(value);
       expect(wire).toContain(CREDENTIAL.token);
     } finally {
-      for (const key of Object.keys(poison)) {
-        if (before[key] === undefined) delete process.env[key];
-        else process.env[key] = before[key];
-      }
+      vi.unstubAllEnvs();
     }
   });
 });
