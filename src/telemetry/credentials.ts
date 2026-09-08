@@ -23,7 +23,8 @@ export interface HarnessCredential {
   /** Base URL without a trailing slash. */
   url: string;
   token: string;
-  source: 'env' | 'login';
+  /** `attest`: the run-bound credential `rcl review --attest` exchanged the job's OIDC token for (RCL-40). */
+  source: 'env' | 'login' | 'attest';
 }
 
 export interface CredentialResolution {

@@ -24,15 +24,19 @@ function tempRepository(): string {
   return directory;
 }
 
-function runRcl(args: string[], cwd: string) {
+function runRcl(args: string[], cwd: string, extraEnv: Record<string, string> = {}) {
   return spawnSync(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
     cwd,
     encoding: 'utf8',
     env: {
       ...process.env,
+      ...extraEnv,
       NODE_NO_WARNINGS: '1',
-      // Never reach a provider or Harness from this test.
+      // Never reach a provider or Harness from this test, and never look like
+      // a GitHub Actions job with id-token: write (the suite may run in one).
       RCL_NO_HARNESS_KEYS: '1',
+      ACTIONS_ID_TOKEN_REQUEST_URL: '',
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: '',
       ANTHROPIC_API_KEY: '',
       OPENAI_API_KEY: '',
       GEMINI_API_KEY: '',
@@ -184,5 +188,53 @@ describe('rcl converge-report — pre-3.0 reports', () => {
     const parsed = JSON.parse(result.stdout);
     expect(parsed.counts).toEqual({ new: 1, repeat: 0, suppressed: 0, regating: 0 });
     expect(parsed.findings[0]).toMatchObject({ status: 'new', gating: 'consensus', file: 'src/a.ts' });
+  });
+});
+
+describe('rcl review — --attest (RCL-40)', () => {
+  it('exits non-zero with a clear message outside GitHub Actions, before any network or reviewer work', () => {
+    const repo = tempRepository();
+    const result = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/GitHub Actions/);
+    expect(result.stderr).toMatch(/id-token: write/);
+    expect(result.stderr).not.toMatch(/Fetching|Resolving diff/);
+  });
+
+  it('refuses a local diff or a patch file: only a pull request can be attested', () => {
+    const repo = tempRepository();
+    writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n');
+    for (const args of [['review', '--staged', '--attest'], ['review', 'change.patch', '--attest']]) {
+      const result = runRcl(args, repo);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/--attest applies to a pull request target/);
+    }
+  });
+
+  it('contradicts --no-telemetry: an attested review is recorded or it does not run', () => {
+    const repo = tempRepository();
+    const result = runRcl(['review', 'allocator-one/rcl#42', '--attest', '--no-telemetry'], repo);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/--attest contradicts --no-telemetry/);
+  });
+
+  it('needs the full telemetry level, read from the environment and the project config before any token is requested', () => {
+    const repo = tempRepository();
+    const reduced = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo, { RCL_TELEMETRY: 'findings' });
+    expect(reduced.status).toBe(1);
+    expect(reduced.stderr).toMatch(/--attest needs the telemetry level full \(resolved: findings\)/);
+
+    writeFileSync(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n');
+    const off = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo);
+    expect(off.status).toBe(1);
+    expect(off.stderr).toMatch(/--attest needs the telemetry level full \(resolved: off\)/);
+
+    // The file --config names is the one read, before any token is requested.
+    writeFileSync(join(repo, 'alt.yml'), 'harness:\n  telemetry: envelope\n');
+    const alt = runRcl(['review', 'allocator-one/rcl#42', '--attest', '--config', 'alt.yml'], repo, { RCL_TELEMETRY: '' });
+    expect(alt.status).toBe(1);
+    expect(alt.stderr).toMatch(/--attest needs the telemetry level full \(resolved: envelope\)/);
   });
 });

@@ -120,7 +120,10 @@ import {
 import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
-import { credentialHost } from './telemetry/credentials.js';
+import { credentialHost, type HarnessCredential } from './telemetry/credentials.js';
+import { attestRun, renewAttestation, type Attestation } from './telemetry/attest.js';
+import type { TelemetryLevel } from './telemetry/envelope.js';
+import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
@@ -181,14 +184,62 @@ function assertEvidenceCanBeRequired(
  * reviewer is paid: an unmanaged repository or a missing credential makes
  * delivery impossible, and that is worth knowing at once.
  */
-async function assertEvidenceDeliverable(opts: { evidenceRequired?: boolean; telemetry?: boolean }, config: Config): Promise<void> {
+async function assertEvidenceDeliverable(
+  opts: { evidenceRequired?: boolean; telemetry?: boolean },
+  config: Config,
+  credential?: HarnessCredential
+): Promise<void> {
   if (!opts.evidenceRequired) return;
-  const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
+  const runtime = await createTelemetryRuntime({
+    rclVersion: RCL_VERSION,
+    config,
+    noTelemetry: opts.telemetry === false,
+    ...(credential ? { credential } : {}),
+  });
   if (!runtime.repoManaged) {
     throw new Error('--evidence-required needs a Harness-managed repository (one carrying .harness-cli/config.json); this one is not.');
   }
   if (runtime.level === 'off') throw new Error('--evidence-required contradicts the resolved telemetry level off.');
   if (!runtime.sink) throw new Error(`--evidence-required needs a Harness credential: ${runtime.note ?? 'none available'}.`);
+}
+
+/** `--attest` records the full report or nothing: the resolved telemetry level must be `full`. */
+function attestLevelMessage(level: TelemetryLevel): string {
+  return `--attest needs the telemetry level full (resolved: ${level}): an attested run carries its full report as evidence. Check RCL_TELEMETRY and harness.telemetry in the project config.`;
+}
+
+/**
+ * `--attest` (RCL-40), before any key, config or reviewer work: the target
+ * must be a pull request, the telemetry level must resolve to `full` from the
+ * environment and the project config (the file `--config` names included),
+ * and only then is the job's OIDC token requested and exchanged. An attested
+ * review is recorded or it does not run; the caller treats evidence as
+ * required from here on.
+ */
+async function attestBeforeReview(
+  spinner: Spinner,
+  opts: CouncilCliOpts,
+  target: string | undefined,
+  gitMode: string | undefined
+): Promise<Attestation> {
+  if (gitMode || target === undefined || !isGitHubTarget(target)) {
+    throw new Error(
+      '--attest applies to a pull request target (owner/repo#N or a GitHub PR URL): Harness attests a run of the pull request it re-reads, not a local diff or a patch file.'
+    );
+  }
+  if (opts.telemetry === false) {
+    throw new Error('--attest contradicts --no-telemetry: an attested review is recorded or it does not run.');
+  }
+  const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd(), opts.config), { noTelemetry: false }, process.env);
+  if (level !== 'full') throw new Error(attestLevelMessage(level));
+
+  spinner.text = 'Attesting to Harness as this GitHub Actions run...';
+  const attestation = await attestRun({ runId: uuidv7(), rclVersion: RCL_VERSION });
+  spinner.info(
+    `Attested: run-bound credential from ${credentialHost(attestation.credential)} for run ${attestation.runId} (expires ${attestation.expiresAt})`
+  );
+  spinner.start('Loading configuration...');
+  return attestation;
 }
 
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
@@ -249,6 +300,10 @@ program
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
   .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
+  .option(
+    '--attest',
+    'GitHub Actions gate workflow only: exchange the job OIDC token for a run-bound Harness credential and record this review as attested (needs id-token: write and HARNESS_API_URL; implies --evidence-required; no fallback to another credential)'
+  )
   .action(async (target: string | undefined, opts) => {
     await runReview(target, opts);
   });
@@ -1166,6 +1221,8 @@ interface CouncilCliOpts {
   telemetry?: boolean;
   /** Exit 4 unless the evidence envelope was acknowledged. */
   evidenceRequired?: boolean;
+  /** GitHub Actions gate workflow: exchange the job OIDC token for a run-bound credential (RCL-40). */
+  attest?: boolean;
 }
 
 interface PreparedCouncil {
@@ -1198,8 +1255,8 @@ interface PreparedCouncil {
  * degradation (dropping openrouter models without OPENROUTER_API_KEY) must
  * see any injected keys.
  */
-async function fetchHarnessKeys(spinner: Spinner): Promise<void> {
-  const { note } = await applyHarnessModelKeys();
+async function fetchHarnessKeys(spinner: Spinner, credential?: HarnessCredential): Promise<void> {
+  const { note } = await applyHarnessModelKeys(credential ? { credential } : {});
   if (note) {
     spinner.info(note);
     spinner.start('Loading configuration...');
@@ -1209,7 +1266,8 @@ async function fetchHarnessKeys(spinner: Spinner): Promise<void> {
 async function prepareCouncil(
   spinner: Spinner,
   opts: CouncilCliOpts,
-  fallbackRoles?: string[]
+  fallbackRoles?: string[],
+  attestation?: Attestation
 ): Promise<PreparedCouncil> {
   const startedAt = new Date();
   // Validate the converge context first: a bad --round must fail before any
@@ -1218,7 +1276,7 @@ async function prepareCouncil(
     { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
     process.env
   );
-  await fetchHarnessKeys(spinner);
+  await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config);
 
   // Validate mutually exclusive role options
@@ -1426,12 +1484,24 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         '--evidence-required needs --head-sha for a patch file: evidence must bind to the commit it reviewed.'
       );
     }
+    // --attest (RCL-40) runs before any key, config or reviewer work; an
+    // attested review is recorded or it does not run, so evidence is required.
+    let attestation: Attestation | undefined;
+    if (opts.attest) {
+      attestation = await attestBeforeReview(spinner, opts, target, gitMode);
+      opts = { ...opts, evidenceRequired: true };
+    }
     assertEvidenceCanBeRequired(opts);
 
-    const prepared = await prepareCouncil(spinner, opts);
+    const prepared = await prepareCouncil(spinner, opts, undefined, attestation);
     const { config } = prepared;
+    if (attestation) {
+      // The loaded config is the authority; the pre-exchange check read the same file.
+      const level = resolveTelemetryLevel(config, { noTelemetry: opts.telemetry === false }, process.env);
+      if (level !== 'full') throw new Error(attestLevelMessage(level));
+    }
     assertEvidenceCanBeRequired(opts, config);
-    await assertEvidenceDeliverable(opts, config);
+    await assertEvidenceDeliverable(opts, config, attestation?.credential);
 
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
 
@@ -1516,6 +1586,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       command: 'review',
       target: runTarget,
       asyncTargetLabel,
+      ...(attestation ? { attestation } : {}),
     });
   } catch (err) {
     spinner.fail(String(err));
@@ -1540,6 +1611,8 @@ async function executeCouncil(
     target: RunHeaderInput['target'];
     focus?: PlanFocus;
     asyncTargetLabel?: string;
+    /** `--attest`: the run-bound credential and the run id it binds (RCL-40). */
+    attestation?: Attestation;
   }
 ): Promise<void> {
   const { config, roleMap, assignments, asyncAssignments, contextFiles } = prepared;
@@ -1737,10 +1810,29 @@ async function executeCouncil(
   // Telemetry off means nothing leaves the machine for weights either. The
   // server side is bounded to three seconds; the settings file and the local
   // store are read as local files.
+  // An attested review may outlast its credential: from here on — the
+  // weights read, then delivery — the credential is renewed for the same run
+  // id when little of it remains (RCL-40).
+  let attestation = extra.attestation;
+  if (attestation) {
+    const renewal = await renewAttestation(attestation, { rclVersion: RCL_VERSION });
+    attestation = renewal.attestation;
+    if (renewal.renewed) {
+      process.stderr.write(chalk.dim(`Attestation renewed for run ${attestation.runId} (expires ${attestation.expiresAt})`) + '\n');
+    } else if (renewal.failure !== undefined) {
+      process.stderr.write(chalk.dim(`Attestation not renewed (${renewal.failure}); continuing with the credential in hand`) + '\n');
+    }
+  }
+
   let modelWeights: Map<string, number> | undefined;
   try {
-    const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd()), { noTelemetry: opts.telemetry === false }, process.env);
-    const loaded = await loadMergedWeights({ rclVersion: RCL_VERSION, timeoutMs: 3_000, serverEnabled: level !== 'off' });
+    const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd(), opts.config), { noTelemetry: opts.telemetry === false }, process.env);
+    const loaded = await loadMergedWeights({
+      rclVersion: RCL_VERSION,
+      timeoutMs: 3_000,
+      serverEnabled: level !== 'off',
+      ...(attestation ? { credential: attestation.credential } : {}),
+    });
     if (loaded.size > 0) modelWeights = loaded;
   } catch (err) {
     // Weights are advisory; the review runs unweighted, but not silently.
@@ -1856,6 +1948,8 @@ async function executeCouncil(
   // Self-describing run header (IO-12475 section 5.1), built once the body
   // exists so the CI verdict is recorded uniformly — with or without --ci.
   const run = buildRunHeader({
+    // An attested run carries the id its credential was minted for.
+    ...(extra.attestation ? { id: extra.attestation.runId } : {}),
     rclVersion: RCL_VERSION,
     command: extra.command,
     target: extra.target,
@@ -1921,6 +2015,7 @@ async function executeCouncil(
       rclVersion: RCL_VERSION,
       config,
       noTelemetry: opts.telemetry === false,
+      ...(attestation ? { credential: attestation.credential } : {}),
     });
   } catch (err) {
     // Kept for the --evidence-required verdict below, which names the cause.

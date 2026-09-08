@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **`rcl review … --attest`** (RCL-40): inside the organization's gate
+  workflow on GitHub Actions, rcl asks the runner for the job's OIDC token
+  (audience: the Harness origin from `HARNESS_API_URL`), exchanges it at
+  `POST /api/v1/reviews/attest` for a run-bound credential (`rbc_…`, thirty
+  minutes, one run id, valid while the Actions run is in progress) and records
+  the review under it — envelope, artifacts, model keys and model stats — so
+  Harness stores the run as `credential_kind: attested`, the tier the enforced
+  gate reads. Fails loudly before any token is requested or any reviewer is
+  paid: outside Actions (`ACTIONS_ID_TOKEN_REQUEST_URL` / `_TOKEN` unset),
+  without `HARNESS_API_URL`, off a pull request target, with a telemetry level
+  other than `full` (environment or project config), or when the exchange is
+  refused (the reason is printed). Never falls back to `HARNESS_API_TOKEN` or
+  the stored login, implies `--evidence-required`, never spools (the
+  credential does not outlive the workflow run), and mints the credential
+  again for the same run id before delivery when a long review has used up
+  most of its thirty minutes.
 - **`round_processed` carries the round's classification** (RCL-47):
   `identities: [{identity_key, matched_identity, status, suppress_reason?}]`
   — each sighting's own report key, the identity `converge-report` matched it
