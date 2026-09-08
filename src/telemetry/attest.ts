@@ -251,9 +251,13 @@ async function exchangeOnce(
       typeof credential !== 'string' ||
       !credential.startsWith('rbc_') ||
       data?.['run_id'] !== runId ||
-      typeof expiresAt !== 'string'
+      typeof expiresAt !== 'string' ||
+      !Number.isFinite(Date.parse(expiresAt))
     ) {
-      throw new AttestError('malformed_response', 'Harness answered the attest request without a run-bound credential for this run.');
+      throw new AttestError(
+        'malformed_response',
+        'Harness answered the attest request without a run-bound credential for this run (or without a readable expiry).'
+      );
     }
     return { credential, expiresAt };
   }
@@ -330,6 +334,7 @@ export interface Renewal {
  */
 export async function renewAttestation(current: Attestation, options: RenewOptions): Promise<Renewal> {
   const now = (options.now ?? Date.now)();
+  // `expiresAt` was checked to parse at mint; a value that does not is treated as spent.
   const expires = Date.parse(current.expiresAt);
   if (Number.isFinite(expires) && expires - now > RENEW_BEFORE_MS) return { attestation: current, renewed: false };
   try {

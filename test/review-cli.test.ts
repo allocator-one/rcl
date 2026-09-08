@@ -32,8 +32,11 @@ function runRcl(args: string[], cwd: string, extraEnv: Record<string, string> = 
       ...process.env,
       ...extraEnv,
       NODE_NO_WARNINGS: '1',
-      // Never reach a provider or Harness from this test.
+      // Never reach a provider or Harness from this test, and never look like
+      // a GitHub Actions job with id-token: write (the suite may run in one).
       RCL_NO_HARNESS_KEYS: '1',
+      ACTIONS_ID_TOKEN_REQUEST_URL: '',
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: '',
       ANTHROPIC_API_KEY: '',
       OPENAI_API_KEY: '',
       GEMINI_API_KEY: '',
@@ -227,5 +230,11 @@ describe('rcl review — --attest (RCL-40)', () => {
     const off = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo);
     expect(off.status).toBe(1);
     expect(off.stderr).toMatch(/--attest needs the telemetry level full \(resolved: off\)/);
+
+    // The file --config names is the one read, before any token is requested.
+    writeFileSync(join(repo, 'alt.yml'), 'harness:\n  telemetry: envelope\n');
+    const alt = runRcl(['review', 'allocator-one/rcl#42', '--attest', '--config', 'alt.yml'], repo, { RCL_TELEMETRY: '' });
+    expect(alt.status).toBe(1);
+    expect(alt.stderr).toMatch(/--attest needs the telemetry level full \(resolved: envelope\)/);
   });
 });

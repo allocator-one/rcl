@@ -164,6 +164,7 @@ describe('rcl review --attest', () => {
     for (const data of [
       { credential: 'aone_personal', token_type: 'bearer', expires_at: '2026-09-08T20:00:00Z', run_id: RUN_ID },
       { credential: 'rbc_minted', token_type: 'bearer', expires_at: '2026-09-08T20:00:00Z', run_id: '019921a0-0000-7000-8000-000000000099' },
+      { credential: 'rbc_minted', token_type: 'bearer', expires_at: 'soon', run_id: RUN_ID },
       { credential: 'rbc_minted' },
     ]) {
       const { error } = await attest({ ...ACTIONS, ...HOST }, server({ attest: () => ({ status: 201, body: { data } }) }));

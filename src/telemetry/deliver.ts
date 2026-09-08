@@ -114,11 +114,14 @@ export function resolveTelemetryLevel(
 /**
  * The `harness` section of the project's config file, read without the
  * full loader (whose fleet degradation warns on stderr — noise no startup
- * flush should print). A missing or unusable file reads as no settings.
+ * flush should print). A missing or unusable file reads as no settings;
+ * `configPath` (`--config`) names the file instead of searching from `cwd`,
+ * and one that cannot be read fails closed like an unparseable section.
  */
-export async function loadHarnessSettings(cwd: string): Promise<Pick<Config, 'harness'> | undefined> {
+export async function loadHarnessSettings(cwd: string, configPath?: string): Promise<Pick<Config, 'harness'> | undefined> {
   try {
-    const found = await cosmiconfig('review-council', { searchPlaces: SEARCH_PLACES }).search(cwd);
+    const explorer = cosmiconfig('review-council', { searchPlaces: SEARCH_PLACES });
+    const found = configPath !== undefined ? await explorer.load(configPath) : await explorer.search(cwd);
     if (!found || found.isEmpty || typeof found.config !== 'object' || found.config === null) return undefined;
     const harness = (found.config as { harness?: unknown }).harness;
     if (harness === undefined) return {};
