@@ -35,6 +35,20 @@ describe('HarnessSink reads', () => {
     expect(outcome).toMatchObject({ kind: 'rejected', error: 'redirected' });
   });
 
+  it('accepts a projection the server has not judged (conclusive: null)', async () => {
+    const unjudged = { status: 'none', conclusive: null, run_id: null, run_url: null, head_sha: null, actionable: [], rounds: [] };
+    const outcome = await getGateStatus(
+      sink(() => ({
+        status: 200,
+        body: { data: { repo: 'allocator-one/rcl', pr_number: 42, head: null, advisory: unjudged, enforced: unjudged, decision: null } },
+      })).sink,
+      'allocator-one',
+      'rcl',
+      42
+    );
+    expect(outcome).toMatchObject({ kind: 'ok', value: { pr_number: 42, advisory: { status: 'none', conclusive: null } } });
+  });
+
   it('refuses an answer about another pull request or another run', async () => {
     const projection = { status: 'converged', conclusive: true, run_id: null, run_url: null, head_sha: null, actionable: [], rounds: [] };
     const other = await getGateStatus(

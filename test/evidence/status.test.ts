@@ -94,6 +94,34 @@ describe('rcl evidence status', () => {
     }
   });
 
+  it('reports a pull request without judged evidence — Harness sends conclusive: null for both projections', async () => {
+    // The production shape for a pull request no current-head run has been judged for.
+    const unjudged = { status: 'none', head_sha: HEAD, conclusive: null, run_id: null, run_url: null, actionable: [], rounds: [] };
+    const data = { ...gateStatus('none'), advisory: unjudged, enforced: unjudged };
+    const { code, out } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data } }));
+    expect(await code).toBe(EVIDENCE_EXIT.notConverged);
+    const text = out.join('\n');
+    expect(text).toContain('advisory: none');
+    expect(text).toContain('enforced: none');
+    expect(text).not.toContain('inconclusive');
+    expect(text).not.toContain('malformed_response');
+  });
+
+  it('renders an unjudged projection that still carries rounds and a run — stale, unverified — without an inconclusive label', async () => {
+    for (const status of ['stale', 'unverified']) {
+      const data = gateStatus(status);
+      data.advisory.conclusive = null;
+      data.enforced.conclusive = null;
+      const { code, out } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data } }));
+      expect(await code, status).toBe(EVIDENCE_EXIT.notConverged);
+      const text = out.join('\n');
+      expect(text, status).toContain(`advisory: ${status}`);
+      expect(text, status).toContain('round 2');
+      expect(text, status).toContain('01a08032');
+      expect(text, status).not.toContain('inconclusive');
+    }
+  });
+
   it('does not open the gate on a converged projection the server marks inconclusive', async () => {
     const data = gateStatus('converged');
     data.advisory.conclusive = false;

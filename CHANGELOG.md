@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`rcl evidence status` reports a pull request nothing has been judged for**
+  (RCL-44). Harness sends `conclusive: null` for a projection without a
+  judged current-head run (status `none`, `stale`, `unverified`); the reader
+  refused every such answer as malformed, so the command failed exactly where
+  it should have said "no evidence yet". `conclusive` is now boolean or null,
+  an unjudged projection prints without an `(inconclusive)` label, and the
+  exit status is unchanged (`1`, not converged).
 - **`rcl review … --for-pr owner/repo#N`** (RCL-39; `RCL_FOR_PR`): a
   patch-file review is bound to the pull request it was taken from
   (`target.repo`, `pr_number`, `url` on the `patch` target), so Harness can
