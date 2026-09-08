@@ -146,9 +146,12 @@ describe('buildBackfillRuns', () => {
       '## Round 1 — report `/tmp/rcl-report-allocator-one-42-r1.json` — 2 findings\n* [Fixed] lib/foo.ex — pagination misses tiebreak on inserted_at\n'
     );
 
+    writeFileSync(join(dir, 'rcl-report-huge.json'), Buffer.alloc(25 * 1024 * 1024 + 1, 0x20));
+
     const built = await buildBackfillRuns({ dir, repo: 'allocator-one/allocator-one', host: 'harness.example.test', rclVersion: '3.1.0' });
     expect(built.runs.map((r) => r.file)).toEqual(['rcl-report-allocator-one-42-r1.json', 'rcl-report-allocator-one-42-r2.json']);
     const reasons = Object.fromEntries(built.skipped.map((s) => [s.file, s.reason]));
+    expect(reasons['rcl-report-huge.json']).toMatch(/artifact cap/);
     expect(reasons['rcl-report-allocator-one-42-r2.md']).toMatch(/symbolic link/);
     expect(reasons['rcl-report-linked.json']).toMatch(/symbolic link/);
     expect(reasons['rcl-report-long.json']).toMatch(/durationMs/);

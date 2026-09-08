@@ -87,6 +87,8 @@ const ROUND_RE = /^##\s+Round\s+(\d+)\b.*?report:?\s+(\S+\.json)/i;
 const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 /** rcl did not exist before 2020; a file time outside [then, tomorrow] is not a finishing time. */
 const MIN_MTIME_MS = Date.UTC(2020, 0, 1);
+/** The server caps an artifact at 25 MB; a recovered file past that is not a report worth reading into memory. */
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 /**
  * Read one file as the recovered artifact it claims to be: opened without
@@ -95,12 +97,11 @@ const MIN_MTIME_MS = Date.UTC(2020, 0, 1);
  * mtime) describe one version of it.
  */
 async function readRegular(path: string): Promise<{ bytes: string; raw: Buffer; mtime: Date }> {
-  // Without O_NOFOLLOW the platform cannot refuse a planted link; then nothing is read.
-  if (fsConstants.O_NOFOLLOW === undefined) throw new Error('this platform cannot refuse symbolic links');
-  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  const handle = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW as number));
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw new Error('not a regular file');
+    if (info.size > MAX_FILE_BYTES) throw new Error(`${info.size} bytes is past the ${MAX_FILE_BYTES}-byte artifact cap`);
     const raw = await handle.readFile();
     // The digest is of the bytes as found; the text is a strict decoding of them.
     return { bytes: new TextDecoder('utf-8', { fatal: true }).decode(raw), raw, mtime: info.mtime };
@@ -260,6 +261,11 @@ function parseLedgerRounds(ledger: string): LedgerRound[] {
 
 export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<BackfillBuild> {
   const { dir, repo, host, rclVersion } = options;
+  // Without O_NOFOLLOW the platform cannot refuse a planted link, and a
+  // recovered directory is not trusted; the command refuses once, up front.
+  if (fsConstants.O_NOFOLLOW === undefined) {
+    throw new Error('this platform cannot refuse symbolic links; run the backfill on macOS or Linux');
+  }
   const entries = (await readdir(dir)).sort();
   const reportNames = entries.filter((n) => /^rcl-report-.*\.json$/.test(n));
   const ledgerNames = entries.filter((n) => /^rcl-converge-.*-ledger\.md$/.test(n));
