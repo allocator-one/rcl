@@ -1,6 +1,6 @@
 import { resolveHarnessCredential } from '../telemetry/credentials.js';
 import { describeOutcome, HarnessSink } from '../telemetry/sink.js';
-import { formatGateStatus } from './format.js';
+import { formatGateStatus, safeJson, text } from './format.js';
 import { needsRemote, parsePullRequestArg, resolveRemoteRepo, type RepoRef } from './target.js';
 
 /**
@@ -73,7 +73,8 @@ export async function runEvidenceStatus(
       : null;
     target = parsePullRequestArg(prArg, remote);
   } catch (err) {
-    deps.stderr(err instanceof Error ? err.message : String(err));
+    // The argument or the remote may be the reason; neither reaches the terminal raw.
+    deps.stderr(text(err instanceof Error ? err.message : String(err), 400));
     return EVIDENCE_EXIT.usage;
   }
 
@@ -81,7 +82,7 @@ export async function runEvidenceStatus(
   if (!sink) return EVIDENCE_EXIT.unanswered;
 
   const outcome = await sink.getGateStatus(target.owner, target.repo, target.number);
-  const name = `${target.owner}/${target.repo}#${target.number}`;
+  const name = text(`${target.owner}/${target.repo}#${target.number}`, 200);
   if (outcome.kind !== 'ok') {
     deps.stderr(`Cannot read the gate status of ${name}: ${describeOutcome(outcome)}`);
     return EVIDENCE_EXIT.unanswered;
@@ -90,7 +91,7 @@ export async function runEvidenceStatus(
   const status = outcome.value;
   const judged = options.enforced ? 'enforced' : 'advisory';
   if (options.json) {
-    deps.stdout(JSON.stringify(status, null, 2));
+    deps.stdout(safeJson(status));
   } else {
     for (const line of formatGateStatus(status, judged)) deps.stdout(line);
   }

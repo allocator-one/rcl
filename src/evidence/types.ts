@@ -157,7 +157,7 @@ export interface RunDetail {
   received_at?: string | null;
   roster?: unknown;
   stats?: Record<string, unknown> | null;
-  artifacts?: RunArtifact[];
+  artifacts?: RunArtifact[] | null;
   findings: RunFinding[];
   calls: RunCall[];
 }
@@ -220,7 +220,7 @@ export function isRunDetail(value: unknown, id: string): value is RunDetail {
     nullableRecord(value['runner']) &&
     nullableRecord(value['stats']) &&
     (value['converge'] === null || value['converge'] === undefined || (isRecord(value['converge']) && isString(value['converge']['target']))) &&
-    (value['artifacts'] === undefined || (isRecordArray(value['artifacts']) && value['artifacts'].every((a) => isString(a['kind'])))) &&
+    (value['artifacts'] === undefined || value['artifacts'] === null || (isRecordArray(value['artifacts']) && value['artifacts'].every((a) => isString(a['kind'])))) &&
     isRecordArray(value['findings']) &&
     value['findings'].every((f) => isString(f['severity']) && isString(f['title']) && nullableRecord(f['verdict'])) &&
     isRecordArray(value['calls']) &&

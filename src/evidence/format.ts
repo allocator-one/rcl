@@ -10,9 +10,19 @@ import type { GateStatus, Projection, RunDetail } from './types.js';
  * the length is bounded, which also keeps every entry on its one line.
  */
 
-function text(value: unknown, limit = 300): string {
+export function text(value: unknown, limit = 300): string {
   if (value === null || value === undefined) return '—';
   return scrubText(String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), limit);
+}
+
+/**
+ * `JSON.stringify` escapes C0 controls but writes DEL and the C1 range
+ * (U+007F–U+009F — 8-bit CSI and OSC introducers) literally; a title carrying
+ * one would reach the terminal or a CI log intact. They become `\\u00xx`
+ * escapes, which parse back to the same string.
+ */
+export function safeJson(value: unknown): string {
+  return JSON.stringify(value, null, 2).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 function short(sha: string | null | undefined): string {

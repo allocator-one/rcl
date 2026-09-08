@@ -174,6 +174,27 @@ describe('rcl evidence status', () => {
     expect(down.err.join('\n')).toMatch(/unreachable/);
   });
 
+  it('keeps control characters out of its messages and escapes C1 characters in --json', async () => {
+    const hostile = run('allocator-one/allocator-one#8524', () => ({ status: 404, body: { error: 'not_found', message: 'gone\u001b[2J' } }));
+    expect(await hostile.code).toBe(EVIDENCE_EXIT.unanswered);
+    for (const line of hostile.err) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+
+    const badArg = run('\u001b]8;;x\u0007/repo#1', () => ({ status: 200, body: {} }));
+    expect(await badArg.code).toBe(EVIDENCE_EXIT.usage);
+    for (const line of badArg.err) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+
+    const data = gateStatus('converged');
+    data.advisory.actionable = [
+      { ref: 'F1', identity_key: 'k', severity: 'important', gating_reason: 'consensus', file: 'f', start_line: 1, end_line: 1, title: 'csi\u009b31m and del\u007f' },
+    ];
+    const json = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data } }), { json: true });
+    expect(await json.code).toBe(EVIDENCE_EXIT.converged);
+    const printed = json.out.join('\n');
+    expect(printed).not.toMatch(/[\u007f-\u009f]/);
+    expect(printed).toContain('\\u009b');
+    expect(JSON.parse(printed)).toEqual(data);
+  });
+
   it('treats a body that is not a gate status as unanswered rather than converged', async () => {
     const { code, err } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: { hello: 'world' } } }));
     expect(await code).toBe(EVIDENCE_EXIT.unanswered);

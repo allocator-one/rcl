@@ -16,9 +16,9 @@ describe('parseRemoteUrl', () => {
     }
   });
 
-  it('refuses remotes that are not a GitHub repository', () => {
-    for (const url of ['https://gitlab.com/a/b.git', 'git@github.com:onlyowner', '/local/path.git', '']) {
-      expect(parseRemoteUrl(url), url).toBeNull();
+  it('refuses remotes that are not a GitHub repository, or that carry characters GitHub does not allow', () => {
+    for (const url of ['https://gitlab.com/a/b.git', 'git@github.com:onlyowner', '/local/path.git', '', 'git@github.com:allocator-one/r\u001b[31mcl.git']) {
+      expect(parseRemoteUrl(url), JSON.stringify(url)).toBeNull();
     }
   });
 });

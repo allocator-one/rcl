@@ -21,10 +21,14 @@ const execFileAsync = promisify(execFile);
 
 // Anchored: the whole remote must be a GitHub repository in the scp-like,
 // ssh, https or git form, with or without a `.git` suffix or trailing slash.
+// Owner and repository are limited to the characters GitHub allows, so a
+// crafted remote cannot carry control or escape characters into a message.
+const NAME = '[A-Za-z0-9_.-]+';
 const REMOTE_PATTERNS = [
-  /^(?:ssh:\/\/)?git@github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
-  /^(?:https?|git):\/\/(?:[^@/\s]+@)?github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i,
+  new RegExp(`^(?:ssh://)?git@github\\.com[:/](${NAME})/(${NAME}?)(?:\\.git)?/?$`, 'i'),
+  new RegExp(`^(?:https?|git)://(?:[A-Za-z0-9_.%-]+@)?github\\.com/(${NAME})/(${NAME}?)(?:\\.git)?/?$`, 'i'),
 ];
+const LEGAL_NAME = new RegExp(`^${NAME}$`);
 
 /** The GitHub repository a remote URL names, or `null` for anything else. */
 export function parseRemoteUrl(url: string): RepoRef | null {
@@ -55,6 +59,14 @@ export function parsePullRequestArg(arg: string, remote: RepoRef | null): PullRe
   const trimmed = arg.trim();
   if (isGitHubTarget(trimmed)) {
     const target = parseGitHubTarget(trimmed);
+    // The GitHub parser is shared with `rcl review`; the read side re-checks
+    // what it hands back so no other target shape passes as a pull request.
+    if (!LEGAL_NAME.test(target.owner) || !LEGAL_NAME.test(target.repo)) {
+      throw new Error('The repository in the pull request target carries characters GitHub does not allow.');
+    }
+    if (!Number.isSafeInteger(target.number) || target.number <= 0) {
+      throw new Error(`Cannot read a pull request number from "${trimmed}": use N, #N, owner/repo#N or a pull request URL.`);
+    }
     return { owner: target.owner, repo: target.repo, number: target.number };
   }
   const numeric = trimmed.match(/^#?(\d+)$/);

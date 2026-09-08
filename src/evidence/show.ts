@@ -1,5 +1,8 @@
 import { describeOutcome } from '../telemetry/sink.js';
-import { formatRun } from './format.js';
+import { formatRun, safeJson, text } from './format.js';
+
+// Run ids are UUIDs (v7 live, v5 backfill); anything else never reaches the network or the terminal raw.
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 import { EVIDENCE_EXIT, openSink, type EvidenceDeps } from './status.js';
 
 /**
@@ -14,6 +17,10 @@ export async function runEvidenceShow(runId: string, options: { json?: boolean }
     deps.stderr('Name the run id: `run.id` in a report, or the id in an `Evidence recorded:` URL.');
     return EVIDENCE_EXIT.usage;
   }
+  if (!RUN_ID.test(id)) {
+    deps.stderr(`Not a run id (a UUID): ${text(id, 80)}`);
+    return EVIDENCE_EXIT.usage;
+  }
 
   const sink = await openSink(deps);
   if (!sink) return EVIDENCE_EXIT.unanswered;
@@ -25,7 +32,7 @@ export async function runEvidenceShow(runId: string, options: { json?: boolean }
   }
 
   if (options.json) {
-    deps.stdout(JSON.stringify(outcome.value, null, 2));
+    deps.stdout(safeJson(outcome.value));
   } else {
     for (const line of formatRun(outcome.value)) deps.stdout(line);
   }

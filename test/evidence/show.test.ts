@@ -209,10 +209,24 @@ describe('rcl evidence show', () => {
     expect(out.find((l) => l.includes('deadbeefdeadbeef'))).toContain('multi line title');
   });
 
-  it('refuses an empty run id before touching the network', async () => {
+  it('refuses an empty or non-UUID run id before touching the network, without echoing control characters', async () => {
     const { code, requests, err } = run('   ', () => ({ status: 200, body: {} }));
     expect(await code).toBe(EVIDENCE_EXIT.usage);
     expect(requests).toHaveLength(0);
     expect(err.join('\n')).toMatch(/run id/);
+
+    const hostile = run('../secrets\u001b[31m', () => ({ status: 200, body: {} }));
+    expect(await hostile.code).toBe(EVIDENCE_EXIT.usage);
+    expect(hostile.requests).toHaveLength(0);
+    for (const line of hostile.err) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+  });
+
+  it('accepts a run whose artifacts are null and escapes C1 characters in --json', async () => {
+    const data = runDetail({ artifacts: null, findings: [{ ref: 'F1', identity_key: 'k', file: 'f', start_line: 1, end_line: 1, severity: 'minor', title: 'x\u0085y', gating_reason: 'none' }] });
+    const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data } }), { json: true });
+    expect(await code).toBe(0);
+    const printed = out.join('\n');
+    expect(printed).not.toMatch(/[\u007f-\u009f]/);
+    expect(JSON.parse(printed)).toEqual(data);
   });
 });
