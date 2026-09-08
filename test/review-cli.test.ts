@@ -186,3 +186,33 @@ describe('rcl converge-report — pre-3.0 reports', () => {
     expect(parsed.findings[0]).toMatchObject({ status: 'new', gating: 'consensus', file: 'src/a.ts' });
   });
 });
+
+describe('rcl review — --attest (RCL-40)', () => {
+  it('exits non-zero with a clear message outside GitHub Actions, before any network or reviewer work', () => {
+    const repo = tempRepository();
+    const result = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/GitHub Actions/);
+    expect(result.stderr).toMatch(/id-token: write/);
+    expect(result.stderr).not.toMatch(/Fetching|Resolving diff/);
+  });
+
+  it('refuses a local diff or a patch file: only a pull request can be attested', () => {
+    const repo = tempRepository();
+    writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n');
+    for (const args of [['review', '--staged', '--attest'], ['review', 'change.patch', '--attest']]) {
+      const result = runRcl(args, repo);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/--attest applies to a pull request target/);
+    }
+  });
+
+  it('contradicts --no-telemetry: an attested review is recorded or it does not run', () => {
+    const repo = tempRepository();
+    const result = runRcl(['review', 'allocator-one/rcl#42', '--attest', '--no-telemetry'], repo);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/--attest contradicts --no-telemetry/);
+  });
+});

@@ -46,6 +46,12 @@ export interface HarnessKeyOptions {
   env?: Record<string, string | undefined>;
   credentialsPath?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * A credential already in hand — the run-bound one `rcl review --attest`
+   * minted (RCL-40). Used instead of the stored login, and the attestation
+   * stands in for the repository's `.harness-cli/config.json`.
+   */
+  credential?: { url: string; token: string };
 }
 
 /** Walk up from `startDir` looking for `.harness-cli/config.json`. */
@@ -142,11 +148,11 @@ export async function applyHarnessModelKeys(options: HarnessKeyOptions = {}): Pr
   const missing = missingProviders(env);
   if (missing.length === 0) return { injected: [] };
 
-  if (findHarnessRepoConfig(options.cwd ?? process.cwd()) === null) return { injected: [] };
+  if (options.credential === undefined && findHarnessRepoConfig(options.cwd ?? process.cwd()) === null) return { injected: [] };
 
-  const credentials = await readStoredCredentials(
-    options.credentialsPath ?? defaultCredentialsPath(env)
-  );
+  const credentials =
+    options.credential ??
+    (await readStoredCredentials(options.credentialsPath ?? defaultCredentialsPath(env)));
   if (credentials === null) {
     return {
       injected: [],

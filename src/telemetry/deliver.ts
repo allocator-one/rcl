@@ -31,6 +31,11 @@ export interface TelemetryRuntime {
   repoManaged: boolean;
   parseFailures: boolean;
   credential?: HarnessCredential;
+  /**
+   * The credential is the run-bound one of `--attest` (RCL-40): it does not
+   * outlive the workflow run, so nothing recorded under it is spooled.
+   */
+  attested?: boolean;
   /** Why there is no credential, when telemetry would otherwise apply. */
   note?: string;
   sink?: HarnessSink;
@@ -54,6 +59,12 @@ export interface RuntimeOptions {
   stderr?: (line: string) => void;
   /** `rcl telemetry` works on the user's outbox from any directory. */
   requireRepo?: boolean;
+  /**
+   * A credential already in hand — the run-bound one `rcl review --attest`
+   * minted: no resolution, the repository counts as Harness-managed (the
+   * attestation is the membership proof), and an attested run never spools.
+   */
+  credential?: HarnessCredential;
 }
 
 const ENV_OFF = new Set(['off', '0', 'false', 'no', 'none', 'disabled']);
@@ -138,6 +149,18 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     stderr: options.stderr ?? ((line) => process.stderr.write(`${line}\n`)),
   };
   if (level === 'off') return runtime;
+
+  if (options.credential) {
+    runtime.repoManaged = true;
+    runtime.credential = options.credential;
+    runtime.attested = options.credential.source === 'attest';
+    runtime.sink = new HarnessSink({
+      credential: options.credential,
+      rclVersion: options.rclVersion,
+      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    });
+    return runtime;
+  }
 
   const resolved = await resolveHarnessCredential({
     env,
@@ -314,6 +337,17 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
   const posted = await runtime.sink.postRun(envelope);
   switch (posted.kind) {
     case 'unavailable': {
+      if (runtime.attested) {
+        // The run-bound credential ends with the workflow run; a flush later
+        // would have to use another credential and record an asserted run.
+        return {
+          status: 'error',
+          runId,
+          spooled: false,
+          line: `Evidence not recorded (Harness unreachable: ${posted.reason}); nothing spooled — an attested run does not outlive its workflow run`,
+          exitCode: exitFor('error', evidenceRequired),
+        };
+      }
       try {
         const spooled = await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
         const dropped = spooled.artifactsDropped.length > 0 ? ' — artifacts not spooled: outbox over its cap' : '';
@@ -404,7 +438,9 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
   }
 
   let spooled = false;
-  if (Object.keys(pendingArtifacts).length > 0 || pendingEvents.length > 0) {
+  if (runtime.attested && (Object.keys(pendingArtifacts).length > 0 || pendingEvents.length > 0)) {
+    notes.push('Harness became unreachable mid-delivery; nothing spooled — an attested run does not outlive its workflow run');
+  } else if (Object.keys(pendingArtifacts).length > 0 || pendingEvents.length > 0) {
     const parts = [
       Object.keys(pendingArtifacts).length > 0 ? 'artifacts' : undefined,
       pendingEvents.length > 0 ? 'events' : undefined,

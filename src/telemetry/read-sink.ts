@@ -1,4 +1,4 @@
-import { credentialHost, resolveHarnessCredential } from './credentials.js';
+import { credentialHost, resolveHarnessCredential, type CredentialResolution, type HarnessCredential } from './credentials.js';
 import { HarnessSink } from './sink.js';
 
 /**
@@ -14,17 +14,21 @@ export interface ReadSinkOptions {
   cwd?: string;
   credentialsPath?: string;
   fetchImpl?: typeof fetch;
+  /** A credential already in hand — the run-bound one of `--attest` — used instead of resolving one. */
+  credential?: HarnessCredential;
 }
 
 export type ReadSink = { sink: HarnessSink; host: string; note?: undefined } | { sink: null; host?: undefined; note: string };
 
 export async function openReadSink(options: ReadSinkOptions): Promise<ReadSink> {
-  const resolved = await resolveHarnessCredential({
-    env: options.env ?? process.env,
-    cwd: options.cwd ?? process.cwd(),
-    ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}),
-    requireRepo: false,
-  });
+  const resolved: CredentialResolution = options.credential
+    ? { repoManaged: true, credential: options.credential }
+    : await resolveHarnessCredential({
+        env: options.env ?? process.env,
+        cwd: options.cwd ?? process.cwd(),
+        ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}),
+        requireRepo: false,
+      });
   if (!resolved.credential) return { sink: null, note: resolved.note ?? 'no Harness credential' };
   return {
     sink: new HarnessSink({

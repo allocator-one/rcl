@@ -91,6 +91,7 @@ Review a PR, a local diff, or uncommitted work.
 | `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` |
 | `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
+| `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
 
 `--role`, `--roles`, and `--reviewer` are mutually exclusive. So are a positional target, `--staged`, and `--working-tree` — pick exactly one review source. Untracked files are invisible to `git diff` and therefore not reviewed.
@@ -288,6 +289,49 @@ rcl review owner/repo#7 --no-telemetry   # keep this review on the machine
 harness:
   telemetry: full        # off | envelope | findings | full (default)
   parseFailures: false   # send a parse-failed call's raw answer (scrubbed, 32 KB cap)
+```
+
+---
+
+### `--attest`: attested reviews from the gate workflow
+
+Only evidence recorded from the organization's own gate workflow on GitHub
+Actions counts for the enforced gate (epic IO-12475, section 4.1). Inside
+such a job — one that grants `id-token: write` — `rcl review owner/repo#N
+--attest` asks the runner for the job's OIDC token with the Harness origin as
+audience, exchanges it at `POST /api/v1/reviews/attest` for a **run-bound
+credential** (`rbc_…`, thirty minutes, one rcl run id, valid while the
+Actions run is in progress), and records the review under it: the envelope,
+its artifacts, the model keys and the model stats all travel with that
+credential and nothing else. Harness verifies the token, requires the
+workflow file to be on the organization's gate allow-list at its default
+branch, re-reads the pull request through its GitHub App and stores the run
+only if the reviewed head is the pull request's current head and the PR is
+not from a fork — the run is then `credential_kind: attested`.
+
+`--attest` fails loudly, before any reviewer is paid: outside Actions (no
+`ACTIONS_ID_TOKEN_REQUEST_URL` / `_TOKEN`), without `HARNESS_API_URL`, off a
+pull request target, with telemetry off, or when Harness refuses the exchange
+(the refusal names the reason: `workflow_not_allowed`, `reviews_disabled`,
+`run_not_in_progress`, …). It never falls back to `HARNESS_API_TOKEN` or the
+stored login, it implies `--evidence-required`, and nothing recorded under the
+run-bound credential is ever spooled — the credential does not outlive the
+workflow run. Pair it with `--expect-head-sha` so a moved pull request fails
+fast instead of being refused at ingest.
+
+```yaml
+# .github/workflows/review_gate.yml (dispatched by Harness for one pull request)
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      HARNESS_API_URL: https://harness.infra.one
+    steps:
+      - run: npm i -g review-council
+      - run: rcl review ${{ inputs.repo }}#${{ inputs.pr }} --attest --expect-head-sha ${{ inputs.head_sha }} --ci
 ```
 
 ---
@@ -540,7 +584,8 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 | `RCL_NO_HARNESS_KEYS` | Set to any value to disable Harness key distribution (below) |
 | `RCL_TELEMETRY` | `off` keeps every review on the machine (see `rcl telemetry`) |
 | `HARNESS_API_TOKEN` | CI credential for evidence delivery; requires `HARNESS_API_URL` — never pairs with the stored login host |
-| `HARNESS_API_URL` | The Harness host `HARNESS_API_TOKEN` was minted by |
+| `HARNESS_API_URL` | The Harness host `HARNESS_API_TOKEN` was minted by; under `--attest` the host attested to (no token needed) |
+| `ACTIONS_ID_TOKEN_REQUEST_URL` / `ACTIONS_ID_TOKEN_REQUEST_TOKEN` | Set by the GitHub Actions runner for jobs with `id-token: write`; `--attest` reads them and refuses to run without them |
 
 The default blocking council is direct-API only (Anthropic, OpenAI, Google) —
 no default review round ever waits on an OpenRouter-routed call. The default
