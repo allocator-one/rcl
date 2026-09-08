@@ -243,6 +243,7 @@ program
   .option('--expect-head-sha <sha>', 'Fail fast unless the resolved head commit equals this SHA')
   .option('--spec-source <source>', 'Where --spec came from: flag | repo_file | harness_issue:<ID>')
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
+  .option('--for-pr <owner/repo#N>', 'The pull request a patch-file review is evidence for (Harness verifies its head and counts the run for its gate)')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
@@ -286,6 +287,7 @@ program
   .option('--markdown <path>', 'Write Markdown report to file')
   .option('--spec-source <source>', 'Where --spec came from: flag | repo_file | harness_issue:<ID>')
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
+  .option('--for-pr <owner/repo#N>', 'The pull request a patch-file review is evidence for (Harness verifies its head and counts the run for its gate)')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
@@ -1149,6 +1151,7 @@ interface CouncilCliOpts {
   specSource?: string;
   /** Converge context, or the RCL_CONVERGE_* environment the skill exports. */
   convergeTarget?: string;
+  forPr?: string;
   round?: string;
   attempt?: string;
   /** commander: `--no-telemetry` sets this false. */
@@ -1463,7 +1466,12 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     // Resolve the head BEFORE the empty-diff exit so --expect-head-sha is
     // honored even when there is nothing to review: a moved target must
     // never read as a clean round.
-    const runTarget = await resolveReviewTarget(diff, gitMode, opts, { gitHeads });
+    const runTarget = await resolveReviewTarget(
+      diff,
+      gitMode,
+      { ...opts, convergeTarget: opts.convergeTarget ?? process.env['RCL_CONVERGE_TARGET'] },
+      { gitHeads }
+    );
     if (opts.expectHeadSha !== undefined) {
       assertExpectedHead(runTarget, opts.expectHeadSha);
     }

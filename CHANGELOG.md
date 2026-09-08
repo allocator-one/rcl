@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **`rcl review … --for-pr owner/repo#N`** (RCL-39): a patch-file review is
+  bound to the pull request it was taken from (`target.repo`, `pr_number`,
+  `url` on the `patch` target), so Harness can verify its `--head-sha` against
+  the pull request's head and count the round for that pull request's gate; a
+  `--converge-target` of the same form attributes the run too. The
+  `rcl-converge` skill passes `--converge-target '<TARGET>' --round <R>
+  --attempt <ATTEMPT> --for-pr <owner/repo#N>` on every launch, counts a
+  spooled round as evidence only once its flush is acknowledged (ledger
+  `evidence: pending` until then), reads `rcl evidence status` after the loop
+  next to the machine resolution, and records that the converge ledger is
+  rendered by Harness (IO-12482) rather than uploaded — the server accepts
+  only artifacts a run declared at delivery.
+
 - **Org-wide model weights** (RCL-38): `rcl models` merges Harness's
   `GET /api/v1/reviews/model-stats` (the organization's window over every run
   it recorded, backfilled history included) with this machine's store — the

@@ -103,3 +103,32 @@ describe('assertExpectedHead', () => {
     expect(() => assertExpectedHead(target, 'abc1234')).toThrow(/--expect-head-sha.*40/);
   });
 });
+
+describe('a patch review attributed to its pull request (RCL-39)', () => {
+  const patch: Diff = { source: 'file', files: [] } as unknown as Diff;
+
+  it('binds repo, number and URL from --for-pr, in either form', async () => {
+    for (const forPr of ['allocator-one/rcl#42', 'https://github.com/allocator-one/rcl/pull/42']) {
+      const target = await resolveReviewTarget(patch, undefined, { headSha: HEAD, forPr });
+      expect(target).toEqual({
+        kind: 'patch',
+        repo: 'allocator-one/rcl',
+        prNumber: 42,
+        url: 'https://github.com/allocator-one/rcl/pull/42',
+        headSha: HEAD,
+      });
+    }
+  });
+
+  it('takes a converge target of the owner/repo#N form, and ignores a slug', async () => {
+    expect(await resolveReviewTarget(patch, undefined, { headSha: HEAD, convergeTarget: 'allocator-one/rcl#42' })).toMatchObject({ repo: 'allocator-one/rcl', prNumber: 42 });
+    expect(await resolveReviewTarget(patch, undefined, { headSha: HEAD, convergeTarget: 'rcl-42' })).toEqual({ kind: 'patch', headSha: HEAD });
+    // --for-pr wins over the converge target.
+    expect(await resolveReviewTarget(patch, undefined, { forPr: 'allocator-one/rcl#7', convergeTarget: 'allocator-one/rcl#42' })).toMatchObject({ prNumber: 7 });
+  });
+
+  it('refuses --for-pr that does not name a pull request', async () => {
+    await expect(resolveReviewTarget(patch, undefined, { forPr: 'feature-branch' })).rejects.toThrow(/--for-pr/);
+    await expect(resolveReviewTarget(patch, undefined, { forPr: 'allocator-one/../x#1' })).rejects.toThrow();
+  });
+});

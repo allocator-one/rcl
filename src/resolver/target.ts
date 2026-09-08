@@ -2,6 +2,7 @@ import type { Diff } from './types.js';
 import type { GitHeads } from './git.js';
 import { resolveGitHeads } from './git.js';
 import { validateSha, type RunHeaderInput } from '../report/run-header.js';
+import { isGitHubTarget, parseGitHubTarget } from './github.js';
 
 /**
  * Exact-head binding (IO-12475 section 8.1): which commit a diff belongs
@@ -18,6 +19,14 @@ export type GitDiffMode = 'staged' | 'working-tree';
 export interface TargetOverrides {
   headSha?: string;
   baseSha?: string;
+  /**
+   * The pull request a patch-file review is evidence for (`owner/repo#N` or a
+   * pull request URL), so Harness can verify its head and count the run for
+   * that pull request's gate (RCL-39). A converge target of the same form
+   * attributes the run the same way.
+   */
+  forPr?: string;
+  convergeTarget?: string;
 }
 
 export async function resolveReviewTarget(
@@ -54,11 +63,39 @@ export async function resolveReviewTarget(
     const heads = deps.gitHeads ?? (await (deps.resolveGitHeads ?? resolveGitHeads)());
     return { kind: gitMode === 'staged' ? 'staged' : 'working_tree', ...heads };
   }
+  const pr = pullRequestFor(opts);
   return {
     kind: 'patch',
+    ...(pr ? { repo: `${pr.owner}/${pr.repo}`, prNumber: pr.number, url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}` } : {}),
     ...(opts.headSha !== undefined ? { headSha: validateSha(opts.headSha, '--head-sha') } : {}),
     ...(opts.baseSha !== undefined ? { baseSha: validateSha(opts.baseSha, '--base-sha') } : {}),
   };
+}
+
+const GITHUB_NAME = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * The pull request a patch review stands for: `--for-pr` when given, else a
+ * converge target that has the `owner/repo#N` form (a converge slug such as
+ * `rcl-7` names nothing and attributes nothing).
+ */
+function pullRequestFor(opts: TargetOverrides): { owner: string; repo: string; number: number } | undefined {
+  if (opts.forPr !== undefined) {
+    const text = opts.forPr.trim();
+    if (!isGitHubTarget(text)) throw new Error(`--for-pr must name a pull request as owner/repo#N or a pull request URL, got "${text}".`);
+    return checked(parseGitHubTarget(text), '--for-pr');
+  }
+  if (opts.convergeTarget !== undefined && isGitHubTarget(opts.convergeTarget.trim())) {
+    return checked(parseGitHubTarget(opts.convergeTarget.trim()), '--converge-target');
+  }
+  return undefined;
+}
+
+function checked(pr: { owner: string; repo: string; number: number }, flag: string): { owner: string; repo: string; number: number } {
+  if (!GITHUB_NAME.test(pr.owner) || !GITHUB_NAME.test(pr.repo) || pr.repo === '.' || pr.repo === '..' || !Number.isSafeInteger(pr.number) || pr.number <= 0) {
+    throw new Error(`${flag} does not name a GitHub pull request.`);
+  }
+  return pr;
 }
 
 /**
