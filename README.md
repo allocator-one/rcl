@@ -326,6 +326,29 @@ rcl evidence status https://github.com/allocator-one/rcl/pull/42
 rcl evidence show 01a08032-0838-76db-ade3-1990f6e54072
 ```
 
+### `--for-pr` on a patch-file review
+
+A patch-file review (`rcl review changes.patch`) carries no repository or pull
+request, so Harness records it as a `patch` run it cannot verify or count for
+any gate. `--for-pr owner/repo#N` (or a pull request URL) names the pull
+request the patch was taken from (`RCL_FOR_PR` in the environment does the
+same for patch files): the run is bound to that pull request and its
+`--head-sha` — required with the flag — is verified against the pull
+request's head. Owner and repository are lower-cased, as GitHub reads them. Counting the round for that pull request's
+gate is the server half (IO-12585); until it lands, `rcl evidence status`
+still reads `stale`/`none` for patch-file loops. The flag is refused on PR and
+git-mode targets, which name their own pull request or checkout. `rcl-converge` passes `--converge-target`, `--round`
+and `--attempt` on every round and adds `--for-pr` when a pull request loop
+reviews a patch file taken from the pull request (a pull request target names
+its own). A converge
+target of the `owner/repo#N` form attributes the run the same way; a slug such
+as `rcl-7` does not.
+
+```bash
+rcl review round-3.patch --head-sha "$HEAD" --base-sha "$BASE" --for-pr allocator-one/rcl#42 \
+  --converge-target allocator-one/rcl#42 --round 3 --attempt 3 --evidence-required
+```
+
 ### `rcl models`
 
 The tool's own memory of which reviewers earn their seat. Every reviewer call

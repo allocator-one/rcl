@@ -8,6 +8,34 @@ export interface GitHubTarget {
   number: number;
 }
 
+/** A GitHub repository by owner and name. */
+export interface RepoRef {
+  owner: string;
+  repo: string;
+}
+
+// GitHub's segment rules: an owner is alphanumerics and single hyphens (no
+// leading or trailing hyphen); a repository is alphanumerics, `-`, `_` and
+// `.`, never `.` or `..` — so neither can carry a control character, a path
+// separator or a dot-segment into a request path.
+export const GITHUB_OWNER_PATTERN = '[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*';
+export const GITHUB_REPO_PATTERN = '[A-Za-z0-9_.-]+';
+const OWNER_RE = new RegExp(`^${GITHUB_OWNER_PATTERN}$`);
+const REPO_RE = new RegExp(`^${GITHUB_REPO_PATTERN}$`);
+
+/** The pair as a repository, or `null` when GitHub would not accept either segment. */
+export function legalRepo(owner: string, repo: string): RepoRef | null {
+  if (!OWNER_RE.test(owner) || !REPO_RE.test(repo) || repo === '.' || repo === '..') return null;
+  return { owner, repo };
+}
+
+/** An `owner/repo` argument as a repository, or `null` when it is not one GitHub would accept. */
+export function parseRepoName(text: string): RepoRef | null {
+  const parts = text.trim().split('/');
+  if (parts.length !== 2) return null;
+  return legalRepo(parts[0]!, parts[1]!);
+}
+
 // Anchored: the whole target must be a PR URL (any scheme, optional www,
 // optional sub-page such as /files, optional query or fragment) or the short
 // owner/repo#N form with single-segment owner and repo. A local path that

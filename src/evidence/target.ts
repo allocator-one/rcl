@@ -1,6 +1,18 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { isGitHubTarget, parseGitHubTarget } from '../resolver/github.js';
+import {
+  GITHUB_OWNER_PATTERN as OWNER,
+  GITHUB_REPO_PATTERN as REPO,
+  isGitHubTarget,
+  legalRepo,
+  parseGitHubTarget,
+  parseRepoName,
+  type RepoRef,
+} from '../resolver/github.js';
+
+// The repository primitives live with the GitHub target parser; evidence
+// callers keep reaching them from here.
+export { parseRepoName, type RepoRef };
 
 /**
  * Which pull request `rcl evidence status` asks about: `owner/repo#N` or a
@@ -8,41 +20,16 @@ import { isGitHubTarget, parseGitHubTarget } from '../resolver/github.js';
  * repository the current checkout's `origin` remote points at.
  */
 
-export interface RepoRef {
-  owner: string;
-  repo: string;
-}
-
 export interface PullRequestRef extends RepoRef {
   number: number;
 }
 
 const execFileAsync = promisify(execFile);
 
-// GitHub's segment rules: an owner is alphanumerics and single hyphens (no
-// leading or trailing hyphen); a repository is alphanumerics, `-`, `_` and
-// `.`, never `.` or `..` — so neither can carry a control character, a path
-// separator or a dot-segment into a request path.
-const OWNER = '[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9]))*';
-const REPO = '[A-Za-z0-9_.-]+';
-const OWNER_RE = new RegExp(`^${OWNER}$`);
-const REPO_RE = new RegExp(`^${REPO}$`);
 // The scp-like form has no scheme to hand to `URL`; the repository is matched
 // lazily (`+?`) so an optional `.git` suffix is not swallowed into the name.
 const SCP_REMOTE = new RegExp(`^git@github\\.com:(${OWNER})/(${REPO}?)(?:\\.git)?/?$`, 'i');
 const REPO_PATH = new RegExp(`^/(${OWNER})/(${REPO}?)(?:\\.git)?/?$`, 'i');
-
-function legalRepo(owner: string, repo: string): RepoRef | null {
-  if (!OWNER_RE.test(owner) || !REPO_RE.test(repo) || repo === '.' || repo === '..') return null;
-  return { owner, repo };
-}
-
-/** An `owner/repo` argument as a repository, or `null` when it is not one GitHub would accept. */
-export function parseRepoName(text: string): RepoRef | null {
-  const parts = text.trim().split('/');
-  if (parts.length !== 2) return null;
-  return legalRepo(parts[0]!, parts[1]!);
-}
 
 /** The GitHub repository a remote URL names, or `null` for anything else. */
 export function parseRemoteUrl(url: string): RepoRef | null {

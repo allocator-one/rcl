@@ -103,3 +103,48 @@ describe('assertExpectedHead', () => {
     expect(() => assertExpectedHead(target, 'abc1234')).toThrow(/--expect-head-sha.*40/);
   });
 });
+
+describe('a patch review attributed to its pull request (RCL-39)', () => {
+  const patch: Diff = { source: 'file', files: [] } as unknown as Diff;
+
+  it('binds repo, number and URL from --for-pr, in either form, lower-cased', async () => {
+    for (const forPr of ['allocator-one/rcl#42', 'https://github.com/allocator-one/rcl/pull/42', 'Allocator-One/RCL#42']) {
+      const target = await resolveReviewTarget(patch, undefined, { headSha: HEAD, forPr });
+      expect(target).toEqual({
+        kind: 'patch',
+        repo: 'allocator-one/rcl',
+        prNumber: 42,
+        url: 'https://github.com/allocator-one/rcl/pull/42',
+        headSha: HEAD,
+      });
+    }
+  });
+
+  it('takes a converge target of the owner/repo#N form, and ignores a slug', async () => {
+    expect(await resolveReviewTarget(patch, undefined, { headSha: HEAD, convergeTarget: 'allocator-one/rcl#42' })).toMatchObject({ repo: 'allocator-one/rcl', prNumber: 42 });
+    expect(await resolveReviewTarget(patch, undefined, { headSha: HEAD, convergeTarget: 'rcl-42' })).toEqual({ kind: 'patch', headSha: HEAD });
+    // --for-pr wins over the converge target.
+    expect(await resolveReviewTarget(patch, undefined, { headSha: HEAD, forPr: 'allocator-one/rcl#7', convergeTarget: 'allocator-one/rcl#42' })).toMatchObject({ prNumber: 7 });
+  });
+
+  it('refuses --for-pr that does not name a pull request, on either segment', async () => {
+    await expect(resolveReviewTarget(patch, undefined, { headSha: HEAD, forPr: 'feature-branch' })).rejects.toThrow(/--for-pr/);
+    for (const bad of ['allocator-one/..#1', '../rcl#1', '-bad-/rcl#1', 'allocator-one/rcl#0']) {
+      await expect(resolveReviewTarget(patch, undefined, { headSha: HEAD, forPr: bad }), bad).rejects.toThrow(/--for-pr/);
+    }
+  });
+
+  it('needs --head-sha with --for-pr, and attributes from a converge target only when the head is there', async () => {
+    await expect(resolveReviewTarget(patch, undefined, { forPr: 'allocator-one/rcl#42' })).rejects.toThrow(/--for-pr needs --head-sha/);
+    // A converge target is a bookkeeping key first: without a head it attributes nothing and refuses nothing.
+    expect(await resolveReviewTarget(patch, undefined, { convergeTarget: 'allocator-one/rcl#42' })).toEqual({ kind: 'patch' });
+    expect(await resolveReviewTarget(patch, undefined, { convergeTarget: 'rcl-42' })).toEqual({ kind: 'patch' });
+    // Nor does a malformed pull-request-shaped converge target.
+    expect(await resolveReviewTarget(patch, undefined, { headSha: HEAD, convergeTarget: 'allocator-one/..#1' })).toEqual({ kind: 'patch', headSha: HEAD });
+  });
+
+  it('refuses --for-pr on a PR or git-mode target, which name their own', async () => {
+    await expect(resolveReviewTarget(prDiff(), undefined, { forPr: 'allocator-one/rcl#42' })).rejects.toThrow(/patch files only/);
+    await expect(resolveReviewTarget(patch, 'staged', { forPr: 'allocator-one/rcl#42' }, { gitHeads: { headSha: HEAD } })).rejects.toThrow(/patch files only/);
+  });
+});

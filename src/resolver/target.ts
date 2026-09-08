@@ -2,6 +2,8 @@ import type { Diff } from './types.js';
 import type { GitHeads } from './git.js';
 import { resolveGitHeads } from './git.js';
 import { validateSha, type RunHeaderInput } from '../report/run-header.js';
+import { isGitHubTarget, parseGitHubTarget } from './github.js';
+import { parseRepoName } from './github.js';
 
 /**
  * Exact-head binding (IO-12475 section 8.1): which commit a diff belongs
@@ -18,6 +20,14 @@ export type GitDiffMode = 'staged' | 'working-tree';
 export interface TargetOverrides {
   headSha?: string;
   baseSha?: string;
+  /**
+   * The pull request a patch-file review is evidence for (`owner/repo#N` or a
+   * pull request URL), so Harness can verify its head and count the run for
+   * that pull request's gate (RCL-39). A converge target of the same form
+   * attributes the run the same way.
+   */
+  forPr?: string;
+  convergeTarget?: string;
 }
 
 export async function resolveReviewTarget(
@@ -27,6 +37,11 @@ export async function resolveReviewTarget(
   deps: { gitHeads?: GitHeads; resolveGitHeads?: () => Promise<GitHeads> } = {}
 ): Promise<ReviewTarget> {
   const overrideGiven = opts.headSha !== undefined || opts.baseSha !== undefined;
+  // `--for-pr` names the pull request a patch file stands for; a PR target
+  // names its own, and a git mode reviews a checkout, not a pull request.
+  if (opts.forPr !== undefined && (diff.metadata || gitMode)) {
+    throw new Error('--for-pr applies to patch files only; a PR target names its pull request itself and a git mode reviews the checkout.');
+  }
   if (diff.metadata) {
     if (overrideGiven) {
       throw new Error(
@@ -54,11 +69,55 @@ export async function resolveReviewTarget(
     const heads = deps.gitHeads ?? (await (deps.resolveGitHeads ?? resolveGitHeads)());
     return { kind: gitMode === 'staged' ? 'staged' : 'working_tree', ...heads };
   }
+  const attributed = pullRequestFor(opts);
+  // Evidence for a pull request binds to a commit: an attributed patch without
+  // its head could be any bytes presented against that pull request's gate.
+  // The explicit flag is refused without one; a converge target only
+  // attributes when the head is there, since it is a bookkeeping key first.
+  if (attributed && opts.headSha === undefined && attributed.source === '--for-pr') {
+    throw new Error('A patch review bound to a pull request by --for-pr needs --head-sha: evidence binds to the commit it reviewed.');
+  }
+  const pr = attributed && opts.headSha !== undefined ? attributed : undefined;
   return {
     kind: 'patch',
+    ...(pr ? { repo: `${pr.owner}/${pr.repo}`, prNumber: pr.number, url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}` } : {}),
     ...(opts.headSha !== undefined ? { headSha: validateSha(opts.headSha, '--head-sha') } : {}),
     ...(opts.baseSha !== undefined ? { baseSha: validateSha(opts.baseSha, '--base-sha') } : {}),
   };
+}
+
+interface Attribution {
+  owner: string;
+  repo: string;
+  number: number;
+  source: '--for-pr' | '--converge-target';
+}
+
+/**
+ * The pull request a patch review stands for: `--for-pr` when given (an
+ * invalid value is an error), else a converge target that parses cleanly as
+ * `owner/repo#N` (anything else — a slug such as `rcl-7`, a malformed
+ * reference — is a bookkeeping key and attributes nothing).
+ */
+function pullRequestFor(opts: TargetOverrides): Attribution | undefined {
+  if (opts.forPr !== undefined) {
+    const text = opts.forPr.trim();
+    if (!isGitHubTarget(text)) throw new Error(`--for-pr must name a pull request as owner/repo#N or a pull request URL, got "${text}".`);
+    const pr = checked(parseGitHubTarget(text));
+    if (!pr) throw new Error('--for-pr does not name a GitHub pull request.');
+    return { ...pr, source: '--for-pr' };
+  }
+  if (opts.convergeTarget !== undefined && isGitHubTarget(opts.convergeTarget.trim())) {
+    const pr = checked(parseGitHubTarget(opts.convergeTarget.trim()));
+    return pr ? { ...pr, source: '--converge-target' } : undefined;
+  }
+  return undefined;
+}
+
+/** GitHub's segment rules for both names and a positive number, lower-cased (one spelling, one key on the server); `null` otherwise. */
+function checked(pr: { owner: string; repo: string; number: number }): { owner: string; repo: string; number: number } | null {
+  if (parseRepoName(`${pr.owner}/${pr.repo}`) === null || !Number.isSafeInteger(pr.number) || pr.number <= 0) return null;
+  return { owner: pr.owner.toLowerCase(), repo: pr.repo.toLowerCase(), number: pr.number };
 }
 
 /**
