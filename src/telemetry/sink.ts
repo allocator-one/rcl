@@ -263,7 +263,7 @@ export class HarnessSink {
     // projections; anything else is not a gate status.
     return this.classify(result, (body) => {
       const data = (body as { data?: unknown } | null)?.data;
-      return isGateStatus(data, number) ? data : null;
+      return isGateStatus(data, `${owner}/${repo}`, number) ? data : null;
     });
   }
 

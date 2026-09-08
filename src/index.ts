@@ -854,11 +854,11 @@ evidenceCmd
   });
 
 evidenceCmd
-  .command('show <run-id>')
+  .command('show [run-id]')
   .description('One recorded run: header, reviewer health, artifacts, findings with identity, gating reason and verdict')
   .option('--json', 'Print the API run object')
-  .action(async (runId: string, opts: { json?: boolean }) => {
-    process.exitCode = await runEvidenceShow(runId, opts, evidenceDeps());
+  .action(async (runId: string | undefined, opts: { json?: boolean }) => {
+    process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
   });
 
 // Detached async-lane worker (RCL-25) — launched by the review process for

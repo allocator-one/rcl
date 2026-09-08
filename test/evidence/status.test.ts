@@ -179,4 +179,42 @@ describe('rcl evidence status', () => {
     expect(await code).toBe(EVIDENCE_EXIT.unanswered);
     expect(err.join('\n')).toMatch(/malformed/);
   });
+
+  it('refuses an answer about another repository, a malformed round, or a projection without its fields', async () => {
+    const otherRepo = { ...gateStatus('converged'), repo: 'allocator-one/rcl' };
+    expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: otherRepo } })).code).toBe(EVIDENCE_EXIT.unanswered);
+
+    const nullRound = gateStatus('converged');
+    (nullRound.advisory.rounds as unknown[]).push(null);
+    expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: nullRound } })).code).toBe(EVIDENCE_EXIT.unanswered);
+
+    const bare = { ...gateStatus('converged'), enforced: { status: 'converged' } };
+    expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: bare } })).code).toBe(EVIDENCE_EXIT.unanswered);
+
+    // Case only differs in the repository name: the same repository to GitHub.
+    const cased = { ...gateStatus('converged'), repo: 'Allocator-One/Allocator-One' };
+    expect(await run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: cased } })).code).toBe(EVIDENCE_EXIT.converged);
+  });
+
+  it('renders a pull request Harness holds no head for, and strips control characters from server text', async () => {
+    const { head: _dropped, ...headless } = gateStatus('none');
+    headless.advisory.actionable = [
+      {
+        ref: 'F1',
+        identity_key: 'abc123def4567890',
+        severity: 'important',
+        gating_reason: 'consensus',
+        file: 'lib/foo.ex',
+        start_line: 1,
+        end_line: 1,
+        title: 'Title with \u001b[31mescape\u001b[0m and\nnewline',
+      },
+    ];
+    const { code, out } = run('allocator-one/allocator-one#8524', () => ({ status: 200, body: { data: headless } }));
+    expect(await code).toBe(EVIDENCE_EXIT.notConverged);
+    expect(out[0]).toContain('no head known');
+    const line = out.find((l) => l.includes('abc123def4567890'))!;
+    expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(line).toContain('escape');
+  });
 });

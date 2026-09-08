@@ -166,30 +166,64 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** A projection as the server shapes it: a status string plus its rounds and actionable findings. */
-export function isProjection(value: unknown): value is Projection {
-  return isRecord(value) && typeof value['status'] === 'string' && Array.isArray(value['actionable']) && Array.isArray(value['rounds']);
+function isRecordArray(value: unknown): value is Record<string, unknown>[] {
+  return Array.isArray(value) && value.every(isRecord);
 }
 
-/** A gate status naming the pull request that was asked for, with both projections. */
-export function isGateStatus(value: unknown, number: number): value is GateStatus {
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function nullableRecord(value: unknown): boolean {
+  return value === null || value === undefined || isRecord(value);
+}
+
+/**
+ * A projection as the server shapes it: status and conclusiveness, every
+ * round a record with its id and tier, every actionable finding a record with
+ * the fields the renderer prints. Checked to the depth the renderer
+ * dereferences, so a malformed answer is refused (exit 3) and never thrown.
+ */
+export function isProjection(value: unknown): value is Projection {
   return (
     isRecord(value) &&
-    typeof value['repo'] === 'string' &&
+    isString(value['status']) &&
+    typeof value['conclusive'] === 'boolean' &&
+    isRecordArray(value['actionable']) &&
+    value['actionable'].every((f) => isString(f['severity']) && isString(f['gating_reason']) && isString(f['title'])) &&
+    isRecordArray(value['rounds']) &&
+    value['rounds'].every((r) => isString(r['id']) && isString(r['tier']))
+  );
+}
+
+/** A gate status about the pull request that was asked for — repository (case-insensitively) and number — with both projections. */
+export function isGateStatus(value: unknown, repo: string, number: number): value is GateStatus {
+  return (
+    isRecord(value) &&
+    isString(value['repo']) &&
+    value['repo'].toLowerCase() === repo.toLowerCase() &&
     value['pr_number'] === number &&
+    nullableRecord(value['head']) &&
+    nullableRecord(value['decision']) &&
     isProjection(value['advisory']) &&
     isProjection(value['enforced'])
   );
 }
 
-/** A run record naming the run that was asked for, with its findings and calls. */
+/** A run record about the run that was asked for, with a target, and findings, calls and artifacts shaped as the renderer reads them. */
 export function isRunDetail(value: unknown, id: string): value is RunDetail {
   return (
     isRecord(value) &&
     value['id'] === id &&
     isRecord(value['target']) &&
-    typeof value['target']['kind'] === 'string' &&
-    Array.isArray(value['findings']) &&
-    Array.isArray(value['calls'])
+    isString(value['target']['kind']) &&
+    nullableRecord(value['runner']) &&
+    nullableRecord(value['stats']) &&
+    (value['converge'] === null || value['converge'] === undefined || (isRecord(value['converge']) && isString(value['converge']['target']))) &&
+    (value['artifacts'] === undefined || (isRecordArray(value['artifacts']) && value['artifacts'].every((a) => isString(a['kind'])))) &&
+    isRecordArray(value['findings']) &&
+    value['findings'].every((f) => isString(f['severity']) && isString(f['title']) && nullableRecord(f['verdict'])) &&
+    isRecordArray(value['calls']) &&
+    value['calls'].every((c) => isString(c['model']) && isString(c['status']))
   );
 }

@@ -181,6 +181,34 @@ describe('rcl evidence show', () => {
     expect(out.join('\n')).toContain('findings (400)');
   });
 
+  it('refuses findings or calls that are not records, and keeps server text on one clean line', async () => {
+    const nullFinding = runDetail({ findings: [null] });
+    expect(await run(RUN_ID, () => ({ status: 200, body: { data: nullFinding } })).code).toBe(EVIDENCE_EXIT.unanswered);
+    const bareCall = runDetail({ calls: [{}] });
+    expect(await run(RUN_ID, () => ({ status: 200, body: { data: bareCall } })).code).toBe(EVIDENCE_EXIT.unanswered);
+
+    const hostile = runDetail({
+      findings: [
+        {
+          ref: 'F9',
+          identity_key: 'deadbeefdeadbeef',
+          file: 'lib/\u001b]8;;https://evil\u0007link.ex',
+          start_line: 1,
+          end_line: 1,
+          severity: 'important',
+          category: 'x',
+          title: 'multi\nline\rtitle',
+          gating_reason: 'consensus',
+        },
+      ],
+      calls: [{ model: 'm', role: 'r', status: 'error', duration_ms: 1, error: 'boom\u001b[2J' }],
+    });
+    const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data: hostile } }));
+    expect(await code).toBe(0);
+    for (const line of out) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(out.find((l) => l.includes('deadbeefdeadbeef'))).toContain('multi line title');
+  });
+
   it('refuses an empty run id before touching the network', async () => {
     const { code, requests, err } = run('   ', () => ({ status: 200, body: {} }));
     expect(await code).toBe(EVIDENCE_EXIT.usage);
