@@ -292,6 +292,40 @@ harness:
 
 ---
 
+### `rcl evidence status` and `rcl evidence show`
+
+What Harness holds — never the client's own claim. `rcl evidence status`
+prints the gate status Harness computed for a pull request: its known head,
+the advisory and enforced projections (status, the rounds behind them, the
+actionable findings still open) and the merge decision once it merged. The
+exit code is the contract the skills gate on:
+
+| exit | meaning |
+| --- | --- |
+| 0 | the judged projection (advisory by default, `--enforced` on request) is `converged` |
+| 1 | any other status: `none`, `stale`, `unverified`, `inconclusive`, `fixes_pending`, `unresolved` |
+| 2 | the pull request could not be named |
+| 3 | the read could not be answered: no credential, evidence off for the organization, unknown pull request, refused credential, unreachable host — never reported as "not converged" |
+
+`rcl evidence show <run id>` prints one recorded run: header and verification,
+credential tier and runner, reviewer health, artifact state, and every finding
+with its identity, gating reason and triage verdict (`—` until the server
+joins the verdict onto the finding).
+
+The reads use the same credential rules as delivery — the stored `harness
+login`, or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI, the token sent to
+its own host only — and need `reviews:read`. They do not depend on the
+telemetry level: switching delivery off does not blind them.
+
+```bash
+rcl evidence status                   # error: name the pull request
+rcl evidence status 8524              # against the current checkout's origin remote
+rcl evidence status '#8524' --enforced
+rcl evidence status allocator-one/rcl#42 --json
+rcl evidence status https://github.com/allocator-one/rcl/pull/42
+rcl evidence show 01a08032-0838-76db-ade3-1990f6e54072
+```
+
 ### `rcl models`
 
 The tool's own memory of which reviewers earn their seat. Every reviewer call

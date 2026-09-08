@@ -5,8 +5,9 @@ import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
 
 /**
- * The HTTP side of evidence delivery (epic IO-12475, section 8.4): POST the
- * envelope, PUT each declared artifact, POST converge events. Every request
+ * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
+ * envelope, PUT each declared artifact, POST converge events, and GET what
+ * Harness holds (a pull request's gate status, one run). Every request
  * runs under a 10 s timeout, carries the client handshake the server's
  * version floor reads, and sends the token only to the host that minted it
  * (the credential is a `{url, token}` pair resolved elsewhere).
@@ -19,10 +20,14 @@ import type { WireEvent } from './events.js';
 export const REQUEST_TIMEOUT_MS = 10_000;
 /** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
 export const MAX_RESPONSE_BYTES = 64 * 1024;
+/** A read carries a run's findings and calls (a 2 MB envelope's worth at most) or a gate status; anything past this is not one. */
+export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
   /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
   timeoutMs?: number;
+  /** The most the response body may hold (default: a receipt's worth). */
+  maxResponseBytes?: number;
 }
 
 export interface RunReceipt {
@@ -124,7 +129,7 @@ export class HarnessSink {
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
       // returns an opaque redirect with status 0. Both read as "redirected".
       if (response.type === 'opaqueredirect') return { status: 302, body: null };
-      const text = await readBounded(response, MAX_RESPONSE_BYTES);
+      const text = await readBounded(response, options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
       if (text === null) {
         return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' } };
       }
@@ -247,6 +252,18 @@ export class HarnessSink {
       if (!count(inserted) || !count(duplicates) || inserted + duplicates !== events.length) return null;
       return { inserted, duplicates };
     });
+  }
+
+  /**
+   * `GET <path>` — a read under the same timeout, handshake and host binding
+   * as deliveries. `validate` says what the caller asked for: it returns the
+   * typed value when `data` is about that thing and `null` otherwise, which
+   * is reported as `malformed_response` rather than trusted. Reads allow a
+   * larger body than a receipt (`MAX_READ_RESPONSE_BYTES`) unless told otherwise.
+   */
+  async getJson<T>(path: string, validate: (data: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
+    const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
+    return this.classify(result, (body) => validate((body as { data?: unknown } | null)?.data));
   }
 }
 
