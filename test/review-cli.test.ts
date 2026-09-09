@@ -47,7 +47,9 @@ function runRcl(args: string[], cwd: string, extraEnv: Record<string, string> = 
       ACTIONS_ID_TOKEN_REQUEST_URL: '',
       ACTIONS_ID_TOKEN_REQUEST_TOKEN: '',
       ANTHROPIC_API_KEY: '',
-      OPENAI_API_KEY: '',
+      // spawn omits undefined values. The SDK rejects a missing key before
+      // any request, but accepts an empty string and attempts a connection.
+      OPENAI_API_KEY: undefined,
       GEMINI_API_KEY: '',
       GOOGLE_API_KEY: '',
       OPENROUTER_API_KEY: '',
@@ -222,6 +224,9 @@ describe('rcl review - async convergence identity', () => {
     expect.soft(report.reviews.filter((review: { async?: boolean }) => review.async)).toEqual([
       expect.objectContaining({ model, role: 'general', status: 'success', async: true }),
     ]);
+    expect(report.reviews.find((review: { model: string }) => review.model === 'openai/fixture')).toMatchObject({
+      status: 'error', error: expect.stringContaining('Missing credentials'),
+    });
     expect.soft(report.stats.asyncMerged).toBe(1);
     expect(report.stats.asyncLaunched).toBeUndefined();
     expect.soft(await collectAsyncResults(store, key)).toEqual([]);
