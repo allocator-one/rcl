@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  asyncTargetKey,
+  collectAsyncResults,
+  resolveAsyncStoreDir,
+  runAsyncWorker,
+  spoolAsyncCalls,
+} from '../src/dispatch/async-lane.js';
+import type { ReviewAdapter } from '../src/dispatch/adapter.js';
 
 const cliEntrypoint = fileURLToPath(new URL('../src/index.ts', import.meta.url));
 const tsxImport = import.meta.resolve('tsx');
@@ -131,6 +140,93 @@ describe('rcl review — exact-head binding flags', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/--spec-source/);
+  });
+});
+
+describe('rcl review - async convergence identity', () => {
+  it.each([
+    { mode: 'patch', context: 'flag', attributed: false },
+    { mode: 'patch', context: 'flag', attributed: true },
+    { mode: 'patch', context: 'environment', attributed: false },
+    { mode: 'patch', context: 'environment', attributed: true },
+    { mode: 'patch', context: 'none', attributed: false },
+    { mode: 'staged', context: 'flag', attributed: false },
+    { mode: 'working-tree', context: 'flag', attributed: false },
+    { mode: 'plan', context: 'flag', attributed: false },
+  ])('collects with $mode identity, $context context, PR attribution=$attributed', async ({ mode, context, attributed }) => {
+    const repo = tempRepository();
+    const first = join(mkdtempSync(join(repo, 'round-1-')), 'review.patch');
+    const next = join(mkdtempSync(join(repo, 'round-2-')), 'review.patch');
+    const patch = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n';
+    writeFileSync(first, patch, { mode: 0o600 });
+    const nextContent = mode === 'plan' ? '# Fixture plan\n\nA later plan.\n' : patch.replace('+b', '+c');
+    writeFileSync(next, nextContent, { mode: 0o600 });
+    const target = 'repo-12';
+    const store = await resolveAsyncStoreDir(repo);
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repo, env: GIT_ENV, encoding: 'utf8',
+    }).trim();
+    const label = mode === 'patch' ? (context === 'none' ? next : first)
+      : mode === 'plan' ? `plan:${next}` : `git-${mode}-${branch}`;
+    const key = asyncTargetKey(label, mode === 'patch' && context !== 'none' ? target : undefined);
+    if (mode === 'staged' || mode === 'working-tree') {
+      writeFileSync(join(repo, 'a.ts'), 'export const a = 2;\n');
+      if (mode === 'staged') execFileSync('git', ['add', 'a.ts'], { cwd: repo, env: GIT_ENV });
+    }
+    const model = 'openrouter/async-fixture';
+    const [spool] = await spoolAsyncCalls([{
+      model, role: 'general', provider: 'openrouter',
+      systemPrompt: 'fixture', userPrompt: patch,
+    }], { storeDir: store, targetKey: key, timeoutMs: 1000, maxRetries: 0 });
+    expect(await collectAsyncResults(store, key)).toEqual([]);
+    const adapter: ReviewAdapter = {
+      name: 'fixture', provider: 'openrouter',
+      review: async (model, role) => ({
+        model, role, provider: 'openrouter', findings: [], durationMs: 1, status: 'success',
+      }),
+      ask: async () => { throw new Error('not used'); },
+    };
+    await runAsyncWorker(spool!, () => adapter);
+
+    const config = join(repo, 'config.json');
+    writeFileSync(config, JSON.stringify({
+      models: ['openai/fixture'], secondaryModels: [], asyncModels: [model],
+    }));
+    const reportPath = join(repo, 'report.json');
+    const home = join(repo, 'home');
+    mkdirSync(home);
+    // Explicit reviewers suppress async dispatch, not collection. The blocking
+    // fixture has no API key and records an error without contacting a provider.
+    // Only the already-published fake result can supply an async review here.
+    const result = runRcl([
+      ...(mode === 'plan' ? ['review-plan', next]
+        : mode === 'patch' ? ['review', next] : ['review', `--${mode}`]),
+      '--config', config, '--reviewer', 'openai/fixture:general',
+      ...(mode === 'patch' ? ['--head-sha', 'a'.repeat(40), '--base-sha', 'b'.repeat(40)] : []),
+      ...(context === 'none' ? [] : ['--round', '2', '--attempt', '2']),
+      '--no-telemetry', '--json-file', reportPath,
+      ...(context === 'flag' ? ['--converge-target', ` ${target} `] : []),
+      ...(attributed && context === 'flag' ? ['--for-pr', 'owner/repo#12'] : []),
+    ], repo, {
+      HOME: home, XDG_CONFIG_HOME: home, RCL_DATA_DIR: join(home, 'rcl'),
+      RCL_CONVERGE_TARGET: context === 'none' ? '' : context === 'flag' ? 'must-not-win' : ` ${target} `,
+      RCL_CONVERGE_ROUND: '', RCL_CONVERGE_ATTEMPT: '',
+      RCL_FOR_PR: attributed && context === 'environment' ? 'owner/repo#12' : '',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    expect(report.run.converge).toEqual(context === 'none' ? undefined : { target, round: 2, attempt: 2 });
+    expect(report.run.target.kind).toBe(mode === 'working-tree' ? 'working_tree' : mode);
+    if (mode === 'patch') expect(report.run.target.head_sha).toBe('a'.repeat(40));
+    expect(report.run.target.pr_number).toBe(attributed ? 12 : undefined);
+    expect.soft(report.reviews.filter((review: { async?: boolean }) => review.async)).toEqual([
+      expect.objectContaining({ model, role: 'general', status: 'success', async: true }),
+    ]);
+    expect.soft(report.stats.asyncMerged).toBe(1);
+    expect(report.stats.asyncLaunched).toBeUndefined();
+    expect.soft(await collectAsyncResults(store, key)).toEqual([]);
+    expect(readFileSync(first, 'utf8')).toBe(patch);
+    expect(readFileSync(next, 'utf8')).toBe(nextContent);
   });
 });
 

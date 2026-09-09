@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   partitionAsyncAssignments,
   asyncTargetKey,
+  resolveAsyncStoreDir,
   spoolAsyncCalls,
   runAsyncWorker,
   collectAsyncResults,
@@ -64,6 +66,26 @@ describe('asyncTargetKey', () => {
     const b = asyncTargetKey('allocator-one/rcl#13');
     expect(a1).toBe(a2);
     expect(a1).not.toBe(b);
+  });
+
+  it('uses one convergence key across different immutable patch captures', () => {
+    expect(asyncTargetKey('/round-1/a.patch', 'repo-12')).toBe(
+      asyncTargetKey('/round-2/b.patch', 'repo-12')
+    );
+  });
+
+  it('isolates distinct convergence targets even when the patch path is identical', () => {
+    expect(asyncTargetKey('/capture/review.patch', 'repo-12')).not.toBe(
+      asyncTargetKey('/capture/review.patch', 'repo-13')
+    );
+  });
+
+  it('keeps convergence keys separate from legacy target labels', () => {
+    const key = asyncTargetKey('/capture/review.patch', 'repo-12');
+    for (const label of ['repo-12', 'converge-repo-12', '/capture/review.patch']) {
+      expect(key).not.toBe(asyncTargetKey(label));
+    }
+    expect(key).toMatch(/^[A-Za-z0-9._-]+$/);
   });
 
   it('produces filesystem-safe keys', () => {
@@ -163,6 +185,53 @@ describe('spool → worker → collect round trip', () => {
 
     // Collect consumes: a second collect returns nothing.
     expect(await collectAsyncResults(dir, targetKey)).toHaveLength(0);
+  });
+
+  it('collects a late result across distinct patch captures of the same convergence target', async () => {
+    const first = asyncTargetKey('/round-1/head-a/review.patch', 'repo-12');
+    const next = asyncTargetKey('/round-2/head-b/review.patch', 'repo-12');
+    const unrelated = asyncTargetKey('/round-2/head-b/review.patch', 'repo-13');
+    const [spool] = await spoolAsyncCalls([spec], {
+      storeDir: dir, targetKey: first, timeoutMs: 1000, maxRetries: 0,
+    });
+    // The originating round finishes before this worker publishes its result.
+    expect(await collectAsyncResults(dir, first)).toEqual([]);
+    await runAsyncWorker(spool!, () => fakeAdapter(1));
+    expect(await collectAsyncResults(dir, unrelated)).toEqual([]);
+    const collected = await collectAsyncResults(dir, next);
+    expect(collected).toHaveLength(1);
+    expect(collected[0]).toMatchObject({ async: true, status: 'success' });
+    expect(collected[0]!.findings).toHaveLength(1);
+    expect(await collectAsyncResults(dir, next)).toEqual([]);
+  });
+
+  it('shares results across linked worktrees, not independent repositories', async () => {
+    const repo = join(dir, 'repo');
+    const linked = join(dir, 'linked');
+    const other = join(dir, 'other');
+    const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+    const git = (...args: string[]) => execFileSync('git', args, {
+      cwd: dir,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice },
+    });
+    git('init', '-q', repo);
+    git('-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '-q', '--allow-empty', '-m', 'fixture');
+    git('-C', repo, 'worktree', 'add', '-q', '-b', 'linked', linked);
+    git('init', '-q', other);
+    const store = await resolveAsyncStoreDir(repo);
+    const linkedStore = await resolveAsyncStoreDir(linked);
+    const otherStore = await resolveAsyncStoreDir(other);
+    expect(linkedStore).toBe(store);
+    expect(otherStore).not.toBe(store);
+    const key = asyncTargetKey('/capture/review.patch', 'repo-12');
+    const [spool] = await spoolAsyncCalls([spec], {
+      storeDir: store, targetKey: key, timeoutMs: 1000, maxRetries: 0,
+    });
+    await runAsyncWorker(spool!, () => fakeAdapter(1));
+    expect(await collectAsyncResults(otherStore, key)).toEqual([]);
+    expect(await collectAsyncResults(linkedStore, key)).toHaveLength(1);
+    expect(await collectAsyncResults(store, key)).toEqual([]);
   });
 
   it('does not collect results belonging to a different target', async () => {

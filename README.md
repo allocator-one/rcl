@@ -558,6 +558,14 @@ spec: SPEC.md
 
 Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`, `review-council.config.js`.
 
+For converging patch reviews, async collection uses `--converge-target` (or
+`RCL_CONVERGE_TARGET`), not the patch pathname. Each round can keep a distinct,
+immutable capture while sharing results across linked worktrees of the same
+repository and target. Other review modes retain their existing keys; previously
+spooled path-keyed results are not migrated. Async findings can come from an
+earlier capture and still need checking against the current code. This does not
+make detached-worker completion part of the blocking round.
+
 Before dispatch, RCL prints the expanded reviewer × chunk call count,
 concurrency, wave count, timeout, and timeout-bound queue estimate. Interactive
 runs update the spinner; redirected runs emit periodic heartbeat and bounded

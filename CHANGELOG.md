@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Async patch convergence** (RCL-50): collect delayed async results across
+  distinct immutable patch captures using the validated convergence target.
+  Preserve repository/worktree scope and other review modes' keys; do not
+  migrate previously spooled path-keyed results. Reviewer health, historical
+  finding handling and detached-worker lifetime are unchanged.
+
 ## 3.2.0 — 2026-09-08
 
 - **`rcl review … --attest`** (RCL-40): inside the organization's gate

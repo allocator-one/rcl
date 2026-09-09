@@ -1575,9 +1575,9 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       process.exit(0);
     }
 
-    // Stable across rounds of the same converge run, so round N+1 finds the
-    // async results round N fired. Git modes carry the branch name so two
-    // branches reviewed in one repository never exchange async results.
+    // PR and Git-mode labels identify the review target directly. Patch
+    // paths identify the capture; executeCouncil scopes converging patches
+    // by their native convergence target instead.
     const asyncTargetLabel = diff.metadata
       ? `${diff.metadata.owner}/${diff.metadata.repo}#${diff.metadata.number}`
       : (target ?? `git-${gitMode}-${await currentBranchLabel()}`);
@@ -1664,7 +1664,10 @@ async function executeCouncil(
   ) {
     try {
       asyncStoreDir = await resolveAsyncStoreDir();
-      asyncKey = asyncTargetKey(asyncTargetLabel);
+      asyncKey = asyncTargetKey(
+        asyncTargetLabel,
+        extra.target.kind === 'patch' ? prepared.converge?.target : undefined
+      );
       let asyncChunkAssignments = chunks.flatMap((chunk) =>
         asyncAssignments.map((assignment) => ({ assignment, chunk }))
       );
