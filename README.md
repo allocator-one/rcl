@@ -421,7 +421,10 @@ native identity/verdict assertion, not private verdict reasons. Harness must
 already hold the corresponding canonical verdict on that same run and round;
 the command does not create one. Harness validates the bindings, but trusts the
 authenticated actor's native mapping assertion. Neither the command nor the
-server claims to have retrieved or verified the original report bytes.
+server claims to have retrieved or verified the original report bytes. Normal
+transport scrubbing applies; if redaction or truncation would change an exact
+binding, both preview and submission refuse it rather than print the raw value
+or silently rebind the evidence.
 
 Uses the normal Harness credential rules, requiring `reviews:read` for preview
 and also `reviews:write` for submission. Requires backend support for the new
@@ -429,7 +432,10 @@ event; an older backend rejects it without changing history. Conflicts and
 network errors fail visibly, without automatic retries or spooling. An
 acknowledgment (exit 0) is not a convergence verdict; separately inspect
 `rcl evidence status` when authorized. Originals and sibling sightings remain
-unchanged, and the correction is not inherited by another run.
+unchanged, and the correction is not inherited by another run. A correction can
+reopen a previously suppressed critical finding if its canonical verdict is not
+critical. A `fixed` correction is audit-only for that run and does not clear
+`fixes_pending`.
 
 ### `--for-pr` on a patch-file review
 

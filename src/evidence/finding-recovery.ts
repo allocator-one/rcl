@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import type { ConvergeRunState } from '../converge/run-state.js';
-import { uuidv7 } from '../report/uuid.js';
-import type { WireEvent } from '../telemetry/events.js';
+import { buildEvent, type WireEvent } from '../telemetry/events.js';
 import type { RunDetail } from './types.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -76,18 +75,22 @@ export function prepareFindingRecovery(input: FindingRecoveryInput): WireEvent {
   require(entry.file === finding.file && entry.category === finding.category && entry.startLine === finding.start_line &&
     entry.endLine === finding.end_line && entry.endLine >= entry.startLine, 'Native identity location does not match the selected finding.');
 
-  return {
-    id: uuidv7(), kind: 'finding_identity_corrected', run_id: run.id,
-    converge_target: input.target, round: runRound!, occurred_at: new Date().toISOString(),
-    payload: {
-      report_json_sha256: input.reportSha256, finding_ref: input.findingRef,
-      identity_key: finding.identity_key!, matched_identity: input.identity,
-      native_evidence: {
-        source: 'rcl_converge_state', state_version: state.version, state_sha256: input.stateSha256,
-        identity_key: entry.key, file: entry.file, category: entry.category,
-        start_line: entry.startLine, end_line: entry.endLine, first_round: entry.firstRound, last_round: entry.lastRound,
-        verdict: entry.verdict, verdict_round: entry.verdictRound, verdict_severity: entry.verdictSeverity ?? entry.severity,
-      },
+  const payload = {
+    report_json_sha256: input.reportSha256, finding_ref: input.findingRef,
+    identity_key: finding.identity_key!, matched_identity: input.identity,
+    native_evidence: {
+      source: 'rcl_converge_state', state_version: state.version, state_sha256: input.stateSha256,
+      identity_key: entry.key, file: entry.file, category: entry.category,
+      start_line: entry.startLine, end_line: entry.endLine, first_round: entry.firstRound, last_round: entry.lastRound,
+      verdict: entry.verdict, verdict_round: entry.verdictRound, verdict_severity: entry.verdictSeverity ?? entry.severity,
     },
   };
+  const event = buildEvent({
+    kind: 'finding_identity_corrected', runId: run.id, convergeTarget: input.target, round: runRound!, payload,
+  });
+  // Normal transport scrubbing still applies. Exact evidence must not be
+  // silently rebound to a redacted/truncated identifier, including in preview.
+  require(event.converge_target === input.target && JSON.stringify(event.payload) === JSON.stringify(payload),
+    'Recovery refused: transport scrubbing would change an exact binding.');
+  return event;
 }

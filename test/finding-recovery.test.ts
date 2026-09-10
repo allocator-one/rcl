@@ -57,8 +57,9 @@ afterEach(async () => {
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function command(submit = false, status = 201) {
+async function command(submit = false, status = 201, mutate?: (input: ReturnType<typeof fixture>) => void) {
   const input = fixture();
+  mutate?.(input);
   const cwd = await mkdtemp(join(tmpdir(), 'rcl-finding-recovery-'));
   directories.push(cwd);
   execFileSync('git', ['init', '-q', cwd]);
@@ -115,6 +116,26 @@ describe('unpaid recovery command', () => {
     expect(payload.events[0].kind).toBe('finding_identity_corrected');
     expect(payload.events[0].payload.native_evidence.state_sha256).toBe(createHash('sha256').update(result.bytes).digest('hex'));
     expect(result.out.join('\n')).toContain('not a convergence verdict');
+  });
+
+  it.each([false, true])('refuses secret-shaped bindings without exposing or posting them, submit=%s', async (submit) => {
+    const secret = 'sk-' + 'a'.repeat(32);
+    const result = await command(submit, 201, (input) => {
+      const file = `src/${secret}.ts`;
+      input.state.findings[canonical]!.file = file;
+      input.run.findings[1]!.file = file;
+    });
+    expect.soft(result.code).not.toBe(0);
+    expect.soft(result.requests.map((r) => r.method)).toEqual(['GET']);
+    expect.soft(result.out.join('\n') + result.err.join('\n')).not.toContain(secret);
+    expect(result.err.join('\n')).toMatch(/scrubbing/);
+  });
+
+  it('does not advise flushing unrelated evidence when a correction credential is refused', async () => {
+    const result = await command(true, 401);
+    expect(result.code).not.toBe(0);
+    expect(result.err.join('\n')).toContain('log in again');
+    expect(result.err.join('\n')).not.toContain('telemetry flush');
   });
 
   it('reports a conflict without retrying or recording any verdict', async () => {
@@ -212,6 +233,20 @@ describe('finding identity recovery assertion', () => {
     });
     expect(JSON.stringify(event)).not.toContain('PRIVATE REASON');
     expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it.each(['target', 'file'])('refuses a %s binding that transport scrubbing would change', (field) => {
+    const input = fixture();
+    const secret = 'sk-' + 'a'.repeat(32);
+    if (field === 'target') {
+      input.target = secret;
+      input.state.target = secret;
+      input.run.converge!.target = secret;
+    } else {
+      input.state.findings[canonical]!.file = `src/${secret}.ts`;
+      input.run.findings[1]!.file = `src/${secret}.ts`;
+    }
+    expect(() => prepareFindingRecovery(input)).toThrow(/scrubbing/);
   });
 
   it('does not require retrieved artifact bytes or claim they were verified', () => {

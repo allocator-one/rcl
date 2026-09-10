@@ -171,7 +171,7 @@ export class HarnessSink {
     // A rejected credential is not a rejected run: after `harness login` (or
     // a fresh CI token) the same entry can still land, so it stays spooled.
     if (status === 401) {
-      return { kind: 'unavailable', reason: `HTTP 401 credential rejected${message ? ` (${message})` : ''} — log in again and run rcl telemetry flush` };
+      return { kind: 'unavailable', reason: `HTTP 401 credential rejected${message ? ` (${message})` : ''} - log in again` };
     }
     if (status >= 300 && status < 400) {
       return { kind: 'rejected', httpStatus: status, error: 'redirected', message: 'the server redirected the request — check HARNESS_API_URL / the login host (redirects are not followed with a token)' };
