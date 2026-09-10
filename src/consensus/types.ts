@@ -112,11 +112,11 @@ export interface ConsensusInfo {
 export interface ConsensusFinding extends Finding {
   consensus: ConsensusInfo;
   /**
-   * Stable cross-round identity — the converge `stableFindingKey` (file,
-   * category, line bucket) computed at review time, so identity exists in
-   * the report itself and not only inside the converge state (IO-12475
-   * section 8.2). Always set on findings rcl ≥ 3.0 produces; optional in the
-   * type so pre-3.0 reports still load.
+   * Report-sighting key, allocated uniquely across kept and appendix groups.
+   * New reports use `report:<run-id>:<16-hex-key>` to keep them separate from
+   * native ledger keys and other runs' sightings. Cross-round location matching
+   * supplies the canonical identity in classifications; it does not use this field
+   * as a ledger key. Optional so older reports remain readable.
    */
   identity?: string;
   /**

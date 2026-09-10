@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { computeConsensus, applyReportThresholds } from '../../src/consensus/voter.js';
+import { computeConsensus as computeConsensusForRun, applyReportThresholds } from '../../src/consensus/voter.js';
 import { getRoleByName } from '../../src/roles/builtin.js';
 import { stableFindingKey } from '../../src/converge/finding-identity.js';
 import type { Finding, ModelReview, DeduplicatedGroup } from '../../src/consensus/types.js';
 import type { Role } from '../../src/roles/types.js';
+
+const RUN_ID = '00000000-0000-7000-8000-000000000001';
+const computeConsensus = computeConsensusForRun.bind(null, RUN_ID);
 
 function mkF(over: Partial<Finding> = {}): Finding {
   return {
@@ -768,7 +771,27 @@ describe('computeConsensus — precision-weighted votes (RCL-27)', () => {
 });
 
 describe('computeConsensus — finding identity', () => {
-  it('stamps every consensus finding with its stable converge identity', () => {
+  it('allocates distinct identities across kept and appendix findings sharing an anchor', () => {
+    const inputs = [
+      mkF({ startLine: 11, endLine: 11 }),
+      mkF({ startLine: 19, endLine: 22 }),
+      mkF({ startLine: 12, endLine: 12, severity: 'nitpick' }),
+    ];
+    const groups = inputs.map((f) => mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }]));
+    const reviews = [mkReview('m1', 'general', inputs), mkReview('m2', 'general')];
+    const before = structuredClone(groups);
+    const findings = computeConsensus(groups, reviews, ROLES);
+    expect(new Set(findings.map((f) => f.identity)).size).toBe(3);
+    expect(findings[0]!.identity).toBe(`report:${RUN_ID}:${stableFindingKey(inputs[0]!)}`);
+    expect(computeConsensus(groups, reviews, ROLES)).toEqual(findings);
+    expect(groups).toEqual(before);
+    const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.9 });
+    expect(kept).toHaveLength(2);
+    expect(dropped).toHaveLength(1);
+    expect([...kept, ...dropped].map((f) => f.identity)).toEqual(findings.map((f) => f.identity));
+  });
+
+  it('namespaces every report identity separately from native ledger keys', () => {
     const f1 = mkF({ id: 'a', file: 'src/a.ts', startLine: 10, endLine: 12 });
     const f2 = mkF({ id: 'b', file: 'src/b.ts', startLine: 200, endLine: 201, category: 'tests', severity: 'nitpick' });
     const reviews = [mkReview('m1', 'general', [f1, f2])];
@@ -777,8 +800,8 @@ describe('computeConsensus — finding identity', () => {
       reviews,
       ROLES
     );
-    expect(findings.map((f) => f.identity)).toEqual([stableFindingKey(f1), stableFindingKey(f2)]);
-    expect(findings.every((f) => /^[0-9a-f]{16}$/.test(f.identity!))).toBe(true);
+    expect(findings.map((f) => f.identity)).toEqual([`report:${RUN_ID}:${stableFindingKey(f1)}`, `report:${RUN_ID}:${stableFindingKey(f2)}`]);
+    expect(findings.every((f) => /^report:[0-9a-f-]{36}:[0-9a-f]{16}$/.test(f.identity!))).toBe(true);
   });
 
   it('keeps the identity on findings the report thresholds drop', () => {
@@ -787,7 +810,7 @@ describe('computeConsensus — finding identity', () => {
     const findings = computeConsensus([mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }])], reviews, ROLES);
     const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.9 });
     expect(kept).toHaveLength(0);
-    expect(dropped[0]!.identity).toBe(stableFindingKey(f));
+    expect(dropped[0]!.identity).toBe(`report:${RUN_ID}:${stableFindingKey(f)}`);
   });
 
   it('stamps a multi-model group with the representative location identity and keeps it on kept findings', () => {
@@ -800,9 +823,9 @@ describe('computeConsensus — finding identity', () => {
       ROLES
     );
     expect(findings[0]!.consensus.models).toEqual(['m1', 'm2']);
-    expect(findings[0]!.identity).toBe(stableFindingKey(rep));
+    expect(findings[0]!.identity).toBe(`report:${RUN_ID}:${stableFindingKey(rep)}`);
     const { kept } = applyReportThresholds(findings, {});
     expect(kept).toHaveLength(1);
-    expect(kept[0]!.identity).toBe(stableFindingKey(rep));
+    expect(kept[0]!.identity).toBe(`report:${RUN_ID}:${stableFindingKey(rep)}`);
   });
 });

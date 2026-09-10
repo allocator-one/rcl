@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sampleFinding } from '../telemetry/fixtures.js';
 
 const cliEntrypoint = fileURLToPath(new URL('../../src/index.ts', import.meta.url));
 const tsxImport = import.meta.resolve('tsx');
@@ -37,6 +38,29 @@ afterEach(() => {
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+describe('converge-report identity collision', () => {
+  it('reports the collision as a structured native blocker without persisting a round', () => {
+    const repo = tempRepository();
+    const report = join(repo, 'report.json');
+    writeFileSync(report, JSON.stringify({ findings: [
+      sampleFinding({ identity: 'same-key', startLine: 11, endLine: 11 }),
+      sampleFinding({ identity: 'same-key', startLine: 19, endLine: 19 }),
+    ] }));
+    const result = spawnSync(process.execPath,
+      ['--import', tsxImport, cliEntrypoint, 'converge-report', '--target', 'test', '--round', '1', '--report', report, '--json'],
+      { cwd: repo, encoding: 'utf8', timeout: 10_000, env: {
+        ...process.env, HOME: repo, XDG_CONFIG_HOME: join(repo, 'config'), RCL_DATA_DIR: join(repo, 'account'),
+        RCL_NO_HARNESS_KEYS: '1', NODE_NO_WARNINGS: '1',
+      } });
+    expect(result.status).toBe(3);
+    expect(result.stdout).toBe('');
+    expect(JSON.parse(result.stderr)).toMatchObject({ error: {
+      code: 'RCL_CONVERGE_RUN_STATE', message: expect.stringMatching(/conflicting classifications/),
+    } });
+    expect(existsSync(join(repo, '.git', 'rcl-converge-runs'))).toBe(false);
+  });
 });
 
 describe('converge-attempt CLI', () => {

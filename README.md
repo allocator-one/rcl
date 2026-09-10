@@ -96,7 +96,7 @@ Review a PR, a local diff, or uncommitted work.
 
 `--role`, `--roles`, and `--reviewer` are mutually exclusive. So are a positional target, `--staged`, and `--working-tree` — pick exactly one review source. Untracked files are invisible to `git diff` and therefore not reviewed.
 
-**Self-describing reports (3.0).** Every report carries a `run` header: a client run id (UUIDv7), the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub for PRs, from `git rev-parse HEAD` and the merge-base with the remote default branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for patch files) and a `diff_sha256`, the roster with each seat's lane (`blocking`, `secondary`, `async`, `verification`), a config digest with thresholds and gating inline, spec and context-file digests, a best-effort `runner` claim (`agent` / `ci` / `human`), timing, the CI verdict (computed even without `--ci`), and the converge context when run under rcl-converge. Every finding carries its stable converge `identity`, and every reviewer call records token `usage` where the provider reports it. Reports without a `run` header (pre-3.0) still load everywhere.
+**Self-describing reports (3.0).** Every report carries a `run` header: a client run id (UUIDv7), the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub for PRs, from `git rev-parse HEAD` and the merge-base with the remote default branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for patch files) and a `diff_sha256`, the roster with each seat's lane (`blocking`, `secondary`, `async`, `verification`), a config digest with thresholds and gating inline, spec and context-file digests, a best-effort `runner` claim (`agent` / `ci` / `human`), timing, the CI verdict (computed even without `--ci`), and the converge context when run under rcl-converge. Every finding carries an `identity`, allocated uniquely across the report's consensus findings, including the below-threshold appendix. Keys use `report:<run-id>:<16-hex-key>` so report allocation cannot alias unrelated native ledger identities or reuse another run's classification. Colliding location anchors are disambiguated before thresholding; native cross-round location matching still determines the unchanged canonical ledger identity. Every reviewer call records token `usage` where the provider reports it. Reports without a `run` header (pre-3.0) remain readable; ambiguous classifications are refused as described below.
 
 **Examples:**
 
@@ -229,6 +229,19 @@ on its evidence and fresh corroboration alone never reopens it), or `regating`
 genuinely new evidence). The same call enforces the evidence-round cap:
 default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
 code 2 is the cap consent boundary; exit 3 is a state failure.
+
+A report key must identify one canonical identity, status and suppression reason.
+`converge-report` refuses conflicting mappings with exit 3 before writing the
+round state, even when telemetry is off. Reports without finding keys use the
+canonical identity as a fallback and are subject to the same check. This leaves
+ambiguous older reports readable but not classifiable by this command. Preserve
+the original report and ledger for separately supported finding-ref recovery;
+rewriting published evidence or rerunning an unchanged council is not recovery.
+Identical mappings still deduplicate, and native ledger keys and verdicts do not
+change when new run-scoped report keys appear. Until the current run's
+classification is delivered, older runs' aliases cannot resolve its new report
+keys. A report without a current classification does not inherit prior native
+verdicts, even when its findings look unchanged.
 
 `converge-verdict` records triage outcomes per finding identity —
 `--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which

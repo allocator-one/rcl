@@ -1850,7 +1850,9 @@ async function executeCouncil(
     config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
   );
 
+  const runId = extra.attestation?.runId ?? uuidv7();
   const consensusFindings = computeConsensus(
+    runId,
     groups,
     reviews,
     roleMap,
@@ -1948,8 +1950,8 @@ async function executeCouncil(
   // Self-describing run header (IO-12475 section 5.1), built once the body
   // exists so the CI verdict is recorded uniformly — with or without --ci.
   const run = buildRunHeader({
-    // An attested run carries the id its credential was minted for.
-    ...(extra.attestation ? { id: extra.attestation.runId } : {}),
+    // Reuse the id that scoped the report keys, including an attested run id.
+    id: runId,
     rclVersion: RCL_VERSION,
     command: extra.command,
     target: extra.target,
