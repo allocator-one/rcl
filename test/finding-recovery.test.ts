@@ -118,6 +118,19 @@ describe('unpaid recovery command', () => {
     expect(result.out.join('\n')).toContain('not a convergence verdict');
   });
 
+  it('preserves a qualified report key without inferring its native identity', async () => {
+    const qualified = `report:${runId}:${reportKey}`;
+    const result = await command(true, 201, (input) => {
+      input.run.findings[0]!.identity_key = `report:${runId}:cccccccccccccccc`;
+      input.run.findings[1]!.identity_key = qualified;
+    });
+    expect(result.code).toBe(0);
+    expect(result.requests.map((r) => r.method)).toEqual(['GET', 'POST']);
+    const event = JSON.parse(result.requests[1]!.body!).events[0];
+    expect(event.payload.identity_key).toBe(qualified);
+    expect(event.payload.matched_identity).toBe(canonical);
+  });
+
   it.each([false, true])('refuses secret-shaped bindings without exposing or posting them, submit=%s', async (submit) => {
     const secret = 'sk-' + 'a'.repeat(32);
     const result = await command(submit, 201, (input) => {
