@@ -577,7 +577,9 @@ immutable capture while sharing results across linked worktrees of the same
 repository and target. Other review modes retain their existing keys; previously
 spooled path-keyed results are not migrated. Async findings can come from an
 earlier capture and still need checking against the current code. This does not
-make detached-worker completion part of the blocking round.
+make detached-worker completion part of the blocking round. `run.roster` records
+this round's planned seats; collected async reviews retain their model and role
+in `reviews` and can come from seats absent from the current roster.
 
 Before dispatch, RCL prints the expanded reviewer × chunk call count,
 concurrency, wave count, timeout, and timeout-bound queue estimate. Interactive
