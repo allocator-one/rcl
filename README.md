@@ -393,6 +393,50 @@ rcl evidence status https://github.com/allocator-one/rcl/pull/42
 rcl evidence show 01a08032-0838-76db-ade3-1990f6e54072
 ```
 
+### `rcl evidence recover-finding`
+
+Recover one recorded finding whose report identity collided, using its retained
+native convergence identity. Preview is the default; `--submit` explicitly
+posts one attributed `finding_identity_corrected` event. This unpaid command
+never calls reviewers, claims an attempt, changes a round or verdict, updates
+precision accounting, flushes/spools an outbox, or rewrites native history.
+
+```bash
+rcl evidence recover-finding --target "$TARGET" --run "$RUN_ID" \
+  --report-sha256 "$ORIGINAL_REPORT_SHA256" --finding-ref f002 \
+  --identity "$NATIVE_IDENTITY" --for-pr example/project#42
+# Inspect the preview, then repeat with --submit if authorized.
+```
+
+Run it in the checkout holding the retained `.git/rcl-converge-runs` state.
+All selectors are mandatory. The command reads the server run and checks its
+ID, original report digest, repository/PR, convergence target and round. The
+explicit native identity must match the selected ref's exact file, category
+and line span. Its latest sighting, verdict and native round-to-run binding
+must belong to that same recorded round. Missing or ambiguous evidence is an
+error, never a reason to reconstruct state, reset counters or rerun review.
+
+The event includes the digest of the exact retained state bytes and the minimal
+native identity/verdict assertion, not private verdict reasons. Harness must
+already hold the corresponding canonical verdict on that same run and round;
+the command does not create one. Harness validates the bindings, but trusts the
+authenticated actor's native mapping assertion. Neither the command nor the
+server claims to have retrieved or verified the original report bytes. Normal
+transport scrubbing applies; if redaction or truncation would change an exact
+binding, both preview and submission refuse it rather than print the raw value
+or silently rebind the evidence.
+
+Uses the normal Harness credential rules, requiring `reviews:read` for preview
+and also `reviews:write` for submission. Requires backend support for the new
+event; an older backend rejects it without changing history. Conflicts and
+network errors fail visibly, without automatic retries or spooling. An
+acknowledgment (exit 0) is not a convergence verdict; separately inspect
+`rcl evidence status` when authorized. Originals and sibling sightings remain
+unchanged, and the correction is not inherited by another run. A correction can
+reopen a previously suppressed critical finding if its canonical verdict is not
+critical. A `fixed` correction is audit-only for that run and does not clear
+`fixes_pending`.
+
 ### `--for-pr` on a patch-file review
 
 A patch-file review (`rcl review changes.patch`) carries no repository or pull

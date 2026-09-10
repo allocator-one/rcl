@@ -147,10 +147,18 @@ async function readState(
   gitCommonDir: string,
   target: string
 ): Promise<ConvergeRunState | undefined> {
+  return (await loadConvergeRunStateEvidence(gitCommonDir, target))?.state;
+}
+
+/** Read-only native evidence: state and the digest of the same bytes, without re-encoding or persisting it. */
+export async function loadConvergeRunStateEvidence(
+  gitCommonDir: string,
+  target: string
+): Promise<{ state: ConvergeRunState; sha256: string } | undefined> {
   const path = convergeRunStatePath(gitCommonDir, target);
-  let raw: string;
+  let raw: Buffer;
   try {
-    raw = await readFile(path, 'utf8');
+    raw = await readFile(path);
   } catch (err) {
     if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
       return undefined;
@@ -159,7 +167,7 @@ async function readState(
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(raw.toString('utf8'));
   } catch (err) {
     throw new ConvergeRunStateError(
       `Invalid JSON in converge run state ${path}; refusing to reset cross-round identity.`,
@@ -179,7 +187,7 @@ async function readState(
       `Invalid converge run state in ${path}; refusing to reset cross-round identity.`
     );
   }
-  return state as ConvergeRunState;
+  return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
 async function writeState(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
