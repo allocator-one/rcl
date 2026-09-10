@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Async patch convergence** (RCL-50): collect delayed async results across
+  distinct immutable patch captures using the validated convergence target.
+  Preserve repository/worktree scope and other review modes' keys; do not
+  migrate previously spooled path-keyed results. Reviewer health, historical
+  finding handling and detached-worker lifetime are unchanged.
 - **Distinct report finding identities** (RCL-51): consensus findings that
   share a line-bucket anchor receive separate report keys, including findings
   below the report threshold. All new report keys use `report:<run-id>:<key>`

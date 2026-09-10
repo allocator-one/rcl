@@ -75,8 +75,12 @@ export function partitionAsyncAssignments<A extends { model: string }>(
  * Stable, filesystem-safe key for a review target, so consecutive rounds of
  * the same converge run find each other's async results and different targets
  * never collide. Same alphabet rule as the converge attempt store.
+ * For a converging patch, pass the validated convergence target instead of
+ * identifying the loop by its per-round capture path. Prefix the complete
+ * key to keep this namespace separate without changing legacy target keys.
  */
-export function asyncTargetKey(target: string): string {
+export function asyncTargetKey(target: string, convergeTarget?: string): string {
+  if (convergeTarget !== undefined) return `converge-${asyncTargetKey(convergeTarget)}`;
   const slug = target
     .replace(/[^A-Za-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
