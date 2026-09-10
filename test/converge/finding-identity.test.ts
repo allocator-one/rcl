@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   stableFindingKey,
+  availableFindingKey,
   matchFinding,
 } from '../../src/converge/finding-identity.js';
 
@@ -12,6 +13,10 @@ const base = {
 };
 
 describe('stableFindingKey (RCL-24)', () => {
+  it('preserves the existing NUL-separated anchor hash', () => {
+    expect(stableFindingKey(base)).toBe('815c65a3273edf9e');
+  });
+
   it('is deterministic for identical inputs', () => {
     expect(stableFindingKey(base)).toBe(stableFindingKey({ ...base }));
   });
@@ -32,6 +37,15 @@ describe('stableFindingKey (RCL-24)', () => {
 
   it('is stable under small line drift within the anchor bucket', () => {
     expect(stableFindingKey(base)).toBe(stableFindingKey({ ...base, startLine: 44, endLine: 47 }));
+  });
+});
+
+describe('availableFindingKey', () => {
+  it('keeps an unoccupied anchor and skips every occupied derived key without mutating the set', () => {
+    expect(availableFindingKey(base, new Set())).toBe('815c65a3273edf9e');
+    const occupied = new Set(['815c65a3273edf9e', 'c483b1f54d367161']);
+    expect(availableFindingKey(base, occupied)).toBe('b0b8a82fe335130d');
+    expect([...occupied]).toEqual(['815c65a3273edf9e', 'c483b1f54d367161']);
   });
 });
 

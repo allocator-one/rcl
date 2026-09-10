@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   processRoundReport,
   recordVerdicts,
   loadConvergeRunState,
+  convergeRunStatePath,
   ConvergeRoundCapError,
   ConvergeRunStateError,
 } from '../../src/converge/run-state.js';
@@ -174,6 +175,46 @@ describe('round ordering and re-runs (RCL-24)', () => {
 });
 
 describe('intra-round identity (RCL-24)', () => {
+  it('refuses ambiguous legacy report keys without creating native state', async () => {
+    await expect(processRoundReport({
+      gitCommonDir: dir, target: 'collision', round: 1,
+      findings: [
+        finding({ identity: 'same-key', startLine: 11, endLine: 11 }),
+        finding({ identity: 'same-key', startLine: 19, endLine: 19 }),
+      ],
+    })).rejects.toThrow(/conflicting classifications/);
+    expect(await loadConvergeRunState(dir, 'collision')).toBeUndefined();
+  });
+
+  it('preserves the existing ledger and verdict when a reprocessed report is ambiguous', async () => {
+    const findings = [
+      finding({ identity: 'first', startLine: 11, endLine: 11 }),
+      finding({ identity: 'second', startLine: 19, endLine: 19 }),
+    ];
+    const round = await processRoundReport({ gitCommonDir: dir, target: 'collision', round: 1, findings });
+    await recordVerdicts({ gitCommonDir: dir, target: 'collision', round: 1,
+      verdicts: [{ key: round.findings[1]!.identity, verdict: 'dismissed', reason: 'guard exists' }] });
+    const path = convergeRunStatePath(dir, 'collision');
+    const before = await readFile(path);
+    await expect(processRoundReport({ gitCommonDir: dir, target: 'collision', round: 1,
+      findings: findings.map((f) => ({ ...f, identity: 'same-key' })),
+    })).rejects.toThrow(/conflicting classifications/);
+    expect(await readFile(path)).toEqual(before);
+  });
+
+  it('preserves legacy state when missing-key fallback would conflate regating and suppressed sightings', async () => {
+    const round = await processRoundReport({ gitCommonDir: dir, target: 'legacy', round: 1,
+      findings: [finding({ identity: undefined, severity: 'important' })] });
+    await recordVerdicts({ gitCommonDir: dir, target: 'legacy', round: 1,
+      verdicts: [{ key: round.findings[0]!.identity, verdict: 'dismissed', reason: 'synthetic guard' }] });
+    const path = convergeRunStatePath(dir, 'legacy');
+    const before = await readFile(path);
+    await expect(processRoundReport({ gitCommonDir: dir, target: 'legacy', round: 2,
+      findings: [finding({ identity: undefined, severity: 'critical' }), finding({ identity: undefined, severity: 'minor' })],
+    })).rejects.toThrow(/conflicting classifications/);
+    expect(await readFile(path)).toEqual(before);
+  });
+
   it('near-duplicates within one report share one identity even across bucket boundaries', async () => {
     const r = await processRoundReport({
       gitCommonDir: dir,

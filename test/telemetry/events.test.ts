@@ -93,10 +93,21 @@ describe('roundIdentities', () => {
       { identity: 'cccccccccccccccc', status: 'new', finding: finding(undefined) },
       { identity: 'ffffffffffffffff', status: 'new', finding: finding('   ') },
       { identity: 'dddddddddddddddd', status: 'repeat', finding: finding('samekey000000001') },
-      { identity: 'eeeeeeeeeeeeeeee', status: 'repeat', finding: finding('samekey000000001') },
+      { identity: 'dddddddddddddddd', status: 'repeat', finding: finding('samekey000000001') },
     ]);
     expect(list.map((e) => e.identity_key)).toEqual(['cccccccccccccccc', 'ffffffffffffffff', 'samekey000000001']);
     expect(list[2]!.matched_identity).toBe('dddddddddddddddd');
+  });
+
+  it.each([
+    { identity: 'other', status: 'new' as const },
+    { identity: 'canonical', status: 'regating' as const },
+    { identity: 'canonical', status: 'new' as const, suppressReason: 'different evidence' },
+  ])('refuses a conflicting duplicate mapping: %j', (different) => {
+    expect(() => roundIdentities([
+      { identity: 'canonical', status: 'new', finding: finding('same-key') },
+      { ...different, finding: finding('same-key') },
+    ])).toThrow(/conflicting classifications/);
   });
 
   it('travels through buildEvent with the rest of the payload, scrubbed like any text', () => {

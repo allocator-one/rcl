@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { ConsensusFinding } from '../consensus/types.js';
 import {
-  stableFindingKey,
+  availableFindingKey,
   matchFinding,
   type IdentityEntry,
 } from './finding-identity.js';
@@ -219,6 +219,30 @@ export function findingGatingReason(f: { severity: string; gating?: { reason: st
   return f.severity === 'critical' || f.severity === 'important' ? 'legacy-blocking' : 'none';
 }
 
+/** The part of a classified finding that must survive report-key deduplication. */
+export interface ReportIdentityMapping {
+  identity: string;
+  status: FindingStatus;
+  suppressReason?: string;
+  finding: { identity?: string };
+}
+
+/** Refuse ambiguous legacy report keys before persisting or publishing classifications. */
+export function validateReportIdentityMappings(findings: readonly ReportIdentityMapping[]): void {
+  const seen = new Map<string, ReportIdentityMapping>();
+  for (const f of findings) {
+    const key = f.finding.identity?.trim() || f.identity;
+    const previous = seen.get(key);
+    if (previous && (previous.identity !== f.identity || previous.status !== f.status ||
+        (previous.suppressReason || undefined) !== (f.suppressReason || undefined))) {
+      throw new ConvergeRunStateError(
+        `Report identity ${key} has conflicting classifications; preserve the report for supported finding-ref recovery.`
+      );
+    }
+    seen.set(key, f);
+  }
+}
+
 /**
  * Dedupe one round's findings against every prior round of this run,
  * enforce the round cap, and persist the updated identity ledger.
@@ -287,6 +311,7 @@ export async function processRoundReport(options: {
   // bucket-key shortcut would merge non-overlapping findings that merely
   // share a 10-line neighborhood.
   const entries: IdentityEntry[] = Object.values(state.findings);
+  const occupied = new Set(Object.keys(state.findings));
   const counts: RoundCounts = { new: 0, repeat: 0, suppressed: 0, regating: 0 };
   const annotated: AnnotatedRoundFinding[] = [];
 
@@ -294,12 +319,8 @@ export async function processRoundReport(options: {
     const matched = matchFinding(finding, entries, lineWindow);
 
     if (!matched) {
-      let key = stableFindingKey(finding);
-      // A different location can share a bucket key only after the overlap
-      // and bucket fallbacks both missed — disambiguate rather than merge.
-      while (state.findings[key]) {
-        key = createHash('sha256').update(`${key}+`).digest('hex').slice(0, 16);
-      }
+      const key = availableFindingKey(finding, occupied);
+      occupied.add(key);
       const created: FindingEntry = {
         key,
         file: finding.file,
@@ -365,6 +386,8 @@ export async function processRoundReport(options: {
       finding,
     });
   }
+
+  validateReportIdentityMappings(annotated);
 
   // Re-processing a round without a report id (a legacy or mismatched
   // report) must not erase the binding an earlier pass persisted.
