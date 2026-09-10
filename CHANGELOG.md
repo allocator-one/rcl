@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 3.3.0 - 2026-09-10
+
+- **Preview-first finding recovery** (RCL-52): `rcl evidence recover-finding`
+  validates explicit run, report digest, finding ref and retained native identity
+  bindings. Preview is the default; `--submit` sends one authenticated correction.
+  No reviewers, new verdicts, accounting changes or unrelated outbox delivery.
+  Requires the Harness backend support from IO-12695 before live submission;
+  an acknowledgment is not convergence. Original report bytes are not retrieved
+  or reconstructed, and historical reports remain unchanged.
 
 - **Async patch convergence** (RCL-50): collect delayed async results across
   distinct immutable patch captures using the validated convergence target.
