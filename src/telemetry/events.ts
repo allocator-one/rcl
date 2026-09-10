@@ -51,7 +51,7 @@ export interface EventInput {
 export interface RoundIdentity {
   /** The finding's own key as the report carries it — what the server stored for the finding. */
   identity_key: string;
-  /** The identity `converge-report` matched the sighting to (its own key when new). */
+  /** The canonical native identity `converge-report` assigned or matched. */
   matched_identity: string;
   status: 'new' | 'repeat' | 'suppressed' | 'regating';
   suppress_reason?: string;

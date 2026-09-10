@@ -379,6 +379,7 @@ export function applyReportThresholds(
 }
 
 export function computeConsensus(
+  runId: string,
   groups: DeduplicatedGroup[],
   reviews: ModelReview[],
   roleMap: Map<string, Role>,
@@ -477,8 +478,9 @@ export function computeConsensus(
       consensus,
       // Report keys must not equal native ledger keys: allocation order and
       // appendix membership differ, and evidence consumers follow key aliases.
-      // Namespace every key, not just collisions, so reordering stays safe.
-      identity: `report:${identity}`,
+      // Scope keys to this run so a prior alias cannot resolve a new sighting
+      // while its round classification is still awaiting delivery.
+      identity: `report:${runId}:${identity}`,
     };
   });
 }

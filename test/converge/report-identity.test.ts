@@ -2,17 +2,19 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stableFindingKey } from '../../src/consensus/finding-identity.js';
 import { computeConsensus, applyReportThresholds } from '../../src/consensus/voter.js';
 import { processRoundReport, recordVerdicts, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
-import { roundIdentities } from '../../src/telemetry/events.js';
+import { buildEvent, roundIdentities } from '../../src/telemetry/events.js';
 import { sampleFinding, sampleResult, sampleReview } from '../telemetry/fixtures.js';
 
+const RUN_ID = sampleResult().run!.id;
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'rcl-report-identity-')); });
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
-function consensus(starts: number[]) {
+function consensus(starts: number[], runId = RUN_ID) {
   const inputs = starts.map((startLine) => sampleFinding({
     startLine, endLine: startLine,
     severity: startLine === 12 ? 'nitpick' : 'important',
@@ -20,6 +22,7 @@ function consensus(starts: number[]) {
   const model = 'test-model';
   const role = 'general';
   return computeConsensus(
+    runId,
     inputs.map((finding) => ({ representative: finding, members: [{ finding, model, role }] })),
     [sampleReview({ model, role, findings: inputs }), sampleReview({ model: 'other-model', role })],
     new Map()
@@ -27,6 +30,29 @@ function consensus(starts: number[]) {
 }
 
 describe('report identity through native classification and telemetry', () => {
+  it('does not reuse a prior run alias before the new run classification arrives', async () => {
+    const findings = consensus([11, 19]).map((f) => ({ ...f,
+      severity: f.startLine === 19 ? 'critical' as const : 'important' as const }));
+    const initial = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 1, findings });
+    await recordVerdicts({ gitCommonDir: dir, target: 'test', round: 1,
+      verdicts: initial.findings.map((f) => ({ key: f.identity, verdict: 'dismissed' as const, reason: 'synthetic guard' })) });
+    const { kept } = applyReportThresholds(consensus([12, 11], '00000000-0000-7000-8000-000000000002'), { minConsensusScore: 0.9 });
+    const next = kept.map((f) => ({ ...f, severity: 'critical' as const }));
+    const classified = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 2, findings: next });
+    expect(classified.findings[0]).toMatchObject({ status: 'regating', identity: initial.findings[0]!.identity });
+    const priorCritical = initial.findings[1]!.identity;
+    // Before RCL-51, first-wins telemetry emitted only the first bare anchor.
+    // That old graph could not lend the sibling's critical verdict here.
+    const oldKey = stableFindingKey(next[0]!);
+    const oldMapping = { identity_key: oldKey, matched_identity: initial.findings[0]!.identity, status: 'new' as const };
+    expect(verdictKeys(oldMapping, [oldMapping])).not.toContain(priorCritical);
+    // The envelope is published before round_processed: no current-run mapping
+    // exists yet, so the server can only follow the PR's prior alias graph.
+    const key = next[0]!.identity!;
+    expect(verdictKeys({ identity_key: key, matched_identity: key, status: 'new' }, roundIdentities(initial.findings)))
+      .not.toContain(priorCritical);
+  });
+
   it.each([
     { starts: [11, 19, 12], dismissedIndex: 0 }, { starts: [11, 19, 12], dismissedIndex: 1 },
     { starts: [12, 19, 11], dismissedIndex: 0 }, { starts: [12, 19, 11], dismissedIndex: 1 },
@@ -48,7 +74,8 @@ describe('report identity through native classification and telemetry', () => {
     await recordVerdicts({ gitCommonDir: dir, target: 'test', round: 1,
       verdicts: initial.findings.map((f) => ({ key: f.identity, verdict: 'dismissed' as const, reason: 'synthetic guard' })) });
     const firstMappings = roundIdentities(initial.findings);
-    const findings = consensus([19, 11]).map((f) => ({ ...f, severity: 'critical' as const, gating: { reason: 'consensus' as const } }));
+    const regenerated = consensus([19, 11], '00000000-0000-7000-8000-000000000002');
+    const findings = regenerated.map((f) => ({ ...f, severity: 'critical' as const, gating: { reason: 'consensus' as const } }));
     const next = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 2, findings });
     expect(next.findings.map((f) => f.status)).toEqual(['regating', 'regating']);
     expect(next.findings.map((f) => f.identity)).toEqual(initial.findings.map((f) => f.identity).reverse());
@@ -70,8 +97,11 @@ describe('report identity through native classification and telemetry', () => {
     expect(new Set(envelope.findings.map((f) => f.identity_key)).size).toBe(3);
     expect(envelope.findings.map((f) => f.ref)).toEqual(['f001', 'f002', 'f003']);
 
-    const classified = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 1, findings });
+    const classified = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 1, runId: result.run!.id, findings });
     const mappings = roundIdentities(classified.findings);
+    expect(buildEvent({ kind: 'round_processed', runId: result.run!.id, round: 1,
+      payload: { identities: mappings } }).payload.identities).toEqual(mappings);
+    expect(mappings.every((m) => m.identity_key.length === 60)).toBe(true);
     expect(mappings).toHaveLength(2);
     for (const [i, f] of classified.findings.entries()) {
       expect(mappings[i]).toEqual({ identity_key: envelope.findings[i]!.identity_key, matched_identity: f.identity, status: 'new' });
@@ -91,6 +121,7 @@ describe('report identity through native classification and telemetry', () => {
     expect(roundIdentities(replay.findings)).toEqual(mappings);
     const moved = [...findings].reverse().map((f) => ({ ...f, startLine: f.startLine + 1, endLine: f.endLine + 1 }));
     const movedConsensus = computeConsensus(
+      '00000000-0000-7000-8000-000000000002',
       moved.map((finding) => ({ representative: finding, members: [{ finding, model: 'test-model', role: 'general' }] })),
       [sampleReview({ model: 'test-model', role: 'general', findings: moved })],
       new Map()

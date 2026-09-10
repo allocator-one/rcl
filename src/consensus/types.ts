@@ -113,9 +113,9 @@ export interface ConsensusFinding extends Finding {
   consensus: ConsensusInfo;
   /**
    * Report-sighting key, allocated uniquely across kept and appendix groups.
-   * New reports namespace these as `report:<16-hex-key>` to keep them separate
-   * from native ledger keys. Cross-round location matching supplies the
-   * canonical identity in round classifications; it does not use this field
+   * New reports use `report:<run-id>:<16-hex-key>` to keep them separate from
+   * native ledger keys and other runs' sightings. Cross-round location matching
+   * supplies the canonical identity in classifications; it does not use this field
    * as a ledger key. Optional so older reports remain readable.
    */
   identity?: string;
