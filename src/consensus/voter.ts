@@ -475,9 +475,10 @@ export function computeConsensus(
       ...rep,
       severity: finalSeverity,
       consensus,
-      // Each report sighting needs an unambiguous key before thresholding.
-      // Cross-round location matching still belongs to the converge ledger.
-      identity,
+      // Report keys must not equal native ledger keys: allocation order and
+      // appendix membership differ, and evidence consumers follow key aliases.
+      // Namespace every key, not just collisions, so reordering stays safe.
+      identity: `report:${identity}`,
     };
   });
 }

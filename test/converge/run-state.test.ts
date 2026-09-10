@@ -202,6 +202,19 @@ describe('intra-round identity (RCL-24)', () => {
     expect(await readFile(path)).toEqual(before);
   });
 
+  it('preserves legacy state when missing-key fallback would conflate regating and suppressed sightings', async () => {
+    const round = await processRoundReport({ gitCommonDir: dir, target: 'legacy', round: 1,
+      findings: [finding({ identity: undefined, severity: 'important' })] });
+    await recordVerdicts({ gitCommonDir: dir, target: 'legacy', round: 1,
+      verdicts: [{ key: round.findings[0]!.identity, verdict: 'dismissed', reason: 'synthetic guard' }] });
+    const path = convergeRunStatePath(dir, 'legacy');
+    const before = await readFile(path);
+    await expect(processRoundReport({ gitCommonDir: dir, target: 'legacy', round: 2,
+      findings: [finding({ identity: undefined, severity: 'critical' }), finding({ identity: undefined, severity: 'minor' })],
+    })).rejects.toThrow(/conflicting classifications/);
+    expect(await readFile(path)).toEqual(before);
+  });
+
   it('near-duplicates within one report share one identity even across bucket boundaries', async () => {
     const r = await processRoundReport({
       gitCommonDir: dir,

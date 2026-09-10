@@ -779,7 +779,7 @@ describe('computeConsensus — finding identity', () => {
     const before = structuredClone(groups);
     const findings = computeConsensus(groups, reviews, ROLES);
     expect(new Set(findings.map((f) => f.identity)).size).toBe(3);
-    expect(findings[0]!.identity).toBe(stableFindingKey(inputs[0]!));
+    expect(findings[0]!.identity).toBe(`report:${stableFindingKey(inputs[0]!)}`);
     expect(computeConsensus(groups, reviews, ROLES)).toEqual(findings);
     expect(groups).toEqual(before);
     const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.9 });
@@ -788,7 +788,7 @@ describe('computeConsensus — finding identity', () => {
     expect([...kept, ...dropped].map((f) => f.identity)).toEqual(findings.map((f) => f.identity));
   });
 
-  it('stamps every consensus finding with its stable converge identity', () => {
+  it('namespaces every report identity separately from native ledger keys', () => {
     const f1 = mkF({ id: 'a', file: 'src/a.ts', startLine: 10, endLine: 12 });
     const f2 = mkF({ id: 'b', file: 'src/b.ts', startLine: 200, endLine: 201, category: 'tests', severity: 'nitpick' });
     const reviews = [mkReview('m1', 'general', [f1, f2])];
@@ -797,8 +797,8 @@ describe('computeConsensus — finding identity', () => {
       reviews,
       ROLES
     );
-    expect(findings.map((f) => f.identity)).toEqual([stableFindingKey(f1), stableFindingKey(f2)]);
-    expect(findings.every((f) => /^[0-9a-f]{16}$/.test(f.identity!))).toBe(true);
+    expect(findings.map((f) => f.identity)).toEqual([`report:${stableFindingKey(f1)}`, `report:${stableFindingKey(f2)}`]);
+    expect(findings.every((f) => /^report:[0-9a-f]{16}$/.test(f.identity!))).toBe(true);
   });
 
   it('keeps the identity on findings the report thresholds drop', () => {
@@ -807,7 +807,7 @@ describe('computeConsensus — finding identity', () => {
     const findings = computeConsensus([mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }])], reviews, ROLES);
     const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.9 });
     expect(kept).toHaveLength(0);
-    expect(dropped[0]!.identity).toBe(stableFindingKey(f));
+    expect(dropped[0]!.identity).toBe(`report:${stableFindingKey(f)}`);
   });
 
   it('stamps a multi-model group with the representative location identity and keeps it on kept findings', () => {
@@ -820,9 +820,9 @@ describe('computeConsensus — finding identity', () => {
       ROLES
     );
     expect(findings[0]!.consensus.models).toEqual(['m1', 'm2']);
-    expect(findings[0]!.identity).toBe(stableFindingKey(rep));
+    expect(findings[0]!.identity).toBe(`report:${stableFindingKey(rep)}`);
     const { kept } = applyReportThresholds(findings, {});
     expect(kept).toHaveLength(1);
-    expect(kept[0]!.identity).toBe(stableFindingKey(rep));
+    expect(kept[0]!.identity).toBe(`report:${stableFindingKey(rep)}`);
   });
 });

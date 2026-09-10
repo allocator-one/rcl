@@ -27,6 +27,39 @@ function consensus(starts: number[]) {
 }
 
 describe('report identity through native classification and telemetry', () => {
+  it.each([
+    { starts: [11, 19, 12], dismissedIndex: 0 }, { starts: [11, 19, 12], dismissedIndex: 1 },
+    { starts: [12, 19, 11], dismissedIndex: 0 }, { starts: [12, 19, 11], dismissedIndex: 1 },
+  ])('does not alias a gating sibling in order $starts when dismissing $dismissedIndex', async ({ starts, dismissedIndex }) => {
+    const { kept } = applyReportThresholds(consensus(starts), { minConsensusScore: 0.9 });
+    const findings = kept.map((f) => ({ ...f, gating: { reason: 'consensus' as const } }));
+    const result = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 1, findings });
+    const mappings = roundIdentities(result.findings);
+    const dismissed = result.findings[dismissedIndex]!;
+    const unresolved = result.findings[1 - dismissedIndex]!;
+    expect(verdictKeys(mappings[1 - dismissedIndex]!, mappings)).not.toContain(dismissed.identity);
+    const verdict = await recordVerdicts({ gitCommonDir: dir, target: 'test', round: 1,
+      verdicts: [{ key: dismissed.identity, verdict: 'dismissed', reason: 'synthetic guard' }] });
+    expect(verdict.resolution).toMatchObject({ status: 'unresolved', unresolved: [unresolved.identity] });
+  });
+
+  it.each([0, 1])('does not borrow sibling %i re-triage when report keys reorder across rounds', async (dismissedIndex) => {
+    const initial = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 1, findings: consensus([11, 19]) });
+    await recordVerdicts({ gitCommonDir: dir, target: 'test', round: 1,
+      verdicts: initial.findings.map((f) => ({ key: f.identity, verdict: 'dismissed' as const, reason: 'synthetic guard' })) });
+    const firstMappings = roundIdentities(initial.findings);
+    const findings = consensus([19, 11]).map((f) => ({ ...f, severity: 'critical' as const, gating: { reason: 'consensus' as const } }));
+    const next = await processRoundReport({ gitCommonDir: dir, target: 'test', round: 2, findings });
+    expect(next.findings.map((f) => f.status)).toEqual(['regating', 'regating']);
+    expect(next.findings.map((f) => f.identity)).toEqual(initial.findings.map((f) => f.identity).reverse());
+    const mappings = roundIdentities(next.findings);
+    const verdict = await recordVerdicts({ gitCommonDir: dir, target: 'test', round: 2,
+      verdicts: [{ key: next.findings[dismissedIndex]!.identity, verdict: 'dismissed', reason: 'synthetic re-triage' }] });
+    expect(verdict.resolution).toMatchObject({ status: 'unresolved', unresolved: [next.findings[1 - dismissedIndex]!.identity] });
+    expect(verdictKeys(mappings[1 - dismissedIndex]!, [...firstMappings, ...mappings]))
+      .not.toContain(next.findings[dismissedIndex]!.identity);
+  });
+
   it.each([{ starts: [11, 19, 12] }, { starts: [12, 19, 11] }])('keeps each sighting addressable in allocation order $starts', async ({ starts }) => {
     const { kept, dropped } = applyReportThresholds(consensus(starts), { minConsensusScore: 0.9 });
     const findings = kept.map((f) => ({ ...f, gating: { reason: f.startLine === 11 ? 'none' as const : 'consensus' as const } }));
@@ -70,3 +103,19 @@ describe('report identity through native classification and telemetry', () => {
     expect(roundIdentities(next.findings)).toHaveLength(2);
   });
 });
+
+// The evidence server follows aliases from a sighting's matched identity.
+// Keep this independent of the allocator so a shared key cannot mask a failure.
+function verdictKeys(mapping: ReturnType<typeof roundIdentities>[number], history: ReturnType<typeof roundIdentities>) {
+  const graph = new Map(history.filter((m) => m.identity_key !== m.matched_identity)
+    .map((m) => [m.identity_key, m.matched_identity]));
+  const keys = new Set([mapping.identity_key, mapping.matched_identity]);
+  let current = mapping.matched_identity;
+  for (let hops = 0; hops < 16; hops++) {
+    const next = graph.get(current);
+    if (!next || keys.has(next)) break;
+    keys.add(next);
+    current = next;
+  }
+  return [...keys];
+}
