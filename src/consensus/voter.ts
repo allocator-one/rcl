@@ -9,7 +9,7 @@ import type {
 import type { Role } from '../roles/types.js';
 import { CONFIDENCE_THRESHOLDS, DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import { linesOverlap, hasOpposingSentiment, combinedSimilarity } from './deduper.js';
-import { stableFindingKey } from './finding-identity.js';
+import { availableFindingKey } from './finding-identity.js';
 
 /** Thresholds shared with the deduper so both layers use the same geometry. */
 export interface ConsensusThresholds {
@@ -392,8 +392,11 @@ export function computeConsensus(
   const allModels = [...new Set(reviews.filter((r) => r.status === 'success').map((r) => r.model))];
   const allRoles = [...new Set(reviews.filter((r) => r.status === 'success').map((r) => r.role))];
 
+  const occupied = new Set<string>();
   return groups.map((group): ConsensusFinding => {
     const rep = group.representative;
+    const identity = availableFindingKey(rep, occupied);
+    occupied.add(identity);
     const uniqueModels = [...new Set(group.members.map((m) => m.model))];
     const uniqueRoles = [...new Set(group.members.map((m) => m.role))];
     const uniqueReviewers = new Set(group.members.map((m) => `${m.model}::${m.role}`)).size;
@@ -472,9 +475,9 @@ export function computeConsensus(
       ...rep,
       severity: finalSeverity,
       consensus,
-      // Identity exists in the report itself, not only in the converge
-      // state, so a stored report can be matched across rounds and heads.
-      identity: stableFindingKey(rep),
+      // Each report sighting needs an unambiguous key before thresholding.
+      // Cross-round location matching still belongs to the converge ledger.
+      identity,
     };
   });
 }

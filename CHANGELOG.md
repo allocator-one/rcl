@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Distinct report finding identities** (RCL-51): consensus findings that
+  share a line-bucket anchor receive separate report keys, including findings
+  below the report threshold. Native location matching and existing ledger
+  identities are unchanged. Legacy reports with conflicting classifications
+  for one report key fail before the round state is written, rather than
+  silently discarding a mapping. Preserve those reports for supported recovery;
+  this change does not relabel already-published evidence.
+
 ## 3.2.0 — 2026-09-08
 
 - **`rcl review … --attest`** (RCL-40): inside the organization's gate

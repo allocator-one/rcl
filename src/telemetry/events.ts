@@ -1,4 +1,5 @@
 import { uuidv7 } from '../report/uuid.js';
+import { validateReportIdentityMappings, type ReportIdentityMapping } from '../converge/run-state.js';
 import { scrubDeep, scrubIdentifier } from './scrub.js';
 
 /**
@@ -61,12 +62,13 @@ export interface RoundIdentity {
  * payload: the server applies a standing verdict to a sighting whose key
  * moved with the code only when it knows which identity rcl matched it to
  * (IO-12601). A finding without an identity in the report (pre-3.0) is
- * reported under the matched identity itself. One entry per report key —
- * the server refuses a key classified twice — keeping the first sighting.
+ * reported under the matched identity itself. Identical mappings share one
+ * entry; conflicting mappings cannot be represented by the key-only protocol.
  */
 export function roundIdentities(
-  findings: ReadonlyArray<{ identity: string; status: RoundIdentity['status']; suppressReason?: string; finding: { identity?: string } }>
+  findings: readonly ReportIdentityMapping[]
 ): RoundIdentity[] {
+  validateReportIdentityMappings(findings);
   const seen = new Set<string>();
   const out: RoundIdentity[] = [];
   for (const f of findings) {

@@ -768,6 +768,26 @@ describe('computeConsensus — precision-weighted votes (RCL-27)', () => {
 });
 
 describe('computeConsensus — finding identity', () => {
+  it('allocates distinct identities across kept and appendix findings sharing an anchor', () => {
+    const inputs = [
+      mkF({ startLine: 11, endLine: 11 }),
+      mkF({ startLine: 19, endLine: 22 }),
+      mkF({ startLine: 12, endLine: 12, severity: 'nitpick' }),
+    ];
+    const groups = inputs.map((f) => mkGroup(f, [{ finding: f, model: 'm1', role: 'general' }]));
+    const reviews = [mkReview('m1', 'general', inputs), mkReview('m2', 'general')];
+    const before = structuredClone(groups);
+    const findings = computeConsensus(groups, reviews, ROLES);
+    expect(new Set(findings.map((f) => f.identity)).size).toBe(3);
+    expect(findings[0]!.identity).toBe(stableFindingKey(inputs[0]!));
+    expect(computeConsensus(groups, reviews, ROLES)).toEqual(findings);
+    expect(groups).toEqual(before);
+    const { kept, dropped } = applyReportThresholds(findings, { minConsensusScore: 0.9 });
+    expect(kept).toHaveLength(2);
+    expect(dropped).toHaveLength(1);
+    expect([...kept, ...dropped].map((f) => f.identity)).toEqual(findings.map((f) => f.identity));
+  });
+
   it('stamps every consensus finding with its stable converge identity', () => {
     const f1 = mkF({ id: 'a', file: 'src/a.ts', startLine: 10, endLine: 12 });
     const f2 = mkF({ id: 'b', file: 'src/b.ts', startLine: 200, endLine: 201, category: 'tests', severity: 'nitpick' });
