@@ -126,6 +126,7 @@ import type { TelemetryLevel } from './telemetry/envelope.js';
 import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
+import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
 import { parseRepoName } from './evidence/target.js';
@@ -149,7 +150,8 @@ program
 // worker is not a user command.
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
-  if (name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  // Explicit identity recovery must not flush unrelated evidence, even in preview.
+  if (name === 'recover-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -929,6 +931,20 @@ evidenceCmd
   .option('--json', 'Print the API run object')
   .action(async (runId: string | undefined, opts: { json?: boolean }) => {
     process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('recover-finding')
+  .description('Preview an unpaid, attributed correction of one recorded finding identity; never reruns review or changes native history')
+  .requiredOption('--target <target>', 'The retained native convergence target')
+  .requiredOption('--run <uuid>', 'The immutable Harness run ID')
+  .requiredOption('--report-sha256 <sha256>', 'The original report JSON digest')
+  .requiredOption('--finding-ref <ref>', 'The exact finding ref within the run')
+  .requiredOption('--identity <key>', 'The native canonical identity from retained state')
+  .requiredOption('--for-pr <owner/repo#N>', 'The expected pull request, explicitly named')
+  .option('--submit', 'Submit the correction; without this flag only read and preview')
+  .action(async (opts: FindingRecoveryOptions) => {
+    process.exitCode = await runFindingRecovery(opts, evidenceDeps());
   });
 
 telemetry

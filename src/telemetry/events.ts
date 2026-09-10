@@ -16,6 +16,7 @@ export type ConvergeEventKind =
   | 'cap_changed'
   | 'round_processed'
   | 'verdicts_recorded'
+  | 'finding_identity_corrected'
   | 'resolution'
   | 'loss';
 
@@ -23,6 +24,7 @@ export type ConvergeEventKind =
 export const RUN_BOUND_KINDS: ReadonlySet<ConvergeEventKind> = new Set([
   'round_processed',
   'verdicts_recorded',
+  'finding_identity_corrected',
   'resolution',
 ]);
 
