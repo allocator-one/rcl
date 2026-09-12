@@ -437,6 +437,45 @@ reopen a previously suppressed critical finding if its canonical verdict is not
 critical. A `fixed` correction is audit-only for that run and does not clear
 `fixes_pending`.
 
+### `rcl evidence retriage-finding`
+
+Record a **new explicit dismissal** for one existing finding at its actual
+recorded severity. This repairs a historical grouped-severity dismissal without
+replaying the report or guessing a native identity after spans have drifted.
+It is not an automatic upgrade of the old verdict or a gate waiver.
+
+```bash
+rcl evidence retriage-finding --target "$TARGET" --run "$RUN_ID" \
+  --report-sha256 "$ORIGINAL_REPORT_SHA256" --finding-ref f002 \
+  --for-pr example/project#42 --reason-file ./retriage-reason.txt
+# Inspect the preview and source-backed reason; repeat with --submit if authorized.
+```
+
+All selectors and the UTF-8 reason file are required. The nonblank reason is
+limited to 2000 characters. The command reads the run, checks its PR, head,
+target, round and stored report metadata, and requires one exact finding ref
+with a unique `report:<run-id>:<key>` identity (RCL 3.3+). Legacy unqualified or
+colliding keys are refused, because a verdict on those keys could affect an
+unrelated sighting. The digest is compared with the stored artifact metadata;
+the command does not retrieve or claim to verify the original report bytes.
+It does not need or read native convergence state. `recover-finding` retains
+its separate exact-span/native-verdict checks unchanged.
+
+Preview performs only the run read. `--submit` appends one fresh, authenticated
+`verdicts_recorded` event under the original report key, on the recorded run and
+round, with the reason and recorded severity. No existing report, verdict,
+mapping, attempt count, model statistics or native file is rewritten. No
+reviewers run, and no outbox is flushed or spooled. Scrubbing that would alter
+the selected evidence or reason causes refusal before submission. The existing
+Harness API and its critical-dismissal check remain unchanged.
+
+Uses the normal Harness credential rules (`reviews:read`, plus `reviews:write`
+to submit). A refusal or uncertain response fails visibly, without automatic
+retry. Each submission is a fresh attributed judgment, not an idempotent replay
+of an old event; inspect server evidence before retrying an uncertain write.
+Exit 0 means preview succeeded or submission was acknowledged, **not** that the
+gate converged. Independently run `rcl evidence status` for the exact PR.
+
 ### `--for-pr` on a patch-file review
 
 A patch-file review (`rcl review changes.patch`) carries no repository or pull

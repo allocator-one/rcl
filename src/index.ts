@@ -127,6 +127,7 @@ import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
+import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
 import { parseRepoName } from './evidence/target.js';
@@ -150,8 +151,8 @@ program
 // worker is not a user command.
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
-  // Explicit identity recovery must not flush unrelated evidence, even in preview.
-  if (name === 'recover-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  // Explicit evidence repairs must not flush unrelated evidence, even in preview.
+  if (name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -945,6 +946,20 @@ evidenceCmd
   .option('--submit', 'Submit the correction; without this flag only read and preview')
   .action(async (opts: FindingRecoveryOptions) => {
     process.exitCode = await runFindingRecovery(opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('retriage-finding')
+  .description('Preview a fresh dismissal of one recorded finding at its actual severity; no rematching or native history changes')
+  .requiredOption('--target <target>', 'The recorded convergence target')
+  .requiredOption('--run <uuid>', 'The immutable Harness run ID')
+  .requiredOption('--report-sha256 <sha256>', 'The original stored report JSON digest')
+  .requiredOption('--finding-ref <ref>', 'The exact finding ref within the run')
+  .requiredOption('--for-pr <owner/repo#N>', 'The expected pull request, explicitly named')
+  .requiredOption('--reason-file <path>', 'UTF-8 file containing the explicit source-backed reason for this new judgment')
+  .option('--submit', 'Submit the fresh verdict; without this flag only read and preview')
+  .action(async (opts: FindingRetriageOptions) => {
+    process.exitCode = await runFindingRetriage(opts, evidenceDeps());
   });
 
 telemetry
