@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -240,6 +240,105 @@ describe('intra-round identity (RCL-24)', () => {
     });
     expect(r.findings[0]!.identity).not.toBe(r.findings[1]!.identity);
     expect(r.counts.new).toBe(2);
+  });
+});
+
+describe('grouped verdict severity (RCL-48)', () => {
+  const severities = ['critical', 'important', 'minor', 'nitpick'] as const;
+
+  it.each(severities.flatMap((first) => severities.map((second) => [first, second] as const)))(
+    'records the strongest same-round severity for %s then %s', async (first, second) => {
+      const findings = [
+        finding({ identity: 'first', severity: first, startLine: 10, endLine: 14 }),
+        finding({ identity: 'second', severity: second, startLine: 13, endLine: 17 }),
+      ];
+      const round = await processRoundReport({ gitCommonDir: dir, target: 'severity', round: 1, findings });
+      const key = round.findings[0]!.identity;
+      expect(round.findings.map((f) => f.identity)).toEqual([key, key]);
+      expect(round.counts).toEqual({ new: 2, repeat: 0, suppressed: 0, regating: 0 });
+      const result = await recordVerdicts({ gitCommonDir: dir, target: 'severity', round: 1,
+        verdicts: [{ key, verdict: 'dismissed', reason: 'synthetic guard' }] });
+      const strongest = severities[Math.min(severities.indexOf(first), severities.indexOf(second))];
+      expect(result.entries[0]).toMatchObject({ severity: strongest, verdictSeverity: strongest,
+        startLine: 13, endLine: 17 });
+      expect(result.resolution?.status).toBe('converged-dismissal-only');
+      expect((await loadConvergeRunState(dir, 'severity'))!.findings[key]!.verdictSeverity).toBe(strongest);
+    }
+  );
+
+  it.each([false, true])('requires explicit critical retriage after an important dismissal (reversed: %s)', async (reversed) => {
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'escalation', round: 1,
+      findings: [finding({ identity: 'important' })] });
+    const key = first.findings[0]!.identity;
+    await recordVerdicts({ gitCommonDir: dir, target: 'escalation', round: 1,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'original evidence' }] });
+    const findings = [finding({ identity: 'critical', severity: 'critical' }), finding({ identity: 'important' })];
+    if (reversed) findings.reverse();
+    const second = await processRoundReport({ gitCommonDir: dir, target: 'escalation', round: 2, findings });
+    expect(second.counts).toEqual({ new: 0, repeat: 0, suppressed: 1, regating: 1 });
+    expect((await loadConvergeRunState(dir, 'escalation'))!.findings[key]).toMatchObject({
+      severity: 'critical', verdictSeverity: 'important', verdictRound: 1, verdictReason: 'original evidence',
+    });
+    const pending = await recordVerdicts({ gitCommonDir: dir, target: 'escalation', round: 2, verdicts: [] });
+    expect(pending.resolution?.status).toBe('unresolved');
+    const retriaged = await recordVerdicts({ gitCommonDir: dir, target: 'escalation', round: 2,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'critical evidence reviewed' }] });
+    expect(retriaged.entries[0]!.verdictSeverity).toBe('critical');
+    expect(retriaged.resolution?.status).toBe('converged-dismissal-only');
+    const third = await processRoundReport({ gitCommonDir: dir, target: 'escalation', round: 3, findings });
+    expect(third.counts).toEqual({ new: 0, repeat: 0, suppressed: 2, regating: 0 });
+  });
+
+  it.each(['critical', 'important'] as const)('uses the reviewed round for a delayed %s verdict', async (severity) => {
+    const laterSeverity = severity === 'critical' ? 'important' : 'critical';
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'delayed', round: 1,
+      findings: [finding({ identity: 'first', severity }), finding({ identity: 'second', severity: 'minor' })] });
+    const key = first.findings[0]!.identity;
+    await processRoundReport({ gitCommonDir: dir, target: 'delayed', round: 2,
+      findings: [finding({ severity: laterSeverity })] });
+    const latest = await recordVerdicts({ gitCommonDir: dir, target: 'delayed', round: 2,
+      verdicts: [{ key, verdict: 'dismissed' }] });
+    expect(latest.entries[0]!.verdictSeverity).toBe(laterSeverity);
+    const delayed = await recordVerdicts({ gitCommonDir: dir, target: 'delayed', round: 1,
+      verdicts: [{ key, verdict: 'dismissed' }] });
+    expect(delayed.entries[0]!.verdictSeverity).toBe(severity);
+    expect(delayed.resolution).toBeUndefined();
+  });
+
+  it('can replay a retained pre-fix round without upgrading its old dismissal until retriage', async () => {
+    const findings = [finding({ identity: 'critical', severity: 'critical' }), finding({ identity: 'important' })];
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'legacy-severity', round: 1, findings });
+    const key = first.findings[0]!.identity;
+    await recordVerdicts({ gitCommonDir: dir, target: 'legacy-severity', round: 1,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'retained reason' }] });
+    const legacy = (await loadConvergeRunState(dir, 'legacy-severity'))!;
+    delete legacy.rounds[0]!.severities;
+    legacy.findings[key]!.severity = 'important';
+    legacy.findings[key]!.verdictSeverity = 'important';
+    await writeFile(convergeRunStatePath(dir, 'legacy-severity'), JSON.stringify(legacy));
+
+    await processRoundReport({ gitCommonDir: dir, target: 'legacy-severity', round: 1, findings });
+    expect((await loadConvergeRunState(dir, 'legacy-severity'))!.findings[key]).toMatchObject({
+      severity: 'critical', verdictSeverity: 'important', verdictReason: 'retained reason',
+    });
+    const retriaged = await recordVerdicts({ gitCommonDir: dir, target: 'legacy-severity', round: 1,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'retained reason' }] });
+    expect(retriaged.entries[0]!.verdictSeverity).toBe('critical');
+    expect(retriaged.resolution?.status).toBe('converged-dismissal-only');
+    expect((await loadConvergeRunState(dir, 'legacy-severity'))!.rounds).toHaveLength(1);
+  });
+
+  it('reprocesses the current round without erasing a verdict or consuming another round', async () => {
+    const findings = [finding({ identity: 'critical', severity: 'critical' }), finding({ identity: 'important' })];
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'replay', round: 1, findings });
+    const key = first.findings[0]!.identity;
+    await recordVerdicts({ gitCommonDir: dir, target: 'replay', round: 1,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'retained reason' }] });
+    expect(await processRoundReport({ gitCommonDir: dir, target: 'replay', round: 1, findings })).toEqual(first);
+    const state = (await loadConvergeRunState(dir, 'replay'))!;
+    expect(state.rounds).toHaveLength(1);
+    expect(state.findings[key]).toMatchObject({ severity: 'critical', verdictSeverity: 'critical',
+      verdictRound: 1, verdictReason: 'retained reason' });
   });
 });
 
