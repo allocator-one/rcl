@@ -26,7 +26,8 @@ export async function runFindingRetriage(options: FindingRetriageOptions, deps: 
     pr = parsePullRequestArg(options.forPr, null);
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(options.run) ||
         !/^[a-f0-9]{64}$/.test(options.reportSha256)) throw new Error('Retriage requires an explicit run UUID and lower-case report SHA-256.');
-    reason = (await readFile(resolve(deps.cwd ?? process.cwd(), options.reasonFile), 'utf8')).trim();
+    reason = new TextDecoder('utf-8', { fatal: true })
+      .decode(await readFile(resolve(deps.cwd ?? process.cwd(), options.reasonFile))).trim();
     if (!reason || reason.length > MAX_FREE_TEXT) throw new Error('Retriage requires an explicit reason of 1 to 2000 characters.');
   } catch (err) {
     deps.stderr(text(err instanceof Error ? err.message : String(err), 400));
@@ -60,7 +61,11 @@ export async function runFindingRetriage(options: FindingRetriageOptions, deps: 
 
   const result = await sink.postEvents([event]);
   if (result.kind !== 'ok') {
-    deps.stderr(`Verdict not acknowledged: ${describeOutcome(result)}. No retry or outbox flush was performed.`);
+    deps.stderr(`Verdict not acknowledged: ${describeOutcome(result)}. No retry or outbox flush was performed. Inspect server evidence before retrying.`);
+    return EVIDENCE_EXIT.unanswered;
+  }
+  if (result.value.inserted !== 1 || result.value.duplicates !== 0) {
+    deps.stderr('A fresh verdict insertion was not acknowledged. Inspect server evidence before retrying.');
     return EVIDENCE_EXIT.unanswered;
   }
   deps.stdout(`Verdict acknowledged: ${result.value.inserted} inserted, ${result.value.duplicates} duplicate. This is not a convergence verdict; check evidence status separately.`);

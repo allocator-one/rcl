@@ -452,7 +452,7 @@ rcl evidence retriage-finding --target "$TARGET" --run "$RUN_ID" \
 ```
 
 All selectors and the UTF-8 reason file are required. The nonblank reason is
-limited to 2000 characters. The command reads the run, checks its PR, head,
+limited to 2000 characters; malformed UTF-8 is refused. The command reads the run, checks its PR, head,
 target, round and stored report metadata, and requires one exact finding ref
 with a unique `report:<run-id>:<key>` identity (RCL 3.3+). Legacy unqualified or
 colliding keys are refused, because a verdict on those keys could affect an
@@ -473,7 +473,7 @@ Uses the normal Harness credential rules (`reviews:read`, plus `reviews:write`
 to submit). A refusal or uncertain response fails visibly, without automatic
 retry. Each submission is a fresh attributed judgment, not an idempotent replay
 of an old event; inspect server evidence before retrying an uncertain write.
-Exit 0 means preview succeeded or submission was acknowledged, **not** that the
+Exit 0 means preview succeeded or exactly one new insertion was acknowledged, **not** that the
 gate converged. Independently run `rcl evidence status` for the exact PR.
 
 ### `--for-pr` on a patch-file review

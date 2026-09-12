@@ -76,7 +76,8 @@ describe('retriage evidence guards', () => {
 });
 
 async function command(options: { submit?: boolean; postStatus?: number; readStatus?: number;
-  reason?: string; missingFile?: boolean; mutate?: (input: ReturnType<typeof fixture>) => void } = {}) {
+  reason?: string | Uint8Array; missingFile?: boolean; receipt?: { inserted: number; duplicates: number };
+  mutate?: (input: ReturnType<typeof fixture>) => void } = {}) {
   const input = fixture();
   options.mutate?.(input);
   const cwd = await mkdtemp(join(tmpdir(), 'rcl-retriage-command-'));
@@ -85,7 +86,7 @@ async function command(options: { submit?: boolean; postStatus?: number; readSta
   const { fetch, requests } = fakeFetch((request) => {
     if (request.method === 'GET') return { status: options.readStatus ?? 200, body: { data: input.run } };
     const status = options.postStatus ?? 201;
-    return { status, body: status === 201 ? { data: { inserted: 1, duplicates: 0 } } : { error: 'conflict', message: 'Synthetic refusal' } };
+    return { status, body: status === 201 ? { data: options.receipt ?? { inserted: 1, duplicates: 0 } } : { error: 'conflict', message: 'Synthetic refusal' } };
   });
   const out: string[] = [];
   const err: string[] = [];
@@ -99,6 +100,29 @@ async function command(options: { submit?: boolean; postStatus?: number; readSta
 }
 
 describe('retriage command failures', () => {
+  it.each([[0xff], [0xc3, 0x28], [0xe2, 0x82], [0xed, 0xa0, 0x80]])('refuses malformed UTF-8 bytes %j before network access', async (...bytes) => {
+    const result = await command({ submit: true, reason: Uint8Array.from(bytes) });
+    expect(result.code).toBe(2);
+    expect(result.requests).toEqual([]);
+  });
+
+  it('preserves a valid Unicode reason in a newly inserted verdict', async () => {
+    const unicodeReason = 'Prüfung: accès autorisé — 確認済み';
+    const result = await command({ submit: true, reason: unicodeReason });
+    expect(result.code).toBe(0);
+    expect(result.requests).toHaveLength(2);
+    expect(result.requests[1]!.body).toContain(unicodeReason);
+  });
+
+  it.each([{ inserted: 0, duplicates: 1 }, { inserted: 0, duplicates: 0 },
+    { inserted: 2, duplicates: 0 }, { inserted: 1, duplicates: 1 }])('refuses an unexpected receipt %j without retrying', async (receipt) => {
+    const result = await command({ submit: true, receipt });
+    expect(result.code).toBe(3);
+    expect(result.requests.map((r) => r.method)).toEqual(['GET', 'POST']);
+    expect(result.out).not.toContain('Verdict acknowledged');
+    expect(result.err).toContain('Inspect server evidence before retrying');
+  });
+
   it('needs no native state for a fresh judgment, and does not claim original bytes were retrieved', async () => {
     const result = await command();
     expect(result.code).toBe(0);

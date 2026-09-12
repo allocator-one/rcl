@@ -11,6 +11,8 @@
   review. Ambiguous and legacy unqualified report keys are refused. Submission
   acknowledgment is not gate convergence; check the server's status separately.
 
+## 3.3.1 - 2026-09-12
+
 - **Grouped verdict severity** (RCL-48): retain the strongest severity seen
   for each identity within its reviewed round, regardless of sighting order.
   Delayed verdicts use the retained round severity instead of a later sighting
