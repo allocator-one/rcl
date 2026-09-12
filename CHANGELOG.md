@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.3.1 - 2026-09-12
+
+- **Grouped verdict severity** (RCL-48): retain the strongest severity seen
+  for each identity within its reviewed round, regardless of sighting order.
+  Delayed verdicts use the retained round severity instead of a later sighting
+  and do not replace a newer round's active verdict. Invalid severities,
+  unrecorded rounds and unsighted identities in retained round snapshots are
+  rejected before any state is written.
+  Existing dismissals are not upgraded automatically; later escalation to
+  critical still requires explicit retriage. Harness's critical-dismissal
+  guard and finding identity matching are unchanged. Recovery of historical
+  grouped verdicts without rematching identities is tracked separately in RCL-56.
+
 ## 3.3.0 - 2026-09-10
 
 - **Preview-first finding recovery** (RCL-52): `rcl evidence recover-finding`

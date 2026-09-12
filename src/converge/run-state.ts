@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { ConsensusFinding } from '../consensus/types.js';
+import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
   availableFindingKey,
   matchFinding,
@@ -86,7 +87,7 @@ export interface FindingEntry {
   /**
    * Severity at the moment the verdict was recorded (RCL-30). A dismissal is
    * terminal on that evidence; only escalation past it re-gates. Absent on
-   * pre-2.1.1 states — the first-seen `severity` stands in.
+   * pre-2.1.1 states — the retained `severity` is frozen before new sightings.
    */
   verdictSeverity?: string;
 }
@@ -103,7 +104,13 @@ export interface ConvergeRunState {
   target: string;
   roundCap: number;
   /** `runId` is the report's `run.id` (rcl ≥ 3.0), which converge-verdict sends with every verdict. */
-  rounds: Array<{ round: number; counts: RoundCounts; runId?: string }>;
+  rounds: Array<{
+    round: number;
+    counts: RoundCounts;
+    runId?: string;
+    /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
+    severities?: Record<string, ConsensusFinding['severity']>;
+  }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
   /**
@@ -282,6 +289,9 @@ export async function processRoundReport(options: {
   if (!Number.isSafeInteger(options.round) || options.round < 1) {
     throw new ConvergeRunStateError('round must be a positive integer.');
   }
+  if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
+    throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
+  }
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
@@ -322,6 +332,7 @@ export async function processRoundReport(options: {
   const occupied = new Set(Object.keys(state.findings));
   const counts: RoundCounts = { new: 0, repeat: 0, suppressed: 0, regating: 0 };
   const annotated: AnnotatedRoundFinding[] = [];
+  const severities: Record<string, ConsensusFinding['severity']> = {};
 
   for (const finding of options.findings) {
     const matched = matchFinding(finding, entries, lineWindow);
@@ -342,6 +353,7 @@ export async function processRoundReport(options: {
         lastRound: options.round,
       };
       state.findings[key] = created;
+      severities[key] = finding.severity;
       entries.push(created);
       counts.new++;
       annotated.push({ identity: key, status: 'new', finding });
@@ -349,18 +361,24 @@ export async function processRoundReport(options: {
     }
 
     const entry = state.findings[matched.key]!;
-    // Capture the evidence the verdict reasoned about before this sighting
-    // overwrites it (pre-2.1.1 entries lack verdictSeverity; the first-seen
-    // severity stands in).
+    // Freeze a legacy verdict's implicit severity before updating sightings;
+    // later reports must not reinterpret that dismissal as critical.
     const severityAtVerdict = entry.verdictSeverity ?? entry.severity;
+    if (entry.verdict !== undefined && entry.verdictSeverity === undefined) {
+      entry.verdictSeverity = severityAtVerdict;
+    }
     entry.lastRound = Math.max(entry.lastRound, options.round);
     entry.models = [...new Set([...entry.models, ...finding.consensus.models])];
-    // Track the latest sighting's span and severity: fixes shift lines
+    // Track the latest sighting's span: fixes shift lines
     // between rounds, and matching against a stale first-seen span would
     // decay round over round.
     entry.startLine = finding.startLine;
     entry.endLine = finding.endLine;
-    entry.severity = finding.severity;
+    const priorSeverity = severities[entry.key];
+    if (priorSeverity === undefined ||
+        DEFAULT_SEVERITY_ORDER.indexOf(finding.severity) < DEFAULT_SEVERITY_ORDER.indexOf(priorSeverity)) {
+      severities[entry.key] = finding.severity;
+    }
 
     let status: FindingStatus;
     let suppressReason: string | undefined;
@@ -396,13 +414,16 @@ export async function processRoundReport(options: {
   }
 
   validateReportIdentityMappings(annotated);
+  for (const [key, severity] of Object.entries(severities)) {
+    state.findings[key]!.severity = severity;
+  }
 
   // Re-processing a round without a report id (a legacy or mismatched
   // report) must not erase the binding an earlier pass persisted.
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts, ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
+    { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,
@@ -463,17 +484,29 @@ export async function recordVerdicts(options: {
       `No converge run state for ${target} — run converge-report before recording verdicts.`
     );
   }
+  const reviewedRound = state.rounds.find((r) => r.round === options.round);
+  if (!reviewedRound) {
+    throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
+  }
   const updated: FindingEntry[] = [];
+  const severities = reviewedRound.severities;
   for (const { key, verdict, reason } of options.verdicts) {
     const entry = state.findings[key];
     if (!entry) {
       throw new ConvergeRunStateError(`Unknown finding key "${key}" for target ${target}.`);
     }
-    entry.verdict = verdict;
-    entry.verdictRound = options.round;
-    entry.verdictSeverity = entry.severity;
-    if (reason !== undefined) entry.verdictReason = reason;
-    updated.push(entry);
+    if (severities !== undefined && severities[key] === undefined) {
+      throw new ConvergeRunStateError(`Finding "${key}" was not sighted in round ${options.round}.`);
+    }
+    // Emit delayed evidence without replacing a newer round's active verdict.
+    const recorded = entry.verdictRound !== undefined && entry.verdictRound > options.round
+      ? { ...entry, verdictReason: undefined }
+      : entry;
+    recorded.verdict = verdict;
+    recorded.verdictRound = options.round;
+    recorded.verdictSeverity = severities?.[key] ?? entry.severity;
+    if (reason !== undefined) recorded.verdictReason = reason;
+    updated.push(recorded);
   }
   state.updatedAt = new Date().toISOString();
   await writeState(options.gitCommonDir, state);
