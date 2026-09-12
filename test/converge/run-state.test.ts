@@ -336,6 +336,31 @@ describe('grouped verdict severity (RCL-48)', () => {
       verdicts: [{ key, verdict: 'dismissed' }] });
     expect(delayed.entries[0]!.verdictSeverity).toBe(severity);
     expect(delayed.resolution).toBeUndefined();
+    expect((await loadConvergeRunState(dir, 'delayed'))!.findings[key]).toMatchObject({
+      verdictRound: 2, verdictSeverity: laterSeverity,
+    });
+  });
+
+  it.each([undefined, 'older evidence'])('preserves a newer critical retriage when recording an older verdict with reason %s', async (reason) => {
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'delayed-retriage', round: 1,
+      findings: [finding()] });
+    const key = first.findings[0]!.identity;
+    await processRoundReport({ gitCommonDir: dir, target: 'delayed-retriage', round: 2,
+      findings: [finding({ severity: 'critical' })] });
+    await recordVerdicts({ gitCommonDir: dir, target: 'delayed-retriage', round: 2,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'critical evidence reviewed' }] });
+    const delayed = await recordVerdicts({ gitCommonDir: dir, target: 'delayed-retriage', round: 1,
+      verdicts: [{ key, verdict: 'dismissed', reason }] });
+    expect(delayed.entries[0]).toMatchObject({ verdict: 'dismissed', verdictRound: 1,
+      verdictSeverity: 'important' });
+    expect(delayed.entries[0]!.verdictReason).toBe(reason);
+    expect((await loadConvergeRunState(dir, 'delayed-retriage'))!.findings[key]).toMatchObject({
+      verdict: 'dismissed', verdictRound: 2, verdictSeverity: 'critical',
+      verdictReason: 'critical evidence reviewed',
+    });
+    const third = await processRoundReport({ gitCommonDir: dir, target: 'delayed-retriage', round: 3,
+      findings: [finding({ severity: 'critical' })] });
+    expect(third.counts).toEqual({ new: 0, repeat: 0, suppressed: 1, regating: 0 });
   });
 
   it('can replay a retained pre-fix round without upgrading its old dismissal until retriage', async () => {

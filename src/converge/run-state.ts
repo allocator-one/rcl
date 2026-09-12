@@ -498,11 +498,15 @@ export async function recordVerdicts(options: {
     if (severities !== undefined && severities[key] === undefined) {
       throw new ConvergeRunStateError(`Finding "${key}" was not sighted in round ${options.round}.`);
     }
-    entry.verdict = verdict;
-    entry.verdictRound = options.round;
-    entry.verdictSeverity = severities?.[key] ?? entry.severity;
-    if (reason !== undefined) entry.verdictReason = reason;
-    updated.push(entry);
+    // Emit delayed evidence without replacing a newer round's active verdict.
+    const recorded = entry.verdictRound !== undefined && entry.verdictRound > options.round
+      ? { ...entry, verdictReason: undefined }
+      : entry;
+    recorded.verdict = verdict;
+    recorded.verdictRound = options.round;
+    recorded.verdictSeverity = severities?.[key] ?? entry.severity;
+    if (reason !== undefined) recorded.verdictReason = reason;
+    updated.push(recorded);
   }
   state.updatedAt = new Date().toISOString();
   await writeState(options.gitCommonDir, state);
