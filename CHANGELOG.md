@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.4.0 - 2026-09-12
+
+- **Explicit finding retriage** (RCL-56): `rcl evidence retriage-finding`
+  previews a fresh dismissal under one immutable, run-scoped report key at its
+  recorded severity. Requires the exact PR, run, report digest, finding ref,
+  convergence target and a source-backed reason file; `--submit` sends one
+  attributed verdict through the existing Harness API. No identity rematching,
+  report rewriting, native history/accounting updates, outbox delivery or paid
+  review. Ambiguous and legacy unqualified report keys are refused. Submission
+  acknowledgment is not gate convergence; check the server's status separately.
+
 ## 3.3.1 - 2026-09-12
 
 - **Grouped verdict severity** (RCL-48): retain the strongest severity seen
@@ -10,8 +21,8 @@
   rejected before any state is written.
   Existing dismissals are not upgraded automatically; later escalation to
   critical still requires explicit retriage. Harness's critical-dismissal
-  guard and finding identity matching are unchanged. Recovery of historical
-  grouped verdicts without rematching identities is tracked separately in RCL-56.
+  guard and finding identity matching are unchanged. Historical grouped verdicts
+  need explicit retriage; upgrading the CLI alone does not repair old evidence.
 
 ## 3.3.0 - 2026-09-10
 
