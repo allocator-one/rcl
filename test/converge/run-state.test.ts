@@ -246,6 +246,39 @@ describe('intra-round identity (RCL-24)', () => {
 describe('grouped verdict severity (RCL-48)', () => {
   const severities = ['critical', 'important', 'minor', 'nitpick'] as const;
 
+  it.each(['info', 'Critical', 'CRITICAL', '', null, undefined])('rejects malformed severity %s without changing state', async (severity) => {
+    await processRoundReport({ gitCommonDir: dir, target: 'invalid-severity', round: 1, findings: [finding()] });
+    const statePath = convergeRunStatePath(dir, 'invalid-severity');
+    const before = await readFile(statePath);
+    await expect(processRoundReport({ gitCommonDir: dir, target: 'invalid-severity', round: 2,
+      findings: [finding({ severity: 'critical' }), finding({ severity: severity as ConsensusFinding['severity'] })],
+    })).rejects.toThrow(/severity/);
+    expect(await readFile(statePath)).toEqual(before);
+  });
+
+  it('rejects a verdict for an unsighted identity in a modern round without partially recording the batch', async () => {
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'unsighted', round: 1, findings: [finding()] });
+    const second = await processRoundReport({ gitCommonDir: dir, target: 'unsighted', round: 2,
+      findings: [finding({ file: 'src/other.ts', severity: 'critical' })] });
+    const statePath = convergeRunStatePath(dir, 'unsighted');
+    const before = await readFile(statePath);
+    await expect(recordVerdicts({ gitCommonDir: dir, target: 'unsighted', round: 1, verdicts: [
+      { key: first.findings[0]!.identity, verdict: 'dismissed' },
+      { key: second.findings[0]!.identity, verdict: 'dismissed' },
+    ] })).rejects.toThrow(/not sighted in round 1/);
+    expect(await readFile(statePath)).toEqual(before);
+  });
+
+  it('rejects a verdict for an unrecorded round', async () => {
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'unknown-round', round: 1, findings: [finding()] });
+    const statePath = convergeRunStatePath(dir, 'unknown-round');
+    const before = await readFile(statePath);
+    await expect(recordVerdicts({ gitCommonDir: dir, target: 'unknown-round', round: 2,
+      verdicts: [{ key: first.findings[0]!.identity, verdict: 'dismissed' }],
+    })).rejects.toThrow(/not recorded/);
+    expect(await readFile(statePath)).toEqual(before);
+  });
+
   it.each(severities.flatMap((first) => severities.map((second) => [first, second] as const)))(
     'records the strongest same-round severity for %s then %s', async (first, second) => {
       const findings = [
@@ -326,6 +359,26 @@ describe('grouped verdict severity (RCL-48)', () => {
     expect(retriaged.entries[0]!.verdictSeverity).toBe('critical');
     expect(retriaged.resolution?.status).toBe('converged-dismissal-only');
     expect((await loadConvergeRunState(dir, 'legacy-severity'))!.rounds).toHaveLength(1);
+  });
+
+  it('keeps a legacy dismissal without verdictSeverity noncritical across repeated processing', async () => {
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'legacy-verdict', round: 1,
+      findings: [finding()] });
+    const key = first.findings[0]!.identity;
+    await recordVerdicts({ gitCommonDir: dir, target: 'legacy-verdict', round: 1,
+      verdicts: [{ key, verdict: 'dismissed', reason: 'original important evidence' }] });
+    const legacy = (await loadConvergeRunState(dir, 'legacy-verdict'))!;
+    delete legacy.findings[key]!.verdictSeverity;
+    delete legacy.rounds[0]!.severities;
+    await writeFile(convergeRunStatePath(dir, 'legacy-verdict'), JSON.stringify(legacy));
+    for (const round of [2, 2, 3]) {
+      const processed = await processRoundReport({ gitCommonDir: dir, target: 'legacy-verdict', round,
+        findings: [finding({ severity: 'critical' })] });
+      expect(processed.findings[0]!.status).toBe('regating');
+    }
+    expect((await loadConvergeRunState(dir, 'legacy-verdict'))!.findings[key]).toMatchObject({
+      verdictSeverity: 'important', verdictRound: 1, verdictReason: 'original important evidence',
+    });
   });
 
   it('reprocesses the current round without erasing a verdict or consuming another round', async () => {

@@ -709,7 +709,7 @@ program
                 ts,
                 verdict: e.verdict!,
                 models: e.models,
-                severity: e.severity,
+                severity: e.verdictSeverity ?? e.severity,
                 target: opts.target as string,
                 findingKey: e.key,
                 source: 'live' as const,

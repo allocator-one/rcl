@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -95,8 +95,8 @@ describe('converge-verdict severity telemetry', () => {
         GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice, RCL_DATA_DIR: join(repo, 'account'),
         HARNESS_API_TOKEN: 'synthetic-test-token', HARNESS_API_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
         RCL_NO_HARNESS_KEYS: '1', NODE_NO_WARNINGS: '1' };
-      const run = (args: string[]) => promisify(execFile)(process.execPath,
-        ['--import', tsxImport, cliEntrypoint, ...args, '--target', 'severity-test', '--round', '1', '--json'],
+      const run = (args: string[], round = 1) => promisify(execFile)(process.execPath,
+        ['--import', tsxImport, cliEntrypoint, ...args, '--target', 'severity-test', '--round', String(round), '--json'],
         { cwd: repo, env, timeout: 10_000 });
       const classified = JSON.parse((await run(['converge-report', '--report', report])).stdout);
       const key = classified.findings[0].identity as string;
@@ -108,6 +108,17 @@ describe('converge-verdict severity telemetry', () => {
       ] } });
       expect(events.find((event) => event.kind === 'resolution')).toMatchObject({ run_id: runId,
         payload: { status: 'converged-dismissal-only', unresolved: 0 } });
+
+      const laterReport = join(repo, 'later-report.json');
+      writeFileSync(laterReport, JSON.stringify({ run: { id: '019921a0-0000-7000-8000-000000000002',
+        converge: { target: 'severity-test', round: 2 } }, findings: [sampleFinding()] }));
+      await run(['converge-report', '--report', laterReport], 2);
+      await run(['converge-verdict', '--dismissed', `${key}=original critical evidence reviewed`]);
+      expect(events.filter((event) => event.kind === 'verdicts_recorded').at(-1)).toMatchObject({ run_id: runId,
+        payload: { verdicts: [{ identity_key: key, severity: 'critical' }] } });
+      const outcomes = readFileSync(join(repo, 'account/outcomes.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(outcomes).toHaveLength(2);
+      expect(outcomes.map((outcome) => outcome.severity)).toEqual(['critical', 'critical']);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

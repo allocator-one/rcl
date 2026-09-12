@@ -87,7 +87,7 @@ export interface FindingEntry {
   /**
    * Severity at the moment the verdict was recorded (RCL-30). A dismissal is
    * terminal on that evidence; only escalation past it re-gates. Absent on
-   * pre-2.1.1 states — the first-seen `severity` stands in.
+   * pre-2.1.1 states — the retained `severity` is frozen before new sightings.
    */
   verdictSeverity?: string;
 }
@@ -289,6 +289,9 @@ export async function processRoundReport(options: {
   if (!Number.isSafeInteger(options.round) || options.round < 1) {
     throw new ConvergeRunStateError('round must be a positive integer.');
   }
+  if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
+    throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
+  }
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
@@ -358,9 +361,12 @@ export async function processRoundReport(options: {
     }
 
     const entry = state.findings[matched.key]!;
-    // Legacy verdicts fall back to the prior severity, which stays untouched
-    // until all sightings are classified so report order cannot alter it.
+    // Freeze a legacy verdict's implicit severity before updating sightings;
+    // later reports must not reinterpret that dismissal as critical.
     const severityAtVerdict = entry.verdictSeverity ?? entry.severity;
+    if (entry.verdict !== undefined && entry.verdictSeverity === undefined) {
+      entry.verdictSeverity = severityAtVerdict;
+    }
     entry.lastRound = Math.max(entry.lastRound, options.round);
     entry.models = [...new Set([...entry.models, ...finding.consensus.models])];
     // Track the latest sighting's span: fixes shift lines
@@ -478,12 +484,19 @@ export async function recordVerdicts(options: {
       `No converge run state for ${target} — run converge-report before recording verdicts.`
     );
   }
+  const reviewedRound = state.rounds.find((r) => r.round === options.round);
+  if (!reviewedRound) {
+    throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
+  }
   const updated: FindingEntry[] = [];
-  const severities = state.rounds.find((r) => r.round === options.round)?.severities;
+  const severities = reviewedRound.severities;
   for (const { key, verdict, reason } of options.verdicts) {
     const entry = state.findings[key];
     if (!entry) {
       throw new ConvergeRunStateError(`Unknown finding key "${key}" for target ${target}.`);
+    }
+    if (severities !== undefined && severities[key] === undefined) {
+      throw new ConvergeRunStateError(`Finding "${key}" was not sighted in round ${options.round}.`);
     }
     entry.verdict = verdict;
     entry.verdictRound = options.round;
