@@ -13,6 +13,8 @@ import {
   linkAbortSignal,
   reviewFromParse,
   usageFromAnthropic,
+  ASK_MAX_OUTPUT_TOKENS,
+  TruncatedAnswerError,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -222,12 +224,18 @@ export class AnthropicAdapter implements ReviewAdapter {
         const response = await this.client.messages.create(
           {
             model: modelId,
-            max_tokens: 4096,
+            max_tokens: ASK_MAX_OUTPUT_TOKENS,
             system: systemPrompt,
             messages: [{ role: 'user', content: userPrompt }],
           },
           { signal, timeout: options.timeoutMs + 30_000 }
         );
+        // An answer cut off at the ceiling is not a short answer: the verifier
+        // emits one entry per finding, and a partial list parses to nothing,
+        // which gates every candidate it never reached (RCL-60).
+        if (response.stop_reason === 'max_tokens') {
+          throw new TruncatedAnswerError('anthropic');
+        }
         return response.content
           .filter((block): block is Anthropic.TextBlock => block.type === 'text')
           .map((block) => block.text)

@@ -118,6 +118,67 @@ describe('applyGating (RCL-23)', () => {
     expect(verification).toMatchObject({ candidates: 2, refuted: 1, unrefuted: 1 });
   });
 
+  // RCL-60: production ran 12, 32, 62 and 73 candidates through one call and
+  // got nothing back — the answer stopped covering the list, so every
+  // candidate was recorded unavailable and gated unrefuted, while the run
+  // still reported healthy reviewers.
+  it('splits a large candidate set across calls so a long answer cannot swallow the lane', async () => {
+    const ask = vi.fn(async (_model, _system, userPrompt): Promise<ModelAnswer> => {
+      const ids = [...userPrompt.matchAll(/^### (F\d+)$/gm)].map((m) => m[1]!);
+      return {
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: JSON.stringify(ids.map((id) => ({ id, verdict: 'refuted', reason: 'guarded' }))),
+        durationMs: 10,
+        status: 'success',
+      };
+    });
+
+    const findings = Array.from({ length: 20 }, (_, i) =>
+      makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+    );
+
+    const { findings: annotated, verification } = await applyGating(findings, { ...baseOpts, ask });
+
+    expect(ask.mock.calls.length).toBeGreaterThan(1);
+    expect(verification).toMatchObject({ candidates: 20, refuted: 20, unavailable: 0 });
+    expect(annotated.every((f) => f.gating?.reason === 'none')).toBe(true);
+  });
+
+  it('keeps one failed batch from costing the findings in the others', async () => {
+    let call = 0;
+    const ask = vi.fn(async (_model, _system, userPrompt): Promise<ModelAnswer> => {
+      const ids = [...userPrompt.matchAll(/^### (F\d+)$/gm)].map((m) => m[1]!);
+      call += 1;
+      if (call === 1) {
+        return {
+          model: 'google/gemini-3.6-flash',
+          provider: 'google',
+          text: '',
+          durationMs: 10,
+          status: 'error',
+          error: 'answer truncated at the output limit',
+        };
+      }
+      return {
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: JSON.stringify(ids.map((id) => ({ id, verdict: 'refuted', reason: 'guarded' }))),
+        durationMs: 10,
+        status: 'success',
+      };
+    });
+
+    const findings = Array.from({ length: 16 }, (_, i) =>
+      makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+    );
+
+    const { verification } = await applyGating(findings, { ...baseOpts, ask });
+
+    // One batch of eight lost, the rest verified — not all sixteen gated.
+    expect(verification).toMatchObject({ candidates: 16, refuted: 8, unavailable: 8 });
+  });
+
   it('honors a higher minModels threshold', async () => {
     const ask = vi.fn(
       async (): Promise<ModelAnswer> => ({
