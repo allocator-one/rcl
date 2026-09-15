@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.6.0 - 2026-09-15
 
 - **Verifier batching** (RCL-60): the verification lane sends candidates in
   batches of eight, three in flight, instead of one call carrying every
