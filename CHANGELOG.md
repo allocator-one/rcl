@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Attested finding retriage** (RCL-58): allow `retriage-finding` to record a
+  source-backed dismissal for a standalone attested gate run whose server record
+  has no convergence metadata. Require the exact verified same-repository CI run,
+  PR, report digest and finding ref. Event round `1` satisfies the existing Harness
+  verdict wire protocol only and does not create or claim native convergence.
+
 ## 3.4.0 - 2026-09-12
 
 - **Explicit finding retriage** (RCL-56): `rcl evidence retriage-finding`

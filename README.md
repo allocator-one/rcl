@@ -452,18 +452,26 @@ rcl evidence retriage-finding --target "$TARGET" --run "$RUN_ID" \
 ```
 
 All selectors and the UTF-8 reason file are required. The nonblank reason is
-limited to 2000 characters; malformed UTF-8 is refused. The command reads the run, checks its PR, head,
-target, round and stored report metadata, and requires one exact finding ref
-with a unique `report:<run-id>:<key>` identity (RCL 3.3+). Legacy unqualified or
+limited to 2000 characters; malformed UTF-8 is refused. The command reads the
+run, checks its PR, head and stored report metadata, and requires one exact
+finding ref with a unique `report:<run-id>:<key>` identity (RCL 3.3+). A native
+convergence run must match the selected target and carry a positive round. A
+standalone gate run without convergence metadata is accepted only when Harness
+records it as an attested, current-head, same-repository CI review. Its PR, run,
+report digest and finding ref provide the server binding; the selected target
+remains the event's informational label. The required event round is `1` as a
+wire-protocol value only, not a claim that the attested review participated in
+native convergence. Legacy unqualified or
 colliding keys are refused, because a verdict on those keys could affect an
 unrelated sighting. The digest is compared with the stored artifact metadata;
 the command does not retrieve or claim to verify the original report bytes.
 It does not need or read native convergence state. `recover-finding` retains
 its separate exact-span/native-verdict checks unchanged.
 
-Preview performs only the run read. `--submit` appends one fresh, authenticated
-`verdicts_recorded` event under the original report key, on the recorded run and
-round, with the reason and recorded severity. No existing report, verdict,
+Preview performs only the run read and labels the standalone-attested transport
+round when applicable. `--submit` appends one fresh, authenticated
+`verdicts_recorded` event under the original report key, on the selected run,
+with the reason and recorded severity. No existing report, verdict,
 mapping, attempt count, model statistics or native file is rewritten. No
 reviewers run, and no outbox is flushed or spooled. Scrubbing that would alter
 the selected evidence or reason causes refusal before submission. The existing

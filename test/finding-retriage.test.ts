@@ -38,6 +38,16 @@ describe('retriage evidence guards', () => {
     expect(JSON.stringify(input)).toBe(original);
   });
 
+  it('binds a standalone attested gate run to the selected PR and wire-protocol round without claiming convergence', () => {
+    const input = fixture();
+    makeStandaloneAttested(input.run);
+    const event = prepareFindingRetriage(input);
+    expect(event).toMatchObject({ kind: 'verdicts_recorded', run_id: runId, converge_target: input.target, round: 1,
+      payload: { report_json_sha256: digest, finding_ref: 'f002',
+        verdicts: [{ identity_key: reportKey, verdict: 'dismissed', severity: 'critical', reason }] } });
+    expect(event).not.toHaveProperty('attempt');
+  });
+
   const invalid: Array<[string, (input: ReturnType<typeof fixture>) => void]> = [
     ['run ID', (i) => { i.runId = '00000000-0000-4000-8000-000000000002'; }],
     ['malformed run ID', (i) => { i.runId = 'not-a-uuid'; }],
@@ -46,6 +56,16 @@ describe('retriage evidence guards', () => {
     ['PR', (i) => { i.prNumber = 43; }],
     ['head', (i) => { i.run.target.head_sha = null; }],
     ['target', (i) => { i.target = 'another-42'; }],
+    ['standalone asserted run', (i) => { i.run.converge = null; }],
+    ['standalone non-review attested run', (i) => { makeStandaloneAttested(i.run); i.run.command = 'converge-report'; }],
+    ['standalone non-attested credential', (i) => { makeStandaloneAttested(i.run); i.run.credential_kind = 'api_token'; }],
+    ['standalone non-attested tier', (i) => { makeStandaloneAttested(i.run); i.run.tier = 'asserted'; }],
+    ['standalone stale-head attested run', (i) => { makeStandaloneAttested(i.run); i.run.head_verified = 'stale'; }],
+    ['standalone unverified attested run', (i) => { makeStandaloneAttested(i.run); i.run.repo_verified = false; }],
+    ['standalone cross-repository attested run', (i) => { makeStandaloneAttested(i.run); i.run.is_cross_repository = true; }],
+    ['standalone backfilled attested run', (i) => { makeStandaloneAttested(i.run); i.run.provenance = 'backfill'; }],
+    ['standalone non-CI attested run', (i) => { makeStandaloneAttested(i.run); i.run.runner = { kind: 'human' }; }],
+    ['standalone patch attested run', (i) => { makeStandaloneAttested(i.run); i.run.target.kind = 'patch'; }],
     ['missing round', (i) => { i.run.converge!.round = null; }],
     ['fractional round', (i) => { i.run.converge!.round = 1.5; }],
     ['zero round', (i) => { i.run.converge!.round = 0; }],
@@ -104,6 +124,19 @@ describe('retriage command failures', () => {
     const result = await command({ submit: true, reason: Uint8Array.from(bytes) });
     expect(result.code).toBe(2);
     expect(result.requests).toEqual([]);
+  });
+
+  it('submits one dismissal for a standalone attested gate run without native history or report replay', async () => {
+    const result = await command({ submit: true, mutate: (i) => makeStandaloneAttested(i.run) });
+    expect(result.code).toBe(0);
+    expect(result.requests.map((r) => r.method)).toEqual(['GET', 'POST']);
+    const event = JSON.parse(result.requests[1]!.body).events[0];
+    expect(event).toMatchObject({ kind: 'verdicts_recorded', run_id: runId, converge_target: 'project-42', round: 1,
+      payload: { report_json_sha256: digest, finding_ref: 'f002',
+        verdicts: [{ identity_key: reportKey, verdict: 'dismissed', severity: 'critical', reason }] } });
+    const preview = await command({ mutate: (i) => makeStandaloneAttested(i.run) });
+    expect(preview.out).toContain('Standalone attested run');
+    expect(preview.out).toContain('not a native convergence round');
   });
 
   it('preserves a valid Unicode reason in a newly inserted verdict', async () => {
@@ -165,6 +198,18 @@ describe('retriage command failures', () => {
     expect(result.requests.map((r) => r.method)).toEqual(['GET']);
   });
 });
+
+function makeStandaloneAttested(run: RunDetail): void {
+  run.converge = null;
+  run.command = 'review';
+  run.credential_kind = 'attested';
+  run.tier = 'attested';
+  run.head_verified = 'current';
+  run.repo_verified = true;
+  run.is_cross_repository = false;
+  run.provenance = 'live';
+  run.runner = { kind: 'ci', ci_run_id: '123' };
+}
 
 function fixture() {
   const run: RunDetail = {
