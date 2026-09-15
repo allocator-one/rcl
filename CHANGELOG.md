@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **GitHub Releases**: the Release workflow now creates the GitHub Release for
+  each `vX.Y.Z` tag after the npm publish, with notes taken from the matching
+  `CHANGELOG.md` section and the published tarball attached. `npm publish`
+  still runs in the minimal tokenless job; only the new final job holds
+  `contents: write`.
+
 ## 3.5.0 - 2026-09-15
 
 - **Attested finding retriage** (RCL-58): allow `retriage-finding` to record a

@@ -133,3 +133,49 @@ jobs:
       - run: npm publish "$PACKAGE_PATH" --access public --provenance --ignore-scripts
         env:
           PACKAGE_PATH: ${{ steps.package.outputs.path }}
+
+  github-release:
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Create GitHub Release from CHANGELOG.md
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ needs.validate.outputs.package_sha256 }}
+          PACKAGE_PATH: ${{ needs.validate.outputs.package_filename }}
+        run: |
+          ACTUAL_SHA256=$(sha256sum "$PACKAGE_PATH" | cut -d ' ' -f 1)
+          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "package artifact checksum mismatch"
+            exit 1
+          fi
+
+          node scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+          {
+            echo
+            echo "npm: https://www.npmjs.com/package/review-council/v/${GITHUB_REF_NAME#v}"
+            echo "Tarball SHA-256: \`$ACTUAL_SHA256\`"
+          } >> release-notes.md
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists — updating notes"
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$GITHUB_REF_NAME" -f name="$GITHUB_REF_NAME" \
+              -F draft=false -F prerelease=false \
+              -f body="$(cat release-notes.md)" >/dev/null
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$PACKAGE_PATH" --clobber

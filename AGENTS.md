@@ -70,12 +70,18 @@ long-lived npm token belongs in this repository.
    organization owners and prevent tag updates and deletions.
 4. Monitor the Release workflow, then verify npm's exact version and dist-tag
    and reinstall the published CLI before checking `rcl --version`.
+5. Confirm the GitHub Release `vX.Y.Z` exists with the CHANGELOG notes and the
+   tarball attached (`gh release view vX.Y.Z`). The workflow creates it; if
+   that job failed, create it by hand from `node scripts/release-notes.mjs`.
 
 The workflow accepts stable annotated tags only when their commit is on
 `main` and the tag matches `package.json`. A tokenless job reruns lint, build,
 and tests and creates the package tarball. A separate minimal job receives only
 that tarball and publishes it with npm trusted publishing and provenance; npm
 install and package lifecycle scripts never receive OIDC publishing authority.
+A final job, after publish, creates the GitHub Release for the tag with notes
+extracted from the matching `CHANGELOG.md` section and the tarball attached.
+Every `CHANGELOG.md` release needs a `## X.Y.Z` heading or that job fails.
 
 ## Architecture Overview
 
