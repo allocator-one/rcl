@@ -161,6 +161,7 @@ describe('retriage command failures', () => {
     expect(result.code).toBe(0);
     expect(result.requests.map((r) => r.method)).toEqual(['GET']);
     expect(result.out).toContain('original report bytes were not retrieved or verified');
+    expect(result.out).not.toContain('Standalone attested run');
   });
 
   it.each([401, 403, 409, 503])('reports submission status %s without retries, spooling or a convergence claim', async (postStatus) => {
