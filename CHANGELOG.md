@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.5.0 - 2026-09-15
 
 - **Attested finding retriage** (RCL-58): allow `retriage-finding` to record a
   source-backed dismissal for a standalone attested gate run whose server record
