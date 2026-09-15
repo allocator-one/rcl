@@ -55,6 +55,9 @@ export async function runFindingRetriage(options: FindingRetriageOptions, deps: 
   if (!options.submit) {
     deps.stdout(`Preview for ${text(new URL(sink.baseUrl).host, 200)}: no verdict submitted. Use --submit to record this new judgment.`);
     deps.stdout(safeJson(event));
+    if (run.value.converge == null) {
+      deps.stdout('Standalone attested run: event round 1 satisfies the Harness verdict wire protocol; it is not a native convergence round.');
+    }
     deps.stdout('The digest matches stored report metadata; original report bytes were not retrieved or verified. Native history is unchanged.');
     return EVIDENCE_EXIT.ok;
   }

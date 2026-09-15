@@ -3,6 +3,8 @@ import { buildEvent, type WireEvent } from '../telemetry/events.js';
 import { MAX_FREE_TEXT } from '../telemetry/scrub.js';
 import type { RunDetail } from './types.js';
 
+const STANDALONE_ATTESTED_EVENT_ROUND = 1;
+
 export interface FindingRetriageInput {
   run: RunDetail;
   target: string;
@@ -29,10 +31,20 @@ export function prepareFindingRetriage(input: FindingRetriageInput): WireEvent {
   const reports = run.artifacts?.filter((a) => a.kind === 'report_json') ?? [];
   require(reports.length === 1 && reports[0]!.stored && reports[0]!.declared_sha256 === input.reportSha256,
     'Retriage requires one stored report with the selected digest.');
-  require(input.target.length > 0 && input.target.length <= 200 && run.converge?.target === input.target,
-    'Retriage target does not match server evidence.');
-  const round = run.converge?.round;
-  require(z.number().int().positive().max(2_147_483_647).safeParse(round).success, 'Retriage requires a recorded round.');
+  require(input.target.length > 0 && input.target.length <= 200, 'Retriage target is invalid.');
+  const standaloneAttested = run.converge == null;
+  if (standaloneAttested) {
+    require(isVerifiedAttestedGateReview(run),
+      'Retriage without convergence metadata requires an attested, verified same-repository CI review.');
+  } else {
+    require(run.converge!.target === input.target, 'Retriage target does not match server evidence.');
+  }
+  // Harness requires a positive round on verdict events. A standalone attested
+  // gate review has no convergence round, so 1 is a transport value only and
+  // does not claim that the review participated in native convergence.
+  const round = standaloneAttested ? STANDALONE_ATTESTED_EVENT_ROUND : run.converge!.round;
+  require(z.number().int().positive().max(2_147_483_647).safeParse(round).success,
+    standaloneAttested ? 'Retriage attested transport round is invalid.' : 'Retriage requires a recorded round.');
   require(input.findingRef.length > 0 && input.findingRef.length <= 32, 'Retriage finding ref is invalid.');
   const findings = run.findings.filter((f) => f.ref === input.findingRef);
   require(findings.length === 1, 'Retriage requires one exact finding ref.');
@@ -58,4 +70,10 @@ export function prepareFindingRetriage(input: FindingRetriageInput): WireEvent {
   require(event.converge_target === input.target && JSON.stringify(event.payload) === JSON.stringify(payload),
     'Retriage refused: transport scrubbing would change the selected evidence or reason.');
   return event;
+}
+
+function isVerifiedAttestedGateReview(run: RunDetail): boolean {
+  return run.command === 'review' && run.credential_kind === 'attested' && run.tier === 'attested' &&
+    run.head_verified === 'current' && run.repo_verified === true && run.is_cross_repository === false &&
+    run.provenance === 'live' && run.runner?.kind === 'ci' && run.target.kind === 'pr';
 }

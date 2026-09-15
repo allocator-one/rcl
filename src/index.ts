@@ -951,7 +951,7 @@ evidenceCmd
 evidenceCmd
   .command('retriage-finding')
   .description('Preview a fresh dismissal of one recorded finding at its actual severity; no rematching or native history changes')
-  .requiredOption('--target <target>', 'The recorded convergence target')
+  .requiredOption('--target <target>', 'The recorded convergence target, or an event label for a standalone attested run')
   .requiredOption('--run <uuid>', 'The immutable Harness run ID')
   .requiredOption('--report-sha256 <sha256>', 'The original stored report JSON digest')
   .requiredOption('--finding-ref <ref>', 'The exact finding ref within the run')
