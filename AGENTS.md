@@ -67,7 +67,10 @@ long-lived npm token belongs in this repository.
 2. Validate and merge the protected PR with green `ci`.
 3. Create annotated tag `vX.Y.Z` on the merge commit, never the pre-merge
    branch tip, and push the tag. GitHub rulesets restrict `v*` creation to
-   organization owners and prevent tag updates and deletions.
+   organization owners and repository Maintainers, and prevent tag updates
+   and deletions. Releasers need no npm account: the workflow publishes
+   through OIDC. To let someone release, give them the Maintain role on the
+   repository; nothing else is required.
 4. Monitor the Release workflow, then verify npm's exact version and dist-tag
    and reinstall the published CLI before checking `rcl --version`.
 5. Confirm the GitHub Release `vX.Y.Z` exists with the CHANGELOG notes and the
