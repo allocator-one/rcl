@@ -204,7 +204,7 @@ export function toMarkdown(result: ReviewResult): string {
     const v = stats.verification;
     if (v) {
       line += ` · verification: ${v.refuted}/${v.candidates} single-model claim(s) refuted in ${(v.durationMs / 1000).toFixed(1)}s`;
-      if (v.unavailable > 0) line += ` (${v.unavailable} unavailable — treated as gating)`;
+      if (v.unavailable > 0) line += ` (${v.unavailable} unavailable — unverified, not gating)`;
     }
     sections.push(line);
     sections.push('');
