@@ -1,9 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 // @ts-expect-error -- plain ESM build script, no type declarations
 import { renderAll, readSource, render, SKILLS, TARGETS } from '../../scripts/build-skills.mjs';
 
 type Rendered = { path: string; content: string };
+
+// Classify a rendered file by its path inside the repository, never by the
+// absolute path: a checkout under `.claude/worktrees/<name>/` would otherwise
+// read every Codex file as a Claude one.
+const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const isClaudeTarget = (path: string): boolean =>
+  relative(ROOT, path).replaceAll('\\', '/').startsWith('.claude/');
 
 describe('generated skill files', () => {
   it('match the source templates (run `npm run build:skills` if this fails)', () => {
@@ -39,8 +48,7 @@ describe('generated skill files', () => {
       (renderAll() as Rendered[]).map((r) => [r.path, r.content])
     );
     for (const [path, content] of bySkillDir) {
-      const normalizedPath = path.replaceAll('\\', '/');
-      if (normalizedPath.includes('/.claude/')) {
+      if (isClaudeTarget(path)) {
         // Claude Code has a first-class background facility; the nohup/PID
         // dance is Codex-only and would be unrunnable guidance here.
         expect(content, path).toContain('run_in_background');
@@ -58,7 +66,6 @@ describe('generated skill files', () => {
     expect(convergeSkills.length).toBeGreaterThan(0);
 
     for (const { path, content } of convergeSkills) {
-      const normalizedPath = path.replaceAll('\\', '/');
       const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
       const claimCount = content.split(claimCommand).length - 1;
       const claim = content.indexOf(claimCommand);
@@ -75,7 +82,7 @@ describe('generated skill files', () => {
       expect(content, path).toMatch(/Exit 3 is an accounting\/infrastructure failure/i);
       expect(content, path).toMatch(/Never terminate a live council/i);
       expect(content, path).toContain('failed to remove stale review artifacts');
-      if (normalizedPath.includes('/.claude/')) {
+      if (isClaudeTarget(path)) {
         expect(content, path).toContain('exactly once as a foreground Bash call');
         expect(content.indexOf('run_in_background: true'), path).toBeGreaterThan(claim);
       } else {

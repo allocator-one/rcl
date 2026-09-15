@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Verifier batching** (RCL-60): the verification lane sends candidates in
+  batches of eight, three in flight, instead of one call carrying every
+  candidate; past about ten candidates that single answer was cut off, parsed
+  to nothing, and every candidate was recorded unavailable. The `ask` path
+  now shares a 16k output budget across adapters, and a provider that stops
+  at its output ceiling fails the answer with `TruncatedAnswerError` instead
+  of returning a truncated success, so an uncovered candidate records the real
+  cause. Contributed in #63.
+- **Unavailable verification no longer gates** (RCL-62): a candidate the
+  verification pass could not check — the call failed, the answer did not
+  cover it, its file has no diff context, or the roster has no direct-API
+  verifier — keeps `gating.verification.verdict: unavailable` with the cause
+  in `note`, but is left at the tier it earned on its own,
+  `gating.reason: none`, instead of being promoted to `verified`. Consensus
+  and critical findings gate as before. Harness reads `gating_reason`, so an
+  attested gate run whose verifier lane failed no longer blocks on
+  single-model findings nobody checked. The report's gating line reads
+  `unavailable — unverified, not gating`.
+- **Skills test**: `test/skills/generated.test.ts` classifies rendered files
+  by their repository-relative path, so `npm test` passes from a checkout
+  under `.claude/worktrees/`.
 - **GitHub Releases**: the Release workflow now creates the GitHub Release for
   each `vX.Y.Z` tag after the npm publish, with notes taken from the matching
   `CHANGELOG.md` section and the published tarball attached. `npm publish`

@@ -198,7 +198,7 @@ describe('applyGating (RCL-23)', () => {
     expect(ask).toHaveBeenCalledTimes(1);
   });
 
-  it('fails safe when the verifier call fails: candidates keep gating, marked unavailable', async () => {
+  it('leaves candidates unverified and not gating when the verifier call fails (RCL-62)', async () => {
     const ask = vi.fn(
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
@@ -214,9 +214,41 @@ describe('applyGating (RCL-23)', () => {
       ask,
     });
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
+  });
+
+  // RCL-62: an attested gate run whose verifier lane failed promoted 15
+  // single-model, low-confidence findings to blocking against a two-model
+  // consensus bar. Verification promotes nothing it did not check; consensus
+  // and critical findings still gate on their own.
+  it('does not promote unchecked candidates while consensus and critical still gate (RCL-62)', async () => {
+    const ask = vi.fn(
+      async (): Promise<ModelAnswer> => ({
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '',
+        durationMs: 5,
+        status: 'error',
+        error: 'TruncatedAnswerError: google: answer truncated at the output limit',
+      })
+    );
+    const { findings, verification } = await applyGating(
+      [
+        makeFinding({ id: 'single', models: ['m1'] }),
+        makeFinding({ id: 'agreed', models: ['m1', 'm2'] }),
+        makeFinding({ id: 'crit', severity: 'critical', models: ['m1'] }),
+      ],
+      { ...baseOpts, ask }
+    );
+    expect(findings[0]!.gating).toMatchObject({
+      reason: 'none',
+      verification: { verdict: 'unavailable', note: expect.stringMatching(/truncated/) },
+    });
+    expect(findings[1]!.gating).toEqual({ reason: 'consensus' });
+    expect(findings[2]!.gating).toEqual({ reason: 'critical' });
+    expect(verification).toMatchObject({ candidates: 1, refuted: 0, unrefuted: 0, unavailable: 1 });
   });
 
   it('treats findings missing from a malformed verifier response as unavailable', async () => {
@@ -234,12 +266,12 @@ describe('applyGating (RCL-23)', () => {
       ask,
     });
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
   });
 
-  it('never sends a candidate without diff context — it stays gating, marked unavailable', async () => {
+  it('never sends a candidate without diff context — it is marked unavailable and does not gate', async () => {
     const ask = vi.fn();
     const { findings } = await applyGating(
       [makeFinding({ file: 'src/not-in-diff.ts', models: ['m1'] })],
@@ -247,13 +279,13 @@ describe('applyGating (RCL-23)', () => {
     );
     expect(ask).not.toHaveBeenCalled();
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
     expect(findings[0]!.gating!.verification!.note).toMatch(/no diff context/i);
   });
 
-  it('keeps candidates gating when no verifier model is available', async () => {
+  it('does not gate candidates when no verifier model is available', async () => {
     const ask = vi.fn();
     const { findings } = await applyGating([makeFinding({ models: ['m1'] })], {
       ...baseOpts,
@@ -262,7 +294,7 @@ describe('applyGating (RCL-23)', () => {
     });
     expect(ask).not.toHaveBeenCalled();
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
   });
@@ -549,7 +581,7 @@ describe('applyGating hunk scoping', () => {
     );
     expect(ask).not.toHaveBeenCalled();
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
     expect(findings[0]!.gating!.verification!.note).toMatch(/no hunk/i);
@@ -599,7 +631,7 @@ describe('applyGating hunk scoping', () => {
 
     expect(ask).not.toHaveBeenCalled();
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
   });
@@ -620,7 +652,7 @@ describe('applyGating hunk scoping', () => {
 
     expect(ask).not.toHaveBeenCalled();
     expect(findings[0]!.gating).toMatchObject({
-      reason: 'verified',
+      reason: 'none',
       verification: { verdict: 'unavailable' },
     });
   });

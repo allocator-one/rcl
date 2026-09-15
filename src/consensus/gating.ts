@@ -24,6 +24,15 @@ import {
  * Everything else still lands in the report — it just stops blocking
  * convergence ('none'). This is the two-stage recall→precision split
  * production review bots converged on.
+ *
+ * Verification promotes nothing it did not check (RCL-62): a candidate the
+ * pass could not judge — verifier call failed, answer did not cover it, no
+ * diff context, no direct-API verifier in the roster — is recorded with
+ * verdict 'unavailable' and left at the tier it earned on its own ('none').
+ * The fail-safe alternative (unavailable keeps gating) turned every verifier
+ * outage into a gate no pull request could pass: on 2026-09-14 a lane-wide
+ * failure promoted 73 single-model, low-confidence findings to blocking on
+ * one PR and blocked every open PR in the organization (RCL-60, RCL-62).
  */
 export type GatingReason = 'consensus' | 'critical' | 'verified' | 'none';
 
@@ -32,9 +41,11 @@ export interface GatingVerification {
   /**
    * 'refuted': the verifier showed the finding does not hold → not gating.
    * 'unrefuted': the verifier could not refute it → gates.
-   * 'unavailable': the verification pass failed or did not cover this
-   * finding — fail SAFE: the finding keeps gating, because a broken
-   * precision filter must never greenlight unreviewed claims.
+   * 'unavailable': the verification pass failed, did not run, or did not
+   * cover this finding — it is left at the tier it earned without
+   * verification ('none'): a single-model claim nobody checked is reported,
+   * not promoted to blocking (RCL-62). Read `note` for the cause; a
+   * persistently broken verifier is a fixable infrastructure problem.
    */
   verdict: 'refuted' | 'unrefuted' | 'unavailable';
   note?: string;
@@ -57,8 +68,8 @@ export interface GatingOptions {
   minModels: number;
   /**
    * Direct-API model that runs the refutation pass. Undefined = no usable
-   * verifier in the configured roster: candidates keep gating, marked
-   * unavailable, and no content leaves the configured providers.
+   * verifier in the configured roster: candidates are recorded unavailable
+   * and do not gate, and no content leaves the configured providers.
    */
   verificationModel: string | undefined;
   verificationTimeoutMs: number;
@@ -68,7 +79,7 @@ export interface GatingOptions {
    * Changed files, so the verifier judges against the actual change. A
    * candidate whose file has no patch here is NEVER sent for verification —
    * a refutation must be grounded in the code, not in the claim's own text —
-   * and stays gating, marked unavailable.
+   * and is recorded unavailable, not gating.
    */
   diffFiles?: FileChange[];
   /**
@@ -109,7 +120,7 @@ export const DEFAULT_GATING_CONFIG = {
   mode: 'verified-consensus',
   minModels: 2,
   // Use the stable Flash council member for this latency-sensitive pass;
-  // verification remains capped at 60 s so it cannot dominate round time.
+  // each verifier batch is capped at 60 s so it cannot dominate round time.
   verificationModel: 'google/gemini-3.8-flash',
   verificationTimeoutMs: 60_000,
 } as const;
@@ -120,7 +131,7 @@ export const DEFAULT_GATING_CONFIG = {
  * DEFAULT verifier is only used when its provider is already in the
  * configured roster — a review must never send the diff to a provider the
  * user configured away from just to verify findings. When the roster has no
- * direct-API model, verification is unavailable (candidates keep gating).
+ * direct-API model, verification is unavailable (candidates do not gate).
  */
 export function resolveGatingConfig(
   input: GatingConfigInput | undefined,
@@ -553,12 +564,15 @@ export async function applyGating(
     durationMs: 0,
   };
 
+  // Verification promotes nothing it did not check (RCL-62): an unchecked
+  // candidate keeps the tier it earned on its own — not gating — with the
+  // cause recorded, instead of being promoted to 'verified' by default.
   function markUnavailable(findingIndex: number, note: string): void {
     stats.unavailable++;
     annotated[findingIndex] = {
       ...findings[findingIndex]!,
       gating: {
-        reason: 'verified',
+        reason: 'none',
         verification: { model: verifierModel, verdict: 'unavailable', note },
       },
     };
@@ -615,7 +629,7 @@ export async function applyGating(
 
   // One verdict per candidate has to fit in one answer, so a single call over
   // every candidate silently stops covering them as a review grows — and an
-  // uncovered candidate gates unrefuted. Batches keep each answer small, and
+  // uncovered candidate goes unverified. Batches keep each answer small, and
   // keep one bad batch from costing the whole lane (RCL-60).
   const verdictsByIndex = new Map<number, { refuted: boolean; note?: string }>();
   const failureByIndex = new Map<number, string>();

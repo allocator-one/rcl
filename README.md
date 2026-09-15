@@ -619,13 +619,15 @@ thresholds:
 # Convergence gating: which findings block convergence / CI (RCL-23).
 # A finding gates when multi-model, critical, or unrefuted by a cheap
 # verification pass; refuted single-model claims stay in the report but
-# stop blocking. Report JSON marks every finding with gating.reason
+# stop blocking, and so does a claim the pass could not check (verdict
+# unavailable): verification promotes nothing it did not check. Report
+# JSON marks every finding with gating.reason
 # (consensus | critical | verified | none).
 gating:
   mode: verified-consensus        # or all-findings (legacy: severity alone decides)
   minModels: 2                    # distinct models for consensus gating
   verificationModel: google/gemini-3.8-flash  # direct-API only
-  verificationTimeout: 60000      # ms for the single batched refutation call
+  verificationTimeout: 60000      # ms per refutation call (8 candidates per batch, 3 in flight)
 
 # Output defaults
 output:
