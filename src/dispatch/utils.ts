@@ -234,6 +234,31 @@ export function linkAbortSignal(
   return () => external.removeEventListener('abort', onAbort);
 }
 
+/**
+ * Output budget for `ask/4` — the single-shot path behind the verification
+ * lane and `discuss`.
+ *
+ * The verifier answers one JSON entry per candidate finding, so its answer
+ * grows with the review, and a thinking model spends this budget on reasoning
+ * before emitting any of it. The old 4k/8k ceilings covered roughly ten
+ * findings; past that the answer was cut off, parsed to nothing, and every
+ * candidate was recorded "unavailable" — silently gating findings the verifier
+ * would have refuted (RCL-60). This matches the review path's budget.
+ */
+export const ASK_MAX_OUTPUT_TOKENS = 16_384;
+
+/**
+ * A provider stopped at its output ceiling. Thrown from an `ask` attempt so a
+ * truncated answer fails loudly instead of arriving as a short success whose
+ * missing content is indistinguishable from a model with nothing to say.
+ */
+export class TruncatedAnswerError extends Error {
+  constructor(provider: string) {
+    super(`${provider}: answer truncated at the output limit; the response would be incomplete`);
+    this.name = 'TruncatedAnswerError';
+  }
+}
+
 export const RETRY_DELAYS = [1000, 2000, 4000] as const;
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);

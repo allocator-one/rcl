@@ -13,6 +13,8 @@ import {
   linkAbortSignal,
   reviewFromParse,
   usageFromOpenAI,
+  ASK_MAX_OUTPUT_TOKENS,
+  TruncatedAnswerError,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
@@ -182,10 +184,18 @@ export class OpenAIAdapter implements ReviewAdapter {
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt },
             ],
-            ...(usesCompletionTokens ? { max_completion_tokens: 4096 } : { max_tokens: 4096 }),
+            ...(usesCompletionTokens
+              ? { max_completion_tokens: ASK_MAX_OUTPUT_TOKENS }
+              : { max_tokens: ASK_MAX_OUTPUT_TOKENS }),
           },
           { signal, timeout: options.timeoutMs + 30_000 }
         );
+        // A reasoning model can spend the whole budget before the answer
+        // starts. Returning the stub silently costs the verification lane
+        // every candidate the answer never reached (RCL-60).
+        if (response.choices[0]?.finish_reason === 'length') {
+          throw new TruncatedAnswerError('openai');
+        }
         return (response.choices[0]?.message?.content ?? '').trim();
       },
     });

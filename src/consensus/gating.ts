@@ -179,6 +179,18 @@ When unsure, answer "confirmed".`;
 
 const MAX_PATCH_CHARS = 4_000;
 
+/**
+ * Candidates per verifier call. The answer carries one JSON entry per
+ * candidate, so its length grows with the batch while the model's output
+ * budget does not — measured against production runs, a single call stopped
+ * covering its candidates somewhere past ten, and every uncovered candidate
+ * was recorded unavailable and gated unrefuted (RCL-60).
+ */
+const VERIFIER_BATCH_SIZE = 8;
+
+/** Verifier batches in flight at once — small enough to stay clear of per-model rate limits. */
+const VERIFIER_CONCURRENCY = 3;
+
 /** Lines of slack when matching a finding's range against a hunk's span. */
 const HUNK_MARGIN_LINES = 16;
 
@@ -601,46 +613,86 @@ export async function applyGating(
     return { findings: annotated, verification: stats };
   }
 
-  let verdicts = new Map<string, { refuted: boolean; note?: string }>();
-  let failure: string | undefined;
+  // One verdict per candidate has to fit in one answer, so a single call over
+  // every candidate silently stops covering them as a review grows — and an
+  // uncovered candidate gates unrefuted. Batches keep each answer small, and
+  // keep one bad batch from costing the whole lane (RCL-60).
+  const verdictsByIndex = new Map<number, { refuted: boolean; note?: string }>();
+  const failureByIndex = new Map<number, string>();
   if (verifiable.length > 0) {
-    const candidates = verifiable.map((i) => findings[i]!);
-    const relevantPatches = new Map(
-      [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
-    );
+    const batches: number[][] = [];
+    for (let i = 0; i < verifiable.length; i += VERIFIER_BATCH_SIZE) {
+      batches.push(verifiable.slice(i, i + VERIFIER_BATCH_SIZE));
+    }
+
+    // Adapter construction can throw (e.g. a missing provider key) — it
+    // must hit the same fail-safe path as a failed call, never abort the
+    // round after the council already ran.
+    let ask: AskFn | undefined;
+    let constructionFailure: string | undefined;
     try {
-      // Adapter construction can throw (e.g. a missing provider key) — it
-      // must hit the same fail-safe path as a failed call, never abort the
-      // round after the council already ran.
-      const ask =
+      ask =
         options.ask ??
         ((): AskFn => {
           const adapter = defaultAdapterFactory(detectProvider(options.verificationModel!));
           return (m, systemPrompt, userPrompt, opts) => adapter.ask(m, systemPrompt, userPrompt, opts);
         })();
-      const answer = await ask(
-        options.verificationModel,
-        VERIFIER_SYSTEM_PROMPT,
-        buildVerifierPrompt(candidates, relevantPatches),
-        { timeoutMs: options.verificationTimeoutMs, maxRetries: 1 }
-      );
-      if (answer.status === 'success') {
-        verdicts = parseVerdicts(answer.text);
-      } else {
-        failure = answer.error ?? answer.status;
-      }
     } catch (err) {
-      failure = err instanceof Error ? err.message : String(err);
+      constructionFailure = err instanceof Error ? err.message : String(err);
     }
+
+    async function runBatch(batch: number[]): Promise<void> {
+      if (ask === undefined) {
+        for (const index of batch) failureByIndex.set(index, constructionFailure!);
+        return;
+      }
+      const candidates = batch.map((i) => findings[i]!);
+      const relevantPatches = new Map(
+        [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
+      );
+      try {
+        const answer = await ask(
+          options.verificationModel!,
+          VERIFIER_SYSTEM_PROMPT,
+          buildVerifierPrompt(candidates, relevantPatches),
+          { timeoutMs: options.verificationTimeoutMs, maxRetries: 1 }
+        );
+        if (answer.status !== 'success') {
+          const reason = answer.error ?? answer.status;
+          for (const index of batch) failureByIndex.set(index, reason);
+          return;
+        }
+        const parsed = parseVerdicts(answer.text);
+        batch.forEach((findingIndex, c) => {
+          const verdict = parsed.get(`F${c + 1}`);
+          if (verdict !== undefined) verdictsByIndex.set(findingIndex, verdict);
+        });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        for (const index of batch) failureByIndex.set(index, reason);
+      }
+    }
+
+    // Index-stealing pool, same shape as the review runner: a slow batch
+    // never stalls the queue behind it.
+    let nextBatch = 0;
+    const width = Math.max(1, Math.min(VERIFIER_CONCURRENCY, batches.length));
+    await Promise.all(
+      Array.from({ length: width }, async () => {
+        while (nextBatch < batches.length) {
+          await runBatch(batches[nextBatch++]!);
+        }
+      })
+    );
   }
 
-  verifiable.forEach((findingIndex, c) => {
+  verifiable.forEach((findingIndex) => {
     const finding = findings[findingIndex]!;
-    const verdict = verdicts.get(`F${c + 1}`);
+    const verdict = verdictsByIndex.get(findingIndex);
     if (verdict === undefined) {
       markUnavailable(
         findingIndex,
-        failure ?? 'verifier response did not cover this finding'
+        failureByIndex.get(findingIndex) ?? 'verifier response did not cover this finding'
       );
       return;
     }

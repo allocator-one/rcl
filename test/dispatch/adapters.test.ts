@@ -259,6 +259,78 @@ describe('truncation detection', () => {
   });
 });
 
+// The verification lane reads ask/4's text as a verdict list covering every
+// candidate. A truncated answer that arrives as a short success is parsed as
+// "no verdicts", which records every candidate unavailable and gates findings
+// the verifier was about to refute (RCL-60).
+describe('ask: truncation is an error, not a short answer', () => {
+  it('anthropic: stop_reason max_tokens fails the answer', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: () =>
+          Promise.resolve({
+            content: [{ type: 'text', text: '[{"id":"F1","verdict":"refuted"' }],
+            stop_reason: 'max_tokens',
+          }),
+      },
+    });
+
+    const answer = await adapter.ask('claude-opus-4-8', 's', 'u', OPTS);
+    expect(answer.status).toBe('error');
+    expect(answer.error).toMatch(/truncat/i);
+    expect(answer.text).toBe('');
+  });
+
+  it('openai: finish_reason length fails the answer', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: () =>
+            Promise.resolve({
+              choices: [{ message: { content: '[{"id":"F1"' }, finish_reason: 'length' }],
+            }),
+        },
+      },
+    });
+
+    const answer = await adapter.ask('gpt-5.5', 's', 'u', OPTS);
+    expect(answer.status).toBe('error');
+    expect(answer.error).toMatch(/truncat/i);
+  });
+
+  it('google: finishReason MAX_TOKENS fails the answer', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, {
+      models: {
+        generateContent: () => Promise.resolve({ text: '', candidates: [{ finishReason: 'MAX_TOKENS' }] }),
+      },
+    });
+
+    const answer = await adapter.ask('gemini-2.5-pro', 's', 'u', OPTS);
+    expect(answer.status).toBe('error');
+    expect(answer.error).toMatch(/truncat/i);
+  });
+
+  it('a complete answer still succeeds', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    setClient(adapter, {
+      models: {
+        generateContent: () =>
+          Promise.resolve({
+            text: '[{"id":"F1","verdict":"refuted","reason":"guarded"}]',
+            candidates: [{ finishReason: 'STOP' }],
+          }),
+      },
+    });
+
+    const answer = await adapter.ask('gemini-2.5-pro', 's', 'u', OPTS);
+    expect(answer.status).toBe('success');
+    expect(answer.text).toContain('refuted');
+  });
+});
+
 describe('retry behavior', () => {
   it('anthropic: retries a 529 overloaded error and succeeds', async () => {
     vi.useFakeTimers();

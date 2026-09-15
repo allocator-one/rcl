@@ -12,6 +12,8 @@ import {
   linkAbortSignal,
   reviewFromParse,
   usageFromGoogle,
+  ASK_MAX_OUTPUT_TOKENS,
+  TruncatedAnswerError,
 } from './utils.js';
 
 /**
@@ -196,11 +198,19 @@ export class GoogleAdapter implements ReviewAdapter {
           contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
           config: {
             systemInstruction: systemPrompt,
-            maxOutputTokens: 8192,
+            maxOutputTokens: ASK_MAX_OUTPUT_TOKENS,
             abortSignal: signal,
             httpOptions: { timeout: options.timeoutMs + 30_000 },
           },
         });
+        // A thinking model spends this budget on reasoning before it emits a
+        // token of answer, so a truncated response arrives as empty or partial
+        // text with a success status. Silently returning it makes a verifier
+        // answer that covers no findings look like a model that had nothing to
+        // say — every finding then gates unrefuted.
+        if (response.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+          throw new TruncatedAnswerError('google');
+        }
         return (response.text ?? '').trim();
       },
     });
