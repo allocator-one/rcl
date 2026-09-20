@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.7.0 - 2026-09-20
+
+- Preserve the actual verifier model and full normalized explanation across live
+  and legacy evidence delivery, CLI reads and Markdown reports (RCL-68, RCL-69).
+  Automated verification and attributed human/agent triage remain separate.
+- Add `rcl telemetry recover-refutations` for machine-wide report discovery,
+  GET-only recovery manifests and explicit, resumable historical delivery
+  (RCL-70). Existing run IDs, findings, gates, original reports and retry queues
+  are preserved. Existing-run enrichment uses Harness's audited server operation.
+- Pin recovery manifests to the authenticated organization and complete base URL,
+  revalidate original digests and repository proofs, and report conflicting,
+  unsafe, incomplete and unsupported sources without importing them blindly.
+- Keep evidence read commands and recovery planning free of automatic outbox
+  delivery. Render verifier and triage text safely while preserving API JSON.
+
+
 ## 3.6.0 - 2026-09-15
 
 - **Verifier batching** (RCL-60): the verification lane sends candidates in

@@ -130,6 +130,7 @@ import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/reco
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
+import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemetry/recovery/command.js';
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
@@ -961,6 +962,19 @@ evidenceCmd
   .option('--submit', 'Submit the fresh verdict; without this flag only read and preview')
   .action(async (opts: FindingRetriageOptions) => {
     process.exitCode = await runFindingRetriage(opts, evidenceDeps());
+  });
+
+telemetry
+  .command('recover-refutations')
+  .description('Discover original refutations and write a reviewed recovery manifest; dry-run by default')
+  .requiredOption('--manifest <path>', 'New private manifest path, or the reviewed manifest with --apply')
+  .option('--root <path>', 'Discovery root; repeat to replace the default roots', (value: string, previous: string[] = []) => [...previous, value])
+  .option('--exclude-sha256 <digest>', 'Explicit synthetic report digest; repeat as needed', (value: string, previous: string[] = []) => [...previous, value])
+  .option('--inventory-only', 'Offline discovery artifact without a destination; cannot be applied')
+  .option('--apply', 'Revalidate and apply only the reviewed manifest selections')
+  .option('--output <path>', 'New outcome path for apply; defaults to a unique file beside the manifest')
+  .action(async (opts: RefutationRecoveryOptions) => {
+    process.exitCode = await runRefutationRecovery(opts, evidenceDeps());
   });
 
 telemetry

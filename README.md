@@ -599,6 +599,90 @@ rcl telemetry backfill --from ~/recovered-rcl-artifacts --repo allocator-one/all
 rcl telemetry backfill --from ~/recovered-rcl-artifacts --repo allocator-one/allocator-one
 ```
 
+### `rcl telemetry recover-refutations`
+
+Recover the original verifier model and explanation from retained modern and
+pre-header reports. The default command only reads files and makes authenticated
+GET requests. It writes a private manifest for review; `--apply` is a separate,
+explicit step. No reviewer is rerun, no triage events are invented, and retry
+queues and source reports remain untouched.
+
+```bash
+# Offline discovery, also usable before the compatible Harness backend is deployed.
+rcl telemetry recover-refutations --inventory-only --manifest inventory.json
+
+# Plan against the authenticated organization. Repeated roots replace defaults.
+rcl telemetry recover-refutations --root ~/Development --root /tmp --manifest recovery.json
+
+# Inspect coverage, source hashes, every refutation and each proposed action first.
+rcl telemetry recover-refutations --manifest recovery.json --apply --output outcome.json
+```
+
+The destination is the complete authenticated Harness base URL plus its
+server-reported organization. Applying with a different host, URL path or
+organization fails before any write. An older receiver without `meta.org_id`
+cannot produce an applyable manifest; use `--inventory-only` until the compatible
+backend is released. Inventory-only artifacts are never accepted for apply.
+Telemetry opt-outs and the existing Harness login/CI credential rules still apply.
+
+Default discovery covers `~/Development`, `/tmp`, `/private/tmp`, the configured
+OS temporary directory and `RCL_DATA_DIR` (otherwise `~/.rcl`). It also inspects
+registered Git worktrees/common directories, RCL output and outbox directories,
+and explicit JSON report references in retained ledgers and task metadata,
+including references beyond the initial roots. Add `--root` for other retained
+cache/task locations. Only bounded candidate files are read; symlinks, changing
+files, invalid UTF-8 and files larger than 25 MiB are rejected. Incomplete,
+missing and inaccessible sources stay in the coverage report. Re-inventory after
+active reviews finish and record a final discovery cutoff.
+
+Identical report bytes collapse to one SHA-256 entry with all discovered file
+locations. The manifest retains positional finding refs, original identities,
+normalized model/notes and source bindings. Missing original notes remain explicit.
+Legacy repository ownership must be proven by a registered source worktree or a
+retained ledger in that worktree; ambiguous ownership is unresolved. A directory
+marked `SYNTHETIC_TEST_ONLY`, or a repeated `--exclude-sha256 <digest>`, explicitly
+excludes synthetic evidence and all copies with that digest. Missing reference
+paths are counted separately from missing reports; a basename match is not proof.
+
+| Planned action | Application |
+| --- | --- |
+| `upload_and_recover` | Upload only the absent original artifact matching the recorded run's declaration, then select that run for server recovery. |
+| `recover` | Select an existing run for the server's validated, append-only recovery operation. RCL does not patch findings. |
+| `import_history` | Import missing evidence once under a deterministic historical ID; preserve original timing/target and explicit original-run/digest binding for modern reports. |
+| `already_present` | Read and confirm the recorded evidence; no write. |
+| `skip`, `conflict`, `unavailable` | Preserve the disposition for resolution; no write. |
+
+Apply rechecks source bytes and server bindings. It can use a retained,
+digest-verified copy if another location disappeared. It never replaces an
+existing run or escalates an existing-run selection into a new historical import.
+For legacy reports, the established UUID derives from lowercase host (including
+port), repository and **original** report digest. Its scrubbed upload may have a
+different digest, recorded in the artifact declaration. Modern originals needing
+redaction are never uploaded under their original digest. When that exact
+artifact is already stored in Harness, it can still supply server recovery without
+another upload. Unsafe, unsupported or conflicting sources require resolution.
+
+An apply outcome includes `server_recovery_run_ids`. An authorized operator passes
+those IDs to the released, bounded Harness recovery operation documented in
+[`harness_review_verification.md`](https://github.com/allocator-one/allocator-one/blob/main/docs/ops/harness_review_verification.md),
+previews the selection, applies it with explicit operator/operation attribution,
+and retains its results. Rerun the reviewed manifest to verify the common API
+projection afterwards. Repeat application is resumable and idempotent, including
+when a delivery receipt is lost; the source, queues and manifest are never deleted.
+Outcome `writes` counts acknowledged creations, so a lost receipt can leave a
+confirmed stored result without a creation count. The report dispositions and
+readback determine completion.
+
+Manifest/output paths must be new and are published atomically with mode `0600`.
+Without `--output`, apply uses a unique outcome filename beside the manifest.
+Exit `0` means a plan/inventory was written, or apply reconciled its selected
+reports; `1` means apply still needs server recovery or source/conflict resolution;
+`2` means the command could not validate or perform the operation. Discovery
+issues and absent original notes still need explicit reconciliation even with
+exit `0`. Stopping and keeping the manifest is the rollback for an interrupted
+operation: do not delete historical records, rewrite original evidence, or flush
+queued live reviews as a recovery shortcut.
+
 ## Config File
 
 Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.

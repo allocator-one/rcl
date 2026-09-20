@@ -261,9 +261,12 @@ export class HarnessSink {
    * is reported as `malformed_response` rather than trusted. Reads allow a
    * larger body than a receipt (`MAX_READ_RESPONSE_BYTES`) unless told otherwise.
    */
-  async getJson<T>(path: string, validate: (data: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
+  async getJson<T>(path: string, validate: (data: unknown, meta?: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
     const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
-    return this.classify(result, (body) => validate((body as { data?: unknown } | null)?.data));
+    return this.classify(result, (body) => {
+      const response = body as { data?: unknown; meta?: unknown } | null;
+      return validate(response?.data, response?.meta);
+    });
   }
 }
 

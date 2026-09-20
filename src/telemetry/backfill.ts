@@ -112,6 +112,8 @@ async function readRegular(path: string): Promise<{ bytes: string; raw: Buffer; 
 }
 
 function reason(err: unknown): string {
+  if (err instanceof Error && err.message === 'invalid_legacy_duration') return 'stats.durationMs is not a review duration';
+  if (err instanceof Error && err.message === 'invalid_legacy_mtime') return 'file time is not a plausible finishing time';
   const code = (err as { code?: string }).code;
   if (code === 'ELOOP') return 'is a symbolic link';
   return err instanceof Error ? err.message : String(err);
@@ -263,6 +265,78 @@ function parseLedgerRounds(ledger: string): LedgerRound[] {
   return rounds;
 }
 
+export interface LegacyReportInput {
+  bytes: string;
+  mtime: Date;
+  repo: string;
+  host: string;
+  reportMd?: string;
+}
+
+/** Build one legacy source using the established host/repo/original-digest identity and file-time convention. */
+export function buildLegacyReport(input: LegacyReportInput): Pick<BackfillRun, 'envelope' | 'artifacts'> {
+  const { bytes, mtime, repo, host, reportMd } = input;
+  const report = JSON.parse(bytes) as RawReport;
+  if (!report || typeof report !== 'object' || report.run !== undefined || !Array.isArray(report.reviews)) {
+    throw new Error('unsupported_legacy_report');
+  }
+  const raw = Buffer.from(bytes, 'utf8');
+  const hostKey = host.toLowerCase();
+  const repoKey = repo.toLowerCase();
+  const { calls, roster } = wireCalls(report.reviews as RawReview[]);
+  const kept = wireFindings(report.findings, false, 0);
+  const below = wireFindings(report.belowThresholdFindings, true, kept.length);
+  const stats = report.stats ?? {};
+  const durationMs = int(stats['durationMs']);
+  if (durationMs > MAX_DURATION_MS) {
+    throw new Error('invalid_legacy_duration');
+  }
+  const finishedAt = mtime;
+  const startedAt = new Date(finishedAt.getTime() - durationMs);
+  if (
+    !Number.isFinite(finishedAt.getTime()) ||
+    finishedAt.getTime() < MIN_MTIME_MS ||
+    finishedAt.getTime() > Date.now() + 24 * 60 * 60 * 1000 ||
+    !Number.isFinite(startedAt.getTime())
+  ) {
+    throw new Error('invalid_legacy_mtime');
+  }
+  const digest = sha256(raw);
+  const id = uuidv5(`${hostKey}|${repoKey}|${digest}`, UUID_NAMESPACE_RCL_BACKFILL);
+  const run: RunHeader = {
+    id,
+    rcl_version: 'pre-3.0',
+    command: 'review',
+    target: { kind: 'patch', repo, diff_sha256: digest, files: 0, additions: 0, deletions: 0 },
+    roster,
+    config_sha256: sha256('rcl telemetry backfill'),
+    thresholds: { min_consensus_score: 0, min_confidence: 0, dedupe_line_window: 0, jaccard_threshold: 0 },
+    // Pre-gating reports carried every finding; no verification pass ran.
+    gating: { mode: 'all-findings', min_models: 0, verification_timeout_ms: 0 },
+    context_files: [],
+    runner: { kind: 'agent', agent: 'rcl telemetry backfill', host: scrubText(host, 64) },
+    started_at: startedAt.toISOString(),
+    finished_at: finishedAt.toISOString(),
+    duration_ms: durationMs,
+    ci_exit_code: 0,
+    provenance: 'backfill',
+  };
+  const reviews = report.reviews as RawReview[];
+  const envelopeStats: RunEnvelope['stats'] = {
+    totalReviews: int(stats['totalReviews'], reviews.length),
+    successfulReviews: int(stats['successfulReviews'], calls.filter((c) => c.status === 'success').length),
+    totalRawFindings: int(stats['totalRawFindings'], kept.length + below.length),
+    totalDeduped: int(stats['totalDeduped'], kept.length),
+    belowThreshold: int(stats['belowThreshold'], below.length),
+    durationMs,
+  };
+  const artifacts: ArtifactBytes = { report_json: scrubSecrets(bytes), ...(reportMd !== undefined ? { report_md: scrubSecrets(reportMd) } : {}) };
+  return { artifacts, envelope: {
+    run, findings: [...kept, ...below].map((f) => f.wire), calls, stats: envelopeStats,
+    artifacts_declared: declareArtifacts(artifacts), delivery: { mode: 'direct' },
+  } };
+}
+
 export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<BackfillBuild> {
   const { dir, repo, host, rclVersion } = options;
   // Without O_NOFOLLOW the platform cannot refuse a planted link, and a
@@ -279,11 +353,6 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
   const findingsByBase = new Map<string, Array<{ file: string; title: string; description: string; severity?: string; models: string[]; identity: string }>>();
   const runByBase = new Map<string, BackfillRun>();
 
-  const hostKey = host.toLowerCase();
-  // GitHub names are case-insensitive; the id must not depend on how the
-  // caller spelled the repository.
-  const repoKey = repo.toLowerCase();
-
   for (const name of reportNames) {
     try {
       const { bytes, raw, mtime } = await readRegular(join(dir, name));
@@ -296,55 +365,6 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
         skipped.push({ file: name, reason: 'carries a run header (rcl ≥ 3.0) — it was delivered when written; use rcl telemetry flush for a spooled one' });
         continue;
       }
-      const { calls, roster } = wireCalls(report.reviews as RawReview[]);
-      const kept = wireFindings(report.findings, false, 0);
-      const below = wireFindings(report.belowThresholdFindings, true, kept.length);
-      const stats = report.stats ?? {};
-      const durationMs = int(stats['durationMs']);
-      if (durationMs > MAX_DURATION_MS) {
-        skipped.push({ file: name, reason: `stats.durationMs ${durationMs} is not a review duration` });
-        continue;
-      }
-      const finishedAt = mtime;
-      const startedAt = new Date(finishedAt.getTime() - durationMs);
-      if (
-        !Number.isFinite(finishedAt.getTime()) ||
-        finishedAt.getTime() < MIN_MTIME_MS ||
-        finishedAt.getTime() > Date.now() + 24 * 60 * 60 * 1000 ||
-        !Number.isFinite(startedAt.getTime())
-      ) {
-        skipped.push({ file: name, reason: `file time ${finishedAt.toISOString()} is not a plausible finishing time` });
-        continue;
-      }
-      const digest = sha256(raw);
-      const id = uuidv5(`${hostKey}|${repoKey}|${digest}`, UUID_NAMESPACE_RCL_BACKFILL);
-      const run: RunHeader = {
-        id,
-        rcl_version: 'pre-3.0',
-        command: 'review',
-        target: { kind: 'patch', repo, diff_sha256: digest, files: 0, additions: 0, deletions: 0 },
-        roster,
-        config_sha256: sha256('rcl telemetry backfill'),
-        thresholds: { min_consensus_score: 0, min_confidence: 0, dedupe_line_window: 0, jaccard_threshold: 0 },
-        // Pre-gating reports carried every finding; no verification pass ran.
-        gating: { mode: 'all-findings', min_models: 0, verification_timeout_ms: 0 },
-        context_files: [],
-        runner: { kind: 'agent', agent: 'rcl telemetry backfill', host: scrubText(host, 64) },
-        started_at: startedAt.toISOString(),
-        finished_at: finishedAt.toISOString(),
-        duration_ms: durationMs,
-        ci_exit_code: 0,
-        provenance: 'backfill',
-      };
-      const reviews = report.reviews as RawReview[];
-      const envelopeStats: RunEnvelope['stats'] = {
-        totalReviews: int(stats['totalReviews'], reviews.length),
-        successfulReviews: int(stats['successfulReviews'], calls.filter((c) => c.status === 'success').length),
-        totalRawFindings: int(stats['totalRawFindings'], kept.length + below.length),
-        totalDeduped: int(stats['totalDeduped'], kept.length),
-        belowThreshold: int(stats['belowThreshold'], below.length),
-        durationMs,
-      };
       const mdName = name.replace(/\.json$/, '.md');
       let reportMd: string | undefined;
       if (entries.includes(mdName)) {
@@ -354,18 +374,9 @@ export async function buildBackfillRuns(options: BackfillBuildOptions): Promise<
           skipped.push({ file: mdName, reason: `companion markdown not read: ${reason(err)}` });
         }
       }
-      // What leaves the machine is scrubbed as a live report would be; the run
-      // id keeps the digest of the file as found, so it names the same file
-      // whatever the scrubber removes.
-      const artifacts: ArtifactBytes = { report_json: scrubSecrets(bytes), ...(reportMd !== undefined ? { report_md: scrubSecrets(reportMd) } : {}) };
-      const envelope: RunEnvelope = {
-        run,
-        findings: [...kept, ...below].map((f) => f.wire),
-        calls,
-        stats: envelopeStats,
-        artifacts_declared: declareArtifacts(artifacts),
-        delivery: { mode: 'direct' },
-      };
+      const { envelope, artifacts } = buildLegacyReport({ bytes, mtime, repo, host, reportMd });
+      const kept = wireFindings(report.findings, false, 0);
+      const below = wireFindings(report.belowThresholdFindings, true, kept.length);
       const built: BackfillRun = { file: name, envelope, artifacts, events: [] };
       runs.push(built);
       runByBase.set(name, built);

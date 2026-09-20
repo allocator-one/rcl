@@ -95,6 +95,8 @@ export interface RunHeader {
   converge?: ConvergeContext;
   /** `backfill` for recovered history (`rcl telemetry backfill`); absent means live. */
   provenance?: 'live' | 'backfill';
+  /** Original immutable modern report, only on a non-gating historical import. */
+  historical_source?: { original_run_id: string; report_sha256: string };
 }
 
 export interface ResolvedThresholds {
