@@ -253,7 +253,7 @@ describe('reviewed refutation recovery', () => {
     const manifest = await planRecovery(await inventoryRefutations({ roots: [s.root] }), remote.sink);
     expect(manifest.plans[0]!.action).toBe('already_present');
     remote.runs.get(envelope.run.id)!.stored = false;
-    expect((await applyRecovery(manifest, remote.sink)).reports[0]!.reason).toBe('reviewed_action_changed');
+    expect((await applyRecovery(manifest, remote.sink)).reports[0]!.action).toBe('already_present');
     expect(remote.requests.every((r) => r.method === 'GET')).toBe(true);
   });
 
@@ -364,6 +364,19 @@ describe('reviewed refutation recovery', () => {
     expect(remote.requests.every((r) => r.method === 'GET')).toBe(true);
     remote.runs.get(envelope.run.id)!.stored = false;
     expect((await planRecovery(inventory, remote.sink)).plans[0]).toMatchObject({ action: 'conflict', reason: 'original_artifact_requires_redaction' });
+  });
+
+  it('keeps findings-complete live runs already present when only the optional artifact is absent', async () => {
+    const s = await source();
+    s.report.findings[0]!.description = 'Quoted old test credential sk-ant-abcdefghijklmnopqrstu';
+    const bytes = JSON.stringify(s.report); await writeFile(s.path, bytes);
+    const envelope = buildRunEnvelope(s.report, { report_json: bytes }, { level: 'full', delivery: { mode: 'direct' } });
+    const remote = server(envelope); remote.runs.get(envelope.run.id)!.stored = false;
+    const manifest = await planRecovery(await inventoryRefutations({ roots: [s.root] }), remote.sink);
+    expect(manifest.plans[0]!.action).toBe('already_present');
+    const outcome = await applyRecovery(manifest, remote.sink);
+    expect(outcome.writes).toEqual({ runs: 0, artifacts: 0 });
+    expect(remote.requests.every((r) => r.method === 'GET')).toBe(true);
   });
 
   it('rechecks a newly marked synthetic source before any apply write', async () => {

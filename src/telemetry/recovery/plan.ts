@@ -181,11 +181,13 @@ function classifyRecorded(source: RecoverySource, prepared: Prepared, recorded: 
     return { ...original, state: conflict ? 'conflict' : missing ? 'missing' : original.note === null ? 'original_note_absent' : 'already_present' };
   });
   const storedArtifact = recorded.artifacts!.find((a) => a.kind === 'report_json')!.stored;
-  if (!storedArtifact && prepared.unsafeArtifact) return disposition(source, 'conflict', 'original_artifact_requires_redaction', recorded.id);
   const conflict = findings.some((f) => f.state === 'conflict');
   const missing = findings.some((f) => f.state === 'missing');
-  // Preserve an absent original artifact even when native fields already exist.
-  const action = conflict ? 'conflict' : !storedArtifact ? 'upload_and_recover' : missing ? 'recover' : 'already_present';
+  const artifactRequired = missing || recorded.provenance === 'backfill';
+  if (!storedArtifact && artifactRequired && prepared.unsafeArtifact) return disposition(source, 'conflict', 'original_artifact_requires_redaction', recorded.id);
+  // Native evidence already present is complete even when the optional original
+  // report artifact was never retained. Only missing evidence needs delivery.
+  const action = conflict ? 'conflict' : artifactRequired && !storedArtifact ? 'upload_and_recover' : missing ? 'recover' : 'already_present';
   return { sha256: source.sha256, run_id: recorded.id, action, ...(conflict ? { reason: 'recorded_evidence_conflict' } : {}), findings };
 }
 
