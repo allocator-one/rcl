@@ -9,6 +9,26 @@
 export const MAX_FREE_TEXT = 2_000;
 export const REDACTED = '[redacted]';
 
+const DISPLAY_MARKS = /[\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+const DISPLAY_LINE_SEPARATORS = /\r\n|[\r\u0085\u2028\u2029]/g;
+
+/**
+ * Normalize only strings rendered for people. Stored and wire values remain
+ * untouched; ZWJ/ZWNJ are intentionally retained for language and emoji text.
+ */
+export function sanitizePresentation(value: string, { multiline }: { multiline: boolean }): string {
+  const lineReplacement = multiline ? '\n' : ' ';
+  return value.replace(DISPLAY_LINE_SEPARATORS, lineReplacement)
+    .replace(multiline ? /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g : /[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(DISPLAY_MARKS, '');
+}
+
+/** Escape display controls in JSON source without changing parsed semantic values. */
+export function escapeDisplayControls(value: string): string {
+  return value.replace(/[\u0085\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 const KEY_PATTERNS: RegExp[] = [
   // Authorization header values.
   /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}/gi,

@@ -169,19 +169,19 @@ describe('rcl evidence show', () => {
   it('scrubs terminal evidence while JSON retains the API semantic strings through safe escaping', async () => {
     const secret = 'sk-ant-abcdefghijklmnopqrstu';
     const data = runDetail({ findings: [{ ...runDetail().findings[0],
-      verification_verdict: 'refuted', verification_model: `model\u001b[2J/${secret}`,
-      verification_note: `First\u009b2J line\n${secret}\tthen\rreturn\u0007.`,
+      verification_verdict: 'refuted\u202E', verification_model: `model\u001b[2J\u2066/${secret}`,
+      verification_note: `First\u009b2J line\u2028${secret}\tthen\rreturn\u0007.`,
       verification_provenance: { source: 'envelope', report_sha256: null, recovered_at: null },
-      verdict: { verdict: 'dismissed', reason: `Reason ${secret}\u001b[31m`, actor: { id: 'u', name: 'Recorder\u009d', email: null } },
+      verdict: { verdict: 'dismissed', reason: `Reason ${secret}\u001b[31m\u2029next`, actor: { id: 'u', name: 'Recorder\u009d\u200f', email: null } },
     }] });
     const rendered = run(RUN_ID, () => ({ status: 200, body: { data } }));
     expect(await rendered.code).toBe(0);
     expect(rendered.out.join('\n')).toContain('[redacted]');
     expect(rendered.out.join('\n')).not.toContain(secret);
-    for (const line of rendered.out) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    for (const line of rendered.out) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u0085\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/);
     const json = run(RUN_ID, () => ({ status: 200, body: { data } }), { json: true });
     expect(await json.code).toBe(0);
-    expect(json.out.join('\n')).not.toMatch(/[\u007f-\u009f]/);
+    expect(json.out.join('\n')).not.toMatch(/[\u007f-\u009f\u0085\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/);
     expect(JSON.parse(json.out.join('\n'))).toEqual(data);
   });
 

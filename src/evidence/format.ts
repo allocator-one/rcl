@@ -1,4 +1,4 @@
-import { scrubIdentifier, scrubText } from '../telemetry/scrub.js';
+import { escapeDisplayControls, sanitizePresentation, scrubIdentifier, scrubText } from '../telemetry/scrub.js';
 import type { GateStatus, Projection, RunDetail, RunFinding } from './types.js';
 
 /**
@@ -11,7 +11,7 @@ import type { GateStatus, Projection, RunDetail, RunFinding } from './types.js';
 
 export function text(value: unknown, limit = 300): string {
   if (value === null || value === undefined) return '—';
-  return scrubText(String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), limit);
+  return scrubText(sanitizePresentation(String(value), { multiline: false }), limit);
 }
 
 /**
@@ -21,7 +21,7 @@ export function text(value: unknown, limit = 300): string {
  * escapes, which parse back to the same string.
  */
 export function safeJson(value: unknown): string {
-  return JSON.stringify(value, null, 2).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return escapeDisplayControls(JSON.stringify(value, null, 2)).replace(/[\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 function short(sha: string | null | undefined): string {
@@ -83,7 +83,7 @@ function reviewerHealth(run: RunDetail): string {
 
 /** Preserve prose/code line breaks while keeping each output entry terminal-safe. */
 function explanationLines(value: string, limit: number): string[] {
-  return scrubText(value.replace(/\r\n/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' '), limit)
+  return scrubText(sanitizePresentation(value, { multiline: true }), limit)
     .split('\n').map((line) => `      ${line}`);
 }
 
@@ -92,7 +92,7 @@ function findingEvidence(finding: RunFinding): string[] {
   if (finding.verification_verdict?.trim()) {
     lines.push(`    Verification: ${text(finding.verification_verdict, 80)}`);
     if (finding.verification_model?.trim()) {
-      const model = scrubIdentifier(finding.verification_model.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), 500);
+      const model = scrubIdentifier(sanitizePresentation(finding.verification_model, { multiline: false }), 500);
       lines.push(`      Model: ${model}`);
     }
     lines.push(...(finding.verification_note?.trim()

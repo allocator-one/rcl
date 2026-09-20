@@ -118,12 +118,12 @@ describe('toMarkdown — recorded verification', () => {
     expect(md).not.toContain('[truncated]');
 
     const secret = 'sk-ant-abcdefghijklmnopqrstu';
-    finding.gating.verification!.note = `<script>bad</script> @reviewer ${secret}\u001b[2J\u009d`;
+    finding.gating.verification!.note = `<script>bad</script> @reviewer ${secret}\u001b[2J\u009d\u202E\u2028next`;
     const safe = toMarkdown(mkResult([], [finding]));
     expect(safe).not.toContain('<script>');
     expect(safe).not.toContain(secret);
     expect(safe).toContain('[redacted]');
-    expect(safe).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(safe).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/);
   });
 
   it('states when legacy explanations are missing and preserves the appendix omission count', () => {

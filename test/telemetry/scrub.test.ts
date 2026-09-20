@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { REDACTED, scrubDeep, scrubIdentifier, scrubSecrets, scrubText, stripFencedCode } from '../../src/telemetry/scrub.js';
+import { REDACTED, sanitizePresentation, scrubDeep, scrubIdentifier, scrubSecrets, scrubText, stripFencedCode } from '../../src/telemetry/scrub.js';
+
+describe('sanitizePresentation', () => {
+  it('removes bidi controls and marks while preserving ordinary RTL text and joiners', () => {
+    const input = 'עברית\u202Ereverse\u2066isolate\u200Fmark\u200Bzero\u200Demoji\u200Cjoin';
+    expect(sanitizePresentation(input, { multiline: false })).toBe('עבריתreverseisolatemarkzero\u200Demoji\u200Cjoin');
+  });
+
+  it('normalizes Unicode line separators only at the presentation boundary', () => {
+    const input = 'one\u2028two\u2029three\u0085four';
+    expect(sanitizePresentation(input, { multiline: true })).toBe('one\ntwo\nthree\nfour');
+    expect(sanitizePresentation(input, { multiline: false })).toBe('one two three four');
+  });
+});
 
 describe('scrubSecrets', () => {
   it('redacts provider, GitHub, Google, Harness and bearer tokens', () => {
