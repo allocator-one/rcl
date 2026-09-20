@@ -105,9 +105,12 @@ describe('the run-bound credential of --attest', () => {
     expect(runtime.credential).toEqual(RBC);
     expect(runtime.level).toBe('full');
 
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The earlier branch returns.' } };
     // The envelope lands; the artifacts hit a dead connection mid-delivery.
-    const outcome = await deliverRun(runtime, { result: sampleResult(), artifacts: ARTIFACTS, evidenceRequired: true });
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
     expect(outcome.status).toBe('recorded');
+    expect(JSON.parse(requests.find(r => r.url.endsWith('/api/v1/reviews/runs'))!.body!).findings[0]).toMatchObject({ verification_verdict: 'refuted', verification_model: 'google/gemini-3.8-flash', verification_note: 'The earlier branch returns.' });
     expect(outcome.spooled).toBe(false);
     expect(outcome.exitCode).toBe(4);
     expect(outcome.line).toMatch(/nothing spooled/);

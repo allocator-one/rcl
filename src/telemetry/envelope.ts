@@ -1,5 +1,7 @@
+import type { GatingVerification } from '../consensus/gating.js';
 import { createHash } from 'node:crypto';
 import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
+import { normalizeVerificationEvidence } from './verification.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
 import { scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
@@ -54,6 +56,8 @@ export interface WireFinding {
   consensus: ConsensusFinding['consensus'];
   gating_reason: 'consensus' | 'critical' | 'verified' | 'none';
   verification_verdict?: string;
+  verification_model?: string;
+  verification_note?: string;
   below_threshold: boolean;
 }
 
@@ -123,6 +127,7 @@ function findingRef(index: number): string {
 
 function wireFinding(finding: ConsensusFinding, index: number, belowThreshold: boolean): WireFinding {
   const identity = finding.identity ?? stableFindingKey(finding);
+  const verification = normalizeVerificationEvidence(finding.gating?.verification);
   return {
     ref: findingRef(index),
     identity_key: identity,
@@ -139,6 +144,8 @@ function wireFinding(finding: ConsensusFinding, index: number, belowThreshold: b
     ...(finding.gating?.verification?.verdict !== undefined
       ? { verification_verdict: scrubText(finding.gating.verification.verdict) }
       : {}),
+    ...(verification.model !== undefined ? { verification_model: verification.model } : {}),
+    ...(verification.note !== undefined ? { verification_note: verification.note } : {}),
     below_threshold: belowThreshold,
   };
 }
@@ -233,7 +240,17 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
     description: scrubText(f.description),
     ...(f.suggestedFix !== undefined ? { suggestedFix: scrubText(f.suggestedFix) } : {}),
     consensus: scrubDeep(f.consensus),
-    ...(f.gating !== undefined ? { gating: scrubDeep(f.gating) } : {}),
+    ...(f.gating !== undefined ? {
+      gating: {
+        ...scrubDeep(f.gating),
+        ...(f.gating.verification !== undefined ? {
+          verification: {
+            verdict: scrubText(f.gating.verification.verdict) as GatingVerification['verdict'],
+            ...normalizeVerificationEvidence(f.gating.verification),
+          },
+        } : {}),
+      },
+    } : {}),
   });
   const review = (r: ModelReview): ModelReview => {
     const error = callError(r, parseFailures);

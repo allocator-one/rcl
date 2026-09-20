@@ -52,6 +52,9 @@ describe('Outbox', () => {
   });
 
   it('spools a run and delivers it later as a retried delivery with its original id', async () => {
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The early branch returns.' } };
+    envelope = buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     const outbox = new Outbox(dir);
     const events = [buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: envelope.run.id, payload: {} })];
     expect(await outbox.spoolRun({ runId: envelope.run.id, envelope, artifacts: ARTIFACTS, events })).toEqual({ spooled: true, artifactsDropped: [] });
@@ -68,6 +71,8 @@ describe('Outbox', () => {
     const retried = calls[0]!.args[0] as RunEnvelope;
     expect(retried.run.id).toBe(envelope.run.id);
     expect(retried.delivery.mode).toBe('retried');
+    expect(retried.findings[0]).toMatchObject({ verification_verdict: 'refuted', verification_model: 'google/gemini-3.8-flash', verification_note: 'The early branch returns.' });
+    expect(retried.findings).toEqual(envelope.findings);
     expect(retried.delivery.spooled_at).toBe(listed[0]!.meta.spooled_at);
     expect(calls[1]!.args).toEqual([envelope.run.id, 'report_json', ARTIFACTS.report_json]);
     expect((calls[3]!.args[0] as WireEvent[])[0]!.id).toBe(events[0]!.id);

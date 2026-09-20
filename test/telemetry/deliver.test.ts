@@ -13,6 +13,7 @@ import {
   flushOutboxAtStart,
   resolveTelemetryLevel,
 } from '../../src/telemetry/deliver.js';
+import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { NOTICE_FILE } from '../../src/telemetry/notice.js';
 import { fakeFetch, sampleResult, type RecordedRequest } from './fixtures.js';
@@ -73,6 +74,32 @@ describe('telemetry delivery', () => {
   afterEach(async () => {
     await rm(repo, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it.each(['findings', 'full'] as const)('delivers verifier evidence at %s level for direct and convergence runs', async (level) => {
+    const { rt, requests } = await runtime(acceptEverything, { env: { RCL_TELEMETRY: level } });
+    for (const converge of [undefined, { target: 'rcl-42', round: 1, attempt: 1 }]) {
+      const result = sampleResult();
+      result.run!.converge = converge;
+      result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The early branch returns.' } };
+      const safe = sanitizeForDelivery(result);
+      const artifacts = { report_json: JSON.stringify(safe), report_md: '# Report' };
+      expect(await deliverRun(rt, { result: safe, artifacts, evidenceRequired: true })).toMatchObject({ status: 'recorded', exitCode: 0 });
+      const posted = JSON.parse(requests.filter(r => r.url.endsWith('/api/v1/reviews/runs')).at(-1)!.body!);
+      expect(posted.findings[0]).toMatchObject({ verification_verdict: 'refuted', verification_model: 'google/gemini-3.8-flash', verification_note: 'The early branch returns.' });
+      if (level === 'full') expect(requests.filter(r => r.url.endsWith('/artifacts/report_json')).at(-1)!.body).toBe(artifacts.report_json);
+      else expect(requests.filter(r => r.method === 'PUT')).toEqual([]);
+    }
+  });
+
+  it('reports an oversized evidence envelope as rejected instead of retrying without explanations', async () => {
+    const { rt, requests } = await runtime(() => ({ status: 413, body: { error: 'payload_too_large' } }));
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The original explanation.' } };
+    const outcome = await deliverRun(rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    expect(outcome).toMatchObject({ status: 'rejected', exitCode: 4, spooled: false });
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]!.body!).findings[0].verification_note).toBe('The original explanation.');
   });
 
   describe('evidenceRequirementConflict', () => {
