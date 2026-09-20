@@ -167,4 +167,12 @@ describe('source normalization and original artifact safety', () => {
     expect(parseSource(shadowed).unsafe).toBe(true);
   });
 
+  it('rejects any duplicate-key artifact, including shadowed arrays and nested objects', () => {
+    const bytes = JSON.stringify(report());
+    const array = bytes.replace('"reviews":', '"discarded":["sk-\\u0061nt-abcdefghijklmnopqrstu"],"discarded":"safe","reviews":');
+    const nested = bytes.replace('"reviews":', '"discarded":{"token":"short passphrase"},"discarded":"safe","reviews":');
+    expect(parseSource(array).unsafe).toBe(true);
+    expect(parseSource(nested).unsafe).toBe(true);
+  });
+
 });

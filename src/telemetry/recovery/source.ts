@@ -93,11 +93,10 @@ export function parseSource(text: string): ParsedSource {
     });
   });
   let unsafe = requiresArtifactRedaction(raw, []);
-  if (!unsafe) {
-    // JSON.parse discards duplicate keys. Walk every raw JSON string pair as
-    // well, decoding escapes before applying the same path-sensitive policy.
-    unsafe = rawArtifactNeedsRedaction(text);
-  }
+  // JSON.parse discards duplicate keys, so a decoded-value scan alone could
+  // miss a credential in the shadowed value. Reject the complete ambiguous
+  // artifact class before it can be selected for original-byte upload.
+  if (!unsafe) unsafe = hasDuplicateObjectKey(text);
   // The transport builder consumes the validated fields above. Older report
   // versions may omit presentation-only consensus labels required by today's
   // ReviewResult type; recovery neither renders nor invents those labels.
@@ -105,31 +104,40 @@ export function parseSource(text: string): ParsedSource {
   return { format: 'legacy', report: data as z.infer<typeof legacy>, refutations, unsafe };
 }
 
-const JSON_STRING = String.raw`"(?:[^"\\]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"`;
-const RAW_PAIR = new RegExp(`(${JSON_STRING})\\s*:\\s*(${JSON_STRING})`, 'g');
-const IDENTIFIER_KEY = /^(?:model|role|provider)$/;
-const SENSITIVE_KEY = /api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token|private[_-]?key/i;
-
-/**
- * Inspect every raw JSON string assignment, including values JSON.parse drops
- * for duplicate keys. Identifier fields use the narrower identifier scrubber;
- * every other field is treated as free text.
- */
-function rawArtifactNeedsRedaction(text: string): boolean {
-  for (const match of text.matchAll(RAW_PAIR)) {
-    let key: string;
-    let value: string;
-    try {
-      key = JSON.parse(match[1]!);
-      value = JSON.parse(match[2]!);
-    } catch {
-      return true;
+/** Bounded JSON token walk that fails closed on duplicate object keys. */
+function hasDuplicateObjectKey(text: string): boolean {
+  let index = 0;
+  const whitespace = () => { while (/\s/.test(text[index] ?? '')) index++; };
+  const string = (): string => {
+    const start = index++;
+    while (index < text.length) {
+      if (text[index] === '\\') { index += 2; continue; }
+      if (text[index++] === '"') return JSON.parse(text.slice(start, index));
     }
-    if (scrubSecrets(key) !== key) return true;
-    if (SENSITIVE_KEY.test(key) && scrubSecrets(JSON.stringify({ [key]: value })) !== JSON.stringify({ [key]: value })) return true;
-    if ((IDENTIFIER_KEY.test(key) ? scrubIdentifier(value, Number.MAX_SAFE_INTEGER) : scrubSecrets(value)) !== value) return true;
-  }
-  return false;
+    throw new Error('invalid_json');
+  };
+  const value = (): boolean => {
+    whitespace();
+    if (text[index] === '"') { string(); return false; }
+    if (text[index] === '{') {
+      index++; const keys = new Set<string>(); whitespace();
+      if (text[index] === '}') { index++; return false; }
+      while (true) {
+        whitespace(); const key = string(); whitespace(); if (text[index++] !== ':') throw new Error('invalid_json');
+        if (keys.has(key) || value()) return true;
+        keys.add(key); whitespace();
+        if (text[index] === '}') { index++; return false; }
+        if (text[index++] !== ',') throw new Error('invalid_json');
+      }
+    }
+    if (text[index] === '[') {
+      index++; whitespace(); if (text[index] === ']') { index++; return false; }
+      while (true) { if (value()) return true; whitespace(); if (text[index] === ']') { index++; return false; } if (text[index++] !== ',') throw new Error('invalid_json'); }
+    }
+    const token = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(text.slice(index));
+    if (!token) throw new Error('invalid_json'); index += token[0].length; return false;
+  };
+  try { const duplicate = value(); whitespace(); return duplicate || index !== text.length; } catch { return true; }
 }
 
 /** Diagnostic evidence from an unsupported report is inventoried but never importable. */
