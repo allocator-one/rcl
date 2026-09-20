@@ -82,6 +82,62 @@ function mkResult(
   };
 }
 
+describe('toMarkdown — recorded verification', () => {
+  it('shows normalized explanations for kept and below-threshold findings without changing their claims', () => {
+    const kept = mkFinding({ tier: 'single', title: 'Original allegation' });
+    kept.suggestedFix = 'original_fix();';
+    kept.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'vendor/actual-model', note: 'The early return prevents this.' } };
+    const below = mkFinding({ tier: 'single', title: 'Below allegation' });
+    below.gating = { reason: 'none', verification: { verdict: 'unavailable', model: 'vendor/attempted-model', note: 'The verifier timed out.' } };
+    const result = mkResult([kept], [below]);
+    const original = JSON.stringify(result);
+    const md = toMarkdown(result);
+    expect(md).toContain('Original allegation');
+    expect(md).toContain('original_fix();');
+    expect(md).toContain('**Verification:** refuted');
+    expect(md).toContain('vendor/actual-model');
+    expect(md).toContain('The early return prevents this.');
+    const appendix = md.slice(md.indexOf('## 🕵️'));
+    expect(appendix).toContain('**Verification:** unavailable');
+    expect(appendix).toContain('vendor/attempted-model');
+    expect(appendix).toContain('The verifier timed out.');
+    expect(JSON.stringify(result)).toBe(original);
+  });
+
+  it('keeps complete bounded Unicode/code explanations while neutralizing HTML, mentions, secrets and controls', () => {
+    const finding = mkFinding({ tier: 'single' });
+    const model = ('vendor/' + 'Model9'.repeat(83)).slice(0, 500);
+    const suffix = '\n```ts\nreturn ok;\n```\n@reviewer #42';
+    const note = '🙂'.repeat(2000 - Array.from(suffix).length) + suffix;
+    finding.gating = { reason: 'none', verification: { verdict: 'unrefuted', model, note } };
+    const md = toMarkdown(mkResult([finding]));
+    expect(md).toContain(model);
+    expect(md).toContain('🙂'.repeat(2000 - Array.from(suffix).length));
+    expect(md).toContain('return ok;');
+    expect(md).toContain('`@reviewer` `#42`');
+    expect(md).not.toContain('[truncated]');
+
+    const secret = 'sk-ant-abcdefghijklmnopqrstu';
+    finding.gating.verification!.note = `<script>bad</script> @reviewer ${secret}\u001b[2J\u009d`;
+    const safe = toMarkdown(mkResult([], [finding]));
+    expect(safe).not.toContain('<script>');
+    expect(safe).not.toContain(secret);
+    expect(safe).toContain('[redacted]');
+    expect(safe).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+  });
+
+  it('states when legacy explanations are missing and preserves the appendix omission count', () => {
+    const missing = mkFinding({ tier: 'single' });
+    missing.gating = { reason: 'none', verification: { verdict: 'refuted', note: '  ' } };
+    const dropped = Array.from({ length: 21 }, (_, index) => ({ ...missing, title: `finding-${index}` }));
+    const md = toMarkdown(mkResult([mkFinding({ tier: 'single', title: 'Unverified claim' })], dropped));
+    expect(md.match(/Explanation not recorded/g)).toHaveLength(20);
+    expect(md).toContain('…and 1 more — see the JSON output');
+    expect(md).not.toContain('finding-20');
+    expect(md.slice(0, md.indexOf('## 🕵️'))).not.toContain('**Verification:**');
+  });
+});
+
 describe('toMarkdown — agreement tier sections', () => {
   it('orders sections unanimous → majority → minority → disputed → single', () => {
     const md = toMarkdown(

@@ -1,13 +1,12 @@
-import { scrubText } from '../telemetry/scrub.js';
-import type { GateStatus, Projection, RunDetail } from './types.js';
+import { scrubIdentifier, scrubText } from '../telemetry/scrub.js';
+import type { GateStatus, Projection, RunDetail, RunFinding } from './types.js';
 
 /**
  * Terminal rendering of what Harness holds; one line per entry, no colour,
- * safe to grep. Every server-supplied string — repository names, titles,
- * paths, model names, errors, URLs — can trace back to reviewed code or model
- * output, so it reaches the terminal only through `text()`: control and
- * escape characters (C0, DEL, C1) become spaces, secrets are scrubbed, and
- * the length is bounded, which also keeps every entry on its one line.
+ * safe to grep. Every server-supplied string can trace back to reviewed code
+ * or model output. Headers use `text()`; evidence uses bounded, indented
+ * multiline text and model identifiers use their dedicated scrubber. All
+ * paths remove terminal control characters and scrub credential-shaped text.
  */
 
 export function text(value: unknown, limit = 300): string {
@@ -82,6 +81,47 @@ function reviewerHealth(run: RunDetail): string {
   return `${run.calls.filter((call) => call.status === 'success').length}/${run.calls.length}`;
 }
 
+/** Preserve prose/code line breaks while keeping each output entry terminal-safe. */
+function explanationLines(value: string, limit: number): string[] {
+  return scrubText(value.replace(/\r\n/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' '), limit)
+    .split('\n').map((line) => `      ${line}`);
+}
+
+function findingEvidence(finding: RunFinding): string[] {
+  const lines: string[] = [];
+  if (finding.verification_verdict?.trim()) {
+    lines.push(`    Verification: ${text(finding.verification_verdict, 80)}`);
+    if (finding.verification_model?.trim()) {
+      const model = scrubIdentifier(finding.verification_model.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' '), 500);
+      lines.push(`      Model: ${model}`);
+    }
+    lines.push(...(finding.verification_note?.trim()
+      ? explanationLines(finding.verification_note, 2_000)
+      : ['      Explanation not recorded']));
+    const provenance = finding.verification_provenance;
+    if (provenance?.source === 'report_json') {
+      lines.push('      Recovered from the original report');
+      if (provenance.report_sha256) lines.push(`      Report SHA-256: ${text(provenance.report_sha256, 64)}`);
+      if (provenance.recovered_at) lines.push(`      Recovered at: ${text(provenance.recovered_at, 80)}`);
+    } else if (provenance) {
+      lines.push(`      Source: ${provenance.source === 'envelope' ? 'recorded in the run envelope' : text(provenance.source, 80)}`);
+    }
+  }
+  const verdict = finding.verdict;
+  if (verdict) {
+    lines.push(`    Triage: ${text(verdict.verdict, 40)}${typeof verdict.round === 'number' ? ` (round ${verdict.round})` : ''}`);
+    const actor = verdict.actor;
+    lines.push(actor
+      ? `      Actor: ${text(actor.name || actor.id)}${actor.email ? ` <${text(actor.email)}>` : ''}`
+      : '      Actor: not recorded');
+    if (verdict.recorded_at) lines.push(`      Recorded at: ${text(verdict.recorded_at, 80)}`);
+    lines.push(...(verdict.reason?.trim()
+      ? explanationLines(verdict.reason, 20_000)
+      : ['      Reason not recorded']));
+  }
+  return lines;
+}
+
 export function formatRun(run: RunDetail): string[] {
   const runner = run.runner ?? {};
   const runnerKind = typeof runner['kind'] === 'string' ? text(runner['kind'], 40) : '—';
@@ -111,6 +151,7 @@ export function formatRun(run: RunDetail): string[] {
       `  ${text(finding.identity_key ?? finding.ref ?? '?', 64)} ${text(finding.severity, 20)} ${text(finding.gating_reason ?? 'none', 20)} ` +
         `${where(finding.file, finding.start_line)} ${text(finding.title, 200)} — ${verdict}`
     );
+    lines.push(...findingEvidence(finding));
   }
   lines.push(`calls (${run.calls.length}):`);
   for (const call of run.calls) {

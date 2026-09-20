@@ -97,6 +97,112 @@ function run(id: string, handler: Parameters<typeof fakeFetch>[0], options: { js
 }
 
 describe('rcl evidence show', () => {
+  it('reads the actual verifier explanation and recovered source with one GET, separately from attributed triage', async () => {
+    const data = runDetail({
+      actor: { name: 'Run starter' },
+      findings: [{ ...runDetail().findings[0],
+        verification_verdict: 'refuted', verification_model: 'google/actual-verifier',
+        verification_note: 'Access.deny redirects the socket.\nhandle_params never runs.',
+        verification_provenance: { source: 'report_json', report_sha256: 'e'.repeat(64), recovered_at: '2026-09-20T12:00:00Z' },
+        verdict: { identity_key: 'abc123def4567890', verdict: 'dismissed', reason: 'Checked the redirect lifecycle.',
+          actor: { id: 'recorder-id', name: 'Actual recorder', email: 'recorder@example.test' },
+          round: 3, recorded_at: '2026-09-20T11:00:00Z' },
+      }],
+    });
+    const { code, requests, out } = run(RUN_ID, () => ({ status: 200, body: { data } }));
+    expect(await code).toBe(0);
+    expect(requests.map(({ method, url }) => [method, url])).toEqual([['GET', `https://harness.example.test/api/v1/reviews/runs/${RUN_ID}`]]);
+    const output = out.join('\n');
+    expect(output).toContain('Verification: refuted');
+    expect(output).toContain('google/actual-verifier');
+    expect(output).toContain('      Access.deny redirects the socket.\n      handle_params never runs.');
+    expect(output).toContain('Recovered from the original report');
+    expect(output).toContain('e'.repeat(64));
+    expect(output).toContain('2026-09-20T12:00:00Z');
+    expect(output).toContain('Triage: dismissed (round 3)');
+    expect(output).toContain('Actual recorder');
+    expect(output).toContain('recorder@example.test');
+    expect(output).toContain('2026-09-20T11:00:00Z');
+    expect(output).toContain('Checked the redirect lifecycle.');
+    expect(output).not.toContain('Run starter');
+  });
+
+  it('preserves the complete Unicode model, multiline note and longer stored triage reason', async () => {
+    const model = ('vendor/' + 'Model9'.repeat(83)).slice(0, 500);
+    const suffix = '\nreturn :ok';
+    const note = '🙂'.repeat(2000 - Array.from(suffix).length) + suffix;
+    const reason = 'Checked the actual branch. '.repeat(700);
+    const data = runDetail({ findings: [{ ...runDetail().findings[0], verification_verdict: 'unrefuted',
+      verification_model: model, verification_note: note,
+      verdict: { verdict: 'fixed', reason, actor: null, round: 1 },
+    }] });
+    const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data } }));
+    expect(await code).toBe(0);
+    const output = out.join('\n');
+    expect(output).toContain(model);
+    expect(output).toContain(note.replaceAll('\n', '\n      '));
+    expect(output).toContain(reason);
+    expect(output).toContain('Actor: not recorded');
+    expect(output).toContain('Triage: fixed (round 1)');
+  });
+
+  it('distinguishes unavailable and legacy results without inventing explanations or attribution', async () => {
+    const finding = runDetail().findings[0];
+    const data = runDetail({ findings: [
+      { ...finding, verification_verdict: 'unavailable', verification_note: '  ', verification_model: null, verdict: null },
+      { ...finding, verification_verdict: 'refuted', verification_note: null, verdict: { verdict: 'dismissed' } },
+      { ...finding, verification_verdict: 'future-result', verification_note: 'Recorded result.' },
+      { ...finding, verification_verdict: null, verification_note: 'Orphaned explanation', verification_model: 'configured-only', verdict: null },
+    ] });
+    const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data } }));
+    expect(await code).toBe(0);
+    const output = out.join('\n');
+    expect(output).toContain('Verification: unavailable');
+    expect(output).toContain('Verification: refuted');
+    expect(output).toContain('Verification: future-result');
+    expect(output.match(/Explanation not recorded/g)).toHaveLength(2);
+    expect(output).not.toContain('Orphaned explanation');
+    expect(output).not.toContain('configured-only');
+    expect(output).toContain('Actor: not recorded');
+  });
+
+  it('scrubs terminal evidence while JSON retains the API semantic strings through safe escaping', async () => {
+    const secret = 'sk-ant-abcdefghijklmnopqrstu';
+    const data = runDetail({ findings: [{ ...runDetail().findings[0],
+      verification_verdict: 'refuted', verification_model: `model\u001b[2J/${secret}`,
+      verification_note: `First\u009b2J line\n${secret}\tthen\rreturn\u0007.`,
+      verification_provenance: { source: 'envelope', report_sha256: null, recovered_at: null },
+      verdict: { verdict: 'dismissed', reason: `Reason ${secret}\u001b[31m`, actor: { id: 'u', name: 'Recorder\u009d', email: null } },
+    }] });
+    const rendered = run(RUN_ID, () => ({ status: 200, body: { data } }));
+    expect(await rendered.code).toBe(0);
+    expect(rendered.out.join('\n')).toContain('[redacted]');
+    expect(rendered.out.join('\n')).not.toContain(secret);
+    for (const line of rendered.out) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    const json = run(RUN_ID, () => ({ status: 200, body: { data } }), { json: true });
+    expect(await json.code).toBe(0);
+    expect(json.out.join('\n')).not.toMatch(/[\u007f-\u009f]/);
+    expect(JSON.parse(json.out.join('\n'))).toEqual(data);
+  });
+
+  it('rejects malformed optional verification and triage fields before rendering them', async () => {
+    for (const malformed of [
+      { verification_verdict: {} }, { verification_model: [] }, { verification_note: 5 },
+      { verification_provenance: [] }, { verification_provenance: { source: 5 } },
+      { verification_provenance: { source: 'report_json', report_sha256: [], recovered_at: null } },
+      { verification_provenance: { source: 'report_json', report_sha256: null, recovered_at: {} } },
+      { verdict: {} }, { verdict: { verdict: 'fixed', reason: [] } },
+      { verdict: { verdict: 'fixed', identity_key: {} } }, { verdict: { verdict: 'fixed', round: '3' } },
+      { verdict: { verdict: 'fixed', recorded_at: [] } }, { verdict: { verdict: 'fixed', actor: [] } },
+      { verdict: { verdict: 'fixed', actor: { id: 'u', name: [] } } },
+    ]) {
+      const data = runDetail({ findings: [{ ...runDetail().findings[0], ...malformed }] });
+      const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data } }));
+      expect(await code, JSON.stringify(malformed)).toBe(EVIDENCE_EXIT.unanswered);
+      expect(out).toEqual([]);
+    }
+  });
+
   it('fetches the run from the credential host and lists findings with identity, gating reason and verdict', async () => {
     const { code, requests, out } = run(RUN_ID, () => ({ status: 200, body: { data: runDetail() } }));
 

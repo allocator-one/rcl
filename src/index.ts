@@ -145,13 +145,14 @@ program
   .description('Review Council — multi-model AI code review')
   .version(RCL_VERSION);
 
-// Every command first delivers what an earlier one could not, bounded to
+// Commands that perform work first deliver what an earlier one could not, bounded to
 // five seconds so an offline machine never stalls (IO-12475 section 8.4).
 // The telemetry commands manage the outbox themselves; the detached async
 // worker is not a user command.
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
-  // Explicit evidence repairs must not flush unrelated evidence, even in preview.
+  // Reads and explicit repairs must not flush unrelated evidence, even in preview.
+  if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
   if (name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
