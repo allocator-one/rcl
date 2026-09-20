@@ -392,13 +392,28 @@ exit code is the contract the skills gate on:
 
 `rcl evidence show <run id>` prints one recorded run: header and verification,
 credential tier and runner, reviewer health, artifact state, and every finding
-with its identity, gating reason and triage verdict (`—` until the server
-joins the verdict onto the finding).
+with its identity and gating reason. Each **Verification** block shows the
+recorded result, actual model and complete stored explanation. Recovered notes
+identify the original report digest and recovery time. Legacy results without
+a note say `Explanation not recorded`; `unavailable` remains distinct from
+`refuted`. A separate **Triage** block shows the recorded judgment, reason,
+actor, round and recording time when available. Missing attribution stays
+unknown, and a displayed judgment does not assert current gate resolution.
+
+Text preserves multiline explanations while scrubbing credential-shaped text
+and terminal controls. `--json` preserves the API object's semantic values with
+safe control-character escaping. Older servers may omit the optional evidence
+and attribution fields. Local Markdown reports also show verifier explanations
+for kept findings and the rendered below-threshold appendix; the appendix still
+shows at most 20 findings and points to JSON for omitted entries.
 
 The reads use the same credential rules as delivery — the stored `harness
 login`, or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI, the token sent to
 its own host only — and need `reviews:read`. They do not depend on the
 telemetry level: switching delivery off does not blind them.
+Both commands send only their normal GET requests. They neither fetch an
+artifact per finding nor flush pending retry deliveries, run reviewers or
+record verdicts. Use `rcl telemetry flush` explicitly to retry queued delivery.
 
 ```bash
 rcl evidence status                   # error: name the pull request

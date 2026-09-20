@@ -2,6 +2,8 @@ import { writeFile } from 'fs/promises';
 import type { AgreementTier, ConsensusFinding, ReviewResult } from '../consensus/types.js';
 import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
 import { describeRunTarget } from '../report/run-header.js';
+import { normalizeVerificationEvidence } from '../telemetry/verification.js';
+import { sanitizePresentation, scrubIdentifier, scrubSecrets } from '../telemetry/scrub.js';
 
 function severityEmoji(severity: ConsensusFinding['severity']): string {
   return { critical: '🔴', important: '🟡', minor: '🔵', nitpick: '⚪' }[severity];
@@ -59,6 +61,28 @@ const SECTION_META: Record<ReportSection, { title: (totalModels: number) => stri
 
 const SECTION_ORDER: ReportSection[] = ['unanimous', 'majority', 'minority', 'disputed', 'single'];
 
+function verificationLines(finding: ConsensusFinding): string[] {
+  const verification = finding.gating?.verification;
+  if (!verification?.verdict?.trim()) return [];
+  const { model, note } = normalizeVerificationEvidence(verification);
+  const inline = (value: string): string => sanitizePresentation(value, { multiline: false });
+  const lines = [`**Verification:** ${sanitizeInline(inline(verification.verdict))}`];
+  // 500 code points fit in 1000 UTF-16 units even after mention escaping.
+  // Presentation cleanup can join a credential split by an invisible mark or
+  // HTML tag. Scrub again after those transformations, keeping model IDs intact.
+  if (model) lines.push(`**Verifier:** ${scrubIdentifier(sanitizeInline(inline(model), 1000), 1000)}`);
+  if (note) {
+    // Keep prose and code readable inside a quote, containing even an unclosed
+    // model-supplied fence. The sanitizer's 4000-unit bound preserves all 2000
+    // normalized code points, including astral characters or escaped mentions.
+    const displayed = scrubSecrets(sanitizeBlock(sanitizePresentation(note, { multiline: true })));
+    lines.push('', ...displayed.split('\n').map((line) => `> ${line}`));
+  } else {
+    lines.push('Explanation not recorded');
+  }
+  return lines;
+}
+
 function buildFindingSection(finding: ConsensusFinding, index: number): string {
   const { consensus } = finding;
   const lines: string[] = [
@@ -74,6 +98,9 @@ function buildFindingSection(finding: ConsensusFinding, index: number): string {
   if (finding.suggestedFix) {
     lines.push('', '**Suggested Fix:**', '', fencedCodeBlock(finding.suggestedFix));
   }
+
+  const verification = verificationLines(finding);
+  if (verification.length > 0) lines.push('', ...verification);
 
   if (consensus.disputed && consensus.positions && consensus.positions.length > 0) {
     lines.push('', '**Positions:**', '');
@@ -123,6 +150,8 @@ function buildAppendix(dropped: ConsensusFinding[]): string[] {
         `${sanitizeInline(f.consensus.models.join(', '))} · ` +
         `confidence ${(f.consensus.confidence * 100).toFixed(0)}%`
     );
+    const verification = verificationLines(f);
+    if (verification.length > 0) lines.push('', ...verification.map((line) => `  ${line}`), '');
   }
 
   if (dropped.length > APPENDIX_MAX_ENTRIES) {

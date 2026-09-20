@@ -82,9 +82,18 @@ export interface GateStatus {
 }
 
 export interface RunFindingVerdict {
+  identity_key?: string | null;
   verdict: string;
   reason?: string | null;
   round?: number | null;
+  recorded_at?: string | null;
+  actor?: { id: string; name?: string | null; email?: string | null } | null;
+}
+
+export interface VerificationProvenance {
+  source: string;
+  report_sha256?: string | null;
+  recovered_at?: string | null;
 }
 
 export interface RunFinding {
@@ -98,8 +107,11 @@ export interface RunFinding {
   title: string;
   gating_reason: string | null;
   verification_verdict?: string | null;
+  verification_model?: string | null;
+  verification_note?: string | null;
+  verification_provenance?: VerificationProvenance | null;
   below_threshold?: boolean;
-  /** Present once the server joins the triage verdict onto the finding (IO-12482). */
+  /** Actual recorded triage, independent of automated verification or current gate resolution. */
   verdict?: RunFindingVerdict | null;
 }
 
@@ -187,6 +199,21 @@ const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean';
 
 const isPositiveInteger = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
 
+const isNonBlankString = (v: unknown): v is string => isString(v) && v.trim().length > 0;
+
+function isVerdict(value: unknown): boolean {
+  return isRecord(value) && isString(value['verdict']) &&
+    optional(value['identity_key'], isString) && optional(value['reason'], isString) &&
+    optional(value['round'], isPositiveInteger) && optional(value['recorded_at'], isString) &&
+    optional(value['actor'], (actor) => isRecord(actor) && isNonBlankString(actor['id']) &&
+      optional(actor['name'], isString) && optional(actor['email'], isString));
+}
+
+function isVerificationProvenance(value: unknown): boolean {
+  return isRecord(value) && isString(value['source']) &&
+    optional(value['report_sha256'], isString) && optional(value['recovered_at'], isString);
+}
+
 /** The pull request head: absent, or a record with its two flags as booleans and its shas as strings or null. */
 function isHead(value: unknown): boolean {
   return (
@@ -254,7 +281,10 @@ export function isRunDetail(value: unknown, id: string): value is RunDetail {
       (isRecordArray(value['artifacts']) &&
         value['artifacts'].every((a) => isString(a['kind']) && isBoolean(a['stored']) && optional(a['url'], isString)))) &&
     isRecordArray(value['findings']) &&
-    value['findings'].every((f) => isString(f['severity']) && isString(f['title']) && nullableRecord(f['verdict'])) &&
+    value['findings'].every((f) => isString(f['severity']) && isString(f['title']) &&
+      optional(f['verification_verdict'], isString) && optional(f['verification_model'], isString) &&
+      optional(f['verification_note'], isString) && optional(f['verification_provenance'], isVerificationProvenance) &&
+      optional(f['verdict'], isVerdict)) &&
     isRecordArray(value['calls']) &&
     value['calls'].every((c) => isString(c['model']) && isString(c['status']))
   );
