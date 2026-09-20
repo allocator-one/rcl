@@ -264,7 +264,7 @@ export async function applyRecovery(value: unknown, sink: HarnessSink): Promise<
     if (current.plan.action === 'import_history' && selected.action !== 'import_history') {
       outcome.reports.push(disposition(source, 'conflict', 'reviewed_run_disappeared', selected.run_id)); continue;
     }
-    if (current.plan.run_id !== selected.run_id && current.plan.run_id !== prepared.originalId) {
+    if (current.plan.run_id !== selected.run_id) {
       outcome.reports.push(disposition(source, 'conflict', 'reviewed_run_binding_changed', current.plan.run_id)); continue;
     }
     if (current.plan.action === 'upload_and_recover' && !['import_history', 'upload_and_recover'].includes(selected.action)) {

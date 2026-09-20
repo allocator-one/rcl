@@ -161,4 +161,10 @@ describe('source normalization and original artifact safety', () => {
     expect(parseSource(assignment).unsafe).toBe(true);
   });
 
+  it('does not exempt an escaped credential in a shadowed JSON value', () => {
+    const bytes = JSON.stringify(report());
+    const shadowed = bytes.replace('"reviews":', '"discarded":"sk-\\u0061nt-abcdefghijklmnopqrstu","discarded":"safe","reviews":');
+    expect(parseSource(shadowed).unsafe).toBe(true);
+  });
+
 });

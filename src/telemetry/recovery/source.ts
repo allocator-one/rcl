@@ -92,21 +92,44 @@ export function parseSource(text: string): ParsedSource {
       model: normalized.model ?? null, note: normalized.note ?? null,
     });
   });
-  const identifiers = new Set<string>();
-  let unsafe = requiresArtifactRedaction(raw, [], identifiers);
+  let unsafe = requiresArtifactRedaction(raw, []);
   if (!unsafe) {
-    let artifact = text;
-    // Preserve configured identifiers without exempting prose or shadowed JSON
-    // values. Decoded values were checked above; the raw pass also catches
-    // credential-shaped bytes discarded by JSON's duplicate-key semantics.
-    for (const identifier of identifiers) artifact = artifact.split(JSON.stringify(identifier)).join('"identifier"');
-    unsafe = scrubSecrets(artifact) !== artifact;
+    // JSON.parse discards duplicate keys. Walk every raw JSON string pair as
+    // well, decoding escapes before applying the same path-sensitive policy.
+    unsafe = rawArtifactNeedsRedaction(text);
   }
   // The transport builder consumes the validated fields above. Older report
   // versions may omit presentation-only consensus labels required by today's
   // ReviewResult type; recovery neither renders nor invents those labels.
   if (hasHeader) return { format: 'modern', report: data as unknown as ReviewResult & { run: NonNullable<ReviewResult['run']> }, refutations, unsafe };
   return { format: 'legacy', report: data as z.infer<typeof legacy>, refutations, unsafe };
+}
+
+const JSON_STRING = String.raw`"(?:[^"\\]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"`;
+const RAW_PAIR = new RegExp(`(${JSON_STRING})\\s*:\\s*(${JSON_STRING})`, 'g');
+const IDENTIFIER_KEY = /^(?:model|role|provider)$/;
+const SENSITIVE_KEY = /api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token|private[_-]?key/i;
+
+/**
+ * Inspect every raw JSON string assignment, including values JSON.parse drops
+ * for duplicate keys. Identifier fields use the narrower identifier scrubber;
+ * every other field is treated as free text.
+ */
+function rawArtifactNeedsRedaction(text: string): boolean {
+  for (const match of text.matchAll(RAW_PAIR)) {
+    let key: string;
+    let value: string;
+    try {
+      key = JSON.parse(match[1]!);
+      value = JSON.parse(match[2]!);
+    } catch {
+      return true;
+    }
+    if (scrubSecrets(key) !== key) return true;
+    if (SENSITIVE_KEY.test(key) && scrubSecrets(JSON.stringify({ [key]: value })) !== JSON.stringify({ [key]: value })) return true;
+    if ((IDENTIFIER_KEY.test(key) ? scrubIdentifier(value, Number.MAX_SAFE_INTEGER) : scrubSecrets(value)) !== value) return true;
+  }
+  return false;
 }
 
 /** Diagnostic evidence from an unsupported report is inventoried but never importable. */
@@ -133,23 +156,22 @@ export function unsupportedSourceDetails(text: string): Pick<import('./types.js'
 }
 
 /** Inspect decoded values too: JSON escapes must not conceal a credential. */
-function requiresArtifactRedaction(value: unknown, path: string[], identifiers: Set<string>): boolean {
+function requiresArtifactRedaction(value: unknown, path: string[]): boolean {
   if (typeof value === 'string') {
     const location = path.join('.');
     const identifier = /^(?:run\.roster\.\d+|reviews\.\d+)\.(?:model|role|provider)$/.test(location) ||
       /^(?:findings|belowThresholdFindings)\.\d+\.gating\.verification\.model$/.test(location) || location === 'run.gating.verification_model';
     const changed = (identifier ? scrubIdentifier(value, Number.MAX_SAFE_INTEGER) : scrubSecrets(value)) !== value;
-    if (identifier && !changed) identifiers.add(value);
     return changed;
   }
-  if (Array.isArray(value)) return value.some((item, i) => requiresArtifactRedaction(item, [...path, String(i)], identifiers));
+  if (Array.isArray(value)) return value.some((item, i) => requiresArtifactRedaction(item, [...path, String(i)]));
   if (value && typeof value === 'object') {
     return Object.entries(value).some(([key, item]) => scrubSecrets(key) !== key ||
       // The existing scrubber recognizes sensitive JSON assignments, including
       // short values which are not independently token-shaped.
       (/api[_-]?key|token|secret|password|passwd|private[_-]?key/i.test(key) &&
         scrubSecrets(JSON.stringify({ [key]: item })) !== JSON.stringify({ [key]: item })) ||
-      requiresArtifactRedaction(item, [...path, key], identifiers));
+      requiresArtifactRedaction(item, [...path, key]));
   }
   return false;
 }

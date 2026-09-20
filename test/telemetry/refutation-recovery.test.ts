@@ -257,6 +257,17 @@ describe('reviewed refutation recovery', () => {
     expect(remote.requests.every((r) => r.method === 'GET')).toBe(true);
   });
 
+  it('does not retarget an approved historical run to a newly present original run', async () => {
+    const s = await source();
+    const remote = server();
+    const manifest = await planRecovery(await inventoryRefutations({ roots: [s.root] }), remote.sink);
+    const original = buildRunEnvelope(s.report, { report_json: s.bytes }, { level: 'full', delivery: { mode: 'direct' } });
+    remote.runs.set(original.run.id, { envelope: original, stored: false });
+    const outcome = await applyRecovery(manifest, remote.sink);
+    expect(outcome.reports[0]).toMatchObject({ action: 'conflict', reason: 'reviewed_run_binding_changed' });
+    expect(remote.requests.every((r) => r.method === 'GET')).toBe(true);
+  });
+
   it('reuses legacy host/repository/original-byte identity and timing while preserving redacted artifact digests separately', async () => {
     const s = await source();
     delete s.report.run;
