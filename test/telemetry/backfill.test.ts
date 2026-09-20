@@ -330,3 +330,22 @@ describe('runBackfill', () => {
     expect(partial.failed).toEqual([{ file: 'rcl-report-allocator-one-42-r1.json', reason: expect.stringMatching(/422/) }]);
   });
 });
+
+
+it('delivers original legacy verifier evidence without rewriting the source artifact or identity', async () => {
+  const dir = corpus();
+  const path = join(dir, 'rcl-report-allocator-one-42-r1.json');
+  const source = JSON.parse(readFileSync(path, 'utf8'));
+  source.findings[0].gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The branch returns before the next callback.' } };
+  source.belowThresholdFindings = [{ ...source.findings[1], gating: { reason: 'none', verification: { verdict: 'unavailable', note: 'The verifier timed out.' } } }];
+  const bytes = JSON.stringify(source);
+  writeFileSync(path, bytes);
+  const built = await buildBackfillRuns({ dir, repo: 'allocator-one/allocator-one', host: 'harness.example.test', rclVersion: '3.6.0' });
+  const run = built.runs.find(r => r.artifacts.report_json === bytes)!;
+  expect(run).toBeDefined();
+  expect(run.envelope.findings[0]).toMatchObject({ verification_verdict: 'refuted', verification_model: 'google/gemini-3.8-flash', verification_note: 'The branch returns before the next callback.' });
+  expect(run.envelope.findings[2]).toMatchObject({ ref: 'f003', below_threshold: true, verification_verdict: 'unavailable', verification_note: 'The verifier timed out.' });
+  expect(run.envelope.findings[2]).not.toHaveProperty('verification_model');
+  expect(run.envelope.artifacts_declared[0]!.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
+  expect(readFileSync(path, 'utf8')).toBe(bytes);
+});

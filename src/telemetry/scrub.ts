@@ -44,9 +44,11 @@ const KEY_PATTERNS: RegExp[] = [
  */
 // The key may be a compound (`client_secret`, `GITHUB_TOKEN`, `private_key`)
 // and may itself be quoted, as in JSON.
-const SENSITIVE_KEY = String.raw`["']?[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token|private[_-]?key)["']?`;
-// A quoted value runs to its closing quote, escaped quotes included.
-const ASSIGNMENT_QUOTED = new RegExp(String.raw`(${SENSITIVE_KEY}\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')`, 'gi');
+const SENSITIVE_KEY = String.raw`(?<![A-Za-z0-9_-])["']?[A-Za-z0-9_-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|passwd|token|private[_-]?key)["']?`;
+// Non-overlapping alternatives consume escaped characters once, including a
+// terminal escape. Match through the closing quote or end of input, even when
+// pre-cut removed the closing quote or the supplied value spans real newlines.
+const ASSIGNMENT_QUOTED = new RegExp(String.raw`(${SENSITIVE_KEY}\s*[:=]\s*)(["'])(?:(?!\2)[^\\]|\\(?:[\s\S]|(?![\s\S])))*(?:\2|(?![\s\S]))`, 'gi');
 const ASSIGNMENT = new RegExp(String.raw`(${SENSITIVE_KEY}\s*[:=]\s*)([^\s"',;]{8,})`, 'gi');
 
 /**
@@ -62,9 +64,8 @@ function opaqueToken(candidate: string): boolean {
 
 /** Replace every credential-shaped substring with `[redacted]`. */
 export function scrubSecrets(text: string): string {
-  let out = text;
+  let out = text.replace(ASSIGNMENT_QUOTED, redactQuoted);
   for (const pattern of KEY_PATTERNS) out = out.replace(pattern, REDACTED);
-  out = out.replace(ASSIGNMENT_QUOTED, redactQuoted);
   out = out.replace(ASSIGNMENT, (_match, prefix: string) => `${prefix}${REDACTED}`);
   out = out.replace(OPAQUE_TOKEN, (candidate) => (opaqueToken(candidate) ? REDACTED : candidate));
   return out;
@@ -77,27 +78,33 @@ function redactQuoted(match: string, prefix: string): string {
 }
 
 /**
- * Scrub, then cap at `max` characters (grapheme-safe, with an ellipsis).
- * The scrub passes run over at most about four times the cap: a huge input
- * is cut first — at the next whitespace, so no token is split and a secret
- * straddling the cut is still matched in full — before the exact cap applies.
+ * Scrub, then cap at `max` Unicode code points with an ellipsis. Preliminary
+ * truncation keeps only through a real whitespace boundary inside the bounded
+ * UTF-16 prefix, so no split credential fragment can survive later redaction.
  */
 export function scrubText(text: string, max: number = MAX_FREE_TEXT): string {
   const bounded = preCut(text, max * 4);
-  const scrubbed = scrubSecrets(bounded);
-  const points = [...scrubbed];
-  if (points.length <= max && bounded === text) return scrubbed;
+  return truncateCodepoints(scrubSecrets(bounded), max, bounded !== text);
+}
+
+function truncateCodepoints(text: string, max: number, cut = false): string {
+  const points: string[] = [];
+  let units = 0;
+  for (const point of text) {
+    if (points.length >= max) break;
+    points.push(point);
+    units += point.length;
+  }
+  if (!cut && units === text.length) return text;
   return `${points.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
 function preCut(text: string, at: number): string {
   if (text.length <= at) return text;
-  // Cut at the last whitespace shortly before the mark, so a token that
-  // straddles it is dropped whole rather than left as a half-secret; only a
-  // whitespace-free stretch longer than the window is cut mid-token.
-  const window = text.slice(Math.max(0, at - 512), at);
-  const back = window.search(/\s\S*$/);
-  return text.slice(0, back === -1 ? at : Math.max(0, at - 512) + back);
+  // A half-surrogate at the boundary cannot be a whitespace boundary.
+  const prefix = text.slice(0, at);
+  const back = prefix.search(/\s\S*$/);
+  return back === -1 ? '' : prefix.slice(0, back);
 }
 
 /**
@@ -106,12 +113,10 @@ function preCut(text: string, at: number): string {
  * `anthropic/Claude-Sonnet-4-5-20250929` is not an opaque token and stays.
  */
 export function scrubIdentifier(text: string, max: number = 200): string {
-  let out = text;
+  let out = text.replace(ASSIGNMENT_QUOTED, redactQuoted);
   for (const pattern of KEY_PATTERNS) out = out.replace(pattern, REDACTED);
-  out = out.replace(ASSIGNMENT_QUOTED, redactQuoted);
   out = out.replace(ASSIGNMENT, (_match, prefix: string) => `${prefix}${REDACTED}`);
-  const points = [...out];
-  return points.length <= max ? out : `${points.slice(0, Math.max(0, max - 1)).join('')}…`;
+  return truncateCodepoints(out, max);
 }
 
 export function scrubOptional(text: string | undefined, max: number = MAX_FREE_TEXT): string | undefined {

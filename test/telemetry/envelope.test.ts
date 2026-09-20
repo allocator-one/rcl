@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { buildRunEnvelope, declareArtifacts, sanitizeForDelivery } from '../../src/telemetry/envelope.js';
@@ -202,5 +203,54 @@ describe('buildRunEnvelope', () => {
     const result = sampleResult();
     delete result.run;
     expect(() => buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } })).toThrow(/run header/);
+  });
+});
+
+
+describe('verification evidence delivery', () => {
+  const fixture = JSON.parse(readFileSync(new URL('../fixtures/verification-normalization.json', import.meta.url), 'utf8')) as {
+    vectors: Array<{ name: string; input: { verification_model: string | null; verification_note: string | null }; expected: { verification_model: string | null; verification_note: string | null } }>;
+  };
+
+  it.each(fixture.vectors)('shares receiver normalization and JSON/wire values: $name', ({ input, expected }) => {
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: input.verification_model, note: input.verification_note } } as never;
+    const safe = sanitizeForDelivery(result);
+    const artifacts = { report_json: JSON.stringify(safe) };
+    const envelope = buildRunEnvelope(safe, artifacts, { level: 'findings', delivery: { mode: 'direct' } });
+    const wire = envelope.findings[0]!;
+    expect(wire.verification_model ?? null).toBe(expected.verification_model);
+    expect(wire.verification_note ?? null).toBe(expected.verification_note);
+    expect(safe.findings[0]!.gating!.verification!.model ?? null).toBe(expected.verification_model);
+    expect(safe.findings[0]!.gating!.verification!.note ?? null).toBe(expected.verification_note);
+    expect(envelope.artifacts_declared).toEqual(declareArtifacts(artifacts));
+    expect(result.findings[0]!.gating!.verification!.note).toBe(input.verification_note);
+  });
+
+  it.each(['refuted', 'unrefuted', 'unavailable'] as const)('preserves %s evidence in kept and below-threshold findings at the selected level', (verdict) => {
+    const result = sampleResult();
+    for (const f of [...result.findings, ...result.belowThresholdFindings!]) {
+      f.gating = { reason: 'none', verification: { verdict, model: 'google/gemini-3.8-flash', note: 'The earlier branch returns.' } };
+    }
+    for (const level of ['findings', 'full'] as const) {
+      const envelope = buildRunEnvelope(result, ARTIFACTS, { level, delivery: { mode: 'direct' } });
+      expect(envelope.findings.map(f => [f.ref, f.below_threshold, f.verification_verdict, f.verification_model, f.verification_note])).toEqual([
+        ['f001', false, verdict, 'google/gemini-3.8-flash', 'The earlier branch returns.'],
+        ['f002', true, verdict, 'google/gemini-3.8-flash', 'The earlier branch returns.'],
+      ]);
+    }
+    expect(buildRunEnvelope(result, ARTIFACTS, { level: 'envelope', delivery: { mode: 'direct' } }).findings).toEqual([]);
+  });
+
+  it('omits absent evidence and never accepts client recovery provenance', () => {
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted' } } as never;
+    Object.assign(result.findings[0]!, { verification_provenance: { source: 'report_json' } });
+    const f = buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }).findings[0]!;
+    expect(f.verification_verdict).toBe('refuted');
+    expect(f).not.toHaveProperty('verification_model');
+    expect(f).not.toHaveProperty('verification_note');
+    expect(f).not.toHaveProperty('verification_provenance');
+    expect(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }).findings[0]).not.toHaveProperty('verification_note');
   });
 });

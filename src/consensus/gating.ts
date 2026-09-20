@@ -37,7 +37,8 @@ import {
 export type GatingReason = 'consensus' | 'critical' | 'verified' | 'none';
 
 export interface GatingVerification {
-  model: string;
+  /** Absent in legacy evidence or when no model was recorded. */
+  model?: string;
   /**
    * 'refuted': the verifier showed the finding does not hold → not gating.
    * 'unrefuted': the verifier could not refute it → gates.

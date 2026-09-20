@@ -52,9 +52,9 @@ describe('scrubSecrets', () => {
 });
 
 describe('scrubText', () => {
-  it('truncates after scrubbing, grapheme-safe, with an ellipsis', () => {
-    expect(scrubText('a'.repeat(50), 10)).toBe(`${'a'.repeat(9)}…`);
-    expect(scrubText('😀'.repeat(20), 5)).toBe(`${'😀'.repeat(4)}…`);
+  it('truncates after scrubbing at Unicode code points, with an ellipsis', () => {
+    expect(scrubText('a'.repeat(20), 10)).toBe(`${'a'.repeat(9)}…`);
+    expect(scrubText('😀'.repeat(8), 5)).toBe(`${'😀'.repeat(4)}…`);
     expect(scrubText('short')).toBe('short');
   });
 });
@@ -161,4 +161,24 @@ describe('scrubbing is idempotent and bounded', () => {
     expect(scrubSecrets('private_key: "-----BEGIN"')).toBe(`private_key: "${REDACTED}"`);
     expect(scrubSecrets('api_key: "abc\\"def" rest')).toBe(`api_key: "${REDACTED}" rest`);
   });
+});
+
+
+describe('bounded verification normalization regressions', () => {
+  it('discards a prefix with no safe whitespace boundary', () => {
+    expect(scrubText('a'.repeat(50), 10)).toBe('…');
+    expect(scrubText('😀'.repeat(20), 5)).toBe('…');
+    expect(scrubText(`sk-${'a'.repeat(7_978)};xxxxx token=abcdefg${'q'.repeat(100)}`)).not.toContain('abcdefg');
+    expect(scrubText(`safe sk-${'a'.repeat(7_467)};token=abcdefg${'q'.repeat(1_000)}`)).toBe('safe…');
+    expect(scrubText(`prefix ${'🙂'.repeat(3_997)} tail ${'x'.repeat(1_000)}`)).toBe('prefix…');
+  });
+
+  it('handles long identifiers and odd/even terminal escapes in bounded time', () => {
+    expect(scrubIdentifier('x'.repeat(200_000), 500)).toBe(`${'x'.repeat(499)}…`);
+    for (const count of [20_000, 20_001]) {
+      const text = `secret="${'\\'.repeat(count)}`;
+      expect(scrubIdentifier(text, 500)).toBe('secret="[redacted]"');
+    }
+    expect(scrubText(`secret="synthetic-passphrase\\ ${'x'.repeat(8_000)}`)).toBe('secret="[redacted]"…');
+  }, 2_000);
 });

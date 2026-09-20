@@ -9,6 +9,7 @@ import type { RosterEntry, RunHeader } from '../report/run-header.js';
 import { UUID_NAMESPACE_RCL_BACKFILL, uuidv5 } from '../report/uuid.js';
 import { declareArtifacts, type ArtifactBytes, type RunEnvelope, type WireCall, type WireFinding } from './envelope.js';
 import { deliverable, type WireEvent } from './events.js';
+import { normalizeVerificationEvidence } from './verification.js';
 import { scrubDeep, scrubIdentifier, scrubSecrets, scrubText } from './scrub.js';
 import { describeOutcome, type HarnessSink } from './sink.js';
 import { getRun } from '../evidence/reads.js';
@@ -67,7 +68,7 @@ interface RawFinding {
   description?: unknown;
   suggestedFix?: unknown;
   consensus?: { models?: unknown } & Record<string, unknown>;
-  gating?: { reason?: unknown; verification?: { verdict?: unknown } };
+  gating?: { reason?: unknown; verification?: { verdict?: unknown; model?: unknown; note?: unknown } };
 }
 
 interface RawReport {
@@ -171,6 +172,7 @@ function wireFindings(raw: unknown, belowThreshold: boolean, offset: number): Ar
       elevated: raw['elevated'] === true,
     } as unknown as ConsensusFinding['consensus'];
     const gatingReason = str(f.gating?.reason);
+    const verification = normalizeVerificationEvidence(f.gating?.verification);
     out.push({
       models,
       wire: {
@@ -187,6 +189,8 @@ function wireFindings(raw: unknown, belowThreshold: boolean, offset: number): Ar
         consensus: scrubDeep(consensus),
         gating_reason: (['consensus', 'critical', 'verified'].includes(gatingReason) ? gatingReason : 'none') as WireFinding['gating_reason'],
         ...(typeof f.gating?.verification?.verdict === 'string' ? { verification_verdict: textField(f.gating.verification.verdict, 200) } : {}),
+        ...(verification.model !== undefined ? { verification_model: verification.model } : {}),
+        ...(verification.note !== undefined ? { verification_note: verification.note } : {}),
         below_threshold: belowThreshold,
       },
     });

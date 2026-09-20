@@ -259,6 +259,22 @@ rcl converge-verdict --target rcl-30 --round 2 \
 
 ---
 
+Structured findings include the recorded verifier model and explanation, when present,
+at both `findings` and `full` telemetry levels. The JSON report and wire envelope
+share normalization: blank values are absent, model identifiers are capped at 500
+Unicode code points, and explanations at 2,000. Missing legacy explanations are
+never generated. Unicode normalization forms and gate outcomes are unchanged.
+
+Quoted credential assignments are redacted through their closing quote or end of
+input, including multiline and unfinished values. Preliminary text truncation
+keeps only through the last whitespace in its bounded prefix (or only an ellipsis
+if there is none), preventing partial secrets from surviving redaction. The shared
+fixture `test/fixtures/verification-normalization.json` comes from allocator-one
+PR #8974 and pins the receiver contract. This corrects the quoted-value and
+preliminary-truncation behavior of RCL 3.6.0. Existing source reports are not
+rewritten to add explanations; legacy backfill retains its declared artifact
+scrubbing and deterministic source identity rules.
+
 ### `rcl telemetry status` and `rcl telemetry flush`
 
 Evidence delivery to Harness (epic IO-12475). In a repository that carries
