@@ -3,8 +3,8 @@ import { REDACTED, sanitizePresentation, scrubDeep, scrubIdentifier, scrubSecret
 
 describe('sanitizePresentation', () => {
   it('removes bidi controls and marks while preserving ordinary RTL text and joiners', () => {
-    const input = 'עברית\u202Ereverse\u2066isolate\u200Fmark\u200Bzero\u200Demoji\u200Cjoin';
-    expect(sanitizePresentation(input, { multiline: false })).toBe('עבריתreverseisolatemarkzero\u200Demoji\u200Cjoin');
+    const input = 'עברית\u061cletter\u180evowel\u202Ereverse\u2066isolate\u200Fmark\u200Bzero\u200Demoji\u200Cjoin';
+    expect(sanitizePresentation(input, { multiline: false })).toBe('עבריתlettervowelreverseisolatemarkzero\u200Demoji\u200Cjoin');
   });
 
   it('normalizes Unicode line separators only at the presentation boundary', () => {

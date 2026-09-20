@@ -9,7 +9,7 @@
 export const MAX_FREE_TEXT = 2_000;
 export const REDACTED = '[redacted]';
 
-const DISPLAY_MARKS = /[\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+const DISPLAY_MARKS = /[\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
 const DISPLAY_LINE_SEPARATORS = /\r\n|[\r\u0085\u2028\u2029]/g;
 
 /**
@@ -25,7 +25,7 @@ export function sanitizePresentation(value: string, { multiline }: { multiline: 
 
 /** Escape display controls in JSON source without changing parsed semantic values. */
 export function escapeDisplayControls(value: string): string {
-  return value.replace(/[\u0085\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/g,
+  return value.replace(/[\u0085\u061c\u180e\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/g,
     (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
