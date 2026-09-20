@@ -136,6 +136,21 @@ describe('toMarkdown — recorded verification', () => {
     expect(md).not.toContain('finding-20');
     expect(md.slice(0, md.indexOf('## 🕵️'))).not.toContain('**Verification:**');
   });
+
+  it.each(['\u200b', '<span></span>'])('scrubs credentials reconstructed by presentation cleanup (%s)', (separator) => {
+    const secret = 'sk-ant-abcdefghijklmnopqrstu';
+    const obscured = `sk-ant-abcdefghij${separator}klmnopqrstu`;
+    const finding = mkFinding({ tier: 'single' });
+    finding.gating = { reason: 'none', verification: { verdict: 'refuted', model: obscured, note: `Recorded ${obscured}` } };
+    const result = mkResult([finding], [finding]);
+    const original = JSON.stringify(result);
+    const md = toMarkdown(result);
+
+    expect(md).not.toContain(secret);
+    expect(md.match(/\*\*Verifier:\*\* \[redacted\]/g)).toHaveLength(2);
+    expect(md.match(/> Recorded \[redacted\]/g)).toHaveLength(2);
+    expect(JSON.stringify(result)).toBe(original);
+  });
 });
 
 describe('toMarkdown — agreement tier sections', () => {

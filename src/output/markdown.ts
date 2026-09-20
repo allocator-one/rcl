@@ -3,7 +3,7 @@ import type { AgreementTier, ConsensusFinding, ReviewResult } from '../consensus
 import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
 import { describeRunTarget } from '../report/run-header.js';
 import { normalizeVerificationEvidence } from '../telemetry/verification.js';
-import { sanitizePresentation } from '../telemetry/scrub.js';
+import { sanitizePresentation, scrubIdentifier, scrubSecrets } from '../telemetry/scrub.js';
 
 function severityEmoji(severity: ConsensusFinding['severity']): string {
   return { critical: '🔴', important: '🟡', minor: '🔵', nitpick: '⚪' }[severity];
@@ -68,12 +68,15 @@ function verificationLines(finding: ConsensusFinding): string[] {
   const inline = (value: string): string => sanitizePresentation(value, { multiline: false });
   const lines = [`**Verification:** ${sanitizeInline(inline(verification.verdict))}`];
   // 500 code points fit in 1000 UTF-16 units even after mention escaping.
-  if (model) lines.push(`**Verifier:** ${sanitizeInline(inline(model), 1000)}`);
+  // Presentation cleanup can join a credential split by an invisible mark or
+  // HTML tag. Scrub again after those transformations, keeping model IDs intact.
+  if (model) lines.push(`**Verifier:** ${scrubIdentifier(sanitizeInline(inline(model), 1000), 1000)}`);
   if (note) {
     // Keep prose and code readable inside a quote, containing even an unclosed
     // model-supplied fence. The sanitizer's 4000-unit bound preserves all 2000
     // normalized code points, including astral characters or escaped mentions.
-    lines.push('', ...sanitizeBlock(sanitizePresentation(note, { multiline: true })).split('\n').map((line) => `> ${line}`));
+    const displayed = scrubSecrets(sanitizeBlock(sanitizePresentation(note, { multiline: true })));
+    lines.push('', ...displayed.split('\n').map((line) => `> ${line}`));
   } else {
     lines.push('Explanation not recorded');
   }
