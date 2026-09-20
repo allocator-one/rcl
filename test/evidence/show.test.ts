@@ -195,6 +195,7 @@ describe('rcl evidence show', () => {
       { verdict: { verdict: 'fixed', identity_key: {} } }, { verdict: { verdict: 'fixed', round: '3' } },
       { verdict: { verdict: 'fixed', recorded_at: [] } }, { verdict: { verdict: 'fixed', actor: [] } },
       { verdict: { verdict: 'fixed', actor: { id: 'u', name: [] } } },
+      { verdict: { verdict: 'fixed', actor: { id: '', name: null, email: null } } },
     ]) {
       const data = runDetail({ findings: [{ ...runDetail().findings[0], ...malformed }] });
       const { code, out } = run(RUN_ID, () => ({ status: 200, body: { data } }));

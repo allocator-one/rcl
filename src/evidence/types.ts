@@ -199,11 +199,13 @@ const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean';
 
 const isPositiveInteger = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
 
+const isNonBlankString = (v: unknown): v is string => isString(v) && v.trim().length > 0;
+
 function isVerdict(value: unknown): boolean {
   return isRecord(value) && isString(value['verdict']) &&
     optional(value['identity_key'], isString) && optional(value['reason'], isString) &&
     optional(value['round'], isPositiveInteger) && optional(value['recorded_at'], isString) &&
-    optional(value['actor'], (actor) => isRecord(actor) && isString(actor['id']) &&
+    optional(value['actor'], (actor) => isRecord(actor) && isNonBlankString(actor['id']) &&
       optional(actor['name'], isString) && optional(actor['email'], isString));
 }
 
