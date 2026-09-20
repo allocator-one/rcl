@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { loadConfig } from '../../src/config/loader.js';
+import type { Config } from '../../src/config/schema.js';
 import {
   createTelemetryRuntime,
   deliverRun,
@@ -46,6 +48,12 @@ describe('telemetry delivery', () => {
   let credentialsPath: string;
   let lines: string[];
 
+  async function projectConfig(harness: NonNullable<Config['harness']>) {
+    const path = join(repo, '.review-council.json');
+    await writeFile(path, JSON.stringify({ models: ['openai-compat/fixture'], harness }));
+    return loadConfig(path);
+  }
+
   async function runtime(handler: Parameters<typeof fakeFetch>[0], extra: Parameters<typeof createTelemetryRuntime>[0] extends infer O ? Partial<O> : never = {}) {
     const { fetch, requests } = fakeFetch(handler);
     const rt = await createTelemetryRuntime({
@@ -77,7 +85,8 @@ describe('telemetry delivery', () => {
   });
 
   it.each(['findings', 'full'] as const)('delivers verifier evidence at %s level for direct and convergence runs', async (level) => {
-    const { rt, requests } = await runtime(acceptEverything, { env: { RCL_TELEMETRY: level } });
+    const config = await projectConfig({ telemetry: level });
+    const { rt, requests } = await runtime(acceptEverything, { config });
     for (const converge of [undefined, { target: 'rcl-42', round: 1, attempt: 1 }]) {
       const result = sampleResult();
       result.run!.converge = converge;
@@ -90,6 +99,21 @@ describe('telemetry delivery', () => {
       if (level === 'full') expect(requests.filter(r => r.url.endsWith('/artifacts/report_json')).at(-1)!.body).toBe(artifacts.report_json);
       else expect(requests.filter(r => r.method === 'PUT')).toEqual([]);
     }
+  });
+
+  it('honors a loaded project opt-out before evidence delivery', async () => {
+    const config = await projectConfig({ telemetry: 'off' });
+    const { rt, requests } = await runtime(acceptEverything, { config });
+    expect(evidenceRequirementConflict({ evidenceRequired: true }, config, {})).toMatch(/harness\.telemetry: off/);
+    expect(await deliverRun(rt, { result: sampleResult(), artifacts: ARTIFACTS })).toMatchObject({ status: 'off' });
+    expect(requests).toEqual([]);
+  });
+
+  it('carries a loaded parse-failure opt-in into the delivery runtime', async () => {
+    const config = await projectConfig({ parseFailures: true });
+    const { rt } = await runtime(acceptEverything, { config });
+    expect(rt.parseFailures).toBe(true);
+    expect(rt.level).toBe('full');
   });
 
   it('reports an oversized evidence envelope as rejected instead of retrying without explanations', async () => {
@@ -180,14 +204,14 @@ describe('telemetry delivery', () => {
   });
 
   it('uploads no artifacts at the findings level and none of the report rows at envelope level', async () => {
-    const { rt, requests } = await runtime(acceptEverything, { config: { harness: { telemetry: 'findings' } } });
+    const { rt, requests } = await runtime(acceptEverything, { config: await projectConfig({ telemetry: 'findings' }) });
     await deliverRun(rt, { result: sampleResult(), artifacts: ARTIFACTS });
     expect(requests).toHaveLength(1);
     const posted = JSON.parse(requests[0]!.body!) as { findings: unknown[]; calls: unknown[]; artifacts_declared: unknown[] };
     expect(posted.findings).toHaveLength(2);
     expect(posted.artifacts_declared).toHaveLength(2);
 
-    const envelopeOnly = await runtime(acceptEverything, { config: { harness: { telemetry: 'envelope' } } });
+    const envelopeOnly = await runtime(acceptEverything, { config: await projectConfig({ telemetry: 'envelope' }) });
     await deliverRun(envelopeOnly.rt, { result: sampleResult(), artifacts: ARTIFACTS });
     // One request: the header alone — no report rows, no artifact uploads.
     expect(envelopeOnly.requests).toHaveLength(1);

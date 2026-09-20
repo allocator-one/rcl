@@ -14,6 +14,8 @@
   unsafe, incomplete and unsupported sources without importing them blindly.
 - Keep evidence read commands and recovery planning free of automatic outbox
   delivery. Render verifier and triage text safely while preserving API JSON.
+- Honor the configured Harness telemetry level and parse-failure opt-in when
+  loading review settings, including findings-only delivery and opt-out (RCL-71).
 
 
 ## 3.6.0 - 2026-09-15
