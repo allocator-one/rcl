@@ -163,6 +163,7 @@ export interface RunDetail {
   repo_verified?: boolean;
   is_cross_repository?: boolean;
   provenance?: string;
+  historical_source?: { original_run_id: string; report_sha256: string } | null;
   rcl_version?: string;
   runner?: Record<string, unknown> | null;
   converge?: RunConverge | null;
