@@ -150,5 +150,6 @@ function mergeWithDefaults(config: Config): Config {
     context: config.context,
     spec: config.spec,
     focus: config.focus,
+    harness: config.harness,
   };
 }
