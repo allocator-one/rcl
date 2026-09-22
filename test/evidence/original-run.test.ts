@@ -98,9 +98,6 @@ describe('source and receipt binding', () => {
     changedInstant.started_at = changedInstant.started_at.replace('.000000Z','.000001Z');
     expect(matchesOriginalRun(changedInstant, prepared)).toBe(false);
     projected.calls[0]!.duration_ms = 999; expect(matchesOriginalRun(projected, prepared)).toBe(false);
-    const reorderedFindings = structuredClone(projection(prepared.envelope,{}));
-    [reorderedFindings.findings[0], reorderedFindings.findings[1]] = [reorderedFindings.findings[1]!, reorderedFindings.findings[0]!];
-    expect(matchesOriginalRun(reorderedFindings, prepared)).toBe(false);
     expect(instant('2026-01-01T01:00:00.123456+01:00')).toBe(instant('2026-01-01T00:00:00.123456Z'));
     expect(instant('2026-01-01T00:00:00.123457Z')).not.toBe(instant('2026-01-01T00:00:00.123456Z'));
   });

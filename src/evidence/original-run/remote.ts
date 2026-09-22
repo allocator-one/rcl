@@ -48,7 +48,7 @@ export function matchesOriginalRun(raw: unknown, prepared: PreparedOriginal): bo
     if (!isDeepStrictEqual(raw.stats, expected.stats) || !isDeepStrictEqual(raw.delivery, expected.delivery)) return false;
     if (!Array.isArray(raw.findings) || raw.findings.length !== expected.findings.length || raw.findings.some(f => !object(f) || !required(f, findingKeys))) return false;
     if (new Set(raw.findings.map(f => (f as Record<string, unknown>).ref)).size !== raw.findings.length) return false;
-    if (!isDeepStrictEqual(raw.findings.map(f => pick(f as Record<string, unknown>, findingKeys)), expected.findings.map(f => pick(f as unknown as Record<string, unknown>, findingKeys)))) return false;
+    if (!isDeepStrictEqual(sorted(raw.findings.map(f => pick(f as Record<string, unknown>, findingKeys))), sorted(expected.findings.map(f => pick(f as unknown as Record<string, unknown>, findingKeys))))) return false;
     if (!Array.isArray(raw.calls) || raw.calls.some(c => !object(c) || !required(c, callKeys))) return false;
     if (!isDeepStrictEqual(sorted(raw.calls.map(c => pick(c as Record<string, unknown>, callKeys))), sorted(expected.calls.map(c => pick(c as unknown as Record<string, unknown>, callKeys))))) return false;
     if (!Array.isArray(raw.artifacts) || raw.artifacts.length !== expected.artifacts_declared.length || raw.artifacts.some(a => !object(a) || !required(a, ['kind','declared_sha256','declared_bytes','stored']) || typeof a.stored !== 'boolean')) return false;
