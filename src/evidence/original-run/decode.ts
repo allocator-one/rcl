@@ -83,6 +83,7 @@ export function decodeOriginalReport(text: string, options: DecodeOriginalReport
           continue;
         }
         if (unit === 0) throw new Error('unsupported_nul_in_original');
+        throw new Error('unsupported_control_in_original');
       }
       if (unit >= 0xd800 && unit <= 0xdbff && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
         result += value.slice(i, i + 2); i++; continue;

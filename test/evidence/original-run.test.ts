@@ -66,6 +66,12 @@ describe('original JSON interpretation', () => {
     const literalDel = String.fromCharCode(0x7f);
     const text = `{"findings":[{"title":"before\\u0000 after","description":"back\\bspace\\fpage\\u001f","suggestedFix":"del${literalDel}"}]}`;
     expect(() => decodeOriginalReport(text)).toThrow('unsupported_nul_in_original');
+    for (const source of [
+      '{"findings":[{"description":"back\\bspace"}]}',
+      '{"findings":[{"description":"page\\fbreak"}]}',
+      '{"findings":[{"description":"unit\\u001fseparator"}]}',
+      `{"findings":[{"description":"del${literalDel}"}]}`,
+    ]) expect(() => decodeOriginalReport(source)).toThrow('unsupported_control_in_original');
     const decoded = decodeOriginalReport(text, { originalProse: 'control-code-units-v1' });
     expect(decoded.value).toEqual({ findings: [{ title: 'before\\u0000 after', description: 'back\\u0008space\\u000Cpage\\u001F', suggestedFix: 'del\\u007F' }] });
     expect(decoded.transformations).toEqual([
