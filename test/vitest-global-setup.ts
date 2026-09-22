@@ -28,7 +28,12 @@ async function buildCli(): Promise<void> {
       buildRequested = false;
       await exec(process.execPath, [typescriptBin()], { cwd: root, timeout: 30_000 });
     }
-  })().finally(() => { building = undefined; });
+  })().then(() => {
+    building = undefined;
+    // A programmatic rerun can request work after the loop settles but before
+    // this continuation. Drain it before releasing callers of this batch.
+    if (buildRequested) return buildCli();
+  }, error => { building = undefined; throw error; });
   await building;
 }
 

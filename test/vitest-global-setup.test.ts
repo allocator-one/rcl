@@ -56,4 +56,27 @@ describe('Vitest CLI build coordination', () => {
     builds.pending.shift()!(); await recovered;
     expect(builds.active).toBe(0); expect(builds.maximum).toBe(1);
   });
+
+  it('builds a rerun requested as the previous compiler promise settles', async () => {
+    vi.stubEnv('RCL_TEST_PACKAGED_CLI', '');
+    let rerun!: () => Promise<void>;
+    const initialized = setup({ onTestsRerun: callback => { rerun = callback; } });
+    builds.pending.shift()!(); await initialized;
+    let completed = 0;
+    const first = rerun().then(() => { completed++; });
+    builds.pending.shift()!();
+    // Programmatic Vitest reruns can arrive in a microtask; the stock watcher
+    // debounce timer is not the trigger for this finalization boundary.
+    const second = Promise.resolve().then(rerun).then(() => { completed++; });
+    try {
+      await vi.waitFor(() => expect(builds.pending).toHaveLength(1));
+      expect(completed).toBe(0);
+      expect(builds.maximum).toBe(1);
+      builds.pending.shift()!(); await Promise.all([first, second]);
+      expect(builds.active).toBe(0); expect(completed).toBe(2);
+    } finally {
+      while (builds.pending.length) { builds.pending.shift()!(); await Promise.resolve(); }
+      await Promise.allSettled([first, second]);
+    }
+  });
 });
