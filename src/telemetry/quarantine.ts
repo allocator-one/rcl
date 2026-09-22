@@ -74,6 +74,7 @@ async function durableFile(path: string, bytes: string): Promise<void> {
 }
 
 async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
   const handle = await open(path, 'r');
   try { await handle.sync(); } finally { await handle.close(); }
 }

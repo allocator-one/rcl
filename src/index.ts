@@ -2158,11 +2158,17 @@ async function executeCouncil(
       };
   if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
   // The flush hint is honest only when something was spooled to flush.
-  const evidenceFailure = delivery.spooled
-    ? `Evidence was not recorded (--evidence-required). Retry delivery with \`rcl telemetry flush --run ${delivery.runId}\` rather than re-running the review.`
-    : delivery.retention?.status === 'complete'
-      ? `Evidence is not fully acknowledged (--evidence-required). Original reports are retained; inspect them with \`rcl telemetry rejected --run ${delivery.runId}\` before supported recovery.`
-    : `Evidence was not recorded (--evidence-required): ${delivery.line || delivery.status}.`;
+  const evidenceFailure = [
+    `Evidence was not recorded (--evidence-required): ${delivery.line || delivery.status}.`,
+    delivery.spooled
+      ? `Retry delivery with \`rcl telemetry flush --run ${delivery.runId}\` rather than re-running the review.`
+      : undefined,
+    delivery.retention?.status === 'complete'
+      ? `Original reports are retained; inspect them with \`rcl telemetry rejected --run ${delivery.runId}\` before supported recovery.`
+      : delivery.retention?.status === 'failed'
+        ? `Original report retention failed: ${delivery.retention.error ?? 'unknown error'}.`
+        : undefined,
+  ].filter((part): part is string => part !== undefined).join(' ');
 
   // CI mode: fail on a fully-failed run or on blocking findings. The gate
   // verdict keeps its exit code — pipelines branch on it — and an evidence

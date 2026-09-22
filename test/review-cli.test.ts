@@ -13,6 +13,9 @@ import {
   spoolAsyncCalls,
 } from '../src/dispatch/async-lane.js';
 import type { ReviewAdapter } from '../src/dispatch/adapter.js';
+import { Quarantine } from '../src/telemetry/quarantine.js';
+import { buildRunEnvelope } from '../src/telemetry/envelope.js';
+import { sampleResult } from './telemetry/fixtures.js';
 
 const cliEntrypoint = fileURLToPath(new URL('../src/index.ts', import.meta.url));
 const tsxImport = import.meta.resolve('tsx');
@@ -142,6 +145,33 @@ describe('rcl review — exact-head binding flags', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/--spec-source/);
+  });
+});
+
+describe('rcl telemetry rejected', () => {
+  it('inspects a selected retained original without delivering it', async () => {
+    const repo = tempRepository();
+    const dataDir = mkdtempSync(join(tmpdir(), 'rcl-rejected-cli-'));
+    tempDirs.push(dataDir);
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result), report_md: '# Original report\n' };
+    const store = new Quarantine(join(dataDir, 'quarantine'));
+    await store.retain({
+      runId: result.run!.id,
+      artifacts,
+      envelope: buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } }),
+      events: [],
+      requestedMode: 'asserted',
+      acknowledged: false,
+      diagnostics: [{ path: 'delivery', message: 'HTTP 422' }],
+    });
+
+    const command = runRcl(['telemetry', 'rejected', '--run', result.run!.id, '--json'], repo, { RCL_DATA_DIR: dataDir });
+
+    expect(command.status, command.stderr).toBe(0);
+    expect(JSON.parse(command.stdout)).toMatchObject({
+      entries: [{ runId: result.run!.id, status: 'complete' }],
+    });
   });
 });
 

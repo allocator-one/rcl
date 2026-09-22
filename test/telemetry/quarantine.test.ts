@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Quarantine, type QuarantineInput } from '../../src/telemetry/quarantine.js';
 import { Outbox } from '../../src/telemetry/outbox.js';
@@ -11,7 +11,7 @@ const fault = vi.hoisted(() => ({ beforeMarkdown: undefined as undefined | (() =
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
-    if (String(args[0]).endsWith('/report.md')) await fault.beforeMarkdown?.();
+    if (basename(String(args[0])) === 'report.md') await fault.beforeMarkdown?.();
     return fs.open(...args);
   } };
 });
