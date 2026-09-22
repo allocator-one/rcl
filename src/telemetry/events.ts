@@ -63,6 +63,8 @@ export interface RoundIdentity {
   report_json_sha256?: string;
   claim_descriptor?: ClaimDescriptor;
   match_rationale?: MatchRationale;
+  /** Pending obligation as captured when this immutable sighting was classified. */
+  pending_round?: number | null;
 }
 
 /**
@@ -88,7 +90,8 @@ export function roundIdentities(
       identity_key: key,
       matched_identity: f.identity,
       status: f.status,
-      ...(f.sighting ? { version: 1 as const, finding_ref: f.sighting.findingRef, report_json_sha256: f.sighting.reportSha256, claim_descriptor: f.sighting.claimDescriptor, match_rationale: f.sighting.matchRationale } : {}),
+      ...(f.sighting ? { version: 1 as const, finding_ref: f.sighting.findingRef, report_json_sha256: f.sighting.reportSha256,
+        claim_descriptor: f.sighting.claimDescriptor, match_rationale: f.sighting.matchRationale, pending_round: f.sighting.pendingRound } : {}),
       ...(f.suppressReason ? { suppress_reason: f.suppressReason } : {}),
     });
   }

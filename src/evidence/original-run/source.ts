@@ -153,6 +153,9 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
       if (Object.hasOwn(described, 'claimDescriptor')) {
         const parsed = descriptor.safeParse(described.claimDescriptor);
         if (!parsed.success) throw new Error('unsupported_original_descriptor');
+        // Published 3.8 Mode A appended descriptors after the common builder.
+        // Preserve that JSON property order: existing manifests pin its digest.
+        delete wire.claim_descriptor;
         (wire as unknown as Record<string, unknown>).claim_descriptor = parsed.data;
       }
       for (const [source, dest] of [['title','title'],['description','description'],['suggestedFix','suggested_fix']] as const) derive(`${group.root}/${index}/${dest}`, f[source], wire[dest], 'existing_buildRunEnvelope_scrub_and_codepoint_limit');

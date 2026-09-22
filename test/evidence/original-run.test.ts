@@ -7,9 +7,9 @@ import { prepareOriginalRun } from '../../src/evidence/original-run/source.js';
 import { runOriginalRecovery, type OriginalRunOptions } from '../../src/evidence/recover-run.js';
 import { matchesOriginalRun, instant } from '../../src/evidence/original-run/remote.js';
 import { openJournal, writeExclusive, MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_DOCUMENT_BYTES } from '../../src/evidence/original-run/journal.js';
-import { readStable, sha256 } from '../../src/telemetry/recovery/files.js';
+import { readStable, sha256, platformPath } from '../../src/telemetry/recovery/files.js';
 import { sampleResult, sampleReview, sampleFinding } from '../telemetry/fixtures.js';
-import { sha256Hex, type RunEnvelope } from '../../src/telemetry/envelope.js';
+import { buildRunEnvelope, sha256Hex, type RunEnvelope } from '../../src/telemetry/envelope.js';
 const dirs: string[] = [];
 afterEach(async () => { for (const p of dirs.splice(0)) await rm(p, { recursive: true, force: true }); });
 const org = '919921a0-0000-4000-8000-000000000001';
@@ -246,6 +246,57 @@ it('preserves valid descriptors exactly and refuses any descriptor normalization
   expect(await collision.preview()).toBe(2);expect(collision.requests).toEqual([]);
   const invalid = await fixture(r => { Object.assign(r.findings[0]!,{claimDescriptor:{...descriptor,invariant:'unpaired\ud800'}}); });
   expect(await invalid.preview()).toBe(2);expect(invalid.requests).toEqual([]);
+});
+
+async function publishedDescriptorManifest() {
+  // Captured from the published 3.8.0 preview, not synthesized by the current
+  // envelope builder. Rebind only fixture paths to this test's private files.
+  const captured = JSON.parse(await readFile(new URL('./fixtures/original-run-3.8-descriptors.json', import.meta.url), 'utf8'));
+  const f = await fixture(report => Object.assign(report, JSON.parse(captured.artifacts.report_json)));
+  expect(f.text).toBe(captured.artifacts.report_json);
+  expect(f.md).toBe(captured.artifacts.report_md);
+  const manifest = captured.manifest;
+  manifest.prepared.selection.reportJson = manifest.prepared.sources.report_json.path = platformPath(f.selection.reportJson);
+  manifest.prepared.selection.reportMd = manifest.prepared.sources.report_md.path = platformPath(f.selection.reportMd);
+  const bytes = JSON.stringify(manifest, null, 2) + '\n';
+  await writeFile(f.manifest, bytes, { flag: 'wx', mode: 0o600 });
+  return { f, manifest, bytes, artifacts: captured.artifacts };
+}
+
+it('keeps the published 3.8 preparation digest for descriptors, appendix and reversed-range provenance', async () => {
+  const { f, manifest, artifacts } = await publishedDescriptorManifest();
+  const current = await prepareOriginalRun(f.selection);
+  expect(current.prepared.envelope_sha256).toBe(manifest.prepared.envelope_sha256);
+  expect(JSON.stringify(current.prepared.envelope)).toBe(JSON.stringify(manifest.prepared.envelope));
+  expect(current.prepared).toEqual(manifest.prepared);
+  expect(current.artifacts).toEqual(artifacts);
+  expect(current.prepared.envelope.findings[0]!.location_provenance).toMatchObject({
+    source: 'report_projection', report_json_sha256: f.selection.reportSha256,
+    original_start_line: 20, original_end_line: 10,
+  });
+  // The historical Mode A layout does not reorder new generated envelopes.
+  const generated = buildRunEnvelope(f.report, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+  expect(Object.keys(generated.findings[0]!).indexOf('claim_descriptor')).toBeLessThan(Object.keys(generated.findings[0]!).indexOf('file'));
+});
+
+it('applies and resumes a published 3.8 descriptor manifest without rewriting pinned evidence', async () => {
+  const { f, bytes, artifacts } = await publishedDescriptorManifest();
+  f.behavior.losePost = true; f.behavior.losePut = true;
+  expect(await f.apply(false, { beforeCheckpoint: async (phase: string) => {
+    if (phase === 'put_outcome') throw Object.assign(new Error('readonly'), { code: 'EROFS' });
+  } })).toBe(5);
+  const journal = f.manifest + '.journal';
+  const checkpoints = await Promise.all((await readdir(journal)).map(async name => ({ name, bytes: await readFile(join(journal, name)) })));
+  expect(await f.apply(true)).toBe(0);
+  const writes = f.requests.filter(request => request.method !== 'GET');
+  expect(writes.map(request => request.method)).toEqual(['POST', 'PUT', 'PUT']);
+  expect(f.stored).toEqual(artifacts);
+  expect(await f.apply(true)).toBe(0);
+  expect(f.requests.filter(request => request.method !== 'GET')).toEqual(writes);
+  expect(await readFile(f.manifest, 'utf8')).toBe(bytes);
+  expect(await readFile(f.selection.reportJson, 'utf8')).toBe(artifacts.report_json);
+  expect(await readFile(f.selection.reportMd, 'utf8')).toBe(artifacts.report_md);
+  for (const checkpoint of checkpoints) expect(await readFile(join(journal, checkpoint.name))).toEqual(checkpoint.bytes);
 });
 
 it('detects symlinked source directories, synthetic markers, invalid UTF-8 and a changed manifest before HTTP', async () => {

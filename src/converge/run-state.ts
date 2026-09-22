@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { bindRoundEvidence, processSemanticRound, verifyRoundBinding, type ReportBinding, type SemanticSighting } from './semantic-state.js';
+import { bindRoundEvidence, processSemanticRound, validateSemanticState, verifyRoundBinding, type ReportBinding, type SemanticSighting } from './semantic-state.js';
 export { migrateConvergeState } from './semantic-state.js';
 import type { ClaimDescriptor } from '../consensus/claim-identity.js';
-import type { ConsensusFinding } from '../consensus/types.js';
+import type { ConsensusFinding, ReviewResult } from '../consensus/types.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
   availableFindingKey,
@@ -147,6 +147,11 @@ export interface RoundReport {
   roundCap: number;
   counts: RoundCounts;
   actionableIdentities?: string[];
+  /** Validated semantic round binding; callers must not publish its local sourcePath. */
+  reportBinding?: ReportBinding;
+  classificationVersion?: 1;
+  /** Migrated obligations have no invented semantic sighting or report ref. */
+  legacyPendingIdentities?: string[];
   findings: AnnotatedRoundFinding[];
 }
 
@@ -191,19 +196,21 @@ export async function loadConvergeRunStateEvidence(
       { cause: err }
     );
   }
-  const state = parsed as Partial<ConvergeRunState>;
+  const state = parsed as Partial<ConvergeRunState> | null;
   if (
+    !state || typeof state !== 'object' ||
     (state.version !== 1 && state.version !== 2) ||
     state.target !== target ||
     !Number.isSafeInteger(state.roundCap) ||
     !Array.isArray(state.rounds) ||
     typeof state.findings !== 'object' ||
-    state.findings === null
+    state.findings === null || Array.isArray(state.findings)
   ) {
     throw new ConvergeRunStateError(
       `Invalid converge run state in ${path}; refusing to reset cross-round identity.`
     );
   }
+  if (state.version === 2) await validateSemanticState(state as ConvergeRunState, gitCommonDir);
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
@@ -299,13 +306,21 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
     throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
   }
   const binding = options.evidence ? bindRoundEvidence(options) : undefined;
-  if (options.findings.some(f => f.claimDescriptor !== undefined) || (binding && options.findings.length === 0)) {
+  const observed = await readState(options.gitCommonDir, target);
+  const gating = binding ? (JSON.parse(options.evidence!.reportJson) as ReviewResult).run?.gating : undefined;
+  if (gating && Object.hasOwn(gating, 'bound_classification_protocol')) {
+    if (gating.bound_classification_protocol !== 1) throw new ConvergeRunStateError('Unsupported bound classification protocol.');
+    if (observed?.version === 1) {
+      throw new ConvergeRunStateError('Declared bound classifications require explicit v1 migration before native admission.');
+    }
+  }
+  if (options.findings.some(f => f.claimDescriptor !== undefined) || (binding && options.findings.length === 0 && observed?.version !== 1)) {
     if (!binding) throw new ConvergeRunStateError('Described claims require immutable original report evidence.');
     return processSemanticRound(options, binding);
   }
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
-  const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
+  const state: ConvergeRunState = observed ?? {
     version: STATE_VERSION,
     target,
     roundCap: DEFAULT_CONVERGE_ROUND_CAP,
@@ -315,6 +330,9 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
   };
   if (state.version === 2) throw new ConvergeRunStateError('Descriptor-less legacy reports cannot update semantic v2 state; retain the original for supported recovery.');
   const existingRound = state.rounds.find(r => r.round === options.round);
+  if (existingRound && binding && !existingRound.reportBinding) {
+    throw new ConvergeRunStateError('Legacy round has no original binding; ordinary replay cannot attach new historical evidence.');
+  }
   if (existingRound?.reportBinding && existingRound.reportBinding.reportSha256 !== binding?.reportSha256) {
     throw new ConvergeRunStateError('Round is already bound to different immutable report bytes.');
   }
@@ -531,10 +549,12 @@ export async function recordVerdicts(options: {
     const recorded = entry.verdictRound !== undefined && entry.verdictRound > options.round
       ? { ...entry, verdictReason: undefined }
       : entry;
-    if (recorded === entry && entry.pendingRound !== undefined && options.round >= entry.pendingRound) delete entry.pendingRound;
+    const verdictSeverity = severities?.[key] ?? entry.severity;
+    if (recorded === entry && entry.pendingRound !== undefined &&
+        verdictClearsPending(state, key, entry.pendingRound, options.round, verdictSeverity)) delete entry.pendingRound;
     recorded.verdict = verdict;
     recorded.verdictRound = options.round;
-    recorded.verdictSeverity = severities?.[key] ?? entry.severity;
+    recorded.verdictSeverity = verdictSeverity;
     if (reason !== undefined) recorded.verdictReason = reason;
     updated.push(recorded);
   }
@@ -569,4 +589,11 @@ export async function recordVerdicts(options: {
     };
   }
   return { entries: updated, ...(resolution ? { resolution } : {}) };
+}
+
+/** A nongating followup cannot lower the severity needed for a critical pending source. */
+export function verdictClearsPending(state: ConvergeRunState, key: string, pendingRound: number,
+  verdictRound: number, verdictSeverity: string | undefined): boolean {
+  const severity = state.rounds.find(round => round.round === pendingRound)?.severities?.[key];
+  return verdictRound >= pendingRound && (severity !== 'critical' || verdictSeverity === 'critical');
 }

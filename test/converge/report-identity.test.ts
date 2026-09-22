@@ -112,7 +112,7 @@ describe('report identity through native classification and telemetry', () => {
     expect(mappings.every((m) => m.identity_key.length === 60)).toBe(true);
     expect(mappings).toHaveLength(3);
     for (const [i, f] of classified.findings.entries()) {
-      expect(mappings[i]).toEqual({ identity_key: envelope.findings[i]!.identity_key, matched_identity: f.identity, status: 'new', version: 1, finding_ref: envelope.findings[i]!.ref, report_json_sha256: createHash('sha256').update(original).digest('hex'), claim_descriptor: envelope.findings[i]!.claim_descriptor, match_rationale: 'new_claim' });
+      expect(mappings[i]).toEqual({ identity_key: envelope.findings[i]!.identity_key, matched_identity: f.identity, status: 'new', version: 1, finding_ref: envelope.findings[i]!.ref, report_json_sha256: createHash('sha256').update(original).digest('hex'), claim_descriptor: envelope.findings[i]!.claim_descriptor, match_rationale: 'new_claim', pending_round: f.finding.startLine === 19 ? 1 : null });
     }
     const observer = classified.findings.find((f) => f.finding.startLine === 19)!;
     const race = classified.findings.find((f) => f.finding.startLine === 11)!;

@@ -7,7 +7,8 @@ import { computeConsensus } from '../../src/consensus/voter.js';
 import { processRoundReport, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { buildRunEnvelope, sanitizeForDelivery } from '../../src/telemetry/envelope.js';
 import { buildEvent, roundIdentities } from '../../src/telemetry/events.js';
-import { sampleFinding, sampleResult, sampleReview, sampleRunHeader } from './fixtures.js';
+import { HarnessSink } from '../../src/telemetry/sink.js';
+import { fakeFetch, sampleFinding, sampleResult, sampleReview, sampleRunHeader } from './fixtures.js';
 
 it('materializes one bounded descriptor before exact serialization and preserves it through wire/native/event', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'claim-pipeline-'));
@@ -29,6 +30,8 @@ it('materializes one bounded descriptor before exact serialization and preserves
     expect(envelope.findings[0]!.claim_descriptor).toEqual(descriptor);
     expect(state.sightings![0]!.claimDescriptor).toEqual(descriptor);
     expect(mapping.claim_descriptor).toEqual(descriptor);
+    expect(mapping.pending_round).toBe(1);
+    expect(mapping.pending_round).toBe(state.sightings![0]!.pendingRound);
     expect(event.payload.identities).toEqual([mapping]);
     expect(mapping.report_json_sha256).toBe(createHash('sha256').update(original).digest('hex'));
     expect(await readFile(state.rounds[0]!.reportBinding!.sourcePath, 'utf8')).toBe(original);
@@ -37,6 +40,49 @@ it('materializes one bounded descriptor before exact serialization and preserves
       expect([...value].length).toBeLessThanOrEqual(500);
       expect(Buffer.byteLength(value)).toBeLessThanOrEqual(2000);
       expect(value).not.toMatch(/[\uD800-\uDFFF]/u);
+    }
+    // Exercise the complete producer event: a partial identity fixture could
+    // hide a missing ref/digest/descriptor or choose the wrong credential route.
+    const eventBefore = JSON.stringify(event);
+    for (const source of ['login', 'attest'] as const) {
+      for (const protocol of [undefined, 2]) {
+        const fake = fakeFetch(request => request.method === 'GET'
+          ? { status: 200, body: { data: source === 'attest' ? { models: [] } : [],
+            meta: protocol === undefined ? {} : { evidence_protocol_version: protocol } } }
+          : { status: 201, body: { data: { inserted: 1, duplicates: 0 } } });
+        const sink = new HarnessSink({ credential: { url: 'https://synthetic.invalid',
+          token: 'synthetic-inert-token', source }, rclVersion: '3.8.0', fetchImpl: fake.fetch });
+        const outcome = await sink.postEvents([event]);
+        expect(new URL(fake.requests[0]!.url).pathname).toBe(source === 'attest'
+          ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs');
+        if (protocol === undefined) {
+          expect(outcome).toMatchObject({ kind: 'rejected', error: 'unsupported_evidence_protocol' });
+          expect(fake.requests.map(request => request.method)).toEqual(['GET']);
+        } else {
+          expect(outcome).toMatchObject({ kind: 'ok', value: { inserted: 1, duplicates: 0 } });
+          expect(fake.requests.map(request => request.method)).toEqual(['GET', 'POST']);
+          expect(new URL(fake.requests[1]!.url).pathname).toBe('/api/v1/reviews/converge/events');
+          expect(JSON.parse(fake.requests[1]!.body!)).toEqual({ events: [event] });
+        }
+        expect(JSON.stringify(event)).toBe(eventBefore);
+        expect(JSON.stringify(report)).toBe(original);
+        expect(await readFile(state.rounds[0]!.reportBinding!.sourcePath, 'utf8')).toBe(original);
+      }
+      const marked = buildEvent({ kind: 'round_processed', runId: run.id, convergeTarget: 'pipeline', round: 1,
+        payload: { classification_version: processed.classificationVersion,
+          report_json_sha256: processed.reportBinding!.reportSha256, identities: [mapping] } });
+      for (const boundSupported of [false, true]) {
+        const fake = fakeFetch(request => request.method === 'GET'
+          ? { status: 200, body: { data: source === 'attest' ? { models: [] } : [],
+            meta: { evidence_protocol_version: 2, ...(boundSupported ? { bound_classification_protocol: 1 } : {}) } } }
+          : { status: 201, body: { data: { inserted: 1, duplicates: 0 } } });
+        const sink = new HarnessSink({ credential: { url: 'https://synthetic.invalid', token: 'synthetic-inert-token', source },
+          rclVersion: '3.8.0', fetchImpl: fake.fetch });
+        expect(await sink.postEvents([marked])).toMatchObject(boundSupported
+          ? { kind: 'ok' } : { kind: 'rejected', error: 'unsupported_bound_classification_protocol' });
+        expect(fake.requests.map(request => request.method)).toEqual(boundSupported ? ['GET', 'POST'] : ['GET']);
+        if (boundSupported) expect(fake.requests[1]!.body).toBe(JSON.stringify({ events: [marked] }));
+      }
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

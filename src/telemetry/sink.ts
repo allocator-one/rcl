@@ -206,7 +206,7 @@ export class HarnessSink {
   }
 
   /** Capability is read at the credential's own host; no speculative write. */
-  private async requireEvidenceProtocol(options: RequestOptions): Promise<SinkOutcome<{ supported: boolean }>> {
+  private async requireEvidenceProtocol(options: RequestOptions, boundClassification = false): Promise<SinkOutcome<{ supported: boolean }>> {
     // Old servers silently discard unknown provenance. The attested credential
     // may read model-stats, but may not list runs or use an ordinary login.
     const attested = this.credential.source === 'attest';
@@ -215,21 +215,32 @@ export class HarnessSink {
       (data, meta) => {
         if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
         const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
-        return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 };
+        const boundVersion = (meta as { bound_classification_protocol?: unknown } | null)?.bound_classification_protocol;
+        return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 &&
+          (!boundClassification || boundVersion === 1) };
       }, options
     );
     if (capability.kind !== 'ok') return capability;
     if (!capability.value.supported) return {
-      kind: 'rejected', httpStatus: 0, error: 'unsupported_evidence_protocol',
-      message: 'The server has not confirmed evidence protocol version 2; versioned evidence was not sent',
+      kind: 'rejected', httpStatus: 0,
+      error: boundClassification ? 'unsupported_bound_classification_protocol' : 'unsupported_evidence_protocol',
+      message: boundClassification
+        ? 'The server has not confirmed evidence protocol 2 and bound classification protocol 1; events were not sent'
+        : 'The server has not confirmed evidence protocol version 2; versioned evidence was not sent',
     };
     return capability;
   }
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
   async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
-    if (envelope.findings.some((finding) => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined)) {
-      const capability = await this.requireEvidenceProtocol(options);
+    const gating = envelope.run.gating;
+    const boundClassification = gating !== null && typeof gating === 'object' && 'bound_classification_protocol' in gating;
+    if (boundClassification && gating.bound_classification_protocol !== 1) return {
+      kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+      message: 'The run must declare bound classification protocol 1; the envelope was not sent',
+    };
+    if (boundClassification || envelope.findings.some((finding) => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined)) {
+      const capability = await this.requireEvidenceProtocol(options, boundClassification);
       if (capability.kind !== 'ok') return capability;
     }
     const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
@@ -287,9 +298,40 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
-    if (events.some(event => event.kind === 'round_processed' && Array.isArray(event.payload.identities) &&
+    // Retained JSON can violate the producer's type. Refuse the batch before
+    // inspecting provenance so the outbox preserves it and continues other entries.
+    if (events.some(event => event.kind === 'round_processed' &&
+      (event.payload === null || typeof event.payload !== 'object' || Array.isArray(event.payload)))) {
+      return { kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
+        message: 'round_processed payload must be an object; events were not sent' };
+    }
+    let boundClassification = false;
+    for (const event of events) {
+      if (event.kind !== 'round_processed') continue;
+      const payload = event.payload;
+      if ('classification_version' in payload || 'legacy_pending_identities' in payload) {
+        const pending = payload.legacy_pending_identities;
+        if (payload.classification_version !== 1 || typeof payload.report_json_sha256 !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(payload.report_json_sha256) ||
+          !Number.isSafeInteger(event.round) || event.round! < 1 ||
+          !Array.isArray(payload.identities) || !payload.identities.every((identity: unknown) => {
+            if (identity === null || typeof identity !== 'object' || Array.isArray(identity) ||
+              !Object.hasOwn(identity, 'pending_round')) return false;
+            const value = (identity as { pending_round: unknown }).pending_round;
+            return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= event.round!);
+          }) ||
+          ('legacy_pending_identities' in payload && (!Array.isArray(pending) || pending.length === 0 || pending.length > 2000 ||
+            !pending.every((identity: unknown, index: number) => typeof identity === 'string' && /^[a-f0-9]{16}$/.test(identity) &&
+              (index === 0 || pending[index - 1] < identity))))) {
+          return { kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+            message: 'Bound classification requires version 1, a lowercase report digest, pending snapshots and valid optional legacy pending identities; events were not sent' };
+        }
+        boundClassification = true;
+      }
+    }
+    if (boundClassification || events.some(event => event.kind === 'round_processed' && Array.isArray(event.payload.identities) &&
       event.payload.identities.some((entry: unknown) => entry !== null && typeof entry === 'object' && 'version' in entry))) {
-      const capability = await this.requireEvidenceProtocol(options);
+      const capability = await this.requireEvidenceProtocol(options, boundClassification);
       if (capability.kind !== 'ok') return capability;
     }
     const result = await this.request(

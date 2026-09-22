@@ -266,3 +266,10 @@ it('refuses versioned classification delivery on old servers before posting even
   expect(await s.postEvents([event])).toMatchObject({ kind: 'rejected', error: 'unsupported_evidence_protocol' });
   expect(requests.map(r => r.method)).toEqual(['GET']);
 });
+
+it.each([null, 0, 2, '1'])('does not bypass capability detection for a present identity version %j', async version => {
+  const event = buildEvent({ kind: 'round_processed', payload: { identities: [{ version }] } });
+  const { sink: s, requests } = sink(() => ({ status: 200, body: { data: [], meta: {} } }));
+  expect(await s.postEvents([event])).toMatchObject({ kind: 'rejected', error: 'unsupported_evidence_protocol' });
+  expect(requests.map(request => request.method)).toEqual(['GET']);
+});

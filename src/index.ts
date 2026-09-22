@@ -597,6 +597,13 @@ program
               round_cap: result.roundCap,
               counts: result.counts,
               actionable_gating: actionableIdentities.size,
+              ...(result.classificationVersion === 1 && result.reportBinding ? {
+                classification_version: 1,
+                report_json_sha256: result.reportBinding.reportSha256,
+                ...(result.legacyPendingIdentities?.length
+                  ? { legacy_pending_identities: result.legacyPendingIdentities }
+                  : {}),
+              } : {}),
               // Which identity each sighting was matched to, so the server
               // can apply standing verdicts to keys that moved (IO-12601).
               identities: roundIdentities(result.findings),
