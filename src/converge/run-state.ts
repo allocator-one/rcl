@@ -313,6 +313,9 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
     if (observed?.version === 1) {
       throw new ConvergeRunStateError('Declared bound classifications require explicit v1 migration before native admission.');
     }
+    if (options.findings.some((finding) => finding.claimDescriptor === undefined)) {
+      throw new ConvergeRunStateError('Declared bound classifications require semantic claim descriptors before native admission.');
+    }
   }
   if (options.findings.some(f => f.claimDescriptor !== undefined) || (binding && options.findings.length === 0 && observed?.version !== 1)) {
     if (!binding) throw new ConvergeRunStateError('Described claims require immutable original report evidence.');
@@ -439,7 +442,7 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
       }
     } else {
       status = 'repeat';
-      if (!entry.verdict && findingGatingReason(finding) !== 'none') entry.pendingRound ??= options.round;
+      if (!entry.verdict && findingGatingReason(finding) !== 'none') entry.pendingRound = options.round;
       counts.repeat++;
     }
     annotated.push({

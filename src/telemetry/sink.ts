@@ -340,7 +340,8 @@ export class HarnessSink {
     for (const event of events) {
       if (event.kind !== 'round_processed') continue;
       const payload = event.payload;
-      if ('classification_version' in payload || 'legacy_pending_identities' in payload) {
+      const markedClassification = 'classification_version' in payload || 'legacy_pending_identities' in payload;
+      if (markedClassification) {
         const pending = payload.legacy_pending_identities;
         if (payload.classification_version !== 1 || typeof payload.report_json_sha256 !== 'string' ||
           !/^[a-f0-9]{64}$/.test(payload.report_json_sha256) ||
@@ -359,6 +360,7 @@ export class HarnessSink {
         }
         boundClassification = true;
       }
+      const markedSightingRefs = new Set<string>();
       if (Array.isArray(payload.identities)) {
         for (const entry of payload.identities) {
           if (entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
@@ -367,6 +369,15 @@ export class HarnessSink {
             kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
             message: 'Per-sighting bindings require a complete supported version 1 identity; events were not sent',
           };
+          if (markedClassification && entry.report_json_sha256 !== payload.report_json_sha256) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use the classification report digest; events were not sent',
+          };
+          if (markedClassification && markedSightingRefs.has(entry.finding_ref as string)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use unique finding references; events were not sent',
+          };
+          if (markedClassification) markedSightingRefs.add(entry.finding_ref as string);
           versionedClassification = true;
         }
       }

@@ -71,6 +71,17 @@ describe('legacy original bindings', () => {
     expect(await readFile(source, 'utf8')).toBe(empty.evidence!.reportJson);
   });
 
+  it('refuses a declared bound descriptorless fresh report before native admission', async () => {
+    const declared = options(1, [claim()]);
+    const report = JSON.parse(declared.evidence!.reportJson);
+    report.run.gating = { bound_classification_protocol: 1 };
+    declared.evidence!.reportJson = JSON.stringify(report);
+    const before = await snapshot();
+    await expect(processRoundReport(declared)).rejects.toMatchObject({ code: 'RCL_CONVERGE_RUN_STATE' });
+    expect(await snapshot()).toEqual(before);
+    await expect(processRoundReport(options(1, [claim()]))).resolves.toMatchObject({ counts: { new: 1 } });
+  });
+
   it('refuses newly attaching report bytes to a historical unbound current round', async () => {
     const original = claim();
     const first = await processRoundReport({ gitCommonDir: dir, target, round: 1, runId, findings: [original] });
@@ -150,6 +161,21 @@ describe('shared semantic ledger validation', () => {
     expect((await loadConvergeRunState(dir, target))!.findings[key]!.pendingRound).toBeUndefined();
   });
 
+  it('keeps a newer critical legacy obligation when an earlier important round is dismissed late', async () => {
+    const first = await processRoundReport(options(1, [claim()]));
+    const key = first.findings[0]!.identity;
+    const secondId = '00000000-0000-7000-8000-000000000002';
+    await processRoundReport(options(2, [{ ...claim(), identity: `report:${secondId}:original`, severity: 'critical' }], secondId));
+    const beforeVerdict = (await loadConvergeRunState(dir, target))!;
+    expect(beforeVerdict.findings[key]!.pendingRound).toBe(2);
+    expect(beforeVerdict.rounds).toMatchObject([{ round: 1, reportBinding: {} }, { round: 2, reportBinding: {} }]);
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1, requireVerifiedBinding: true,
+      verdicts: [{ key, verdict: 'dismissed' }] });
+    const afterVerdict = (await loadConvergeRunState(dir, target))!;
+    expect(afterVerdict.findings[key]).toMatchObject({ pendingRound: 2, verdict: 'dismissed', verdictRound: 1, verdictSeverity: 'important' });
+    expect(afterVerdict.rounds).toEqual(beforeVerdict.rounds);
+  });
+
   it('uses the new gated batch severity when a critical claim recurs as important', async () => {
     const first = await processRoundReport(options(1, [{ ...claim(true), severity: 'critical' }]));
     const key = first.findings[0]!.identity;
@@ -174,10 +200,10 @@ describe('shared semantic ledger validation', () => {
         const path = convergeRunStatePath(dir, target);
         const state: ConvergeRunState = JSON.parse(await readFile(path, 'utf8'));
         const key = first.findings[0]!.identity;
-        expect(state.findings[key]!.pendingRound).toBe(migrated ? 1 : 2);
+        expect(state.findings[key]!.pendingRound).toBe(2);
         if (corruption === 'missing entry') delete state.findings[key];
         else if (corruption === 'missing pending') delete state.findings[key]!.pendingRound;
-        else state.findings[key]!.pendingRound = migrated ? 2 : 1;
+        else state.findings[key]!.pendingRound = 1;
         await writeFile(path, JSON.stringify(state));
         const before = await snapshot();
         for (const action of [

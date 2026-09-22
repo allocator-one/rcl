@@ -52,6 +52,68 @@ it.each([null, 1, 2])('preserves marked pending_round %j without changing the ev
   expect(fake.requests[1]!.body).toBe(JSON.stringify({ events: [event] }));
 });
 
+it.each([
+  ['a mismatched sighting digest', [{ ...semanticIdentity, pending_round: 2, report_json_sha256: 'b'.repeat(64) }]],
+  ['a duplicate sighting reference', [
+    { ...semanticIdentity, pending_round: 2 },
+    { ...semanticIdentity, identity_key: `report:${runId}:second`, matched_identity: '0000000000000002', pending_round: 2 },
+  ]],
+])('refuses marked classifications with %s before HTTP', async (_name, identities) => {
+  const event = classified({ ...marker, identities });
+  const before = JSON.stringify(event);
+  const fake = supportedTransport();
+  const sink = new HarnessSink({ credential: { url: 'https://synthetic.invalid', token: 'synthetic-token', source: 'login' },
+    rclVersion: '3.8.0', fetchImpl: fake.fetch });
+  expect(await sink.postEvents([event])).toMatchObject({ kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding' });
+  expect(fake.requests).toEqual([]);
+  expect(JSON.stringify(event)).toBe(before);
+});
+
+it.each([
+  ['marked first', (marked: ReturnType<typeof classified>, unmarked: ReturnType<typeof classified>) => [marked, unmarked]],
+  ['marked second', (marked: ReturnType<typeof classified>, unmarked: ReturnType<typeof classified>) => [unmarked, marked]],
+])('checks the capability for a mixed batch with the marked event %s', async (_name, order) => {
+  const marked = classified({ ...marker, identities: [{ ...semanticIdentity, pending_round: 2 }] });
+  const unmarked = classified({ report_json_sha256: 'legacy metadata' });
+  const events = order(marked, unmarked);
+  const fake = fakeFetch(request => request.method === 'GET'
+    ? { status: 200, body: { data: [], meta: { evidence_protocol_version: 2, bound_classification_protocol: 1 } } }
+    : { status: 201, body: { data: { inserted: 2, duplicates: 0 } } });
+  const sink = new HarnessSink({ credential: { url: 'https://synthetic.invalid', token: 'synthetic-token', source: 'login' },
+    rclVersion: '3.8.0', fetchImpl: fake.fetch });
+  expect(await sink.postEvents(events)).toMatchObject({ kind: 'ok' });
+  expect(fake.requests.map(request => request.method)).toEqual(['GET', 'POST']);
+  expect(fake.requests[1]!.body).toBe(JSON.stringify({ events }));
+});
+
+it.each([
+  ['marked first', (marked: ReturnType<typeof classified>, unmarked: ReturnType<typeof classified>) => [marked, unmarked]],
+  ['marked second', (marked: ReturnType<typeof classified>, unmarked: ReturnType<typeof classified>) => [unmarked, marked]],
+])('does not post a mixed batch when the marked event %s lacks protocol support', async (_name, order) => {
+  const marked = classified({ ...marker, identities: [{ ...semanticIdentity, pending_round: 2 }] });
+  const unmarked = classified({ report_json_sha256: 'legacy metadata' });
+  const fake = fakeFetch(request => request.method === 'GET'
+    ? { status: 200, body: { data: [], meta: { evidence_protocol_version: 2 } } }
+    : { status: 201, body: { data: { inserted: 2, duplicates: 0 } } });
+  const sink = new HarnessSink({ credential: { url: 'https://synthetic.invalid', token: 'synthetic-token', source: 'login' },
+    rclVersion: '3.8.0', fetchImpl: fake.fetch });
+  expect(await sink.postEvents(order(marked, unmarked))).toMatchObject({ kind: 'rejected', error: 'unsupported_bound_classification_protocol' });
+  expect(fake.requests.map(request => request.method)).toEqual(['GET']);
+});
+
+it.each([
+  ['malformed first', (malformed: ReturnType<typeof classified>, marked: ReturnType<typeof classified>) => [malformed, marked]],
+  ['malformed second', (malformed: ReturnType<typeof classified>, marked: ReturnType<typeof classified>) => [marked, malformed]],
+])('refuses a malformed bound event anywhere in a mixed batch before HTTP', async (_name, order) => {
+  const malformed = classified({ ...marker, identities: [{ ...semanticIdentity, pending_round: 3 }] });
+  const marked = classified({ ...marker, identities: [{ ...semanticIdentity, pending_round: 2 }] });
+  const fake = supportedTransport();
+  const sink = new HarnessSink({ credential: { url: 'https://synthetic.invalid', token: 'synthetic-token', source: 'login' },
+    rclVersion: '3.8.0', fetchImpl: fake.fetch });
+  expect(await sink.postEvents(order(malformed, marked))).toMatchObject({ kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification' });
+  expect(fake.requests).toEqual([]);
+});
+
 it('keeps an old unmarked version 1 identity deliverable without pending_round', async () => {
   const event = classified({ identities: [semanticIdentity] });
   const fake = fakeFetch(request => request.method === 'GET'
