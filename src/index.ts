@@ -129,6 +129,7 @@ import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
+import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
@@ -159,7 +160,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   if (name === 'converge-report' || name === 'converge-verdict' || name === 'converge-migrate') return;
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -1010,6 +1011,27 @@ evidenceCmd
   .option('--json', 'Print the API run object')
   .action(async (runId: string | undefined, opts: { json?: boolean }) => {
     process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('recover-run')
+  .description('Preview, apply or resume delivery of one immutable original asserted run; no review, events or native accounting')
+  .option('--preview', 'Validate sources and scoped remote reads; write only a new exclusive manifest')
+  .option('--apply', 'Start the explicitly pinned manifest operation')
+  .option('--resume', 'Resume the same journal through fresh exact run/artifact reads')
+  .requiredOption('--manifest <path>', 'Exclusive preview manifest; existing manifest for apply/resume')
+  .option('--manifest-sha256 <sha256>', 'Required exact reviewed manifest digest for apply/resume')
+  .option('--run <uuid>', 'Original run UUID (preview)')
+  .option('--for-pr <owner/repo#N>', 'Original repository and pull request (preview)')
+  .option('--head <sha>', 'Original full reviewed head SHA (preview)')
+  .option('--report-json <path>', 'Original bounded regular UTF-8 JSON file (preview)')
+  .option('--report-sha256 <sha256>', 'Exact original JSON digest (preview)')
+  .option('--report-md <path>', 'Optional original Markdown file (preview)')
+  .option('--markdown-sha256 <sha256>', 'Required digest when selecting original Markdown')
+  .option('--original-mode <mode>', 'Required operator assertion: asserted; CI/attested originals unsupported')
+  .option('--json', 'Print machine-readable operation status and diagnostics')
+  .action(async (opts: OriginalRunOptions) => {
+    process.exitCode = await runOriginalRecovery(opts, evidenceDeps());
   });
 
 evidenceCmd

@@ -52,10 +52,11 @@ export interface WireFinding {
   end_line: number;
   location_provenance?: {
     version: 1;
-    source: 'parser';
+    source: 'parser' | 'report_projection';
     reason: 'reversed_range';
     original_start_line: number;
     original_end_line: number;
+    report_json_sha256?: string;
   };
   severity: ConsensusFinding['severity'];
   category: ConsensusFinding['category'];

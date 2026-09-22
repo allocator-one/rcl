@@ -17,7 +17,7 @@ const timestamp = string.refine((value) => /^\d{4}-\d\d-\d\dT/.test(value) && Nu
 const hash = string.regex(SHA256);
 const objectId = string.regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
 const verification = z.object({ verdict: nonblank.max(32), model: string.optional(), note: string.optional() });
-const finding = z.object({
+const originalFinding = z.object({
   id: string, file: nonblank, startLine: integer, endLine: integer,
   severity: z.enum(['critical', 'important', 'minor', 'nitpick']),
   category: nonblank, title: nonblank, description: string,
@@ -27,7 +27,9 @@ const finding = z.object({
     crossRole: z.boolean(), crossModel: z.boolean(), elevated: z.boolean(),
   }).passthrough(),
   gating: z.object({ reason: z.enum(['consensus', 'critical', 'verified', 'none']), verification: verification.optional() }).optional(),
-}).refine((value) => value.endLine >= value.startLine);
+});
+const finding = originalFinding.refine((value) => value.endLine >= value.startLine);
+export const originalRawFindingSchema = originalFinding.omit({ consensus: true, identity: true, gating: true });
 const review = z.object({
   model: nonblank, role: nonblank, provider: nonblank, findings: z.array(z.unknown()),
   durationMs: number, status: z.enum(['success', 'timeout', 'error', 'parse_failed', 'canceled']),
@@ -59,6 +61,12 @@ const modern = z.object({
   belowThresholdFindings: z.array(finding).max(2000).optional(),
   stats: z.object({ totalReviews: integer, successfulReviews: integer, totalRawFindings: integer, totalDeduped: integer, belowThreshold: integer, durationMs: number }).passthrough(),
 }).refine((value) => value.findings.length + (value.belowThresholdFindings?.length ?? 0) <= 2000);
+
+/** Shape validation only; Mode A retains the original object, including provenance. */
+export const originalRunReportSchema = modern.safeExtend({
+  findings: z.array(originalFinding).max(2000),
+  belowThresholdFindings: z.array(originalFinding).max(2000).optional(),
+});
 const legacy = z.object({
   reviews: z.array(z.object({ model: nonblank }).passthrough()).max(500),
   findings: z.array(finding).max(2000), belowThresholdFindings: z.array(finding).max(2000).optional(),
@@ -164,7 +172,7 @@ export function unsupportedSourceDetails(text: string): Pick<import('./types.js'
 }
 
 /** Inspect decoded values too: JSON escapes must not conceal a credential. */
-function requiresArtifactRedaction(value: unknown, path: string[]): boolean {
+export function requiresArtifactRedaction(value: unknown, path: string[] = []): boolean {
   if (typeof value === 'string') {
     const location = path.join('.');
     const identifier = /^(?:run\.roster\.\d+|reviews\.\d+)\.(?:model|role|provider)$/.test(location) ||

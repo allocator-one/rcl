@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { Outbox } from '../../src/telemetry/outbox.js';
@@ -13,7 +13,7 @@ import { sampleFinding, sampleResult, sampleReview } from './fixtures.js';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
 // The same behavior checks can exercise the installed npm tarball before release.
-const cli = process.env['RCL_TEST_PACKAGED_CLI'] ?? join(root, 'dist/index.js');
+const cli = process.env['RCL_TEST_PACKAGED_CLI'] || join(root, 'dist/index.js');
 async function snapshot(dir: string): Promise<Record<string, { bytes: string; mtime: number }>> {
   const files: Record<string, { bytes: string; mtime: number }> = {};
   for (const entry of await readdir(dir, { withFileTypes: true })) {
@@ -23,10 +23,6 @@ async function snapshot(dir: string): Promise<Record<string, { bytes: string; mt
   }
   return files;
 }
-beforeAll(async () => {
-  if (!process.env['RCL_TEST_PACKAGED_CLI']) await exec(process.execPath, [join(dirname(fileURLToPath(import.meta.resolve('typescript'))), '../bin/tsc')], { cwd: root, timeout: 30_000 });
-}, 35_000);
-
 describe('built refutation recovery command', () => {
   it('keeps dry-run GET-only with a valid queued live review, applies explicitly, and repeats with zero writes', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'rcl-recovery-cli-')); const dataDir = join(cwd, 'data'); const reports = join(cwd, 'reports');
