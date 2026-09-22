@@ -40,3 +40,44 @@ it('materializes one bounded descriptor before exact serialization and preserves
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+it('normalizes newly generated human text before hashing without rewriting historical artifacts', async () => {
+  const { normalizeGeneratedReport } = await import('../../src/telemetry/envelope.js');
+  const raw = sampleFinding({ title: 'Cache\0 title\u0001', description: 'Keep\tindent\nand\rline breaks\u007f plus 😀\uD800', suggestedFix: 'Repair\0 records' });
+  const run = sampleRunHeader({ converge: { target: 'producer-controls', round: 1 } });
+  const reviews = [sampleReview({ model: 'synthetic/fixture', role: 'general', findings: [raw], error: 'Provider\0 error', warnings: ['Parser\u0001 warning'] })];
+  const [finding] = computeConsensus(run.id, [{ representative: raw, members: [{ finding: raw, model: 'synthetic/fixture', role: 'general' }] }], reviews, new Map());
+  finding!.consensus.disputeDetails = 'Disputed\0 evidence';
+  finding!.consensus.positions = [{ model: 'synthetic/fixture', role: 'general', severity: 'important', title: 'Position\0 title', excerpt: 'Position\0 evidence' }];
+  finding!.gating = { reason: 'verified', verification: { model: 'synthetic/fixture', verdict: 'confirmed', note: 'Checked\0 evidence' } };
+  const input = sampleResult({ run, findings: [finding!], belowThresholdFindings: [{ ...finding!, identity: `report:${run.id}:appendix` }], reviews });
+  const before = JSON.stringify(input);
+  expect(sanitizeForDelivery(input).findings[0]!.title).toBe('Cache title');
+  for (const report of [normalizeGeneratedReport(input), sanitizeForDelivery(input)]) {
+    const original = JSON.stringify(report);
+    const parsed = JSON.parse(original);
+    expect(parsed.findings[0].title).toBe('Cache title');
+    expect(parsed.findings[0].description).toBe('Keep\tindent\nand\rline breaks plus 😀�');
+    expect(parsed.reviews[0].findings[0].title).toBe('Cache title');
+    expect(parsed.belowThresholdFindings[0].title).toBe('Cache title');
+    expect(parsed.reviews[0].error).toBe('Provider error');
+    expect(parsed.findings[0].consensus.positions[0].excerpt).toBe('Position evidence');
+    expect(parsed.findings[0].gating.verification.note).toBe('Checked evidence');
+    expect(parsed.findings[0].claimDescriptor).toEqual(finding!.claimDescriptor);
+    const envelope = buildRunEnvelope(report, { report_json: original }, { level: 'full', delivery: { mode: 'direct' } });
+    expect(envelope.findings[0]!.title).toBe(parsed.findings[0].title);
+    expect(envelope.findings[0]!.claim_descriptor).toEqual(parsed.findings[0].claimDescriptor);
+    expect(envelope.calls[0]!.error).toBe('Provider error');
+    expect(envelope.artifacts_declared[0]!.sha256).toBe(createHash('sha256').update(original).digest('hex'));
+  }
+  const unusualPath = { ...input, findings: [{ ...finding!, file: 'lib/cache\u0001.ex', id: 'raw\u0001id' }] };
+  expect(normalizeGeneratedReport(unusualPath).findings[0]).toMatchObject({ file: 'lib/cache\u0001.ex', id: 'raw\u0001id', identity: finding!.identity });
+  expect(JSON.stringify(input)).toBe(before);
+  const legacy = sampleResult({ findings: [raw], belowThresholdFindings: [], reviews });
+  delete legacy.findings[0]!.claimDescriptor;
+  const legacyBytes = JSON.stringify(legacy);
+  const historical = buildRunEnvelope(legacy, { report_json: legacyBytes }, { level: 'full', delivery: { mode: 'direct' } });
+  expect(historical.artifacts_declared[0]!.sha256).toBe(createHash('sha256').update(legacyBytes).digest('hex'));
+  expect(historical.findings[0]!.claim_descriptor).toBeUndefined();
+  expect(JSON.stringify(legacy)).toBe(legacyBytes);
+});

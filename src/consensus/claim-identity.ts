@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Finding } from './types.js';
 import { hasOpposingSentiment, jaccardSimilarity, tokenize } from './deduper.js';
-import { scrubText } from '../telemetry/scrub.js';
+import { normalizeGeneratedText, scrubText } from '../telemetry/scrub.js';
 
 /** Wire version, independent of native state and matching algorithm versions. */
 export interface ClaimDescriptor {
@@ -21,7 +21,7 @@ export const claimDescriptorSchema = z.object({ version: z.literal(1), operation
 
 /** Do this before report serialization, never while replaying an original. */
 function clean(s: string): string {
-  return s.replace(/[\uD800-\uDFFF]/gu, '\uFFFD').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+  return normalizeGeneratedText(s).trim();
 }
 function bounded(s: string): string {
   const value = clean(scrubText(clean(s), Math.max(500, [...s].length + 1)));

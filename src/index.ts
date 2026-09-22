@@ -118,7 +118,7 @@ import {
   loadHarnessSettings,
   resolveTelemetryLevel,
 } from './telemetry/deliver.js';
-import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { normalizeGeneratedReport, sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
 import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
@@ -2153,9 +2153,9 @@ async function executeCouncil(
   // failure reduced to the parser message unless harness.parseFailures opts
   // in. --json-file and --markdown are written from the same view, so the
   // declared digests match the files and nothing raw travels. With
-  // telemetry off the raw report is written as before.
+  // telemetry off secrets remain local; producer control normalization still applies.
   const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : normalizeGeneratedReport(result);
   const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
 
   // Output
