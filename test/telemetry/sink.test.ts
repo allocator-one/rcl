@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { describeClaim } from '../../src/consensus/claim-identity.js';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { describeOutcome, HarnessSink } from '../../src/telemetry/sink.js';
-import { fakeFetch, sampleResult } from './fixtures.js';
+import { fakeFetch, sampleFinding, sampleResult } from './fixtures.js';
 
 const CREDENTIAL = { url: 'https://harness.example.test', token: 'aone_TESTTOKEN0123456789', source: 'login' as const };
 const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
@@ -261,15 +262,17 @@ describe('HarnessSink.postEvents', () => {
 });
 
 it('refuses versioned classification delivery on old servers before posting events', async () => {
-  const event = buildEvent({ kind: 'round_processed', payload: { identities: [{ version: 1, finding_ref: 'f001' }] } });
+  const event = buildEvent({ kind: 'round_processed', payload: { identities: [{ version: 1, finding_ref: 'f001',
+    identity_key: 'original', matched_identity: '0000000000000001', status: 'new',
+    report_json_sha256: 'a'.repeat(64), claim_descriptor: describeClaim(sampleFinding()), match_rationale: 'new_claim' }] } });
   const { sink: s, requests } = sink(() => ({ status: 200, body: { data: [], meta: {} } }));
   expect(await s.postEvents([event])).toMatchObject({ kind: 'rejected', error: 'unsupported_evidence_protocol' });
   expect(requests.map(r => r.method)).toEqual(['GET']);
 });
 
-it.each([null, 0, 2, '1'])('does not bypass capability detection for a present identity version %j', async version => {
+it.each([null, 0, 2, '1'])('refuses an unsupported identity version %j before HTTP', async version => {
   const event = buildEvent({ kind: 'round_processed', payload: { identities: [{ version }] } });
   const { sink: s, requests } = sink(() => ({ status: 200, body: { data: [], meta: {} } }));
-  expect(await s.postEvents([event])).toMatchObject({ kind: 'rejected', error: 'unsupported_evidence_protocol' });
-  expect(requests.map(request => request.method)).toEqual(['GET']);
+  expect(await s.postEvents([event])).toMatchObject({ kind: 'rejected', error: 'invalid_sighting_binding' });
+  expect(requests).toEqual([]);
 });

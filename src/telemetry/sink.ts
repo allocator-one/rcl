@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { claimDescriptorSchema } from '../consensus/claim-identity.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
@@ -24,7 +25,7 @@ export const MAX_RESPONSE_BYTES = 64 * 1024;
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
-  /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
+  /** A shorter delivery budget, including any capability preflight, e.g. a flush's remaining time. */
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
@@ -73,6 +74,28 @@ export interface SinkOptions {
 interface ErrorBody {
   error?: string;
   message?: string;
+}
+
+const SIGHTING_BINDING_FIELDS = ['version', 'finding_ref', 'report_json_sha256', 'claim_descriptor', 'match_rationale', 'pending_round'];
+
+/** Inspect retained bindings without normalizing or replacing their original values. */
+function validSightingBinding(entry: Record<string, unknown>): boolean {
+  const key = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 64;
+  return entry.version === 1 && key(entry.identity_key) && key(entry.matched_identity) &&
+    ['new', 'repeat', 'suppressed', 'regating'].includes(entry.status as string) &&
+    typeof entry.finding_ref === 'string' && Buffer.byteLength(entry.finding_ref, 'utf8') > 0 &&
+    Buffer.byteLength(entry.finding_ref, 'utf8') <= 32 &&
+    typeof entry.report_json_sha256 === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(entry.report_json_sha256) &&
+    claimDescriptorSchema.safeParse(entry.claim_descriptor).success &&
+    ['new_claim', 'exact_descriptor', 'supported_paraphrase', 'ambiguous', 'explicit_split'].includes(entry.match_rationale as string) &&
+    (!Object.hasOwn(entry, 'pending_round') || entry.pending_round === null ||
+      (typeof entry.pending_round === 'number' && Number.isSafeInteger(entry.pending_round) && entry.pending_round >= 1));
+}
+
+function remainingRequestOptions(options: RequestOptions, deadline: number | undefined): RequestOptions | null {
+  if (deadline === undefined) return options;
+  const timeoutMs = Math.floor(deadline - performance.now());
+  return timeoutMs < 1 ? null : { ...options, timeoutMs };
 }
 
 export class HarnessSink {
@@ -233,6 +256,7 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
   async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
     const gating = envelope.run.gating;
     const boundClassification = gating !== null && typeof gating === 'object' && 'bound_classification_protocol' in gating;
     if (boundClassification && gating.bound_classification_protocol !== 1) return {
@@ -240,10 +264,15 @@ export class HarnessSink {
       message: 'The run must declare bound classification protocol 1; the envelope was not sent',
     };
     if (boundClassification || envelope.findings.some((finding) => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined)) {
-      const capability = await this.requireEvidenceProtocol(options, boundClassification);
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
       if (capability.kind !== 'ok') return capability;
     }
-    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
+    const body = JSON.stringify(envelope);
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+    const result = await this.request('POST', '/api/v1/reviews/runs', body, 'application/json', remaining);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
@@ -298,6 +327,7 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
     // Retained JSON can violate the producer's type. Refuse the batch before
     // inspecting provenance so the outbox preserves it and continues other entries.
     if (events.some(event => event.kind === 'round_processed' &&
@@ -306,6 +336,7 @@ export class HarnessSink {
         message: 'round_processed payload must be an object; events were not sent' };
     }
     let boundClassification = false;
+    let versionedClassification = false;
     for (const event of events) {
       if (event.kind !== 'round_processed') continue;
       const payload = event.payload;
@@ -328,18 +359,33 @@ export class HarnessSink {
         }
         boundClassification = true;
       }
+      if (Array.isArray(payload.identities)) {
+        for (const entry of payload.identities) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
+            !SIGHTING_BINDING_FIELDS.some(field => Object.hasOwn(entry, field))) continue;
+          if (!validSightingBinding(entry)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Per-sighting bindings require a complete supported version 1 identity; events were not sent',
+          };
+          versionedClassification = true;
+        }
+      }
     }
-    if (boundClassification || events.some(event => event.kind === 'round_processed' && Array.isArray(event.payload.identities) &&
-      event.payload.identities.some((entry: unknown) => entry !== null && typeof entry === 'object' && 'version' in entry))) {
-      const capability = await this.requireEvidenceProtocol(options, boundClassification);
+    if (boundClassification || versionedClassification) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
       if (capability.kind !== 'ok') return capability;
     }
+    const body = JSON.stringify({ events });
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
     const result = await this.request(
       'POST',
       '/api/v1/reviews/converge/events',
-      JSON.stringify({ events }),
+      body,
       'application/json',
-      options
+      remaining
     );
     return this.classify(result, (body) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
