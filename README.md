@@ -275,7 +275,7 @@ preliminary-truncation behavior of RCL 3.6.0. Existing source reports are not
 rewritten to add explanations; legacy backfill retains its declared artifact
 scrubbing and deterministic source identity rules.
 
-### `rcl telemetry status` and `rcl telemetry flush`
+### `rcl telemetry status`, `flush` and `rejected`
 
 Evidence delivery to Harness (epic IO-12475). In a repository that carries
 `.harness-cli/config.json` and with a `harness login` (or `HARNESS_API_TOKEN` +
@@ -290,7 +290,7 @@ provider API keys, `GITHUB_TOKEN`, the Harness credential, environment
 variables, prompts or raw model answers; every free-text field is truncated
 and scrubbed for key-shaped strings before it leaves the process.
 
-The review never blocks on the network. A delivery Harness could not take is
+The review never blocks on the network. A retryable delivery outage is
 spooled to `~/.rcl/outbox/<run id>/` and retried, with its original run id,
 at the start of every rcl command (bounded to five seconds) or by
 `rcl telemetry flush`. One dim status line says what happened:
@@ -306,10 +306,30 @@ evidence failure is printed beside it. The first delivery from a machine
 prints a one-time notice naming the host and what is sent
 (`~/.rcl/telemetry-notice` records it).
 
+Completed envelopes are validated locally before transmission. Two valid
+reversed line numbers are ordered before finding identity is allocated, with
+the original numeric pair retained as parser provenance. Missing, blank,
+boolean, negative, fractional or non-finite coordinates remain parser errors;
+valid sibling findings are preserved. Provenance delivery requires the server
+to advertise evidence protocol version 2.
+
+Local validation failures and terminal server refusals retain the exact JSON
+and Markdown bytes in `~/.rcl/quarantine/<run id>/` (or under `RCL_DATA_DIR`).
+The immutable manifest records original digests, delivery mode and diagnostics;
+distinct later delivery observations are appended separately. Interrupted or
+corrupted entries are reported as incomplete. Retention failure, including a
+read-only filesystem or the 1 GiB storage cap, is reported explicitly.
+`rcl telemetry rejected` inspects these files and verifies their digests without
+contacting Harness, flushing the outbox, changing native review accounting or
+applying recovery. Retained evidence is not server acknowledgment. Attested
+evidence is never queued for replay with ordinary credentials. Recovery of an
+already-completed historical run remains a separate operation.
+
 ```bash
 rcl telemetry status                # level, credential source, what waits in the outbox
 rcl telemetry flush                 # deliver everything spooled, to completion
 rcl telemetry flush --run <run id>  # one run only
+rcl telemetry rejected --run <run id> --json  # inspect one retained original
 rcl review owner/repo#7 --no-telemetry   # keep this review on the machine
 ```
 

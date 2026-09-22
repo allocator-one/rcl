@@ -1,6 +1,6 @@
 import type { GatingVerification } from '../consensus/gating.js';
 import { createHash } from 'node:crypto';
-import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
+import type { ConsensusFinding, LocationProvenance, ModelReview, ReviewResult } from '../consensus/types.js';
 import { normalizeVerificationEvidence } from './verification.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
@@ -48,6 +48,13 @@ export interface WireFinding {
   file: string;
   start_line: number;
   end_line: number;
+  location_provenance?: {
+    version: 1;
+    source: 'parser';
+    reason: 'reversed_range';
+    original_start_line: number;
+    original_end_line: number;
+  };
   severity: ConsensusFinding['severity'];
   category: ConsensusFinding['category'];
   title: string;
@@ -134,6 +141,15 @@ function wireFinding(finding: ConsensusFinding, index: number, belowThreshold: b
     file: scrubText(finding.file),
     start_line: finding.startLine,
     end_line: finding.endLine,
+    ...(finding.locationProvenance !== undefined ? {
+      location_provenance: {
+        version: finding.locationProvenance.version,
+        source: finding.locationProvenance.source,
+        reason: finding.locationProvenance.reason,
+        original_start_line: finding.locationProvenance.originalStartLine,
+        original_end_line: finding.locationProvenance.originalEndLine,
+      },
+    } : {}),
     severity: finding.severity,
     category: finding.category,
     title: scrubText(finding.title, 500),
@@ -235,6 +251,7 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
   const parseFailures = options.parseFailures === true;
   const finding = (f: ConsensusFinding): ConsensusFinding => ({
     ...f,
+    ...(f.locationProvenance !== undefined ? { locationProvenance: scrubLocationProvenance(f.locationProvenance) } : {}),
     file: scrubText(f.file),
     title: scrubText(f.title, 500),
     description: scrubText(f.description),
@@ -262,6 +279,7 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
       provider: scrubIdentifier(r.provider),
       findings: r.findings.map((f) => ({
         ...f,
+        ...(f.locationProvenance !== undefined ? { locationProvenance: scrubLocationProvenance(f.locationProvenance) } : {}),
         file: scrubText(f.file),
         title: scrubText(f.title, 500),
         description: scrubText(f.description),
@@ -278,6 +296,16 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
     findings: result.findings.map(finding),
     ...(result.belowThresholdFindings ? { belowThresholdFindings: result.belowThresholdFindings.map(finding) } : {}),
   };
+}
+
+function scrubLocationProvenance(provenance: LocationProvenance): LocationProvenance {
+  return scrubDeep({
+    version: provenance.version,
+    source: provenance.source,
+    reason: provenance.reason,
+    originalStartLine: provenance.originalStartLine,
+    originalEndLine: provenance.originalEndLine,
+  });
 }
 
 /**

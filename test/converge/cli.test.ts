@@ -25,14 +25,19 @@ function tempRepository(): string {
   return directory;
 }
 
-function runConvergeAttempt(args: string[], cwd = fileURLToPath(new URL('../..', import.meta.url))) {
+function runConvergeAttempt(args: string[], cwd = tempRepository()) {
   return spawnSync(
     process.execPath,
     ['--import', tsxImport, cliEntrypoint, 'converge-attempt', '--json', ...args],
     {
       cwd,
       encoding: 'utf8',
-      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+      // A machine-readable error test must never flush the developer's real
+      // outbox or resolve a stored Harness login before validating its flags.
+      env: { ...process.env, NODE_NO_WARNINGS: '1',
+        RCL_DATA_DIR: join(cwd, 'private-data'), XDG_CONFIG_HOME: join(cwd, 'private-config'),
+        HARNESS_API_TOKEN: '', HARNESS_API_URL: '',
+      },
       timeout: 10_000,
     }
   );

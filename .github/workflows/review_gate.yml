@@ -1,0 +1,89 @@
+# The Review Council gate (epic IO-12475, sections 4.1, 9 and 11; IO-12484).
+#
+# Harness dispatches this workflow for one pull request head once the
+# advisory gate status has converged. The job's OIDC token — this file, on the
+# protected default branch, allow-listed by exact path in the organization's
+# review settings — is what `rcl review --attest` exchanges for a run-bound
+# Harness credential, so the round it records is *attested* and drives the
+# `Review Council` check run and the enforced gate.
+#
+# Nothing here checks out the pull request or holds a provider secret: rcl
+# reads the pull request through the GitHub API and fetches model keys from
+# Harness under the run-bound credential. The inputs reach the shell through
+# the environment, never by expression interpolation into a command line.
+name: Review Council gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number the attested round reviews
+        required: true
+        type: string
+      head_sha:
+        description: Head commit the round must find on the pull request (the review fails fast otherwise)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-gate-${{ inputs.pr_number }}-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  attested-review:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: read
+    env:
+      HARNESS_API_URL: https://harness.infra.one
+    steps:
+      # The workflow's own commit on the default branch — the installer
+      # script lives here; the pull request is never checked out.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Install Review Council
+        run: |
+          # Same private-prefix install as review.yml: the hosted toolcache is
+          # world-writable by design, which the installer refuses as a prefix.
+          umask 077
+          TOOLCACHE_PREFIX="$(dirname "$(dirname "$(command -v npm)")")"
+          RUNTIME_PREFIX="$(mktemp -d "$RUNNER_TEMP/rcl-runtime.XXXXXX")"
+          cp -R "$TOOLCACHE_PREFIX"/. "$RUNTIME_PREFIX"/
+          python3 scripts/install_latest_rcl.py \
+            --npm-bin "$RUNTIME_PREFIX/bin/npm" \
+            --node-bin "$RUNTIME_PREFIX/bin/node" \
+            --approved-prefix "$RUNTIME_PREFIX"
+          echo "$RUNTIME_PREFIX/bin" >> "$GITHUB_PATH"
+
+      - name: Attested review
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*) echo "pr_number must be a pull request number, got: $PR_NUMBER" >&2; exit 2 ;;
+          esac
+          case "$HEAD_SHA" in
+            *[!0-9a-f]*|'') echo "head_sha must be a full lowercase commit id" >&2; exit 2 ;;
+          esac
+          if [ "${#HEAD_SHA}" -ne 40 ]; then
+            echo "head_sha must be 40 hex characters, got ${#HEAD_SHA}" >&2
+            exit 2
+          fi
+          rcl review "$GITHUB_REPOSITORY#$PR_NUMBER" \
+            --attest \
+            --expect-head-sha "$HEAD_SHA" \
+            --evidence-required \
+            --ci

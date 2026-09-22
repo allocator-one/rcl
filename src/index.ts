@@ -118,6 +118,7 @@ import {
   resolveTelemetryLevel,
 } from './telemetry/deliver.js';
 import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
 import { credentialHost, type HarnessCredential } from './telemetry/credentials.js';
@@ -817,7 +818,29 @@ program
 // Evidence delivery operations (IO-12475 section 8.10).
 const telemetry = program
   .command('telemetry')
-  .description('Evidence delivery to Harness: the credential in use and the spooled deliveries waiting in the outbox');
+  .description('Evidence delivery to Harness: credentials, queued deliveries and retained rejected reports');
+
+telemetry
+  .command('rejected')
+  .description('Inspect immutable retained evidence without delivering or retrying it')
+  .option('--run <id>', 'Select one retained original run')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { run?: string; json?: boolean }) => {
+    const store = new Quarantine(join(resolveDataDir(), QUARANTINE_DIR));
+    try {
+      const selected = opts.run ? await store.inspect(opts.run) : undefined;
+      const entries = opts.run ? (selected ? [selected] : []) : await store.list();
+      if (opts.json) console.log(JSON.stringify({ dir: store.dir, entries }, null, 2));
+      else {
+        console.log(`Retained evidence: ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} — no automatic retry`);
+        for (const entry of entries) console.log(`  ${entry.runId} ${entry.status} ${entry.path}${entry.error ? ` (${entry.error})` : ''}`);
+      }
+      if ((opts.run && entries.length === 0) || entries.some((e) => e.status !== 'complete')) process.exitCode = 1;
+    } catch (error) {
+      console.error(`Cannot inspect retained evidence: ${scrubText(error instanceof Error ? error.message : String(error), 200)}`);
+      process.exitCode = 1;
+    }
+  });
 
 telemetry
   .command('status')
@@ -2089,14 +2112,19 @@ async function executeCouncil(
     printReviewSummary(result);
   }
 
-  if (opts.jsonFile) {
-    await writeFile(opts.jsonFile, artifacts.report_json, 'utf-8');
-    console.log(chalk.dim(`JSON written to: ${opts.jsonFile}`));
-  }
-
-  if (opts.markdown) {
-    await writeFile(opts.markdown, artifacts.report_md ?? '', 'utf-8');
-    console.log(chalk.dim(`Markdown written to: ${opts.markdown}`));
+  const outputDiagnostics: Array<{ path: string; message: string }> = [];
+  for (const [kind, path, label] of [
+    ['report_json', opts.jsonFile, 'JSON'], ['report_md', opts.markdown, 'Markdown'],
+  ] as const) {
+    if (!path) continue;
+    try {
+      await writeFile(path, artifacts[kind] ?? '', 'utf-8');
+      console.log(chalk.dim(`${label} written to: ${path}`));
+    } catch (error) {
+      const message = `Could not write ${label}: ${scrubText(String(error), 300)}`;
+      outputDiagnostics.push({ path: `output.${kind}`, message });
+      process.stderr.write(chalk.red(message) + '\n');
+    }
   }
 
   if (opts.post && !diff.metadata) {
@@ -2112,11 +2140,11 @@ async function executeCouncil(
     }
   }
 
-  // Deliver after the report is on disk and before any exit code, so a
-  // review is never lost to the network.
+  // A failed requested output must not prevent delivery or immutable recovery
+  // retention of the rendered originals. Try both files before any exit code.
   const evidenceRequired = opts.evidenceRequired === true;
   const delivery: DeliveryOutcome = runtime
-    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired }).catch((err: unknown) => ({
+    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics }).catch((err: unknown) => ({
         status: 'error' as const,
         line: `Evidence delivery failed: ${scrubText(String(err), 300)}`,
         exitCode: evidenceRequired ? (4 as const) : (0 as const),
@@ -2130,9 +2158,17 @@ async function executeCouncil(
       };
   if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
   // The flush hint is honest only when something was spooled to flush.
-  const evidenceFailure = delivery.spooled
-    ? `Evidence was not recorded (--evidence-required). Retry delivery with \`rcl telemetry flush --run ${delivery.runId}\` rather than re-running the review.`
-    : `Evidence was not recorded (--evidence-required): ${delivery.line || delivery.status}.`;
+  const evidenceFailure = [
+    `Evidence was not recorded (--evidence-required): ${delivery.line || delivery.status}.`,
+    delivery.spooled
+      ? `Retry delivery with \`rcl telemetry flush --run ${delivery.runId}\` rather than re-running the review.`
+      : undefined,
+    delivery.retention?.status === 'complete'
+      ? `Original reports are retained; inspect them with \`rcl telemetry rejected --run ${delivery.runId}\` before supported recovery.`
+      : delivery.retention?.status === 'failed'
+        ? `Original report retention failed: ${delivery.retention.error ?? 'unknown error'}.`
+        : undefined,
+  ].filter((part): part is string => part !== undefined).join(' ');
 
   // CI mode: fail on a fully-failed run or on blocking findings. The gate
   // verdict keeps its exit code — pipelines branch on it — and an evidence
@@ -2149,6 +2185,7 @@ async function executeCouncil(
     console.error(chalk.red(evidenceFailure));
     process.exit(delivery.exitCode);
   }
+  if (outputDiagnostics.length > 0) process.exitCode = 1;
 }
 
 async function runDiscuss(

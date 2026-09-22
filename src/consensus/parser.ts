@@ -5,17 +5,20 @@ import type { Finding } from './types.js';
  * Models emit line numbers as JSON strings often enough ("startLine": "59")
  * that a strict `z.number()` silently discards otherwise-perfect findings —
  * and when EVERY finding in a response is affected, the whole reviewer is
- * lost. Coerce instead, then enforce the integer/non-negative shape, so a
- * genuinely nonsensical value is still rejected.
+ * lost. Preserve numeric-string compatibility, but never coerce null, a
+ * boolean, a blank string or a container into an invented coordinate.
  */
-const LineNumber = z.coerce.number().int().nonnegative();
+const LineNumber = z.preprocess(
+  (value) => typeof value === 'string' && value.trim() !== '' ? Number(value) : value,
+  z.number().int().nonnegative()
+);
 
 /**
  * Enum-ish fields arrive with stray casing or whitespace ("Critical",
  * " security"). Normalizing before validation costs nothing and is the same
  * lesson as the line numbers: reject meaning, not formatting.
  */
-function normalizedEnum<T extends readonly [string, ...string[]]>(values: T) {
+function normalizedEnum<const T extends readonly [string, ...string[]]>(values: T) {
   return z.preprocess(
     (value) => (typeof value === 'string' ? value.trim().toLowerCase() : value),
     z.enum(values)
@@ -35,6 +38,20 @@ const FindingSchema = z.object({
   title: z.string().max(200),
   description: z.string(),
   suggestedFix: z.string().optional(),
+}).transform((finding): Finding => {
+  if (finding.startLine <= finding.endLine) return finding;
+  return {
+    ...finding,
+    startLine: finding.endLine,
+    endLine: finding.startLine,
+    locationProvenance: {
+      version: 1,
+      source: 'parser',
+      reason: 'reversed_range',
+      originalStartLine: finding.startLine,
+      originalEndLine: finding.endLine,
+    },
+  };
 });
 
 const ReviewOutputSchema = z.object({
