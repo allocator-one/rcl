@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.8.2 - 2026-09-23
+
+- Serialize concurrent native report, verdict and attempt writes under shared
+  target ownership, keeping ownership through evidence publication. Preserve
+  existing round and attempt accounting (RCL-76).
+- Add strict selected-receipt reads and pure validation for recovery sources,
+  claim splits and retained native state. These are recovery prerequisites;
+  the claim-split recovery command is not yet available.
+
 ## 3.8.1 - 2026-09-23
 
 - Add explicit `--original-prose control-code-units-v1` recovery for retained

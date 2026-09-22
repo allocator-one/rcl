@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
+import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
@@ -197,17 +199,22 @@ export async function loadConvergeRunStateEvidence(
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
-async function writeState(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
+/** Persist only under live explicit target authority; started writes drain before release. */
+export function writeState(gitCommonDir: string, state: ConvergeRunState, ownership: NativeTargetOwnership): Promise<void> {
+  return withOwnedNativeOperation(ownership, gitCommonDir, state.target, () => writeStateOwned(gitCommonDir, state));
+}
+
+async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
+  gitCommonDir = await realpath(resolve(gitCommonDir));
   const path = convergeRunStatePath(gitCommonDir, state.target);
-  await mkdir(join(resolve(gitCommonDir), STATE_DIR), { recursive: true, mode: 0o700 });
+  const stateDir = join(gitCommonDir, STATE_DIR);
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  await syncNativeDirectory(gitCommonDir);
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, {
-      encoding: 'utf8',
-      flag: 'wx',
-      mode: 0o600,
-    });
+    await writeNativeStateExclusive(temp, state);
     await rename(temp, path);
+    await syncNativeDirectory(stateDir);
   } finally {
     await rm(temp, { force: true });
   }
@@ -272,7 +279,7 @@ export function validateReportIdentityMappings(findings: readonly ReportIdentity
  * that reopened popular false positives every round — see allocator-one#7774,
  * 24 rounds.)
  */
-export async function processRoundReport(options: {
+export interface ProcessRoundOptions {
   gitCommonDir: string;
   target: string;
   round: number;
@@ -281,7 +288,17 @@ export async function processRoundReport(options: {
   lineWindow?: number;
   /** The report's own run id, kept so verdicts can be bound to the round's run. */
   runId?: string;
-}): Promise<RoundReport> {
+  ownership?: NativeTargetOwnership;
+}
+
+export async function processRoundReport(options: ProcessRoundOptions): Promise<RoundReport> {
+  const { target } = validateRoundReportInput(options);
+  return options.ownership
+    ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership))
+    : withNativeTarget(options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership));
+}
+
+function validateRoundReportInput(options: ProcessRoundOptions): { target: string; runId?: string } {
   const target = options.target.trim();
   if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
   // A blank id is no binding at all; only a real one is persisted.
@@ -292,6 +309,11 @@ export async function processRoundReport(options: {
   if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
     throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
   }
+  return { target, runId };
+}
+
+async function processRoundReportOwned(options: ProcessRoundOptions, ownership: NativeTargetOwnership): Promise<RoundReport> {
+  const { target, runId } = validateRoundReportInput(options);
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
@@ -307,7 +329,7 @@ export async function processRoundReport(options: {
   }
   if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) {
     // Persist a tightened/extended cap even when this round is refused.
-    if (options.maxRounds !== undefined) await writeState(options.gitCommonDir, state);
+    if (options.maxRounds !== undefined) await writeState(options.gitCommonDir, state, ownership);
     throw new ConvergeRoundCapError(target, options.round, state.roundCap);
   }
   // Rounds advance contiguously: the current round may be re-processed (the
@@ -434,7 +456,7 @@ export async function processRoundReport(options: {
     })),
   };
   state.updatedAt = new Date().toISOString();
-  await writeState(options.gitCommonDir, state);
+  await writeState(options.gitCommonDir, state, ownership);
 
   return { roundCap: state.roundCap, counts, findings: annotated };
 }
@@ -471,12 +493,21 @@ export interface RecordVerdictsResult {
  * caller can append them to the global model-stats store, plus the round's
  * resolution when it can be decided.
  */
-export async function recordVerdicts(options: {
+export interface RecordVerdictsOptions {
   gitCommonDir: string;
   target: string;
   round: number;
   verdicts: Array<{ key: string; verdict: FindingVerdict; reason?: string }>;
-}): Promise<RecordVerdictsResult> {
+  ownership?: NativeTargetOwnership;
+}
+
+export async function recordVerdicts(options: RecordVerdictsOptions): Promise<RecordVerdictsResult> {
+  return options.ownership
+    ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, options.target, ownership => recordVerdictsOwned(options, ownership))
+    : withNativeTarget(options.gitCommonDir, options.target, ownership => recordVerdictsOwned(options, ownership));
+}
+
+async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: NativeTargetOwnership): Promise<RecordVerdictsResult> {
   const target = options.target.trim();
   const state = await readState(options.gitCommonDir, target);
   if (!state) {
@@ -509,7 +540,7 @@ export async function recordVerdicts(options: {
     updated.push(recorded);
   }
   state.updatedAt = new Date().toISOString();
-  await writeState(options.gitCommonDir, state);
+  await writeState(options.gitCommonDir, state, ownership);
 
   let resolution: RoundResolution | undefined;
   if (state.lastAnnotations && state.lastAnnotations.round === options.round) {

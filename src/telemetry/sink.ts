@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
@@ -28,6 +29,8 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
+  /** Recovery reads require HTTP 200 and a complete data/meta envelope, never a partial/error answer. */
+  requireCompleteRead?: boolean;
 }
 
 export interface RunReceipt {
@@ -162,9 +165,15 @@ export class HarnessSink {
       let parsed: unknown = null;
       if (text !== '') {
         try {
-          parsed = JSON.parse(text);
+          if (options.requireCompleteRead) {
+            const decoded = decodeOriginalReport(text, { exactNumbers: true });
+            if (decoded.transformations.length) throw new Error('transformed_receipt');
+            parsed = decoded.value;
+          } else parsed = JSON.parse(text);
         } catch {
-          parsed = { message: text.slice(0, 200) };
+          parsed = options.requireCompleteRead
+            ? { error: 'malformed_response', message: 'invalid or ambiguous complete read response' }
+            : { message: text.slice(0, 200) };
         }
       }
       return { status: response.status, body: parsed };
@@ -307,7 +316,10 @@ export class HarnessSink {
    */
   async getJson<T>(path: string, validate: (data: unknown, meta?: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
     const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
-    return this.classify(result, (body) => {
+    return this.classify(result, (body, status) => {
+      if (options.requireCompleteRead && (status !== 200 || !body || typeof body !== 'object' || Array.isArray(body) ||
+          !Object.hasOwn(body, 'data') || !Object.hasOwn(body, 'meta') ||
+          Object.keys(body).some(key => key !== 'data' && key !== 'meta'))) return null;
       const response = body as { data?: unknown; meta?: unknown } | null;
       return validate(response?.data, response?.meta);
     });

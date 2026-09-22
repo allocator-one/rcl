@@ -26,6 +26,10 @@ export function instant(value: unknown): string {
   if (typeof value !== 'string') throw new Error('invalid_receipt_timestamp');
   const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,6}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
   if (!match) throw new Error('invalid_receipt_timestamp');
+  // Date.parse normalizes impossible dates such as February 30. Such input
+  // must not compare equal to a different, valid persisted timestamp.
+  const calendar = new Date(match[1]! + 'Z');
+  if (!Number.isFinite(calendar.getTime()) || calendar.toISOString().slice(0, 19) !== match[1]) throw new Error('invalid_receipt_timestamp');
   const seconds = Date.parse(match[1]! + match[3]!);
   if (!Number.isFinite(seconds)) throw new Error('invalid_receipt_timestamp');
   return (BigInt(seconds) * 1000n + BigInt((match[2] ?? '').padEnd(6, '0'))).toString();

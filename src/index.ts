@@ -73,6 +73,7 @@ import {
   ConvergeAttemptStateError,
   resolveGitCommonDir,
 } from './converge/attempt-budget.js';
+import { withNativeTarget } from './converge/target-ownership.js';
 import {
   DEFAULT_CONVERGE_ROUND_CAP,
   HARD_CONVERGE_ROUND_CAP,
@@ -417,20 +418,22 @@ program
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           maxAttempts,
+          afterClaim: async claim => {
+            await reportConvergeEvents([
+              buildEvent({
+                kind: 'attempt_claimed',
+                convergeTarget: claim.target,
+                attempt: claim.attempt,
+                // The claim's local state path and process id stay on this machine.
+                payload: { attempt: claim.attempt, cap: claim.cap },
+              }),
+              // An explicit --max-attempts is consent evidence, whatever it was before.
+              ...(maxAttempts !== undefined
+                ? [buildEvent({ kind: 'cap_changed', convergeTarget: claim.target, attempt: claim.attempt, payload: { kind: 'attempts', to: claim.cap } })]
+                : []),
+            ]);
+          },
         });
-        await reportConvergeEvents([
-          buildEvent({
-            kind: 'attempt_claimed',
-            convergeTarget: claim.target,
-            attempt: claim.attempt,
-            // The claim's local state path and process id stay on this machine.
-            payload: { attempt: claim.attempt, cap: claim.cap },
-          }),
-          // An explicit --max-attempts is consent evidence, whatever it was before.
-          ...(maxAttempts !== undefined
-            ? [buildEvent({ kind: 'cap_changed', convergeTarget: claim.target, attempt: claim.attempt, payload: { kind: 'attempts', to: claim.cap } })]
-            : []),
-        ]);
         if (opts.json) {
           console.log(JSON.stringify(claim));
         } else {
@@ -545,82 +548,86 @@ program
             )
           );
         }
-        const result = await processRoundReport({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
-          round,
-          findings: report.findings,
-          ...(maxRounds !== undefined ? { maxRounds } : {}),
-          ...(runId !== undefined ? { runId } : {}),
-        });
-
-        const classified = result.findings.map((f) => ({
-          identity: f.identity,
-          status: f.status,
-          gating: findingGatingReason(f.finding),
-          severity: f.finding.severity,
-          file: f.finding.file,
-          startLine: f.finding.startLine,
-          endLine: f.finding.endLine,
-          title: f.finding.title,
-          ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
-        }));
-        const actionable = classified.filter(
-          (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
-        );
-        await reportConvergeEvents([
-          buildEvent({
-            kind: 'round_processed',
-            convergeTarget: opts.target,
+        const gitCommonDir = await resolveGitCommonDir();
+        await withNativeTarget(gitCommonDir, opts.target, async ownership => {
+          const result = await processRoundReport({
+            gitCommonDir,
+            ownership,
+            target: opts.target as string,
             round,
+            findings: report.findings,
+            ...(maxRounds !== undefined ? { maxRounds } : {}),
             ...(runId !== undefined ? { runId } : {}),
-            payload: {
+          });
+
+          const classified = result.findings.map((f) => ({
+            identity: f.identity,
+            status: f.status,
+            gating: findingGatingReason(f.finding),
+            severity: f.finding.severity,
+            file: f.finding.file,
+            startLine: f.finding.startLine,
+            endLine: f.finding.endLine,
+            title: f.finding.title,
+            ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
+          }));
+          const actionable = classified.filter(
+            (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
+          );
+          await reportConvergeEvents([
+            buildEvent({
+              kind: 'round_processed',
+              convergeTarget: opts.target as string,
               round,
-              round_cap: result.roundCap,
-              counts: result.counts,
-              actionable_gating: actionable.length,
-              // Which identity each sighting was matched to, so the server
-              // can apply standing verdicts to keys that moved (IO-12601).
-              identities: roundIdentities(result.findings),
-            },
-          }),
-          ...(maxRounds !== undefined
-            ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target, round, payload: { kind: 'rounds', to: result.roundCap } })]
-            : []),
-        ]);
-
-        if (opts.json) {
-          console.log(
-            JSON.stringify(
-              {
-                target: opts.target,
+              ...(runId !== undefined ? { runId } : {}),
+              payload: {
                 round,
-                roundCap: result.roundCap,
+                round_cap: result.roundCap,
                 counts: result.counts,
-                actionableGating: actionable.length,
-                findings: classified,
+                actionable_gating: actionable.length,
+                // Which identity each sighting was matched to, so the server
+                // can apply standing verdicts to keys that moved (IO-12601).
+                identities: roundIdentities(result.findings),
               },
-              null,
-              2
-            )
-          );
-          return;
-        }
+            }),
+            ...(maxRounds !== undefined
+              ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target as string, round, payload: { kind: 'rounds', to: result.roundCap } })]
+              : []),
+          ]);
 
-        console.log(
-          `Round ${round}/${result.roundCap} for ${opts.target}: ` +
-            `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
-            `${result.counts.suppressed} suppressed, ${result.counts.regating} regating · ` +
-            `${actionable.length} actionable gating finding(s)`
-        );
-        for (const f of actionable) {
-          console.log(`  [${f.status}] ${f.identity} ${f.file}:${f.startLine} — ${f.title}`);
-        }
-        for (const f of classified.filter((c) => c.status === 'suppressed')) {
+          if (opts.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  target: opts.target as string,
+                  round,
+                  roundCap: result.roundCap,
+                  counts: result.counts,
+                  actionableGating: actionable.length,
+                  findings: classified,
+                },
+                null,
+                2
+              )
+            );
+            return;
+          }
+
           console.log(
-            chalk.dim(`  [suppressed] ${f.identity} ${f.file}:${f.startLine} — ${f.suppressReason}`)
+            `Round ${round}/${result.roundCap} for ${opts.target}: ` +
+              `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
+              `${result.counts.suppressed} suppressed, ${result.counts.regating} regating · ` +
+              `${actionable.length} actionable gating finding(s)`
           );
-        }
+          for (const f of actionable) {
+            console.log(`  [${f.status}] ${f.identity} ${f.file}:${f.startLine} — ${f.title}`);
+          }
+          for (const f of classified.filter((c) => c.status === 'suppressed')) {
+            console.log(
+              chalk.dim(`  [suppressed] ${f.identity} ${f.file}:${f.startLine} — ${f.suppressReason}`)
+            );
+          }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
@@ -697,113 +704,117 @@ program
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
-        const { entries: updated, resolution } = await recordVerdicts({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
-          round,
-          verdicts,
-        });
-        // Feed the cross-run precision history (RCL-27) — fail-soft, the
-        // verdicts above are already durably recorded.
-        try {
-          const ts = new Date().toISOString();
-          await appendOutcomes(
-            updated
-              .filter((e) => e.verdict !== undefined && e.models.length > 0)
-              .map((e) => ({
-                ts,
-                verdict: e.verdict!,
-                models: e.models,
-                severity: e.verdictSeverity ?? e.severity,
-                target: opts.target as string,
-                findingKey: e.key,
-                source: 'live' as const,
-              }))
-          );
-        } catch (err) {
-          // Advisory history; verdict recording must not fail over it —
-          // but say so, or a broken store silently stops learning.
-          console.warn(
-            `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
-          );
-        }
-        // The run id binding is advisory: an unreadable state file must not
-        // fail a command whose verdicts are already recorded.
-        let roundRun: string | undefined;
-        try {
-          roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
-        } catch {
-          roundRun = undefined;
-        }
-        await reportConvergeEvents([
-          buildEvent({
-            kind: 'verdicts_recorded',
-            convergeTarget: opts.target,
+        const gitCommonDir = await resolveGitCommonDir();
+        await withNativeTarget(gitCommonDir, opts.target, async ownership => {
+          const { entries: updated, resolution } = await recordVerdicts({
+            gitCommonDir,
+            ownership,
+            target: opts.target as string,
             round,
-            ...(roundRun !== undefined ? { runId: roundRun } : {}),
-            payload: {
-              verdicts: updated.map((e) => ({
-                identity_key: e.key,
-                verdict: e.verdict,
-                // A dismissal reason is user-authored prose: scrubbed like every other free text that leaves the machine.
-                ...(e.verdictReason !== undefined ? { reason: scrubText(e.verdictReason, 500) } : {}),
-                severity: e.verdictSeverity ?? e.severity,
-                models: e.models,
-              })),
-            },
-          }),
-          ...(resolution
-            ? [
-                buildEvent({
-                  kind: 'resolution',
-                  convergeTarget: opts.target,
-                  round,
-                  ...(roundRun !== undefined ? { runId: roundRun } : {}),
-                  payload: {
-                    status: resolution.status,
-                    actionable: resolution.actionable,
-                    unresolved: resolution.unresolved.length,
-                    fixed_this_round: resolution.fixedThisRound,
-                  },
-                }),
-              ]
-            : []),
-        ]);
-        if (opts.json) {
-          console.log(
-            JSON.stringify({
-              target: opts.target,
+            verdicts,
+          });
+          // Feed the cross-run precision history (RCL-27) — fail-soft, the
+          // verdicts above are already durably recorded.
+          try {
+            const ts = new Date().toISOString();
+            await appendOutcomes(
+              updated
+                .filter((e) => e.verdict !== undefined && e.models.length > 0)
+                .map((e) => ({
+                  ts,
+                  verdict: e.verdict!,
+                  models: e.models,
+                  severity: e.verdictSeverity ?? e.severity,
+                  target: opts.target as string,
+                  findingKey: e.key,
+                  source: 'live' as const,
+                }))
+            );
+          } catch (err) {
+            // Advisory history; verdict recording must not fail over it —
+            // but say so, or a broken store silently stops learning.
+            console.warn(
+              `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
+            );
+          }
+          // The run id binding is advisory: an unreadable state file must not
+          // fail a command whose verdicts are already recorded.
+          let roundRun: string | undefined;
+          try {
+            roundRun = roundRunId(await loadConvergeRunState(gitCommonDir, opts.target as string), round);
+          } catch {
+            roundRun = undefined;
+          }
+          await reportConvergeEvents([
+            buildEvent({
+              kind: 'verdicts_recorded',
+              convergeTarget: opts.target as string,
               round,
-              recorded: verdicts.length,
-              ...(resolution ? { resolution } : {}),
-            })
-          );
-        } else {
-          console.log(`Recorded ${verdicts.length} verdict(s) for ${opts.target} round ${round}.`);
-          if (resolution) {
-            switch (resolution.status) {
-              case 'converged-dismissal-only':
-                console.log(
-                  `Round ${round} resolution: all ${resolution.actionable} gating finding(s) dismissed, ` +
-                    'nothing fixed — the reviewed patch is unchanged, so this round CONVERGES. ' +
-                    'No confirmation round is required (RCL-30).'
-                );
-                break;
-              case 'fixes-pending-fresh-round':
-                console.log(
-                  `Round ${round} resolution: ${resolution.fixedThisRound} fix(es) recorded — ` +
-                    'the patch changes; commit, push, and run a fresh exact-head round.'
-                );
-                break;
-              case 'unresolved':
-                console.log(
-                  `Round ${round} resolution: ${resolution.unresolved.length} gating identity(ies) ` +
-                    `still untriaged: ${resolution.unresolved.join(', ')}`
-                );
-                break;
+              ...(roundRun !== undefined ? { runId: roundRun } : {}),
+              payload: {
+                verdicts: updated.map((e) => ({
+                  identity_key: e.key,
+                  verdict: e.verdict,
+                  // A dismissal reason is user-authored prose: scrubbed like every other free text that leaves the machine.
+                  ...(e.verdictReason !== undefined ? { reason: scrubText(e.verdictReason, 500) } : {}),
+                  severity: e.verdictSeverity ?? e.severity,
+                  models: e.models,
+                })),
+              },
+            }),
+            ...(resolution
+              ? [
+                  buildEvent({
+                    kind: 'resolution',
+                    convergeTarget: opts.target as string,
+                    round,
+                    ...(roundRun !== undefined ? { runId: roundRun } : {}),
+                    payload: {
+                      status: resolution.status,
+                      actionable: resolution.actionable,
+                      unresolved: resolution.unresolved.length,
+                      fixed_this_round: resolution.fixedThisRound,
+                    },
+                  }),
+                ]
+              : []),
+          ]);
+          if (opts.json) {
+            console.log(
+              JSON.stringify({
+                target: opts.target as string,
+                round,
+                recorded: verdicts.length,
+                ...(resolution ? { resolution } : {}),
+              })
+            );
+          } else {
+            console.log(`Recorded ${verdicts.length} verdict(s) for ${opts.target} round ${round}.`);
+            if (resolution) {
+              switch (resolution.status) {
+                case 'converged-dismissal-only':
+                  console.log(
+                    `Round ${round} resolution: all ${resolution.actionable} gating finding(s) dismissed, ` +
+                      'nothing fixed — the reviewed patch is unchanged, so this round CONVERGES. ' +
+                      'No confirmation round is required (RCL-30).'
+                  );
+                  break;
+                case 'fixes-pending-fresh-round':
+                  console.log(
+                    `Round ${round} resolution: ${resolution.fixedThisRound} fix(es) recorded — ` +
+                      'the patch changes; commit, push, and run a fresh exact-head round.'
+                  );
+                  break;
+                case 'unresolved':
+                  console.log(
+                    `Round ${round} resolution: ${resolution.unresolved.length} gating identity(ies) ` +
+                      `still untriaged: ${resolution.unresolved.join(', ')}`
+                  );
+                  break;
+              }
             }
           }
-        }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {

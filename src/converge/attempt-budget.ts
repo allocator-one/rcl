@@ -14,6 +14,8 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { withNativeTarget } from './target-ownership.js';
+import { RegistryCleanupError } from '../coordination/registry-lock.js';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
 
@@ -88,6 +90,8 @@ interface ClaimOptions {
   recordPid?: number;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
+  /** Runs after durable accounting and before target ownership is released. */
+  afterClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
 }
 
 interface AttemptLockOwner {
@@ -553,6 +557,25 @@ async function releaseOwnedLock(lockFile: string, owner: AttemptLockOwner): Prom
  * attempt. This makes the cost ceiling independent of agent bookkeeping.
  */
 export async function claimConvergeAttempt(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
+  const target = validateTarget(options.target);
+  if (options.maxAttempts !== undefined) validateCap(options.maxAttempts);
+  let committed: ConvergeAttemptClaim | undefined;
+  try {
+    return await withNativeTarget(options.gitCommonDir, target, async () => {
+      committed = await claimConvergeAttemptOwned(options);
+      await options.afterClaim?.(committed);
+      return committed;
+    });
+  } catch (error) {
+    if (!(error instanceof RegistryCleanupError) || !committed || error.result !== committed) throw error;
+    committed.warning = [committed.warning,
+      `Attempt ${committed.attempt}/${committed.cap} is durably recorded, but target lock cleanup failed: ${error.message}. ` +
+      'Do not retry this claim. Inspect target coordination before further target mutations.'].filter(Boolean).join(' ');
+    return committed;
+  }
+}
+
+async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
   const target = validateTarget(options.target);
   const requestedCap =
     options.maxAttempts === undefined ? undefined : validateCap(options.maxAttempts);

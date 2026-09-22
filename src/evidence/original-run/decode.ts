@@ -13,10 +13,27 @@ export interface ControlProseTransformation extends ProseTransformation {
 }
 export type OriginalProseTransformation = ProseTransformation | ControlProseTransformation;
 export type OriginalProseMode = 'control-code-units-v1';
-export interface DecodeOriginalReportOptions { originalProse?: OriginalProseMode }
+export interface DecodeOriginalReportOptions {
+  originalProse?: OriginalProseMode;
+  /** Refuse numeric tokens whose original decimal meaning is lost by JSON parsing. */
+  exactNumbers?: boolean;
+}
 export const findingProsePath = /^(?:\/(?:findings|belowThresholdFindings)\/\d+|\/reviews\/\d+\/findings\/\d+)\/(?:title|description|suggestedFix)$/;
 const pointer = (parts: string[]) => '/' + parts.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
 const scalarToken = /(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/y;
+
+/** Compare decimal meanings without converting the original token to a float. */
+function decimalIdentity(token: string): string {
+  const negative = token.startsWith('-');
+  const [mantissa, exponent = '0'] = (negative ? token.slice(1) : token).toLowerCase().split('e');
+  const [integer, fraction = ''] = mantissa!.split('.');
+  const digits = (integer! + fraction).replace(/^0+/, '');
+  if (!digits) return '0';
+  const significant = digits.replace(/0+$/, '');
+  const power = Number(exponent) - fraction.length + digits.length - significant.length;
+  if (!Number.isSafeInteger(power)) throw new Error('invalid_or_ambiguous_original_json');
+  return `${negative ? '-' : ''}${significant}e${power}`;
+}
 
 /** UTF-8 prefix lengths for the immutable source, computed once only when needed. */
 function utf8Offsets(text: string): Uint32Array {
@@ -130,6 +147,8 @@ export function decodeOriginalReport(text: string, options: DecodeOriginalReport
     if (!token) return fail(); at += token[0].length;
     const parsed: unknown = JSON.parse(token[0]);
     if (typeof parsed === 'number' && (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER)) return fail();
+    if (typeof parsed === 'number' && options.exactNumbers &&
+        decimalIdentity(token[0]) !== decimalIdentity(JSON.stringify(parsed))) return fail();
     return parsed;
   }
   const result = value([], 0); whitespace(); if (at !== text.length) return fail();
