@@ -553,6 +553,36 @@ protected bindings, or any newly required secret redaction, refuse. Markdown
 requiring redaction is unsupported. No fresh-report normalizer or backfill UUID
 is applied to the original.
 
+An original that contains an escaped C0 control or literal DEL in that same
+finding prose is unsupported by default. When the retained report must be
+represented, select the explicit, versioned mode during preview:
+
+```sh
+rcl evidence recover-run --preview --manifest original-run.json \
+  --run "$ORIGINAL_RUN_ID" --for-pr owner/repo#123 --head "$ORIGINAL_HEAD_SHA" \
+  --report-json /absolute/original/report.json --report-sha256 "$JSON_SHA256" \
+  --original-mode asserted --original-prose control-code-units-v1 --json
+```
+
+This selection never rewrites the retained artifact or its digest. It projects
+only allowed finding-prose controls to visible uppercase `\uXXXX` transport text
+and records a version-1 `control_code_unit` transformation with the source path,
+code-unit offset and original UTF-8 byte offset. Short JSON escapes
+(`\b`, `\f`), `\uXXXX` escapes and literal DEL are covered. Literal tab, LF
+and CR are valid JSON prose and remain literal; they are not transformed. Raw
+unescaped C0 is invalid JSON; controls in keys, descriptors, identifiers,
+locations or other structural fields refuse. Existing surrogate records keep
+their prior shape.
+
+The mode is intentionally unavailable against older servers. Preview requires
+the usual recovery/evidence metadata **and**
+`meta.original_prose_representation_version: 1`; without it, it makes the scoped
+capability GET but writes no manifest and sends no delivery request. Apply and
+resume use the selected, manifest-pinned representation and repeat that check.
+Inspect the visible projection and transformation records before applying. A
+successful delivery still does not repair native accounting or establish a fresh
+review gate.
+
 Existing transport scrubbing, limits, call summaries and duration rounding remain
 explicitly recorded derivations. Two valid reversed integer coordinates may use
 `report_projection` provenance bound to the original coordinates and JSON digest;

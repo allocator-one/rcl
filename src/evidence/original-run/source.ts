@@ -7,7 +7,7 @@ import { originalRunReportSchema, originalRawFindingSchema, requiresArtifactReda
 import { readStable, hasSyntheticAncestor, platformPath, sha256 } from '../../telemetry/recovery/files.js';
 import { scrubSecrets, scrubText } from '../../telemetry/scrub.js';
 import { parsePullRequestArg } from '../target.js';
-import { decodeOriginalReport, findingProsePath, type ProseTransformation } from './decode.js';
+import { decodeOriginalReport, findingProsePath, type OriginalProseMode, type OriginalProseTransformation } from './decode.js';
 
 export const hashSchema = z.string().regex(/^[0-9a-f]{64}(?![\s\S])/);
 export const uuidSchema = z.string().uuid().refine(value => value === value.toLowerCase(), 'UUID must already use canonical lowercase form');
@@ -15,6 +15,7 @@ export const selectionSchema = z.object({
   run: uuidSchema, forPr: z.string(), head: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})(?![\s\S])/).refine(s => !/^0+$/.test(s)),
   reportJson: z.string().min(1), reportSha256: hashSchema,
   reportMd: z.string().min(1).optional(), markdownSha256: hashSchema.optional(), originalMode: z.literal('asserted'),
+  originalProse: z.literal('control-code-units-v1').optional(),
 }).strict().refine(s => (s.reportMd === undefined) === (s.markdownSha256 === undefined));
 export type Selection = z.infer<typeof selectionSchema>;
 /** Static selection guidance only; never expose Zod issues or supplied values. */
@@ -30,6 +31,7 @@ const selectionGuidance: Record<keyof Selection, string> = {
   reportMd: 'Provide a nonempty original Markdown path with --report-md, or omit both Markdown options.',
   markdownSha256: 'Use --markdown-sha256 with the original Markdown digest (64 lowercase hex characters).',
   originalMode: 'Specify --original-mode asserted for this recovery command.',
+  originalProse: 'Use --original-prose control-code-units-v1 only when the original report contains allowed finding-prose controls.',
 };
 export interface SourceFile { path: string; sha256: string; bytes: number }
 export interface PreparedOriginal {
@@ -37,7 +39,7 @@ export interface PreparedOriginal {
   sources: { report_json: SourceFile; report_md?: SourceFile };
   envelope: RunEnvelope;
   envelope_sha256: string;
-  transformations: ProseTransformation[];
+  transformations: OriginalProseTransformation[];
   transport_derivations: Array<{ path: string; rule: string; original_sha256: string; transport_sha256: string }>;
   original_mode: { value: 'asserted'; authority: 'operator_assertion'; retained_runner: unknown };
   retained_content_limitations: { report_sha256: string; redacted_prose: Array<{ path: string; count: number }>; meaning: string };
@@ -96,7 +98,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   }
   const json = await readStable(selection.reportJson, MAX_ARTIFACT_BYTES);
   if (json.sha256 !== selection.reportSha256 || !Buffer.from(json.text, 'utf8').equals(json.raw)) throw new Error('original_report_digest_mismatch');
-  const decoded = decodeOriginalReport(json.text);
+  const decoded = decodeOriginalReport(json.text, { ...(selection.originalProse ? { originalProse: selection.originalProse as OriginalProseMode } : {}) });
   if (!originalRunReportSchema.safeParse(decoded.value).success) throw new Error('unsupported_original_report');
   const report = decoded.value as ReviewResult & { run: NonNullable<ReviewResult['run']> };
   if (report.reviews.some(r => r.findings.length > 2000 || r.findings.some(f => !originalRawFindingSchema.safeParse(f).success))) throw new Error('unsupported_original_reviewer_finding');

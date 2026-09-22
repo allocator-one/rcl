@@ -976,6 +976,7 @@ evidenceCmd
   .option('--report-md <path>', 'Optional original Markdown file (preview)')
   .option('--markdown-sha256 <sha256>', 'Required digest when selecting original Markdown')
   .option('--original-mode <mode>', 'Required operator assertion: asserted; CI/attested originals unsupported')
+  .option('--original-prose <mode>', 'Explicit original finding-prose representation: control-code-units-v1')
   .option('--json', 'Print machine-readable operation status and diagnostics')
   .action(async (opts: OriginalRunOptions) => {
     process.exitCode = await runOriginalRecovery(opts, evidenceDeps());

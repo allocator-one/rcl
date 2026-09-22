@@ -4,6 +4,7 @@ import { HarnessSink, type SinkOutcome } from '../../telemetry/sink.js';
 import { sha256 } from '../../telemetry/recovery/files.js';
 import type { PreparedOriginal } from './source.js';
 import { uuidSchema } from './source.js';
+import type { OriginalProseMode } from './decode.js';
 export interface Destination { base_url: string; org_id: string }
 export function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 export const missing = (r: SinkOutcome<unknown>) => r.kind === 'rejected' && r.httpStatus === 404 && r.error === 'not_found';
@@ -11,10 +12,11 @@ export function requireOk<T>(result: SinkOutcome<T>, label: string): T {
   if (result.kind !== 'ok') throw new Error(`${label}_${result.kind}`);
   return result.value;
 }
-export async function destination(sink: HarnessSink): Promise<Destination> {
+export async function destination(sink: HarnessSink, originalProse?: OriginalProseMode): Promise<Destination> {
   if (sink.credentialSource === 'attest') throw new Error('unsupported_attested_recovery');
   const outcome = await sink.getJson('/api/v1/reviews/runs?page_size=1', (data, meta) => {
-    if (!Array.isArray(data) || !object(meta) || !uuidSchema.safeParse(meta.org_id).success || meta.original_report_recovery_version !== 1 || meta.evidence_protocol_version !== 2) return null;
+    if (!Array.isArray(data) || !object(meta) || !uuidSchema.safeParse(meta.org_id).success || meta.original_report_recovery_version !== 1 || meta.evidence_protocol_version !== 2 ||
+        (originalProse === 'control-code-units-v1' && meta.original_prose_representation_version !== 1)) return null;
     return { base_url: sink.baseUrl, org_id: meta.org_id as string };
   });
   return requireOk(outcome, 'recovery_capability_or_destination');

@@ -16,7 +16,7 @@ export interface OriginalRunOptions {
   preview?: boolean; apply?: boolean; resume?: boolean; json?: boolean;
   manifest: string; manifestSha256?: string;
   run?: string; forPr?: string; head?: string; reportJson?: string; reportSha256?: string;
-  reportMd?: string; markdownSha256?: string; originalMode?: string;
+  reportMd?: string; markdownSha256?: string; originalMode?: string; originalProse?: string;
 }
 export interface OriginalRunDeps extends EvidenceDeps { beforeCheckpoint?: (phase: string) => Promise<void> }
 export const MAX_ORIGINAL_RUN_MANIFEST_BYTES = MAX_RECOVERY_DOCUMENT_BYTES;
@@ -55,7 +55,7 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
     let artifacts: Awaited<ReturnType<typeof prepareOriginalRun>>['artifacts'];
     if (options.preview) {
       if (options.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
-      ({ prepared, artifacts } = await prepareOriginalRun({ run: options.run, forPr: options.forPr, head: options.head, reportJson: options.reportJson, reportSha256: options.reportSha256, reportMd: options.reportMd, markdownSha256: options.markdownSha256, originalMode: options.originalMode }));
+      ({ prepared, artifacts } = await prepareOriginalRun({ run: options.run, forPr: options.forPr, head: options.head, reportJson: options.reportJson, reportSha256: options.reportSha256, reportMd: options.reportMd, markdownSha256: options.markdownSha256, originalMode: options.originalMode, originalProse: options.originalProse }));
       // Reject oversized prepared evidence before any destination read. The complete
       // manifest is checked again after destination and observation metadata exist.
       serializeRecoveryDocument({ prepared }, MAX_ORIGINAL_RUN_MANIFEST_BYTES);
@@ -63,7 +63,7 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
       try { await lstat(path); throw new Error('manifest_already_exists'); }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     } else {
-      if ([options.run,options.forPr,options.head,options.reportJson,options.reportSha256,options.reportMd,options.markdownSha256,options.originalMode].some(v => v !== undefined)) throw new Error('resume_uses_only_pinned_manifest');
+      if ([options.run,options.forPr,options.head,options.reportJson,options.reportSha256,options.reportMd,options.markdownSha256,options.originalMode,options.originalProse].some(v => v !== undefined)) throw new Error('resume_uses_only_pinned_manifest');
       boundSha = hashSchema.parse(options.manifestSha256);
       const retained = await readStable(path, MAX_ORIGINAL_RUN_MANIFEST_BYTES);
       if (retained.sha256 !== boundSha) throw new Error('manifest_digest_mismatch');
@@ -73,7 +73,7 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
     }
     stage = 'remote';
     const sink = await openSink(deps); if (!sink) return 3;
-    const target = await destination(sink);
+    const target = await destination(sink, prepared.selection.originalProse);
     if (manifest && !isDeepStrictEqual(manifest.destination, target)) throw new Error('destination_or_organization_conflict');
     const inspect = async () => {
       const run = await readOriginalRun(sink, target, prepared);
@@ -100,7 +100,7 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
     const completion = await withRecoveryLock(join(resolveDataDir(deps.env), 'original-run-recovery-locks'), JSON.stringify([target.base_url,target.org_id,prepared.selection.run]), async () => {
       const journal = await openJournal(`${path}.journal`, pinned, selected.operation_id, options.apply ? 'apply' : 'resume', deps.beforeCheckpoint);
       const append = async (phase: string, data?: unknown) => { stage = 'journal'; await journal.append(phase, data); };
-      const read = async () => { stage = 'remote'; if (!isDeepStrictEqual(await destination(sink), target)) throw new Error('destination_or_organization_conflict'); return inspect(); };
+      const read = async () => { stage = 'remote'; if (!isDeepStrictEqual(await destination(sink, prepared.selection.originalProse), target)) throw new Error('destination_or_organization_conflict'); return inspect(); };
       await append('prepared', { source_sha256: prepared.sources, envelope_sha256: prepared.envelope_sha256, destination: target, retained_content_limitations: prepared.retained_content_limitations });
       let observed = await read();
       if (!observed.run.exists) {
