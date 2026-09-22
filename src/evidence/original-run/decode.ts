@@ -8,11 +8,34 @@ export interface ProseTransformation {
 }
 export const findingProsePath = /^(?:\/(?:findings|belowThresholdFindings)\/\d+|\/reviews\/\d+\/findings\/\d+)\/(?:title|description|suggestedFix)$/;
 const pointer = (parts: string[]) => '/' + parts.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+const scalarToken = /(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/y;
+
+/** UTF-8 prefix lengths for the immutable source, computed once only when needed. */
+function utf8Offsets(text: string): Uint32Array {
+  const offsets = new Uint32Array(text.length + 1);
+  let bytes = 0;
+  for (let index = 0; index < text.length; index++) {
+    offsets[index] = bytes;
+    const unit = text.charCodeAt(index);
+    if (unit <= 0x7f) bytes++;
+    else if (unit <= 0x7ff) bytes += 2;
+    else if (unit >= 0xd800 && unit <= 0xdbff && text.charCodeAt(index + 1) >= 0xdc00 && text.charCodeAt(index + 1) <= 0xdfff) {
+      // Buffer.byteLength on a prefix ending between a valid pair encodes the
+      // detached high unit as U+FFFD; normal scanner offsets never land there.
+      offsets[index + 1] = bytes + 3;
+      bytes += 4;
+      index++;
+    } else bytes += 3;
+  }
+  offsets[text.length] = bytes;
+  return offsets;
+}
 
 /** Strict JSON with duplicate-key detection and explicit prose-only lone-surrogate notation. */
 export function decodeOriginalReport(text: string): { value: unknown; transformations: ProseTransformation[] } {
   let at = 0;
   const transformations: ProseTransformation[] = [];
+  let sourceOffsets: Uint32Array | undefined;
   const fail = (): never => { throw new Error('invalid_or_ambiguous_original_json'); };
   const whitespace = () => { while (/[\x20\t\r\n]/.test(text[at] ?? 'x')) at++; };
   function string(path: string[], key = false): string {
@@ -43,7 +66,8 @@ export function decodeOriginalReport(text: string): { value: unknown; transforma
         const hex = unit.toString(16).toUpperCase(); const replacement = `\\u${hex}`;
         const source = offsets.get(i);
         if (source === undefined) throw new Error('unsupported_literal_surrogate');
-        transformations.push({ path: pointer(path), code_unit_offset: i, source_byte_offset: Buffer.byteLength(text.slice(0, source), 'utf8'), original_unit: hex, replacement });
+        sourceOffsets ??= utf8Offsets(text);
+        transformations.push({ path: pointer(path), code_unit_offset: i, source_byte_offset: sourceOffsets[source]!, original_unit: hex, replacement });
         result += replacement;
       } else result += value[i];
     }
@@ -74,7 +98,8 @@ export function decodeOriginalReport(text: string): { value: unknown; transforma
         if (text[at++] !== ',') return fail();
       }
     }
-    const token = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(text.slice(at));
+    scalarToken.lastIndex = at;
+    const token = scalarToken.exec(text);
     if (!token) return fail(); at += token[0].length;
     const parsed: unknown = JSON.parse(token[0]);
     if (typeof parsed === 'number' && (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER)) return fail();

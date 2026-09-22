@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { decodeOriginalReport } from '../../src/evidence/original-run/decode.js';
 import { prepareOriginalRun } from '../../src/evidence/original-run/source.js';
 import { runOriginalRecovery, type OriginalRunOptions } from '../../src/evidence/recover-run.js';
@@ -76,6 +76,19 @@ describe('original JSON interpretation', () => {
     const decoded = decodeOriginalReport(text);
     expect(decoded.transformations).toHaveLength(2);
     expect(() => decodeOriginalReport('{"x":[{"a":1,"a":2}]}')).toThrow('ambiguous');
+  });
+  it('records many escaped-surrogate byte offsets without rescanning source prefixes', () => {
+    const escaped = '\\uD800'.repeat(4096);
+    const text = `{"findings":[{"description":"😀${escaped}"}]}`;
+    const byteLength = vi.spyOn(Buffer, 'byteLength');
+    const decoded = decodeOriginalReport(text);
+    expect(byteLength).not.toHaveBeenCalled();
+    byteLength.mockRestore();
+    expect(decoded.transformations).toHaveLength(4096);
+    expect(decoded.transformations[0]).toMatchObject({ code_unit_offset: 2, source_byte_offset: Buffer.byteLength(text.slice(0, text.indexOf('\\uD800'))) });
+    const last = decoded.transformations.at(-1)!;
+    const lastSource = text.lastIndexOf('\\uD800');
+    expect(last).toMatchObject({ code_unit_offset: 2 + 4095, source_byte_offset: Buffer.byteLength(text.slice(0, lastSource)) });
   });
 });
 
