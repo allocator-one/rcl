@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.8.0 - 2026-09-22
+
+- Retain completed review reports when evidence delivery is rejected, with
+  explicit refusal diagnostics and bounded quarantine receipts. Preserve raw
+  reversed finding coordinates in transport provenance (RCL-74).
+- Add `rcl evidence recover-run` to preview, apply and resume delivery of a
+  completed, unacknowledged asserted run under its original UUID. Pin source and
+  manifest hashes, retain original JSON/Markdown bytes, and verify the complete
+  stored run plus raw artifacts before reporting completion (RCL-76, Mode A).
+- Resolve lost acknowledgments through fresh reads and serialize concurrent
+  recovery operations. Keep native rounds, attempts, verdicts, precision history
+  and unrelated outbox entries unchanged.
+- Represent original unpaired UTF-16 finding prose explicitly in the recovery
+  manifest without rewriting artifacts. Refuse unsafe structural content,
+  changed sources, conflicting receipts and oversized manifests before delivery.
+  Requires backend evidence protocol 2 and original-report recovery capability 1.
+
 ## 3.7.0 - 2026-09-20
 
 - Preserve the actual verifier model and full normalized explanation across live

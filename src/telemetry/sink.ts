@@ -99,6 +99,32 @@ export class HarnessSink {
     return this.credential.url;
   }
 
+  /** Recovery never substitutes an ordinary credential for an attested one. */
+  get credentialSource(): HarnessCredential['source'] { return this.credential.token.startsWith('rbc_') ? 'attest' : this.credential.source; }
+
+  /** Exact bounded raw artifact read; never decode/re-encode original evidence. */
+  async getArtifact(runId: string, kind: ArtifactKind, limit: number): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>> {
+    if (!Number.isSafeInteger(limit) || limit < 0 || limit > 25_000_000) throw new Error('invalid_artifact_read_limit');
+    if (kind !== 'report_json' && kind !== 'report_md') return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: 'Unsupported artifact selection' };
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
+        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual', signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (response.status !== 200) {
+        const text = await readBounded(response, MAX_RESPONSE_BYTES);
+        let body: unknown = null;
+        try { body = JSON.parse(text ?? 'null'); } catch { /* Untrusted failure text is not a receipt. */ }
+        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body }, () => null);
+      }
+      const bytes = await readBoundedBytes(response, limit);
+      const digest = response.headers.get('x-artifact-sha256');
+      if (bytes === null || digest === null || !/^[0-9a-f]{64}(?![\s\S])/.test(digest) || createHash('sha256').update(bytes).digest('hex') !== digest) {
+        return { kind: 'rejected', httpStatus: 200, error: 'malformed_artifact_response', message: 'Raw artifact bytes do not match their receipt' };
+      }
+      return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: digest } };
+    } catch { return { kind: 'unavailable', reason: 'artifact_read_failed' }; }
+  }
+
   private headers(contentType: string): Record<string, string> {
     return {
       authorization: `Bearer ${this.credential.token}`,
@@ -298,6 +324,15 @@ export async function readBounded(response: Response, limit: number): Promise<st
     const text = await response.text();
     return Buffer.byteLength(text, 'utf8') > limit ? null : text;
   }
+  const bytes = await readBoundedBytes(response, limit);
+  return bytes === null ? null : new TextDecoder().decode(bytes);
+}
+
+async function readBoundedBytes(response: Response, limit: number): Promise<Buffer | null> {
+  if (!response.body) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return bytes.length > limit ? null : bytes;
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -311,7 +346,7 @@ export async function readBounded(response: Response, limit: number): Promise<st
     }
     chunks.push(value);
   }
-  return new TextDecoder().decode(Buffer.concat(chunks.map((c) => Buffer.from(c))));
+  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
 }
 
 function hostOnly(raw: string): string {

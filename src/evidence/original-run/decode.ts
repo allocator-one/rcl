@@ -1,0 +1,85 @@
+/** An interpretation of immutable JSON, never replacement artifact bytes. */
+export interface ProseTransformation {
+  path: string;
+  code_unit_offset: number;
+  source_byte_offset: number;
+  original_unit: string;
+  replacement: string;
+}
+export const findingProsePath = /^(?:\/(?:findings|belowThresholdFindings)\/\d+|\/reviews\/\d+\/findings\/\d+)\/(?:title|description|suggestedFix)$/;
+const pointer = (parts: string[]) => '/' + parts.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+
+/** Strict JSON with duplicate-key detection and explicit prose-only lone-surrogate notation. */
+export function decodeOriginalReport(text: string): { value: unknown; transformations: ProseTransformation[] } {
+  let at = 0;
+  const transformations: ProseTransformation[] = [];
+  const fail = (): never => { throw new Error('invalid_or_ambiguous_original_json'); };
+  const whitespace = () => { while (/[\x20\t\r\n]/.test(text[at] ?? 'x')) at++; };
+  function string(path: string[], key = false): string {
+    const start = at++;
+    if (text[start] !== '"') return fail();
+    const offsets = new Map<number, number>();
+    let units = 0;
+    while (at < text.length && text[at] !== '"') {
+      // Valid UTF-8 cannot contain a literal unpaired unit. Only \u escapes
+      // need source positions; avoid one allocation per prose character.
+      if (text[at] === '\\' && text[at + 1] === 'u') offsets.set(units, at);
+      if (text[at] === '\\') { at += text[at + 1] === 'u' ? 6 : 2; }
+      else at++;
+      units++;
+    }
+    if (text[at++] !== '"') return fail();
+    let value: string;
+    try { value = JSON.parse(text.slice(start, at)) as string; } catch { return fail(); }
+    let result = '';
+    for (let i = 0; i < value.length; i++) {
+      const unit = value.charCodeAt(i);
+      if (unit === 0) throw new Error('unsupported_nul_in_original');
+      if (unit >= 0xd800 && unit <= 0xdbff && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
+        result += value.slice(i, i + 2); i++; continue;
+      }
+      if (unit >= 0xd800 && unit <= 0xdfff) {
+        if (key || !findingProsePath.test(pointer(path))) throw new Error('unsupported_structural_surrogate');
+        const hex = unit.toString(16).toUpperCase(); const replacement = `\\u${hex}`;
+        const source = offsets.get(i);
+        if (source === undefined) throw new Error('unsupported_literal_surrogate');
+        transformations.push({ path: pointer(path), code_unit_offset: i, source_byte_offset: Buffer.byteLength(text.slice(0, source), 'utf8'), original_unit: hex, replacement });
+        result += replacement;
+      } else result += value[i];
+    }
+    return result;
+  }
+  function value(path: string[], depth: number): unknown {
+    if (depth > 64) throw new Error('original_json_too_deep');
+    whitespace();
+    if (text[at] === '"') return string(path);
+    if (text[at] === '{') {
+      at++; whitespace(); const out: Record<string, unknown> = Object.create(null);
+      if (text[at] === '}') { at++; return out; }
+      for (;;) {
+        whitespace(); const key = string(path, true);
+        if (Object.hasOwn(out, key) || ['__proto__', 'constructor', 'prototype'].includes(key)) return fail();
+        whitespace(); if (text[at++] !== ':') return fail();
+        out[key] = value([...path, key], depth + 1); whitespace();
+        if (text[at] === '}') { at++; return out; }
+        if (text[at++] !== ',') return fail();
+      }
+    }
+    if (text[at] === '[') {
+      at++; whitespace(); const out: unknown[] = [];
+      if (text[at] === ']') { at++; return out; }
+      for (;;) {
+        out.push(value([...path, String(out.length)], depth + 1)); whitespace();
+        if (text[at] === ']') { at++; return out; }
+        if (text[at++] !== ',') return fail();
+      }
+    }
+    const token = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(text.slice(at));
+    if (!token) return fail(); at += token[0].length;
+    const parsed: unknown = JSON.parse(token[0]);
+    if (typeof parsed === 'number' && (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER)) return fail();
+    return parsed;
+  }
+  const result = value([], 0); whitespace(); if (at !== text.length) return fail();
+  return { value: JSON.parse(JSON.stringify(result)) as unknown, transformations };
+}
