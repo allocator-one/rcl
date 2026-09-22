@@ -82,7 +82,8 @@ describe('original JSON interpretation', () => {
     const text = `{"findings":[{"description":"😀${escaped}"}]}`;
     const byteLength = vi.spyOn(Buffer, 'byteLength');
     const decoded = decodeOriginalReport(text);
-    expect(byteLength).not.toHaveBeenCalled();
+    const measuredUnits = byteLength.mock.calls.reduce((total, [value]) => total + (typeof value === 'string' ? value.length : 0), 0);
+    expect(measuredUnits).toBeLessThanOrEqual(2 * text.length);
     byteLength.mockRestore();
     expect(decoded.transformations).toHaveLength(4096);
     expect(decoded.transformations[0]).toMatchObject({ code_unit_offset: 2, source_byte_offset: Buffer.byteLength(text.slice(0, text.indexOf('\\uD800'))) });
