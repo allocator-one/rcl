@@ -38,6 +38,24 @@ vi.mock('node:fs/promises', async (original) => {
   } };
 });
 const directories: string[] = [];
+async function completeContenderBeforeRelease(first: Promise<void>, ready: Promise<void>, startSecond: () => Promise<void>, release: () => void, timeoutMs = 1500): Promise<void> {
+  let second: Promise<void> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let failed = false;
+  try {
+    await Promise.race([ready, first.then(() => { throw new Error('writer_completed_before_pause'); })]);
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('contender_did_not_complete_before_release')), timeoutMs);
+    });
+    second = startSecond();
+    await Promise.race([second, timeout]);
+  } catch (error) { failed = true; throw error; }
+  finally {
+    clearTimeout(timer); release();
+    const settled = await Promise.allSettled([first, ...(second ? [second] : [])]);
+    if (!failed) for (const result of settled) if (result.status === 'rejected') throw result.reason;
+  }
+}
 afterEach(async () => {
   controls.beforeWrite = undefined;
   controls.failTemporaryUnlink = false;
@@ -63,17 +81,25 @@ it('lets contending recovery complete while another owner document is still bein
   controls.beforeWrite = async () => { reached(); await paused; };
   const entered: string[] = [];
   const first = withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('first'); });
-  await waiting;
-  let second: PromiseSettledResult<void>;
-  try {
-    [second] = await Promise.allSettled([
-      withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('second'); }),
-    ]);
-  } finally { release(); }
-  await first;
-  expect(second!.status).toBe('fulfilled');
+  await completeContenderBeforeRelease(first, waiting,
+    () => withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('second'); }), release);
   expect(entered).toEqual(['second', 'first']);
   expect(await readdir(join(root, `${sha256('same destination/org/run')}.bakery`))).toEqual([]);
+});
+
+it('releases and settles owned work when a contender incorrectly waits for the paused writer', async () => {
+  vi.useFakeTimers();
+  let releaseWriter!: () => void; let firstSettled = false; let secondSettled = false;
+  const first = new Promise<void>(resolve => { releaseWriter = resolve; }).then(() => { firstSettled = true; });
+  const release = vi.fn(() => releaseWriter());
+  const completed = completeContenderBeforeRelease(first, Promise.resolve(), () => first.then(() => { secondSettled = true; }), release)
+    .then(() => undefined, error => error as Error);
+  try {
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(release).toHaveBeenCalledOnce();
+    expect(await completed).toMatchObject({ message: 'contender_did_not_complete_before_release' });
+    expect(firstSettled).toBe(true); expect(secondSettled).toBe(true); expect(vi.getTimerCount()).toBe(0);
+  } finally { releaseWriter(); await completed; vi.useRealTimers(); }
 });
 
 it('retains an existing incomplete lock without entering recovery or overwriting it', async () => {

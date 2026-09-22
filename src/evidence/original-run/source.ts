@@ -17,6 +17,20 @@ export const selectionSchema = z.object({
   reportMd: z.string().min(1).optional(), markdownSha256: hashSchema.optional(), originalMode: z.literal('asserted'),
 }).strict().refine(s => (s.reportMd === undefined) === (s.markdownSha256 === undefined));
 export type Selection = z.infer<typeof selectionSchema>;
+/** Static selection guidance only; never expose Zod issues or supplied values. */
+export class OriginalSelectionError extends Error {
+  constructor(reason: string, readonly instruction: string) { super(reason); }
+}
+const selectionGuidance: Record<keyof Selection, string> = {
+  run: 'Use --run with the original lowercase UUID.',
+  forPr: 'Use --for-pr owner/repo#N or a GitHub pull-request URL with a positive PR number.',
+  head: 'Use --head with the original full nonzero lowercase Git SHA (40 or 64 hex characters).',
+  reportJson: 'Provide a nonempty original JSON path with --report-json.',
+  reportSha256: 'Use --report-sha256 with the original JSON digest (64 lowercase hex characters).',
+  reportMd: 'Provide a nonempty original Markdown path with --report-md, or omit both Markdown options.',
+  markdownSha256: 'Use --markdown-sha256 with the original Markdown digest (64 lowercase hex characters).',
+  originalMode: 'Specify --original-mode asserted for this recovery command.',
+};
 export interface SourceFile { path: string; sha256: string; bytes: number }
 export interface PreparedOriginal {
   selection: Selection;
@@ -62,8 +76,21 @@ function retainedRedactions(value: unknown, path = ''): Array<{ path: string; co
 
 /** Rebuild only the reviewed transport interpretation; artifact strings remain exact originals. */
 export async function prepareOriginalRun(input: unknown): Promise<{ prepared: PreparedOriginal; artifacts: ArtifactBytes }> {
-  const selection = selectionSchema.parse(input);
-  const pr = parsePullRequestArg(selection.forPr, null);
+  const parsed = selectionSchema.safeParse(input);
+  if (!parsed.success) {
+    // The selection's only root-level custom rule pairs Markdown path/digest.
+    if (parsed.error.issues.some(issue => issue.code === 'custom' && issue.path.length === 0)) {
+      throw new OriginalSelectionError('unpaired_recovery_markdown', 'Provide --report-md and --markdown-sha256 together, or omit both.');
+    }
+    // Enumerate our finite known fields rather than echoing an issue's keys,
+    // message, regex, input value, source path or other validation payload.
+    const hints = Object.entries(selectionGuidance).filter(([field]) => parsed.error.issues.some(issue => issue.path[0] === field)).map(([, hint]) => hint);
+    throw new OriginalSelectionError('invalid_recovery_selection', hints.join(' ') || 'Use the explicit preview selection options shown by rcl evidence recover-run --help.');
+  }
+  const selection = parsed.data;
+  let pr: ReturnType<typeof parsePullRequestArg>;
+  try { pr = parsePullRequestArg(selection.forPr, null); }
+  catch { throw new OriginalSelectionError('invalid_recovery_pr', selectionGuidance.forPr); }
   for (const path of [selection.reportJson, ...(selection.reportMd ? [selection.reportMd] : [])]) {
     if (await hasSyntheticAncestor(path)) throw new Error('source_marked_synthetic');
   }

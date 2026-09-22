@@ -7,7 +7,7 @@ import { resolveDataDir } from '../config/data-dir.js';
 import { readStable, platformPath, sha256 } from '../telemetry/recovery/files.js';
 import { type ArtifactKind } from '../telemetry/envelope.js';
 import { openSink, type EvidenceDeps } from './status.js';
-import { prepareOriginalRun, hashSchema, selectionSchema, uuidSchema, type PreparedOriginal } from './original-run/source.js';
+import { prepareOriginalRun, hashSchema, selectionSchema, uuidSchema, OriginalSelectionError, type PreparedOriginal } from './original-run/source.js';
 import { destination, readOriginalRun, readOriginalArtifacts, type Destination } from './original-run/remote.js';
 import { writeExclusive, withRecoveryLock, openJournal, serializeRecoveryDocument } from './original-run/journal.js';
 import { decodeOriginalReport } from './original-run/decode.js';
@@ -142,11 +142,12 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
     const reason = failure(error);
     const definitiveRejection = reason.startsWith('run_delivery_rejected_') || reason.startsWith('artifact_delivery_rejected_');
     const exit = stage === 'input' ? 2 : definitiveRejection || reason.includes('conflict') ? 4 : stage === 'journal' ? 5 : 3;
-    const instruction = options.preview
+    const nextStep = options.preview
       ? 'Correct the explicit input; no delivery was attempted.'
       : definitiveRejection
         ? 'Correct the reported remote refusal; do not resume this manifest unchanged.'
         : 'Preserve the manifest and journal. Resume this same pinned operation after resolving the reported failure; completion requires fresh readback.';
+    const instruction = error instanceof OriginalSelectionError ? `${error.instruction} ${nextStep}` : nextStep;
     const result = { status: 'incomplete', error: reason, stage, exit_code: exit, instruction };
     if (options.json) emit(result); else deps.stderr(`Original-run recovery incomplete: ${reason}. ${result.instruction}`);
     return exit;
