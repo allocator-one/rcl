@@ -23,7 +23,7 @@ async function fixture(change?: (r: ReturnType<typeof sampleResult>) => void) {
   await writeFile(join(dir,'original.json'), text); await writeFile(join(dir,'original.md'), md);
   const selection = { run: report.run!.id, forPr: 'allocator-one/rcl#42', head: 'a'.repeat(40), reportJson: join(dir,'original.json'), reportSha256: sha256Hex(text), reportMd: join(dir,'original.md'), markdownSha256: sha256Hex(md), originalMode: 'asserted' as const };
   let recorded: RunEnvelope | undefined; const stored: Record<string, string> = {}; const requests: { method: string; path: string; body?: string }[] = [];
-  const behavior = { losePost: false, losePut: false, capability: true, evidenceProtocol: 2, wrongOrg: false, failRead: false, corruptArtifact: false, mutateProjection: undefined as ((p: ReturnType<typeof projection>) => void) | undefined };
+  const behavior = { losePost: false, losePut: false, rejectPost: false, capability: true, evidenceProtocol: 2, wrongOrg: false, failRead: false, corruptArtifact: false, mutateProjection: undefined as ((p: ReturnType<typeof projection>) => void) | undefined };
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
     const path = new URL(String(url)).pathname + new URL(String(url)).search; const method = init?.method ?? 'GET';
     requests.push({ method, path, ...(typeof init?.body === 'string' ? { body: init.body } : {}) });
@@ -31,7 +31,9 @@ async function fixture(change?: (r: ReturnType<typeof sampleResult>) => void) {
     const currentMeta = { ...meta, evidence_protocol_version: behavior.evidenceProtocol, org_id: behavior.wrongOrg ? '919921a0-0000-4000-8000-000000000002' : org, original_report_recovery_version: behavior.capability ? 1 : undefined };
     if (method === 'GET' && path.endsWith('?page_size=1')) return answer({ data: [], meta: currentMeta });
     if (method === 'POST') {
-      recorded = JSON.parse(String(init?.body)); if (behavior.losePost) { behavior.losePost = false; throw new Error('synthetic response loss'); }
+      const submitted = JSON.parse(String(init?.body));
+      if (behavior.rejectPost) return answer({ error: 'invalid_original', message: 'source binding is invalid' }, 422);
+      recorded = submitted; if (behavior.losePost) { behavior.losePost = false; throw new Error('synthetic response loss'); }
       return answer({ data: { id: recorded!.run.id, url: '/run', artifacts_expected: ['report_json','report_md'] } }, 201);
     }
     if (recorded && path.includes('/artifacts/')) {
@@ -141,6 +143,16 @@ describe('receipt-aware original delivery', () => {
     expect(await f.apply(true)).toBe(0);
     expect(f.requests.filter(r => r.method === 'PUT' && r.path.endsWith('report_json'))).toHaveLength(1);
     expect((await readdir(f.manifest + '.journal')).length).toBeGreaterThan(5);
+  });
+  it('records a definitive POST refusal and does not advise an unchanged resume', async () => {
+    const f = await fixture(); expect(await f.preview()).toBe(0); f.behavior.rejectPost = true;
+    expect(await f.apply()).toBe(4);
+    const result = JSON.parse(f.stdout.at(-1)!);
+    expect(result).toMatchObject({ status: 'incomplete', error: 'run_delivery_rejected_invalid_original', stage: 'remote', exit_code: 4 });
+    expect(result.instruction).toContain('do not resume');
+    const records = await Promise.all((await readdir(f.manifest + '.journal')).sort().map(async name => JSON.parse(await readFile(join(f.manifest + '.journal', name), 'utf8'))));
+    expect(records).toContainEqual(expect.objectContaining({ phase: 'post_outcome', data: { kind: 'rejected', http_status: 422, error: 'invalid_original' } }));
+    expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
   });
   it('refuses complete header/finding/call conflicts, malformed receipts and corrupt raw artifacts', async () => {
     for (const mutate of [(p: ReturnType<typeof projection>) => { p.findings[0]!.description = 'different claim'; }, (p: ReturnType<typeof projection>) => { p.runner = { kind:'human' }; }, (p: ReturnType<typeof projection>) => { p.calls = []; }]) {

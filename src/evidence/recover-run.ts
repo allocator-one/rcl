@@ -33,6 +33,15 @@ function failure(error: unknown): string {
   if (error instanceof Error && /^[a-z][a-z0-9_]+$/.test(error.message)) return error.message;
   return 'invalid_or_unsupported_recovery_input';
 }
+function outcomeAudit(outcome: { kind: string; httpStatus?: number; error?: string }): Record<string, unknown> {
+  const httpStatus = outcome.httpStatus;
+  const error = outcome.error;
+  return {
+    kind: outcome.kind,
+    ...(Number.isInteger(httpStatus) && httpStatus! >= 100 && httpStatus! <= 599 ? { http_status: httpStatus } : {}),
+    ...(typeof error === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(error) ? { error } : {}),
+  };
+}
 /** Mode A only: no provider, event, native accounting, outbox or fresh report generation. */
 export async function runOriginalRecovery(options: OriginalRunOptions, deps: OriginalRunDeps): Promise<number> {
   let stage: 'input' | 'remote' | 'journal' = 'input';
@@ -99,7 +108,11 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
         await append('post_intent', { envelope_sha256: prepared.envelope_sha256 });
         await verifySources();
         stage = 'remote'; const posted = await sink.postRun(prepared.envelope);
-        await append('post_outcome', { kind: posted.kind, ...(posted.kind === 'ok' ? { http_status: posted.httpStatus } : {}) });
+        await append('post_outcome', outcomeAudit(posted));
+        if (posted.kind === 'rejected') {
+          stage = 'remote';
+          throw new Error(`run_delivery_rejected_${outcomeAudit(posted).error ?? 'unspecified'}`);
+        }
         observed = await read();
         if (!observed.run.exists) throw new Error('run_delivery_not_verified');
       }
@@ -125,8 +138,14 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
     return 0;
   } catch (error) {
     const reason = failure(error);
-    const exit = stage === 'input' ? 2 : reason.includes('conflict') ? 4 : stage === 'journal' ? 5 : 3;
-    const result = { status: 'incomplete', error: reason, stage, exit_code: exit, instruction: options.preview ? 'Correct the explicit input; no delivery was attempted.' : 'Preserve the manifest and journal. Resume this same pinned operation after resolving the reported failure; completion requires fresh readback.' };
+    const definitiveRejection = reason.startsWith('run_delivery_rejected_');
+    const exit = stage === 'input' ? 2 : definitiveRejection || reason.includes('conflict') ? 4 : stage === 'journal' ? 5 : 3;
+    const instruction = options.preview
+      ? 'Correct the explicit input; no delivery was attempted.'
+      : definitiveRejection
+        ? 'Correct the reported remote refusal; do not resume this manifest unchanged.'
+        : 'Preserve the manifest and journal. Resume this same pinned operation after resolving the reported failure; completion requires fresh readback.';
+    const result = { status: 'incomplete', error: reason, stage, exit_code: exit, instruction };
     if (options.json) emit(result); else deps.stderr(`Original-run recovery incomplete: ${reason}. ${result.instruction}`);
     return exit;
   }
