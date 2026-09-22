@@ -52,9 +52,10 @@ const run = z.object({
 });
 
 const provenance = z.object({
-  version: z.literal(1), source: z.literal('parser'), reason: z.literal('reversed_range'),
+  version: z.literal(1), source: z.enum(['parser', 'report_projection']), reason: z.literal('reversed_range'),
   original_start_line: integer, original_end_line: integer,
-}).strict();
+  report_json_sha256: digest.optional(),
+}).strict().refine(p => p.source === 'parser' ? p.report_json_sha256 === undefined : p.report_json_sha256 !== undefined);
 
 const finding = z.object({
   ref: text(32, true), identity_key: text(64, true), file: text(20_000, true),
@@ -89,6 +90,9 @@ const envelopeSchema = z.object({
   if (new Set(kinds).size !== kinds.length || !kinds.includes('report_json')) ctx.addIssue({ code: 'custom', path: ['artifacts_declared'], message: 'Require one report_json declaration and no duplicate kinds' });
   if (v.run.historical_source && v.run.historical_source.report_sha256 !== v.artifacts_declared.find((a) => a.kind === 'report_json')?.sha256) {
     ctx.addIssue({ code: 'custom', path: ['run', 'historical_source'], message: 'Historical source digest differs from the declared report' });
+  }
+  if (v.findings.some(f => f.location_provenance?.source === 'report_projection' && f.location_provenance.report_json_sha256 !== v.artifacts_declared.find(a => a.kind === 'report_json')?.sha256)) {
+    ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Historical location projection must bind the original report digest' });
   }
 });
 

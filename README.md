@@ -444,6 +444,128 @@ rcl evidence status https://github.com/allocator-one/rcl/pull/42
 rcl evidence show 01a08032-0838-76db-ade3-1990f6e54072
 ```
 
+### `rcl evidence recover-run`
+
+Recover one original completed asserted run without rerunning review, changing its
+UUID or rewriting its JSON/Markdown artifacts. This is delivery only: it does not
+admit a native round, record verdicts, change attempts/precision, flush unrelated
+outbox entries or confer gate approval. Semantic claim splits are not part of this
+command.
+
+First prepare an exclusive manifest using explicit original source pins:
+
+```sh
+rcl evidence recover-run --preview --manifest original-run.json \
+  --run "$ORIGINAL_RUN_ID" --for-pr owner/repo#123 --head "$ORIGINAL_HEAD_SHA" \
+  --report-json /absolute/original/report.json --report-sha256 "$JSON_SHA256" \
+  --report-md /absolute/original/report.md --markdown-sha256 "$MARKDOWN_SHA256" \
+  --original-mode asserted --json
+```
+
+Markdown is optional; its path and digest must be supplied together. The report
+must retain its complete modern header, explicit finding identities, and an exact
+PR or PR-bound patch target. Original UUIDs must already be lowercase; recovery
+refuses other spellings instead of rewriting identity. Headerless imports, CI/attested/backfill originals,
+unknown mode fields, missing sources and ambiguous bindings refuse. The explicit
+asserted mode is an **operator assertion**, checked against the retained non-CI
+runner metadata; it is not cryptographic proof of the original invocation. A
+run-bound credential is never converted to a normal login.
+
+Preview validates all local inputs before HTTP and writes only the explicitly
+named manifest. Its formatted UTF-8 representation, including the final newline,
+must fit within 8 MiB so apply and resume can read it. Oversized prepared evidence
+refuses before HTTP; the complete manifest is checked again before publication.
+It makes scoped authenticated GET requests, requires
+`meta.original_report_recovery_version: 1` and evidence protocol 2, and binds the
+host and server organization. An older or disabled server remains unsupported.
+Inspect the manifest's exact envelope, source digests, transformations and retained
+content limitations, then use the digest printed by preview:
+
+```sh
+rcl evidence recover-run --apply --manifest original-run.json \
+  --manifest-sha256 "$MANIFEST_SHA256" --json
+
+# After interruption or an uncertain acknowledgment, reuse that same operation.
+rcl evidence recover-run --resume --manifest original-run.json \
+  --manifest-sha256 "$MANIFEST_SHA256" --json
+```
+
+Apply starts an adjacent `original-run.json.journal` directory with append-only,
+fsynced checkpoints before every remote write. Each checkpoint has an
+8 MiB + 1 KiB read/write bound, retaining the manifest's full prose audit and
+reserving space for the checkpoint wrapper.
+Oversized checkpoints refuse before publication. Apply and resume require the
+journal to be effective-user-owned mode 0700, on the supported local storage
+listed below, with protected ancestors and no harmful or unknown ACL grants.
+Apply checks the selected parent before creating the journal exclusively; resume
+never creates missing state or repairs permissions. Each append checks the
+selected journal's device/inode identity before writing. This detects replacement
+between checkpoints; it does not claim protection against concurrent privileged
+or same-user path manipulation. Resume requires that directory;
+it never generates a replacement operation. A dedicated
+`RCL_DATA_DIR/original-run-recovery-locks` directory serializes applies for the same
+host/organization/run, including different manifest paths. Native accounting
+locks and stores are not used. Locks with incomplete or unverifiable ownership
+fail closed and require inspection; never delete a live lock.
+
+The lock uses a unique registration per acquisition and automatically removes a
+dead participant only when its PID is absent in the same kernel boot and PID
+namespace. A reboot, foreign scope, PID reuse or uncertain liveness requires
+inspection or a bounded retry; age alone never permits deletion. Legacy private
+`.lock`/`.reclaim` state is refused, not migrated or bypassed. Empty `.bakery`
+registries remain in place, and an interrupted unpublished `.tmp` is harmless.
+Concurrent older private recovery clients are unsupported.
+
+This protocol requires coherent ordinary local storage: local APFS/HFS with
+ownership enabled on macOS, or ext2/3/4, tmpfs, XFS or Btrfs on Linux. Network,
+FUSE, overlay and unknown filesystems are unsupported. macOS refuses an ambiguous
+system mount listing, including an ambiguous entry for an unrelated mount. It
+uses the existing directory's filesystem name and mountpoint from bounded
+`df --libxo json` output, matched to one exact mount-table entry; firmlink or case
+aliases never select an ancestor's flags. Unavailable structured inspection or
+unmatched/ambiguous attribution refuses without a fallback. It
+rejects ACL allow grants or unrecognized ACL output; restrictive deny-only ACLs
+are allowed. The root must already be private (effective-user-owned
+mode 0700), and ancestors must be protected against other users' writes, apart
+from root-owned sticky temporary directories. Missing private directories are
+created; existing permissions are never silently repaired. These checks do not
+certify arbitrary filesystem implementations or protect against hostile code
+running as the same user or a privileged administrator.
+
+Every invocation rechecks source bytes and the reviewed manifest. Before retrying,
+it reads and compares all immutable run header/settings/findings/calls/artifact
+declarations, then fetches exact raw artifact bytes and verifies their digest and
+size. A POST duplicate receipt or a stored-artifact flag alone is insufficient.
+Lost POST/PUT acknowledgment can finish through exact reads; otherwise the same
+journal remains incomplete. Changed bytes, organization, header, findings or calls
+refuse. A torn last checkpoint is retained and bound into the next append; it is
+never treated as acknowledgment. Preserve the manifest, journal and sources until
+independent reconciliation is complete.
+
+Only unpaired UTF-16 units in actual finding `title`, `description` or
+`suggestedFix` prose receive a derived wire spelling: visible ASCII `\uD800`,
+using uppercase hex. Valid surrogate pairs and existing literal backslash-u text
+remain unchanged. Each transformation records the original JSON path, code-unit
+index and byte offset. Keys, identifiers, descriptors and structural fields cannot
+receive that transformation. Existing producer `[redacted]` literals in finding
+prose stay unchanged and are listed as retained-content limitations; markers in
+protected bindings, or any newly required secret redaction, refuse. Markdown
+requiring redaction is unsupported. No fresh-report normalizer or backfill UUID
+is applied to the original.
+
+Existing transport scrubbing, limits, call summaries and duration rounding remain
+explicitly recorded derivations. Two valid reversed integer coordinates may use
+`report_projection` provenance bound to the original coordinates and JSON digest;
+original finding identities are never recomputed from the normalized interval.
+Unsupported coordinate types refuse rather than being guessed.
+
+Exit codes: `0` means preview prepared or delivery independently verified; `2`
+means invalid/unavailable local selection; `3` means remote capability/read/delivery
+unanswered; `4` means conflicting destination, evidence or journal bindings; `5` means local durable
+journal/lock persistence failed. JSON diagnostics include the stage and next step.
+Even successful delivery does not establish current-head review freshness,
+convergence, attestation or historical accounting repair.
+
 ### `rcl evidence recover-finding`
 
 Recover one recorded finding whose report identity collided, using its retained
