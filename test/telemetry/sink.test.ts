@@ -259,3 +259,10 @@ describe('HarnessSink.postEvents', () => {
     expect(await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })])).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
   });
 });
+
+it('refuses versioned classification delivery on old servers before posting events', async () => {
+  const event = buildEvent({ kind: 'round_processed', payload: { identities: [{ version: 1, finding_ref: 'f001' }] } });
+  const { sink: s, requests } = sink(() => ({ status: 200, body: { data: [], meta: {} } }));
+  expect(await s.postEvents([event])).toMatchObject({ kind: 'rejected', error: 'unsupported_evidence_protocol' });
+  expect(requests.map(r => r.method)).toEqual(['GET']);
+});

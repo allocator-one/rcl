@@ -179,25 +179,32 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
+  /** Capability is read at the credential's own host; no speculative write. */
+  private async requireEvidenceProtocol(options: RequestOptions): Promise<SinkOutcome<{ supported: boolean }>> {
+    // Old servers silently discard unknown provenance. The attested credential
+    // may read model-stats, but may not list runs or use an ordinary login.
+    const attested = this.credential.source === 'attest';
+    const capability = await this.getJson(
+      attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
+      (data, meta) => {
+        if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
+        const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
+        return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 };
+      }, options
+    );
+    if (capability.kind !== 'ok') return capability;
+    if (!capability.value.supported) return {
+      kind: 'rejected', httpStatus: 0, error: 'unsupported_evidence_protocol',
+      message: 'The server has not confirmed evidence protocol version 2; versioned evidence was not sent',
+    };
+    return capability;
+  }
+
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
   async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
-    if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
-      // Old servers silently discard unknown provenance. The attested credential
-      // may read model-stats, but may not list runs or use an ordinary login.
-      const attested = this.credential.source === 'attest';
-      const capability = await this.getJson(
-        attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
-        (data, meta) => {
-          if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
-          const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
-          return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 };
-        }, options
-      );
+    if (envelope.findings.some((finding) => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined)) {
+      const capability = await this.requireEvidenceProtocol(options);
       if (capability.kind !== 'ok') return capability;
-      if (!capability.value.supported) return {
-        kind: 'rejected', httpStatus: 0, error: 'unsupported_evidence_protocol',
-        message: 'The server has not confirmed evidence protocol version 2; normalization provenance was not sent',
-      };
     }
     const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
     return this.classify(result, (body, status) => {
@@ -254,6 +261,11 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    if (events.some(event => event.kind === 'round_processed' && Array.isArray(event.payload.identities) &&
+      event.payload.identities.some((entry: unknown) => entry !== null && typeof entry === 'object' && 'version' in entry))) {
+      const capability = await this.requireEvidenceProtocol(options);
+      if (capability.kind !== 'ok') return capability;
+    }
     const result = await this.request(
       'POST',
       '/api/v1/reviews/converge/events',

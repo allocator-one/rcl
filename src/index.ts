@@ -77,6 +77,7 @@ import {
   DEFAULT_CONVERGE_ROUND_CAP,
   HARD_CONVERGE_ROUND_CAP,
   processRoundReport,
+  migrateConvergeState,
   recordVerdicts,
   findingGatingReason,
   ConvergeRoundCapError,
@@ -153,6 +154,9 @@ program
 // worker is not a user command.
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
+  // These commands validate immutable evidence or preview a state migration.
+  // An invalid binding must fail before even unrelated queued work is sent.
+  if (name === 'converge-report' || name === 'converge-verdict' || name === 'converge-migrate') return;
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
   if (name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
@@ -514,8 +518,12 @@ program
         }
 
         let report: ReviewResult;
+        let reportJson: string;
         try {
-          report = JSON.parse(await readFile(opts.report, 'utf-8')) as ReviewResult;
+          const bytes = await readFile(opts.report);
+          reportJson = bytes.toString('utf8');
+          if (!Buffer.from(reportJson, 'utf8').equals(bytes)) throw new Error('Report is not valid UTF-8.');
+          report = JSON.parse(reportJson) as ReviewResult;
         } catch (err) {
           throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
             cause: err,
@@ -537,6 +545,12 @@ program
           reportRunId !== undefined && typeof reportTarget === 'string' && reportTarget.trim() === opts.target.trim()
             ? reportRunId
             : undefined;
+        if (runId !== undefined && (!Number.isSafeInteger(report.run?.converge?.round) ||
+            report.run!.converge!.round! < 1 || report.run!.converge!.round !== round)) {
+          throw new ConvergeRunStateError(
+            `Report converge.round must be the positive integer ${round}; refusing to bind another or missing round.`
+          );
+        }
         if (reportRunId !== undefined && runId === undefined) {
           console.error(
             chalk.yellow(
@@ -544,13 +558,16 @@ program
             )
           );
         }
+        const allFindings = [...report.findings, ...(report.belowThresholdFindings ?? [])];
+        const described = allFindings.some(f => f.claimDescriptor !== undefined);
         const result = await processRoundReport({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
-          findings: report.findings,
+          findings: described ? allFindings : report.findings,
           ...(maxRounds !== undefined ? { maxRounds } : {}),
           ...(runId !== undefined ? { runId } : {}),
+          ...(runId !== undefined ? { evidence: { reportJson } } : {}),
         });
 
         const classified = result.findings.map((f) => ({
@@ -564,9 +581,10 @@ program
           title: f.finding.title,
           ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
         }));
-        const actionable = classified.filter(
+        const actionableIdentities = new Set(result.actionableIdentities ?? classified.filter(
           (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
-        );
+        ).map(f => f.identity));
+        const actionable = classified.filter(f => actionableIdentities.has(f.identity));
         await reportConvergeEvents([
           buildEvent({
             kind: 'round_processed',
@@ -577,7 +595,7 @@ program
               round,
               round_cap: result.roundCap,
               counts: result.counts,
-              actionable_gating: actionable.length,
+              actionable_gating: actionableIdentities.size,
               // Which identity each sighting was matched to, so the server
               // can apply standing verdicts to keys that moved (IO-12601).
               identities: roundIdentities(result.findings),
@@ -596,7 +614,8 @@ program
                 round,
                 roundCap: result.roundCap,
                 counts: result.counts,
-                actionableGating: actionable.length,
+                actionableGating: actionableIdentities.size,
+                actionableIdentities: [...actionableIdentities].sort(),
                 findings: classified,
               },
               null,
@@ -610,10 +629,15 @@ program
           `Round ${round}/${result.roundCap} for ${opts.target}: ` +
             `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
             `${result.counts.suppressed} suppressed, ${result.counts.regating} regating · ` +
-            `${actionable.length} actionable gating finding(s)`
+            `${actionableIdentities.size} actionable gating finding(s)`
         );
         for (const f of actionable) {
           console.log(`  [${f.status}] ${f.identity} ${f.file}:${f.startLine} — ${f.title}`);
+        }
+        for (const identity of actionableIdentities) {
+          if (!classified.some(f => f.identity === identity)) {
+            console.log(`  [unresolved] ${identity} — gating claim from an earlier round still needs triage`);
+          }
         }
         for (const f of classified.filter((c) => c.status === 'suppressed')) {
           console.log(
@@ -637,6 +661,34 @@ program
       }
     }
   );
+
+program
+  .command('converge-migrate')
+  .description('Preview an additive legacy-state migration; preserve original bytes and require explicit --apply')
+  .option('--target [key]', 'Existing convergence target key')
+  .option('--apply', 'Preserve the original snapshot and publish semantic v2 state without transferring legacy verdicts')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { target?: string | boolean; apply?: boolean; json?: boolean }) => {
+    try {
+      if (typeof opts.target !== 'string' || opts.target.trim() === '') {
+        throw new ConvergeRunStateError('--target is required.');
+      }
+      const receipt = await migrateConvergeState({ gitCommonDir: await resolveGitCommonDir(),
+        target: opts.target, apply: opts.apply === true });
+      if (opts.json) console.log(JSON.stringify(receipt, null, 2));
+      else {
+        console.log(`${receipt.status}: ${opts.target}, state v${receipt.fromVersion} → v${receipt.toVersion}; ` +
+          `${receipt.roundCount} recorded rounds, cap ${receipt.roundCap}, ${receipt.legacyIdentityCount} legacy identities.`);
+        if (receipt.status === 'preview') console.log('Use --apply to preserve the original snapshot and migrate. Legacy claims still require source-backed recovery.');
+        if (receipt.snapshotPath) console.log(`Original state: ${receipt.snapshotPath}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_MIGRATION', message } }));
+      else console.error(chalk.red(message));
+      process.exitCode = 3;
+    }
+  });
 
 // Record triage outcomes for finding identities (RCL-24; the precision
 // history these verdicts build feeds RCL-27's model weighting).
@@ -701,6 +753,7 @@ program
           target: opts.target,
           round,
           verdicts,
+          requireVerifiedBinding: true,
         });
         // Feed the cross-run precision history (RCL-27) — fail-soft, the
         // verdicts above are already durably recorded.

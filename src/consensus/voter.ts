@@ -1,3 +1,4 @@
+import { describeClaim } from './claim-identity.js';
 import type {
   ModelReview,
   ConsensusFinding,
@@ -474,6 +475,7 @@ export function computeConsensus(
 
     return {
       ...rep,
+      claimDescriptor: describeClaim(rep),
       severity: finalSeverity,
       consensus,
       // Report keys must not equal native ledger keys: allocation order and

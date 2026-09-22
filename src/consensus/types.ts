@@ -1,3 +1,4 @@
+import type { ClaimDescriptor } from './claim-identity.js';
 /** The original numeric interval when a model returned its endpoints reversed. */
 export interface LocationProvenance {
   version: 1;
@@ -120,6 +121,8 @@ export interface ConsensusInfo {
 }
 
 export interface ConsensusFinding extends Finding {
+  /** Materialized before hashing the original report. Never added during replay. */
+  claimDescriptor?: ClaimDescriptor;
   consensus: ConsensusInfo;
   /**
    * Report-sighting key, allocated uniquely across kept and appendix groups.

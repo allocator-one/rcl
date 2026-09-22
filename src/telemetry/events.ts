@@ -1,3 +1,4 @@
+import type { ClaimDescriptor, MatchRationale } from '../consensus/claim-identity.js';
 import { uuidv7 } from '../report/uuid.js';
 import { validateReportIdentityMappings, type ReportIdentityMapping } from '../converge/run-state.js';
 import { scrubDeep, scrubIdentifier } from './scrub.js';
@@ -57,6 +58,11 @@ export interface RoundIdentity {
   matched_identity: string;
   status: 'new' | 'repeat' | 'suppressed' | 'regating';
   suppress_reason?: string;
+  version?: 1;
+  finding_ref?: string;
+  report_json_sha256?: string;
+  claim_descriptor?: ClaimDescriptor;
+  match_rationale?: MatchRationale;
 }
 
 /**
@@ -82,6 +88,7 @@ export function roundIdentities(
       identity_key: key,
       matched_identity: f.identity,
       status: f.status,
+      ...(f.sighting ? { version: 1 as const, finding_ref: f.sighting.findingRef, report_json_sha256: f.sighting.reportSha256, claim_descriptor: f.sighting.claimDescriptor, match_rationale: f.sighting.matchRationale } : {}),
       ...(f.suppressReason ? { suppress_reason: f.suppressReason } : {}),
     });
   }

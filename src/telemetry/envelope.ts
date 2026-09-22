@@ -1,3 +1,4 @@
+import type { ClaimDescriptor } from '../consensus/claim-identity.js';
 import type { GatingVerification } from '../consensus/gating.js';
 import { createHash } from 'node:crypto';
 import type { ConsensusFinding, LocationProvenance, ModelReview, ReviewResult } from '../consensus/types.js';
@@ -43,6 +44,7 @@ export interface DeliveryInfo {
 }
 
 export interface WireFinding {
+  claim_descriptor?: ClaimDescriptor;
   ref: string;
   identity_key: string;
   file: string;
@@ -138,6 +140,7 @@ function wireFinding(finding: ConsensusFinding, index: number, belowThreshold: b
   return {
     ref: findingRef(index),
     identity_key: identity,
+    ...(finding.claimDescriptor !== undefined ? { claim_descriptor: finding.claimDescriptor } : {}),
     file: scrubText(finding.file),
     start_line: finding.startLine,
     end_line: finding.endLine,

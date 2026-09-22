@@ -412,7 +412,7 @@ describe('grouped verdict severity (RCL-48)', () => {
     const key = first.findings[0]!.identity;
     await recordVerdicts({ gitCommonDir: dir, target: 'replay', round: 1,
       verdicts: [{ key, verdict: 'dismissed', reason: 'retained reason' }] });
-    expect(await processRoundReport({ gitCommonDir: dir, target: 'replay', round: 1, findings })).toEqual(first);
+    expect(await processRoundReport({ gitCommonDir: dir, target: 'replay', round: 1, findings })).toEqual({ ...first, actionableIdentities: [] });
     const state = (await loadConvergeRunState(dir, 'replay'))!;
     expect(state.rounds).toHaveLength(1);
     expect(state.findings[key]).toMatchObject({ severity: 'critical', verdictSeverity: 'critical',
