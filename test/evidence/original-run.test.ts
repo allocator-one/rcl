@@ -21,14 +21,14 @@ async function fixture(change?: (r: ReturnType<typeof sampleResult>) => void) {
   const report = sampleResult({ reviews: [sampleReview()], findings: [sampleFinding({ description: 'Original \ud800 text; pair 😀 and literal \\uD800 stay.' })] }); change?.(report);
   const text = JSON.stringify(report, null, 2); const md = 'Synthetic original Markdown with unchanged bytes.\n';
   await writeFile(join(dir,'original.json'), text); await writeFile(join(dir,'original.md'), md);
-  const selection = { run: report.run!.id, forPr: 'allocator-one/rcl#42', head: 'a'.repeat(40), reportJson: join(dir,'original.json'), reportSha256: sha256Hex(text), reportMd: join(dir,'original.md'), markdownSha256: sha256Hex(md), originalMode: 'asserted' as const };
+  const selection: { run: string; forPr: string; head: string; reportJson: string; reportSha256: string; reportMd: string; markdownSha256: string; originalMode: 'asserted'; originalProse?: 'control-code-units-v1' } = { run: report.run!.id, forPr: 'allocator-one/rcl#42', head: 'a'.repeat(40), reportJson: join(dir,'original.json'), reportSha256: sha256Hex(text), reportMd: join(dir,'original.md'), markdownSha256: sha256Hex(md), originalMode: 'asserted' };
   let recorded: RunEnvelope | undefined; const stored: Record<string, string> = {}; const requests: { method: string; path: string; body?: string }[] = [];
-  const behavior = { losePost: false, losePut: false, rejectPost: false, conflictPost: false, rejectPut: false, capability: true, evidenceProtocol: 2, wrongOrg: false, failRead: false, corruptArtifact: false, mutateProjection: undefined as ((p: ReturnType<typeof projection>) => void) | undefined };
+  const behavior = { losePost: false, losePut: false, rejectPost: false, conflictPost: false, rejectPut: false, capability: true, proseRepresentation: false, evidenceProtocol: 2, wrongOrg: false, failRead: false, corruptArtifact: false, mutateProjection: undefined as ((p: ReturnType<typeof projection>) => void) | undefined };
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
     const path = new URL(String(url)).pathname + new URL(String(url)).search; const method = init?.method ?? 'GET';
     requests.push({ method, path, ...(typeof init?.body === 'string' ? { body: init.body } : {}) });
     const answer = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status });
-    const currentMeta = { ...meta, evidence_protocol_version: behavior.evidenceProtocol, org_id: behavior.wrongOrg ? '919921a0-0000-4000-8000-000000000002' : org, original_report_recovery_version: behavior.capability ? 1 : undefined };
+    const currentMeta = { ...meta, evidence_protocol_version: behavior.evidenceProtocol, org_id: behavior.wrongOrg ? '919921a0-0000-4000-8000-000000000002' : org, original_report_recovery_version: behavior.capability ? 1 : undefined, ...(behavior.proseRepresentation ? { original_prose_representation_version: 1 } : {}) };
     if (method === 'GET' && path.endsWith('?page_size=1')) return answer({ data: [], meta: currentMeta });
     if (method === 'POST') {
       const submitted = JSON.parse(String(init?.body));
@@ -62,6 +62,35 @@ async function fixture(change?: (r: ReturnType<typeof sampleResult>) => void) {
 }
 
 describe('original JSON interpretation', () => {
+  it('represents selected forbidden controls only in allowed finding prose', () => {
+    const literalDel = String.fromCharCode(0x7f);
+    const text = `{"findings":[{"title":"before\\u0000 after","description":"back\\bspace\\fpage\\u001f","suggestedFix":"del${literalDel}"}]}`;
+    expect(() => decodeOriginalReport(text)).toThrow('unsupported_nul_in_original');
+    for (const source of [
+      '{"findings":[{"description":"back\\bspace"}]}',
+      '{"findings":[{"description":"page\\fbreak"}]}',
+      '{"findings":[{"description":"unit\\u001fseparator"}]}',
+      `{"findings":[{"description":"del${literalDel}"}]}`,
+    ]) expect(() => decodeOriginalReport(source)).toThrow('unsupported_control_in_original');
+    const decoded = decodeOriginalReport(text, { originalProse: 'control-code-units-v1' });
+    expect(decoded.value).toEqual({ findings: [{ title: 'before\\u0000 after', description: 'back\\u0008space\\u000Cpage\\u001F', suggestedFix: 'del\\u007F' }] });
+    expect(decoded.transformations).toEqual([
+      expect.objectContaining({ version: 1, kind: 'control_code_unit', path: '/findings/0/title', source_byte_offset: text.indexOf('\\u0000'), original_unit: '0000', replacement: '\\u0000' }),
+      expect.objectContaining({ version: 1, kind: 'control_code_unit', path: '/findings/0/description', source_byte_offset: text.indexOf('\\b'), original_unit: '0008', replacement: '\\u0008' }),
+      expect.objectContaining({ version: 1, kind: 'control_code_unit', path: '/findings/0/description', source_byte_offset: text.indexOf('\\f'), original_unit: '000C', replacement: '\\u000C' }),
+      expect.objectContaining({ version: 1, kind: 'control_code_unit', path: '/findings/0/description', source_byte_offset: text.indexOf('\\u001f'), original_unit: '001F', replacement: '\\u001F' }),
+      expect.objectContaining({ version: 1, kind: 'control_code_unit', path: '/findings/0/suggestedFix', source_byte_offset: text.indexOf(literalDel), original_unit: '007F', replacement: '\\u007F' }),
+    ]);
+    for (const source of [
+      '{"findings":[{"file":"a\\u0000b"}]}',
+      '{"run":{"title":"a\\u001fb"}}',
+      '{"findings":[{"claimDescriptor":{"invariant":"a\\u007fb"}}]}',
+      '{"key\\u0000":1}',
+    ]) expect(() => decodeOriginalReport(source, { originalProse: 'control-code-units-v1' })).toThrow('unsupported_control_in_original');
+    expect(() => decodeOriginalReport('{"findings":[{"description":"literal\bcontrol"}]}', { originalProse: 'control-code-units-v1' })).toThrow('invalid_or_ambiguous_original_json');
+    expect(() => decodeOriginalReport(text, { originalProse: 'unknown' as never })).toThrow('unsupported_original_prose_mode');
+  });
+
   it('records exact source offsets, preserves valid pairs and literal escapes, and isolates allowed prose', () => {
     const text = '{"findings":[{"description":"a\\uD800\\ud801\\uDC00\\udc01 \\\\uD800 😀"}]}';
     const decoded = decodeOriginalReport(text);
@@ -118,6 +147,35 @@ describe('source and receipt binding', () => {
     projected.calls[0]!.duration_ms = 999; expect(matchesOriginalRun(projected, prepared)).toBe(false);
     expect(instant('2026-01-01T01:00:00.123456+01:00')).toBe(instant('2026-01-01T00:00:00.123456Z'));
     expect(instant('2026-01-01T00:00:00.123457Z')).not.toBe(instant('2026-01-01T00:00:00.123456Z'));
+  });
+  it('requires the advertised capability before manifesting selected control-prose representation', async () => {
+    const f = await fixture(r => { r.findings[0]!.description = 'before\0after'; });
+    f.selection.originalProse = 'control-code-units-v1';
+    f.selection.reportSha256 = sha256Hex(JSON.stringify(f.report, null, 2));
+    await writeFile(f.selection.reportJson, JSON.stringify(f.report, null, 2));
+    expect(await f.preview()).toBe(3);
+    expect(f.requests).toEqual([{ method: 'GET', path: '/api/v1/reviews/runs?page_size=1' }]);
+    await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
+    f.behavior.proseRepresentation = true;
+    expect(await f.preview()).toBe(0);
+    expect(await readFile(f.selection.reportJson, 'utf8')).toBe(JSON.stringify(f.report, null, 2));
+    const prepared = JSON.parse(await readFile(f.manifest, 'utf8')).prepared;
+    expect(prepared.selection.originalProse).toBe('control-code-units-v1');
+    expect(prepared.transformations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ version: 1, kind: 'control_code_unit', original_unit: '0000', replacement: '\\u0000' }),
+    ]));
+    expect(prepared.envelope.findings[0].description).toBe('before\\u0000after');
+    expect(f.requests.every(r => r.method === 'GET')).toBe(true);
+  });
+  it('keeps default Mode A manifest selection and surrogate records unchanged', async () => {
+    const f = await fixture();
+    expect(await f.preview()).toBe(0);
+    const prepared = JSON.parse(await readFile(f.manifest, 'utf8')).prepared;
+    expect(Object.hasOwn(prepared.selection, 'originalProse')).toBe(false);
+    expect(prepared.transformations[0]).toEqual({
+      path: '/findings/0/description', code_unit_offset: 9,
+      source_byte_offset: f.text.indexOf('\\ud800'), original_unit: 'D800', replacement: '\\uD800',
+    });
   });
   it('records reversed appendix ranges against their original source path', async () => {
     const f = await fixture(r => { r.belowThresholdFindings![0]!.startLine = 20; r.belowThresholdFindings![0]!.endLine = 10; });
