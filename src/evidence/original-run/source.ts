@@ -40,6 +40,7 @@ const descriptor = z.object({
 function knownKeys(value: object, allowed: string[], label: string): void {
   if (Object.keys(value).some(k => !allowed.includes(k))) throw new Error(`unsupported_${label}_fields`);
 }
+const consensusFindingKeys = ['id','file','startLine','endLine','locationProvenance','severity','category','title','description','suggestedFix','identity','consensus','gating','claimDescriptor'];
 function cleanMarkdown(text: string): void {
   if (scrubSecrets(text) !== text || text.includes('[redacted]') || text.includes('\0')) throw new Error('original_artifact_requires_redaction');
   if (text.includes('SYNTHETIC_TEST_ONLY')) throw new Error('source_marked_synthetic');
@@ -84,6 +85,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   if (report.run.plan) knownKeys(report.run.plan, ['focus'], 'plan');
   for (const row of report.run.roster) knownKeys(row, ['model','role','provider','lane'], 'roster');
   for (const row of report.run.context_files) knownKeys(row, ['path','sha256'], 'context');
+  for (const finding of [...report.findings, ...(report.belowThresholdFindings ?? [])]) knownKeys(finding, consensusFindingKeys, 'finding');
   if (!['human','agent'].includes(report.run.runner.kind) || report.run.runner.ci_run_id !== undefined || report.run.provenance === 'backfill') throw new Error('unsupported_original_evidence_mode');
   if (report.run.id !== selection.run || !['pr','patch'].includes(report.run.target.kind) || report.run.target.repo !== `${pr.owner}/${pr.repo}` || report.run.target.pr_number !== pr.number || report.run.target.head_sha !== selection.head) throw new Error('original_run_binding_mismatch');
   const artifacts: ArtifactBytes = { report_json: json.text };
@@ -111,20 +113,26 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   const derive = (path: string, before: unknown, after: unknown, rule: string) => {
     if (!isDeepStrictEqual(before, after)) derivations.push({ path, rule, original_sha256: sha256(JSON.stringify(before) ?? 'null'), transport_sha256: sha256(JSON.stringify(after) ?? 'null') });
   };
-  originalFindings.forEach((f, i) => {
-    const wire = envelope.findings[i]!;
-    if (f.startLine > f.endLine) wire.location_provenance = { ...wire.location_provenance!, source: 'report_projection', report_json_sha256: json.sha256 };
-    if (wire.file !== f.file || wire.identity_key !== f.identity || wire.category !== f.category || !isDeepStrictEqual(wire.consensus, f.consensus)) throw new Error('structural_finding_requires_transformation');
-    const described = f as unknown as Record<string, unknown>;
-    if (Object.hasOwn(described, 'claimDescriptor')) {
-      const parsed = descriptor.safeParse(described.claimDescriptor);
-      if (!parsed.success) throw new Error('unsupported_original_descriptor');
-      (wire as unknown as Record<string, unknown>).claim_descriptor = parsed.data;
-    }
-    for (const [source, dest] of [['title','title'],['description','description'],['suggestedFix','suggested_fix']] as const) derive(`/findings/${i}/${dest}`, f[source], wire[dest], 'existing_buildRunEnvelope_scrub_and_codepoint_limit');
-    derive(`/findings/${i}/location`, [f.startLine, f.endLine, f.locationProvenance ?? null], [wire.start_line, wire.end_line, wire.location_provenance ?? null], 'existing_reversed_range_provenance');
-    derive(`/findings/${i}/verification`, f.gating?.verification ?? null, { verdict: wire.verification_verdict, model: wire.verification_model, note: wire.verification_note }, 'existing_normalizeVerificationEvidence');
-  });
+  const findingGroups = [
+    { source: report.findings, root: '/findings', offset: 0 },
+    { source: report.belowThresholdFindings ?? [], root: '/belowThresholdFindings', offset: report.findings.length },
+  ];
+  for (const group of findingGroups) {
+    group.source.forEach((f, index) => {
+      const wire = envelope.findings[group.offset + index]!;
+      if (f.startLine > f.endLine) wire.location_provenance = { ...wire.location_provenance!, source: 'report_projection', report_json_sha256: json.sha256 };
+      if (wire.file !== f.file || wire.identity_key !== f.identity || wire.category !== f.category || !isDeepStrictEqual(wire.consensus, f.consensus)) throw new Error('structural_finding_requires_transformation');
+      const described = f as unknown as Record<string, unknown>;
+      if (Object.hasOwn(described, 'claimDescriptor')) {
+        const parsed = descriptor.safeParse(described.claimDescriptor);
+        if (!parsed.success) throw new Error('unsupported_original_descriptor');
+        (wire as unknown as Record<string, unknown>).claim_descriptor = parsed.data;
+      }
+      for (const [source, dest] of [['title','title'],['description','description'],['suggestedFix','suggested_fix']] as const) derive(`${group.root}/${index}/${dest}`, f[source], wire[dest], 'existing_buildRunEnvelope_scrub_and_codepoint_limit');
+      derive(`${group.root}/${index}/location`, [f.startLine, f.endLine, f.locationProvenance ?? null], [wire.start_line, wire.end_line, wire.location_provenance ?? null], 'existing_reversed_range_provenance');
+      derive(`${group.root}/${index}/verification`, f.gating?.verification ?? null, { verdict: wire.verification_verdict, model: wire.verification_model, note: wire.verification_note }, 'existing_normalizeVerificationEvidence');
+    });
+  }
   report.reviews.forEach((r, i) => {
     const call = envelope.calls[i]!;
     if (call.model !== r.model || call.role !== r.role || call.provider !== r.provider) throw new Error('call_identity_requires_transformation');

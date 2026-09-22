@@ -98,8 +98,21 @@ describe('source and receipt binding', () => {
     changedInstant.started_at = changedInstant.started_at.replace('.000000Z','.000001Z');
     expect(matchesOriginalRun(changedInstant, prepared)).toBe(false);
     projected.calls[0]!.duration_ms = 999; expect(matchesOriginalRun(projected, prepared)).toBe(false);
+    const reorderedFindings = structuredClone(projection(prepared.envelope,{}));
+    [reorderedFindings.findings[0], reorderedFindings.findings[1]] = [reorderedFindings.findings[1]!, reorderedFindings.findings[0]!];
+    expect(matchesOriginalRun(reorderedFindings, prepared)).toBe(false);
+    const addedCall = structuredClone(projection(prepared.envelope,{}));
+    addedCall.calls.push(structuredClone(addedCall.calls[0]!));
+    expect(matchesOriginalRun(addedCall, prepared)).toBe(false);
     expect(instant('2026-01-01T01:00:00.123456+01:00')).toBe(instant('2026-01-01T00:00:00.123456Z'));
     expect(instant('2026-01-01T00:00:00.123457Z')).not.toBe(instant('2026-01-01T00:00:00.123456Z'));
+  });
+  it('records reversed appendix ranges against their original source path', async () => {
+    const f = await fixture(r => { r.belowThresholdFindings![0]!.startLine = 20; r.belowThresholdFindings![0]!.endLine = 10; });
+    const { prepared } = await prepareOriginalRun(f.selection);
+    expect(prepared.transport_derivations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: '/belowThresholdFindings/0/location', rule: 'existing_reversed_range_provenance' }),
+    ]));
   });
   it('refuses unsafe/unknown modes, bad source pins, redaction and source symlinks before HTTP', async () => {
     for (const change of [(r: ReturnType<typeof sampleResult>) => { r.run!.runner.kind = 'ci'; }, (r: ReturnType<typeof sampleResult>) => { r.findings[0]!.description = 'sk-ant-abcdefghijklmnopqrstu'; }, (r: ReturnType<typeof sampleResult>) => { (r.run as unknown as Record<string,unknown>).attested = true; }]) {
@@ -107,6 +120,11 @@ describe('source and receipt binding', () => {
     }
     const f = await fixture(); const real = f.selection.reportJson; f.selection.reportJson = join(f.dir,'link.json'); await symlink(real, f.selection.reportJson);
     expect(await f.preview()).toBe(2); expect(f.requests).toEqual([]);
+  });
+  it('refuses unknown consensus-finding fields before they can be omitted from the recovery envelope', async () => {
+    const f = await fixture(r => { Object.assign(r.findings[0]!, { unexpected_original_field: 'not transportable' }); });
+    expect(await f.preview()).toBe(2);
+    expect(f.requests).toEqual([]);
   });
 });
 

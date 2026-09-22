@@ -35,8 +35,6 @@ const headerKeys = ['id','command','rcl_version','config_sha256','roster','thres
 const findingKeys = ['ref','identity_key','file','start_line','end_line','location_provenance','claim_descriptor','severity','category','title','description','suggested_fix','consensus','gating_reason','verification_verdict','verification_model','verification_note','below_threshold'];
 const callKeys = ['model','role','provider','lane','chunk_index','status','duration_ms','input_tokens','output_tokens','reasoning_tokens','dropped_findings','warnings','error','async'];
 function converge(v: unknown): unknown { return object(v) ? pick(v, ['target','round','attempt']) : v ?? null; }
-const sorted = (rows: unknown[]) => rows.map(stableStringify).sort();
-
 /** Compare every persisted immutable field; server-derived judgments are intentionally not receipts. */
 export function matchesOriginalRun(raw: unknown, prepared: PreparedOriginal): boolean {
   try {
@@ -49,11 +47,11 @@ export function matchesOriginalRun(raw: unknown, prepared: PreparedOriginal): bo
     if (!isDeepStrictEqual(raw.stats, expected.stats) || !isDeepStrictEqual(raw.delivery, expected.delivery)) return false;
     if (!Array.isArray(raw.findings) || raw.findings.length !== expected.findings.length || raw.findings.some(f => !object(f) || !required(f, findingKeys))) return false;
     if (new Set(raw.findings.map(f => (f as Record<string, unknown>).ref)).size !== raw.findings.length) return false;
-    if (!isDeepStrictEqual(sorted(raw.findings.map(f => pick(f as Record<string, unknown>, findingKeys))), sorted(expected.findings.map(f => pick(f as unknown as Record<string, unknown>, findingKeys))))) return false;
-    if (!Array.isArray(raw.calls) || raw.calls.some(c => !object(c) || !required(c, callKeys))) return false;
-    if (!isDeepStrictEqual(sorted(raw.calls.map(c => pick(c as Record<string, unknown>, callKeys))), sorted(expected.calls.map(c => pick(c as unknown as Record<string, unknown>, callKeys))))) return false;
+    if (!isDeepStrictEqual(raw.findings.map(f => pick(f as Record<string, unknown>, findingKeys)), expected.findings.map(f => pick(f as unknown as Record<string, unknown>, findingKeys)))) return false;
+    if (!Array.isArray(raw.calls) || raw.calls.length !== expected.calls.length || raw.calls.some(c => !object(c) || !required(c, callKeys))) return false;
+    if (!isDeepStrictEqual(raw.calls.map(c => pick(c as Record<string, unknown>, callKeys)), expected.calls.map(c => pick(c as unknown as Record<string, unknown>, callKeys)))) return false;
     if (!Array.isArray(raw.artifacts) || raw.artifacts.length !== expected.artifacts_declared.length || raw.artifacts.some(a => !object(a) || !required(a, ['kind','declared_sha256','declared_bytes','stored']) || typeof a.stored !== 'boolean')) return false;
-    return isDeepStrictEqual(sorted(raw.artifacts.map(a => pick(a as Record<string, unknown>, ['kind','declared_sha256','declared_bytes']))), sorted(expected.artifacts_declared.map(a => ({ kind: a.kind, declared_sha256: a.sha256, declared_bytes: a.bytes }))));
+    return isDeepStrictEqual(raw.artifacts.map(a => pick(a as Record<string, unknown>, ['kind','declared_sha256','declared_bytes'])), expected.artifacts_declared.map(a => ({ kind: a.kind, declared_sha256: a.sha256, declared_bytes: a.bytes })));
   } catch { return false; }
 }
 export async function readOriginalRun(sink: HarnessSink, expected: Destination, prepared: PreparedOriginal): Promise<{ exists: false } | { exists: true; projection_sha256: string; raw: Record<string, unknown> }> {
