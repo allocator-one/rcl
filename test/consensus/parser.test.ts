@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseReviewOutput } from '../../src/consensus/parser.js';
+import { reviewFromParse } from '../../src/dispatch/utils.js';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
@@ -63,6 +64,49 @@ const VALID_FINDING = {
   title: 'Missing input validation',
   description: 'Input is used unchecked',
 };
+
+describe('valid location inputs and normalization provenance', () => {
+  it.each([
+    [0, 0], [0, 5], [5, 5], ['59', '62'], ['5.9e1', '62.0'], ['0x3b', ' 62 '],
+  ])('preserves compatible ordered coordinates %s to %s', (startLine, endLine) => {
+    const result = parseReviewOutput(JSON.stringify({ findings: [{ ...VALID_FINDING, startLine, endLine }] }), 'm', 'r');
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ startLine: Number(startLine), endLine: Number(endLine) });
+    expect(result.findings[0]).not.toHaveProperty('locationProvenance');
+    expect(result.dropped).toBe(0);
+  });
+
+  it.each([false, true])('normalizes reversed numeric strings through the shared schema (salvage=%s)', (salvage) => {
+    const findings: unknown[] = [{ ...VALID_FINDING, startLine: '3.53e2', endLine: ' 0 ' }];
+    if (salvage) findings.push({ file: 'invalid.ts' });
+    const result = parseReviewOutput(JSON.stringify({ findings }), 'm', 'r');
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      startLine: 0, endLine: 353,
+      locationProvenance: { version: 1, source: 'parser', reason: 'reversed_range', originalStartLine: 353, originalEndLine: 0 },
+    });
+    expect(result.dropped).toBe(salvage ? 1 : 0);
+    expect(result.unusable).toBe(false);
+  });
+
+  it.each(['startLine', 'endLine'] as const)('rejects invalid %s values without losing valid siblings or claiming a clean reviewer', (field) => {
+    for (const value of [undefined, null, true, false, '', '  ', [], [1], {}, -1, 1.5, 'NaN', 'Infinity', '-Infinity', '1e309', 'nonsense']) {
+      const malformed = { ...VALID_FINDING, [field]: value };
+      const mixed = parseReviewOutput(JSON.stringify({ findings: [VALID_FINDING, malformed] }), 'm', 'r');
+      expect(mixed.findings, `${field}=${JSON.stringify(value)}`).toHaveLength(1);
+      expect(mixed).toMatchObject({ dropped: 1, unusable: false });
+      expect(mixed.warnings.length).toBeGreaterThan(0);
+      const parsed = parseReviewOutput(JSON.stringify({ findings: [malformed] }), 'm', 'r');
+      const review = reviewFromParse({ model: 'm', role: 'r', provider: 'test', startedAt: Date.now(), parsed });
+      expect(review).toMatchObject({ status: 'parse_failed', droppedFindings: 1, findings: [] });
+    }
+  });
+
+  it('rejects an overflowing JSON numeric literal without inventing a coordinate', () => {
+    const raw = JSON.stringify({ findings: [{ ...VALID_FINDING, startLine: 'OVERFLOW' }] }).replace('"OVERFLOW"', '1e309');
+    expect(parseReviewOutput(raw, 'm', 'r')).toMatchObject({ findings: [], dropped: 1, unusable: true });
+  });
+});
 
 describe('parseReviewOutput — untrusted output robustness', () => {
   it('keeps findings that omit id entirely and assigns unique generated ids', () => {

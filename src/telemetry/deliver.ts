@@ -5,7 +5,9 @@ import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { resolveDataDir } from '../config/data-dir.js';
 import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
-import { buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type TelemetryLevel } from './envelope.js';
+import { buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type RunEnvelope, type TelemetryLevel } from './envelope.js';
+import { validateRunEnvelope, type EvidenceDiagnostic } from './envelope-validation.js';
+import { Quarantine, QUARANTINE_DIR, type RetentionOutcome } from './quarantine.js';
 import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
@@ -40,6 +42,7 @@ export interface TelemetryRuntime {
   note?: string;
   sink?: HarnessSink;
   outbox: Outbox;
+  quarantine?: Quarantine;
   dataDir: string;
   rclVersion: string;
   stderr: (line: string) => void;
@@ -147,6 +150,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     repoManaged: false,
     parseFailures: config?.harness?.parseFailures === true,
     outbox: new Outbox(join(dataDir, OUTBOX_DIR)),
+    quarantine: new Quarantine(join(dataDir, QUARANTINE_DIR)),
     dataDir,
     rclVersion: options.rclVersion,
     stderr: options.stderr ?? ((line) => process.stderr.write(`${line}\n`)),
@@ -245,6 +249,8 @@ export interface DeliveryOutcome {
   runId?: string;
   /** Something waits in the outbox for `rcl telemetry flush`. */
   spooled: boolean;
+  /** Original recovery inputs retained locally; never means server acknowledgment or auto-retry. */
+  retention?: RetentionOutcome;
   /**
    * 4 when `--evidence-required` and the evidence is incomplete: the envelope
    * was not acknowledged, or a declared artifact was spooled or refused.
@@ -257,6 +263,8 @@ export interface DeliverRunInput {
   artifacts: ArtifactBytes;
   evidenceRequired?: boolean;
   events?: WireEvent[];
+  /** Requested report files that could not be written; the rendered originals still exist in memory. */
+  outputDiagnostics?: EvidenceDiagnostic[];
 }
 
 function exitFor(status: DeliveryStatus, evidenceRequired: boolean): DeliveryOutcome['exitCode'] {
@@ -267,12 +275,42 @@ function localFailure(err: unknown): string {
   return scrubText(err instanceof Error ? err.message : String(err), 300);
 }
 
+async function retainRun(
+  runtime: TelemetryRuntime, input: DeliverRunInput, envelope: RunEnvelope | undefined,
+  diagnostics: EvidenceDiagnostic[], acknowledged = false
+): Promise<RetentionOutcome> {
+  return (runtime.quarantine ?? new Quarantine(join(runtime.dataDir, QUARANTINE_DIR))).retain({
+    runId: input.result.run?.id ?? '', artifacts: input.artifacts, envelope,
+    events: (input.events ?? []).filter(deliverable), requestedMode: runtime.attested ? 'attested' : 'asserted',
+    acknowledged, diagnostics: [...(input.outputDiagnostics ?? []), ...diagnostics],
+  });
+}
+
+function retentionLine(retention: RetentionOutcome, runId: string): string {
+  return retention.status === 'complete'
+    ? `original evidence retained; inspect with rcl telemetry rejected --run ${runId}`
+    : `could not preserve a complete recovery copy (${retention.error})`;
+}
+
 /**
  * POST the envelope, PUT the artifacts (at `full`), POST any events; spool
  * whatever the server could not take because it was unreachable. Local
  * failures (notice file, outbox) are reported, never thrown.
  */
 export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInput): Promise<DeliveryOutcome> {
+  const outcome = await deliverCompletedRun(runtime, input);
+  if (input.outputDiagnostics?.length && !outcome.retention && runtime.level !== 'off' && runtime.repoManaged && input.result.run) {
+    const envelope = buildRunEnvelope(input.result, input.artifacts, {
+      level: runtime.level, delivery: { mode: 'direct' }, parseFailures: runtime.parseFailures,
+    });
+    const retention = await retainRun(runtime, input, envelope, [], outcome.status === 'recorded');
+    return { ...outcome, runId: input.result.run.id, retention,
+      line: `${outcome.line}; ${retentionLine(retention, input.result.run.id)}` };
+  }
+  return outcome;
+}
+
+async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunInput): Promise<DeliveryOutcome> {
   const evidenceRequired = input.evidenceRequired === true;
   // A runtime built for the outbox commands (`requireRepo: false`) may carry
   // a level and a sink outside a Harness-managed repository; new evidence
@@ -294,11 +332,22 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
       exitCode: exitFor('skipped', evidenceRequired),
     };
   }
-  const envelope = buildRunEnvelope(input.result, input.artifacts, {
-    level: runtime.level,
-    delivery: { mode: 'direct' },
-    parseFailures: runtime.parseFailures,
-  });
+  let envelope: RunEnvelope;
+  try {
+    envelope = buildRunEnvelope(input.result, input.artifacts, {
+      level: runtime.level, delivery: { mode: 'direct' }, parseFailures: runtime.parseFailures,
+    });
+  } catch {
+    const retention = await retainRun(runtime, input, undefined, [{ path: 'envelope', message: 'Could not build a complete evidence envelope' }]);
+    return { status: 'rejected', runId, spooled: false, retention, exitCode: exitFor('rejected', evidenceRequired),
+      line: `Evidence refused locally: invalid envelope; ${retentionLine(retention, runId)}` };
+  }
+  const diagnostics = validateRunEnvelope(envelope, input.artifacts);
+  if (diagnostics.length > 0) {
+    const retention = await retainRun(runtime, input, envelope, diagnostics);
+    return { status: 'rejected', runId, spooled: false, retention, exitCode: exitFor('rejected', evidenceRequired),
+      line: `Evidence refused locally (${diagnostics[0]!.path}: ${diagnostics[0]!.message}); ${retentionLine(retention, runId)}` };
+  }
   const events = (input.events ?? []).filter(deliverable);
   const artifactsToSend: Partial<Record<ArtifactKind, string>> =
     runtime.level === 'full'
@@ -315,11 +364,13 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     if (!evidenceRequired) {
       return { status: 'skipped', line: `Evidence not sent: ${reason}`, runId, spooled: false, exitCode: 0 };
     }
+    const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: reason }]);
     try {
       await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
       return {
         status: 'spooled',
-        line: `Evidence spooled (${reason}); run rcl telemetry flush once a credential is available`,
+        retention,
+        line: `Evidence spooled (${reason}); run rcl telemetry flush once a credential is available; ${retentionLine(retention, runId)}`,
         runId,
         spooled: true,
         exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
@@ -327,7 +378,8 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     } catch (err) {
       return {
         status: 'skipped',
-        line: `Evidence not sent: ${reason}; could not spool it either (${localFailure(err)})`,
+        retention,
+        line: `Evidence not sent: ${reason}; could not spool it either (${localFailure(err)}); ${retentionLine(retention, runId)}`,
         runId,
         spooled: false,
         exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
@@ -340,14 +392,16 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
   const posted = await runtime.sink.postRun(envelope);
   switch (posted.kind) {
     case 'unavailable': {
+      const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: describeOutcome(posted) }]);
       if (runtime.attested) {
         // The run-bound credential ends with the workflow run; a flush later
         // would have to use another credential and record an asserted run.
         return {
           status: 'error',
+          retention,
           runId,
           spooled: false,
-          line: `Evidence not recorded (Harness unreachable: ${posted.reason}); nothing spooled — an attested run does not outlive its workflow run`,
+          line: `Evidence not recorded (Harness unreachable: ${posted.reason}); nothing spooled — an attested run does not outlive its workflow run; ${retentionLine(retention, runId)}`,
           exitCode: exitFor('error', evidenceRequired),
         };
       }
@@ -356,17 +410,19 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
         const dropped = spooled.artifactsDropped.length > 0 ? ' — artifacts not spooled: outbox over its cap' : '';
         return {
           status: 'spooled',
+          retention,
           runId,
           spooled: true,
-          line: `Evidence spooled (Harness unreachable: ${posted.reason}); run rcl telemetry flush${dropped}`,
+          line: `Evidence spooled (Harness unreachable: ${posted.reason}); run rcl telemetry flush${dropped}; ${retentionLine(retention, runId)}`,
           exitCode: exitFor('spooled', evidenceRequired),
         };
       } catch (err) {
         return {
           status: 'error',
+          retention,
           runId,
           spooled: false,
-          line: `Evidence not sent (Harness unreachable: ${posted.reason}) and could not be spooled: ${localFailure(err)}`,
+          line: `Evidence not sent (Harness unreachable: ${posted.reason}) and could not be spooled: ${localFailure(err)}; ${retentionLine(retention, runId)}`,
           exitCode: exitFor('error', evidenceRequired),
         };
       }
@@ -379,22 +435,28 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
         line: `Evidence not sent: ${host} has not enabled review evidence for this organization`,
         exitCode: exitFor('disabled', evidenceRequired),
       };
-    case 'conflict':
+    case 'conflict': {
+      const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: describeOutcome(posted) }]);
       return {
         status: 'conflict',
+        retention,
         runId,
         spooled: false,
-        line: `Evidence conflict: ${host} already holds run ${runId} with a different report; nothing recorded`,
+        line: `Evidence conflict: ${host} already holds run ${runId} with a different report; nothing recorded; ${retentionLine(retention, runId)}`,
         exitCode: exitFor('conflict', evidenceRequired),
       };
-    case 'rejected':
+    }
+    case 'rejected': {
+      const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: describeOutcome(posted) }]);
       return {
         status: 'rejected',
+        retention,
         runId,
         spooled: false,
-        line: `Evidence refused by ${host} (${describeOutcome(posted)}); nothing spooled`,
+        line: `Evidence refused by ${host} (${describeOutcome(posted)}); nothing spooled; ${retentionLine(retention, runId)}`,
         exitCode: exitFor('rejected', evidenceRequired),
       };
+    }
     case 'ok':
       break;
   }
@@ -416,6 +478,7 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     if (outcome.kind === 'ok') continue;
     if (outcome.kind === 'disabled') {
       notes.push('artifacts capped by the organization');
+      artifactsRefused += 1;
       break;
     }
     if (outcome.kind === 'unavailable') {
@@ -471,14 +534,19 @@ export async function deliverRun(runtime: TelemetryRuntime, input: DeliverRunInp
     }
   }
 
-  // The run is recorded; the evidence is complete only when every artifact
-  // the server expected has landed (or the org caps artifacts).
+  // Recording the envelope does not acknowledge artifacts the server expected
+  // but subsequently refused, including an organization cap changed mid-flight.
   const artifactsOutstanding = Object.keys(pendingArtifacts).length + artifactsRefused;
+  const retention = artifactsOutstanding > 0 || pendingEvents.length > 0
+    ? await retainRun(runtime, input, envelope, [{ path: 'delivery', message: notes.join('; ') }], true)
+    : undefined;
+  if (retention) notes.push(retentionLine(retention, runId));
   return {
     status: 'recorded',
     runId,
     url: receipt.url,
     spooled,
+    ...(retention ? { retention } : {}),
     line: `Evidence recorded: ${receipt.url}${notes.length > 0 ? ` (${notes.join('; ')})` : ''}`,
     exitCode: evidenceRequired && artifactsOutstanding > 0 ? EVIDENCE_REQUIRED_EXIT_CODE : 0,
   };

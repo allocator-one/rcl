@@ -1,8 +1,18 @@
+/** The original numeric interval when a model returned its endpoints reversed. */
+export interface LocationProvenance {
+  version: 1;
+  source: 'parser';
+  reason: 'reversed_range';
+  originalStartLine: number;
+  originalEndLine: number;
+}
+
 export interface Finding {
   id: string;
   file: string;
   startLine: number;
   endLine: number;
+  locationProvenance?: LocationProvenance;
   severity: 'critical' | 'important' | 'minor' | 'nitpick';
   category: 'security' | 'correctness' | 'best-practices' | 'tests' | 'api-design';
   title: string;

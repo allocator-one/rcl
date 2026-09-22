@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -337,5 +337,39 @@ describe('rcl review — --attest (RCL-40)', () => {
     const alt = runRcl(['review', 'allocator-one/rcl#42', '--attest', '--config', 'alt.yml'], repo, { RCL_TELEMETRY: '' });
     expect(alt.status).toBe(1);
     expect(alt.stderr).toMatch(/--attest needs the telemetry level full \(resolved: envelope\)/);
+  });
+});
+
+describe('rcl review — completed report output failure', () => {
+  it.each(['json', 'markdown'])('retains both originals and attempts the sibling output when %s cannot be written', (failed) => {
+    const repo = tempRepository();
+    const dataDir = join(repo, 'private-data');
+    mkdirSync(join(repo, '.harness-cli'));
+    writeFileSync(join(repo, '.harness-cli', 'config.json'), '{}');
+    writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n');
+    writeFileSync(join(repo, 'config.json'), JSON.stringify({ models: ['openai/fixture'], secondaryModels: [], asyncModels: [] }));
+    const jsonPath = join(repo, failed === 'json' ? 'missing/report.json' : 'report.json');
+    const mdPath = join(repo, failed === 'markdown' ? 'missing/report.md' : 'report.md');
+    const result = runRcl([
+      'review', 'change.patch', '--config', 'config.json', '--reviewer', 'openai/fixture:general',
+      '--head-sha', 'a'.repeat(40),
+      '--json-file', jsonPath, '--markdown', mdPath,
+    ], repo, {
+      RCL_DATA_DIR: dataDir, RCL_TELEMETRY: 'findings',
+      // An incomplete explicit credential pair prevents login fallback and all HTTP.
+      HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: '',
+      RCL_CONVERGE_TARGET: '', RCL_CONVERGE_ROUND: '', RCL_CONVERGE_ATTEMPT: '', RCL_FOR_PR: '',
+    });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain('Could not write');
+    const [runId] = readdirSync(join(dataDir, 'quarantine'));
+    const dir = join(dataDir, 'quarantine', runId!);
+    const originalJson = readFileSync(join(dir, 'report.json'), 'utf8');
+    const originalMd = readFileSync(join(dir, 'report.md'), 'utf8');
+    expect(JSON.parse(originalJson).run.id).toBe(runId);
+    expect(originalMd).toContain(runId);
+    expect(readFileSync(failed === 'json' ? mdPath : jsonPath, 'utf8')).toBe(failed === 'json' ? originalMd : originalJson);
+    expect(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).diagnostics)
+      .toContainEqual(expect.objectContaining({ path: `output.${failed === 'json' ? 'report_json' : 'report_md'}` }));
   });
 });
