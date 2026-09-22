@@ -60,7 +60,16 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
       let stale: { pid?: number; token?: string };
       let snapshot: Awaited<ReturnType<typeof readStable>>;
       try { snapshot = await readStable(path, 1000); }
-      catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue; throw e; }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        // Removing the publisher's temporary hard link changes the owner's
+        // ctime. Retry a fresh lock read within the existing contention bound.
+        if (e instanceof Error && e.message === 'changing_source' && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 25));
+          continue;
+        }
+        throw e;
+      }
       try { stale = JSON.parse(snapshot.text); } catch { throw new Error('incomplete_recovery_lock_requires_inspection'); }
       if (!Number.isSafeInteger(stale.pid) || stale.pid! < 1 || typeof stale.token !== 'string') throw new Error('invalid_recovery_lock_requires_inspection');
       let alive = true;
