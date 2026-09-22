@@ -96,7 +96,7 @@ Review a PR, a local diff, or uncommitted work.
 
 `--role`, `--roles`, and `--reviewer` are mutually exclusive. So are a positional target, `--staged`, and `--working-tree` — pick exactly one review source. Untracked files are invisible to `git diff` and therefore not reviewed.
 
-**Self-describing reports (3.0).** Every report carries a `run` header: a client run id (UUIDv7), the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub for PRs, from `git rev-parse HEAD` and the merge-base with the remote default branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for patch files) and a `diff_sha256`, the roster with each seat's lane (`blocking`, `secondary`, `async`, `verification`), a config digest with thresholds and gating inline, spec and context-file digests, a best-effort `runner` claim (`agent` / `ci` / `human`), timing, the CI verdict (computed even without `--ci`), and the converge context when run under rcl-converge. Every finding carries an `identity`, allocated uniquely across the report's consensus findings, including the below-threshold appendix. Keys use `report:<run-id>:<16-hex-key>` so report allocation cannot alias unrelated native ledger identities or reuse another run's classification. Colliding location anchors are disambiguated before thresholding; native cross-round location matching still determines the unchanged canonical ledger identity. Every reviewer call records token `usage` where the provider reports it. Reports without a `run` header (pre-3.0) remain readable; ambiguous classifications are refused as described below.
+**Self-describing reports (3.0).** Every report carries a `run` header: a client run id (UUIDv7), the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub for PRs, from `git rev-parse HEAD` and the merge-base with the remote default branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for patch files) and a `diff_sha256`, the roster with each seat's lane (`blocking`, `secondary`, `async`, `verification`), a config digest with thresholds and gating inline, spec and context-file digests, a best-effort `runner` claim (`agent` / `ci` / `human`), timing, the CI verdict (computed even without `--ci`), and the converge context when run under rcl-converge. Every finding carries an `identity`, allocated uniquely across the report's consensus findings, including the below-threshold appendix. Keys use `report:<run-id>:<16-hex-key>` so report allocation cannot alias unrelated native ledger identities or reuse another run's classification. Colliding location anchors are disambiguated before thresholding; versioned semantic matching determines a separate canonical native identity. New consensus findings carry a bounded `claimDescriptor` before report serialization; original descriptor-less artifacts are never upgraded during replay. Every reviewer call records token `usage` where the provider reports it. Reports without a `run` header (pre-3.0) remain readable; ambiguous classifications are refused as described below.
 
 **Examples:**
 
@@ -219,34 +219,90 @@ rcl converge-attempt --target owner-repo-123 --max-attempts 10  # explicit overr
 The cross-round memory of a converge run, persisted in
 `.git/rcl-converge-runs/<target>.json`.
 
-`converge-report` dedupes one round's report JSON against every prior round of
-the run using a location-anchored finding identity (hash of file + category +
-line bucket, plus a line-overlap matcher — titles are deliberately ignored:
-models rephrase ~98% of them between rounds). Each finding is classified
-`new`, `repeat`, `suppressed` (previously dismissed — a dismissal is terminal
-on its evidence and fresh corroboration alone never reopens it), or `regating`
-(previously dismissed at non-critical severity, now sighted as critical —
-genuinely new evidence). The same call enforces the evidence-round cap:
-default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
-code 2 is the cap consent boundary; exit 3 is a state failure.
+`converge-report` binds the exact report bytes, run UUID, target and round before
+changing state. A bound report with a missing, invalid or different round is
+refused with exit 3. Report, verdict and migration commands never flush unrelated
+queued telemetry at startup. Headerless legacy imports remain supported without
+inventing a server run binding; a historical run-id-only binding cannot authorize
+new verdict events without supported recovery of its original evidence. Ordinary
+replay cannot attach newly supplied bytes to an already recorded unbound round.
+Every version 2 load checks the complete sighting ledger against its retained
+original reports before replay, verdict or migration changes state.
 
-A report key must identify one canonical identity, status and suppression reason.
-`converge-report` refuses conflicting mappings with exit 3 before writing the
-round state, even when telemetry is off. Reports without finding keys use the
-canonical identity as a fallback and are subject to the same check. This leaves
-ambiguous older reports readable but not classifiable by this command. Preserve
-the original report and ledger for separately supported finding-ref recovery;
-rewriting published evidence or rerunning an unchanged council is not recovery.
-Identical mappings still deduplicate, and native ledger keys and verdicts do not
-change when new run-scoped report keys appear. Until the current run's
-classification is delivered, older runs' aliases cannot resolve its new report
-keys. A report without a current classification does not inherit prior native
-verdicts, even when its findings look unchanged.
+New reports use version 2 native state. Each immutable sighting retains its
+report key, original positional finding ref, report digest, descriptor, canonical
+identity and matching rationale. Matching uses a frozen candidate snapshot and
+separate deterministic allocation; it never sorts or rewrites the original
+report. Location narrows candidates but cannot establish equivalence. Exact
+supported descriptors and conservative grammatical paraphrases can recur across
+line drift. Broader paraphrases, sparse evidence, changed symbols or conditions,
+opposition, multiple candidates and transitive bridges remain separate claims
+for triage. Text omitted by the descriptor bounds retains a digest so truncation
+cannot manufacture equality. No model calls perform this bookkeeping.
+
+Each sighting is `new`, `repeat`, `suppressed` (a matching prior dismissal), or
+`regating` (a matching non-critical dismissal has become critical). A canonical
+group retains the highest **incoming consensus-finding** severity, independent of
+input order; this does not change the voter's separate reviewer-severity policy.
+Untriaged gating obligations remain actionable across repeat and empty reports.
+Appendix sightings retain bindings but do not become gating findings.
+
+The report key and canonical identity are distinct. Every described sighting
+has a unique report-qualified key, including the appendix. Its version 1 wire
+classification binds run, target, round, original ref, digest and descriptor.
+Delivery requires the credential host to confirm evidence protocol version 2
+through an allowed read before sending new descriptors or classifications. A
+missing current classification cannot borrow a previous run's aliases. Legacy
+conflicting key-only mappings still refuse before state writes (the RCL-51 guard).
+
+Fresh convergence reports also declare `run.gating.bound_classification_protocol: 1`
+before serialization. The server keeps a declared run unresolved until its bound
+classification arrives, including when the report is empty. Semantic round events
+carry `classification_version: 1` and the exact `report_json_sha256`; delivery
+requires the additional `meta.bound_classification_protocol: 1` capability through
+the same credential-scoped read. The server carries unresolved claims across
+marked repeats and empty rounds, retaining their original run/ref attribution.
+Existing unmarked events retain their historical interpretation.
+Each sighting records `pending_round` at classification time; a delayed verdict
+from an older round cannot erase a newer unresolved obligation. A nongating
+sighting cannot lower an outstanding critical obligation's required severity.
+
+Existing version 1 state requires explicit migration before a described report
+or a report declaring the bound classification protocol, including an empty one:
+
+```bash
+rcl converge-migrate --target my-target --json        # read-only preview
+rcl converge-migrate --target my-target --apply --json
+```
+
+Apply retains the exact original state in a read-only SHA-256-named snapshot and
+writes a version 2 derivation. It preserves rounds, caps and old identities;
+attempt budgets and precision history are untouched. Legacy entries remain
+separate from new semantic claims: migration does not transfer their verdicts to
+inferred descriptors or rewrite reports. Untriaged legacy gating, including
+unknown gating history, remains an explicit pending obligation. Older clients
+refuse version 2. Historical claim splitting and ambiguous run/ref recovery
+require the separately supported recovery workflow, not a counter reset or a
+paid reviewer rerun. As with other native state writes, the converge owner must
+hold the target's workflow lock; do not migrate beside an active writer.
+
+Marked events expose pending descriptor-less migration entries separately as
+`legacy_pending_identities`. These do not invent historical sighting refs. The
+server retains an explicit unresolved recovery requirement until sufficient
+source-backed recovery resolves that ambiguity; omitting the list in a later
+empty report cannot clear it. A local legacy verdict alone is not proof that the
+server's historical claim attribution has been repaired.
+At most 2,000 legacy pending identities can be sent in one event; larger pending
+sets are refused rather than truncated.
+
+Round caps remain 15 by default, with explicit `--max-rounds` from 2–99; no round
+past 99 is accepted. Exit 2 is the cap consent boundary, exit 3 a state failure.
+Exact bound report replay preserves its original classifications and bytes.
 
 `converge-verdict` records triage outcomes per finding identity —
 `--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which
 drives later-round suppression and accrues the per-model precision history.
-Once every gating identity of the current round is triaged, it also reports
+Once every gating identity, including pending earlier obligations, is triaged, it also reports
 the round's resolution: `converged-dismissal-only` (everything dismissed,
 nothing fixed — the round converges on the spot, no confirmation round),
 `fixes-pending-fresh-round`, or `unresolved` with the identities still open.

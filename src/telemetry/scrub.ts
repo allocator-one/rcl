@@ -23,6 +23,12 @@ export function sanitizePresentation(value: string, { multiline }: { multiline: 
     .replace(DISPLAY_MARKS, '');
 }
 
+/** Normalize newly produced human text before report hashing, never retained originals. */
+export function normalizeGeneratedText(value: string): string {
+  return value.replace(/[\uD800-\uDFFF]/gu, '\uFFFD')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+}
+
 /** Escape display controls in JSON source without changing parsed semantic values. */
 export function escapeDisplayControls(value: string): string {
   return value.replace(/[\u0085\u061c\u180e\u200b\u200e\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]/g,

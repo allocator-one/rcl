@@ -122,6 +122,14 @@ describe('uuidv7', () => {
 });
 
 describe('buildRunHeader', () => {
+  it('declares bound classification before serializing a newly generated convergence report', () => {
+    const run = buildRunHeader({ ...baseInput(), converge: { target: 'rcl-75', round: 1, attempt: 2 } });
+    expect(JSON.parse(JSON.stringify(run)).gating.bound_classification_protocol).toBe(1);
+    expect(buildRunHeader(baseInput()).gating).not.toHaveProperty('bound_classification_protocol');
+    expect(buildRunHeader({ ...baseInput(), converge: { target: 'rcl-75', attempt: 2 } }).gating)
+      .not.toHaveProperty('bound_classification_protocol');
+  });
+
   it('identifies the run: client id, rcl version, command', () => {
     const run = buildRunHeader(baseInput());
     expect(run.id).toMatch(UUID_V7);

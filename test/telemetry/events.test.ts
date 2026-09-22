@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildEvent, deliverable, roundIdentities } from '../../src/telemetry/events.js';
+import { describeClaim } from '../../src/consensus/claim-identity.js';
+import { sampleFinding } from './fixtures.js';
 
 describe('buildEvent', () => {
   it('mints a UUIDv7 id and an ISO timestamp, and scrubs the payload', () => {
@@ -64,6 +66,25 @@ describe('deliverable', () => {
 
 describe('roundIdentities', () => {
   const finding = (identity: string | undefined) => ({ identity, file: 'src/a.ts', startLine: 1, endLine: 1 });
+
+  it('maps a semantic pending snapshot without inferring it from repeat status', () => {
+    const runId = '019921a0-0000-7000-8000-000000000001';
+    const mappings = [2, null].map((pendingRound, index) => {
+      const original = sampleFinding({ identity: `report:${runId}:${index}` });
+      return { identity: `canonical-${index}`, status: 'repeat' as const, finding: original,
+        sighting: { runId, target: 'synthetic', round: 3, reportSha256: 'a'.repeat(64),
+          findingRef: `f00${index + 1}`, reportKey: original.identity!, canonicalIdentity: `canonical-${index}`,
+          claimDescriptor: describeClaim(original), matchRationale: 'exact_descriptor' as const,
+          status: 'repeat' as const, pendingRound, severity: original.severity, gating: 'consensus',
+          belowThreshold: false, file: original.file, category: original.category,
+          startLine: original.startLine, endLine: original.endLine } };
+    });
+    const before = JSON.stringify(mappings);
+    const identities = roundIdentities(mappings);
+    expect(identities).toMatchObject([{ status: 'repeat', pending_round: 2 }, { status: 'repeat', pending_round: null }]);
+    expect(identities.every(identity => Object.hasOwn(identity, 'pending_round'))).toBe(true);
+    expect(JSON.stringify(mappings)).toBe(before);
+  });
 
   it('reports each sighting under its own key with the identity it was matched to, its status and any suppress reason', () => {
     const list = roundIdentities([

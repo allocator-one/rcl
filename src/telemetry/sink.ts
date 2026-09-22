@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { claimDescriptorSchema } from '../consensus/claim-identity.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
@@ -24,7 +25,7 @@ export const MAX_RESPONSE_BYTES = 64 * 1024;
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
-  /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
+  /** A shorter delivery budget, including any capability preflight, e.g. a flush's remaining time. */
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
@@ -73,6 +74,28 @@ export interface SinkOptions {
 interface ErrorBody {
   error?: string;
   message?: string;
+}
+
+const SIGHTING_BINDING_FIELDS = ['version', 'finding_ref', 'report_json_sha256', 'claim_descriptor', 'match_rationale', 'pending_round'];
+
+/** Inspect retained bindings without normalizing or replacing their original values. */
+function validSightingBinding(entry: Record<string, unknown>): boolean {
+  const key = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 64;
+  return entry.version === 1 && key(entry.identity_key) && key(entry.matched_identity) &&
+    ['new', 'repeat', 'suppressed', 'regating'].includes(entry.status as string) &&
+    typeof entry.finding_ref === 'string' && Buffer.byteLength(entry.finding_ref, 'utf8') > 0 &&
+    Buffer.byteLength(entry.finding_ref, 'utf8') <= 32 &&
+    typeof entry.report_json_sha256 === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(entry.report_json_sha256) &&
+    claimDescriptorSchema.safeParse(entry.claim_descriptor).success &&
+    ['new_claim', 'exact_descriptor', 'supported_paraphrase', 'ambiguous', 'explicit_split'].includes(entry.match_rationale as string) &&
+    (!Object.hasOwn(entry, 'pending_round') || entry.pending_round === null ||
+      (typeof entry.pending_round === 'number' && Number.isSafeInteger(entry.pending_round) && entry.pending_round >= 1));
+}
+
+function remainingRequestOptions(options: RequestOptions, deadline: number | undefined): RequestOptions | null {
+  if (deadline === undefined) return options;
+  const timeoutMs = Math.floor(deadline - performance.now());
+  return timeoutMs < 1 ? null : { ...options, timeoutMs };
 }
 
 export class HarnessSink {
@@ -205,27 +228,51 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
+  /** Capability is read at the credential's own host; no speculative write. */
+  private async requireEvidenceProtocol(options: RequestOptions, boundClassification = false): Promise<SinkOutcome<{ supported: boolean }>> {
+    // Old servers silently discard unknown provenance. The attested credential
+    // may read model-stats, but may not list runs or use an ordinary login.
+    const attested = this.credential.source === 'attest';
+    const capability = await this.getJson(
+      attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
+      (data, meta) => {
+        if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
+        const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
+        const boundVersion = (meta as { bound_classification_protocol?: unknown } | null)?.bound_classification_protocol;
+        return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 &&
+          (!boundClassification || boundVersion === 1) };
+      }, options
+    );
+    if (capability.kind !== 'ok') return capability;
+    if (!capability.value.supported) return {
+      kind: 'rejected', httpStatus: 0,
+      error: boundClassification ? 'unsupported_bound_classification_protocol' : 'unsupported_evidence_protocol',
+      message: boundClassification
+        ? 'The server has not confirmed evidence protocol 2 and bound classification protocol 1; events were not sent'
+        : 'The server has not confirmed evidence protocol version 2; versioned evidence was not sent',
+    };
+    return capability;
+  }
+
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
   async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
-    if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
-      // Old servers silently discard unknown provenance. The attested credential
-      // may read model-stats, but may not list runs or use an ordinary login.
-      const attested = this.credential.source === 'attest';
-      const capability = await this.getJson(
-        attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
-        (data, meta) => {
-          if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
-          const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
-          return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 };
-        }, options
-      );
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
+    const gating = envelope.run.gating;
+    const boundClassification = gating !== null && typeof gating === 'object' && 'bound_classification_protocol' in gating;
+    if (boundClassification && gating.bound_classification_protocol !== 1) return {
+      kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+      message: 'The run must declare bound classification protocol 1; the envelope was not sent',
+    };
+    if (boundClassification || envelope.findings.some((finding) => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined)) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
       if (capability.kind !== 'ok') return capability;
-      if (!capability.value.supported) return {
-        kind: 'rejected', httpStatus: 0, error: 'unsupported_evidence_protocol',
-        message: 'The server has not confirmed evidence protocol version 2; normalization provenance was not sent',
-      };
     }
-    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
+    const body = JSON.stringify(envelope);
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+    const result = await this.request('POST', '/api/v1/reviews/runs', body, 'application/json', remaining);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
@@ -280,12 +327,76 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
+    // Retained JSON can violate the producer's type. Refuse the batch before
+    // inspecting provenance so the outbox preserves it and continues other entries.
+    if (events.some(event => event.kind === 'round_processed' &&
+      (event.payload === null || typeof event.payload !== 'object' || Array.isArray(event.payload)))) {
+      return { kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
+        message: 'round_processed payload must be an object; events were not sent' };
+    }
+    let boundClassification = false;
+    let versionedClassification = false;
+    for (const event of events) {
+      if (event.kind !== 'round_processed') continue;
+      const payload = event.payload;
+      const markedClassification = 'classification_version' in payload || 'legacy_pending_identities' in payload;
+      if (markedClassification) {
+        const pending = payload.legacy_pending_identities;
+        if (payload.classification_version !== 1 || typeof payload.report_json_sha256 !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(payload.report_json_sha256) ||
+          !Number.isSafeInteger(event.round) || event.round! < 1 ||
+          !Array.isArray(payload.identities) || !payload.identities.every((identity: unknown) => {
+            if (identity === null || typeof identity !== 'object' || Array.isArray(identity) ||
+              !Object.hasOwn(identity, 'pending_round')) return false;
+            const value = (identity as { pending_round: unknown }).pending_round;
+            return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= event.round!);
+          }) ||
+          ('legacy_pending_identities' in payload && (!Array.isArray(pending) || pending.length === 0 || pending.length > 2000 ||
+            !pending.every((identity: unknown, index: number) => typeof identity === 'string' && /^[a-f0-9]{16}$/.test(identity) &&
+              (index === 0 || pending[index - 1] < identity))))) {
+          return { kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+            message: 'Bound classification requires version 1, a lowercase report digest, pending snapshots and valid optional legacy pending identities; events were not sent' };
+        }
+        boundClassification = true;
+      }
+      const markedSightingRefs = new Set<string>();
+      if (Array.isArray(payload.identities)) {
+        for (const entry of payload.identities) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
+            !SIGHTING_BINDING_FIELDS.some(field => Object.hasOwn(entry, field))) continue;
+          if (!validSightingBinding(entry)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Per-sighting bindings require a complete supported version 1 identity; events were not sent',
+          };
+          if (markedClassification && entry.report_json_sha256 !== payload.report_json_sha256) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use the classification report digest; events were not sent',
+          };
+          if (markedClassification && markedSightingRefs.has(entry.finding_ref as string)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use unique finding references; events were not sent',
+          };
+          if (markedClassification) markedSightingRefs.add(entry.finding_ref as string);
+          versionedClassification = true;
+        }
+      }
+    }
+    if (boundClassification || versionedClassification) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
+      if (capability.kind !== 'ok') return capability;
+    }
+    const body = JSON.stringify({ events });
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
     const result = await this.request(
       'POST',
       '/api/v1/reviews/converge/events',
-      JSON.stringify({ events }),
+      body,
       'application/json',
-      options
+      remaining
     );
     return this.classify(result, (body) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;

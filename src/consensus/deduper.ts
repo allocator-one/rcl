@@ -17,7 +17,7 @@ const STOPWORDS = new Set([
   'via', 'when', 'which', 'their', 'there', 'than', 'then',
 ]);
 
-function tokenize(s: string): Set<string> {
+export function tokenize(s: string): Set<string> {
   return new Set(
     s
       .toLowerCase()

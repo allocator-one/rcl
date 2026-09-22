@@ -1,10 +1,11 @@
+import type { ClaimDescriptor } from '../consensus/claim-identity.js';
 import type { GatingVerification } from '../consensus/gating.js';
 import { createHash } from 'node:crypto';
-import type { ConsensusFinding, LocationProvenance, ModelReview, ReviewResult } from '../consensus/types.js';
+import type { ConsensusFinding, Finding, LocationProvenance, ModelReview, ReviewResult } from '../consensus/types.js';
 import { normalizeVerificationEvidence } from './verification.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
-import { scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
+import { normalizeGeneratedText, scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
 
 /**
  * The transport envelope rcl posts to `POST /api/v1/reviews/runs` (epic
@@ -43,6 +44,7 @@ export interface DeliveryInfo {
 }
 
 export interface WireFinding {
+  claim_descriptor?: ClaimDescriptor;
   ref: string;
   identity_key: string;
   file: string;
@@ -139,6 +141,7 @@ function wireFinding(finding: ConsensusFinding, index: number, belowThreshold: b
   return {
     ref: findingRef(index),
     identity_key: identity,
+    ...(finding.claimDescriptor !== undefined ? { claim_descriptor: finding.claimDescriptor } : {}),
     file: scrubText(finding.file),
     start_line: finding.startLine,
     end_line: finding.endLine,
@@ -241,6 +244,39 @@ export function buildRunEnvelope(
 }
 
 /**
+ * Normalize only fresh reviewer prose before its first serialization. Keep
+ * identifiers, structural fields and already materialized descriptors intact.
+ * Recovery/envelope builders must not apply this to retained original bytes.
+ */
+export function normalizeGeneratedReport(result: ReviewResult): ReviewResult {
+  const text = normalizeGeneratedText;
+  const finding = <T extends Finding>(f: T): T => ({
+    ...f, title: text(f.title), description: text(f.description),
+    ...(f.suggestedFix !== undefined ? { suggestedFix: text(f.suggestedFix) } : {}),
+  });
+  const consensusFinding = (f: ConsensusFinding): ConsensusFinding => ({
+    ...finding(f),
+    consensus: {
+      ...f.consensus,
+      ...(f.consensus.disputeDetails !== undefined ? { disputeDetails: text(f.consensus.disputeDetails) } : {}),
+      ...(f.consensus.positions ? { positions: f.consensus.positions.map(p => ({ ...p, title: text(p.title), excerpt: text(p.excerpt) })) } : {}),
+    },
+    ...(typeof f.gating?.verification?.note === 'string' ? { gating: { ...f.gating,
+      verification: { ...f.gating.verification, note: text(f.gating.verification.note) },
+    } } : {}),
+  });
+  return {
+    ...result,
+    findings: result.findings.map(consensusFinding),
+    ...(result.belowThresholdFindings ? { belowThresholdFindings: result.belowThresholdFindings.map(consensusFinding) } : {}),
+    reviews: result.reviews.map(r => ({ ...r, findings: r.findings.map(finding),
+      ...(r.error !== undefined ? { error: text(r.error) } : {}),
+      ...(r.warnings ? { warnings: r.warnings.map(text) } : {}),
+    })),
+  };
+}
+
+/**
  * The report as it may leave the machine: every free-text field scrubbed
  * and a `parse_failed` call's error reduced to the parser message unless
  * `parseFailures` opts in (fenced code removed, capped). The artifacts are
@@ -249,6 +285,7 @@ export function buildRunEnvelope(
  * neither contains a raw model answer or a key quoted from the diff.
  */
 export function sanitizeForDelivery(result: ReviewResult, options: { parseFailures?: boolean } = {}): ReviewResult {
+  result = normalizeGeneratedReport(result);
   const parseFailures = options.parseFailures === true;
   const finding = (f: ConsensusFinding): ConsensusFinding => ({
     ...f,

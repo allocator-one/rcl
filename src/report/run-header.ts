@@ -80,6 +80,8 @@ export interface RunHeader {
     min_models: number;
     verification_model?: string;
     verification_timeout_ms: number;
+    /** A fresh bound report remains pending until its classification event arrives. */
+    bound_classification_protocol?: 1;
   };
   spec?: { source: SpecSource; sha256: string };
   context_files: Array<{ path: string; sha256: string }>;
@@ -448,6 +450,9 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
         ? { verification_model: input.gating.verificationModel }
         : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
+      ...(input.converge?.target.trim() && Number.isSafeInteger(input.converge.round) && input.converge.round! > 0
+        ? { bound_classification_protocol: 1 as const }
+        : {}),
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),
