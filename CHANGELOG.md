@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.8.1 - 2026-09-23
+
+- Add explicit `--original-prose control-code-units-v1` recovery for retained
+  reports containing forbidden C0/DEL characters in finding prose. Represent
+  those code units visibly and record their original offsets without changing
+  report bytes or digests; preserve tabs, line feeds and carriage returns.
+- Require the matching backend capability before preparing or resuming the
+  selected representation. Keep existing recovery manifests and surrogate
+  records compatible; refuse controls in structural fields (RCL-76).
+
 ## 3.8.0 - 2026-09-22
 
 - Retain completed review reports when evidence delivery is rejected, with
