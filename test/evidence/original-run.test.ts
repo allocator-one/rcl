@@ -23,7 +23,7 @@ async function fixture(change?: (r: ReturnType<typeof sampleResult>) => void) {
   await writeFile(join(dir,'original.json'), text); await writeFile(join(dir,'original.md'), md);
   const selection = { run: report.run!.id, forPr: 'allocator-one/rcl#42', head: 'a'.repeat(40), reportJson: join(dir,'original.json'), reportSha256: sha256Hex(text), reportMd: join(dir,'original.md'), markdownSha256: sha256Hex(md), originalMode: 'asserted' as const };
   let recorded: RunEnvelope | undefined; const stored: Record<string, string> = {}; const requests: { method: string; path: string; body?: string }[] = [];
-  const behavior = { losePost: false, losePut: false, rejectPost: false, capability: true, evidenceProtocol: 2, wrongOrg: false, failRead: false, corruptArtifact: false, mutateProjection: undefined as ((p: ReturnType<typeof projection>) => void) | undefined };
+  const behavior = { losePost: false, losePut: false, rejectPost: false, conflictPost: false, rejectPut: false, capability: true, evidenceProtocol: 2, wrongOrg: false, failRead: false, corruptArtifact: false, mutateProjection: undefined as ((p: ReturnType<typeof projection>) => void) | undefined };
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
     const path = new URL(String(url)).pathname + new URL(String(url)).search; const method = init?.method ?? 'GET';
     requests.push({ method, path, ...(typeof init?.body === 'string' ? { body: init.body } : {}) });
@@ -33,12 +33,14 @@ async function fixture(change?: (r: ReturnType<typeof sampleResult>) => void) {
     if (method === 'POST') {
       const submitted = JSON.parse(String(init?.body));
       if (behavior.rejectPost) return answer({ error: 'invalid_original', message: 'source binding is invalid' }, 422);
+      if (behavior.conflictPost) { recorded = submitted; return answer({ error: 'run_conflict', message: 'already created' }, 409); }
       recorded = submitted; if (behavior.losePost) { behavior.losePost = false; throw new Error('synthetic response loss'); }
       return answer({ data: { id: recorded!.run.id, url: '/run', artifacts_expected: ['report_json','report_md'] } }, 201);
     }
     if (recorded && path.includes('/artifacts/')) {
       const kind = path.split('/').at(-1)!;
       if (method === 'PUT') {
+        if (behavior.rejectPut) return answer({ error: 'invalid_artifact', message: 'artifact binding is invalid' }, 422);
         stored[kind] = String(init?.body); if (behavior.losePut) { behavior.losePut = false; throw new Error('synthetic response loss'); }
         return answer({ data: { kind, sha256: sha256Hex(stored[kind]) } }, 201);
       }
@@ -153,6 +155,21 @@ describe('receipt-aware original delivery', () => {
     const records = await Promise.all((await readdir(f.manifest + '.journal')).sort().map(async name => JSON.parse(await readFile(join(f.manifest + '.journal', name), 'utf8'))));
     expect(records).toContainEqual(expect.objectContaining({ phase: 'post_outcome', data: { kind: 'rejected', http_status: 422, error: 'invalid_original' } }));
     expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+  });
+  it('settles a POST conflict with an exact read before delivering missing artifacts', async () => {
+    const f = await fixture(); expect(await f.preview()).toBe(0); f.behavior.conflictPost = true;
+    expect(await f.apply()).toBe(0);
+    expect(f.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect(f.stored).toEqual({ report_json: f.text, report_md: f.md });
+  });
+  it('records a definitive artifact refusal after its exact readback', async () => {
+    const f = await fixture(); expect(await f.preview()).toBe(0); f.behavior.rejectPut = true;
+    expect(await f.apply()).toBe(4);
+    const result = JSON.parse(f.stdout.at(-1)!);
+    expect(result).toMatchObject({ status: 'incomplete', error: 'artifact_delivery_rejected_invalid_artifact', stage: 'remote', exit_code: 4 });
+    expect(result.instruction).toContain('do not resume');
+    const records = await Promise.all((await readdir(f.manifest + '.journal')).sort().map(async name => JSON.parse(await readFile(join(f.manifest + '.journal', name), 'utf8'))));
+    expect(records).toContainEqual(expect.objectContaining({ phase: 'put_outcome', data: { artifact: 'report_json', kind: 'rejected', http_status: 422, error: 'invalid_artifact' } }));
   });
   it('refuses complete header/finding/call conflicts, malformed receipts and corrupt raw artifacts', async () => {
     for (const mutate of [(p: ReturnType<typeof projection>) => { p.findings[0]!.description = 'different claim'; }, (p: ReturnType<typeof projection>) => { p.runner = { kind:'human' }; }, (p: ReturnType<typeof projection>) => { p.calls = []; }]) {

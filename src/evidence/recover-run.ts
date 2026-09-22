@@ -109,12 +109,11 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
         await verifySources();
         stage = 'remote'; const posted = await sink.postRun(prepared.envelope);
         await append('post_outcome', outcomeAudit(posted));
-        if (posted.kind === 'rejected') {
-          stage = 'remote';
-          throw new Error(`run_delivery_rejected_${outcomeAudit(posted).error ?? 'unspecified'}`);
-        }
         observed = await read();
-        if (!observed.run.exists) throw new Error('run_delivery_not_verified');
+        if (!observed.run.exists) {
+          if (posted.kind === 'rejected') throw new Error(`run_delivery_rejected_${outcomeAudit(posted).error ?? 'unspecified'}`);
+          throw new Error('run_delivery_not_verified');
+        }
       }
       await append('run_verified', { projection_sha256: observed.run.exists ? observed.run.projection_sha256 : null });
       for (const a of prepared.envelope.artifacts_declared) {
@@ -122,9 +121,12 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
         await append('put_intent', { kind: a.kind, sha256: a.sha256, bytes: a.bytes });
         await verifySources();
         stage = 'remote'; const uploaded = await sink.putArtifact(prepared.selection.run, a.kind, artifacts[a.kind as ArtifactKind]!);
-        await append('put_outcome', { artifact: a.kind, kind: uploaded.kind });
+        await append('put_outcome', { artifact: a.kind, ...outcomeAudit(uploaded) });
         observed = await read();
-        if (!observed.run.exists || observed.states[a.kind] !== 'verified') throw new Error('artifact_delivery_not_verified');
+        if (!observed.run.exists || observed.states[a.kind] !== 'verified') {
+          if (uploaded.kind === 'rejected') throw new Error(`artifact_delivery_rejected_${outcomeAudit(uploaded).error ?? 'unspecified'}`);
+          throw new Error('artifact_delivery_not_verified');
+        }
         await append('artifact_verified', a);
       }
       observed = await read();
@@ -138,7 +140,7 @@ export async function runOriginalRecovery(options: OriginalRunOptions, deps: Ori
     return 0;
   } catch (error) {
     const reason = failure(error);
-    const definitiveRejection = reason.startsWith('run_delivery_rejected_');
+    const definitiveRejection = reason.startsWith('run_delivery_rejected_') || reason.startsWith('artifact_delivery_rejected_');
     const exit = stage === 'input' ? 2 : definitiveRejection || reason.includes('conflict') ? 4 : stage === 'journal' ? 5 : 3;
     const instruction = options.preview
       ? 'Correct the explicit input; no delivery was attempted.'
