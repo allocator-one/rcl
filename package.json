@@ -15,8 +15,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "test": "npm run build && vitest run",
-    "test:watch": "npm run build && vitest",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run lint && npm test",
     "build:skills": "node scripts/build-skills.mjs"
