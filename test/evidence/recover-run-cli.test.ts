@@ -3,9 +3,9 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { beforeAll, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { sampleResult, sampleReview } from '../telemetry/fixtures.js';
 import { buildRunEnvelope, sha256Hex } from '../../src/telemetry/envelope.js';
 import { Outbox } from '../../src/telemetry/outbox.js';
@@ -14,9 +14,6 @@ import type { RunEnvelope } from '../../src/telemetry/envelope.js';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const cli = process.env['RCL_TEST_PACKAGED_CLI'] ?? join(root, 'dist/index.js');
-beforeAll(async () => {
-  if (!process.env['RCL_TEST_PACKAGED_CLI']) await exec(process.execPath, [join(dirname(fileURLToPath(import.meta.resolve('typescript'))), '../bin/tsc')], { cwd: root, timeout: 30000 });
-}, 35000);
 async function snapshot(dir: string): Promise<unknown> {
   const rows: unknown[] = [];
   for (const name of (await readdir(dir)).sort()) {

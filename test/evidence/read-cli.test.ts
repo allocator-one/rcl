@@ -2,10 +2,10 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { Outbox } from '../../src/telemetry/outbox.js';
@@ -24,10 +24,6 @@ async function snapshot(dir: string): Promise<Record<string, { bytes: string; mt
   }
   return files;
 }
-
-beforeAll(async () => {
-  await exec(process.execPath, [join(dirname(fileURLToPath(import.meta.resolve('typescript'))), '../bin/tsc')], { cwd: root, timeout: 30_000 });
-}, 35_000);
 
 describe('built evidence read commands', () => {
   it.each(['show', 'status'] as const)('%s issues only its GET and leaves a valid populated retry queue untouched', async (command) => {

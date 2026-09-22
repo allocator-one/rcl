@@ -15,10 +15,10 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "npm run build && vitest run",
+    "test:watch": "npm run build && vitest",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build && npm run lint && npm test",
+    "prepublishOnly": "npm run lint && npm test",
     "build:skills": "node scripts/build-skills.mjs"
   },
   "engines": {
