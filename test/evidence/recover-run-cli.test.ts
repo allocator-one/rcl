@@ -53,7 +53,7 @@ it('built Mode A rejects bad pins without flushing, then previews only into its 
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   try {
     const address = server.address(); if (!address || typeof address === 'string') throw new Error();
-    const env = { PATH: process.env.PATH, RCL_DATA_DIR: data, XDG_CONFIG_HOME: join(dir, 'config'), HARNESS_API_TOKEN: 'aone_SYNTHETIC_LOCAL_ONLY', HARNESS_API_URL: `http://127.0.0.1:${address.port}`, NO_COLOR: '1' };
+    const env = { PATH: process.env.PATH, ...(process.env['SystemRoot'] ? { SystemRoot: process.env['SystemRoot'] } : {}), RCL_DATA_DIR: data, XDG_CONFIG_HOME: join(dir, 'config'), HARNESS_API_TOKEN: 'aone_SYNTHETIC_LOCAL_ONLY', HARNESS_API_URL: `http://127.0.0.1:${address.port}`, NO_COLOR: '1' };
     const manifest = join(dir, 'manifest.json');
     const args = ['evidence', 'recover-run', '--preview', '--manifest', manifest, '--run', report.run!.id, '--for-pr', 'allocator-one/rcl#42', '--head', 'a'.repeat(40), '--report-json', path, '--original-mode', 'asserted', '--json'];
     const bad = await exec(process.execPath, [cli, ...args, '--report-sha256', 'f'.repeat(64)], { cwd: dir, env }).catch(e => e);
