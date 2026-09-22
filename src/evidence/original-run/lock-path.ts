@@ -23,19 +23,27 @@ export function checkDarwinLockACL(output: string): void {
       (header[10] === '+' && entries.length === 0)) throw new Error('unsafe_recovery_lock_acl');
 }
 
-/** Inspect the mount name/flags, not Darwin's nonportable numeric f_type. */
-export function checkDarwinLockMount(path: string, output: string): void {
-  let selected: { path: string; flags: string[] } | undefined;
+/** Match path-bound statfs information from df, including firmlink/case aliases. */
+export function checkDarwinLockMount(output: string, filesystemOutput: string): void {
+  let filesystems;
+  try { filesystems = JSON.parse(filesystemOutput)?.['storage-system-information']?.filesystem; }
+  catch { throw new Error('unsupported_recovery_lock_filesystem'); }
+  if (!Array.isArray(filesystems) || filesystems.length !== 1 ||
+      typeof filesystems[0]?.name !== 'string' || !filesystems[0].name || /[\r\n\0]/.test(filesystems[0].name) ||
+      typeof filesystems[0]?.['mounted-on'] !== 'string' || !filesystems[0]['mounted-on'].startsWith('/') ||
+      /[\r\n\0]/.test(filesystems[0]['mounted-on'])) throw new Error('unsupported_recovery_lock_filesystem');
+  const filesystem = filesystems[0];
+  let selected: string[] | undefined;
   for (const line of output.trimEnd().split('\n')) {
     if (line.indexOf(' on ') !== line.lastIndexOf(' on ')) throw new Error('unsupported_recovery_lock_filesystem');
-    const match = /^.+ on (\/.*) \(([^\n]+)\)$/.exec(line);
+    const match = /^(.+) on (\/.*) \(([^\n]+)\)$/.exec(line);
     if (!match) throw new Error('unsupported_recovery_lock_filesystem');
-    const mount = match[1]!;
-    if ((mount === '/' || path === mount || path.startsWith(`${mount}/`)) && (!selected || mount.length > selected.path.length)) {
-      selected = { path: mount, flags: match[2]!.split(', ') };
+    if (match[1] === filesystem.name && match[2] === filesystem['mounted-on']) {
+      if (selected) throw new Error('unsupported_recovery_lock_filesystem');
+      selected = match[3]!.split(', ');
     }
   }
-  if (!selected || !['apfs', 'hfs'].includes(selected.flags[0]!) || !selected.flags.includes('local') || selected.flags.includes('noowners')) {
+  if (!selected || !['apfs', 'hfs'].includes(selected[0]!) || !selected.includes('local') || selected.includes('noowners')) {
     throw new Error('unsupported_recovery_lock_filesystem');
   }
 }
@@ -75,7 +83,12 @@ async function recoveryDirectory(input: string, privateRoot: boolean, createMiss
       checkDarwinLockACL(await lockSystemCommand('/bin/ls', ['-lde', current]));
     }
   }
-  if (process.platform === 'darwin') checkDarwinLockMount(path, await lockSystemCommand('/sbin/mount', []));
+  if (process.platform === 'darwin') {
+    try {
+      const filesystem = await lockSystemCommand('/bin/df', ['--libxo', 'json', '-P', '-k', path]);
+      checkDarwinLockMount(await lockSystemCommand('/sbin/mount', []), filesystem);
+    } catch { throw new Error('unsupported_recovery_lock_filesystem'); }
+  }
   else if (process.platform === 'linux' && typeof filesystem.statfs === 'function') checkLinuxLockFilesystem((await filesystem.statfs(path, { bigint: true })).type);
   else throw new Error('unsupported_recovery_lock_filesystem');
   return path;

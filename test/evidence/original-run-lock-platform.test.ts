@@ -5,13 +5,18 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { localLockScope } from '../../src/evidence/original-run/lock-scope.js';
-import { checkDarwinLockACL, checkDarwinLockMount, checkLinuxLockFilesystem, checkLockDirectory } from '../../src/evidence/original-run/lock-path.js';
+import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
+import { checkDarwinLockACL, checkDarwinLockMount, checkLinuxLockFilesystem, checkLockDirectory, inspectRecoveryDirectory } from '../../src/evidence/original-run/lock-path.js';
 import { withRecoveryLock } from '../../src/evidence/original-run/journal.js';
+import { platformPath } from '../../src/telemetry/recovery/files.js';
 
 const boot = '00000000-0000-4000-8000-000000000001';
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function root() { const path = await mkdtemp(join(tmpdir(), 'rcl-lock-platform-')); roots.push(path); return path; }
+const filesystem = (name: string, mounted: string) => JSON.stringify({
+  'storage-system-information': { filesystem: [{ name, 'mounted-on': mounted }] },
+});
 
 it('binds Darwin scope to a validated boot UUID from the absolute system utility', async () => {
   const command = vi.fn(async () => boot.toUpperCase() + '\n');
@@ -75,14 +80,63 @@ it.runIf(process.platform === 'darwin')('refuses a real harmful macOS ACL even w
   } finally { await promisify(execFile)('/bin/chmod', ['-N', path]); }
 });
 
-it('qualifies Darwin mounts by name and local/ownership flags with the longest mount match', () => {
+it('qualifies the path-bound Darwin mount by exact source, mountpoint and local/ownership flags', () => {
   const mount = '/dev/disk on / (apfs, local, journaled)\n';
-  expect(() => checkDarwinLockMount('/private/tmp', mount)).not.toThrow();
+  expect(() => checkDarwinLockMount(mount, filesystem('/dev/disk', '/'))).not.toThrow();
   for (const flags of ['nfs, local', 'apfs, local, noowners', 'apfs, journaled', 'smbfs, local']) {
-    expect(() => checkDarwinLockMount('/private/tmp/root', mount + `server on /private/tmp (${flags})\n`)).toThrow('unsupported_recovery_lock_filesystem');
+    expect(() => checkDarwinLockMount(mount + `server on /private/tmp (${flags})\n`, filesystem('server', '/private/tmp'))).toThrow('unsupported_recovery_lock_filesystem');
   }
-  expect(() => checkDarwinLockMount('/tmp', 'unrecognized')).toThrow('unsupported_recovery_lock_filesystem');
-  expect(() => checkDarwinLockMount('/tmp/a on /b', mount + 'server on /tmp/a on /b (nfs, local)\n')).toThrow('unsupported_recovery_lock_filesystem');
+  expect(() => checkDarwinLockMount('unrecognized', filesystem('/dev/disk', '/'))).toThrow('unsupported_recovery_lock_filesystem');
+  expect(() => checkDarwinLockMount(mount + 'server on /tmp/a on /b (nfs, local)\n', filesystem('/dev/disk', '/'))).toThrow('unsupported_recovery_lock_filesystem');
+});
+
+it('keeps firmlink and case-alias attribution independent of the operator path spelling', () => {
+  const mount = '/dev/root on / (apfs, local)\n/dev/data on /System/Volumes/Data (apfs, local)\nserver on /Users/Shared (nfs, local)\n';
+  expect(() => checkDarwinLockMount(mount, filesystem('/dev/data', '/System/Volumes/Data'))).not.toThrow();
+  expect(() => checkDarwinLockMount(mount, filesystem('server', '/Users/Shared'))).toThrow('unsupported_recovery_lock_filesystem');
+  expect(() => checkDarwinLockMount(mount, filesystem('server', '/users/Shared'))).toThrow('unsupported_recovery_lock_filesystem');
+});
+
+it('refuses malformed, missing or ambiguous path-bound filesystem attribution without ancestor fallback', () => {
+  const mount = '/dev/root on / (apfs, local)\n';
+  for (const value of ['{', 'null', '{}', JSON.stringify({ 'storage-system-information': { filesystem: [] } }),
+    JSON.stringify({ 'storage-system-information': { filesystem: [{ name: '/dev/root', 'mounted-on': '/' }, { name: '/dev/root', 'mounted-on': '/' }] } }),
+    filesystem('/dev/other', '/'), filesystem('/dev/root', '/Other'), filesystem('/dev/root', 'relative'), filesystem('/dev/root\n', '/')]) {
+    expect(() => checkDarwinLockMount(mount, value)).toThrow('unsupported_recovery_lock_filesystem');
+  }
+  expect(() => checkDarwinLockMount(mount + mount, filesystem('/dev/root', '/'))).toThrow('unsupported_recovery_lock_filesystem');
+});
+
+it('preserves spaces and parentheses while refusing ambiguous mount delimiters', () => {
+  const name = '/dev/volume (backup)'; const path = '/Volumes/Local (apfs, local)';
+  expect(() => checkDarwinLockMount(`${name} on ${path} (hfs, local)\n`, filesystem(name, path))).not.toThrow();
+  expect(() => checkDarwinLockMount(`${name} on ${path} (nfs, local)\n`, filesystem(name, path))).toThrow('unsupported_recovery_lock_filesystem');
+  expect(() => checkDarwinLockMount('disk on name on / (apfs, local)\n', filesystem('disk on name', '/'))).toThrow('unsupported_recovery_lock_filesystem');
+});
+
+it.runIf(process.platform === 'darwin').each(['apfs, local, noowners', 'nfs, local'])(
+  'refuses work when the actual filesystem behind a firmlink has %s flags', async flags => {
+    const path = await root(); const work = vi.fn(); const command = lockScope.lockSystemCommand;
+    vi.spyOn(lockScope, 'lockSystemCommand').mockImplementation(async (file, args) => {
+      if (file === '/sbin/mount') return `/dev/root on / (apfs, local)\n/dev/data on /System/Volumes/Data (${flags})\n`;
+      if (file === '/bin/df') return filesystem('/dev/data', '/System/Volumes/Data');
+      return command(file, args);
+    });
+    await expect(withRecoveryLock(path, 'run', work)).rejects.toThrow('unsupported_recovery_lock_filesystem');
+    expect(work).not.toHaveBeenCalled(); expect(await readdir(path)).toEqual([]);
+  },
+);
+
+it.runIf(process.platform === 'darwin')('queries the existing normalized directory and refuses unavailable structured inspection', async () => {
+  const path = await root(); const command = lockScope.lockSystemCommand;
+  const inspected: string[][] = [];
+  vi.spyOn(lockScope, 'lockSystemCommand').mockImplementation(async (file, args) => {
+    if (file === '/bin/df') { inspected.push(args); throw new Error('synthetic unavailable option'); }
+    return command(file, args);
+  });
+  await expect(inspectRecoveryDirectory(path, true)).rejects.toThrow('unsupported_recovery_lock_filesystem');
+  expect(inspected).toEqual([['--libxo', 'json', '-P', '-k', platformPath(path)]]);
+  expect(await readdir(path)).toEqual([]);
 });
 
 it('refuses network, FUSE and unqualified Linux filesystems', () => {

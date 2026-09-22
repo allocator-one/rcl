@@ -520,6 +520,10 @@ This protocol requires coherent ordinary local storage: local APFS/HFS with
 ownership enabled on macOS, or ext2/3/4, tmpfs, XFS or Btrfs on Linux. Network,
 FUSE, overlay and unknown filesystems are unsupported. macOS refuses an ambiguous
 system mount listing, including an ambiguous entry for an unrelated mount. It
+uses the existing directory's filesystem name and mountpoint from bounded
+`df --libxo json` output, matched to one exact mount-table entry; firmlink or case
+aliases never select an ancestor's flags. Unavailable structured inspection or
+unmatched/ambiguous attribution refuses without a fallback. It
 rejects ACL allow grants or unrecognized ACL output; restrictive deny-only ACLs
 are allowed. The root must already be private (effective-user-owned
 mode 0700), and ancestors must be protected against other users' writes, apart
