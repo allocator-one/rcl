@@ -46,8 +46,17 @@ export function checkLinuxLockFilesystem(type: bigint): void {
   if (![0xef53n, 0x01021994n, 0x58465342n, 0x9123683en].includes(type)) throw new Error('unsupported_recovery_lock_filesystem');
 }
 
+/** Inspect existing recovery storage without creating or adopting missing state. */
+export function inspectRecoveryDirectory(input: string, privateRoot: boolean): Promise<string> {
+  return recoveryDirectory(input, privateRoot, false);
+}
+
 /** Validate before creating children, then recheck after concurrent mkdir. */
-export async function prepareLockRoot(input: string): Promise<string> {
+export function prepareLockRoot(input: string): Promise<string> {
+  return recoveryDirectory(input, true, true);
+}
+
+async function recoveryDirectory(input: string, privateRoot: boolean, createMissing: boolean): Promise<string> {
   const path = platformPath(input); const uid = process.geteuid?.();
   if (uid === undefined || /[\r\n]/.test(path)) throw new Error('unsafe_recovery_lock_root');
   const chain: string[] = [];
@@ -56,12 +65,12 @@ export async function prepareLockRoot(input: string): Promise<string> {
     let info;
     try { info = await lstat(current); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (!createMissing || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       try { await mkdir(current, { mode: 0o700 }); }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
       info = await lstat(current);
     }
-    checkLockDirectory(info, uid, current === path);
+    checkLockDirectory(info, uid, privateRoot && current === path);
     if (process.platform === 'darwin') {
       checkDarwinLockACL(await lockSystemCommand('/bin/ls', ['-lde', current]));
     }

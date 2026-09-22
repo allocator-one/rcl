@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, readdir, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -141,6 +141,18 @@ describe('source and receipt binding', () => {
 });
 
 describe('receipt-aware original delivery', () => {
+  it('refuses an unsafe journal parent before delivering a previewed missing run', async () => {
+    const f = await fixture();
+    const shared = join(f.dir, 'shared'); await mkdir(shared); await chmod(shared, 0o777);
+    const manifest = join(shared, 'manifest.json');
+    expect(await runOriginalRecovery({ preview: true, manifest, ...f.selection, json: true }, f.deps)).toBe(0);
+    const manifestSha256 = sha256Hex(await readFile(manifest, 'utf8'));
+    expect(await runOriginalRecovery({ apply: true, manifest, manifestSha256, json: true }, f.deps)).toBe(5);
+    expect(f.requests.every(request => request.method === 'GET')).toBe(true);
+    expect(f.recorded()).toBeUndefined();
+    expect(f.stored).toEqual({});
+    await expect(readdir(manifest + '.journal')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('resolves lost POST and PUT acknowledgments by exact reads, and concurrent resumes never repost', async () => {
     const f = await fixture(); f.behavior.losePost = true; f.behavior.losePut = true;
     expect(await f.preview()).toBe(0); expect(f.requests.every(r => r.method === 'GET')).toBe(true);

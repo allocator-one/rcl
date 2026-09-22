@@ -494,7 +494,14 @@ Apply starts an adjacent `original-run.json.journal` directory with append-only,
 fsynced checkpoints before every remote write. Each checkpoint has an
 8 MiB + 1 KiB read/write bound, retaining the manifest's full prose audit and
 reserving space for the checkpoint wrapper.
-Oversized checkpoints refuse before publication. Resume requires that directory;
+Oversized checkpoints refuse before publication. Apply and resume require the
+journal to be effective-user-owned mode 0700, on the supported local storage
+listed below, with protected ancestors and no harmful or unknown ACL grants.
+Apply checks the selected parent before creating the journal exclusively; resume
+never creates missing state or repairs permissions. Each append checks the
+selected journal's device/inode identity before writing. This detects replacement
+between checkpoints; it does not claim protection against concurrent privileged
+or same-user path manipulation. Resume requires that directory;
 it never generates a replacement operation. A dedicated
 `RCL_DATA_DIR/original-run-recovery-locks` directory serializes applies for the same
 host/organization/run, including different manifest paths. Native accounting

@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { platformPath, readStable, sha256 } from '../../telemetry/recovery/files.js';
+import { inspectRecoveryDirectory } from './lock-path.js';
 
 // Prepared checkpoint data copies manifest subtrees at the same indentation,
 // except for the destination's extra level and the longer source field name.
@@ -33,14 +34,27 @@ export async function writeExclusive(path: string, value: unknown, limit = Infin
 }
 export { withRecoveryLock } from './lock.js';
 
+async function inspectJournalDirectory(path: string, privateRoot: boolean): Promise<void> {
+  try { await inspectRecoveryDirectory(path, privateRoot); }
+  catch (error) {
+    if (error instanceof Error && /^(unsafe|unsupported)_recovery_lock_/.test(error.message)) {
+      throw new Error(error.message.replace('_lock_', '_journal_'));
+    }
+    throw error;
+  }
+}
+
 export interface Journal {
   append: (phase: string, data?: unknown) => Promise<void>;
 }
 /** Checkpoints are audit facts, never a substitute for fresh server readback. */
 export async function openJournal(path: string, manifestSha: string, operation: string, mode: 'apply' | 'resume', beforeWrite?: (phase: string) => Promise<void>): Promise<Journal> {
   path = platformPath(path); await parentSafe(path);
+  await inspectJournalDirectory(dirname(path), false);
   if (mode === 'apply') { await mkdir(path, { mode: 0o700 }); await syncDirectory(dirname(path)); }
   else if (await realpath(path) !== path || !(await lstat(path)).isDirectory()) throw new Error('recovery_journal_unavailable');
+  await inspectJournalDirectory(path, true);
+  const directory = await lstat(path, { bigint: true });
   const files = (await readdir(path)).sort();
   if (files.some(n => !/^\d{8}\.json$/.test(n))) throw new Error('unknown_recovery_journal_file');
   let sequence = 0; let previous = manifestSha;
@@ -63,6 +77,8 @@ export async function openJournal(path: string, manifestSha: string, operation: 
   }
   const journal: Journal = { append: async (phase, data = null) => {
     await beforeWrite?.(phase);
+    const current = await lstat(path, { bigint: true });
+    if (!current.isDirectory() || current.dev !== directory.dev || current.ino !== directory.ino) throw new Error('recovery_journal_replaced');
     const record = { operation_id: operation, manifest_sha256: manifestSha, sequence: sequence + 1, previous_sha256: previous, phase, recorded_at: new Date().toISOString(), data };
     const name = join(path, `${String(sequence + 1).padStart(8,'0')}.json`);
     await writeExclusive(name, record, MAX_RECOVERY_CHECKPOINT_BYTES); sequence++;
