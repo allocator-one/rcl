@@ -13,7 +13,7 @@ import { sampleFinding, sampleResult, sampleReview } from './fixtures.js';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
 // The same behavior checks can exercise the installed npm tarball before release.
-const cli = process.env['RCL_TEST_PACKAGED_CLI'] ?? join(root, 'dist/index.js');
+const cli = process.env['RCL_TEST_PACKAGED_CLI'] || join(root, 'dist/index.js');
 async function snapshot(dir: string): Promise<Record<string, { bytes: string; mtime: number }>> {
   const files: Record<string, { bytes: string; mtime: number }> = {};
   for (const entry of await readdir(dir, { withFileTypes: true })) {

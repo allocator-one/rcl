@@ -13,7 +13,7 @@ import { projection } from './original-run-fixtures.js';
 import type { RunEnvelope } from '../../src/telemetry/envelope.js';
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const cli = process.env['RCL_TEST_PACKAGED_CLI'] ?? join(root, 'dist/index.js');
+const cli = process.env['RCL_TEST_PACKAGED_CLI'] || join(root, 'dist/index.js');
 async function snapshot(dir: string): Promise<unknown> {
   const rows: unknown[] = [];
   for (const name of (await readdir(dir)).sort()) {
