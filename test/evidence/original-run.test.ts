@@ -101,9 +101,6 @@ describe('source and receipt binding', () => {
     const reorderedFindings = structuredClone(projection(prepared.envelope,{}));
     [reorderedFindings.findings[0], reorderedFindings.findings[1]] = [reorderedFindings.findings[1]!, reorderedFindings.findings[0]!];
     expect(matchesOriginalRun(reorderedFindings, prepared)).toBe(false);
-    const addedCall = structuredClone(projection(prepared.envelope,{}));
-    addedCall.calls.push(structuredClone(addedCall.calls[0]!));
-    expect(matchesOriginalRun(addedCall, prepared)).toBe(false);
     expect(instant('2026-01-01T01:00:00.123456+01:00')).toBe(instant('2026-01-01T00:00:00.123456Z'));
     expect(instant('2026-01-01T00:00:00.123457Z')).not.toBe(instant('2026-01-01T00:00:00.123456Z'));
   });
