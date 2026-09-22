@@ -9,7 +9,7 @@ import { type ArtifactKind } from '../telemetry/envelope.js';
 import { openSink, type EvidenceDeps } from './status.js';
 import { prepareOriginalRun, hashSchema, selectionSchema, uuidSchema, OriginalSelectionError, type PreparedOriginal } from './original-run/source.js';
 import { destination, readOriginalRun, readOriginalArtifacts, type Destination } from './original-run/remote.js';
-import { writeExclusive, withRecoveryLock, openJournal, serializeRecoveryDocument } from './original-run/journal.js';
+import { writeExclusive, withRecoveryLock, openJournal, serializeRecoveryDocument, MAX_RECOVERY_DOCUMENT_BYTES } from './original-run/journal.js';
 import { decodeOriginalReport } from './original-run/decode.js';
 
 export interface OriginalRunOptions {
@@ -19,7 +19,7 @@ export interface OriginalRunOptions {
   reportMd?: string; markdownSha256?: string; originalMode?: string;
 }
 export interface OriginalRunDeps extends EvidenceDeps { beforeCheckpoint?: (phase: string) => Promise<void> }
-export const MAX_ORIGINAL_RUN_MANIFEST_BYTES = 8 * 1024 * 1024;
+export const MAX_ORIGINAL_RUN_MANIFEST_BYTES = MAX_RECOVERY_DOCUMENT_BYTES;
 const manifestSchema = z.object({
   kind: z.literal('rcl-original-run-recovery'), version: z.literal(1), operation_id: uuidSchema,
   created_at: z.string(), rcl_version: z.string(),

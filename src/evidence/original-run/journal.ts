@@ -4,6 +4,13 @@ import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { platformPath, readStable, sha256 } from '../../telemetry/recovery/files.js';
 
+// Prepared checkpoint data copies manifest subtrees at the same indentation,
+// except for the destination's extra level and the longer source field name.
+// Reserve 1 KiB beyond the manifest for those bytes and the bounded journal
+// wrapper (UUID, hashes, sequence, phase and timestamp); do not truncate audit.
+export const MAX_RECOVERY_DOCUMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_RECOVERY_CHECKPOINT_BYTES = MAX_RECOVERY_DOCUMENT_BYTES + 1024;
+
 async function parentSafe(path: string): Promise<void> {
   if (await realpath(dirname(path)) !== dirname(path)) throw new Error('symlink_directory');
 }
@@ -40,7 +47,7 @@ export async function openJournal(path: string, manifestSha: string, operation: 
   let torn: Array<{ file: string; sha256: string }> = [];
   for (const name of files) {
     if (name !== `${String(++sequence).padStart(8,'0')}.json`) throw new Error('recovery_journal_sequence_gap');
-    const snapshot = await readStable(join(path, name), 1024 * 1024);
+    const snapshot = await readStable(join(path, name), MAX_RECOVERY_CHECKPOINT_BYTES);
     let record: Record<string, unknown>;
     try { record = JSON.parse(snapshot.text) as Record<string, unknown>; }
     catch {
@@ -58,7 +65,7 @@ export async function openJournal(path: string, manifestSha: string, operation: 
     await beforeWrite?.(phase);
     const record = { operation_id: operation, manifest_sha256: manifestSha, sequence: sequence + 1, previous_sha256: previous, phase, recorded_at: new Date().toISOString(), data };
     const name = join(path, `${String(sequence + 1).padStart(8,'0')}.json`);
-    await writeExclusive(name, record); sequence++;
+    await writeExclusive(name, record, MAX_RECOVERY_CHECKPOINT_BYTES); sequence++;
     previous = sha256(JSON.stringify(record, null, 2) + '\n');
   } };
   if (torn.length) await journal.append('interrupted_checkpoints_retained', { files: torn });

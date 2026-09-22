@@ -491,7 +491,10 @@ rcl evidence recover-run --resume --manifest original-run.json \
 ```
 
 Apply starts an adjacent `original-run.json.journal` directory with append-only,
-fsynced checkpoints before every remote write. Resume requires that directory;
+fsynced checkpoints before every remote write. Each checkpoint has an
+8 MiB + 1 KiB read/write bound, retaining the manifest's full prose audit and
+reserving space for the checkpoint wrapper.
+Oversized checkpoints refuse before publication. Resume requires that directory;
 it never generates a replacement operation. A dedicated
 `RCL_DATA_DIR/original-run-recovery-locks` directory serializes applies for the same
 host/organization/run, including different manifest paths. Native accounting
@@ -508,9 +511,10 @@ Concurrent older private recovery clients are unsupported.
 
 This protocol requires coherent ordinary local storage: local APFS/HFS with
 ownership enabled on macOS, or ext2/3/4, tmpfs, XFS or Btrfs on Linux. Network,
-FUSE, overlay and unknown filesystems are unsupported. macOS checks the system
-mount listing and rejects ACL allow grants or unrecognized ACL output; restrictive
-deny-only ACLs are allowed. The root must already be private (effective-user-owned
+FUSE, overlay and unknown filesystems are unsupported. macOS refuses an ambiguous
+system mount listing, including an ambiguous entry for an unrelated mount. It
+rejects ACL allow grants or unrecognized ACL output; restrictive deny-only ACLs
+are allowed. The root must already be private (effective-user-owned
 mode 0700), and ancestors must be protected against other users' writes, apart
 from root-owned sticky temporary directories. Missing private directories are
 created; existing permissions are never silently repaired. These checks do not

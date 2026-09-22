@@ -6,7 +6,7 @@ import { decodeOriginalReport } from '../../src/evidence/original-run/decode.js'
 import { prepareOriginalRun } from '../../src/evidence/original-run/source.js';
 import { runOriginalRecovery, type OriginalRunOptions } from '../../src/evidence/recover-run.js';
 import { matchesOriginalRun, instant } from '../../src/evidence/original-run/remote.js';
-import { writeExclusive } from '../../src/evidence/original-run/journal.js';
+import { openJournal, writeExclusive, MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_DOCUMENT_BYTES } from '../../src/evidence/original-run/journal.js';
 import { readStable, sha256 } from '../../src/telemetry/recovery/files.js';
 import { sampleResult, sampleReview, sampleFinding } from '../telemetry/fixtures.js';
 import { sha256Hex, type RunEnvelope } from '../../src/telemetry/envelope.js';
@@ -316,6 +316,43 @@ it('bounds exclusive manifests by formatted UTF-8 bytes including the final LF, 
   const tooLarge = f.manifest + '.oversized';
   await expect(writeExclusive(tooLarge,{ value:value.value + 'x' },limit)).rejects.toThrow('recovery_document_too_large');
   await expect(readFile(tooLarge)).rejects.toMatchObject({ code:'ENOENT' });
+});
+
+it('resumes an accepted original whose retained prose audit exceeds the old journal read bound', async () => {
+  const rawFinding = { id: 'raw', file: 'file.ts', startLine: 1, endLine: 2, severity: 'important' as const,
+    category: 'correctness', title: '[redacted]', description: '[redacted]', suggestedFix: '[redacted]' };
+  const f = await fixture(report => {
+    report.reviews = Array.from({ length: 2 }, () => sampleReview({
+      findings: Array.from({ length: 2000 }, (_, index) => ({ ...rawFinding, id: `raw-${index}` })),
+    }));
+  });
+  // Fill the complete accepted manifest to its byte limit, including its
+  // observation metadata, using valid UTF-8 client metadata. Keep every audit
+  // location and exercise the actual preview/apply/fresh-resume lifecycle.
+  expect(await f.preview()).toBe(0);
+  const remaining = MAX_RECOVERY_DOCUMENT_BYTES - (await readFile(f.manifest)).length;
+  await rm(f.manifest);
+  f.deps.rclVersion += '😀'.repeat(Math.floor(remaining / 4)) + 'x'.repeat(remaining % 4);
+  expect(await f.preview()).toBe(0);
+  expect((await readFile(f.manifest)).length).toBe(MAX_RECOVERY_DOCUMENT_BYTES);
+  expect(await f.apply()).toBe(0);
+  const checkpoint = await readFile(join(f.manifest + '.journal', '00000001.json'));
+  expect(checkpoint.length).toBeGreaterThan(1024 * 1024);
+  expect(JSON.parse(checkpoint.toString('utf8')).data.retained_content_limitations.redacted_prose).toHaveLength(12000);
+  const writes = f.requests.filter(request => request.method !== 'GET');
+  expect(await f.apply(true)).toBe(0);
+  expect(f.requests.filter(request => request.method !== 'GET')).toEqual(writes);
+  expect(await readFile(f.selection.reportJson, 'utf8')).toBe(f.text);
+}, 20_000);
+
+it('refuses an oversized checkpoint before publication and keeps the journal resumable', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rcl-journal-bound-')); dirs.push(dir);
+  const path = join(dir, 'journal'); const digest = 'a'.repeat(64); const operation = 'operation';
+  const journal = await openJournal(path, digest, operation, 'apply');
+  await expect(journal.append('oversized', 'x'.repeat(MAX_RECOVERY_CHECKPOINT_BYTES))).rejects.toThrow('recovery_document_too_large');
+  expect(await readdir(path)).toEqual([]);
+  await journal.append('retry', { readable: true });
+  await expect(openJournal(path, digest, operation, 'resume')).resolves.toBeDefined();
 });
 
 

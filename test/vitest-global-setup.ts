@@ -16,9 +16,20 @@ export const shouldBuildCli = (env: NodeJS.ProcessEnv = process.env): boolean =>
 const require = createRequire(import.meta.url);
 export const typescriptBin = (): string => require.resolve('typescript/bin/tsc');
 
+let building: Promise<void> | undefined;
+let buildRequested = false;
 async function buildCli(): Promise<void> {
   if (!shouldBuildCli()) return;
-  await exec(process.execPath, [typescriptBin()], { cwd: root, timeout: 30_000 });
+  buildRequested = true;
+  // Vitest can enter another rerun hook before the first hook finishes. Keep
+  // all callers waiting until changes received during compilation are built.
+  building ??= (async () => {
+    while (buildRequested) {
+      buildRequested = false;
+      await exec(process.execPath, [typescriptBin()], { cwd: root, timeout: 30_000 });
+    }
+  })().finally(() => { building = undefined; });
+  await building;
 }
 
 export async function setup(project: VitestProject): Promise<void> {
