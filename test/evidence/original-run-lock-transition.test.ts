@@ -3,57 +3,39 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { withRecoveryLock } from '../../src/evidence/original-run/journal.js';
-const controls = vi.hoisted(() => ({ pauseTemp: false, observeBefore: false, snapshots: [] as Array<{nlink:number;ctimeMs:number;size:number}>, linked: (() => {}) as () => void, allowUnlink: Promise.resolve(), releaseUnlink: (() => {}) as () => void, releaseWork: (() => {}) as () => void, unlinked: Promise.resolve(), unlinkDone: (() => {}) as () => void }));
-vi.mock('node:fs/promises', async (original) => {
+import { platformPath, sha256 } from '../../src/telemetry/recovery/files.js';
+
+const controls = vi.hoisted(() => ({ path: '', armed: false, releaseChoosing: () => {}, ready: Promise.resolve() }));
+vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
-  return { ...fs, lstat: async (...args: Parameters<typeof fs.lstat>) => {
-    const snapshot = await fs.lstat(...args);
-    // Release after the contender has captured the changed owner stat, so the
-    // immutable read reports its real ctime conflict before acquisition retries.
-    if (String(args[0]).endsWith('.lock') && controls.snapshots.length === 2) controls.releaseWork();
-    return snapshot;
-  }, unlink: async (path: Parameters<typeof fs.unlink>[0]) => {
-    if (controls.pauseTemp && String(path).endsWith('.tmp')) {
-      controls.pauseTemp = false; controls.linked(); await controls.allowUnlink;
-      await new Promise(r => setTimeout(r, 5));
-      const result = await fs.unlink(path); controls.unlinkDone(); return result;
+  return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    if (controls.armed && String(args[0]) === controls.path) {
+      controls.armed = false; controls.releaseChoosing(); await controls.ready;
     }
-    return fs.unlink(path);
-  }, open: async (...args: Parameters<typeof fs.open>) => {
-    const handle = await fs.open(...args); const stat = handle.stat.bind(handle);
-    if (String(args[0]).endsWith('.lock')) handle.stat = (async (...statArgs: Parameters<typeof handle.stat>) => {
-      const snapshot = await stat(...statArgs); controls.snapshots.push({nlink:Number(snapshot.nlink),ctimeMs:Number(snapshot.ctimeMs),size:Number(snapshot.size)});
-      if (controls.observeBefore) { controls.observeBefore = false; controls.releaseUnlink(); await controls.unlinked; }
-      return snapshot;
-    }) as typeof handle.stat;
-    return handle;
+    return fs.open(...args);
   } };
 });
-it('retries lock metadata changes during hard-link cleanup and enters recovery only after acquiring ownership', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'rcl-hardlink-transition-'));
-  const visible = new Promise<void>(resolve => { controls.linked = resolve; });
-  controls.allowUnlink = new Promise<void>(resolve => { controls.releaseUnlink = resolve; });
-  controls.unlinked = new Promise<void>(resolve => { controls.unlinkDone = resolve; });
-  const holdWork = new Promise<void>(resolve => { controls.releaseWork = resolve; });
-  controls.pauseTemp = true; controls.observeBefore = true;
-  let active = 0; let maximum = 0; let completed = 0;
-  const first = withRecoveryLock(root, 'same destination/org/run', async () => {
-    active++; maximum = Math.max(maximum, active);
-    await holdWork; active--; completed++;
-  });
+
+it('rereads an actual choosing-to-ready inode replacement between lstat and open', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rcl-ready-transition-')); const identity = 'same run';
+  let choose!: () => void; const chosen = new Promise<void>(resolve => { choose = resolve; });
+  const holdChoosing = new Promise<void>(resolve => { controls.releaseChoosing = resolve; });
+  let ready!: () => void; controls.ready = new Promise<void>(resolve => { ready = resolve; });
+  let active = 0; let maximum = 0; let completed = 0; let secondTicket = 0;
+  const work = async () => { maximum = Math.max(maximum, ++active); await new Promise(r => setImmediate(r)); active--; completed++; };
+  const first = withRecoveryLock(root, identity, work, { onEvent: async event => {
+    if (event.stage === 'choosing_published') {
+      controls.path = join(platformPath(root), `${sha256(identity)}.bakery`, `${event.registration.token}.json`);
+      choose(); await holdChoosing;
+    }
+    if (event.stage === 'ready_published') ready();
+  } });
   try {
-    await visible;
-    const second = withRecoveryLock(root, 'same destination/org/run', async () => {
-      active++; maximum = Math.max(maximum, active); active--; completed++;
-    });
-    await expect(second).resolves.toBeUndefined();
-    await first;
-    expect(completed).toBe(2); expect(maximum).toBe(1);
-    expect(controls.snapshots[0]!.nlink).toBe(2);
-    expect(controls.snapshots[1]!.nlink).toBe(1);
-    expect(controls.snapshots[0]!.ctimeMs).not.toBe(controls.snapshots[1]!.ctimeMs);
-  } finally {
-    controls.releaseUnlink(); controls.releaseWork();
-    await first; await rm(root, { recursive: true, force: true });
-  }
+    await chosen; controls.armed = true;
+    const second = withRecoveryLock(root, identity, work, { onEvent: async event => {
+      if (event.stage === 'ticket_selected') secondTicket = event.registration.ticket!;
+    } });
+    await Promise.all([first, second]);
+    expect(controls.armed).toBe(false); expect(secondTicket).toBe(2); expect(completed).toBe(2); expect(maximum).toBe(1);
+  } finally { controls.releaseChoosing(); ready(); await first; await rm(root, { recursive: true, force: true }); }
 });

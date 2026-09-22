@@ -498,6 +498,25 @@ host/organization/run, including different manifest paths. Native accounting
 locks and stores are not used. Locks with incomplete or unverifiable ownership
 fail closed and require inspection; never delete a live lock.
 
+The lock uses a unique registration per acquisition and automatically removes a
+dead participant only when its PID is absent in the same kernel boot and PID
+namespace. A reboot, foreign scope, PID reuse or uncertain liveness requires
+inspection or a bounded retry; age alone never permits deletion. Legacy private
+`.lock`/`.reclaim` state is refused, not migrated or bypassed. Empty `.bakery`
+registries remain in place, and an interrupted unpublished `.tmp` is harmless.
+Concurrent older private recovery clients are unsupported.
+
+This protocol requires coherent ordinary local storage: local APFS/HFS with
+ownership enabled on macOS, or ext2/3/4, tmpfs, XFS or Btrfs on Linux. Network,
+FUSE, overlay and unknown filesystems are unsupported. macOS checks the system
+mount listing and rejects ACL allow grants or unrecognized ACL output; restrictive
+deny-only ACLs are allowed. The root must already be private (effective-user-owned
+mode 0700), and ancestors must be protected against other users' writes, apart
+from root-owned sticky temporary directories. Missing private directories are
+created; existing permissions are never silently repaired. These checks do not
+certify arbitrary filesystem implementations or protect against hostile code
+running as the same user or a privileged administrator.
+
 Every invocation rechecks source bytes and the reviewed manifest. Before retrying,
 it reads and compares all immutable run header/settings/findings/calls/artifact
 declarations, then fetches exact raw artifact bytes and verifies their digest and
