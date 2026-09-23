@@ -54,6 +54,12 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+it('refuses recovery timing overrides before acquiring a target lock', async () => {
+  const work = vi.fn();
+  await expect(withNativeTarget(dir, target, work, { qualification: 'recovery', lockTimeoutMs: 1 })).rejects.toThrow('native_target_recovery_timing_unsupported');
+  expect(work).not.toHaveBeenCalled();
+});
+
 it('preserves ordinary attempt and round operations in the Windows platform branch', async () => {
   // Branch simulation, not Windows filesystem qualification. Existing attempt
   // durability explicitly skips directory fsync on Windows.

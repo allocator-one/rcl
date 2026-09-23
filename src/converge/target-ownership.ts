@@ -47,6 +47,9 @@ export async function withNativeTarget<T>(gitCommonDir: string, target: string,
   if (!target) throw new Error('native_target_required');
   const qualification = options.qualification ?? 'ordinary';
   if (qualification !== 'ordinary' && qualification !== 'recovery') throw new Error('native_target_invalid_qualification');
+  if (qualification === 'recovery' && (options.lockTimeoutMs !== undefined || options.lockRetryMs !== undefined)) {
+    throw new Error('native_target_recovery_timing_unsupported');
+  }
   const commonDir = await realpath(resolve(gitCommonDir));
   const lock = qualification === 'recovery' ? withRecoveryLock : withNativeLock;
   return qualification === 'ordinary'
