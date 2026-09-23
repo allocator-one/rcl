@@ -63,7 +63,7 @@ exit "$FAKE_RCL_EXIT"
     cwd: root,
     encoding: 'utf8',
     env: {
-      PATH: `${fakeBin}:/opt/homebrew/bin:/usr/bin:/bin`,
+      PATH: `${fakeBin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
       PR_NUMBER: '80',
       HEAD_SHA: headSha,
       GITHUB_REPOSITORY: 'allocator-one/rcl',
@@ -152,6 +152,10 @@ describe('Review Council gate workflow', () => {
 
     const retention = workflow.slice(workflow.indexOf('- name: Retain original review evidence'));
     expect(retention).toContain('if: always()');
+    expect(retention).toContain(
+      'name: review-gate-${{ github.run_id }}-${{ github.run_attempt }}'
+    );
+    expect(retention).not.toContain('inputs.attempt_id');
     expect(retention).toContain('${{ runner.temp }}/rcl-gate-evidence/');
     expect(retention).toContain('${{ runner.temp }}/rcl-gate-data/quarantine/');
   });
