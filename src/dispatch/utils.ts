@@ -280,6 +280,26 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleepUntilRetry(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const finish = (): void => {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+
+    signal.addEventListener('abort', finish, { once: true });
+    if (signal.aborted) {
+      finish();
+      return;
+    }
+    timeoutHandle = setTimeout(finish, ms);
+  });
+}
+
 export type AttemptOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; timedOut: boolean; error: string };
@@ -318,11 +338,15 @@ export async function attemptWithRetries<T>(opts: {
           return { ok: false, timedOut: !cancelled, error: cancelled ? 'Request cancelled' : 'Request timed out' };
         }
         if (opts.isRetryable(err) && attempt < opts.maxRetries) {
-          await Promise.race([
-            sleep(retryDelay(attempt)),
-            new Promise<void>((resolve) => controller.signal.addEventListener('abort', () => resolve(), { once: true })),
-          ]);
-          if (controller.signal.aborted) return { ok: false, timedOut: opts.signal?.aborted !== true, error: opts.signal?.aborted ? 'Request cancelled' : 'Request timed out' };
+          await sleepUntilRetry(retryDelay(attempt), controller.signal);
+          if (controller.signal.aborted) {
+            const cancelled = opts.signal?.aborted === true;
+            return {
+              ok: false,
+              timedOut: !cancelled,
+              error: cancelled ? 'Request cancelled' : 'Request timed out',
+            };
+          }
           continue;
         }
         break;

@@ -137,6 +137,14 @@ describe('machine refutation discovery', () => {
 });
 
 describe('source normalization and original artifact safety', () => {
+  it('accepts fractional verification timeouts from compatible reports', () => {
+    const original = report();
+    original.run!.gating.verification_timeout_ms = 12.5;
+    original.run!.gating.verification_pass_timeout_ms = 37.5;
+
+    expect(parseSource(JSON.stringify(original))).toMatchObject({ format: 'modern' });
+  });
+
   it('retains long model identifiers while detecting secret values hidden by JSON escapes', () => {
     const original = report();
     const model = 'vendor/' + 'AbCd3fGhIjKlMnOp'.repeat(5);

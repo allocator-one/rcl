@@ -74,7 +74,7 @@ describe('attemptWithRetries external cancellation', () => {
       attempt,
     });
 
-    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(attempt).not.toHaveBeenCalled();
     expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
   });
 
@@ -95,5 +95,36 @@ describe('attemptWithRetries external cancellation', () => {
 
     expect(attempt).toHaveBeenCalledTimes(1);
     expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
+  });
+
+  it('cancels a retry delay without starting another attempt', async () => {
+    const controller = new AbortController();
+    let retryableChecked!: () => void;
+    const retryableWasChecked = new Promise<void>((resolve) => {
+      retryableChecked = resolve;
+    });
+    const attempt = vi.fn(async () => {
+      throw new Error('retryable');
+    });
+    const outcomePromise = attemptWithRetries({
+      timeoutMs: 10_000,
+      maxRetries: 3,
+      signal: controller.signal,
+      isRetryable: () => {
+        retryableChecked();
+        return true;
+      },
+      attempt,
+    });
+
+    await retryableWasChecked;
+    controller.abort();
+
+    await expect(outcomePromise).resolves.toEqual({
+      ok: false,
+      timedOut: false,
+      error: 'Request cancelled',
+    });
+    expect(attempt).toHaveBeenCalledTimes(1);
   });
 });
