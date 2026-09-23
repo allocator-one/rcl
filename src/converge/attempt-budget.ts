@@ -14,6 +14,8 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { withNativeTarget } from './target-ownership.js';
+import { RegistryCleanupError } from '../coordination/registry-lock.js';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
 
@@ -67,6 +69,18 @@ export class ConvergeAttemptBudgetExceededError extends Error {
   }
 }
 
+/** A post-claim delivery failed after the attempt was durably consumed. */
+export class ConvergeAttemptPostClaimError extends Error {
+  constructor(readonly claim: ConvergeAttemptClaim, cause: unknown) {
+    super(
+      `Attempt ${claim.attempt}/${claim.cap} is durably recorded, but post-claim delivery failed: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}. Do not retry this claim.`,
+      { cause }
+    );
+    this.name = 'ConvergeAttemptPostClaimError';
+  }
+}
+
 export class ConvergeAttemptStateError extends Error {
   readonly code = 'RCL_CONVERGE_ATTEMPT_STATE';
 
@@ -88,6 +102,8 @@ interface ClaimOptions {
   recordPid?: number;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
+  /** Runs after durable accounting and before target ownership is released. */
+  afterClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
 }
 
 interface AttemptLockOwner {
@@ -553,6 +569,59 @@ async function releaseOwnedLock(lockFile: string, owner: AttemptLockOwner): Prom
  * attempt. This makes the cost ceiling independent of agent bookkeeping.
  */
 export async function claimConvergeAttempt(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
+  // Callers can retain and mutate their options object while this invocation
+  // waits for target ownership. Capture every input before that first await so
+  // the state claim cannot escape the lock selected for this operation.
+  const claimOptions: ClaimOptions = {
+    gitCommonDir: options.gitCommonDir,
+    target: validateTarget(options.target),
+    maxAttempts: options.maxAttempts,
+    now: options.now,
+    recordPid: options.recordPid,
+    lockTimeoutMs: options.lockTimeoutMs,
+    lockRetryMs: options.lockRetryMs,
+    afterClaim: options.afterClaim,
+  };
+  // Use one canonical directory for both target ownership and state paths.
+  // The caller's textual symlink must not be resolved once for a lock and
+  // later again for a state write after it has been retargeted.
+  claimOptions.gitCommonDir = await realpath(resolve(claimOptions.gitCommonDir));
+  const { gitCommonDir, target } = claimOptions;
+  if (claimOptions.maxAttempts !== undefined) validateCap(claimOptions.maxAttempts);
+  let committed: ConvergeAttemptClaim | undefined;
+  try {
+    return await withNativeTarget(gitCommonDir, target, async () => {
+      committed = await claimConvergeAttemptOwned(claimOptions);
+      try {
+        await claimOptions.afterClaim?.(committed);
+      } catch (error) {
+        throw new ConvergeAttemptPostClaimError(committed, error);
+      }
+      return committed;
+    }, { lockTimeoutMs: claimOptions.lockTimeoutMs, lockRetryMs: claimOptions.lockRetryMs });
+  } catch (error) {
+    const postClaim = findPostClaimError(error);
+    if (postClaim) throw postClaim;
+    if (!(error instanceof RegistryCleanupError) || !committed || error.result !== committed) throw error;
+    committed.warning = [committed.warning,
+      `Attempt ${committed.attempt}/${committed.cap} is durably recorded, but target lock cleanup failed: ${error.message}. ` +
+      'Do not retry this claim. Inspect target coordination before further target mutations.'].filter(Boolean).join(' ');
+    return committed;
+  }
+}
+
+function findPostClaimError(error: unknown): ConvergeAttemptPostClaimError | undefined {
+  if (error instanceof ConvergeAttemptPostClaimError) return error;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const found = findPostClaimError(nested);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
   const target = validateTarget(options.target);
   const requestedCap =
     options.maxAttempts === undefined ? undefined : validateCap(options.maxAttempts);
