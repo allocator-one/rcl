@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { previewRoundGap } from '../../src/converge/round-gap.js';
+import { previewRoundGap, roundGapOperationPath } from '../../src/converge/round-gap.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 
 import { fixture, cleanup } from './round-gap-fixtures.js';
@@ -28,12 +28,29 @@ it('rechecks selected partial evidence before mutation', async () => {
   expect(await readFile(f.statePath)).toEqual(before);
 });
 it('retains exact native and attempt snapshots before changing native audit', async () => {
-  const f = await fixture(), manifest = await f.prepare();
+  const f = await fixture();
+  const native = await readFile(f.statePath);
+  const attempts = await readFile(f.attemptPath);
+  const report = await readFile(f.input.reportPath);
+  const incomplete = await readFile(f.input.incompletePath);
+  const manifest = await f.prepare();
   await f.apply();
-  expect(await readdir(join(f.dir, 'rcl-converge-gap-audits'))).not.toEqual([]);
+  const operation = roundGapOperationPath(f.dir, manifest.operationId);
+  expect(await readFile(join(operation, 'native-before.json'))).toEqual(native);
+  expect(await readFile(join(operation, 'attempts-before.json'))).toEqual(attempts);
+  expect(await readFile(join(operation, 'source-0.bin'))).toEqual(report);
+  expect(await readFile(join(operation, 'source-1.bin'))).toEqual(incomplete);
+  expect(await readFile(f.attemptPath)).toEqual(attempts);
+  expect(await readFile(f.input.reportPath)).toEqual(report);
+  expect(await readFile(f.input.incompletePath)).toEqual(incomplete);
 });
 it('refuses unknown audit manifest versions before native writes', async () => {
   const f = await fixture(), manifest = await f.prepare();
   await f.save({ ...manifest, version: 2 } as never);
+  const native = await readFile(f.statePath);
+  const attempts = await readFile(f.attemptPath);
   await expect(f.apply()).rejects.toThrow();
+  expect(await readFile(f.statePath)).toEqual(native);
+  expect(await readFile(f.attemptPath)).toEqual(attempts);
+  await expect(readdir(join(f.dir, 'rcl-converge-gap-audits'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
