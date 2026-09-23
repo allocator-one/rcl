@@ -66,6 +66,19 @@ describe('recoverAttestedDelivery', () => {
     expect(posts).toBe(1);
   });
 
+  it.each([true, false])('reports cancellation when a %s receipt normalizes its abort as unavailable', async (receiptFirst) => {
+    const controller = new AbortController();
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, signal: controller.signal, receiptFirst,
+      initialAttempts: receiptFirst ? 1 : 0,
+      post: async () => ({ kind: 'unavailable' }),
+      receipt: async () => { controller.abort(); return { kind: 'unavailable' }; },
+      sleep: async () => {},
+    });
+
+    expect(outcome).toEqual({ kind: 'cancelled', attempts: receiptFirst ? 1 : 1, recovered: false });
+  });
+
   it('refuses replay after expiry, cancellation, the deadline, or the finite attempt budget', async () => {
     const expired = await recoverAttestedDelivery({
       runId: 'run-1', payload: 'immutable', expiresAt: '2026-09-23T11:59:59.000Z', now: () => NOW,

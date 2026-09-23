@@ -86,6 +86,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
       return stopped() ?? outcome('deadline_exceeded', attempts);
     }
     if (receipt.kind === 'recorded') return outcome('recorded', attempts, true, receipt.value);
+    const afterInitialReceipt = stopped();
+    if (afterInitialReceipt) return afterInitialReceipt;
     if (receipt.kind === 'unavailable') return outcome('receipt_unavailable', attempts);
     if (receipt.kind === 'rejected') return outcome('receipt_rejected', attempts);
   }
@@ -118,6 +120,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
       return stopped() ?? outcome('deadline_exceeded', attempts);
     }
     if (receipt.kind === 'recorded') return outcome('recorded', attempts, true, receipt.value);
+    const afterReceipt = stopped();
+    if (afterReceipt) return afterReceipt;
     if (receipt.kind === 'unavailable') return outcome('receipt_unavailable', attempts);
     if (receipt.kind === 'rejected') return outcome('receipt_rejected', attempts);
 
