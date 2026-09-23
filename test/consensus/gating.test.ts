@@ -230,6 +230,7 @@ describe('applyGating (RCL-23)', () => {
       const fallback = await result;
 
       expect(ask).toHaveBeenCalledTimes(3);
+      expect(fallback.ok).toBe(false);
       expect(fallback.failure).toBeInstanceOf(Error);
       expect(fallback.findings).toEqual(findings);
       expect(fallback.findings.every((finding) => finding.gating === undefined)).toBe(true);

@@ -87,13 +87,21 @@ describe('loadConfig', () => {
   });
 
   it.each([
-    ['verificationTimeout', 12.5],
-    ['verificationPassTimeout', 12.5],
     ['verificationTimeout', 2_147_483_648],
     ['verificationPassTimeout', 2_147_483_648],
   ])('rejects unsafe gating %s values', async (key, value) => {
     await writeFile(join(dir, '.review-council.json'), JSON.stringify({ gating: { [key]: value } }));
     await expect(loadConfig(undefined, dir)).rejects.toThrow(ConfigError);
+  });
+
+  it.each([
+    ['verificationTimeout', 12.5],
+    ['verificationPassTimeout', 12.5],
+  ] as const)('accepts a positive fractional gating %s value', async (key, value) => {
+    await writeFile(join(dir, '.review-council.json'), JSON.stringify({ gating: { [key]: value } }));
+    const config = await loadConfig(undefined, dir);
+
+    expect(config.gating?.[key]).toBe(value);
   });
 });
 
