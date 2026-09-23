@@ -16,7 +16,9 @@ export function findingGatingReason(f: { severity: string; gating?: { reason: st
 /** A nongating followup cannot lower the severity needed for a critical pending source. */
 export function verdictClearsPending(state: ConvergeRunState, key: string, pendingRound: number,
   verdictRound: number, verdictSeverity: string | undefined): boolean {
-  const severity = state.rounds.find(round => round.round === pendingRound)?.severities?.[key];
+  // v1 rounds predate the per-round severity ledger. Their retained entry
+  // severity is the only evidence available, and must remain conservative.
+  const severity = state.rounds.find(round => round.round === pendingRound)?.severities?.[key] ?? state.findings[key]?.severity;
   return verdictRound >= pendingRound && (severity !== 'critical' || verdictSeverity === 'critical');
 }
 /** Derive only the explicit migration obligation from the unchanged v1 snapshot. */

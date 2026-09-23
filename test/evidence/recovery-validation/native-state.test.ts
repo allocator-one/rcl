@@ -27,6 +27,37 @@ it('accepts legacy-to-v2 lineage only with exact retained original bytes', () =>
   expect(validateRetainedNativeEvidence({ sourceJson: JSON.stringify(current), target, reports: [], nativeSourceJsons: [original] }).state).toEqual(current);
 });
 
+it('retains a legacy critical obligation when its original round has no severity ledger', () => {
+  const f = legacyFixture();
+  f.state.findings[f.key].severity = 'critical';
+  delete f.state.rounds[0].severities;
+  const original = JSON.stringify(f.state);
+  const current = {
+    ...f.state,
+    version: 2,
+    sightings: [],
+    findings: {
+      [f.key]: {
+        ...f.state.findings[f.key],
+        verdict: 'dismissed',
+        verdictRound: 1,
+        verdictSeverity: 'important',
+      },
+    },
+    migration: {
+      sourceSha256: sha(original),
+      snapshotPath: `/synthetic/native.v1-${sha(original)}.snapshot`,
+      migratedAt: '2026-09-22T01:00:00Z',
+    },
+  };
+  const input = { sourceJson: JSON.stringify(current), target, reports: [], nativeSourceJsons: [original] };
+  expect(() => validateRetainedNativeEvidence(input)).toThrow();
+  current.findings[f.key].pendingRound = 1;
+  input.sourceJson = JSON.stringify(current);
+  const result = validateRetainedNativeEvidence(input);
+  expect(result.actionableIdentities).toEqual([f.key]);
+});
+
 it.each(['report-bytes', 'digest', 'run', 'target', 'round', 'ref', 'key', 'descriptor', 'category', 'location', 'counts', 'severity', 'pending', 'annotation', 'missing-member'])
 ('refuses retained v2 %s tampering', change => {
   const f = semanticFixture(); const input = f.input(); const state = JSON.parse(input.sourceJson);
