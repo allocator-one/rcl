@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { readFile } from 'node:fs/promises';
-import { fixture, cleanup } from './round-gap-fixtures.js';
+import { fixture } from './round-gap-fixtures.js';
 import { loadConvergeRunState } from '../../src/converge/run-state.js';
 const fault=vi.hoisted(()=>({suffix:'',fail:false,failed:0,synced:0,skip:0}));
 vi.mock('node:fs/promises',async importOriginal=>{
@@ -14,7 +14,7 @@ vi.mock('node:fs/promises',async importOriginal=>{
     }});
   }};
 });
-afterEach(async()=>{fault.suffix='';fault.fail=false;fault.failed=0;fault.synced=0;fault.skip=0;await cleanup();});
+afterEach(()=>{fault.suffix='';fault.fail=false;fault.failed=0;fault.synced=0;fault.skip=0;});
 it.each(['native-before.json','attempts-before.json','source-0.bin','native-after.json'])(
   'refuses persistent initial fsync failure and resyncs identical retained %s before success',async suffix=>{
     const f=await fixture();await f.prepare();const before=await readFile(f.statePath);

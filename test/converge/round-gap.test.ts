@@ -1,10 +1,8 @@
-import { afterEach, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { readFile, writeFile } from 'node:fs/promises';
 import { processRoundReport, loadConvergeRunState, loadConvergeRunStateEvidence } from '../../src/converge/run-state.js';
-import { fixture, cleanup } from './round-gap-fixtures.js';
+import { fixture } from './round-gap-fixtures.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
-afterEach(cleanup);
-
 it('audits a spent missing report without fabricating round two, then admits exact original round three', async () => {
   const f = await fixture(), manifest = await f.prepare(), attempts = await readFile(f.attemptPath);
   expect(manifest.stateSha256).toBe((await loadConvergeRunStateEvidence(f.dir, f.target))?.sha256);

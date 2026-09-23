@@ -1,12 +1,10 @@
-import { afterEach, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture, cleanup } from './round-gap-fixtures.js';
+import { fixture } from './round-gap-fixtures.js';
 import { previewRoundGap } from '../../src/converge/round-gap.js';
 import { loadConvergeRunState, processRoundReport } from '../../src/converge/run-state.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
-
-afterEach(cleanup);
 
 async function laterGap(auditedEarlierGap = false) {
   const f = await fixture();

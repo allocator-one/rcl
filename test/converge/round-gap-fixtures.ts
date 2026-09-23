@@ -7,10 +7,10 @@ import { convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { applyRoundGap, previewRoundGap, type RoundGapManifest } from '../../src/converge/round-gap.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import { sampleResult } from '../telemetry/fixtures.js';
-const dirs: string[] = [];
-export async function cleanup() { await Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))); }
+import { onTestFinished } from 'vitest';
 export async function fixture(git = false) {
-  const cwd = await mkdtemp(join(tmpdir(), 'rcl-gap-binding-')); dirs.push(cwd);
+  const cwd = await mkdtemp(join(tmpdir(), 'rcl-gap-binding-'));
+  onTestFinished(() => rm(cwd, { recursive: true, force: true }));
   if (git) execFileSync('git',['init','-q',cwd]);
   const dir = git ? join(cwd,'.git') : cwd;
   const target = 'synthetic-gap';

@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture, cleanup } from './round-gap-fixtures.js';
+import { fixture } from './round-gap-fixtures.js';
 import { applyRoundGap, previewRoundGap, roundGapOperationPath } from '../../src/converge/round-gap.js';
 import { claimConvergeAttempt } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
@@ -16,7 +16,7 @@ vi.mock('../../src/evidence/original-run/lock.js', async original => {
   }) as typeof locks.withRecoveryLock };
 });
 function barrier() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
-afterEach(async () => { contention.wait = undefined; await cleanup(); });
+afterEach(() => { contention.wait = undefined; });
 
 it('preserves exact original snapshots, finding history and counters with an explicit unknown exit', async () => {
   const f = await fixture();

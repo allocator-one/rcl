@@ -1,16 +1,15 @@
-import { afterEach, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fixture, cleanup } from './round-gap-fixtures.js';
+import { fixture } from './round-gap-fixtures.js';
 import { Outbox } from '../../src/telemetry/outbox.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { loadConvergeRunState } from '../../src/converge/run-state.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
-afterEach(cleanup);
 const cli = fileURLToPath(new URL('../../src/index.ts',import.meta.url));
 async function command(cwd:string,args:string[],env:NodeJS.ProcessEnv) {
   const child=spawn(process.execPath,['--import',import.meta.resolve('tsx'),cli,...args],{
@@ -18,7 +17,10 @@ async function command(cwd:string,args:string[],env:NodeJS.ProcessEnv) {
     env:{...process.env,...env,TSX_DISABLE_CACHE:'1',NO_COLOR:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull},
   });
   let stdout='',stderr=''; child.stdout.on('data',c=>stdout+=c); child.stderr.on('data',c=>stderr+=c);
-  const code=await new Promise<number|null>((resolve,reject)=>{child.on('error',reject);child.on('close',resolve);});
+  const {code,signal}=await new Promise<{code:number|null;signal:NodeJS.Signals|null}>((resolve,reject)=>{
+    child.on('error',reject);child.on('close',(code,signal)=>resolve({code,signal}));
+  });
+  if(code===null) throw new Error(`CLI child terminated by ${signal??'an unknown signal'} before exit${stderr?`: ${stderr}`:''}`);
   return {code,stdout,stderr};
 }
 async function snapshot(dir:string):Promise<Record<string,string>> {

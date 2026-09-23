@@ -1,11 +1,10 @@
-import { afterEach, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { previewRoundGap, roundGapOperationPath } from '../../src/converge/round-gap.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 
-import { fixture, cleanup } from './round-gap-fixtures.js';
-afterEach(cleanup);
+import { fixture } from './round-gap-fixtures.js';
 
 it('rejects a supplied report digest that does not describe the selected actual bytes', async () => {
   const f = await fixture();
