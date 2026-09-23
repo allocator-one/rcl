@@ -13,7 +13,7 @@ vi.mock('node:fs/promises', async original => {
   return { ...fs,
     lstat: async (...args: Parameters<typeof fs.lstat>) => {
       const info = await fs.lstat(...args);
-      if (faults.unsafeWindowsStateDir && String(args[0]).endsWith('/rcl-converge-runs')) {
+      if (faults.unsafeWindowsStateDir && String(args[0]).replaceAll('\\', '/').endsWith('/rcl-converge-runs')) {
         return new Proxy(info, { get(target, property, receiver) {
           if (property === 'mode') return 0o40777;
           if (property === 'uid') return 0;

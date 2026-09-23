@@ -94,6 +94,7 @@ it('rejects duplicate-key manifests instead of accepting the last assertion', as
   const f=await fixture(); await f.prepare(); const text=(await readFile(f.manifestPath)).toString(); await writeFile(f.manifestPath,text.replace('"gapRound": 2','"gapRound": 4, "gapRound": 2'));
   await expect(f.apply()).rejects.toThrow('ambiguous');
 });
+
 it('preview creates no audit, lock or native changes and rejects symlink sources', async () => {
   const f=await fixture(), before=(await readdir(f.dir)).sort(), state=await readFile(f.statePath), attempts=await readFile(f.attemptPath);
   await previewRoundGap(f.input,f.dir); expect((await readdir(f.dir)).sort()).toEqual(before); expect(await readFile(f.statePath)).toEqual(state); expect(await readFile(f.attemptPath)).toEqual(attempts);
