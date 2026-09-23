@@ -597,8 +597,12 @@ export async function applyGating(
 
   const now = options.monotonicNow ?? performance.now.bind(performance);
   const started = now();
-  const verificationPassTimeoutMs =
-    options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs;
+  const verificationTimeoutMs = resolveTimerDelay(
+    'verificationTimeoutMs', options.verificationTimeoutMs
+  );
+  const verificationPassTimeoutMs = resolveTimerDelay(
+    'verificationPassTimeoutMs', options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+  );
   const verificationDeadline = started + verificationPassTimeoutMs;
   const verifierModel = options.verificationModel ?? '(none)';
   const stats: VerificationStats = {
@@ -727,7 +731,7 @@ export async function applyGating(
         if (remainingMs <= 0) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
-        const callTimeoutMs = Math.max(1, Math.min(options.verificationTimeoutMs, remainingMs));
+        const callTimeoutMs = Math.max(1, Math.min(verificationTimeoutMs, remainingMs));
         const controller = new AbortController();
         const answer = await new Promise<ModelAnswer>((resolve, reject) => {
           const deadlineTimer = setTimeout(() => {
