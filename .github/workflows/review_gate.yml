@@ -161,7 +161,7 @@ jobs:
           shutil.rmtree(sys.argv[1], ignore_errors=True)
           PYCLEAN
           mkdir -p "$RCL_RECOVERY_DIR"
-          ARCHIVE="$(mktemp "$RUNNER_TEMP/rcl-review-evidence.XXXXXX.tar")"
+          ARCHIVE="$(mktemp "$RUNNER_TEMP/rcl-review-evidence.XXXXXX")"
           CIPHERTEXT="$RCL_RECOVERY_DIR/review-evidence.cms"
           trap 'unlink "$ARCHIVE" 2>/dev/null || true' EXIT
           python3 - "$ARCHIVE" "$RCL_GATE_EXPORT" "$RCL_QUARANTINE" <<'PYARCHIVE'
@@ -189,16 +189,19 @@ jobs:
                       raise SystemExit(f"refusing non-regular retained path: {path}")
                   relative = path.relative_to(root)
                   member = Path(prefix, *relative.parts).as_posix()
-                  data = path.read_bytes()
-                  retained.append((member, data))
+                  digest = hashlib.sha256()
+                  with path.open("rb") as source:
+                      for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                          digest.update(chunk)
+                  retained.append((member, path, path.stat().st_size, digest.hexdigest()))
 
           if not retained:
               raise SystemExit("no review evidence is available to retain")
 
           manifest = {
               "files": [
-                  {"bytes": len(data), "path": name, "sha256": hashlib.sha256(data).hexdigest()}
-                  for name, data in retained
+                  {"bytes": size, "path": name, "sha256": digest}
+                  for name, _path, size, digest in retained
               ],
               "schema": "rcl-review-evidence-archive-v1",
           }
@@ -217,10 +220,22 @@ jobs:
               info.gname = ""
               bundle.addfile(info, io.BytesIO(data))
 
-          with tarfile.open(archive, "w", format=tarfile.USTAR_FORMAT) as bundle:
+          def add_file(bundle, name, path, size):
+              info = tarfile.TarInfo(name)
+              info.size = size
+              info.mtime = 0
+              info.mode = 0o600
+              info.uid = 0
+              info.gid = 0
+              info.uname = ""
+              info.gname = ""
+              with path.open("rb") as source:
+                  bundle.addfile(info, source)
+
+          with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as bundle:
               add_bytes(bundle, "MANIFEST.json", manifest_bytes)
-              for name, data in retained:
-                  add_bytes(bundle, name, data)
+              for name, path, size, _digest in retained:
+                  add_file(bundle, name, path, size)
           PYARCHIVE
           openssl x509 -in "$RCL_RECOVERY_CERT" -noout -pubkey >/dev/null
           openssl cms -encrypt \

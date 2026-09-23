@@ -112,6 +112,15 @@ describe('encrypted review evidence retention', () => {
     expect(script).toContain('-aes-256-gcm');
   });
 
+  it('uses a portable temporary archive path and streams retained files into a long-path-safe tar', () => {
+    const script = encryptedRetentionScript();
+    expect(script).toContain('ARCHIVE="$(mktemp "$RUNNER_TEMP/rcl-review-evidence.XXXXXX")"');
+    expect(script).not.toContain('rcl-review-evidence.XXXXXX.tar');
+    expect(script).not.toContain('path.read_bytes()');
+    expect(script).toContain('tarfile.PAX_FORMAT');
+    expect(script).toContain('bundle.addfile(info, source)');
+  });
+
   it('round-trips deterministic originals and refuses wrong-key or tampered ciphertext', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rcl-encrypted-retention-test-'));
     roots.push(root);
