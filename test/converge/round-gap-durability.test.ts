@@ -45,6 +45,18 @@ it.each(['sources_retained','native_write_intent','native_audit_verified','compl
     expect(await readFile(f.attemptPath)).toEqual(attempts);
   });
 
+it('resumes an interruption after the native audit write without duplicating history', async () => {
+  const f = await fixture(), m = await f.prepare();
+  await expect(f.apply('apply', { afterNativeWrite: async () => { throw new Error('synthetic post-write interruption'); } }))
+    .rejects.toThrow('synthetic post-write interruption');
+  const committed = await readFile(f.statePath);
+  expect(JSON.parse(committed.toString()).roundGapAudit.entries).toHaveLength(1);
+  await expect(f.apply('resume')).resolves.toBe('resumed');
+  expect(await readFile(f.statePath)).toEqual(committed);
+  expect((await loadConvergeRunState(f.dir, f.target))?.roundGapAudit?.entries).toHaveLength(1);
+  expect(await readFile(join(roundGapOperationPath(f.dir, m.operationId), 'complete.json'))).toBeTruthy();
+});
+
 it('serializes two identical applies and resumes without duplicate audit entries', async () => {
   const f = await fixture(); await f.prepare();
   expect((await Promise.all([f.apply(),f.apply()])).sort()).toEqual(['applied','resumed']);

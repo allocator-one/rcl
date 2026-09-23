@@ -198,7 +198,11 @@ export async function verifyRoundGapReceipt(gitCommonDir: string, entry: RoundGa
   return report!;
 }
 export interface ApplyRoundGapOptions { manifest: string; manifestSha256: string; mode: 'apply' | 'resume' }
-export interface RoundGapHooks { beforeCheckpoint?: (phase: string) => Promise<void> }
+export interface RoundGapHooks {
+  beforeCheckpoint?: (phase: string) => Promise<void>;
+  /** Test-only interruption seam after the native CAS is durable. */
+  afterNativeWrite?: () => Promise<void>;
+}
 /** Target-owned CAS with exact snapshots and append-only audit. No round or budget is created. */
 export async function applyRoundGap(input: ApplyRoundGapOptions, gitCommonDir: string, hooks: RoundGapHooks = {}): Promise<'applied' | 'resumed'> {
   const selection = z.object({ manifest: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/), mode: z.enum(['apply','resume']) }).strict().safeParse(input);
@@ -257,6 +261,7 @@ export async function applyRoundGap(input: ApplyRoundGapOptions, gitCommonDir: s
       await selected(convergeAttemptStatePath(commonDir,m.target),m.attemptSha256);
       await writeState(commonDir,next,ownership);
       await selected(convergeRunStatePath(commonDir,m.target),sha256(nextBytes));
+      await hooks.afterNativeWrite?.();
     } else {
       // A prior rename can be visible even when its directory sync failed.
       await syncIdentical(convergeRunStatePath(commonDir,m.target),currentBytes.raw);
