@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { attemptWithRetries, stripKnownProviderPrefix, isRetryableStatus } from '../../src/dispatch/utils.js';
+import {
+  attemptWithRetries,
+  isRetryableStatus,
+  sleep,
+  stripKnownProviderPrefix,
+} from '../../src/dispatch/utils.js';
 
 describe('stripKnownProviderPrefix', () => {
   it('strips anthropic/ prefix', () => {
@@ -113,6 +118,35 @@ describe('attemptWithRetries external cancellation', () => {
     });
 
     expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
+  });
+
+  it('keeps timeout classification when external cancellation arrives later', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const outcomePromise = attemptWithRetries({
+        timeoutMs: 100,
+        maxRetries: 0,
+        signal: controller.signal,
+        isRetryable: () => false,
+        attempt: async () => {
+          await sleep(200);
+          throw new Error('late provider rejection');
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(outcomePromise).resolves.toEqual({
+        ok: false,
+        timedOut: true,
+        error: 'Request timed out',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cancels a retry delay without starting another attempt', async () => {

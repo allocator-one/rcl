@@ -222,16 +222,21 @@ export function reviewFromParse(opts: {
  */
 export function linkAbortSignal(
   controller: AbortController,
-  external: AbortSignal | undefined
+  external: AbortSignal | undefined,
+  onAbort: () => void = () => {}
 ): () => void {
   if (!external) return () => {};
   if (external.aborted) {
+    onAbort();
     controller.abort();
     return () => {};
   }
-  const onAbort = (): void => controller.abort();
-  external.addEventListener('abort', onAbort, { once: true });
-  return () => external.removeEventListener('abort', onAbort);
+  const abort = (): void => {
+    onAbort();
+    controller.abort();
+  };
+  external.addEventListener('abort', abort, { once: true });
+  return () => external.removeEventListener('abort', abort);
 }
 
 /**
@@ -318,15 +323,22 @@ export async function attemptWithRetries<T>(opts: {
   attempt: (signal: AbortSignal) => Promise<T>;
 }): Promise<AttemptOutcome<T>> {
   const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), opts.timeoutMs);
-  const unlinkAbort = linkAbortSignal(controller, opts.signal);
+  let abortCause: 'cancelled' | 'timeout' | undefined;
+  const timeoutHandle = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    abortCause = 'timeout';
+    controller.abort();
+  }, opts.timeoutMs);
+  const unlinkAbort = linkAbortSignal(controller, opts.signal, () => {
+    abortCause ??= 'cancelled';
+  });
   let lastErr: unknown = new Error('no attempts made');
   const abortOutcome = (): AttemptOutcome<T> => {
-    const cancelled = opts.signal?.aborted === true;
+    const timedOut = abortCause === 'timeout';
     return {
       ok: false,
-      timedOut: !cancelled,
-      error: cancelled ? 'Request cancelled' : 'Request timed out',
+      timedOut,
+      error: timedOut ? 'Request timed out' : 'Request cancelled',
     };
   };
   if (controller.signal.aborted) {
