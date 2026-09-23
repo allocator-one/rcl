@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
 import type { ConsensusFinding } from './types.js';
 import type { ModelAnswer } from '../dispatch/adapter.js';
@@ -79,6 +80,8 @@ export interface GatingOptions {
   verificationPassTimeoutMs?: number;
   /** Observable batch progress for interactive and redirected CLI output. */
   onVerificationProgress?: (progress: VerificationProgress) => void;
+  /** Monotonic time source; injectable for deterministic deadline tests. */
+  monotonicNow?: () => number;
   /** Test seam; defaults to the verification model's own adapter. */
   ask?: AskFn;
   /**
@@ -592,7 +595,8 @@ export async function applyGating(
     return { findings: annotated };
   }
 
-  const started = Date.now();
+  const now = options.monotonicNow ?? performance.now.bind(performance);
+  const started = now();
   const verificationPassTimeoutMs =
     options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs;
   const verificationDeadline = started + verificationPassTimeoutMs;
@@ -665,7 +669,7 @@ export async function applyGating(
     for (const findingIndex of verifiable) {
       markUnavailable(findingIndex, 'no direct-API verifier available in the configured roster');
     }
-    stats.durationMs = Date.now() - started;
+    stats.durationMs = now() - started;
     return { findings: annotated, verification: stats };
   }
 
@@ -718,7 +722,7 @@ export async function applyGating(
         [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
       );
       try {
-        const remainingMs = verificationDeadline - Date.now();
+        const remainingMs = verificationDeadline - now();
         if (remainingMs <= 0) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
@@ -745,7 +749,7 @@ export async function applyGating(
             }
           );
         });
-        if (Date.now() >= verificationDeadline) {
+        if (now() >= verificationDeadline) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         if (answer.status !== 'success') {
@@ -774,7 +778,7 @@ export async function applyGating(
         while (true) {
           const batchIndex = nextBatch++;
           if (batchIndex >= batches.length) return;
-          if (Date.now() >= verificationDeadline) {
+          if (now() >= verificationDeadline) {
             throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
           }
           const batch = batches[batchIndex]!;
@@ -826,6 +830,6 @@ export async function applyGating(
     annotated[findingIndex] = { ...finding, gating };
   });
 
-  stats.durationMs = Date.now() - started;
+  stats.durationMs = now() - started;
   return { findings: annotated, verification: stats };
 }
