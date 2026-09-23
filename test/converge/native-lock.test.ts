@@ -8,6 +8,7 @@ import { withRecoveryLock } from '../../src/evidence/original-run/lock.js';
 import { localLockScope } from '../../src/evidence/original-run/lock-scope.js';
 import { prepareLockRoot } from '../../src/evidence/original-run/lock-path.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
+import { RegistryCleanupError, withLegacyReservation } from '../../src/coordination/registry-lock.js';
 
 const faults = vi.hoisted(() => ({ overlay: false }));
 vi.mock('../../src/evidence/original-run/lock-scope.js', async original => {
@@ -51,6 +52,32 @@ async function historicalLock(identity: string, acquired: () => void, release: P
     }
   }
 }
+
+it('preserves a completed legacy reservation result when its outer cleanup fails', async () => {
+  let syncs = 0;
+  const sync = async () => { if (++syncs === 2) throw Object.assign(new Error('outer release failed'), { code: 'EIO' }); };
+  let error: unknown;
+  try {
+    await withLegacyReservation(root, target, { pid: process.pid, token }, async () => 'committed', { sync });
+  } catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(RegistryCleanupError);
+  expect((error as RegistryCleanupError<string>).result).toBe('committed');
+  expect((error as Error).cause).toMatchObject({ code: 'EIO' });
+});
+
+it('preserves an inner cleanup result when outer legacy cleanup also fails', async () => {
+  let syncs = 0;
+  const sync = async () => { if (++syncs === 2) throw Object.assign(new Error('outer release failed'), { code: 'EIO' }); };
+  let error: unknown;
+  try {
+    await withLegacyReservation(root, target, { pid: process.pid, token }, async () => {
+      throw new RegistryCleanupError('committed', new Error('inner cleanup failed'));
+    }, { sync });
+  } catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(RegistryCleanupError);
+  expect((error as RegistryCleanupError<string>).result).toBe('committed');
+  expect((error as Error).cause).toBeInstanceOf(AggregateError);
+});
 
 it('caches only immutable process scope and leaves recovery filesystem qualification explicit', async () => {
   await withNativeLock(root, target, async () => {});

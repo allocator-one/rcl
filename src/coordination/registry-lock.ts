@@ -191,12 +191,19 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
     }
     await unlink(path); await options.sync(root);
   };
-  let failed = false; let failure: unknown;
-  try { return await work(); }
-  catch (error) { failed = true; failure = error; throw error; }
-  finally {
+  let failed = false; let failure: unknown; let completed = false; let result: T;
+  try { result = await work(); completed = true; return result; }
+  catch (error) {
+    if (error instanceof RegistryCleanupError) { result = error.result as T; completed = true; failure = error; }
+    else { failed = true; failure = error; }
+    throw error;
+  } finally {
     try { await release(); }
     catch (error) {
+      if (completed) {
+        const cause = failure ? new AggregateError([failure, error], 'recovery_lock_cleanup_failed', { cause: failure }) : error;
+        throw new RegistryCleanupError(result!, cause);
+      }
       if (failed) throw new AggregateError([failure, error], 'recovery_lock_cleanup_failed', { cause: failure });
       throw error;
     }

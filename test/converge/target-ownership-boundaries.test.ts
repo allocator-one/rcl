@@ -25,7 +25,7 @@ vi.mock('node:fs/promises', async original => {
     },
     unlink: async (...args: Parameters<typeof fs.unlink>) => {
       await fs.unlink(...args);
-      if (faults.release && String(args[0]).includes('/rcl-native-target-locks/') && String(args[0]).endsWith('.json')) {
+      if (faults.release && String(args[0]).replaceAll('\\', '/').includes('/rcl-native-target-locks/') && String(args[0]).endsWith('.json')) {
         faults.release = false;
         throw Object.assign(new Error('Synthetic outer cleanup acknowledgment lost'), { code: 'EIO' });
       }
@@ -49,7 +49,7 @@ beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-
 afterEach(async () => {
   vi.restoreAllMocks();
   Object.defineProperty(process, 'platform', platform);
-  if (geteuid) Object.defineProperty(process, 'geteuid', geteuid);
+  if (geteuid) Object.defineProperty(process, 'geteuid', geteuid); else delete (process as { geteuid?: unknown }).geteuid;
   faults.release = false; faults.pausePath = ''; faults.failWrite = false; faults.unsafeWindowsStateDir = false;
   await rm(dir, { recursive: true, force: true });
 });
@@ -92,6 +92,7 @@ it('does not require geteuid in the Windows platform branch', async () => {
 });
 
 it('fails closed when POSIX cannot identify the current owner', async () => {
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
   Object.defineProperty(process, 'geteuid', { configurable: true, value: undefined });
   await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow(/unsafe_(native_lock|converge_state)_directory/);
 });
