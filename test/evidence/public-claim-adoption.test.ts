@@ -90,5 +90,23 @@ describe('public acknowledgment adoption',{timeout:60000},() => {
     expect(f.calls.filter(c=>c.method==='POST')).toHaveLength(1);
     expect(await readFile(f.statePath)).toEqual(f.original);
   });
+  it.each(['original-field','other-member','projection-actor','artifact-url'])('refuses %s drift while adopting the exact owned split',async kind=>{
+    const f=await interrupted();
+    f.change((body,url)=>{
+      if(url.pathname.endsWith('/runs/'+f.source.scope.run_id)) {
+        if(kind==='original-field') body.data.findings[0].title='Changed original title';
+        if(kind==='other-member') body.data.findings[1].claim_identity=f.selection.identity;
+        if(kind==='projection-actor') body.data.findings[0].identity_provenance.actor_user_id=uuid(999);
+        if(kind==='artifact-url') body.data.artifacts[0].url='https://other.example/original';
+      }
+      return body;
+    });
+    const result=await f.adopt();
+    expect(result.exit).not.toBe(0);
+    expect(f.calls.filter(c=>c.method==='POST')).toHaveLength(1);
+    expect(await readFile(f.statePath)).toEqual(f.original);
+    expect(await readFile(f.manifest,'utf8')).toBe(f.oldManifest);
+    expect((await readdir(f.root+'/operation')).some(name=>name.startsWith('adopted.json'))).toBe(false);
+  });
 
 });

@@ -8,7 +8,7 @@ import { decodeRecoveryDocument } from '../original-run/decode.js';
 import { MAX_RECOVERY_DOCUMENT_BYTES } from '../original-run/journal.js';
 import { readEventReceipts,matchesPreparedEventReceipt,type StoredEventReceipt } from '../event-receipts.js';
 import { readClaimProof } from './proof-storage.js';
-import { claimCarriers,assertUnusedClaimIdentity } from './public-model.js';
+import { claimCarriers,assertUnusedClaimIdentity,assertOwnedSplitSourceExtension } from './public-model.js';
 import type { PublicClaimSelection } from './public-model.js';
 import type { ClaimHistoryContent } from './carrier-inventory.js';
 import type { Manifest,Material,Preparation,ClaimAdoption,AdoptedStage } from './public-manifest.js';
@@ -59,8 +59,6 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
   if(Boolean(material.adoption)!==(old.version===3)) throw new Error('claim_adoption_version_conflict');
   if(material.adoption) {await verifyAdoptionFiles(material.adoption);await verifyReplacedAbsence(material.adoption,o.sink);}
   if(material.history.actorUserId!==old.actorUserId||old.actorUserId!==current.actorUserId) throw new Error('claim_adoption_actor_changed');
-  for(const source of material.history.sources)
-    if(!isDeepStrictEqual(source,current.sources.find(s=>s.selector.scope.run_id===source.selector.scope.run_id))) throw new Error('claim_adoption_source_changed');
   for(const history of material.history.histories) {
     const now=current.histories.find(h=>h.runId===history.runId);
     if(!now||now.eventSequence<history.eventSequence||history.receipts.some(r=>!isDeepStrictEqual(r,now.receipts.find(n=>n.id===r.id)))) throw new Error('claim_adoption_history_changed');
@@ -102,7 +100,14 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
     if(inherited&&(!receipt||!isDeepStrictEqual(inherited.receipt,receipt)||inherited.eventJson!==eventJson)) throw new Error('claim_adopted_receipt_unavailable');
     rows.push({stage,scope,receipt,preparation,eventJson,inherited});
   }
-  const priorHistory={...material.history,histories:material.history.histories.map(h=>{
+  const owned=new Map(rows.flatMap(row=>row.eventJson?[[row.stage.id,row.eventJson] as const]:[]));
+  const acceptedReceipts=rows.flatMap(row=>row.receipt?[row.receipt]:[]);
+  const sources=material.history.sources.map(source=>{
+    const currentSource=current.sources.find(s=>s.selector.scope.run_id===source.selector.scope.run_id);
+    assertOwnedSplitSourceExtension(source,currentSource,acceptedReceipts,owned,old.actorUserId);
+    return currentSource!;
+  });
+  const priorHistory={...material.history,sources,histories:material.history.histories.map(h=>{
     const receipts=[...h.receipts,...rows.flatMap(r=>r.receipt&&r.receipt.run_id===h.runId&&!h.receipts.some(x=>x.id===r.receipt!.id)?[r.receipt]:[])].sort((a,b)=>a.sequence-b.sequence);
     return {...h,receipts,eventSequence:Math.max(h.eventSequence,...receipts.map(r=>r.sequence))};
   })};
@@ -121,7 +126,7 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
       o.validate(old,material,validationStage,preparation!,history,split,createdAt);
       accepted.push({id:stage.id,preparation:preparation!,eventJson:row.eventJson!,receipt,history,createdAt,validationStage});
       stages[index]!.id=stage.id;
-      if(stage.kind==='split') split=o.splitEvidence(material,selection,preparation as ClaimSplitInput,receipt);
+      if(stage.kind==='split') split=o.splitEvidence({...material,history:priorHistory},selection,preparation as ClaimSplitInput,receipt);
     } else replacements.push({oldId:stage.id,newId:stages[index]!.id,scope:row.scope});
   }
   if(!split) assertUnusedClaimIdentity(current,selection.identity);

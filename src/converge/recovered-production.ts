@@ -1,13 +1,31 @@
 import { lstat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describeClaim } from '../consensus/claim-identity.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import type { ConvergeContext } from '../report/run-header.js';
 import { ConvergeRunStateError, convergeRunStatePath, loadConvergeRunStateEvidence } from './run-state.js';
+import { resolveGitCommonDir } from './attempt-budget.js';
+
+const execFileAsync=promisify(execFile);
 
 /** Local predecessor evidence, selected before providers; never review authority. */
 export interface RecoveredProduction {
   readonly version: 1;
   readonly nativeSha256: string;
+}
+
+/** A patch review outside a repository has no canonical native target. Preserve
+ * that ordinary producer while refusing every other Git discovery failure. */
+export async function selectCurrentRecoveredProduction(context: ConvergeContext,cwd=process.cwd()): Promise<RecoveredProduction|undefined> {
+  try {
+    await execFileAsync('git',['rev-parse','--is-inside-work-tree'],{ cwd,encoding: 'utf8',timeout: 5000,env: { ...process.env,LC_ALL: 'C' } });
+  } catch(error) {
+    const failure=error as { code?: number; stderr?: string };
+    if(failure.code===128&&failure.stderr?.trim()==='fatal: not a git repository (or any of the parent directories): .git') return undefined;
+    throw new ConvergeRunStateError('Could not inspect the repository for native recovery evidence.',{ cause: error });
+  }
+  return selectRecoveredProduction(await resolveGitCommonDir(cwd),context);
 }
 
 /** Read and fully validate the canonical target, including every recovery source. */

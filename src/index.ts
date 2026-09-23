@@ -129,7 +129,7 @@ import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
-import { selectRecoveredProduction, materializeRecoveredClaims, type RecoveredProduction } from './converge/recovered-production.js';
+import { selectCurrentRecoveredProduction, materializeRecoveredClaims, type RecoveredProduction } from './converge/recovered-production.js';
 import { runPublicClaimRecovery, type PublicClaimRecoveryOptions } from './evidence/recover-claim.js';
 import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
@@ -1409,7 +1409,7 @@ async function prepareCouncil(
     process.env
   );
   const recoveredProduction = converge
-    ? await selectRecoveredProduction(await resolveGitCommonDir(), converge)
+    ? await selectCurrentRecoveredProduction(converge)
     : undefined;
   await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config);

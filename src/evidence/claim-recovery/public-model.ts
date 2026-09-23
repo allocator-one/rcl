@@ -5,7 +5,7 @@ import { uuidSchema } from './validation/primitives.js';
 import { validateOccurrenceSource } from './validation/occurrence-source.js';
 import type { ClaimHistoryContent } from './carrier-inventory.js';
 import type { OccurrenceSource,OccurrenceContext } from './validation/occurrence-types.js';
-import type { OccurrenceCarrierSelector,OccurrenceRunSelector } from './validation/carrier-types.js';
+import type { CarrierSourceInventory,OccurrenceCarrierSelector,OccurrenceRunSelector } from './validation/carrier-types.js';
 import type { StoredEventReceipt } from '../event-receipts.js';
 import { matchesPreparedEventReceipt } from '../event-receipts.js';
 import { object } from './validation/primitives.js';
@@ -98,10 +98,20 @@ export function assertHistoryExtension(before: ClaimHistoryContent,after: ClaimH
       throw new Error('claim_sequence_changed_since_preview');
   }
   for(const [index,source] of before.sources.entries()) {
-    const current=after.sources[index]!;
-    if(isDeepStrictEqual(source,current)) continue;
+    assertOwnedSplitSourceExtension(source,after.sources[index]!,acceptedSplits,owned,before.actorUserId);
+  }
+}
+
+/** Only exact owned split receipts may explain changes to a saved source view.
+ * Explicit adoption uses the same bound projection while separately reviewing
+ * additive foreign history; it never discards original or derived fields. */
+export function assertOwnedSplitSourceExtension(source: CarrierSourceInventory,current: CarrierSourceInventory|undefined,
+  acceptedSplits: StoredEventReceipt[],owned: Map<string,string>,actor: string): void {
+    if(isDeepStrictEqual(source,current)) return;
     const expected=structuredClone(source);
-    for(const receipt of acceptedSplits.filter(r=>r.run_id===source.selector.scope.run_id)) {
+    for(const receipt of acceptedSplits.filter(r=>r.kind==='finding_claim_split'&&r.run_id===source.selector.scope.run_id)) {
+      const event=owned.get(receipt.id);
+      if(!event||!matchesPreparedEventReceipt(receipt,event,source.selector.scope,actor)) throw new Error('claim_receipt_conflict');
       const payload=receipt.payload;
       if(receipt.converge_target!==source.selector.target||receipt.round!==source.selector.round||
         payload.report_json_sha256!==source.selector.reportSha256||!Array.isArray(expected.storedRun?.findings))
@@ -127,7 +137,6 @@ export function assertHistoryExtension(before: ClaimHistoryContent,after: ClaimH
       if(Object.hasOwn(findings[0],'verdict')) findings[0].verdict=null;
     }
     if(!isDeepStrictEqual(expected,current)) throw new Error('claim_history_changed_since_preview');
-  }
 }
 export function uniqueReceipts(rows: StoredEventReceipt[]): StoredEventReceipt[] {
   const result=new Map<string,StoredEventReceipt>();
