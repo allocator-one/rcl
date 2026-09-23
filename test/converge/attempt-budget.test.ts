@@ -199,12 +199,15 @@ describe('convergence attempt budget', () => {
     const rejected = claims.filter((claim) => claim.status === 'rejected');
     expect(successful).toHaveLength(7);
     expect(rejected).toHaveLength(5);
-    expect(
-      rejected.every(
-        (claim) =>
-          claim.status === 'rejected' && claim.reason instanceof ConvergeAttemptBudgetExceededError
-      )
-    ).toBe(true);
+    const unexpected = rejected.filter((claim) =>
+      claim.status === 'rejected' && !(claim.reason instanceof ConvergeAttemptBudgetExceededError)
+    ).map(claim => {
+      const error = claim.reason as Error & { code?: unknown; cause?: unknown };
+      const cause = error.cause instanceof Error ? error.cause : undefined;
+      return { name: error.name, code: error.code, message: error.message,
+        cause: cause && { name: cause.name, code: (cause as Error & { code?: unknown }).code, message: cause.message } };
+    });
+    expect(unexpected).toEqual([]);
     expect((await loadConvergeAttemptState(gitCommonDir, 'repo-7559'))?.attemptsUsed).toBe(7);
   });
 
