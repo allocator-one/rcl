@@ -217,6 +217,10 @@ describe('convergence attempt budget', () => {
       Array.from({ length: 4 }, () => runClaimProcess(gitCommonDir, 'cross-process', 2))
     );
 
+    const unexpected = results.filter((result) => ![0, 2].includes(result.status)).map(result => ({
+      status: result.status, stdout: result.stdout, stderr: result.stderr,
+    }));
+    expect(unexpected).toEqual([]);
     expect(results.map((result) => result.status).sort()).toEqual([0, 0, 2, 2]);
     expect(results.filter((result) => result.status === 0).every((result) => result.stdout)).toBe(
       true

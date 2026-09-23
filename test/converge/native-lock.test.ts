@@ -141,6 +141,21 @@ it('times out behind a live historical owner without entering work', async () =>
   expect(await readFile(path, 'utf8')).toContain('old-client-token');
 });
 
+it('never exposes a partial legacy owner while a contender prepares publication', async () => {
+  let prepared!: () => void, release!: () => void;
+  const reached = new Promise<void>(resolve => { prepared = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const first = withNativeLock(root, target, async () => 'first', {
+    onLegacyPrepared: async () => { prepared(); await hold; },
+  });
+  try {
+    await reached;
+    await expect(withNativeLock(root, target, async () => 'second')).resolves.toBe('second');
+  } finally {
+    release(); await first;
+  }
+});
+
 async function unqualifiedRegistration() {
   const registry = join(root, `${sha256(target)}.bakery`);
   await mkdir(registry, { mode: 0o700 });

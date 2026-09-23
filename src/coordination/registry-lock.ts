@@ -13,6 +13,8 @@ export interface RegistryRegistration<Scope> {
 type LockStage = 'legacy_reserved' | 'choosing_published' | 'ticket_selected' | 'ready_published' | 'before_reap' | 'after_reap' | 'scan_complete';
 /** Internal deterministic test seams. The CLI never accepts these overrides. */
 export interface RegistryHooks<Scope> {
+  /** Test-only pause after private legacy preparation, before atomic publication. */
+  onLegacyPrepared?: () => Promise<void>;
   scope?: () => Promise<Scope>;
   token?: () => string;
   probe?: (pid: number) => void;
@@ -50,6 +52,7 @@ export interface LegacyReservationOptions {
   wait?: () => Promise<void>;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
+  onPrepared?: () => Promise<void>;
 }
 
 interface LegacyOwner { pid: number; token: string }
@@ -92,20 +95,32 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
   };
   const create = async (): Promise<boolean> => {
     let created = false;
+    let published = false;
+    const temporary = `${path}.${owner.token}.${randomUUID()}.tmp`;
     try {
-      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       created = true;
+      await options.onPrepared?.();
       try { await handle.writeFile(JSON.stringify(owner) + '\n'); await handle.sync(); }
       finally { await handle.close(); }
+      // Link publication gives legacy readers either no owner or a complete,
+      // fsynced document. They must never parse our private write in flight.
+      await link(temporary, path); published = true;
+      await unlink(temporary); created = false;
       await options.sync(root);
       return true;
     } catch (error) {
       if (code(error) === 'EEXIST') return false;
-      if (created) {
+      if (published) {
         try { await unlink(path); await options.sync(root); }
         catch (cleanup) { throw new AggregateError([error, cleanup], 'legacy_recovery_lock_cleanup_failed', { cause: error }); }
       }
       throw error;
+    } finally {
+      if (created) {
+        try { await unlink(temporary); }
+        catch (cleanup) { if (code(cleanup) !== 'ENOENT') throw cleanup; }
+      }
     }
   };
 
@@ -343,5 +358,5 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
     }
   }
   }, { sync, read: hooks.read ?? policy.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait,
-    lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs });
+    lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs, onPrepared: hooks.onLegacyPrepared });
 }
