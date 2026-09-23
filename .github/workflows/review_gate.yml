@@ -110,7 +110,7 @@ jobs:
             fi
           fi
           umask 077
-          mkdir -p "$RCL_GATE_EXPORT" "$RCL_DATA_DIR"
+          mkdir -p "$RCL_GATE_EXPORT" "$RCL_DATA_DIR/quarantine"
           python3 - <<'PYMANIFEST'
           import json, os
           from pathlib import Path

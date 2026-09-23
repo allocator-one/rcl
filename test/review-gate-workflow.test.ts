@@ -69,7 +69,6 @@ while [ "$#" -gt 0 ]; do
 done
 printf '{"fake":true}\\n' > "$json_file"
 printf '# fake report\\n' > "$markdown_file"
-mkdir -p "$RCL_DATA_DIR/quarantine"
 printf 'retained\\n' > "$RCL_DATA_DIR/quarantine/fake.json"
 exit "$FAKE_RCL_EXIT"
 `
