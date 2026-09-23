@@ -175,6 +175,18 @@ it('never reaps an unqualified owner using PID absence or elapsed time', async (
   expect(await readFile(original.path, 'utf8')).toBe(original.bytes);
 });
 
+it('never reaps an unqualified scoped legacy reservation using PID absence', async () => {
+  const path = join(root, `${sha256(target)}.lock`);
+  const original = JSON.stringify({ pid: 2147483647, token: 'old-client-token', scope: unknownScope }) + '\n';
+  await writeFile(path, original, { mode: 0o600 });
+  let clock = 0; const work = vi.fn();
+  const probe = vi.fn(() => { throw Object.assign(new Error('not running'), { code: 'ESRCH' }); });
+  await expect(withNativeLock(root, target, work, { scope: async () => unknownScope, probe,
+    now: () => clock, wait: async () => { clock += 1_000; } })).rejects.toThrow('legacy_recovery_lock_requires_inspection');
+  expect(probe).not.toHaveBeenCalled(); expect(work).not.toHaveBeenCalled();
+  expect(await readFile(path, 'utf8')).toBe(original);
+});
+
 it('refuses an unqualified registration under strict recovery without deleting it', async () => {
   const original = await unqualifiedRegistration(), work = vi.fn(), probe = vi.fn();
   await expect(withRecoveryLock(root, target, work, { probe })).rejects.toThrow('invalid_recovery_lock_requires_inspection');

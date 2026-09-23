@@ -56,6 +56,8 @@ export interface LegacyReservationOptions {
   /** Legacy owner documents lack scope, so strict recovery must not reclaim them. */
   reclaimLegacy?: boolean;
   qualifiedLegacy?: (owner: unknown) => boolean;
+  /** A scoped compatibility owner may be probed only under the caller's policy. */
+  mayProbeLegacy?: (owner: LegacyOwner) => boolean;
 }
 
 interface LegacyOwner { pid: number; token: string; scope?: unknown }
@@ -151,6 +153,7 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
     // documents retain the caller's explicit compatibility policy.
     if (existing.scope !== undefined) {
       if (!options.qualifiedLegacy?.(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
+      if (options.mayProbeLegacy && !options.mayProbeLegacy(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
     } else if (options.reclaimLegacy === false) {
       throw new Error('legacy_recovery_lock_requires_inspection');
     }
@@ -372,5 +375,6 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   }, { sync, read: hooks.read ?? policy.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait,
     lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs, onPrepared: hooks.onLegacyPrepared,
     qualifiedLegacy: owner => policy.validScope((owner as { scope?: unknown }).scope) &&
-      isDeepStrictEqual((owner as { scope: unknown }).scope, scope) });
+      isDeepStrictEqual((owner as { scope: unknown }).scope, scope),
+    mayProbeLegacy: owner => policy.validScope(owner.scope) && policy.mayProbePid(owner.scope) });
 }
