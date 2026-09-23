@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { stripKnownProviderPrefix, isRetryableStatus } from '../../src/dispatch/utils.js';
+import { describe, it, expect, vi } from 'vitest';
+import { attemptWithRetries, stripKnownProviderPrefix, isRetryableStatus } from '../../src/dispatch/utils.js';
 
 describe('stripKnownProviderPrefix', () => {
   it('strips anthropic/ prefix', () => {
@@ -54,5 +54,46 @@ describe('isRetryableStatus', () => {
 
   it('does not retry undefined status', () => {
     expect(isRetryableStatus(undefined)).toBe(false);
+  });
+});
+
+
+describe('attemptWithRetries external cancellation', () => {
+  it('does not retry a pre-aborted external signal', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const attempt = vi.fn(async () => {
+      throw new Error('retryable');
+    });
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: 1_000,
+      maxRetries: 3,
+      signal: controller.signal,
+      isRetryable: () => true,
+      attempt,
+    });
+
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({ ok: false, timedOut: true, error: 'Request timed out' });
+  });
+
+  it('does not retry after an external abort during a retryable failure', async () => {
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => {
+      controller.abort();
+      throw new Error('retryable');
+    });
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: 1_000,
+      maxRetries: 3,
+      signal: controller.signal,
+      isRetryable: () => true,
+      attempt,
+    });
+
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual({ ok: false, timedOut: true, error: 'Request timed out' });
   });
 });
