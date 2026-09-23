@@ -123,6 +123,8 @@ export interface RecordedRequest {
   body?: string;
   /** The `redirect` mode the caller asked for. */
   redirect?: RequestRedirect;
+  /** The exact cancellation boundary supplied to fetch. */
+  signal?: AbortSignal | null;
 }
 
 /** `'hang'` never answers: the promise settles only when the caller's abort signal fires (a timeout). */
@@ -142,6 +144,7 @@ export function fakeFetch(
       headers,
       ...(typeof init?.body === 'string' ? { body: init.body } : {}),
       ...(init?.redirect !== undefined ? { redirect: init.redirect } : {}),
+      ...(init?.signal !== undefined ? { signal: init.signal } : {}),
     };
     requests.push(request);
     const outcome = handler(request);

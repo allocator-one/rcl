@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { abortSignalWithTimeout } from './abort-signal.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
-import type { ArtifactKind, RunEnvelope } from './envelope.js';
+import type { ArtifactDeclaration, ArtifactKind, RunEnvelope } from './envelope.js';
+import type { ReceiptProbe } from './attested-retry.js';
 import type { WireEvent } from './events.js';
 
 /**
@@ -28,6 +30,8 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
+  /** Cancellation/deadline for an attested same-workflow retry operation. */
+  signal?: AbortSignal;
 }
 
 export interface RunReceipt {
@@ -144,12 +148,13 @@ export class HarnessSink {
     options: RequestOptions = {}
   ): Promise<{ status: number; body: unknown } | { failure: string }> {
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
+    const signal = abortSignalWithTimeout(options.signal, timeoutMs);
     try {
       const response = await this.fetchImpl(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal.signal,
         redirect: 'manual',
       });
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
@@ -169,7 +174,9 @@ export class HarnessSink {
       }
       return { status: response.status, body: parsed };
     } catch (err) {
-      return { failure: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+      return { failure: transportFailure(err) };
+    } finally {
+      signal.dispose();
     }
   }
 
@@ -206,7 +213,7 @@ export class HarnessSink {
   }
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
-  async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
+  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope = JSON.stringify(envelope)): Promise<SinkOutcome<RunReceipt>> {
     if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
       // Old servers silently discard unknown provenance. The attested credential
       // may read model-stats, but may not list runs or use an ordinary login.
@@ -225,7 +232,7 @@ export class HarnessSink {
         message: 'The server has not confirmed evidence protocol version 2; normalization provenance was not sent',
       };
     }
-    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
+    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', options);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
@@ -243,6 +250,37 @@ export class HarnessSink {
         status: meta?.status === 'existing' || status === 200 ? 'existing' : 'created',
       };
     });
+  }
+
+  /**
+   * Read the restricted run-bound receipt after an uncertain attested POST.
+   * Only a 404 authorizes a replay; every other missing or malformed answer
+   * is a refusal. The server independently restricts this route to the
+   * credential's own live run and signed workflow subject.
+   */
+  async getAttestedRunReceipt(envelope: RunEnvelope, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    if (this.credentialSource !== 'attest') return { kind: 'rejected' };
+    if (!envelope.artifacts_declared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`, undefined, 'application/json', options);
+    if ('failure' in result) return { kind: 'unavailable' };
+    if (result.status === 404) return { kind: 'absent' };
+    if (result.status !== 200) return { kind: 'rejected' };
+    const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
+    const data = response?.data;
+    if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string' ||
+      response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], envelope.artifacts_declared)) return { kind: 'rejected' };
+    return {
+      kind: 'recorded',
+      value: {
+        id: envelope.run.id,
+        url: data['url'],
+        ...(typeof data['received_at'] === 'string' ? { received_at: data['received_at'] } : {}),
+        ...(typeof data['repo_verified'] === 'boolean' ? { repo_verified: data['repo_verified'] } : {}),
+        ...(typeof data['head_verified'] === 'string' ? { head_verified: data['head_verified'] } : {}),
+        artifacts_expected: envelope.artifacts_declared.map(({ kind }) => kind),
+        status: 'existing',
+      },
+    };
   }
 
   /** `PUT /api/v1/reviews/runs/:id/artifacts/:kind` — the raw bytes, never JSON. */
@@ -355,6 +393,30 @@ function hostOnly(raw: string): string {
   } catch {
     return '(unparseable URL)';
   }
+}
+
+/** A transport failure can carry Node's nested `Error.cause`; retain only safe, bounded diagnostics. */
+function transportFailure(err: unknown): string {
+  const describe = (value: unknown): string => value instanceof Error ? `${value.name}: ${value.message}` : String(value);
+  const primary = describe(err);
+  const cause = err instanceof Error ? err.cause : undefined;
+  return scrubText(cause === undefined ? primary : `${primary}; cause: ${describe(cause)}`, 300);
+}
+
+function sameDeclarations(raw: unknown, expected: ArtifactDeclaration[]): boolean {
+  if (!Array.isArray(raw) || raw.length !== expected.length) return false;
+  const byKind = new Map<string, ArtifactDeclaration>();
+  for (const declaration of raw) {
+    if (!declaration || typeof declaration !== 'object') return false;
+    const value = declaration as Record<string, unknown>;
+    if (typeof value['kind'] !== 'string' || typeof value['sha256'] !== 'string' ||
+      typeof value['bytes'] !== 'number' || !Number.isSafeInteger(value['bytes']) || value['bytes'] < 0 || byKind.has(value['kind'])) return false;
+    byKind.set(value['kind'], { kind: value['kind'] as ArtifactKind, sha256: value['sha256'], bytes: value['bytes'] });
+  }
+  return expected.every(declaration => {
+    const actual = byKind.get(declaration.kind);
+    return actual?.sha256 === declaration.sha256 && actual.bytes === declaration.bytes;
+  });
 }
 
 /** Server or network text made safe for a terminal: scrubbed, control characters removed, bounded. */

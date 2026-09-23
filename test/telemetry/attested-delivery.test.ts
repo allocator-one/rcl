@@ -139,6 +139,71 @@ describe('the run-bound credential of --attest', () => {
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
   });
 
+  it('does a receipt-first, bounded same-workflow replay after an uncertain envelope acknowledgement', async () => {
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${sampleResult().run!.id}`)) return { status: 404, body: { error: 'not_found' } };
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        if (posts === 1) return new TypeError('fetch failed');
+        const envelope = JSON.parse(request.body!) as { run: { id: string } };
+        return { status: 201, body: { data: { id: envelope.run.id, url: `https://harness.example.test/api/v1/reviews/runs/${envelope.run.id}`, artifacts_expected: [] }, meta: { status: 'created' } } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.1', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+    const result = sampleResult();
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
+    const postBodies = requests.filter((request) => request.url.endsWith('/api/v1/reviews/runs')).map((request) => request.body);
+    expect(postBodies).toHaveLength(2);
+    expect(postBodies[1]).toBe(postBodies[0]);
+    expect(requests.filter((request) => request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`))).toHaveLength(1);
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+  });
+
+  it.each([
+    { receiptStatus: 0, status: 'error', posts: 1 },
+    { receiptStatus: 403, status: 'rejected', posts: 1 },
+    { receiptStatus: 404, status: 'conflict', posts: 2 },
+  ])('retains the original safe transport diagnostic when recovery ends as $status', async ({ receiptStatus, status, posts }) => {
+    const secret = 'Abcdef1234567890Abcdef1234567890';
+    const failure = new TypeError('fetch failed', { cause: new Error(`socket reset authorization=Bearer ${secret}`) });
+    let submitted = 0;
+    const result = sampleResult();
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) {
+        return receiptStatus === 0 ? new TypeError('receipt unavailable') : { status: receiptStatus, body: { error: 'fixture_receipt_failure' } };
+      }
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        submitted++;
+        return submitted === 1 ? failure : { status: 409, body: { error: 'conflict' } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.2', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status, spooled: false, exitCode: 4 });
+    expect(requests.filter((request) => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(posts);
+    const retained = await runtime.quarantine!.inspect(result.run!.id);
+    expect(retained).toMatchObject({ status: 'complete', manifest: { run_id: result.run!.id, requested_mode: 'attested', acknowledged: false } });
+    const diagnostic = retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery.initial_transport');
+    expect(diagnostic?.message).toContain('TypeError: fetch failed; cause: Error: socket reset');
+    expect(diagnostic!.message).not.toContain(secret);
+    expect(diagnostic!.message.length).toBeLessThanOrEqual(300);
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+  });
+
   it('still honours telemetry off: no sink, nothing sent', async () => {
     const { fetch, requests } = fakeFetch(answer);
     const runtime = await createTelemetryRuntime({
