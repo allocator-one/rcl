@@ -39,7 +39,8 @@ export function nativeMaterial(reference: NativeMaterialReference,materials: rea
       throw new Error('native_recovery_material_unavailable'); return found[0]!;
   });
   const content=unpackRecoveryMaterial(reference.rootSha256,rows) as NativeMaterialContent;
-  if(!isDeepStrictEqual(packNativeMaterial(content).reference,reference))
+  if(content.currentProjection&&!([1,2] as unknown[]).includes(content.currentProjection.version)||
+    !isDeepStrictEqual(packNativeMaterial(content).reference,reference))
     throw new Error('native_recovery_material_conflict');
   return content;
 }

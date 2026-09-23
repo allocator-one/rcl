@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { resolveGitCommonDir } from '../converge/attempt-budget.js';
 import { loadConvergeRunStateEvidence,convergeRunStatePath } from '../converge/run-state.js';
 import { withRecoveryTarget } from '../converge/target-ownership.js';
-import { applyNativeRecovery,deriveNativeRecovery,readNativeRecoverySourceJsons,readNativeRecoveryMaterials,recoveryAnchors,type NativeRecoveryInput } from '../converge/recovery-state.js';
+import { applyNativeRecovery,deriveNativeRecovery,nativeRecoveryPlanProjectionVersion,readNativeRecoverySourceJsons,readNativeRecoveryMaterials,recoveryAnchors,type NativeRecoveryInput } from '../converge/recovery-state.js';
 import { correctionAnchor } from '../converge/correction-anchors.js';
 import { prepareClaimSplit,type ClaimSplitInput } from './claim-split.js';
 import { prepareObligationTransfer,prepareClaimDisposition,validatePreservedDispositionSubject } from './claim-recovery/validation/occurrence.js';
@@ -296,10 +296,12 @@ export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions
       await fresh();
       if(!acceptedSplit)
         throw new Error('claim_split_receipt_missing');
+      let projectionVersion: 1|2=2;
       if(await exists(savedPlanPath)) {
         const saved=await readClaimProof(savedPlanPath,pool) as import('../converge/recovery-state.js').NativeRecoveryPlan;
         if(!saved.currentHistory||!sameClaimHistoryEvidence(saved.currentHistory,history))
           throw new Error('native_plan_history_changed');
+        projectionVersion=nativeRecoveryPlanProjectionVersion(saved);
         history={ ...history,readWindow: saved.currentHistory.readWindow };
       }
       const input: NativeRecoveryInput={
@@ -307,7 +309,7 @@ export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions
         anchors: selection.action==='split'? [correctionAnchor(acceptedSplit.selection,acceptedSplit.receipt,manifest.actorUserId,manifest.operationId)]:[],reports: selection.action==='split'? [acceptedSplit.source.reportJson]:[],
         sourceReceipts: selection.action==='split'? acceptedSplit.selection.sourceReceipts:[],transfers,dispositions,carriers: carriers.map(carrier => ({ carrier,inventoryStatus: 'complete',sources: history.sources }))
       };
-      const plan=deriveNativeRecovery(input);
+      const plan=deriveNativeRecovery(input,projectionVersion);
       if(await exists(savedPlanPath)) {
         if(!isDeepStrictEqual(await readClaimProof(savedPlanPath,pool),plan))
           throw new Error('native_plan_conflict');

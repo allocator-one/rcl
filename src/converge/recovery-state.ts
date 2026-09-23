@@ -1,4 +1,4 @@
-import { deriveCurrentClaimProjection, nativeProjectionFingerprint } from '../evidence/claim-recovery/validation/current-projection.js';
+import { deriveCurrentClaimProjection, nativeProjectionFingerprint, type CurrentClaimProjection } from '../evidence/claim-recovery/validation/current-projection.js';
 import { sameClaimHistoryEvidence, claimHistoryContent, type AuthenticatedClaimHistory, type ClaimHistoryContent } from '../evidence/claim-recovery/carrier-inventory.js';
 import { nativeMaterial, operationOccurrences, packNativeMaterial, type NativeMaterialReference } from '../evidence/claim-recovery/validation/native-material.js';
 import type { RecoveryMaterial } from '../evidence/claim-recovery/validation/materials.js';
@@ -193,7 +193,7 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
 }
 
 /** Pure exact-byte preview. No clock, identifier allocation, filesystem or network. */
-export function deriveNativeRecovery(input: NativeRecoveryInput): NativeRecoveryPlan {
+export function deriveNativeRecovery(input: NativeRecoveryInput, projectionVersion: CurrentClaimProjection['version']=2): NativeRecoveryPlan {
   try {
     const source = verifyNativeRecoveryLineage(input.sourceJson, input.target, input.nativeSourceJsons).state;
     validateAnchors(input, source);
@@ -202,7 +202,7 @@ export function deriveNativeRecovery(input: NativeRecoveryInput): NativeRecovery
       previous: source.recovery?.operations.flatMap(op => { const value = operationOccurrences(op, input.recoveryMaterials ?? []); return value ? [value] : []; }) ?? [] });
     const priorOccurrences=source.recovery?.operations.flatMap(op=>{const value=operationOccurrences(op,input.recoveryMaterials??[]);return value?[value]:[];})??[];
     const currentProjection=input.currentHistory?deriveCurrentClaimProjection(source,[...recoveryAnchors(source),...input.anchors],
-      [...priorOccurrences,...(occurrences?[occurrences]:[])],input.currentHistory,input.nativeSourceJsons,input.sourceJson):undefined;
+      [...priorOccurrences,...(occurrences?[occurrences]:[])],input.currentHistory,input.nativeSourceJsons,input.sourceJson,projectionVersion):undefined;
     requireSource(!currentProjection || input.externalMaterial);
     const packed = input.externalMaterial && (occurrences || currentProjection) ? packNativeMaterial({ ...(occurrences?{occurrences}:{}),...(currentProjection?{currentProjection}:{}) }) : undefined;
     const operation: NativeRecoveryOperation = { operationId: input.operationId, sourceVersion: source.version,
@@ -216,6 +216,19 @@ export function deriveNativeRecovery(input: NativeRecoveryInput): NativeRecovery
     if (error instanceof Error && error.message.startsWith('native_recovery_')) throw error;
     throw new Error('native_recovery_source_conflict', { cause: error });
   }
+}
+
+/** Infer replay semantics from the exact retained result material, without adding
+ * fields to previously serialized plans or changing their content digests. */
+export function nativeRecoveryPlanProjectionVersion(plan: NativeRecoveryPlan): CurrentClaimProjection['version'] {
+  if(!plan.currentHistory) return 2;
+  requireSource(sha(plan.resultJson)===plan.resultSha256);
+  const result=nativeSource(plan.resultJson,plan.target);
+  const operation=result.recovery?.operations.at(-1);
+  requireSource(operation?.operationId===plan.operationId&&operation.sourceSha256===plan.sourceSha256&&operation.material);
+  const projection=nativeMaterial(operation!.material!,plan.recoveryMaterials??[]).currentProjection;
+  requireSource(projection&&isDeepStrictEqual(projection.history,plan.currentHistory));
+  return projection!.version;
 }
 
 export function recoveryAnchors(state: ConvergeRunState): NativeCorrectionAnchor[] {
@@ -303,11 +316,12 @@ export async function validateNativeRecoveryState(state: ConvergeRunState, gitCo
       const reports = await Promise.all([...new Set(operation.anchors.map(anchor => anchor.source.reportSha256))]
         .map(async digest => (await readStable(reportPath(gitCommonDir, state.target, digest), MAX_BYTES)).text));
       const occurrences=operationOccurrences(operation,recoveryMaterials);
+      const currentStored=operation.material?nativeMaterial(operation.material,recoveryMaterials).currentProjection:undefined;
       const plan = deriveNativeRecovery({ sourceJson, recoveryMaterials, externalMaterial: !!operation.material,
-        ...(operation.material && nativeMaterial(operation.material,recoveryMaterials).currentProjection ? {currentHistory:nativeMaterial(operation.material,recoveryMaterials).currentProjection!.history}:{}), target: state.target, operationId: operation.operationId,
+        ...(currentStored? {currentHistory:currentStored.history}:{}), target: state.target, operationId: operation.operationId,
         nativeSourceJsons: ancestorsOf(source, snapshots), anchors: operation.anchors, sourceReceipts: operation.sourceReceipts, reports,
         ...(occurrences ? { transfers: occurrences.transfers, dispositions: occurrences.dispositions,
-          carriers: occurrences.carriers } : {}) });
+          carriers: occurrences.carriers } : {}) },currentStored?.version);
       const initial = JSON.parse(plan.resultJson) as ConvergeRunState;
       requireSource(isDeepStrictEqual(operation, initial.recovery!.operations.at(-1)));
     }
@@ -340,7 +354,7 @@ export function applyNativeRecovery(options: { gitCommonDir: string; plan: Nativ
     const commonDir = await realpath(gitCommonDir);
     if(plan.currentHistory)requireSource(options.history && sameClaimHistoryEvidence(claimHistoryContent(options.history),plan.currentHistory) &&
       Date.parse(plan.currentHistory.readWindow.completedAt)<=Date.parse(claimHistoryContent(options.history).readWindow.completedAt));
-    const expected = deriveNativeRecovery(plan);
+    const expected = deriveNativeRecovery(plan,nativeRecoveryPlanProjectionVersion(plan));
     requireSource(plan.sourceVersion === expected.sourceVersion && plan.sourceSha256 === expected.sourceSha256 &&
       plan.resultJson === expected.resultJson && plan.resultSha256 === expected.resultSha256 &&
       isDeepStrictEqual(plan.actionableIdentities, expected.actionableIdentities));

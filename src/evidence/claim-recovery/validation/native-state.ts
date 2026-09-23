@@ -265,7 +265,7 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
         const currentStored=operation.material?nativeMaterial(operation.material,input.recoveryMaterials??[]).currentProjection:undefined;
         const currentProjection=currentStored?deriveCurrentClaimProjection(source,[...recoveryAnchors(source),...operation.anchors],
           [...source.recovery?.operations.flatMap(op=>{const value=operationOccurrences(op,input.recoveryMaterials??[]);return value?[value]:[];})??[],...(occurrences?[occurrences]:[])],
-          currentStored.history,ancestorsOf(source,snapshots),sourceJson):undefined;
+          currentStored.history,ancestorsOf(source,snapshots),sourceJson,currentStored.version):undefined;
         requireSource(!currentStored || isDeepStrictEqual(currentProjection,currentStored));
         requireSource(isDeepStrictEqual(operation, { operationId: operation.operationId,
           sourceVersion: source.version, sourceSha256: sha(sourceJson),

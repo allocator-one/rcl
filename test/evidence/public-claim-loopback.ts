@@ -197,6 +197,11 @@ export async function publicLoopback(input=occurrenceFixture(),commandTimeout=25
   }
   return {
     root,repo,env,source,original,selection,replaceOriginal,addReceipt: (receipt: any) => { receipts.push({ ...receipt,sequence: ++sequence }); },addSource: (value: typeof source) => { value.scope.base_url=url; rows.push({ source: value,receipts: [value.classification,...value.corrections] }); },selectionPath,manifest,statePath,calls,receipts,command,
+    addSourceReceipt: (runId: string,receipt: any) => {
+      const row=rows.find(item => item.source.scope.run_id===runId);
+      if(!row) throw new Error('unknown synthetic source');
+      row.receipts.push({ ...receipt,sequence: Math.max(0,...row.receipts.map(item => item.sequence))+1 });
+    },
     preview: () => command(['--preview','--selection',selectionPath,'--manifest',manifest,'--json']),
     execute: async (mode='apply') => command([`--${mode}`,'--manifest',manifest,'--manifest-sha256',sha(await readFile(manifest,'utf8')),'--json']),
     loseAck: () => { loseAck=true; },deferPostAt: (count:number) => {deferPostCount=count;},hideAfterPost: (value=true,count=1) => {
