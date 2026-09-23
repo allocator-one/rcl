@@ -58,8 +58,14 @@ REPOSITORY=allocator-one/rcl
 : "${EXPECTED_ARTIFACT_DIGEST:?set the artifact digest from the receipt}"
 ARTIFACT_NAME="review-gate-encrypted-${RUN_ID}-${RUN_ATTEMPT}"
 
-case "$RUN_ID:$RUN_ATTEMPT:$EXPECTED_ARTIFACT_ID" in
-  *[!0-9:]*|'') echo "receipt IDs must be decimal numbers" >&2; exit 1 ;;
+case "$RUN_ID" in
+  *[!0-9]*|'') echo "workflow run ID must be a decimal number" >&2; exit 1 ;;
+esac
+case "$RUN_ATTEMPT" in
+  *[!0-9]*|'') echo "workflow run attempt must be a decimal number" >&2; exit 1 ;;
+esac
+case "$EXPECTED_ARTIFACT_ID" in
+  *[!0-9]*|'') echo "artifact ID must be a decimal number" >&2; exit 1 ;;
 esac
 case "$EXPECTED_ARTIFACT_DIGEST" in
   *[!0-9a-f]*|'') echo "artifact digest must be lowercase hexadecimal" >&2; exit 1 ;;
