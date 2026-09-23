@@ -53,9 +53,12 @@ export interface LegacyReservationOptions {
   lockTimeoutMs?: number;
   lockRetryMs?: number;
   onPrepared?: () => Promise<void>;
+  /** Legacy owner documents lack scope, so strict recovery must not reclaim them. */
+  reclaimLegacy?: boolean;
+  qualifiedLegacy?: (owner: unknown) => boolean;
 }
 
-interface LegacyOwner { pid: number; token: string }
+interface LegacyOwner { pid: number; token: string; scope?: unknown }
 
 /**
  * Reserve the legacy recovery-lock pathname for the duration of `work`.
@@ -142,6 +145,7 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
     if (!Number.isSafeInteger(existing.pid) || existing.pid < 1 || typeof existing.token !== 'string') {
       throw new Error('invalid_recovery_lock_requires_inspection');
     }
+    if (options.reclaimLegacy === false && !options.qualifiedLegacy?.(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
     let alive = true;
     try { (options.probe ?? (pid => process.kill(pid, 0)))(existing.pid); }
     catch (error) { if (code(error) === 'ESRCH') alive = false; }
@@ -209,7 +213,7 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   const key = sha256(identity);
   const token = (hooks.token ?? randomUUID)();
   if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
-  return withLegacyReservation(root, identity, { pid: process.pid, token }, async () => {
+  return withLegacyReservation(root, identity, { pid: process.pid, token, scope }, async () => {
   // Keep this directory permanently: removing it on release could split two
   // contenders across different inodes of the same registry pathname.
   const registry = join(root, `${key}.bakery`);

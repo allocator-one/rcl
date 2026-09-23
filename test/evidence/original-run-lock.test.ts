@@ -112,3 +112,14 @@ it('retains an existing incomplete lock without entering recovery or overwriting
   expect(await readFile(path, 'utf8')).toBe('{"pid":');
   expect(await readdir(root)).toEqual([`${sha256(identity)}.lock`]);
 });
+
+it('refuses an unqualified dead legacy owner without probing, unlinking, or entering work', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rcl-original-lock-')); directories.push(root);
+  const identity = 'same destination/org/run'; const path = join(root, `${sha256(identity)}.lock`);
+  await writeFile(path, JSON.stringify({ pid: 2147483647, token: 'old-client-token' }) + '\n');
+  const probe = vi.fn(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+  const work = vi.fn();
+  await expect(withRecoveryLock(root, identity, work, { probe })).rejects.toThrow('legacy_recovery_lock_requires_inspection');
+  expect(probe).not.toHaveBeenCalled(); expect(work).not.toHaveBeenCalled();
+  expect(await readFile(path, 'utf8')).toContain('old-client-token');
+});

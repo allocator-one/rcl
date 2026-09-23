@@ -186,6 +186,6 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
     if (process.env.NODE_ENV !== 'test') throw new Error('test_only_bakery_hook');
     return acquire();
   }
-  return withLegacyReservation(root, identity, { pid: process.pid, token }, acquire,
-    { sync, read: hooks.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait });
+  return withLegacyReservation(root, identity, { pid: process.pid, token, scope }, acquire,
+    { sync, read: hooks.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait, reclaimLegacy: false, qualifiedLegacy: owner => validLockScope((owner as { scope?: unknown }).scope) });
 }
