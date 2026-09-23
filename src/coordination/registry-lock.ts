@@ -100,8 +100,7 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
     try {
       const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       created = true;
-      await options.onPrepared?.();
-      try { await handle.writeFile(JSON.stringify(owner) + '\n'); await handle.sync(); }
+      try { await options.onPrepared?.(); await handle.writeFile(JSON.stringify(owner) + '\n'); await handle.sync(); }
       finally { await handle.close(); }
       // Link publication gives legacy readers either no owner or a complete,
       // fsynced document. They must never parse our private write in flight.
