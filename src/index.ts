@@ -83,6 +83,9 @@ import {
   ConvergeRoundCapError,
   ConvergeRunStateError,
 } from './converge/run-state.js';
+import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
+import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
+import { readStable, sha256 } from './telemetry/recovery/files.js';
 import {
   appendCalls,
   appendOutcomes,
@@ -159,7 +162,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'recover-claim' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-gap' || name === 'recover-claim' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -478,6 +481,47 @@ program
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
 program
+  .command('converge-gap')
+  .description('Preview, apply or resume one evidenced missing-terminal-report audit gap; never creates a round, finding, verdict or attempt')
+  .option('--preview')
+  .option('--apply')
+  .option('--resume')
+  .requiredOption('--manifest <path>', 'Exclusive preview manifest; existing reviewed manifest for apply/resume')
+  .option('--target <target>')
+  .option('--gap-round <number>')
+  .option('--admitting-round <number>')
+  .option('--attempt <number>')
+  .option('--run <uuid>')
+  .option('--report <path>', 'Exact original report JSON')
+  .option('--report-sha256 <sha256>')
+  .option('--incomplete <path>', 'Available incomplete-run evidence; does not prove global absence')
+  .option('--incomplete-sha256 <sha256>')
+  .option('--evidence <path>', 'Optional JSON array of additional {path, sha256} selections')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest bytes; required for apply/resume')
+  .option('--json')
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      if ([opts.preview, opts.apply, opts.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_round_gap_mode');
+      const gitCommonDir = await resolveGitCommonDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
+        if (![opts.target, opts.gapRound, opts.admittingRound, opts.attempt, opts.run, opts.report, opts.reportSha256, opts.incomplete, opts.incompleteSha256].every(value => typeof value === 'string')) throw new Error('round_gap_preview_arguments_required');
+        const evidence = typeof opts.evidence === 'string' ? JSON.parse((await readStable(opts.evidence, 1024 * 1024)).text) : undefined;
+        const manifest = await previewRoundGap({ target: opts.target as string, gapRound: Number(opts.gapRound), admittingRound: Number(opts.admittingRound), attempt: Number(opts.attempt), runId: opts.run as string,
+          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string,
+          incompletePath: opts.incomplete as string, incompleteSha256: opts.incompleteSha256 as string, ...(evidence !== undefined ? { evidence } : {}) }, gitCommonDir);
+        await writeExclusive(opts.manifest as string, manifest, 1024 * 1024);
+        result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)), accounting: 'unchanged', scope: 'local audit only; no admission or approval' };
+      } else {
+        if ([opts.target,opts.gapRound,opts.admittingRound,opts.attempt,opts.run,opts.report,opts.reportSha256,opts.incomplete,opts.incompleteSha256,opts.evidence].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
+        result = { mode: opts.apply ? 'apply' : 'resume', result: await applyRoundGap({ manifest: opts.manifest as string, manifestSha256: opts.manifestSha256 as string, mode: opts.apply ? 'apply' : 'resume' }, gitCommonDir), accounting: 'unchanged', scope: 'local audit only; no admission or approval' };
+      }
+      console.log(JSON.stringify(result));
+    } catch (error) { console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_GAP', message: error instanceof Error ? error.message : String(error) } })); process.exitCode = 3; }
+  });
+
+program
   .command('converge-report')
   .description(
     'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating'
@@ -521,9 +565,12 @@ program
 
         let report: ReviewResult;
         let reportJson: string;
+        let reportSha256: string;
         try {
-          reportJson = await readFile(opts.report, 'utf-8');
+          const source = await readFile(opts.report);
+          reportJson = source.toString('utf8');
           report = JSON.parse(reportJson) as ReviewResult;
+          reportSha256 = sha256(source);
         } catch (err) {
           throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
             cause: err,
@@ -559,6 +606,7 @@ program
           const result = await processRoundReport({
             gitCommonDir,
             ownership,
+            reportSha256,
             target: opts.target as string,
             round,
             findings: recoveredReport ? [...report.findings, ...(report.belowThresholdFindings ?? [])] : report.findings,
