@@ -1,5 +1,5 @@
-import type { ParseResult } from "../consensus/parser.js";
-import type { ModelReview, TokenUsage } from "../consensus/types.js";
+import type { ParseResult } from '../consensus/parser.js';
+import type { ModelReview, TokenUsage } from '../consensus/types.js';
 
 /**
  * Token usage extractors — one per SDK response shape (IO-12475 section
@@ -9,22 +9,15 @@ import type { ModelReview, TokenUsage } from "../consensus/types.js";
  */
 function compactUsage(usage: TokenUsage): TokenUsage | undefined {
   const out: TokenUsage = {};
-  if (typeof usage.inputTokens === "number")
-    out.inputTokens = usage.inputTokens;
-  if (typeof usage.outputTokens === "number")
-    out.outputTokens = usage.outputTokens;
-  if (typeof usage.reasoningTokens === "number")
-    out.reasoningTokens = usage.reasoningTokens;
+  if (typeof usage.inputTokens === 'number') out.inputTokens = usage.inputTokens;
+  if (typeof usage.outputTokens === 'number') out.outputTokens = usage.outputTokens;
+  if (typeof usage.reasoningTokens === 'number') out.reasoningTokens = usage.reasoningTokens;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function sumPresent(
-  ...values: Array<number | null | undefined>
-): number | undefined {
-  const present = values.filter((v): v is number => typeof v === "number");
-  return present.length > 0
-    ? present.reduce((sum, v) => sum + v, 0)
-    : undefined;
+function sumPresent(...values: Array<number | null | undefined>): number | undefined {
+  const present = values.filter((v): v is number => typeof v === 'number');
+  return present.length > 0 ? present.reduce((sum, v) => sum + v, 0) : undefined;
 }
 
 /**
@@ -42,14 +35,14 @@ export function usageFromAnthropic(
         cache_creation_input_tokens?: number | null;
       }
     | null
-    | undefined,
+    | undefined
 ): TokenUsage | undefined {
   if (!usage) return undefined;
   return compactUsage({
     inputTokens: sumPresent(
       usage.input_tokens,
       usage.cache_read_input_tokens,
-      usage.cache_creation_input_tokens,
+      usage.cache_creation_input_tokens
     ),
     outputTokens: usage.output_tokens ?? undefined,
   });
@@ -68,14 +61,13 @@ export function usageFromOpenAI(
         completion_tokens_details?: { reasoning_tokens?: number | null } | null;
       }
     | null
-    | undefined,
+    | undefined
 ): TokenUsage | undefined {
   if (!usage) return undefined;
   return compactUsage({
     inputTokens: usage.prompt_tokens ?? undefined,
     outputTokens: usage.completion_tokens ?? undefined,
-    reasoningTokens:
-      usage.completion_tokens_details?.reasoning_tokens ?? undefined,
+    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? undefined,
   });
 }
 
@@ -93,25 +85,22 @@ export function usageFromGoogle(
         thoughtsTokenCount?: number | null;
       }
     | null
-    | undefined,
+    | undefined
 ): TokenUsage | undefined {
   if (!usage) return undefined;
   return compactUsage({
     inputTokens: usage.promptTokenCount ?? undefined,
-    outputTokens: sumPresent(
-      usage.candidatesTokenCount,
-      usage.thoughtsTokenCount,
-    ),
+    outputTokens: sumPresent(usage.candidatesTokenCount, usage.thoughtsTokenCount),
     reasoningTokens: usage.thoughtsTokenCount ?? undefined,
   });
 }
 
 const KNOWN_PROVIDER_PREFIXES = [
-  "anthropic/",
-  "openai/",
-  "google/",
-  "openrouter/",
-  "openai-compat/",
+  'anthropic/',
+  'openai/',
+  'google/',
+  'openrouter/',
+  'openai-compat/',
 ] as const;
 
 /**
@@ -150,7 +139,7 @@ export function failedReview(opts: {
   provider: string;
   startedAt: number;
   error: string;
-  status?: "error" | "timeout";
+  status?: 'error' | 'timeout';
   /** Tokens the failed attempt still consumed (a truncated answer is billed). */
   usage?: TokenUsage;
 }): ModelReview {
@@ -160,7 +149,7 @@ export function failedReview(opts: {
     provider: opts.provider,
     findings: [],
     durationMs: Date.now() - opts.startedAt,
-    status: opts.status ?? "error",
+    status: opts.status ?? 'error',
     error: opts.error,
     ...(opts.usage ? { usage: opts.usage } : {}),
   };
@@ -214,7 +203,7 @@ export function reviewFromParse(opts: {
   if (unusable) {
     return {
       ...base,
-      status: "parse_failed",
+      status: 'parse_failed',
       error:
         dropped > 0
           ? `All ${dropped} finding(s) failed schema validation; this reviewer's output was lost`
@@ -222,7 +211,7 @@ export function reviewFromParse(opts: {
     };
   }
 
-  return { ...base, status: "success" };
+  return { ...base, status: 'success' };
 }
 
 /**
@@ -233,7 +222,7 @@ export function reviewFromParse(opts: {
  */
 export function linkAbortSignal(
   controller: AbortController,
-  external: AbortSignal | undefined,
+  external: AbortSignal | undefined
 ): () => void {
   if (!external) return () => {};
   if (external.aborted) {
@@ -241,8 +230,8 @@ export function linkAbortSignal(
     return () => {};
   }
   const onAbort = (): void => controller.abort();
-  external.addEventListener("abort", onAbort, { once: true });
-  return () => external.removeEventListener("abort", onAbort);
+  external.addEventListener('abort', onAbort, { once: true });
+  return () => external.removeEventListener('abort', onAbort);
 }
 
 /**
@@ -265,10 +254,8 @@ export const ASK_MAX_OUTPUT_TOKENS = 16_384;
  */
 export class TruncatedAnswerError extends Error {
   constructor(provider: string) {
-    super(
-      `${provider}: answer truncated at the output limit; the response would be incomplete`,
-    );
-    this.name = "TruncatedAnswerError";
+    super(`${provider}: answer truncated at the output limit; the response would be incomplete`);
+    this.name = 'TruncatedAnswerError';
   }
 }
 
@@ -294,7 +281,8 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export type AttemptOutcome<T> =
-  { ok: true; value: T } | { ok: false; timedOut: boolean; error: string };
+  | { ok: true; value: T }
+  | { ok: false; timedOut: boolean; error: string };
 
 /**
  * Shared timeout-owning retry skeleton for one-off adapter calls (discuss).
@@ -312,7 +300,7 @@ export async function attemptWithRetries<T>(opts: {
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), opts.timeoutMs);
   const unlinkAbort = linkAbortSignal(controller, opts.signal);
-  let lastErr: unknown = new Error("no attempts made");
+  let lastErr: unknown = new Error('no attempts made');
 
   try {
     for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
@@ -321,7 +309,7 @@ export async function attemptWithRetries<T>(opts: {
       } catch (err) {
         lastErr = err;
         if (controller.signal.aborted) {
-          return { ok: false, timedOut: true, error: "Request timed out" };
+          return { ok: false, timedOut: true, error: 'Request timed out' };
         }
         if (opts.isRetryable(err) && attempt < opts.maxRetries) {
           await sleep(retryDelay(attempt));
@@ -335,9 +323,6 @@ export async function attemptWithRetries<T>(opts: {
     unlinkAbort();
   }
 
-  const error =
-    lastErr instanceof Error
-      ? `${lastErr.name}: ${lastErr.message}`
-      : String(lastErr);
+  const error = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
   return { ok: false, timedOut: false, error };
 }
