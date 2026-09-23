@@ -96,9 +96,14 @@ jobs:
             echo "head_sha must be 40 hex characters, got ${#HEAD_SHA}" >&2
             exit 2
           fi
-          if [ -n "$ATTEMPT_ID" ] && ! printf '%s\n' "$ATTEMPT_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
-            echo "attempt_id must be a lowercase UUID when provided" >&2
-            exit 2
+          if [ -n "$ATTEMPT_ID" ]; then
+            case "$ATTEMPT_ID" in
+              *$'\n'*) echo "attempt_id must be a lowercase UUID when provided" >&2; exit 2 ;;
+            esac
+            if ! printf '%s\n' "$ATTEMPT_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+              echo "attempt_id must be a lowercase UUID when provided" >&2
+              exit 2
+            fi
           fi
           umask 077
           mkdir -p "$RCL_GATE_EXPORT" "$RCL_DATA_DIR"
@@ -108,6 +113,7 @@ jobs:
           keys = ["GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "PR_NUMBER", "HEAD_SHA", "ATTEMPT_ID"]
           Path(os.environ["RCL_GATE_EXPORT"], "workflow.json").write_text(json.dumps({k: os.environ.get(k) for k in keys}, sort_keys=True) + "\n")
           PYMANIFEST
+          set +e
           rcl review "$GITHUB_REPOSITORY#$PR_NUMBER" \
             --attest \
             --expect-head-sha "$HEAD_SHA" \
@@ -115,6 +121,10 @@ jobs:
             --json-file "$RCL_GATE_EXPORT/report.json" \
             --markdown "$RCL_GATE_EXPORT/report.md" \
             --ci
+          REVIEW_EXIT=$?
+          set -e
+          printf '%s\n' "$REVIEW_EXIT" > "$RCL_GATE_EXPORT/exit-status"
+          exit "$REVIEW_EXIT"
 
       # Private GitHub artifacts retain originals even when delivery/health fails.
       # Abrupt runner loss before serialization/export remains an unavailable window.

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = await readFile(
   new URL('../.github/workflows/review_gate.yml', import.meta.url),
@@ -13,18 +14,12 @@ const headSha = 'a'.repeat(40);
 const registeredAttempt = '12345678-1234-4abc-8def-1234567890ab';
 
 function attestedReviewScript(): string {
-  const stepStart = workflow.indexOf('      - name: Attested review\n');
-  const runStart = workflow.indexOf('        run: |\n', stepStart);
-  if (stepStart < 0 || runStart < 0) throw new Error('attested_review_step_not_found');
-
-  const lines = workflow.slice(runStart + '        run: |\n'.length).split('\n');
-  const script: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith('          ')) script.push(line.slice(10));
-    else if (line === '') script.push('');
-    else break;
-  }
-  return script.join('\n');
+  const parsed = parse(workflow) as {
+    jobs?: { 'attested-review'?: { steps?: Array<{ name?: string; run?: unknown }> } };
+  };
+  const script = parsed.jobs?.['attested-review']?.steps?.find(step => step.name === 'Attested review')?.run;
+  if (typeof script !== 'string') throw new Error('attested_review_step_not_found');
+  return script;
 }
 
 async function runReviewStep(attemptId: string, exitCode = 0) {
@@ -119,6 +114,7 @@ describe('Review Council gate workflow', () => {
   it.each([
     'not-a-uuid',
     '12345678-1234-4ABC-8def-1234567890ab',
+    `not-a-uuid\n${registeredAttempt}`,
   ])('rejects malformed attempt id %s before output or review', async attemptId => {
     const run = await runReviewStep(attemptId);
     expect(run.result.status).toBe(2);
@@ -139,6 +135,7 @@ describe('Review Council gate workflow', () => {
       HEAD_SHA: headSha,
     });
     expect(await readFile(join(run.dataDir, 'quarantine', 'fake.json'), 'utf8')).toBe('retained\n');
+    expect(await readFile(join(run.exportDir, 'exit-status'), 'utf8')).toBe('1\n');
   });
 
   it('keeps runner paths step-scoped and uploads retained files on every outcome', () => {
