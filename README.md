@@ -414,6 +414,17 @@ mints it again for the same run id before delivery. Pair it with
 `--expect-head-sha` so a moved pull request fails fast instead of being
 refused at ingest.
 
+If the completed envelope's POST becomes unavailable, delivery first reads a
+restricted receipt for that same run with its still-live attested credential.
+A matching receipt resumes artifact delivery without another POST; only an
+explicit 404 permits replay of the exact serialized envelope. Recovery allows
+at most three POSTs including the original, with an additional 20-second recovery
+deadline bounded by credential expiry. Conflicts, rejected or unanswered receipts,
+expiry and exhausted retries stop recovery. No reviewer is called again and no
+ordinary credential is substituted. Failed delivery retains bounded, redacted
+transport diagnostics, including the initial error cause, with the original
+recovery evidence.
+
 ```yaml
 # .github/workflows/review_gate.yml (dispatched by Harness for one pull request)
 permissions:

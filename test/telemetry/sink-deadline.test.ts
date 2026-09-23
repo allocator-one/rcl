@@ -8,13 +8,6 @@ const credential = { url: 'https://synthetic.invalid', token: 'synthetic-token',
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
-  // Native AbortSignal timers are not controlled by fake timers. Drive real
-  // AbortSignals with the same fake clock as the transport, including rejection.
-  vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), ms);
-    return controller.signal;
-  });
 });
 
 afterEach(() => {
@@ -79,7 +72,7 @@ it.each(['run', 'events'] as const)('aborts a %s POST at the remaining operation
   await vi.advanceTimersByTimeAsync(1);
   expect(outcome).toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('TimeoutError') });
   expect(fake.requests[1]!.aborted).toBe(5000);
-  expect(vi.mocked(AbortSignal.timeout).mock.calls.map(([ms]) => ms)).toEqual([5000, 500]);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it.each(['run', 'events'] as const)('does not start a %s POST after a late successful capability read exhausts the allowance', async kind => {
@@ -98,13 +91,13 @@ it.each(['run', 'events'] as const)('does not start a %s POST after a late succe
 });
 
 it.each(['run', 'events'] as const)('keeps normal per-request timeout behavior for %s without an explicit operation budget', async kind => {
-  const fake = transport(4500, 4500);
+  const fake = transport(9000, 9000);
   let outcome: unknown;
   void deliver(kind, fake.fetchImpl, {}).then(value => { outcome = value; });
-  await vi.advanceTimersByTimeAsync(9000);
+  await vi.advanceTimersByTimeAsync(18_000);
   expect(outcome).toMatchObject({ kind: 'ok' });
-  expect(fake.requests).toEqual([{ method: 'GET', started: 0 }, { method: 'POST', started: 4500 }]);
-  expect(vi.mocked(AbortSignal.timeout).mock.calls.map(([ms]) => ms)).toEqual([10_000, 10_000]);
+  expect(fake.requests).toEqual([{ method: 'GET', started: 0 }, { method: 'POST', started: 9000 }]);
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it('still bounds an ungated event POST by the supplied allowance', async () => {
@@ -116,4 +109,27 @@ it('still bounds an ungated event POST by the supplied allowance', async () => {
   await vi.advanceTimersByTimeAsync(5000);
   expect(outcome).toMatchObject({ kind: 'unavailable' });
   expect(fake.requests).toEqual([{ method: 'POST', started: 0, aborted: 5000 }]);
+});
+
+it.each(['json', 'artifact'] as const)('keeps the %s response body under the request deadline', async kind => {
+  let signal: AbortSignal | undefined;
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    signal = init!.signal!;
+    return new Response(new ReadableStream({ start(controller) {
+      signal!.addEventListener('abort', () => controller.error(signal!.reason), { once: true });
+    } }));
+  };
+  const sink = new HarnessSink({ credential, rclVersion: 'test', fetchImpl, timeoutMs: 50 });
+  let outcome: unknown;
+  const pending = kind === 'json'
+    ? sink.getJson('/read', data => data)
+    : sink.getArtifact('00000000-0000-7000-8000-000000000001', 'report_json', 100);
+  void pending.then(value => { outcome = value; });
+  await vi.advanceTimersByTimeAsync(49);
+  expect(outcome).toBeUndefined();
+  expect(signal?.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(outcome).toMatchObject({ kind: 'unavailable' });
+  expect(signal?.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
 });

@@ -98,17 +98,22 @@ describe('recovery transport budget', () => {
 
   it('creates its ten-second network timeout only after quota admission', async () => {
     const sequence: string[] = [];
-    const time = clock(() => { sequence.push('quota wait'); });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const time = clock(ms => { sequence.push('quota wait'); vi.advanceTimersByTime(ms); });
     const budget = new RecoveryRequestBudget(time);
     for (let i = 0; i < 240; i++) await budget.acquire();
-    const original = AbortSignal.timeout;
-    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => { sequence.push(`timeout ${ms}`); return original(ms); });
     try {
       const sink = new HarnessSink({ credential, rclVersion: 'test', requestBudget: budget,
-        fetchImpl: async () => { sequence.push('fetch'); return Response.json({ data: [] }); } });
+        fetchImpl: async (_url, init) => {
+          sequence.push('fetch');
+          expect(init?.signal?.aborted).toBe(false);
+          return Response.json({ data: [] });
+        } });
       expect(await sink.getJson('/read', data => data)).toMatchObject({ kind: 'ok' });
-      expect(sequence).toEqual(['quota wait', 'timeout 10000', 'fetch']);
-    } finally { timeout.mockRestore(); }
+      expect(sequence).toEqual(['quota wait', 'fetch']);
+      expect(time.now()).toBeGreaterThanOrEqual(60_000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
   it('does not perform I/O if its quota wait is interrupted', async () => {
