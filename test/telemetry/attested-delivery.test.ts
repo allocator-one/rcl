@@ -169,9 +169,12 @@ describe('the run-bound credential of --attest', () => {
 
   it.each([
     { receiptStatus: 0, status: 'error', posts: 1 },
+    { receiptStatus: 408, status: 'error', posts: 1 },
+    { receiptStatus: 429, status: 'error', posts: 1 },
+    { receiptStatus: 503, status: 'error', posts: 1 },
     { receiptStatus: 403, status: 'rejected', posts: 1 },
     { receiptStatus: 404, status: 'conflict', posts: 2 },
-  ])('retains the original safe transport diagnostic when recovery ends as $status', async ({ receiptStatus, status, posts }) => {
+  ])('retains the original safe transport diagnostic when receipt $receiptStatus ends recovery as $status', async ({ receiptStatus, status, posts }) => {
     const secret = 'Abcdef1234567890Abcdef1234567890';
     const failure = new TypeError('fetch failed', { cause: new Error(`socket reset authorization=Bearer ${secret}`) });
     let submitted = 0;
@@ -195,12 +198,18 @@ describe('the run-bound credential of --attest', () => {
 
     expect(outcome).toMatchObject({ status, spooled: false, exitCode: 4 });
     expect(requests.filter((request) => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(posts);
+    expect(requests.map((request) => request.method)).toEqual(posts === 1 ? ['POST', 'GET'] : ['POST', 'GET', 'POST']);
+    expect(requests[1]!.url).toBe(`https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`);
     const retained = await runtime.quarantine!.inspect(result.run!.id);
     expect(retained).toMatchObject({ status: 'complete', manifest: { run_id: result.run!.id, requested_mode: 'attested', acknowledged: false } });
     const diagnostic = retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery.initial_transport');
     expect(diagnostic?.message).toContain('TypeError: fetch failed; cause: Error: socket reset');
     expect(diagnostic!.message).not.toContain(secret);
     expect(diagnostic!.message.length).toBeLessThanOrEqual(300);
+    if (status === 'error') {
+      expect(outcome.line).toContain('attested_recovery_receipt_unavailable');
+      expect(retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery')?.message).toContain('attested_recovery_receipt_unavailable');
+    }
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
   });
 
