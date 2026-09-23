@@ -35,7 +35,10 @@ export interface AttestedRecoveryOptions<T = undefined> {
   post: (payload: string, signal: AbortSignal) => Promise<DeliveryAttempt<T>>;
   /** Must read only the credential-bound run and validate a matching receipt. */
   receipt: (runId: string, signal: AbortSignal) => Promise<ReceiptProbe<T>>;
+  /** Epoch clock used only for the credential's absolute expiry. */
   now?: () => number;
+  /** Monotonic clock used for the finite elapsed delivery budget. */
+  monotonicNow?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
   maxAttempts?: number;
@@ -52,18 +55,19 @@ export interface AttestedRecoveryOptions<T = undefined> {
  */
 export async function recoverAttestedDelivery<T = undefined>(options: AttestedRecoveryOptions<T>): Promise<AttestedRecoveryOutcome<T>> {
   const now = options.now ?? Date.now;
+  const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const sleep = options.sleep ?? abortableSleep;
   const maxAttempts = validBound(options.maxAttempts, ATTESTED_DELIVERY_MAX_ATTEMPTS);
   const deadlineMs = validBound(options.deadlineMs, ATTESTED_DELIVERY_DEADLINE_MS);
   const expiresAt = Date.parse(options.expiresAt);
-  const startedAt = now();
+  const startedAt = monotonicNow();
   let attempts = Math.min(validBound(options.initialAttempts, 0), maxAttempts);
 
   const boundary = (): { remainingMs: number } | { stopped: AttestedRecoveryOutcome<T> } => {
     if (options.signal?.aborted) return { stopped: outcome('cancelled', attempts) };
     const current = now();
     if (!Number.isFinite(expiresAt) || current >= expiresAt) return { stopped: outcome('expired', attempts) };
-    const elapsedMs = current - startedAt;
+    const elapsedMs = monotonicNow() - startedAt;
     if (elapsedMs >= deadlineMs) return { stopped: outcome('deadline_exceeded', attempts) };
     const remainingMs = Math.min(deadlineMs - elapsedMs, expiresAt - current);
     if (remainingMs <= 0) return { stopped: outcome(expiresAt - current <= deadlineMs - elapsedMs ? 'expired' : 'deadline_exceeded', attempts) };

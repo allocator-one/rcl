@@ -42,6 +42,47 @@ describe('recoverAttestedDelivery', () => {
     expect(posts).toBe(1);
   });
 
+  it('keeps the elapsed deadline when the credential clock moves backward', async () => {
+    let epoch = NOW;
+    let elapsed = 0;
+    let posts = 0;
+    const receipt = vi.fn(async () => ({ kind: 'absent' as const }));
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE,
+      now: () => epoch, monotonicNow: () => elapsed, deadlineMs: 20,
+      post: async () => {
+        posts++;
+        epoch -= 60_000;
+        elapsed += 25;
+        return posts === 1 ? { kind: 'unavailable' } : { kind: 'recorded' };
+      },
+      receipt, sleep: async () => {},
+    });
+
+    expect(outcome).toEqual({ kind: 'deadline_exceeded', attempts: 1, recovered: false });
+    expect(posts).toBe(1);
+    expect(receipt).not.toHaveBeenCalled();
+  });
+
+  it('does not expire the elapsed deadline when the credential clock moves forward within its validity', async () => {
+    let epoch = NOW;
+    let elapsed = 0;
+    let posts = 0;
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE,
+      now: () => epoch, monotonicNow: () => elapsed, deadlineMs: 20,
+      post: async () => {
+        posts++;
+        epoch += 60_000;
+        elapsed++;
+        return posts === 1 ? { kind: 'unavailable' } : { kind: 'recorded' };
+      },
+      receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+
+    expect(outcome).toEqual({ kind: 'recorded', attempts: 2, recovered: true });
+  });
+
   it.each([
     ['conflict', { kind: 'conflict' }],
     ['hard rejection', { kind: 'rejected' }],
@@ -94,9 +135,9 @@ describe('recoverAttestedDelivery', () => {
     });
     expect(cancelled).toEqual({ kind: 'cancelled', attempts: 0, recovered: false });
 
-    let clock = NOW;
+    let clock = 0;
     const deadline = await recoverAttestedDelivery({
-      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => clock, deadlineMs: 1,
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, monotonicNow: () => clock, deadlineMs: 1,
       post: async () => { clock += 1; return { kind: 'unavailable' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
     });
     expect(deadline).toEqual({ kind: 'deadline_exceeded', attempts: 1, recovered: false });
@@ -113,12 +154,14 @@ describe('recoverAttestedDelivery', () => {
       let ticks = 0;
       const receiptExpired: boolean[] = [];
       const postExpired: boolean[] = [];
-      const now = () => NOW + (++ticks >= 4 ? 1 : 0);
-      const stopped = () => boundary === 'expiry' ? now() >= NOW + 1 : now() - NOW >= 1;
+      const tick = () => ++ticks >= 4 ? 1 : 0;
+      const now = () => NOW + (boundary === 'expiry' ? tick() : 0);
+      const monotonicNow = () => boundary === 'deadline' ? tick() : 0;
+      const stopped = () => boundary === 'expiry' ? now() >= NOW + 1 : monotonicNow() >= 1;
 
       const outcome = await recoverAttestedDelivery({
         runId: 'run-1', payload: 'immutable', expiresAt: new Date(boundary === 'expiry' ? NOW + 1 : NOW + 60_000).toISOString(),
-        now, receiptFirst, ...(boundary === 'deadline' ? { deadlineMs: 1 } : {}),
+        now, monotonicNow, receiptFirst, ...(boundary === 'deadline' ? { deadlineMs: 1 } : {}),
         initialAttempts: receiptFirst ? 1 : 0,
         post: async () => { postExpired.push(stopped()); return { kind: 'recorded' }; },
         receipt: async () => { receiptExpired.push(stopped()); return { kind: 'absent' }; },
