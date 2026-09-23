@@ -22,6 +22,7 @@ type WorkflowStep = {
 };
 
 type WorkflowJob = {
+  'runs-on'?: string;
   'timeout-minutes'?: number;
   steps?: WorkflowStep[];
 };
@@ -122,6 +123,8 @@ describe('Review Council gate workflow', () => {
       '--markdown',
       join(run.exportDir, 'report.md'),
       '--ci',
+      '--config',
+      join(run.dataDir, 'public-artifact.yml'),
     ]);
     expect(JSON.parse(await readFile(join(run.exportDir, 'workflow.json'), 'utf8'))).toEqual({
       ATTEMPT_ID: attemptId,
@@ -132,6 +135,10 @@ describe('Review Council gate workflow', () => {
       HEAD_SHA: headSha,
       PR_NUMBER: '80',
     });
+    expect(await readFile(join(run.dataDir, 'public-artifact.yml'), 'utf8')).toBe(
+      'harness:\n  telemetry: full\n  parseFailures: false\n'
+    );
+    expect(await readFile(join(run.exportDir, 'workflow.json'), 'utf8')).not.toContain('test-token');
   });
 
   it.each([
@@ -176,7 +183,7 @@ describe('Review Council gate workflow', () => {
     expect(await readFile(join(run.exportDir, 'exit-status'), 'utf8')).toBe('1\n');
   });
 
-  it('keeps runner paths step-scoped and uploads retained files on every outcome', () => {
+  it('uploads only encrypted retained evidence on every outcome', () => {
     const jobPrefix = workflow.slice(workflow.indexOf('jobs:'), workflow.indexOf('steps:'));
     expect(jobPrefix).not.toContain('${{ runner.temp }}');
     expect(workflow).toContain('RCL_DATA_DIR: ${{ runner.temp }}/rcl-gate-data');
@@ -184,35 +191,73 @@ describe('Review Council gate workflow', () => {
     expect(workflow).toContain(
       "run-name: Review Council gate · ${{ inputs.attempt_id || 'unregistered' }}"
     );
+    expect(workflow).toContain('parseFailures: false');
+    expect(attestedReviewScript()).toContain('public-artifact.yml');
+    expect(attestedReviewScript()).toContain('Never enable parse-failure answer retention');
+    expect(attestedReviewScript()).not.toContain('GITHUB_TOKEN"];');
+    expect(workflow).not.toContain('OPENAI_API_KEY:');
+    expect(workflow).not.toContain('GEMINI_API_KEY:');
+    expect(workflow).not.toContain('OPENROUTER_API_KEY:');
 
-    const retention = workflow.slice(workflow.indexOf('- name: Retain original review evidence'));
+    const prepare = workflow.slice(
+      workflow.indexOf('- name: Prepare encrypted review evidence'),
+      workflow.indexOf('- name: Retain encrypted review evidence')
+    );
+    expect(prepare).toContain('if: always()');
+    expect(prepare).toContain('openssl cms -encrypt');
+    expect(prepare).toContain('-aes-256-gcm');
+    expect(prepare).toContain('rcl-review-evidence-archive-v1');
+
+    const retention = workflow.slice(
+      workflow.indexOf('- name: Retain encrypted review evidence'),
+      workflow.indexOf('- name: Record retained evidence receipt')
+    );
     expect(retention).toContain('if: always()');
+    expect(retention).toContain('id: retain-original-review-evidence');
     expect(retention).toContain(
-      'name: review-gate-${{ github.run_id }}-${{ github.run_attempt }}'
+      'name: review-gate-encrypted-${{ github.run_id }}-${{ github.run_attempt }}'
     );
     expect(retention).not.toContain('inputs.attempt_id');
-    expect(retention).toContain('${{ runner.temp }}/rcl-gate-evidence/');
-    expect(retention).toContain('${{ runner.temp }}/rcl-gate-data/quarantine/');
+    expect(retention).toContain(
+      'path: ${{ runner.temp }}/rcl-gate-recovery/review-evidence.cms'
+    );
+    expect(retention).not.toContain('${{ runner.temp }}/rcl-gate-evidence/');
+    expect(retention).not.toContain('${{ runner.temp }}/rcl-gate-data/quarantine/');
+    expect(retention).toContain('if-no-files-found: error');
+
+    const receipt = workflow.slice(workflow.indexOf('- name: Record retained evidence receipt'));
+    expect(receipt).toContain('if: always()');
+    expect(receipt).toContain('timeout-minutes: 1');
+    expect(receipt).toContain('artifact-digest');
+    expect(receipt).toContain("grep -Eq '^[0-9a-f]{64}$'");
+    expect(receipt).toContain('$GITHUB_STEP_SUMMARY');
   });
 
-  it('bounds sequential steps so retained evidence has time before the job deadline', () => {
+  it('bounds encryption and upload so retention keeps five minutes of job margin', () => {
     const job = attestedReviewJob();
     const steps = job.steps ?? [];
     const checkout = steps.find(step => step.uses?.startsWith('actions/checkout@'));
     const setupNode = steps.find(step => step.uses?.startsWith('actions/setup-node@'));
     const install = steps.find(step => step.name === 'Install Review Council');
     const review = steps.find(step => step.name === 'Attested review');
-    const retain = steps.find(step => step.name === 'Retain original review evidence');
+    const encrypt = steps.find(step => step.name === 'Prepare encrypted review evidence');
+    const retain = steps.find(step => step.name === 'Retain encrypted review evidence');
+    const receipt = steps.find(step => step.name === 'Record retained evidence receipt');
 
+    expect(job['runs-on']).toBe('ubuntu-24.04');
     expect(job['timeout-minutes']).toBe(360);
     expect(checkout?.['timeout-minutes']).toBe(5);
     expect(setupNode?.['timeout-minutes']).toBe(5);
     expect(install?.['timeout-minutes']).toBe(10);
-    expect(review?.['timeout-minutes']).toBe(330);
+    expect(review?.['timeout-minutes']).toBe(325);
+    expect(encrypt?.['timeout-minutes']).toBe(4);
     expect(retain?.['timeout-minutes']).toBe(5);
+    expect(receipt?.['timeout-minutes']).toBe(1);
+    expect(encrypt?.if).toBe('always()');
     expect(retain?.if).toBe('always()');
+    expect(receipt?.if).toBe('always()');
 
-    const aggregateBudget = [checkout, setupNode, install, review, retain].reduce(
+    const aggregateBudget = [checkout, setupNode, install, review, encrypt, retain, receipt].reduce(
       (total, step) => total + (step?.['timeout-minutes'] ?? 0),
       0
     );
