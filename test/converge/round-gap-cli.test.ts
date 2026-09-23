@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture, cleanup } from './round-gap-fixtures.js';
@@ -12,7 +13,10 @@ import { sha256 } from '../../src/telemetry/recovery/files.js';
 afterEach(cleanup);
 const cli = fileURLToPath(new URL('../../src/index.ts',import.meta.url));
 async function command(cwd:string,args:string[],env:NodeJS.ProcessEnv) {
-  const child=spawn(process.execPath,['--import',import.meta.resolve('tsx'),cli,...args],{cwd,env:{...process.env,...env,TSX_DISABLE_CACHE:'1',NO_COLOR:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'}});
+  const child=spawn(process.execPath,['--import',import.meta.resolve('tsx'),cli,...args],{
+    cwd,timeout:10_000,killSignal:'SIGKILL',
+    env:{...process.env,...env,TSX_DISABLE_CACHE:'1',NO_COLOR:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull},
+  });
   let stdout='',stderr=''; child.stdout.on('data',c=>stdout+=c); child.stderr.on('data',c=>stderr+=c);
   const code=await new Promise<number|null>((resolve,reject)=>{child.on('error',reject);child.on('close',resolve);});
   return {code,stdout,stderr};
