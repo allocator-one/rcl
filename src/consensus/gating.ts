@@ -1,17 +1,17 @@
-import { performance } from 'node:perf_hooks';
-import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
-import type { ConsensusFinding } from './types.js';
-import type { ModelAnswer } from '../dispatch/adapter.js';
-import type { FileChange } from '../resolver/types.js';
-import { defaultAdapterFactory } from '../dispatch/runner.js';
-import { detectProvider } from '../roles/dispatcher.js';
-import { neutralizeDelimiters, wrapDiff } from '../prompts/hardening.js';
+import { performance } from "node:perf_hooks";
+import { MAX_TIMER_DELAY_MS } from "../config/schema.js";
+import type { ConsensusFinding } from "./types.js";
+import type { ModelAnswer } from "../dispatch/adapter.js";
+import type { FileChange } from "../resolver/types.js";
+import { defaultAdapterFactory } from "../dispatch/runner.js";
+import { detectProvider } from "../roles/dispatcher.js";
+import { neutralizeDelimiters, wrapDiff } from "../prompts/hardening.js";
 import {
   formatSyntheticHunkHeader,
   parseUnifiedDiff,
   type UnifiedDiffHunk,
   type UnifiedDiffLine,
-} from '../prepare/unified-diff.js';
+} from "../prepare/unified-diff.js";
 
 /**
  * Convergence gating (RCL-23). The RCL-21 audit showed why "any single
@@ -36,7 +36,7 @@ import {
  * failure promoted 73 single-model, low-confidence findings to blocking on
  * one PR and blocked every open PR in the organization (RCL-60, RCL-62).
  */
-export type GatingReason = 'consensus' | 'critical' | 'verified' | 'none';
+export type GatingReason = "consensus" | "critical" | "verified" | "none";
 
 export interface GatingVerification {
   /** Absent in legacy evidence or when no model was recorded. */
@@ -50,7 +50,7 @@ export interface GatingVerification {
    * not promoted to blocking (RCL-62). Read `note` for the cause; a
    * persistently broken verifier is a fixable infrastructure problem.
    */
-  verdict: 'refuted' | 'unrefuted' | 'unavailable';
+  verdict: "refuted" | "unrefuted" | "unavailable";
   note?: string;
 }
 
@@ -63,7 +63,7 @@ export type AskFn = (
   model: string,
   systemPrompt: string,
   userPrompt: string,
-  options: { timeoutMs: number; maxRetries: number }
+  options: { timeoutMs: number; maxRetries: number; signal?: AbortSignal },
 ) => Promise<ModelAnswer>;
 
 export interface GatingOptions {
@@ -118,13 +118,15 @@ export interface VerificationProgress {
 
 export class VerificationPassTimeoutError extends Error {
   constructor(timeoutMs: number) {
-    super(`Verification pass exceeded its whole-pass deadline of ${timeoutMs}ms`);
-    this.name = 'VerificationPassTimeoutError';
+    super(
+      `Verification pass exceeded its whole-pass deadline of ${timeoutMs}ms`,
+    );
+    this.name = "VerificationPassTimeoutError";
   }
 }
 
 export interface GatingConfigInput {
-  mode?: 'verified-consensus' | 'all-findings';
+  mode?: "verified-consensus" | "all-findings";
   minModels?: number;
   verificationModel?: string;
   verificationTimeout?: number;
@@ -132,28 +134,30 @@ export interface GatingConfigInput {
 }
 
 export interface ResolvedGatingConfig {
-  mode: 'verified-consensus' | 'all-findings';
+  mode: "verified-consensus" | "all-findings";
   minModels: number;
   verificationModel: string | undefined;
   verificationTimeoutMs: number;
   verificationPassTimeoutMs: number;
 }
 
-const DIRECT_PROVIDERS = new Set(['anthropic', 'openai', 'google']);
+const DIRECT_PROVIDERS = new Set(["anthropic", "openai", "google"]);
 
 function resolveTimerDelay(name: string, value: number): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMER_DELAY_MS) {
-    throw new Error(`${name} must be an integer between 1 and ${MAX_TIMER_DELAY_MS}, got ${value}`);
+    throw new Error(
+      `${name} must be an integer between 1 and ${MAX_TIMER_DELAY_MS}, got ${value}`,
+    );
   }
   return value;
 }
 
 export const DEFAULT_GATING_CONFIG = {
-  mode: 'verified-consensus',
+  mode: "verified-consensus",
   minModels: 2,
   // Use the stable Flash council member for this latency-sensitive pass.
   // Individual batches and the complete queue both have explicit bounds.
-  verificationModel: 'google/gemini-3.8-flash',
+  verificationModel: "google/gemini-3.8-flash",
   verificationTimeoutMs: 60_000,
   // Bound the complete queue to three per-call windows. Large finding sets
   // may span many batches; without a pass deadline those waves can keep a
@@ -171,11 +175,13 @@ export const DEFAULT_GATING_CONFIG = {
  */
 export function resolveGatingConfig(
   input: GatingConfigInput | undefined,
-  rosterModels?: readonly string[]
+  rosterModels?: readonly string[],
 ): ResolvedGatingConfig {
   const minModels = input?.minModels ?? DEFAULT_GATING_CONFIG.minModels;
   if (!Number.isSafeInteger(minModels) || minModels < 2) {
-    throw new Error(`gating.minModels must be an integer ≥ 2, got ${minModels}`);
+    throw new Error(
+      `gating.minModels must be an integer ≥ 2, got ${minModels}`,
+    );
   }
 
   let verificationModel: string | undefined;
@@ -184,19 +190,25 @@ export function resolveGatingConfig(
     // The verification pass sits on the blocking path of every round — it
     // must use a direct provider API, never an aggregator with unbounded
     // tails.
-    if (verificationModel.startsWith('openrouter/')) {
+    if (verificationModel.startsWith("openrouter/")) {
       throw new Error(
-        `gating.verificationModel must be a direct-API model, got "${verificationModel}"`
+        `gating.verificationModel must be a direct-API model, got "${verificationModel}"`,
       );
     }
   } else if (rosterModels === undefined) {
     verificationModel = DEFAULT_GATING_CONFIG.verificationModel;
   } else {
     const rosterProviders = new Set(rosterModels.map((m) => detectProvider(m)));
-    if (rosterProviders.has(detectProvider(DEFAULT_GATING_CONFIG.verificationModel))) {
+    if (
+      rosterProviders.has(
+        detectProvider(DEFAULT_GATING_CONFIG.verificationModel),
+      )
+    ) {
       verificationModel = DEFAULT_GATING_CONFIG.verificationModel;
     } else {
-      verificationModel = rosterModels.find((m) => DIRECT_PROVIDERS.has(detectProvider(m)));
+      verificationModel = rosterModels.find((m) =>
+        DIRECT_PROVIDERS.has(detectProvider(m)),
+      );
     }
   }
 
@@ -205,12 +217,13 @@ export function resolveGatingConfig(
     minModels,
     verificationModel,
     verificationTimeoutMs: resolveTimerDelay(
-      'gating.verificationTimeout',
-      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs
+      "gating.verificationTimeout",
+      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs,
     ),
     verificationPassTimeoutMs: resolveTimerDelay(
-      'gating.verificationPassTimeout',
-      input?.verificationPassTimeout ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+      "gating.verificationPassTimeout",
+      input?.verificationPassTimeout ??
+        DEFAULT_GATING_CONFIG.verificationPassTimeoutMs,
     ),
   };
 }
@@ -259,14 +272,18 @@ function isChangedLine(line: UnifiedDiffLine): boolean {
 
 function replacementBlock(
   body: readonly UnifiedDiffLine[],
-  index: number
+  index: number,
 ): { start: number; end: number; hasDeletion: boolean } {
   let start = index;
   while (start > 0) {
     const previous = body[start - 1]!;
     if (isChangedLine(previous)) {
       start -= 1;
-    } else if (previous.marker && start > 1 && isChangedLine(body[start - 2]!)) {
+    } else if (
+      previous.marker &&
+      start > 1 &&
+      isChangedLine(body[start - 2]!)
+    ) {
       start -= 2;
     } else {
       break;
@@ -297,7 +314,7 @@ function replacementBlock(
 function windowForMatches(
   hunk: UnifiedDiffHunk,
   hunkIndex: number,
-  matches: readonly number[]
+  matches: readonly number[],
 ): HunkWindow | undefined {
   const first = matches[0];
   const last = matches.at(-1);
@@ -325,14 +342,15 @@ function windowForMatches(
 
 function hunkDistance(
   hunk: UnifiedDiffHunk,
-  range: { start: number; end: number }
+  range: { start: number; end: number },
 ): number {
   // A zero-count range is anchored after newStart and its deletion body uses
   // newStart + 1 as the effective new-file coordinate. Treat both sides of
   // that boundary as adjacent so either conventional line reference keeps
   // the complete removal in view.
   const hunkStart = hunk.newStart;
-  let hunkEnd = hunk.newCount === 0 ? hunk.newStart + 1 : hunk.newStart + hunk.newCount - 1;
+  let hunkEnd =
+    hunk.newCount === 0 ? hunk.newStart + 1 : hunk.newStart + hunk.newCount - 1;
   // A deletion after the hunk's final new-file line is anchored at the next
   // coordinate. Parsed body coordinates are monotonic; only a legal trailing
   // no-newline marker can follow the last real line.
@@ -347,12 +365,16 @@ function hunkDistance(
 function requiredWindow(
   hunk: UnifiedDiffHunk,
   hunkIndex: number,
-  range: { start: number; end: number }
+  range: { start: number; end: number },
 ): HunkWindow | undefined {
   const exact: number[] = [];
   for (let index = 0; index < hunk.body.length; index += 1) {
     const line = hunk.body[index]!;
-    if (!line.marker && line.newLine >= range.start && line.newLine <= range.end) {
+    if (
+      !line.marker &&
+      line.newLine >= range.start &&
+      line.newLine <= range.end
+    ) {
       exact.push(index);
     }
   }
@@ -389,12 +411,17 @@ function requiredWindow(
 
 function mergeWindows(windows: HunkWindow[]): HunkWindow[] {
   const sorted = [...windows].sort(
-    (left, right) => left.hunkIndex - right.hunkIndex || left.start - right.start
+    (left, right) =>
+      left.hunkIndex - right.hunkIndex || left.start - right.start,
   );
   const merged: HunkWindow[] = [];
   for (const window of sorted) {
     const previous = merged.at(-1);
-    if (previous && previous.hunkIndex === window.hunkIndex && window.start <= previous.end) {
+    if (
+      previous &&
+      previous.hunkIndex === window.hunkIndex &&
+      window.start <= previous.end
+    ) {
       previous.end = Math.max(previous.end, window.end);
     } else {
       merged.push({ ...window });
@@ -406,7 +433,7 @@ function mergeWindows(windows: HunkWindow[]): HunkWindow[] {
 function expandWindows(
   hunks: UnifiedDiffHunk[],
   required: HunkWindow[],
-  margin: number
+  margin: number,
 ): HunkWindow[] {
   const expanded = required.map((window) => {
     const body = hunks[window.hunkIndex]!.body;
@@ -419,16 +446,19 @@ function expandWindows(
   return mergeWindows(expanded);
 }
 
-function renderWindows(hunks: UnifiedDiffHunk[], windows: HunkWindow[]): string {
+function renderWindows(
+  hunks: UnifiedDiffHunk[],
+  windows: HunkWindow[],
+): string {
   return windows
     .map((window) => {
       const hunk = hunks[window.hunkIndex]!;
       const body = hunk.body.slice(window.start, window.end);
       const header = formatSyntheticHunkHeader(body);
-      if (!header) return '';
-      return [header, ...body.map((line) => line.text)].join('\n');
+      if (!header) return "";
+      return [header, ...body.map((line) => line.text)].join("\n");
     })
-    .join('\n');
+    .join("\n");
 }
 
 /**
@@ -440,23 +470,26 @@ function renderWindows(hunks: UnifiedDiffHunk[], windows: HunkWindow[]): string 
  */
 export function relevantPatchExcerpt(
   patch: string,
-  ranges: Array<{ start: number; end: number }>
+  ranges: Array<{ start: number; end: number }>,
 ): string {
-  if (ranges.length === 0) return '';
+  if (ranges.length === 0) return "";
   if (!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(patch)) {
-    return patch.length <= MAX_PATCH_CHARS ? patch : '';
+    return patch.length <= MAX_PATCH_CHARS ? patch : "";
   }
   if (
     ranges.some(
       ({ start, end }) =>
-        !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start < 1 ||
+        end < start,
     )
   ) {
-    return '';
+    return "";
   }
 
   const parsed = parseUnifiedDiff(patch);
-  if (!parsed.ok) return '';
+  if (!parsed.ok) return "";
   const { hunks } = parsed.diff;
 
   const required: HunkWindow[] = [];
@@ -468,19 +501,22 @@ export function relevantPatchExcerpt(
       .filter(({ distance }) => distance === 0);
     const closestDistance = distances.reduce(
       (closest, distance) => Math.min(closest, distance),
-      Number.POSITIVE_INFINITY
+      Number.POSITIVE_INFINITY,
     );
     const matches =
       overlapping.length > 0
         ? overlapping
         : distances
             .map((distance, index) => ({ distance, index }))
-            .filter(({ distance }) => distance === closestDistance && distance <= HUNK_MARGIN_LINES);
-    if (matches.length === 0) return '';
+            .filter(
+              ({ distance }) =>
+                distance === closestDistance && distance <= HUNK_MARGIN_LINES,
+            );
+    if (matches.length === 0) return "";
 
     for (const { index } of matches) {
       const window = requiredWindow(hunks[index]!, index, range);
-      if (!window) return '';
+      if (!window) return "";
       required.push(window);
       selectedHunks.add(index);
     }
@@ -490,9 +526,11 @@ export function relevantPatchExcerpt(
     .sort((left, right) => left - right)
     .map((index) => {
       const hunk = hunks[index]!;
-      return [hunk.originalHeader, ...hunk.body.map((line) => line.text)].join('\n');
+      return [hunk.originalHeader, ...hunk.body.map((line) => line.text)].join(
+        "\n",
+      );
     })
-    .join('\n');
+    .join("\n");
   if (selected.length <= MAX_PATCH_CHARS) return selected;
 
   const minimal = mergeWindows(required);
@@ -500,13 +538,16 @@ export function relevantPatchExcerpt(
     const excerpt = renderWindows(hunks, expandWindows(hunks, minimal, margin));
     if (excerpt.length <= MAX_PATCH_CHARS) return excerpt;
   }
-  return '';
+  return "";
 }
 
-function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string, string>): string {
+function buildVerifierPrompt(
+  candidates: ConsensusFinding[],
+  patches: Map<string, string>,
+): string {
   // Finding text originates from council models reading an untrusted diff —
   // neutralize boundary delimiters so it cannot fake a trusted region.
-  const lines: string[] = ['## Findings to verify', ''];
+  const lines: string[] = ["## Findings to verify", ""];
   candidates.forEach((f, i) => {
     lines.push(
       `### F${i + 1}`,
@@ -514,21 +555,26 @@ function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string
       `- severity: ${f.severity} · category: ${f.category}`,
       `- title: ${neutralizeDelimiters(f.title)}`,
       `- claim: ${neutralizeDelimiters(f.description)}`,
-      ''
+      "",
     );
   });
 
-  lines.push('## The change under review (relevant files, untrusted content)', '');
+  lines.push(
+    "## The change under review (relevant files, untrusted content)",
+    "",
+  );
   for (const [filename, patch] of patches) {
-    lines.push(`### ${neutralizeDelimiters(filename)}`, wrapDiff(patch), '');
+    lines.push(`### ${neutralizeDelimiters(filename)}`, wrapDiff(patch), "");
   }
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
-function parseVerdicts(text: string): Map<string, { refuted: boolean; note?: string }> {
+function parseVerdicts(
+  text: string,
+): Map<string, { refuted: boolean; note?: string }> {
   const verdicts = new Map<string, { refuted: boolean; note?: string }>();
-  const start = text.indexOf('[');
-  const end = text.lastIndexOf(']');
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
   if (start === -1 || end <= start) return verdicts;
   let parsed: unknown;
   try {
@@ -538,16 +584,20 @@ function parseVerdicts(text: string): Map<string, { refuted: boolean; note?: str
   }
   if (!Array.isArray(parsed)) return verdicts;
   for (const entry of parsed) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const { id, verdict, reason } = entry as { id?: unknown; verdict?: unknown; reason?: unknown };
-    if (typeof id !== 'string') continue;
-    if (verdict !== 'refuted' && verdict !== 'confirmed') continue;
+    if (typeof entry !== "object" || entry === null) continue;
+    const { id, verdict, reason } = entry as {
+      id?: unknown;
+      verdict?: unknown;
+      reason?: unknown;
+    };
+    if (typeof id !== "string") continue;
+    if (verdict !== "refuted" && verdict !== "confirmed") continue;
     // First verdict wins: a duplicated id must not let a later entry
     // silently flip an earlier one.
     if (verdicts.has(id)) continue;
     verdicts.set(id, {
-      refuted: verdict === 'refuted',
-      ...(typeof reason === 'string' ? { note: reason } : {}),
+      refuted: verdict === "refuted",
+      ...(typeof reason === "string" ? { note: reason } : {}),
     });
   }
   return verdicts;
@@ -560,7 +610,7 @@ function parseVerdicts(text: string): Map<string, { refuted: boolean; note?: str
  */
 export async function applyGating(
   findings: ConsensusFinding[],
-  options: GatingOptions
+  options: GatingOptions,
 ): Promise<{ findings: ConsensusFinding[]; verification?: VerificationStats }> {
   const annotated: ConsensusFinding[] = new Array(findings.length);
   const candidateIndices: number[] = [];
@@ -572,20 +622,22 @@ export async function applyGating(
       : models.reduce((sum, m) => sum + (weights.get(m) ?? 1), 0);
 
   findings.forEach((finding, i) => {
-    const blocking = finding.severity === 'critical' || finding.severity === 'important';
+    const blocking =
+      finding.severity === "critical" || finding.severity === "important";
     // Consensus gating: the configured distinct-model count is always
     // required, and with weights active the weighted vote mass must ALSO
     // reach it — weights can only DEMOTE (noisy models lose gating power);
     // they never let fewer distinct models than configured auto-gate.
     const models = finding.consensus.models;
     const consensusGated =
-      models.length >= options.minModels && weightedSupport(models) >= options.minModels;
+      models.length >= options.minModels &&
+      weightedSupport(models) >= options.minModels;
     if (!blocking) {
-      annotated[i] = { ...finding, gating: { reason: 'none' } };
+      annotated[i] = { ...finding, gating: { reason: "none" } };
     } else if (consensusGated) {
-      annotated[i] = { ...finding, gating: { reason: 'consensus' } };
-    } else if (finding.severity === 'critical') {
-      annotated[i] = { ...finding, gating: { reason: 'critical' } };
+      annotated[i] = { ...finding, gating: { reason: "consensus" } };
+    } else if (finding.severity === "critical") {
+      annotated[i] = { ...finding, gating: { reason: "critical" } };
     } else {
       candidateIndices.push(i);
     }
@@ -598,9 +650,10 @@ export async function applyGating(
   const now = options.monotonicNow ?? performance.now.bind(performance);
   const started = now();
   const verificationPassTimeoutMs =
-    options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs;
+    options.verificationPassTimeoutMs ??
+    DEFAULT_GATING_CONFIG.verificationPassTimeoutMs;
   const verificationDeadline = started + verificationPassTimeoutMs;
-  const verifierModel = options.verificationModel ?? '(none)';
+  const verifierModel = options.verificationModel ?? "(none)";
   const stats: VerificationStats = {
     model: verifierModel,
     candidates: candidateIndices.length,
@@ -618,8 +671,8 @@ export async function applyGating(
     annotated[findingIndex] = {
       ...findings[findingIndex]!,
       gating: {
-        reason: 'none',
-        verification: { model: verifierModel, verdict: 'unavailable', note },
+        reason: "none",
+        verification: { model: verifierModel, verdict: "unavailable", note },
       },
     };
   }
@@ -630,13 +683,16 @@ export async function applyGating(
   // claim from the claim's own wording could un-gate real findings.
   const fullPatches = new Map<string, string>();
   for (const df of options.diffFiles ?? []) {
-    const patch = df.patch ?? '';
+    const patch = df.patch ?? "";
     if (patch.trim().length > 0) fullPatches.set(df.filename, patch);
   }
   // Per-file excerpt covering that file's candidates, so the verifier sees
   // exactly the hunks the claims are about — never a tail-truncated patch
   // whose relevant hunk fell off.
-  const candidateRangesByFile = new Map<string, Array<{ start: number; end: number }>>();
+  const candidateRangesByFile = new Map<
+    string,
+    Array<{ start: number; end: number }>
+  >();
   for (const findingIndex of candidateIndices) {
     const f = findings[findingIndex]!;
     if (!fullPatches.has(f.file)) continue;
@@ -659,15 +715,18 @@ export async function applyGating(
       markUnavailable(
         findingIndex,
         fullPatches.has(f.file)
-          ? 'no hunk context fits the safe verifier bound — not sent to the verifier'
-          : 'no diff context for this file — not sent to the verifier'
+          ? "no hunk context fits the safe verifier bound — not sent to the verifier"
+          : "no diff context for this file — not sent to the verifier",
       );
     }
   }
 
   if (options.verificationModel === undefined) {
     for (const findingIndex of verifiable) {
-      markUnavailable(findingIndex, 'no direct-API verifier available in the configured roster');
+      markUnavailable(
+        findingIndex,
+        "no direct-API verifier available in the configured roster",
+      );
     }
     stats.durationMs = now() - started;
     return { findings: annotated, verification: stats };
@@ -677,7 +736,10 @@ export async function applyGating(
   // every candidate silently stops covering them as a review grows — and an
   // uncovered candidate goes unverified. Batches keep each answer small, and
   // keep one bad batch from costing the whole lane (RCL-60).
-  const verdictsByIndex = new Map<number, { refuted: boolean; note?: string }>();
+  const verdictsByIndex = new Map<
+    number,
+    { refuted: boolean; note?: string }
+  >();
   const failureByIndex = new Map<number, string>();
   if (verifiable.length > 0) {
     const batches: number[][] = [];
@@ -705,8 +767,11 @@ export async function applyGating(
       ask =
         options.ask ??
         ((): AskFn => {
-          const adapter = defaultAdapterFactory(detectProvider(options.verificationModel!));
-          return (m, systemPrompt, userPrompt, opts) => adapter.ask(m, systemPrompt, userPrompt, opts);
+          const adapter = defaultAdapterFactory(
+            detectProvider(options.verificationModel!),
+          );
+          return (m, systemPrompt, userPrompt, opts) =>
+            adapter.ask(m, systemPrompt, userPrompt, opts);
         })();
     } catch (err) {
       constructionFailure = err instanceof Error ? err.message : String(err);
@@ -714,30 +779,42 @@ export async function applyGating(
 
     async function runBatch(batch: number[]): Promise<void> {
       if (ask === undefined) {
-        for (const index of batch) failureByIndex.set(index, constructionFailure!);
+        for (const index of batch)
+          failureByIndex.set(index, constructionFailure!);
         return;
       }
       const candidates = batch.map((i) => findings[i]!);
       const relevantPatches = new Map(
-        [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
+        [...new Set(candidates.map((f) => f.file))].map((file) => [
+          file,
+          patches.get(file)!,
+        ]),
       );
       try {
         const remainingMs = verificationDeadline - now();
         if (remainingMs <= 0) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
-        const callTimeoutMs = Math.max(1, Math.min(options.verificationTimeoutMs, remainingMs));
+        const callTimeoutMs = Math.max(
+          1,
+          Math.min(options.verificationTimeoutMs, remainingMs),
+        );
+        const controller = new AbortController();
         const answerPromise = ask(
           options.verificationModel!,
           VERIFIER_SYSTEM_PROMPT,
           buildVerifierPrompt(candidates, relevantPatches),
-          { timeoutMs: callTimeoutMs, maxRetries: 1 }
+          {
+            timeoutMs: callTimeoutMs,
+            maxRetries: 1,
+            signal: controller.signal,
+          },
         );
         const answer = await new Promise<ModelAnswer>((resolve, reject) => {
-          const deadlineTimer = setTimeout(
-            () => reject(new VerificationPassTimeoutError(verificationPassTimeoutMs)),
-            remainingMs
-          );
+          const deadlineTimer = setTimeout(() => {
+            controller.abort();
+            reject(new VerificationPassTimeoutError(verificationPassTimeoutMs));
+          }, remainingMs);
           answerPromise.then(
             (value) => {
               clearTimeout(deadlineTimer);
@@ -746,13 +823,13 @@ export async function applyGating(
             (err: unknown) => {
               clearTimeout(deadlineTimer);
               reject(err);
-            }
+            },
           );
         });
         if (now() >= verificationDeadline) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
-        if (answer.status !== 'success') {
+        if (answer.status !== "success") {
           const reason = answer.error ?? answer.status;
           for (const index of batch) failureByIndex.set(index, reason);
           return;
@@ -763,7 +840,12 @@ export async function applyGating(
           if (verdict !== undefined) verdictsByIndex.set(findingIndex, verdict);
         });
       } catch (err) {
-        if (err instanceof VerificationPassTimeoutError) throw err;
+        if (
+          err instanceof VerificationPassTimeoutError ||
+          now() >= verificationDeadline
+        ) {
+          throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+        }
         const reason = err instanceof Error ? err.message : String(err);
         for (const index of batch) failureByIndex.set(index, reason);
       }
@@ -787,10 +869,10 @@ export async function applyGating(
           completedCandidates += batch.length;
           reportProgress();
         }
-      })
+      }),
     );
     const failedWorker = workerResults.find(
-      (result): result is PromiseRejectedResult => result.status === 'rejected'
+      (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failedWorker !== undefined) throw failedWorker.reason;
   }
@@ -801,7 +883,8 @@ export async function applyGating(
     if (verdict === undefined) {
       markUnavailable(
         findingIndex,
-        failureByIndex.get(findingIndex) ?? 'verifier response did not cover this finding'
+        failureByIndex.get(findingIndex) ??
+          "verifier response did not cover this finding",
       );
       return;
     }
@@ -809,20 +892,20 @@ export async function applyGating(
     if (verdict.refuted) {
       stats.refuted++;
       gating = {
-        reason: 'none',
+        reason: "none",
         verification: {
           model: verifierModel,
-          verdict: 'refuted',
+          verdict: "refuted",
           ...(verdict.note ? { note: verdict.note } : {}),
         },
       };
     } else {
       stats.unrefuted++;
       gating = {
-        reason: 'verified',
+        reason: "verified",
         verification: {
           model: verifierModel,
-          verdict: 'unrefuted',
+          verdict: "unrefuted",
           ...(verdict.note ? { note: verdict.note } : {}),
         },
       };
@@ -832,4 +915,24 @@ export async function applyGating(
 
   stats.durationMs = now() - started;
   return { findings: annotated, verification: stats };
+}
+
+/**
+ * Apply verifier annotations without allowing a failed verification lane to
+ * discard the completed council result. Callers receive the unannotated
+ * findings, which the CI gate evaluates with strict severity fallback.
+ */
+export async function applyGatingWithFallback(
+  findings: ConsensusFinding[],
+  options: GatingOptions,
+): Promise<{
+  findings: ConsensusFinding[];
+  verification?: VerificationStats;
+  failure?: unknown;
+}> {
+  try {
+    return await applyGating(findings, options);
+  } catch (failure) {
+    return { findings, failure };
+  }
 }

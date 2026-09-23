@@ -1,7 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { parseReviewOutput } from '../consensus/parser.js';
-import type { ModelReview } from '../consensus/types.js';
-import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
+import Anthropic from "@anthropic-ai/sdk";
+import { parseReviewOutput } from "../consensus/parser.js";
+import type { ModelReview } from "../consensus/types.js";
+import type { ReviewAdapter, AdapterOptions, ModelAnswer } from "./adapter.js";
 import {
   stripKnownProviderPrefix,
   isRetryableStatus,
@@ -15,21 +15,21 @@ import {
   usageFromAnthropic,
   ASK_MAX_OUTPUT_TOKENS,
   TruncatedAnswerError,
-} from './utils.js';
+} from "./utils.js";
 
 function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
 export class AnthropicAdapter implements ReviewAdapter {
-  name = 'anthropic';
-  provider = 'anthropic';
+  name = "anthropic";
+  provider = "anthropic";
 
   private client: Anthropic;
 
   constructor(apiKey?: string) {
     this.client = new Anthropic({
-      apiKey: apiKey ?? process.env['ANTHROPIC_API_KEY'],
+      apiKey: apiKey ?? process.env["ANTHROPIC_API_KEY"],
       // The adapter's retry loop owns all retries; SDK-internal retries
       // would multiply wire attempts inside one timeout budget.
       maxRetries: 0,
@@ -41,14 +41,17 @@ export class AnthropicAdapter implements ReviewAdapter {
     role: string,
     systemPrompt: string,
     userPrompt: string,
-    options: AdapterOptions
+    options: AdapterOptions,
   ): Promise<ModelReview> {
     const start = Date.now();
     const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
+    const timeoutHandle = setTimeout(
+      () => controller.abort(),
+      options.timeoutMs,
+    );
     const unlinkAbort = linkAbortSignal(controller, options.signal);
 
-    let lastErr: unknown = new Error('no attempts made');
+    let lastErr: unknown = new Error("no attempts made");
     const modelId = stripKnownProviderPrefix(model);
 
     try {
@@ -60,89 +63,110 @@ export class AnthropicAdapter implements ReviewAdapter {
               model: modelId,
               max_tokens: 16384,
               system: systemPrompt,
-              messages: [{ role: 'user', content: userPrompt }],
+              messages: [{ role: "user", content: userPrompt }],
               tools: [
                 {
-                  name: 'report_findings',
-                  description: 'Report code review findings as structured JSON',
+                  name: "report_findings",
+                  description: "Report code review findings as structured JSON",
                   input_schema: {
-                    type: 'object' as const,
+                    type: "object" as const,
                     properties: {
                       findings: {
-                        type: 'array',
+                        type: "array",
                         items: {
-                          type: 'object',
+                          type: "object",
                           properties: {
-                            id: { type: 'string' },
-                            file: { type: 'string' },
-                            startLine: { type: 'number' },
-                            endLine: { type: 'number' },
+                            id: { type: "string" },
+                            file: { type: "string" },
+                            startLine: { type: "number" },
+                            endLine: { type: "number" },
                             severity: {
-                              type: 'string',
-                              enum: ['critical', 'important', 'minor', 'nitpick'],
+                              type: "string",
+                              enum: [
+                                "critical",
+                                "important",
+                                "minor",
+                                "nitpick",
+                              ],
                             },
                             category: {
-                              type: 'string',
-                              enum: ['security', 'correctness', 'best-practices', 'tests', 'api-design'],
+                              type: "string",
+                              enum: [
+                                "security",
+                                "correctness",
+                                "best-practices",
+                                "tests",
+                                "api-design",
+                              ],
                             },
-                            title: { type: 'string' },
-                            description: { type: 'string' },
-                            suggestedFix: { type: 'string' },
+                            title: { type: "string" },
+                            description: { type: "string" },
+                            suggestedFix: { type: "string" },
                           },
-                          required: ['id', 'file', 'startLine', 'endLine', 'severity', 'category', 'title', 'description'],
+                          required: [
+                            "id",
+                            "file",
+                            "startLine",
+                            "endLine",
+                            "severity",
+                            "category",
+                            "title",
+                            "description",
+                          ],
                         },
                       },
                     },
-                    required: ['findings'],
+                    required: ["findings"],
                   },
                 },
               ],
-              tool_choice: { type: 'any' as const },
+              tool_choice: { type: "any" as const },
             },
             // Buffer above our own timeout so the SDK's request timeout
             // (600s default) never wins the race and misclassifies a
             // timeout as a generic error.
-            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
+            { signal: controller.signal, timeout: options.timeoutMs + 30_000 },
           );
           const usage = usageFromAnthropic(response.usage);
 
-          if (response.stop_reason === 'max_tokens') {
+          if (response.stop_reason === "max_tokens") {
             return failedReview({
               model,
               role,
-              provider: 'anthropic',
+              provider: "anthropic",
               startedAt: start,
               usage,
-              error: 'Response truncated at max_tokens; findings would be incomplete',
+              error:
+                "Response truncated at max_tokens; findings would be incomplete",
             });
           }
 
           // Safety classifiers decline in-band: HTTP 200, no content. Left
           // unhandled this reads as a clean review of code nobody looked at.
-          if (response.stop_reason === 'refusal') {
+          if (response.stop_reason === "refusal") {
             const details = response.stop_details;
             const category =
-              details !== null && details !== undefined && 'category' in details
+              details !== null && details !== undefined && "category" in details
                 ? (details.category as string | null)
                 : null;
             return failedReview({
               model,
               role,
-              provider: 'anthropic',
+              provider: "anthropic",
               startedAt: start,
               usage,
-              error: `Model refused this review${category ? ` (${category})` : ''} — the diff was not reviewed`,
+              error: `Model refused this review${category ? ` (${category})` : ""} — the diff was not reviewed`,
             });
           }
 
           // Extract from tool use
-          let rawOutput = '';
+          let rawOutput = "";
           for (const block of response.content) {
-            if (block.type === 'tool_use' && block.name === 'report_findings') {
+            if (block.type === "tool_use" && block.name === "report_findings") {
               rawOutput = JSON.stringify(block.input);
               break;
             }
-            if (block.type === 'text') {
+            if (block.type === "text") {
               rawOutput += block.text;
             }
           }
@@ -151,10 +175,11 @@ export class AnthropicAdapter implements ReviewAdapter {
             return failedReview({
               model,
               role,
-              provider: 'anthropic',
+              provider: "anthropic",
               startedAt: start,
               usage,
-              error: 'Model returned an empty response; the diff was not reviewed',
+              error:
+                "Model returned an empty response; the diff was not reviewed",
             });
           }
 
@@ -165,7 +190,7 @@ export class AnthropicAdapter implements ReviewAdapter {
           return reviewFromParse({
             model,
             role,
-            provider: 'anthropic',
+            provider: "anthropic",
             startedAt: start,
             parsed,
             usage,
@@ -176,11 +201,11 @@ export class AnthropicAdapter implements ReviewAdapter {
             return {
               model,
               role,
-              provider: 'anthropic',
+              provider: "anthropic",
               findings: [],
               durationMs: Date.now() - start,
-              status: 'timeout',
-              error: 'Request timed out',
+              status: "timeout",
+              error: "Request timed out",
             };
           }
           if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
@@ -195,14 +220,17 @@ export class AnthropicAdapter implements ReviewAdapter {
       unlinkAbort();
     }
 
-    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
+    const errMsg =
+      lastErr instanceof Error
+        ? `${lastErr.name}: ${lastErr.message}`
+        : String(lastErr);
     return {
       model,
       role,
-      provider: 'anthropic',
+      provider: "anthropic",
       findings: [],
       durationMs: Date.now() - start,
-      status: 'error',
+      status: "error",
       error: errMsg,
     };
   }
@@ -211,7 +239,7 @@ export class AnthropicAdapter implements ReviewAdapter {
     model: string,
     systemPrompt: string,
     userPrompt: string,
-    options: AdapterOptions
+    options: AdapterOptions,
   ): Promise<ModelAnswer> {
     const start = Date.now();
     const modelId = stripKnownProviderPrefix(model);
@@ -219,6 +247,7 @@ export class AnthropicAdapter implements ReviewAdapter {
     const outcome = await attemptWithRetries({
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries ?? 3,
+      signal: options.signal,
       isRetryable,
       attempt: async (signal) => {
         const response = await this.client.messages.create(
@@ -226,33 +255,41 @@ export class AnthropicAdapter implements ReviewAdapter {
             model: modelId,
             max_tokens: ASK_MAX_OUTPUT_TOKENS,
             system: systemPrompt,
-            messages: [{ role: 'user', content: userPrompt }],
+            messages: [{ role: "user", content: userPrompt }],
           },
-          { signal, timeout: options.timeoutMs + 30_000 }
+          { signal, timeout: options.timeoutMs + 30_000 },
         );
         // An answer cut off at the ceiling is not a short answer: the verifier
         // emits one entry per finding, and a partial list parses to nothing,
         // which gates every candidate it never reached (RCL-60).
-        if (response.stop_reason === 'max_tokens') {
-          throw new TruncatedAnswerError('anthropic');
+        if (response.stop_reason === "max_tokens") {
+          throw new TruncatedAnswerError("anthropic");
         }
         return response.content
-          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+          .filter(
+            (block): block is Anthropic.TextBlock => block.type === "text",
+          )
           .map((block) => block.text)
-          .join('\n')
+          .join("\n")
           .trim();
       },
     });
 
     const durationMs = Date.now() - start;
     return outcome.ok
-      ? { model, provider: 'anthropic', text: outcome.value, durationMs, status: 'success' }
+      ? {
+          model,
+          provider: "anthropic",
+          text: outcome.value,
+          durationMs,
+          status: "success",
+        }
       : {
           model,
-          provider: 'anthropic',
-          text: '',
+          provider: "anthropic",
+          text: "",
           durationMs,
-          status: outcome.timedOut ? 'timeout' : 'error',
+          status: outcome.timedOut ? "timeout" : "error",
           error: outcome.error,
         };
   }
