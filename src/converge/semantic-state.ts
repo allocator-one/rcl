@@ -4,7 +4,8 @@ import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withOwnedNativeOperation, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
-import { effectivePendingIdentities, recoveryAnchors } from './recovery-state.js';
+import { effectivePendingIdentities, readNativeRecoveryMaterials, recoveryAnchors } from './recovery-state.js';
+import { nativeMaterial } from '../evidence/claim-recovery/validation/native-material.js';
 import { recoveryProjectionFreshness } from '../evidence/claim-recovery/validation/current-projection.js';
 import { z } from 'zod';
 import { claimDescriptorSchema, compareClaims, semanticFindingKey, type ClaimDescriptor, type MatchRationale } from '../consensus/claim-identity.js';
@@ -390,13 +391,17 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   const counts = { new: 0, repeat: 0, suppressed: 0, regating: 0 };
   const severities: Record<string, ConsensusFinding['severity']> = {};
   const annotations: RoundReport['findings'] = [];
+  const recoveredDismissals = findings.some(finding => finding.severity === 'critical')
+    ? await retainedRecoveredDismissals(state, options.gitCommonDir) : new Map<string, string>();
   for (const group of groups) {
     const rows = group.indices.map(i => findings[i]!);
     const severity = highest(rows); const key = group.key!;
     severities[key] = severity;
     const representative = group.representative ?? rows.slice().sort((a, b) => JSON.stringify(a.claimDescriptor).localeCompare(JSON.stringify(b.claimDescriptor)))[0]!;
     const previous = state.findings[key];
-    const status: FindingStatus = !previous ? anchors.some(anchor => anchor.identity === key) ? 'repeat' : 'new' : previous.verdict === 'dismissed'
+    const recoveredEscalation = previous?.verdict === undefined && severity === 'critical' &&
+      recoveredDismissals.has(key) && recoveredDismissals.get(key) !== 'critical';
+    const status: FindingStatus = recoveredEscalation ? 'regating' : !previous ? anchors.some(anchor => anchor.identity === key) ? 'repeat' : 'new' : previous.verdict === 'dismissed'
       ? severity === 'critical' && (previous.verdictSeverity ?? previous.severity) !== 'critical' ? 'regating' : 'suppressed' : 'repeat';
     const suppressReason = status === 'suppressed' ? `dismissed in round ${previous!.verdictRound}${previous!.verdictReason ? ` (${previous!.verdictReason})` : ''} — matching semantic claim; escalation to critical re-gates` : undefined;
     const entry: FindingEntry = previous ?? { key, file: representative.file, category: representative.category, startLine: representative.startLine,
@@ -429,6 +434,28 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   await writeStateIfUnchanged(options.gitCommonDir, predecessor.native_sha256, state, ownership);
   return { ...semanticRoundBinding(state, binding), roundCap: state.roundCap, counts, findings: annotations, actionableIdentities: pending(state) };
 }
+
+/** Historical attribution may add an escalation obligation, never clear one.
+ * The caller has fully replay-validated the native state and its retained
+ * material under target ownership; the report and write still bind its CAS.
+ * Ordinary writes invalidate remote standing, not the exact accepted decision.
+ * Keep that evidence separate from native producer verdicts and suppression. */
+async function retainedRecoveredDismissals(state: ConvergeRunState, gitCommonDir: string): Promise<Map<string, string>> {
+  const reference = state.recovery?.operations.at(-1)?.material;
+  if (!reference?.current) return new Map();
+  const content = nativeMaterial(reference, await readNativeRecoveryMaterials(gitCommonDir, state));
+  const projection = content.currentProjection;
+  const dismissed = new Map<string, string>();
+  if (!projection || projection.residuals.length) return dismissed;
+  for (const claim of projection.claims) {
+    const proof = content.occurrences?.dispositions.find(row => row.receipt.id === claim.dispositionEventId);
+    if (proof?.preparation.split.selection.identity === claim.identity && proof.preparation.verdict === 'dismissed') {
+      dismissed.set(claim.identity, proof.preparation.severity);
+    }
+  }
+  return dismissed;
+}
+
 export function pending(state: ConvergeRunState): string[] {
   return effectivePendingIdentities(state);
 }
