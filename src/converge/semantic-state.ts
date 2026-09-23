@@ -449,4 +449,3 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
   if (regating && entry.verdictRound !== state.lastAnnotations!.round) pendingRound ??= state.lastAnnotations!.round;
   return pendingRound;
 }
-

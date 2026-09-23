@@ -29,4 +29,3 @@ export function describeClaim(finding: Pick<Finding, 'file' | 'title' | 'descrip
   const evidence = [...new Set([bounded(finding.title), bounded(finding.description), bounded(finding.suggestedFix ?? '')].filter(Boolean))];
   return claimDescriptorSchema.parse({ version: 1, operation: bounded(operation), invariant, evidence: evidence.length ? evidence : [invariant] });
 }
-
