@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { claimConvergeAttempt, ConvergeAttemptPostClaimError, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
@@ -30,10 +30,12 @@ vi.mock('node:fs/promises', async original => {
 let dir: string;
 const target = 'synthetic-owner-boundary';
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+const geteuid = Object.getOwnPropertyDescriptor(process, 'geteuid');
 function barrier() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-native-boundary-'))); });
 afterEach(async () => {
   Object.defineProperty(process, 'platform', platform);
+  if (geteuid) Object.defineProperty(process, 'geteuid', geteuid);
   faults.release = false; faults.pausePath = ''; faults.failWrite = false;
   await rm(dir, { recursive: true, force: true });
 });
@@ -48,6 +50,30 @@ it('preserves ordinary attempt and round operations in the Windows platform bran
   const recovery = vi.fn();
   await expect(withRecoveryTarget(dir, target, recovery)).rejects.toThrow('unsupported_recovery_lock_scope');
   expect(recovery).not.toHaveBeenCalled();
+});
+
+it.each([0o775, 0o777])('refuses an existing group/other-writable convergence state directory (%o)', async mode => {
+  const stateDir = join(dir, 'rcl-converge-runs');
+  await mkdir(stateDir); await chmod(stateDir, mode);
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow('unsafe_converge_state_directory');
+});
+
+it('accepts an existing owner-controlled 0755 convergence state directory', async () => {
+  const stateDir = join(dir, 'rcl-converge-runs');
+  await mkdir(stateDir); await chmod(stateDir, 0o755);
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
+});
+
+it('refuses a symlinked convergence state directory', async () => {
+  const real = join(dir, 'real-state'); await mkdir(real);
+  await symlink(real, join(dir, 'rcl-converge-runs'));
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow('unsafe_converge_state_directory');
+});
+
+it('does not require geteuid in the Windows platform branch', async () => {
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  Object.defineProperty(process, 'geteuid', { configurable: true, value: undefined });
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
 });
 
 it('returns a committed attempt after publication with a do-not-retry warning when outer cleanup fails', async () => {

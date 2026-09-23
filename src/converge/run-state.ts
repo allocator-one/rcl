@@ -1,10 +1,12 @@
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 import { gapManifest, validateRoundGapAudit, type RoundGapEntry } from './round-gap-schema.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
+import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
+import { lockSystemCommand } from '../evidence/original-run/lock-scope.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
@@ -216,6 +218,12 @@ async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): P
   const path = convergeRunStatePath(gitCommonDir, state.target);
   const stateDir = join(gitCommonDir, STATE_DIR);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const directory = await lstat(stateDir), uid = process.geteuid?.();
+  if (!directory.isDirectory() || directory.isSymbolicLink() ||
+      (process.platform !== 'win32' && (uid === undefined || directory.uid !== uid || (directory.mode & 0o022) !== 0))) {
+    throw new Error('unsafe_converge_state_directory');
+  }
+  if (process.platform === 'darwin') checkDarwinLockACL(await lockSystemCommand('/bin/ls', ['-lde', stateDir]));
   await syncNativeDirectory(gitCommonDir);
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
