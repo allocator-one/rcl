@@ -288,8 +288,10 @@ controller exit stays `unknown`; supplied files do not prove global absence.
 Neither audit mode flushes the outbox or sends server events.
 
 This version supports one missing ordinal immediately before the selected original
-report, with an explicit spent record for both ordinals. Migrated totals without
-those records, multiple gaps, altered sources and unsupported storage refuse.
+report, with an explicit spent record for both ordinals and every earlier ordinary
+round present from round 1. Histories with earlier gaps, including audited gaps,
+are unsupported. Migrated totals without those records, multiple gaps, altered
+sources and unsupported storage refuse.
 The later report keeps its original round, run and contents. Later discovery of
 the missing report needs separate explicit evidence recovery; an ordinary empty
 report cannot fill the reserved gap. Audit is local history, never reviewer health,

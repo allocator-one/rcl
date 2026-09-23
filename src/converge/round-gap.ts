@@ -44,6 +44,10 @@ function validateNative(state: ConvergeRunState, m: { target: string; gapRound: 
         !round.counts || ['new', 'repeat', 'suppressed', 'regating'].some(k => !Number.isSafeInteger(round.counts[k as keyof typeof round.counts]) || round.counts[k as keyof typeof round.counts] < 0)) throw new Error('invalid_round_gap_native_state');
     seen.add(round.round);
   }
+  // This operation covers one gap only; prior audits do not establish its prefix.
+  for (let round = 1; round < m.gapRound; round++) {
+    if (!seen.has(round)) throw new Error('round_gap_not_contiguous');
+  }
   if (!state.findings || Array.isArray(state.findings) || Object.entries(state.findings).some(([key, f]) =>
     !f || f.key !== key || !seen.has(f.firstRound) || !seen.has(f.lastRound) || f.firstRound > f.lastRound ||
     !['critical','important','minor','nitpick'].includes(f.severity) ||
