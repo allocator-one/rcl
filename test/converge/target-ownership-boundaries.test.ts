@@ -82,13 +82,13 @@ it('preserves ordinary attempt and round operations in the Windows platform bran
   expect(recovery).not.toHaveBeenCalled();
 });
 
-it.each([0o775, 0o777])('refuses an existing group/other-writable convergence state directory (%o)', async mode => {
+it.runIf(process.platform !== 'win32').each([0o775, 0o777])('refuses an existing group/other-writable convergence state directory (%o)', async mode => {
   const stateDir = join(dir, 'rcl-converge-runs');
   await mkdir(stateDir); await chmod(stateDir, mode);
   await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow(/unsafe_(native_lock|converge_state)_directory/);
 });
 
-it('accepts an existing owner-controlled 0755 convergence state directory', async () => {
+it.runIf(process.platform !== 'win32')('accepts an existing owner-controlled 0755 convergence state directory', async () => {
   const stateDir = join(dir, 'rcl-converge-runs');
   await mkdir(stateDir); await chmod(stateDir, 0o755);
   await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });

@@ -362,7 +362,7 @@ describe('rcl review — --attest (RCL-40)', () => {
       expected: 'off',
       prepare: (repo: string) => {
         writeFileSync(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n');
-        return { args: [] as string[], env: {} };
+        return { args: [] as string[], env: { RCL_TELEMETRY: '' } };
       },
     },
     {
