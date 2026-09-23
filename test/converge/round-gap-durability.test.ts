@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fixture, cleanup } from './round-gap-fixtures.js';
@@ -7,7 +7,16 @@ import { claimConvergeAttempt } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
-afterEach(cleanup);
+const contention = vi.hoisted(() => ({ wait: undefined as (() => Promise<void>) | undefined }));
+vi.mock('../../src/evidence/original-run/lock.js', async original => {
+  const locks = await original<typeof import('../../src/evidence/original-run/lock.js')>();
+  return { ...locks, withRecoveryLock: ((...args: Parameters<typeof locks.withRecoveryLock>) => {
+    const [root, identity, work, hooks = {}] = args;
+    return locks.withRecoveryLock(root, identity, work, contention.wait ? { ...hooks, wait: contention.wait } : hooks);
+  }) as typeof locks.withRecoveryLock };
+});
+function barrier() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
+afterEach(async () => { contention.wait = undefined; await cleanup(); });
 
 it('preserves exact original snapshots, finding history and counters with an explicit unknown exit', async () => {
   const f = await fixture();
@@ -59,8 +68,28 @@ it('resumes an interruption after the native audit write without duplicating his
 
 it('serializes two identical applies and resumes without duplicate audit entries', async () => {
   const f = await fixture(); await f.prepare();
-  expect((await Promise.all([f.apply(),f.apply()])).sort()).toEqual(['applied','resumed']);
-  expect((await loadConvergeRunState(f.dir,f.target))?.roundGapAudit?.entries).toHaveLength(1);
+  const entered = barrier(), release = barrier(), contended = barrier(), retry = barrier();
+  const first = f.apply('apply', { beforeCheckpoint: async (phase: string) => {
+    if (phase === 'sources_retained') { entered.resolve(); await release.promise; }
+  } });
+  void first.catch(() => {});
+  let second: ReturnType<typeof f.apply> | undefined;
+  try {
+    await Promise.race([entered.promise, first.then(() => { throw new Error('first apply missed checkpoint'); })]);
+    contention.wait = async () => { contended.resolve(); await retry.promise; };
+    second = f.apply();
+    void second.catch(() => {});
+    await Promise.race([contended.promise, second.then(() => { throw new Error('contender bypassed occupied target'); })]);
+    expect((await loadConvergeRunState(f.dir,f.target))?.roundGapAudit).toBeUndefined();
+    release.resolve();
+    expect(await first).toBe('applied');
+    retry.resolve();
+    expect(await second).toBe('resumed');
+    expect((await loadConvergeRunState(f.dir,f.target))?.roundGapAudit?.entries).toHaveLength(1);
+  } finally {
+    release.resolve(); retry.resolve();
+    await Promise.allSettled([first, ...(second ? [second] : [])]);
+  }
 });
 it('retains all journal checkpoints byte for byte across repeated acknowledgment loss', async () => {
   const f = await fixture(), m = await f.prepare(); await f.apply();
