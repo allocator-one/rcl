@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
+import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 import { gapManifest, validateRoundGapAudit, type RoundGapEntry } from './round-gap-schema.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import type { ConsensusFinding } from '../consensus/types.js';
@@ -210,6 +210,8 @@ export function writeState(gitCommonDir: string, state: ConvergeRunState, owners
 }
 
 async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
+  // Callers pass the immutable directory bound to target ownership; resolving
+  // it here normalizes platform aliases without consulting a mutable caller path.
   gitCommonDir = await realpath(resolve(gitCommonDir));
   const path = convergeRunStatePath(gitCommonDir, state.target);
   const stateDir = join(gitCommonDir, STATE_DIR);
@@ -320,9 +322,10 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
 
 async function processRoundReportOwned(options: ProcessRoundOptions, ownership: NativeTargetOwnership): Promise<RoundReport> {
   const { target, runId } = validateRoundReportInput(options);
+  const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
-  const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
+  const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? {
     version: STATE_VERSION,
     target,
     roundCap: DEFAULT_CONVERGE_ROUND_CAP,
@@ -336,7 +339,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     const m = gapManifest(entry);
     if (m.runId !== runId || m.reportSha256 !== options.reportSha256) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
     const { verifyRoundGapReceipt } = await import('./round-gap.js');
-    const original = await verifyRoundGapReceipt(options.gitCommonDir, entry);
+    const original = await verifyRoundGapReceipt(gitCommonDir, entry);
     if (!isDeepStrictEqual(original.findings, options.findings)) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
   }
   if (options.maxRounds !== undefined) {
@@ -344,7 +347,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   }
   if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) {
     // Persist a tightened/extended cap even when this round is refused.
-    if (options.maxRounds !== undefined) await writeState(options.gitCommonDir, state, ownership);
+    if (options.maxRounds !== undefined) await writeState(gitCommonDir, state, ownership);
     throw new ConvergeRoundCapError(target, options.round, state.roundCap);
   }
   // Rounds advance contiguously: the current round may be re-processed (the
@@ -354,7 +357,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // resumed ledger is on (pre-upgrade runs have history the state lacks).
   const maxRecorded = state.rounds.reduce((max, r) => Math.max(max, r.round), 0);
   const gaps = Array.from({ length: Math.max(0, options.round - maxRecorded - 1) }, (_, i) => maxRecorded + i + 1);
-  const admittedThroughGap = gaps.length > 0 && gaps.every(gapRound => gapEntries.some(entry => {
+  const admittedThroughGap = gaps.length === 1 && gaps.every(gapRound => gapEntries.some(entry => {
     const m = gapManifest(entry);
     return m.gapRound === gapRound && m.admittingRound === options.round && m.runId === runId && m.reportSha256 === options.reportSha256;
   }));
@@ -529,7 +532,8 @@ export async function recordVerdicts(options: RecordVerdictsOptions): Promise<Re
 
 async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: NativeTargetOwnership): Promise<RecordVerdictsResult> {
   const target = options.target.trim();
-  const state = await readState(options.gitCommonDir, target);
+  const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
+  const state = await readState(gitCommonDir, target);
   if (!state) {
     throw new ConvergeRunStateError(
       `No converge run state for ${target} — run converge-report before recording verdicts.`
@@ -560,7 +564,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     updated.push(recorded);
   }
   state.updatedAt = new Date().toISOString();
-  await writeState(options.gitCommonDir, state, ownership);
+  await writeState(gitCommonDir, state, ownership);
 
   let resolution: RoundResolution | undefined;
   if (state.lastAnnotations && state.lastAnnotations.round === options.round) {

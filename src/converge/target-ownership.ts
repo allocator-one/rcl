@@ -72,6 +72,13 @@ export async function assertNativeTargetOwnership(ownership: NativeTargetOwnersh
       registration.commonDir !== commonDir) throw new Error('native_target_not_owned');
 }
 
+/** Return the immutable canonical repository directory bound when ownership was acquired. */
+export async function ownedNativeTargetCommonDir(ownership: NativeTargetOwnership,
+  gitCommonDir: string, target: string): Promise<string> {
+  await assertNativeTargetOwnership(ownership, gitCommonDir, target);
+  return registrations.get(ownership)!.commonDir;
+}
+
 /** Recovery effects require authority acquired through strict filesystem qualification. */
 export async function assertRecoveryTargetOwnership(ownership: NativeTargetOwnership,
   gitCommonDir: string, target: string): Promise<void> {

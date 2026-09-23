@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, mkdtemp, open, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withNativeLock } from '../../src/converge/native-lock.js';
@@ -32,6 +33,25 @@ const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 beforeEach(async () => { root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-native-lock-'))); });
 afterEach(async () => { faults.overlay = false; Object.defineProperty(process, 'platform', platform); await rm(root, { recursive: true, force: true }); });
 
+/** Exact pre-bakery owner document and O_EXCL acquisition shape. */
+async function historicalLock(identity: string, acquired: () => void, release: Promise<void>) {
+  const path = join(root, `${sha256(identity)}.lock`);
+  const token = '00000000-0000-4000-8000-000000000099';
+  for (;;) {
+    try {
+      const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      try { await handle.writeFile(JSON.stringify({ pid: process.pid, token }) + '\n'); await handle.sync(); }
+      finally { await handle.close(); }
+      acquired(); await release;
+      await unlink(path);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      await new Promise<void>(resolve => setTimeout(resolve, 5));
+    }
+  }
+}
+
 it('caches only immutable process scope and leaves recovery filesystem qualification explicit', async () => {
   await withNativeLock(root, target, async () => {});
   await withNativeLock(root, target, async () => {});
@@ -61,6 +81,64 @@ it.each(['ordinary first', 'recovery first'] as const)('uses the same registry t
     release(); await owner; await waiter;
   }
   expect(secondEntered).toBe(true);
+});
+
+it.each(['historical first', 'bakery first'] as const)('excludes a historical owner with %s acquisition', async order => {
+  let releaseHistorical!: () => void, releaseBakery!: () => void;
+  const historicalReleased = new Promise<void>(resolve => { releaseHistorical = resolve; });
+  const bakeryReleased = new Promise<void>(resolve => { releaseBakery = resolve; });
+  let historicalAcquired!: () => void, bakeryReserved!: () => void;
+  const historicalReady = new Promise<void>(resolve => { historicalAcquired = resolve; });
+  const bakeryReady = new Promise<void>(resolve => { bakeryReserved = resolve; });
+  let historicalDone = false, bakeryEntered = false;
+  const modernLock = () => withNativeLock(root, target, async () => { bakeryEntered = true; await bakeryReleased; }, {
+    onEvent: async event => { if (event.stage === 'legacy_reserved') bakeryReserved(); },
+  });
+  let old: Promise<void> | undefined;
+  let modern: Promise<void> | undefined;
+  try {
+    if (order === 'historical first') {
+      old = historicalLock(target, historicalAcquired, historicalReleased).then(() => { historicalDone = true; });
+      await historicalReady;
+      modern = modernLock();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(bakeryEntered).toBe(false);
+      releaseHistorical(); await old; await bakeryReady;
+      expect(historicalDone).toBe(true);
+      releaseBakery(); await modern;
+    } else {
+      modern = modernLock();
+      await bakeryReady;
+      old = historicalLock(target, historicalAcquired, historicalReleased).then(() => { historicalDone = true; });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(historicalDone).toBe(false);
+      releaseBakery(); await modern; await historicalReady; releaseHistorical(); await old;
+      expect(bakeryEntered).toBe(true);
+    }
+  } finally {
+    releaseHistorical(); releaseBakery();
+    await Promise.allSettled([...(old ? [old] : []), ...(modern ? [modern] : [])]);
+  }
+});
+
+it('reclaims a dead historical owner before publishing the bakery registration', async () => {
+  const path = join(root, `${sha256(target)}.lock`);
+  await writeFile(path, JSON.stringify({ pid: 2147483647, token: 'old-client-token' }) + '\n', { mode: 0o600 });
+  const probe = vi.fn(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+  await expect(withNativeLock(root, target, async () => 'resumed', { probe })).resolves.toBe('resumed');
+  expect(probe).toHaveBeenCalledWith(2147483647);
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('times out behind a live historical owner without entering work', async () => {
+  const path = join(root, `${sha256(target)}.lock`);
+  await writeFile(path, JSON.stringify({ pid: process.pid, token: 'old-client-token' }) + '\n', { mode: 0o600 });
+  let clock = 0; const work = vi.fn();
+  await expect(withNativeLock(root, target, work, {
+    now: () => clock, wait: async () => { clock += 1_000; },
+  })).rejects.toThrow('recovery_run_locked');
+  expect(work).not.toHaveBeenCalled();
+  expect(await readFile(path, 'utf8')).toContain('old-client-token');
 });
 
 async function unqualifiedRegistration() {

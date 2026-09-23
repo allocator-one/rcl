@@ -54,12 +54,17 @@ function validateNative(state: ConvergeRunState, m: { target: string; gapRound: 
     (f.verdict !== undefined && (!['fixed','dismissed'].includes(f.verdict) || !seen.has(f.verdictRound!))))) throw new Error('invalid_round_gap_native_state');
   validateRoundGapAudit(state);
 }
-function validateReport(snap: Snapshot, m: { target: string; runId: string; admittingRound: number }): void {
+function validateReport(snap: Snapshot, m: { target: string; runId: string; admittingRound: number }): number {
   const decoded = decodeOriginalReport(snap.text);
   if (decoded.transformations.length) throw new Error('round_gap_report_requires_interpretation');
   const report = originalRunReportSchema.safeParse(decoded.value);
-  if (!report.success || report.data.run.id !== m.runId || report.data.run.converge?.target !== m.target ||
-      report.data.run.converge?.round !== m.admittingRound || report.data.run.converge?.attempt !== m.admittingRound) throw new Error('round_gap_report_binding_mismatch');
+  const converge = report.success ? report.data.run.converge : undefined;
+  const attempt = converge?.attempt;
+  if (!report.success || report.data.run.id !== m.runId || converge?.target !== m.target ||
+      converge.round !== m.admittingRound || typeof attempt !== 'number' || !Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new Error('round_gap_report_binding_mismatch');
+  }
+  return attempt;
 }
 async function evidenceSources(m: RoundGapSelection | RoundGapManifest): Promise<Snapshot[]> {
   const specs = 'report' in m ? [m.report, m.incomplete, ...m.evidence] :
@@ -73,15 +78,16 @@ async function evidenceSources(m: RoundGapSelection | RoundGapManifest): Promise
     if ('bytes' in item && snapshot.raw.length !== item.bytes) throw new Error('round_gap_source_changed');
     paths.add(path); results.push(snapshot);
   }
-  validateReport(results[0]!, m);
+  const admittingAttempt = validateReport(results[0]!, m);
+  if ('admittingAttempt' in m && admittingAttempt !== m.admittingAttempt.attempt) throw new Error('round_gap_report_binding_mismatch');
   if (!results[1]!.raw.length) throw new Error('round_gap_incomplete_evidence_empty');
   return results;
 }
-function attemptRecords(snapshot: Snapshot, target: string, gap: number, admitting: number) {
+function attemptRecords(snapshot: Snapshot, target: string, gapAttempt: number, admittingAttempt: number) {
   const attempts = validateConvergeAttemptState(parse(snapshot), target, 'round-gap-selected-attempts');
-  const gapAttempt = attempts.attempts.find(a => a.attempt === gap), admittingAttempt = attempts.attempts.find(a => a.attempt === admitting);
-  if (!gapAttempt || !admittingAttempt) throw new Error('round_gap_not_bound_to_spent_attempt');
-  return { gapAttempt, admittingAttempt };
+  const gap = attempts.attempts.find(a => a.attempt === gapAttempt), admitting = attempts.attempts.find(a => a.attempt === admittingAttempt);
+  if (!gap || !admitting) throw new Error('round_gap_not_bound_to_spent_attempt');
+  return { gapAttempt: gap, admittingAttempt: admitting };
 }
 /** Read-only preview: the only identities introduced belong to the audit operation. */
 export async function previewRoundGap(input: RoundGapSelection, gitCommonDir: string): Promise<RoundGapManifest> {
@@ -93,11 +99,12 @@ export async function previewRoundGap(input: RoundGapSelection, gitCommonDir: st
   const attempts = await readStable(convergeAttemptStatePath(commonDir, selection.target));
   const state = parse(native) as ConvergeRunState;
   validateNative(state, selection);
+  const admittingAttempt = validateReport(sources[0]!, selection);
   const manifest = { kind: 'rcl-round-gap-audit', version: 1, operationId: selection.operationId ?? randomUUID(), createdAt: new Date().toISOString(),
     gitCommonDir: commonDir, target: selection.target, gapRound: selection.gapRound, admittingRound: selection.admittingRound,
     attempt: selection.attempt, runId: selection.runId, reportSha256: selection.reportSha256, incompleteSha256: selection.incompleteSha256,
     stateSha256: native.sha256, attemptSha256: attempts.sha256,
-    ...attemptRecords(attempts, selection.target, selection.gapRound, selection.admittingRound),
+    ...attemptRecords(attempts, selection.target, selection.attempt, admittingAttempt),
     report: source(selection.reportPath, sources[0]!), incomplete: source(selection.incompletePath, sources[1]!),
     evidence: (selection.evidence ?? []).map((s,i) => source(s.path, sources[i+2]!)),
     disposition: { kind: 'missing-terminal-report', controllerExit: 'unknown', scope: 'supplied-evidence-only' } };
@@ -174,12 +181,15 @@ export async function verifyRoundGapReceipt(gitCommonDir: string, entry: RoundGa
   const before = await selected(join(dir, 'native-before.json'), m.stateSha256);
   const attempts = await selected(join(dir, 'attempts-before.json'), m.attemptSha256);
   const state = parse(before) as ConvergeRunState; validateNative(state, m);
-  if (!isDeepStrictEqual(attemptRecords(attempts, m.target, m.gapRound, m.admittingRound), { gapAttempt: m.gapAttempt, admittingAttempt: m.admittingAttempt })) throw new Error('round_gap_attempt_changed');
+  if (!isDeepStrictEqual(attemptRecords(attempts, m.target, m.gapAttempt.attempt, m.admittingAttempt.attempt), { gapAttempt: m.gapAttempt, admittingAttempt: m.admittingAttempt })) throw new Error('round_gap_attempt_changed');
   let report: ReviewResult | undefined;
   for (const [index, source] of [m.report,m.incomplete,...m.evidence].entries()) {
     const snapshot = await selected(join(dir, `source-${index}.bin`), source.sha256);
     if (snapshot.raw.length !== source.bytes) throw new Error('round_gap_source_changed');
-    if (index === 0) { validateReport(snapshot, m); report = parse(snapshot) as ReviewResult; }
+    if (index === 0) {
+      if (validateReport(snapshot, m) !== m.admittingAttempt.attempt) throw new Error('round_gap_report_binding_mismatch');
+      report = parse(snapshot) as ReviewResult;
+    }
   }
   const expected = Buffer.from(serializeRecoveryDocument(afterState(state, entry, m)));
   if (!(await readStable(join(dir, 'native-after.json'))).raw.equals(expected) ||
@@ -216,7 +226,7 @@ export async function applyRoundGap(input: ApplyRoundGapOptions, gitCommonDir: s
     const native = prior ? await selected(join(dir,'native-before.json'), m.stateSha256) : await selected(convergeRunStatePath(commonDir,m.target), m.stateSha256);
     const attempts = prior ? await selected(join(dir,'attempts-before.json'),m.attemptSha256) : await selected(convergeAttemptStatePath(commonDir,m.target),m.attemptSha256);
     const before = parse(native) as ConvergeRunState; validateNative(before,m);
-    if (!isDeepStrictEqual(attemptRecords(attempts,m.target,m.gapRound,m.admittingRound), {gapAttempt:m.gapAttempt,admittingAttempt:m.admittingAttempt})) throw new Error('round_gap_attempt_changed');
+    if (!isDeepStrictEqual(attemptRecords(attempts,m.target,m.gapAttempt.attempt,m.admittingAttempt.attempt), {gapAttempt:m.gapAttempt,admittingAttempt:m.admittingAttempt})) throw new Error('round_gap_attempt_changed');
     if (!prior && current.state.roundGapAudit?.entries.some(e => gapManifest(e).gapRound === m.gapRound)) throw new Error('round_gap_conflict');
     await prepareLockRoot(dirname(dir)); await syncDirectory(commonDir);
     await prepareLockRoot(dir); await syncDirectory(dirname(dir));

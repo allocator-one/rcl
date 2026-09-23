@@ -19,8 +19,8 @@ export const roundGapManifestSchema = z.object({
   report: file, incomplete: file, evidence: z.array(file).max(20),
   disposition: z.object({ kind: z.literal('missing-terminal-report'), controllerExit: z.literal('unknown'),
     scope: z.literal('supplied-evidence-only') }).strict(),
-}).strict().refine(m => m.admittingRound === m.gapRound + 1 && m.attempt === m.gapRound &&
-  m.gapAttempt.attempt === m.attempt && m.admittingAttempt.attempt === m.admittingRound &&
+}).strict().refine(m => m.admittingRound === m.gapRound + 1 && m.attempt === m.gapAttempt.attempt &&
+  m.gapAttempt.attempt < m.admittingAttempt.attempt &&
   m.reportSha256 === m.report.sha256 && m.incompleteSha256 === m.incomplete.sha256);
 export type RoundGapManifest = z.infer<typeof roundGapManifestSchema>;
 export const roundGapEntrySchema = z.object({ manifestSha256: digest, manifestJson: z.string().max(1024 * 1024) }).strict();

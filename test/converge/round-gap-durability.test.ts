@@ -66,7 +66,7 @@ it.each(['round','attempt','id'] as const)('rejects original report %s drift wit
   const f = await fixture();
   if(field==='id') f.report.run!.id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; else f.report.run!.converge![field]=4;
   await writeFile(f.input.reportPath,JSON.stringify(f.report));
-  await expect(previewRoundGap({...f.input,reportSha256:sha256(await readFile(f.input.reportPath))},f.dir)).rejects.toThrow('binding_mismatch');
+  await expect(previewRoundGap({...f.input,reportSha256:sha256(await readFile(f.input.reportPath))},f.dir)).rejects.toThrow(field === 'attempt' ? 'not_bound_to_spent_attempt' : 'binding_mismatch');
 });
 it('rejects changed native source after preview before creating an audit operation', async () => {
   const f = await fixture(); await f.prepare(); await recordVerdicts({gitCommonDir:f.dir,target:f.target,round:1,verdicts:[]});

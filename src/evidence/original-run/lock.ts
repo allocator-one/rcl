@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { withLegacyReservation } from '../../coordination/registry-lock.js';
 import { readStable, sha256 } from '../../telemetry/recovery/files.js';
 import { checkLockDirectory, prepareLockRoot } from './lock-path.js';
 import { localLockScope, LOCK_UUID, validLockScope, type LockScope } from './lock-scope.js';
@@ -11,9 +12,11 @@ export interface LockRegistration {
   version: 1; pid: number; token: string; scope: LockScope;
   state: 'choosing' | 'ready'; ticket?: number;
 }
-type LockStage = 'choosing_published' | 'ticket_selected' | 'ready_published' | 'before_reap' | 'after_reap' | 'scan_complete';
+type LockStage = 'legacy_reserved' | 'choosing_published' | 'ticket_selected' | 'ready_published' | 'before_reap' | 'after_reap' | 'scan_complete';
 /** Internal deterministic test seams. The CLI never accepts these overrides. */
 export interface LockHooks {
+  /** Test-only: exercises bakery mechanics independently of legacy bridging. */
+  legacy?: boolean;
   scope?: () => Promise<LockScope>;
   token?: () => string;
   probe?: (pid: number) => void;
@@ -37,11 +40,9 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
   if (!validLockScope(scope)) throw new Error('unsupported_recovery_lock_scope');
   root = await prepareLockRoot(root);
   const key = sha256(identity);
-  for (const legacy of [`${key}.lock`, `${key}.lock.reclaim`]) {
-    try { await lstat(join(root, legacy)); }
-    catch (error) { if (code(error) === 'ENOENT') continue; throw error; }
-    throw new Error('legacy_recovery_lock_requires_inspection');
-  }
+  const token = (hooks.token ?? randomUUID)();
+  if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
+  const acquire = async () => {
   // Keep this directory permanently: removing it on release could split two
   // contenders across different inodes of the same registry pathname.
   const registry = join(root, `${key}.bakery`);
@@ -51,8 +52,6 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
   checkLockDirectory(await lstat(registry), process.geteuid!(), true);
   // Includes inherited Darwin ACL and mount inspection for the registry itself.
   await prepareLockRoot(registry);
-  const token = (hooks.token ?? randomUUID)();
-  if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
   const path = join(registry, `${token}.json`);
   let owner: LockRegistration = { version: 1, pid: process.pid, token, scope, state: 'choosing' };
   const now = hooks.now ?? (() => performance.now()); const deadline = now() + 5000;
@@ -141,6 +140,7 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
   };
   let failed = false; let failure: unknown;
   try {
+    await emit('legacy_reserved');
     await publish(owner, true); await emit('choosing_published');
     const peers = await scan();
     const maximum = peers.reduce((max, peer) => Math.max(max, peer.ticket ?? 0), 0);
@@ -181,4 +181,11 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
     try { await release(); }
     catch (error) { if (failed) throw new AggregateError([failure, error], 'recovery_lock_cleanup_failed', { cause: failure }); throw error; }
   }
+  };
+  if (hooks.legacy === false) {
+    if (process.env.NODE_ENV !== 'test') throw new Error('test_only_bakery_hook');
+    return acquire();
+  }
+  return withLegacyReservation(root, identity, { pid: process.pid, token }, acquire,
+    { sync, read: hooks.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait });
 }

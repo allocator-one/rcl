@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { readFile, writeFile } from 'node:fs/promises';
 import { processRoundReport, loadConvergeRunState, loadConvergeRunStateEvidence } from '../../src/converge/run-state.js';
 import { fixture, cleanup } from './round-gap-fixtures.js';
+import { sha256 } from '../../src/telemetry/recovery/files.js';
 afterEach(cleanup);
 
 it('audits a spent missing report without fabricating round two, then admits exact original round three', async () => {
@@ -13,6 +14,31 @@ it('audits a spent missing report without fabricating round two, then admits exa
     runId:f.input.runId,reportSha256:f.input.reportSha256 })).resolves.toHaveProperty('counts');
   expect((await loadConvergeRunState(f.dir,f.target))?.rounds.map(r => r.round)).toEqual([1,3]);
   expect(await readFile(f.attemptPath)).toEqual(attempts);
+});
+
+it('binds the gap and admitting report to their actual attempts after an earlier reportless attempt', async () => {
+  const f = await fixture();
+  f.attempts.attemptsUsed = 4;
+  f.attempts.attempts.push({ attempt: 4, claimedAt: '2026-01-01T00:00:00.000Z', pid: process.pid, source: 'claim' });
+  f.input.attempt = 3;
+  f.report.run!.converge!.attempt = 4;
+  await writeFile(f.attemptPath, JSON.stringify(f.attempts));
+  await writeFile(f.input.reportPath, JSON.stringify(f.report));
+  f.input.reportSha256 = sha256(await readFile(f.input.reportPath));
+
+  const manifest = await f.prepare();
+
+  expect(manifest.gapAttempt.attempt).toBe(3);
+  expect(manifest.admittingAttempt.attempt).toBe(4);
+  await expect(f.apply()).resolves.toBe('applied');
+  await expect(processRoundReport({
+    gitCommonDir: f.dir,
+    target: f.target,
+    round: 3,
+    findings: f.report.findings,
+    runId: f.input.runId,
+    reportSha256: f.input.reportSha256,
+  })).resolves.toHaveProperty('counts');
 });
 it('refuses an unbound higher report and changed CAS evidence', async () => {
   const f = await fixture();
