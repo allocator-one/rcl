@@ -506,7 +506,7 @@ rcl evidence recover-run --preview --manifest original-run.json \
 
 Markdown is optional; its path and digest must be supplied together. The report
 must retain its complete modern header, explicit finding identities, and an exact
-PR or PR-bound patch target. Original UUIDs must already be lowercase; recovery
+PR or PR-bound patch target. Original run UUID bytes are preserved; only generated operation IDs are canonical lowercase. Recovery
 refuses other spellings instead of rewriting identity. Headerless imports, CI/attested/backfill originals,
 unknown mode fields, missing sources and ambiguous bindings refuse. The explicit
 asserted mode is an **operator assertion**, checked against the retained non-CI

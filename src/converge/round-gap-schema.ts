@@ -4,14 +4,15 @@ import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import type { ConvergeRunState } from './run-state.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
-const uuid = z.string().uuid().refine(value => value === value.toLowerCase());
+const uuid = z.string().uuid();
+const operationUuid = uuid.refine(value => value === value.toLowerCase());
 const ordinal = z.number().int().min(1).max(99);
 const timestamp = z.string().datetime();
 export const gapAttemptSchema = z.object({ attempt: z.number().int().positive().safe(), claimedAt: timestamp,
   pid: z.number().int().positive().safe(), source: z.literal('claim') }).strict();
 const file = z.object({ path: z.string().min(1), sha256: digest, bytes: z.number().int().nonnegative().max(25 * 1024 * 1024) }).strict();
 export const roundGapManifestSchema = z.object({
-  kind: z.literal('rcl-round-gap-audit'), version: z.literal(1), operationId: uuid, createdAt: timestamp,
+  kind: z.literal('rcl-round-gap-audit'), version: z.literal(1), operationId: operationUuid, createdAt: timestamp,
   gitCommonDir: z.string().min(1), target: z.string().min(1).max(200).refine(s => s.trim() === s),
   gapRound: ordinal, admittingRound: ordinal, attempt: z.number().int().positive().safe(), runId: uuid,
   reportSha256: digest, incompleteSha256: digest, stateSha256: digest, attemptSha256: digest,
