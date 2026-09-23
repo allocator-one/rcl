@@ -51,9 +51,9 @@ const header = z.object({
     mode: z.enum(['all-findings', 'verified-consensus']),
     min_models: integer,
     verification_model: string.optional(),
-    verification_timeout_ms: integer,
+    verification_timeout_ms: z.number().finite().positive(),
     // Optional for reports written before RCL-85 introduced a whole-pass bound.
-    verification_pass_timeout_ms: integer.optional(),
+    verification_pass_timeout_ms: z.number().finite().positive().optional(),
   }),
   spec: z.object({ source: nonblank, sha256: hash }).optional(),
   context_files: z.array(z.object({ path: nonblank, sha256: hash })).max(200),

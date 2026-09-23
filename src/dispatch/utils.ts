@@ -301,6 +301,11 @@ export async function attemptWithRetries<T>(opts: {
   const timeoutHandle = setTimeout(() => controller.abort(), opts.timeoutMs);
   const unlinkAbort = linkAbortSignal(controller, opts.signal);
   let lastErr: unknown = new Error('no attempts made');
+  if (controller.signal.aborted) {
+    clearTimeout(timeoutHandle);
+    unlinkAbort();
+    return { ok: false, timedOut: false, error: 'Request cancelled' };
+  }
 
   try {
     for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
@@ -313,7 +318,11 @@ export async function attemptWithRetries<T>(opts: {
           return { ok: false, timedOut: !cancelled, error: cancelled ? 'Request cancelled' : 'Request timed out' };
         }
         if (opts.isRetryable(err) && attempt < opts.maxRetries) {
-          await sleep(retryDelay(attempt));
+          await Promise.race([
+            sleep(retryDelay(attempt)),
+            new Promise<void>((resolve) => controller.signal.addEventListener('abort', () => resolve(), { once: true })),
+          ]);
+          if (controller.signal.aborted) return { ok: false, timedOut: opts.signal?.aborted !== true, error: opts.signal?.aborted ? 'Request cancelled' : 'Request timed out' };
           continue;
         }
         break;
