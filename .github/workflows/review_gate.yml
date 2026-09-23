@@ -54,14 +54,17 @@ jobs:
       # The workflow's own commit on the default branch — the installer
       # script lives here; the pull request is never checked out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
         with:
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        timeout-minutes: 5
         with:
           node-version: 22
 
       - name: Install Review Council
+        timeout-minutes: 10
         run: |
           # Same private-prefix install as review.yml: the hosted toolcache is
           # world-writable by design, which the installer refuses as a prefix.
@@ -76,6 +79,7 @@ jobs:
           echo "$RUNTIME_PREFIX/bin" >> "$GITHUB_PATH"
 
       - name: Attested review
+        timeout-minutes: 330
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
@@ -130,6 +134,7 @@ jobs:
       # Abrupt runner loss before serialization/export remains an unavailable window.
       - name: Retain original review evidence
         if: always()
+        timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: review-gate-${{ github.run_id }}-${{ github.run_attempt }}

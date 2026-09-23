@@ -13,16 +13,39 @@ const roots: string[] = [];
 const headSha = 'a'.repeat(40);
 const registeredAttempt = '12345678-1234-4abc-8def-1234567890ab';
 
-function attestedReviewScript(): string {
+type WorkflowStep = {
+  name?: string;
+  uses?: string;
+  run?: unknown;
+  if?: string;
+  'timeout-minutes'?: number;
+};
+
+type WorkflowJob = {
+  'timeout-minutes'?: number;
+  steps?: WorkflowStep[];
+};
+
+function attestedReviewJob(): WorkflowJob {
   const parsed = parse(workflow) as {
-    jobs?: { 'attested-review'?: { steps?: Array<{ name?: string; run?: unknown }> } };
+    jobs?: { 'attested-review'?: WorkflowJob };
   };
-  const script = parsed.jobs?.['attested-review']?.steps?.find(step => step.name === 'Attested review')?.run;
+  const job = parsed.jobs?.['attested-review'];
+  if (!job) throw new Error('attested_review_job_not_found');
+  return job;
+}
+
+function attestedReviewScript(): string {
+  const script = attestedReviewJob().steps?.find(step => step.name === 'Attested review')?.run;
   if (typeof script !== 'string') throw new Error('attested_review_step_not_found');
   return script;
 }
 
-async function runReviewStep(attemptId: string, exitCode = 0) {
+async function runReviewStep(
+  attemptId: string,
+  exitCode = 0,
+  envOverrides: Record<string, string> = {}
+) {
   const root = await mkdtemp(join(tmpdir(), 'rcl-review-gate-test-'));
   roots.push(root);
   const fakeBin = join(root, 'bin');
@@ -71,6 +94,7 @@ exit "$FAKE_RCL_EXIT"
       RCL_GATE_EXPORT: exportDir,
       FAKE_RCL_ARGS: argsPath,
       FAKE_RCL_EXIT: String(exitCode),
+      ...envOverrides,
     },
   });
   return { result, argsPath, dataDir, exportDir };
@@ -125,6 +149,21 @@ describe('Review Council gate workflow', () => {
     });
   });
 
+  it.each([
+    ['non-numeric pull request', { PR_NUMBER: 'eight' }],
+    ['empty pull request', { PR_NUMBER: '' }],
+    ['short head', { HEAD_SHA: 'a'.repeat(39) }],
+    ['uppercase head', { HEAD_SHA: 'A'.repeat(40) }],
+    ['multi-line head', { HEAD_SHA: `${headSha}\nextra` }],
+  ])('rejects an invalid %s before output or review', async (_kind, envOverrides) => {
+    const run = await runReviewStep(registeredAttempt, 0, envOverrides);
+    expect(run.result.status).toBe(2);
+    await expect(readFile(run.argsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(join(run.exportDir, 'workflow.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('preserves exported originals and quarantine material after an adverse review', async () => {
     const run = await runReviewStep(registeredAttempt, 1);
     expect(run.result.status).toBe(1);
@@ -155,5 +194,30 @@ describe('Review Council gate workflow', () => {
     expect(retention).not.toContain('inputs.attempt_id');
     expect(retention).toContain('${{ runner.temp }}/rcl-gate-evidence/');
     expect(retention).toContain('${{ runner.temp }}/rcl-gate-data/quarantine/');
+  });
+
+  it('bounds sequential steps so retained evidence has time before the job deadline', () => {
+    const job = attestedReviewJob();
+    const steps = job.steps ?? [];
+    const checkout = steps.find(step => step.uses?.startsWith('actions/checkout@'));
+    const setupNode = steps.find(step => step.uses?.startsWith('actions/setup-node@'));
+    const install = steps.find(step => step.name === 'Install Review Council');
+    const review = steps.find(step => step.name === 'Attested review');
+    const retain = steps.find(step => step.name === 'Retain original review evidence');
+
+    expect(job['timeout-minutes']).toBe(360);
+    expect(checkout?.['timeout-minutes']).toBe(5);
+    expect(setupNode?.['timeout-minutes']).toBe(5);
+    expect(install?.['timeout-minutes']).toBe(10);
+    expect(review?.['timeout-minutes']).toBe(330);
+    expect(retain?.['timeout-minutes']).toBe(5);
+    expect(retain?.if).toBe('always()');
+
+    const aggregateBudget = [checkout, setupNode, install, review, retain].reduce(
+      (total, step) => total + (step?.['timeout-minutes'] ?? 0),
+      0
+    );
+    expect(aggregateBudget).toBe(355);
+    expect((job['timeout-minutes'] ?? 0) - aggregateBudget).toBe(5);
   });
 });
