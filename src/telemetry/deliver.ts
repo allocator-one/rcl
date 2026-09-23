@@ -12,7 +12,7 @@ import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
-import { describeOutcome, HarnessSink } from './sink.js';
+import { describeOutcome, HarnessSink, type SinkOutcome } from './sink.js';
 import { recoverAttestedDelivery } from './attested-retry.js';
 
 /**
@@ -402,6 +402,8 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   let posted = await runtime.sink.postRun(envelope, {}, serializedEnvelope);
   if (posted.kind === 'unavailable' && runtime.attested && runtime.attestedExpiresAt !== undefined) {
     deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
+    // Recovery stops on refusal; keep organization disablement distinct in the delivery result.
+    let disabledOutcome: Extract<SinkOutcome<unknown>, { kind: 'disabled' }> | undefined;
     const recovered = await recoverAttestedDelivery({
       runId,
       payload: serializedEnvelope,
@@ -412,6 +414,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
         const outcome = await runtime.sink!.postRun(envelope, { signal }, payload);
         if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
         if (outcome.kind === 'conflict') return { kind: 'conflict' };
+        if (outcome.kind === 'disabled') disabledOutcome = outcome;
         if (outcome.kind === 'rejected' || outcome.kind === 'disabled') return { kind: 'rejected' };
         return { kind: 'unavailable' };
       },
@@ -419,6 +422,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     });
     if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
     else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };
+    else if (recovered.kind === 'rejected' && disabledOutcome !== undefined) posted = disabledOutcome;
     else if (recovered.kind === 'rejected' || recovered.kind === 'receipt_rejected') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_refused', message: recovered.kind };
     else posted = { kind: 'unavailable', reason: `attested_recovery_${recovered.kind}` };
   }
@@ -459,14 +463,19 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
         };
       }
     }
-    case 'disabled':
+    case 'disabled': {
+      const retention = deliveryDiagnostics.length > 0
+        ? await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: describeOutcome(posted) }])
+        : undefined;
       return {
         status: 'disabled',
+        ...(retention ? { retention } : {}),
         runId,
         spooled: false,
-        line: `Evidence not sent: ${host} has not enabled review evidence for this organization`,
+        line: `Evidence not sent: ${host} has not enabled review evidence for this organization${retention ? `; ${retentionLine(retention, runId)}` : ''}`,
         exitCode: exitFor('disabled', evidenceRequired),
       };
+    }
     case 'conflict': {
       const retention = await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: describeOutcome(posted) }]);
       return {

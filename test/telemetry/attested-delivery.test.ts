@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -165,6 +165,47 @@ describe('the run-bound credential of --attest', () => {
     expect(postBodies[1]).toBe(postBodies[0]);
     expect(requests.filter((request) => request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`))).toHaveLength(1);
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+  });
+
+  it('preserves disabled status and private originals when the replay disables review evidence', async () => {
+    const secret = 'Abcdef1234567890Abcdef1234567890';
+    const failure = new TypeError('fetch failed', { cause: new Error(`socket reset authorization=Bearer ${secret}`) });
+    const result = sampleResult();
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) return { status: 404, body: { error: 'not_found' } };
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        return posts === 1 ? failure : { status: 403, body: { error: 'reviews_disabled', message: 'Review evidence is disabled' } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.1', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'disabled', spooled: false, exitCode: 4, retention: { status: 'complete' } });
+    expect(outcome.line).toContain('has not enabled review evidence for this organization');
+    expect(outcome.line).toContain('original evidence retained');
+    expect(requests.map((request) => request.method)).toEqual(['POST', 'GET', 'POST']);
+    expect(requests[1]!.url).toBe(`https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`);
+    expect(requests[2]!.body).toBe(requests[0]!.body);
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+    const retained = await runtime.quarantine!.inspect(result.run!.id);
+    expect(retained).toMatchObject({ status: 'complete', manifest: { run_id: result.run!.id, requested_mode: 'attested', acknowledged: false } });
+    expect((await stat(retained!.path)).mode & 0o777).toBe(0o700);
+    for (const [kind, bytes] of Object.entries(ARTIFACTS)) {
+      const path = join(retained!.path, retained!.manifest!.artifacts[kind]!.file);
+      expect(await readFile(path, 'utf8')).toBe(bytes);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
+    const diagnostic = retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery.initial_transport');
+    expect(diagnostic?.message).toContain('TypeError: fetch failed; cause: Error: socket reset');
+    expect(diagnostic!.message).not.toContain(secret);
+    expect(retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery')?.message).toContain('organization has not enabled review evidence');
   });
 
   it.each([
