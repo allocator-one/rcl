@@ -95,6 +95,36 @@ describe('recoverAttestedDelivery', () => {
     expect(budget).toEqual({ kind: 'attempts_exhausted', attempts: 2, recovered: false });
   });
 
+  it('does not start receipt-first or replay transports after a boundary crosses while acquiring its timeout', async () => {
+    async function recover(receiptFirst: boolean, boundary: 'expiry' | 'deadline') {
+      let ticks = 0;
+      const receiptExpired: boolean[] = [];
+      const postExpired: boolean[] = [];
+      const now = () => NOW + (++ticks >= 4 ? 1 : 0);
+      const stopped = () => boundary === 'expiry' ? now() >= NOW + 1 : now() - NOW >= 1;
+
+      const outcome = await recoverAttestedDelivery({
+        runId: 'run-1', payload: 'immutable', expiresAt: new Date(boundary === 'expiry' ? NOW + 1 : NOW + 60_000).toISOString(),
+        now, receiptFirst, ...(boundary === 'deadline' ? { deadlineMs: 1 } : {}),
+        initialAttempts: receiptFirst ? 1 : 0,
+        post: async () => { postExpired.push(stopped()); return { kind: 'recorded' }; },
+        receipt: async () => { receiptExpired.push(stopped()); return { kind: 'absent' }; },
+        sleep: async () => {},
+      });
+
+      return { outcome, receiptExpired, postExpired };
+    }
+
+    for (const [boundary, outcome] of [['expiry', 'expired'], ['deadline', 'deadline_exceeded']] as const) {
+      await expect(recover(true, boundary)).resolves.toEqual({
+        outcome: { kind: outcome, attempts: 1, recovered: false }, receiptExpired: [false], postExpired: [],
+      });
+      await expect(recover(false, boundary)).resolves.toEqual({
+        outcome: { kind: 'recorded', attempts: 1, recovered: false }, receiptExpired: [], postExpired: [false],
+      });
+    }
+  });
+
   it('aborts an in-flight post at the remaining delivery deadline', async () => {
     let aborted = false;
     const outcome = await recoverAttestedDelivery({

@@ -59,19 +59,28 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
   const startedAt = now();
   let attempts = Math.min(validBound(options.initialAttempts, 0), maxAttempts);
 
+  const boundary = (): { remainingMs: number } | { stopped: AttestedRecoveryOutcome<T> } => {
+    if (options.signal?.aborted) return { stopped: outcome('cancelled', attempts) };
+    const current = now();
+    if (!Number.isFinite(expiresAt) || current >= expiresAt) return { stopped: outcome('expired', attempts) };
+    const elapsedMs = current - startedAt;
+    if (elapsedMs >= deadlineMs) return { stopped: outcome('deadline_exceeded', attempts) };
+    const remainingMs = Math.min(deadlineMs - elapsedMs, expiresAt - current);
+    if (remainingMs <= 0) return { stopped: outcome(expiresAt - current <= deadlineMs - elapsedMs ? 'expired' : 'deadline_exceeded', attempts) };
+    return { remainingMs };
+  };
+
   const stopped = (): AttestedRecoveryOutcome<T> | undefined => {
-    if (options.signal?.aborted) return outcome('cancelled', attempts);
-    if (!Number.isFinite(expiresAt) || now() >= expiresAt) return outcome('expired', attempts);
-    if (now() - startedAt >= deadlineMs) return outcome('deadline_exceeded', attempts);
-    return undefined;
+    const active = boundary();
+    return 'stopped' in active ? active.stopped : undefined;
   };
 
   if (options.receiptFirst) {
-    const stop = stopped();
-    if (stop) return stop;
+    const active = boundary();
+    if ('stopped' in active) return active.stopped;
     let receipt: ReceiptProbe<T>;
     try {
-      receipt = await withActiveSignal(options.signal, Math.min(deadlineMs - (now() - startedAt), expiresAt - now()),
+      receipt = await withActiveSignal(options.signal, active.remainingMs,
         signal => options.receipt(options.runId, signal));
     } catch {
       return stopped() ?? outcome('deadline_exceeded', attempts);
@@ -82,13 +91,13 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
   }
 
   while (attempts < maxAttempts) {
-    const stop = stopped();
-    if (stop) return stop;
+    const active = boundary();
+    if ('stopped' in active) return active.stopped;
 
     attempts++;
     let posted: DeliveryAttempt<T>;
     try {
-      posted = await withActiveSignal(options.signal, Math.min(deadlineMs - (now() - startedAt), expiresAt - now()),
+      posted = await withActiveSignal(options.signal, active.remainingMs,
         signal => options.post(options.payload, signal));
     } catch {
       return stopped() ?? outcome('deadline_exceeded', attempts);
@@ -99,9 +108,11 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
 
     const afterPost = stopped();
     if (afterPost) return afterPost;
+    const receiptActive = boundary();
+    if ('stopped' in receiptActive) return receiptActive.stopped;
     let receipt: ReceiptProbe<T>;
     try {
-      receipt = await withActiveSignal(options.signal, Math.min(deadlineMs - (now() - startedAt), expiresAt - now()),
+      receipt = await withActiveSignal(options.signal, receiptActive.remainingMs,
         signal => options.receipt(options.runId, signal));
     } catch {
       return stopped() ?? outcome('deadline_exceeded', attempts);
@@ -113,8 +124,10 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
     if (attempts === maxAttempts) break;
     const beforePause = stopped();
     if (beforePause) return beforePause;
+    const pauseActive = boundary();
+    if ('stopped' in pauseActive) return pauseActive.stopped;
     try {
-      await withActiveSignal(options.signal, Math.min(deadlineMs - (now() - startedAt), expiresAt - now()),
+      await withActiveSignal(options.signal, pauseActive.remainingMs,
         signal => sleep(ATTESTED_DELIVERY_RETRY_PAUSE_MS, signal));
     } catch {
       return stopped() ?? outcome('deadline_exceeded', attempts);
