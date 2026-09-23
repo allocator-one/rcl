@@ -359,8 +359,8 @@ export class HarnessSink {
 
   /**
    * Read the restricted run-bound receipt after an uncertain attested POST.
-   * Only a 404 authorizes a replay; every other missing or malformed answer
-   * is a refusal. The server independently restricts this route to the
+   * Only a 404 authorizes a replay; unavailable, rejected or malformed answers
+   * stop recovery. The server independently restricts this route to the
    * credential's own live run and signed workflow subject.
    */
   async getAttestedRunReceipt(envelope: RunEnvelope, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
@@ -369,6 +369,7 @@ export class HarnessSink {
     const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`, undefined, 'application/json', options);
     if ('failure' in result) return { kind: 'unavailable' };
     if (result.status === 404) return { kind: 'absent' };
+    if (result.status >= 500 || result.status === 429 || result.status === 408) return { kind: 'unavailable' };
     if (result.status !== 200) return { kind: 'rejected' };
     const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
     const data = response?.data;
