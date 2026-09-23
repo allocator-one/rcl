@@ -198,6 +198,31 @@ describe('applyGating (RCL-23)', () => {
     }
   });
 
+  it('rejects when final progress processing crosses the pass deadline', async () => {
+    let monotonicNow = 0;
+    const ask = vi.fn(
+      async (): Promise<ModelAnswer> => ({
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[{"id":"F1","verdict":"confirmed"}]',
+        durationMs: 1,
+        status: 'success',
+      })
+    );
+
+    await expect(
+      applyGating([makeFinding()], {
+        ...baseOpts,
+        verificationPassTimeoutMs: 100,
+        monotonicNow: () => monotonicNow,
+        onVerificationProgress: (event) => {
+          if (event.completedBatches === event.totalBatches) monotonicNow = 100;
+        },
+        ask,
+      })
+    ).rejects.toThrow(/verification pass.*100ms/i);
+  });
+
   it('bounds the whole verification pass and stops starting batches at its deadline', async () => {
     vi.useFakeTimers();
     try {

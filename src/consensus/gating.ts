@@ -814,21 +814,30 @@ export async function applyGating(
     try {
       workerResults = await Promise.allSettled(
         Array.from({ length: width }, async () => {
-          while (true) {
-            const batchIndex = nextBatch++;
-            if (batchIndex >= batches.length) return;
-            if (now() >= verificationDeadline) {
-              passController.abort();
-              throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+          try {
+            while (true) {
+              const batchIndex = nextBatch++;
+              if (batchIndex >= batches.length) return;
+              if (now() >= verificationDeadline) {
+                passController.abort();
+                throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+              }
+              const batch = batches[batchIndex]!;
+              await runBatch(batch);
+              completedBatches++;
+              completedCandidates += batch.length;
+              reportProgress();
             }
-            const batch = batches[batchIndex]!;
-            await runBatch(batch);
-            completedBatches++;
-            completedCandidates += batch.length;
-            reportProgress();
+          } catch (err) {
+            passController.abort();
+            throw err;
           }
         })
       );
+      if (now() >= verificationDeadline) {
+        passController.abort();
+        throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+      }
     } finally {
       clearTimeout(passTimeoutHandle);
     }
