@@ -279,7 +279,10 @@ describe('ask cancellation', () => {
     const pending = adapter.ask('gemini-2.5-pro', 's', 'u', { ...OPTS, signal: controller.signal });
     controller.abort();
 
-    await expect(pending).resolves.toMatchObject({ status: 'timeout' });
+    await expect(pending).resolves.toMatchObject({
+      status: 'error',
+      error: 'Request cancelled',
+    });
   });
 });
 
