@@ -394,9 +394,9 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
 }
 
 async function processRoundReportOwned(options: ProcessRoundOptions, ownership: NativeTargetOwnership): Promise<RoundReport> {
-  const { target, runId, binding, gating } = validateRoundReportInput(options);
-  const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
+  const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, options.target);
   options = { ...options, gitCommonDir };
+  const { target, runId, binding, gating } = validateRoundReportInput(options);
   const observed = await readState(gitCommonDir, target);
   if (observed?.version === 3) {
     if (!binding || gating?.bound_classification_protocol !== 1) {
@@ -632,7 +632,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     const reviewed = state.rounds.find(r => r.round === options.round);
     if (reviewed?.reportBinding) await verifyRoundBinding(reviewed.reportBinding, target, options.round, reviewed.runId!);
     const prepared = prepareVerdicts(state, { ...options, recordedAt: new Date().toISOString() });
-    await writeState(options.gitCommonDir, prepared.state, ownership);
+    await writeState(gitCommonDir, prepared.state, ownership);
     return prepared.result;
   }
   if (state.version === 2) throw new ConvergeRunStateError('Semantic verdicts require supported recovery of this target first.');
