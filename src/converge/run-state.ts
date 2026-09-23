@@ -115,6 +115,8 @@ export interface ConvergeRunState {
   }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
+  /** Additive local audit only; entries never stand for an admitted round. */
+  roundGapAudit?: { version: 1; entries: Array<{ operationId: string; gapRound: number; admittingRound: number; attempt: number; runId: string; reportSha256: string; stateSha256: string; attemptSha256: string; incompleteSha256: string }> };
   /**
    * The most recent round's classified identities (RCL-30), so
    * `converge-verdict` can decide the round's resolution — in particular
@@ -288,6 +290,7 @@ export interface ProcessRoundOptions {
   lineWindow?: number;
   /** The report's own run id, kept so verdicts can be bound to the round's run. */
   runId?: string;
+  reportSha256?: string;
   ownership?: NativeTargetOwnership;
 }
 
@@ -338,7 +341,12 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // cap's intent. A state with no recorded rounds adopts whatever round the
   // resumed ledger is on (pre-upgrade runs have history the state lacks).
   const maxRecorded = state.rounds.reduce((max, r) => Math.max(max, r.round), 0);
-  if (maxRecorded > 0 && (options.round < maxRecorded || options.round > maxRecorded + 1)) {
+  const gapEntries = state.roundGapAudit?.entries ?? [];
+  const admittedThroughGap = options.round > maxRecorded + 1 &&
+    Array.from({ length: options.round - maxRecorded - 1 }, (_, i) => maxRecorded + i + 1)
+      .every(gapRound => gapEntries.some(entry => entry.gapRound === gapRound && entry.admittingRound === options.round &&
+        entry.runId === runId && entry.reportSha256 === options.reportSha256));
+  if (maxRecorded > 0 && (options.round < maxRecorded || (options.round > maxRecorded + 1 && !admittedThroughGap))) {
     throw new ConvergeRunStateError(
       `Round ${options.round} for ${target} is out of order: recorded rounds reach ` +
         `${maxRecorded}; only round ${maxRecorded} (re-run) or ${maxRecorded + 1} is accepted.`
