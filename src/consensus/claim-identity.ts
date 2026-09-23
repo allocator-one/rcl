@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Finding } from './types.js';
 import { normalizeGeneratedText, scrubText } from '../telemetry/scrub.js';
 import { claimDescriptorSchema, type ClaimDescriptor } from '../evidence/claim-recovery/validation/claims.js';
+import { describeContract } from './claim-contract.js';
 export { claimDescriptorSchema, descriptorKey, semanticFindingKey, compareClaims } from '../evidence/claim-recovery/validation/claims.js';
 export type { ClaimDescriptor, MatchRationale } from '../evidence/claim-recovery/validation/claims.js';
 
@@ -23,6 +24,9 @@ function anchors(s: string): string[] {
     .map(m => m[1] ?? m[2]!))].sort();
 }
 export function describeClaim(finding: Pick<Finding, 'file' | 'title' | 'description' | 'suggestedFix'>): ClaimDescriptor {
+  const contract = describeContract(finding);
+  if (contract) return claimDescriptorSchema.parse({ ...contract, operation: bounded(contract.operation),
+    invariant: bounded(contract.invariant), evidence: contract.evidence.map(bounded) });
   const symbols = anchors(`${finding.title} ${finding.description}`);
   const operation = symbols.length ? `${finding.file} :: ${symbols.join(', ')}` : `${finding.file} :: ${finding.title}`;
   const invariant = bounded(finding.description) || bounded(finding.title) || '[insufficient-evidence: no reviewer invariant]';

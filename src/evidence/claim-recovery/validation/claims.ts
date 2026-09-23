@@ -1,8 +1,9 @@
-// Recovery-only validation extracted from ff36a93; no descriptor generation or producer matching.
+// Shared wire validation and claim comparison; retained descriptors are never regenerated.
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Finding } from '../../../consensus/types.js';
 import { hasOpposingSentiment, jaccardSimilarity, tokenize } from './lexical.js';
+import { compareContractDescriptors, isContractDescriptor } from '../../../consensus/claim-contract.js';
 
 /** Wire version, independent of native state and matching algorithm versions. */
 export interface ClaimDescriptor {
@@ -38,7 +39,12 @@ function substantive(s: string): string[] {
 function invariantWords(s: string): string[] {
   const grammar = new Set(['the', 'a', 'an', 'their', 'its', 'is', 'are', 'was', 'were', 'been', 'being']);
   const inflections: Record<string, string> = { returns: 'return', returned: 'return', returning: 'return', checks: 'check', checked: 'check', checking: 'check', entries: 'entry' };
-  return (s.toLowerCase().match(/[\p{L}\p{N}_]+|[<>!=]=?/gu) ?? []).filter(t => !grammar.has(t)).map(t => inflections[t] ?? t);
+  // Whole-assertion grammar: "X lacks Y" and "X has Y gaps" assert the
+  // same absent condition. Preserve all subject/condition words in order.
+  const canonical = s.toLowerCase().trim().replace(/[.!]$/, '')
+    .replace(/^(.+) lacks (.+)$/, '$1 missing $2')
+    .replace(/^(.+) has (.+) gaps$/, '$1 missing $2');
+  return (canonical.match(/[\p{L}\p{N}_]+|[<>!=]=?/gu) ?? []).filter(t => !grammar.has(t)).map(t => inflections[t] ?? t);
 }
 function similarity(a: string, b: string): number {
   return substantive(a).length >= 3 && substantive(b).length >= 3 ? jaccardSimilarity(a, b) : 0;
@@ -57,6 +63,7 @@ export function compareClaims(a: ClaimDescriptor, b: ClaimDescriptor): 'exact_de
   const informative = (d: ClaimDescriptor) => ![d.operation, d.invariant, ...d.evidence].some(t => t.includes('[redacted]') || t.includes('[insufficient-evidence:')) &&
     d.evidence.some(e => e !== d.invariant && substantive(e).length >= 3);
   if (!informative(a) || !informative(b)) return undefined;
+  if (isContractDescriptor(a) || isContractDescriptor(b)) return compareContractDescriptors(a, b);
   if (substantive(a.invariant).length < 3 || substantive(b.invariant).length < 3 || opposed(a, b)) return undefined;
   if (descriptorKey(a) === descriptorKey(b)) return 'exact_descriptor';
   // Explicit symbols, digit-bearing constraints and omitted-text commitments must agree.
@@ -77,6 +84,8 @@ export function compareClaims(a: ClaimDescriptor, b: ClaimDescriptor): 'exact_de
   if (JSON.stringify(invariantWords(a.invariant)) !== JSON.stringify(invariantWords(b.invariant))) return undefined;
   if (similarity(a.invariant, b.invariant) < 0.72) return undefined;
   const independent = (d: ClaimDescriptor) => d.evidence.filter(e => e !== d.invariant);
-  if (!independent(a).some(x => independent(b).some(y => similarity(x, y) >= 0.72))) return undefined;
+  if (!independent(a).some(x => independent(b).some(y => similarity(x, y) >= 0.72 ||
+    substantive(x).length >= 3 && substantive(y).length >= 3 &&
+    JSON.stringify(invariantWords(x)) === JSON.stringify(invariantWords(y))))) return undefined;
   return 'supported_paraphrase';
 }

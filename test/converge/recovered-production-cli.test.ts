@@ -16,7 +16,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))));
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
-async function fixture() {
+async function fixture(syntheticFindings?: Array<Record<string, unknown>> | ((model: string) => Array<Record<string, unknown>>)) {
   const root = await mkdtemp(join(tmpdir(), 'rcl-recovered-cli-')); roots.push(root);
   const repo = join(root, 'repo'); await mkdir(repo);
   const gitEnv = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
@@ -42,7 +42,7 @@ async function fixture() {
       let result: unknown;
       if (path === '/v1/chat/completions') {
         const change = onProvider; onProvider = undefined; await change?.();
-        const findings = [
+        const findings = (typeof syntheticFindings==='function'? syntheticFindings(body.model):syntheticFindings) ?? [
           { id: 'expiry', file: 'cache.ts', startLine: 10, endLine: 12, category: 'correctness', severity: 'important', confidence: 0.99,
             title: 'Expired cache entries', description: recovered.selection.descriptor.invariant,
             suggestedFix: recovered.selection.descriptor.evidence[0] },
@@ -74,15 +74,15 @@ async function fixture() {
     HARNESS_API_URL: url, HARNESS_API_TOKEN: 'synthetic-only', OPENAI_COMPAT_BASE_URL: `${url}/v1`, OPENAI_COMPAT_API_KEY: 'local',
     NO_COLOR: '1', FORCE_COLOR: '0', RCL_RUNNER: 'human' };
   const reportPath = join(root, 'review.json'); const markdownPath = join(root, 'review.md');
-  async function command(args: string[]) {
-    try { const out = await exec(process.execPath, [entry, ...args], { cwd: repo, env, timeout: 20000, maxBuffer: 4 * 1024 * 1024 }); return { code: 0, ...out }; }
+  async function command(args: string[], cwd=repo) {
+    try { const out = await exec(process.execPath, [entry, ...args], { cwd, env, timeout: 20000, maxBuffer: 4 * 1024 * 1024 }); return { code: 0, ...out }; }
     catch (error) { const e = error as Error & { code: number; stdout: string; stderr: string }; return { code: e.code, stdout: e.stdout, stderr: e.stderr }; }
   }
   return { root, common, recovered, requests, reportPath, markdownPath, command,
     providerChange: (change: () => Promise<void>) => { onProvider = change; },
-    review: () => command(['review', patch, '--config', config, '--converge-target', recovered.plan.target, '--round', '2', '--attempt', '6',
+    review: (target=recovered.plan.target,cwd=repo) => command(['review', patch, '--config', config, '--converge-target', target, '--round', '2', '--attempt', '6',
       '--head-sha', 'b'.repeat(40), '--base-sha', 'a'.repeat(40), '--for-pr', 'synthetic/recovery#7',
-      '--json-file', reportPath, '--markdown', markdownPath, '--json', '--evidence-required']),
+      '--json-file', reportPath, '--markdown', markdownPath, '--json', ...(cwd===repo? ['--evidence-required']:['--no-telemetry'])],cwd),
     admit: () => command(['converge-report', '--target', recovered.plan.target, '--round', '2', '--report', reportPath, '--json']),
   };
 }
@@ -138,3 +138,68 @@ it('refuses an unavailable original before any synthetic provider call', async (
   expect(await readFile(f.recovered.path, 'utf8')).toBe(before);
   expect(await readdir(f.root)).not.toContain('review.json');
 }, 30000);
+
+const boundClaims = ['lower','upper'].map((direction,i) => ({
+  id: direction,file: 'cache.ts',startLine: 10,endLine: 12,category: 'correctness',
+  severity: i===0? 'important':'critical',confidence: 0.99,title: 'Cache bound validation',
+  description: `The cache bound lacks a ${direction} clamp.`,suggestedFix: 'Validate the cache bound before reading the array.',
+}));
+it('separates independent same-location recovered claims before actual producer consensus',async () => {
+  const f=await fixture(boundClaims); const before=await readFile(f.recovered.path,'utf8');
+  const reviewed=await f.review(); expect(reviewed.code,reviewed.stderr).toBe(0);
+  const raw=await readFile(f.reportPath,'utf8'); const report=JSON.parse(raw);
+  expect(report.stats.totalRawFindings).toBe(4);
+  expect(report.stats.totalDeduped).toBe(2);
+  expect(report.findings).toHaveLength(2);
+  expect(new Set(report.findings.map((finding: any) => finding.claimDescriptor.invariant)).size).toBe(2);
+  expect(report.findings.map((finding: any) => finding.consensus.score)).toEqual([2,2]);
+  expect(report.findings.every((finding: any) => finding.consensus.models.length===2)).toBe(true);
+  expect(report.reviews.flatMap((review: any) => review.findings.map((finding: any) => finding.description)).sort())
+    .toEqual(boundClaims.flatMap(finding => [finding.description,finding.description]).sort());
+  expect(await readFile(f.recovered.path,'utf8')).toBe(before);
+  expect(report.run.converge.recovery_source.native_sha256).toBe(sha(before));
+  const admitted=await f.admit(); expect(admitted.code,admitted.stderr).toBe(0);
+  const findings=JSON.parse(admitted.stdout).findings;
+  expect(new Set(findings.map((finding: any) => finding.identity)).size).toBe(2);
+  const after=JSON.parse(await readFile(f.recovered.path,'utf8'));
+  expect(after.recovery).toEqual(JSON.parse(before).recovery);
+  expect(after.rounds[0]).toEqual(JSON.parse(before).rounds[0]);
+},30000);
+it.each(['absent','v1','standalone'] as const)('preserves ordinary legacy grouping for %s production',async mode => {
+  const f=await fixture(boundClaims);
+  if(mode==='v1') await writeFile(f.recovered.path,f.recovered.sourceJson);
+  const reviewed=await f.review(mode==='v1'? f.recovered.plan.target:'ordinary',mode==='standalone'? f.root:undefined);
+  expect(reviewed.code,reviewed.stderr).toBe(0);
+  const report=JSON.parse(await readFile(f.reportPath,'utf8'));
+  expect(report.stats.totalRawFindings).toBe(4); expect(report.stats.totalDeduped).toBe(1);
+  expect(report.findings).toHaveLength(1);
+  expect(report.findings[0].description).toBe(boundClaims[1]!.description);
+  expect(report.findings[0].severity).toBe('critical');
+  expect(report.findings[0].consensus.models).toHaveLength(2);
+  expect(report.findings[0].claimDescriptor).toBeUndefined();
+  expect(report.run.converge.recovery_source).toBeUndefined();
+},30000);
+it('refuses unsupported native v2 before contacting the actual loopback producer',async () => {
+  const f=await fixture(boundClaims);
+  await writeFile(f.recovered.path,JSON.stringify({ version: 2,target: f.recovered.plan.target,roundCap: 15,
+    updatedAt: '2026-09-23T00:00:00.000Z',rounds: [],findings: {},sightings: [] }));
+  const reviewed=await f.review(); expect(reviewed.code).not.toBe(0);
+  expect(reviewed.stderr).toContain('supported recovery');
+  expect(f.requests.filter(r => r.path==='/v1/chat/completions')).toEqual([]);
+},30000);
+
+it('combines a complete bounded paraphrase in the actual recovered producer while preserving both raw reports',async () => {
+  const originals=await Promise.all(['claude','gpt'].map(async name => JSON.parse(await readFile(
+    new URL(`../fixtures/review-${name}.json`,import.meta.url),'utf8')).findings[0]));
+  const f=await fixture(model => [originals[model==='synthetic-a'?0:1]]);
+  const before=await readFile(f.recovered.path,'utf8');
+  const reviewed=await f.review(); expect(reviewed.code,reviewed.stderr).toBe(0);
+  const report=JSON.parse(await readFile(f.reportPath,'utf8'));
+  expect(report.stats.totalRawFindings).toBe(2); expect(report.stats.totalDeduped).toBe(1);
+  expect(report.findings).toHaveLength(1);
+  expect(report.findings[0].claimDescriptor.operation).toContain('rcl-claim-contract-v1:');
+  expect(report.findings[0].consensus.score).toBe(2);
+  expect(report.reviews.flatMap((review: any) => review.findings.map((finding: any) => finding.description)).sort())
+    .toEqual(originals.map(finding => finding.description).sort());
+  expect(await readFile(f.recovered.path,'utf8')).toBe(before);
+},30000);

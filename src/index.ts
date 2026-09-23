@@ -43,6 +43,7 @@ import {
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { deduplicateFindings } from './consensus/deduper.js';
+import { deduplicateSemanticFindings } from './consensus/semantic-deduper.js';
 import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
 import { applyGating, resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
@@ -2032,7 +2033,8 @@ async function executeCouncil(
   spinner.text = 'Computing consensus...';
 
   // Deduplicate and compute consensus
-  const groups = deduplicateFindings(
+  const deduplicate = prepared.recoveredProduction ? deduplicateSemanticFindings : deduplicateFindings;
+  const groups = deduplicate(
     reviews,
     config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
     config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
