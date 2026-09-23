@@ -10,6 +10,9 @@
   reviewer calls can be distinguished from consensus, verification, report
   assembly and artifact-write failures. Record the effective whole-pass bound
   in terminal report evidence.
+- Correlate Harness-dispatched protected review runs with their persisted
+  lifecycle attempts so exact-head attested evidence can complete the required
+  Review Council check (RCL-86).
 
 ## 3.8.1 - 2026-09-23
 

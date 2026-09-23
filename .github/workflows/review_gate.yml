@@ -11,7 +11,10 @@
 # reads the pull request through the GitHub API and fetches model keys from
 # Harness under the run-bound credential. The inputs reach the shell through
 # the environment, never by expression interpolation into a command line.
+# harness-review-lifecycle: 1
+# This marker promises the optional attempt_id input and exact run-name below.
 name: Review Council gate
+run-name: Review Council gate · ${{ inputs.attempt_id || 'unregistered' }}
 
 on:
   workflow_dispatch:
@@ -23,6 +26,10 @@ on:
       head_sha:
         description: Head commit the round must find on the pull request (the review fails fast otherwise)
         required: true
+        type: string
+      attempt_id:
+        description: Harness dispatch attempt UUID (omit only for an unregistered manual run)
+        required: false
         type: string
 
 permissions:
@@ -71,6 +78,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           GITHUB_TOKEN: ${{ github.token }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
         run: |
           case "$PR_NUMBER" in
             ''|*[!0-9]*) echo "pr_number must be a pull request number, got: $PR_NUMBER" >&2; exit 2 ;;
@@ -80,6 +88,10 @@ jobs:
           esac
           if [ "${#HEAD_SHA}" -ne 40 ]; then
             echo "head_sha must be 40 hex characters, got ${#HEAD_SHA}" >&2
+            exit 2
+          fi
+          if [ -n "$ATTEMPT_ID" ] && ! printf '%s\n' "$ATTEMPT_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            echo "attempt_id must be a lowercase UUID when provided" >&2
             exit 2
           fi
           rcl review "$GITHUB_REPOSITORY#$PR_NUMBER" \
