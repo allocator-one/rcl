@@ -82,6 +82,7 @@ import {
   ConvergeRoundCapError,
   ConvergeRunStateError,
 } from './converge/run-state.js';
+import { applyRoundGap, previewRoundGap, type RoundGapManifest } from './converge/round-gap.js';
 import {
   appendCalls,
   appendOutcomes,
@@ -472,6 +473,39 @@ program
 
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
+program
+  .command('converge-gap')
+  .description('Preview, apply or resume one evidenced missing-terminal-report audit gap; never creates a round, finding, verdict or attempt')
+  .option('--preview')
+  .option('--apply')
+  .option('--resume')
+  .requiredOption('--manifest <path>', 'Exclusive preview manifest; existing reviewed manifest for apply/resume')
+  .option('--target <target>')
+  .option('--gap-round <number>')
+  .option('--admitting-round <number>')
+  .option('--attempt <number>')
+  .option('--run <uuid>')
+  .option('--report-sha256 <sha256>')
+  .option('--incomplete-sha256 <sha256>')
+  .option('--json')
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      if ([opts.preview, opts.apply, opts.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_round_gap_mode');
+      const gitCommonDir = await resolveGitCommonDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (![opts.target, opts.gapRound, opts.admittingRound, opts.attempt, opts.run, opts.reportSha256, opts.incompleteSha256].every(value => typeof value === 'string')) throw new Error('round_gap_preview_arguments_required');
+        const manifest = await previewRoundGap({ target: opts.target as string, gapRound: Number(opts.gapRound), admittingRound: Number(opts.admittingRound), attempt: Number(opts.attempt), runId: opts.run as string, reportSha256: opts.reportSha256 as string, incompleteSha256: opts.incompleteSha256 as string }, gitCommonDir);
+        await writeFile(opts.manifest as string, JSON.stringify(manifest) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        result = { mode: 'preview', manifest };
+      } else {
+        const manifest = JSON.parse(await readFile(opts.manifest as string, 'utf8')) as RoundGapManifest;
+        result = { mode: opts.apply ? 'apply' : 'resume', result: await applyRoundGap(manifest, gitCommonDir) };
+      }
+      console.log(JSON.stringify(result));
+    } catch (error) { console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_GAP', message: error instanceof Error ? error.message : String(error) } })); process.exitCode = 3; }
+  });
+
 program
   .command('converge-report')
   .description(
