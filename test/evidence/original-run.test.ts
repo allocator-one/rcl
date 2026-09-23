@@ -441,3 +441,31 @@ it('checks the complete manifest again when observation metadata makes its forma
   await expect(readdir(f.manifest + '.journal')).rejects.toMatchObject({ code:'ENOENT' });
   expect(await readdir(join(f.dir,'data'))).toEqual([]);
 });
+
+it('preserves a valid recovered producer predecessor marker through immutable original preparation', async () => {
+  const f = await fixture(report => {
+    report.run!.converge = { target: 'recovered', round: 2, recovery_source: { version: 1, native_sha256: 'c'.repeat(64) } };
+    report.run!.gating.bound_classification_protocol = 1;
+  });
+  const original = await readFile(f.selection.reportJson, 'utf8');
+  const prepared = await prepareOriginalRun(f.selection);
+  expect(prepared.artifacts.report_json).toBe(original);
+  expect(prepared.prepared.envelope.run.converge?.recovery_source).toEqual({ version: 1, native_sha256: 'c'.repeat(64) });
+  expect(await readFile(f.selection.reportJson, 'utf8')).toBe(original);
+});
+it.each([
+  { version: 2, native_sha256: 'c'.repeat(64) },
+  { version: 1, native_sha256: 'C'.repeat(64) },
+  { version: 1, native_sha256: 'c'.repeat(64) + '\n' },
+  { version: 1, native_sha256: 'c'.repeat(63) },
+  { version: 1, native_sha256: 'c'.repeat(64), authority: 'attested' },
+  null,
+])('refuses unsupported original predecessor marker %j without rewriting it', async marker => {
+  const f = await fixture(report => {
+    report.run!.converge = { target: 'recovered', round: 2, recovery_source: marker as never };
+    report.run!.gating.bound_classification_protocol = 1;
+  });
+  const original = await readFile(f.selection.reportJson, 'utf8');
+  await expect(prepareOriginalRun(f.selection)).rejects.toThrow(/unsupported_recovery_source/);
+  expect(await readFile(f.selection.reportJson, 'utf8')).toBe(original);
+});

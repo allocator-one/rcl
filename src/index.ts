@@ -118,7 +118,7 @@ import {
   loadHarnessSettings,
   resolveTelemetryLevel,
 } from './telemetry/deliver.js';
-import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { sanitizeForDelivery, normalizeGeneratedReport, type ArtifactBytes } from './telemetry/envelope.js';
 import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
@@ -129,6 +129,8 @@ import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
+import { selectRecoveredProduction, materializeRecoveredClaims, type RecoveredProduction } from './converge/recovered-production.js';
+import { runPublicClaimRecovery, type PublicClaimRecoveryOptions } from './evidence/recover-claim.js';
 import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
@@ -157,7 +159,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'recover-claim' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -518,8 +520,10 @@ program
         }
 
         let report: ReviewResult;
+        let reportJson: string;
         try {
-          report = JSON.parse(await readFile(opts.report, 'utf-8')) as ReviewResult;
+          reportJson = await readFile(opts.report, 'utf-8');
+          report = JSON.parse(reportJson) as ReviewResult;
         } catch (err) {
           throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
             cause: err,
@@ -550,12 +554,15 @@ program
         }
         const gitCommonDir = await resolveGitCommonDir();
         await withNativeTarget(gitCommonDir, opts.target, async ownership => {
+          const existing = await loadConvergeRunState(gitCommonDir, opts.target as string);
+          const recoveredReport = existing?.version === 3 || report.run?.gating?.bound_classification_protocol !== undefined;
           const result = await processRoundReport({
             gitCommonDir,
             ownership,
             target: opts.target as string,
             round,
-            findings: report.findings,
+            findings: recoveredReport ? [...report.findings, ...(report.belowThresholdFindings ?? [])] : report.findings,
+            ...(recoveredReport ? { evidence: { reportJson } } : {}),
             ...(maxRounds !== undefined ? { maxRounds } : {}),
             ...(runId !== undefined ? { runId } : {}),
           });
@@ -563,7 +570,7 @@ program
           const classified = result.findings.map((f) => ({
             identity: f.identity,
             status: f.status,
-            gating: findingGatingReason(f.finding),
+            gating: f.sighting?.gating ?? findingGatingReason(f.finding),
             severity: f.finding.severity,
             file: f.finding.file,
             startLine: f.finding.startLine,
@@ -584,7 +591,10 @@ program
                 round,
                 round_cap: result.roundCap,
                 counts: result.counts,
-                actionable_gating: actionable.length,
+                actionable_gating: result.actionableIdentities?.length ?? actionable.length,
+                ...(result.classificationVersion ? { classification_version: result.classificationVersion,
+                  report_json_sha256: result.reportBinding!.reportSha256,
+                  ...(result.legacyPendingIdentities ? { legacy_pending_identities: result.legacyPendingIdentities } : {}) } : {}),
                 // Which identity each sighting was matched to, so the server
                 // can apply standing verdicts to keys that moved (IO-12601).
                 identities: roundIdentities(result.findings),
@@ -603,7 +613,8 @@ program
                   round,
                   roundCap: result.roundCap,
                   counts: result.counts,
-                  actionableGating: actionable.length,
+                  actionableGating: result.actionableIdentities?.length ?? actionable.length,
+                  ...(result.recoveryProjection ? { recoveryProjection: result.recoveryProjection } : {}),
                   findings: classified,
                 },
                 null,
@@ -969,6 +980,23 @@ evidenceCmd
   .option('--json', 'Print the API run object')
   .action(async (runId: string | undefined, opts: { json?: boolean }) => {
     process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('recover-claim')
+  .description('Recover exact original claims on the same target using authenticated receipts; preserve original reports and accounting')
+  .option('--preview', 'Read exact sources and write a new immutable manifest; no server/native changes')
+  .option('--apply', 'Apply the exact reviewed manifest once')
+  .option('--resume', 'Resolve acknowledgments and resume the same immutable operation')
+  .option('--selection <path>', 'Strict original run/digest/ref and explicit semantic assertion JSON (preview only)')
+  .option('--adopt-manifest <path>', 'Re-preview an interrupted operation with exact acknowledged stages and fresh remaining events')
+  .option('--adopt-manifest-sha256 <sha256>', 'Exact interrupted manifest digest (adoption preview only)')
+  .requiredOption('--manifest <path>', 'Manifest in an existing private recovery directory')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest digest (apply/resume)')
+  .option('--json', 'Print machine-readable status')
+  .action(async (opts: PublicClaimRecoveryOptions) => {
+    const { runPublicClaimRecovery } = await import('./evidence/recover-claim.js');
+    process.exitCode = await runPublicClaimRecovery(opts, evidenceDeps());
   });
 
 evidenceCmd
@@ -1344,6 +1372,7 @@ interface PreparedCouncil {
   /** The blocking council's own models — the roster's `blocking` lane. */
   coreModels: string[];
   converge?: ConvergeContext;
+  recoveredProduction?: RecoveredProduction;
   /** When the command started; the run header records the full wall time. */
   startedAt: Date;
 }
@@ -1379,6 +1408,9 @@ async function prepareCouncil(
     { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
     process.env
   );
+  const recoveredProduction = converge
+    ? await selectRecoveredProduction(await resolveGitCommonDir(), converge)
+    : undefined;
   await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config);
 
@@ -1539,7 +1571,10 @@ async function prepareCouncil(
     ...(spec ? { spec } : {}),
     explicit: explicitReviewers !== undefined,
     coreModels: models,
-    ...(converge ? { converge } : {}),
+    ...(converge ? { converge: { ...converge, ...(recoveredProduction ? { recovery_source: {
+      version: 1 as const, native_sha256: recoveredProduction.nativeSha256,
+    } } : {}) } } : {}),
+    ...(recoveredProduction ? { recoveredProduction } : {}),
     startedAt,
   };
 }
@@ -1957,7 +1992,7 @@ async function executeCouncil(
   );
 
   const runId = extra.attestation?.runId ?? uuidv7();
-  const consensusFindings = computeConsensus(
+  const consensusFindings = materializeRecoveredClaims(computeConsensus(
     runId,
     groups,
     reviews,
@@ -1967,7 +2002,7 @@ async function executeCouncil(
       jaccardThreshold: config.thresholds?.jaccardThreshold,
     },
     modelWeights
-  );
+  ), prepared.recoveredProduction);
 
   const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
     consensusFindings,
@@ -2135,8 +2170,9 @@ async function executeCouncil(
   // in. --json-file and --markdown are written from the same view, so the
   // declared digests match the files and nothing raw travels. With
   // telemetry off the raw report is written as before.
+  const produced = prepared.recoveredProduction ? normalizeGeneratedReport(result) : result;
   const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+    runtime && runtime.level !== 'off' ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
   const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
 
   // Output

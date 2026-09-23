@@ -1,3 +1,4 @@
+import type { RecoveryMaterial } from './materials.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { claimDescriptorSchema, type ClaimDescriptor } from './claims.js';
@@ -10,7 +11,7 @@ import { normalizeUrl } from './primitives.js';
 import { scrubDeep, scrubIdentifier } from '../../../telemetry/scrub.js';
 import { validSightingBinding } from './sighting.js';
 import { isEventReceipt, type EventReceipt, type EventReceiptScope } from './receipts.js';
-import { decodeOriginalReport } from '../../original-run/decode.js';
+import { decodeRecoveryOriginal as decodeOriginalReport } from './recovery-json.js';
 import { instant, object } from './primitives.js';
 import { uuidSchema } from './primitives.js';
 
@@ -23,6 +24,7 @@ export interface ClaimSplitInput {
   nativeJson: string;
   /** Exact retained predecessor and legacy migration snapshots, when required. */
   nativeSourceJsons?: string[];
+  recoveryMaterials?: RecoveryMaterial[];
   reportJson: string;
   findingRef: string;
   previousIdentity: string;
@@ -49,10 +51,10 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 const identity = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value);
 const positive = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647;
 const requireEvidence = (valid: unknown): void => { if (!valid) throw new Error('claim_split_source_conflict'); };
-function original(raw: string): Record<string, unknown> {
+function original(raw: string, prose = false): Record<string, unknown> {
   requireEvidence(typeof raw === 'string' && Buffer.byteLength(raw, 'utf8') <= 64 * 1024 * 1024);
-  const parsed = decodeOriginalReport(raw, { exactNumbers: true });
-  requireEvidence(object(parsed.value) && parsed.transformations.length === 0);
+  const parsed = decodeOriginalReport(raw, { exactNumbers: true, ...(prose ? { originalProse: 'control-code-units-v1' as const } : {}) });
+  requireEvidence(object(parsed.value) && (prose || parsed.transformations.length === 0));
   return parsed.value as Record<string, unknown>;
 }
 
@@ -78,7 +80,7 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
   requireEvidence(claimDescriptorSchema.safeParse(input.descriptor).success && typeof input.reason === 'string' &&
     input.reason.trim().length > 0 && [...input.reason].length <= 2000 &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.reason));
-  const native = original(input.nativeJson); const report = original(input.reportJson);
+  const native = original(input.nativeJson); const report = original(input.reportJson, true);
   requireEvidence([1, 2, 3].includes(native.version as number) && native.target === input.target &&
     Array.isArray(native.rounds) && object(native.findings) && object(report.run));
   const lineage = native.version === 3 || input.nativeSourceJsons !== undefined

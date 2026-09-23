@@ -1,3 +1,5 @@
+import type { NativeMaterialReference } from './native-material.js';
+import type { NativeOccurrenceEvidence } from './native-occurrences.js';
 import type { ConsensusFinding, ReviewResult } from '../../../consensus/types.js';
 import type { ClaimDescriptor, MatchRationale } from './claims.js';
 import type { NativeCorrectionAnchor } from './anchors.js';
@@ -9,9 +11,9 @@ export interface RetainedReport extends Omit<ReviewResult, 'findings' | 'belowTh
 }
 export interface NativeRecoveryOperation {
   operationId: string; sourceVersion: 1 | 2 | 3; sourceSha256: string;
-  anchors: NativeCorrectionAnchor[]; sourceReceipts: EventReceipt[];
+  anchors: NativeCorrectionAnchor[]; sourceReceipts: EventReceipt[]; occurrences?: NativeOccurrenceEvidence; material?: NativeMaterialReference;
 }
-export interface NativeRecoveryMetadata { version: 1; operations: NativeRecoveryOperation[] }
+export interface NativeRecoveryMetadata { version: 1 | 2; operations: NativeRecoveryOperation[] }
 export type FindingVerdict = 'fixed' | 'dismissed';
 
 export interface FindingEntry {

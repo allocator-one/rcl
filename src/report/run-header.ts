@@ -1,3 +1,4 @@
+import type { RecoverySource } from './recovery-source.js';
 import { createHash } from 'node:crypto';
 import type { Config } from '../config/schema.js';
 import type { ResolvedGatingConfig } from '../consensus/gating.js';
@@ -56,6 +57,9 @@ export interface RunnerClaim {
 }
 
 export interface ConvergeContext {
+  /** Versioned local predecessor commitment, present only on recovered-v3 production.
+   * It cannot confer attestation; ordinary admission verifies it under target ownership. */
+  recovery_source?: RecoverySource;
   target: string;
   round?: number;
   attempt?: number;
@@ -77,6 +81,7 @@ export interface RunHeader {
   };
   gating: {
     mode: ResolvedGatingConfig['mode'];
+    bound_classification_protocol?: 1;
     min_models: number;
     verification_model?: string;
     verification_timeout_ms: number;
@@ -448,6 +453,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
         ? { verification_model: input.gating.verificationModel }
         : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
+      ...(input.converge?.recovery_source ? { bound_classification_protocol: 1 as const } : {}),
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),

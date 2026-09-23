@@ -13,11 +13,7 @@ export interface ControlProseTransformation extends ProseTransformation {
 }
 export type OriginalProseTransformation = ProseTransformation | ControlProseTransformation;
 export type OriginalProseMode = 'control-code-units-v1';
-export interface DecodeOriginalReportOptions {
-  originalProse?: OriginalProseMode;
-  /** Refuse numeric tokens whose original decimal meaning is lost by JSON parsing. */
-  exactNumbers?: boolean;
-}
+export interface DecodeOriginalReportOptions { originalProse?: OriginalProseMode; exactNumbers?: boolean }
 export const findingProsePath = /^(?:\/(?:findings|belowThresholdFindings)\/\d+|\/reviews\/\d+\/findings\/\d+)\/(?:title|description|suggestedFix)$/;
 const pointer = (parts: string[]) => '/' + parts.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
 const scalarToken = /(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/y;
@@ -58,6 +54,17 @@ function utf8Offsets(text: string): Uint32Array {
 
 /** Strict JSON with duplicate-key detection and explicit prose-only lone-surrogate notation. */
 export function decodeOriginalReport(text: string, options: DecodeOriginalReportOptions = {}): { value: unknown; transformations: OriginalProseTransformation[] } {
+  return decodeJSON(text,options,false);
+}
+
+/** Strict internal JSON, preserving retained strings verbatim. This is not an
+ * original report validator: every embedded original is separately interpreted
+ * under its own source policy before it can establish a recovery binding. */
+export function decodeRecoveryDocument(text:string):unknown {
+  return decodeJSON(text,{exactNumbers:true},true).value;
+}
+function decodeJSON(text:string,options:DecodeOriginalReportOptions,preserveStrings:boolean):{value:unknown;transformations:OriginalProseTransformation[]} {
+
   if (options.originalProse !== undefined && options.originalProse !== 'control-code-units-v1') throw new Error('unsupported_original_prose_mode');
   let at = 0;
   const transformations: OriginalProseTransformation[] = [];
@@ -80,6 +87,7 @@ export function decodeOriginalReport(text: string, options: DecodeOriginalReport
     if (text[at++] !== '"') return fail();
     let value: string;
     try { value = JSON.parse(text.slice(start, at)) as string; } catch { return fail(); }
+    if(preserveStrings)return value;
     const pathText = pointer(path);
     let result = '';
     for (let i = 0; i < value.length; i++) {

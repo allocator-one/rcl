@@ -1,23 +1,15 @@
 import type { HarnessSink, SinkOutcome } from '../telemetry/sink.js';
 import {
-  isEventReceipt,
   isEventReceiptScope,
-  positiveCounter,
-  type EventReceipt,
+  isStoredEventReceipt,
+  type StoredEventReceipt,
   type EventReceiptScope,
 } from './claim-recovery/validation/receipts.js';
-import { instant, object, uuidSchema } from './claim-recovery/validation/primitives.js';
+import { object, uuidSchema } from './claim-recovery/validation/primitives.js';
 
 export { matchesPreparedEventReceipt } from './claim-recovery/validation/receipts.js';
-export type { EventReceipt, EventReceiptScope } from './claim-recovery/validation/receipts.js';
-
-/** Server acceptance metadata is separate from the original wire assertion. */
-export interface StoredEventReceipt extends EventReceipt {
-  /** Positive safe-integer position in this run's stored event stream. */
-  sequence: number;
-  /** Exact server timestamp, retaining all supplied microsecond precision. */
-  received_at: string;
-}
+export { isStoredEventReceipt } from './claim-recovery/validation/receipts.js';
+export type { StoredEventReceipt, EventReceipt, EventReceiptScope } from './claim-recovery/validation/receipts.js';
 
 export interface SelectedEventReceipts {
   receipts: StoredEventReceipt[];
@@ -27,13 +19,6 @@ export interface SelectedEventReceipts {
 export const MAX_SELECTED_EVENT_RECEIPTS = 50;
 
 export { isEventReceipt } from './claim-recovery/validation/receipts.js';
-
-/** Validate a selected API receipt, including its server-owned chronology. */
-export function isStoredEventReceipt(raw: unknown, scope: EventReceiptScope): raw is StoredEventReceipt {
-  if (!object(raw) || !isEventReceipt(raw, scope) || !Object.hasOwn(raw, 'sequence') ||
-      !Object.hasOwn(raw, 'received_at') || !positiveCounter(raw.sequence)) return false;
-  try { instant(raw.received_at); return true; } catch { return false; }
-}
 
 /**
  * Read only explicitly selected receipts. A successful empty result proves

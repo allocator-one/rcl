@@ -38,7 +38,7 @@ export async function syncNativeDirectory(path: string): Promise<void> {
   try { await handle.sync(); } finally { await handle.close(); }
 }
 
-async function inspectNativeDirectory(path: string): Promise<void> {
+export async function inspectNativeDirectory(path: string): Promise<void> {
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink() || await realpath(path) !== path ||
       (process.platform !== 'win32' && ((info.mode & 0o7777) !== 0o700 || info.uid !== process.geteuid?.()))) {
@@ -46,7 +46,7 @@ async function inspectNativeDirectory(path: string): Promise<void> {
   }
 }
 
-async function prepareNativeRoot(input: string): Promise<string> {
+export async function prepareNativeRoot(input: string): Promise<string> {
   const path = resolve(input);
   if (await realpath(dirname(path)) !== dirname(path)) throw new Error('unsafe_native_lock_directory');
   try { await mkdir(path, { mode: 0o700 }); }
@@ -93,10 +93,10 @@ export function withNativeLock<T>(root: string, target: string, work: () => Prom
 }
 
 /** Native atomic replacement uses the same JSON bytes and platform durability as attempts. */
-export async function writeNativeStateExclusive(path: string, value: unknown): Promise<void> {
+export async function writeNativeStateExclusive(path: string, value: unknown, limit = Infinity): Promise<void> {
   if (await realpath(dirname(path)) !== dirname(path)) throw new Error('symlink_directory');
   const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
-  try { await handle.writeFile(serializeRecoveryDocument(value)); await handle.sync(); }
+  try { await handle.writeFile(serializeRecoveryDocument(value, limit)); await handle.sync(); }
   finally { await handle.close(); }
   await syncNativeDirectory(dirname(path));
 }

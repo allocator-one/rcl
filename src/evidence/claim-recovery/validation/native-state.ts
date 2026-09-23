@@ -1,9 +1,14 @@
+import { deriveCurrentClaimProjection, nativeProjectionFingerprint } from './current-projection.js';
+import { claimHistoryContent, type AuthenticatedClaimHistory, type ClaimHistoryContent } from '../carrier-inventory.js';
+import { nativeMaterial, operationOccurrences, packNativeMaterial } from './native-material.js';
+import type { RecoveryMaterial } from './materials.js';
+import { deriveNativeOccurrenceEvidence, occurrencePendingIdentities, type NativeOccurrenceInput } from './native-occurrences.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { claimDescriptorSchema } from './claims.js';
 import { correctionAnchor, type NativeCorrectionAnchor } from './anchors.js';
 import type { EventReceipt } from './receipts.js';
-import { decodeOriginalReport } from '../../original-run/decode.js';
+import { decodeRecoveryOriginal as decodeOriginalReport } from './recovery-json.js';
 import { object, uuidSchema } from './primitives.js';
 import type { ConvergeRunState } from './types.js';
 import { migratedLegacyPendingRound } from './obligations.js';
@@ -16,7 +21,7 @@ const uuid = (value: unknown): value is string => uuidSchema.safeParse(value).su
 const identity = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value);
 const requireSource = (valid: unknown): void => { if (!valid) throw new Error('native_recovery_source_conflict'); };
 
-interface NativeRecoveryInput {
+interface NativeRecoveryInput extends NativeOccurrenceInput {
   sourceJson: string;
   target: string;
   operationId: string;
@@ -26,9 +31,7 @@ interface NativeRecoveryInput {
   sourceReceipts: EventReceipt[];
   /** Exact predecessor and (when present) original v1 migration snapshots. */
   nativeSourceJsons?: string[];
-  /** No bare-key retirement or unqualified verdict adapter is supported. */
-  transfers?: readonly unknown[];
-  dispositions?: readonly unknown[];
+  recoveryMaterials?: RecoveryMaterial[];
 }
 function decode(raw: string): Record<string, unknown> {
   requireSource(typeof raw === 'string' && Buffer.byteLength(raw) <= MAX_BYTES);
@@ -41,7 +44,7 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
   requireSource((state.version === 1 || state.version === 2 || state.version === 3) && state.target === target &&
     Number.isSafeInteger(state.roundCap) && (state.roundCap as number) >= 2 && (state.roundCap as number) <= 99 &&
     Array.isArray(state.rounds) && object(state.findings) && typeof state.updatedAt === 'string');
-  requireSource(state.version === 3 ? object(state.recovery) && state.recovery.version === 1 &&
+  requireSource(state.version === 3 ? object(state.recovery) && [1, 2].includes(state.recovery.version as number) &&
     Array.isArray(state.recovery.operations) && state.recovery.operations.length > 0 : state.recovery === undefined);
   requireSource(state.version !== 1 || state.sightings === undefined && state.migration === undefined);
   const rounds = state.rounds as Record<string, unknown>[]; const seen = new Set<number>();
@@ -119,8 +122,8 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
 
 function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): void {
   requireSource(uuid(input.operationId) && input.target.trim() === input.target && input.target.length > 0 &&
-    Array.isArray(input.anchors) && input.anchors.length > 0 && Array.isArray(input.reports) && Array.isArray(input.sourceReceipts));
-  if (input.transfers?.length || input.dispositions?.length) throw new Error('native_recovery_unsupported_receipt_contract');
+    Array.isArray(input.anchors) && (input.anchors.length > 0 ||
+      [input.transfers, input.dispositions, input.carriers].some(rows => Array.isArray(rows) && rows.length > 0)) && Array.isArray(input.reports) && Array.isArray(input.sourceReceipts));
   requireSource(input.transfers === undefined || Array.isArray(input.transfers));
   requireSource(input.dispositions === undefined || Array.isArray(input.dispositions));
   const reports = new Map(input.reports.map(raw => [sha(raw), raw]));
@@ -129,7 +132,7 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
   requireSource(receipts.size === input.sourceReceipts.length);
   const usedReports = new Set<string>(); const usedReceipts = new Set<string>();
   const identities = new Set<string>(); const members = new Set<string>(); const eventIds = new Set<string>();
-  const destination = input.anchors[0]!.destination;
+  const destination = input.anchors[0]?.destination;
   const prior = recoveryAnchors(source);
   requireSource(source.version !== 3 || source.recovery!.operations.every(operation => operation.operationId !== input.operationId));
   for (const anchor of input.anchors) {
@@ -137,7 +140,7 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
       !Object.hasOwn(source.findings, anchor.identity) && !prior.some(existing => existing.identity === anchor.identity) && !identities.has(anchor.identity));
     identities.add(anchor.identity);
     requireSource(['base_url', 'org_id', 'repo', 'pr_number'].every(field =>
-      anchor.destination[field as keyof typeof destination] === destination[field as keyof typeof destination]));
+      anchor.destination[field as keyof typeof destination] === destination![field as keyof NonNullable<typeof destination>]));
     const event = decode(anchor.eventJson); const payload = event.payload as Record<string, unknown>;
     requireSource(object(payload) && Array.isArray(payload.source_event_ids) && payload.source_event_ids.length >= 1 && payload.source_event_ids.length <= 2 &&
       payload.source_event_ids.every(uuid) && !eventIds.has(event.id as string));
@@ -164,9 +167,13 @@ export function recoveryAnchors(state: ConvergeRunState): NativeCorrectionAnchor
 }
 /** All native resolution consumers must count independent recovered occurrences. */
 export function effectivePendingIdentities(state: ConvergeRunState): string[] {
+  const current=state.recovery?.operations.at(-1)?.material?.current;
+  if(current && current.nativeFingerprint===nativeProjectionFingerprint(state))return [...current.actionableIdentities];
   const pending = Object.values(state.findings).filter(entry => entry.pendingRound !== undefined ||
     state.version === 3 && entry.claimDescriptor === undefined && migratedLegacyPendingRound(entry, state) !== undefined).map(entry => entry.key);
-  return [...new Set([...pending, ...recoveryAnchors(state).filter(anchor => anchor.source.gating !== 'none').map(anchor => anchor.identity)])].sort();
+  const occurrences = state.recovery?.operations.flatMap(operation => operation.occurrences ? [operation.occurrences] : []).at(-1);
+  return [...new Set([...pending, ...occurrencePendingIdentities(occurrences), ...(state.recovery?.operations.at(-1)?.material?.pendingIdentities ?? []),
+    ...recoveryAnchors(state).filter(anchor => anchor.source.gating !== 'none').map(anchor => anchor.identity)])].sort();
 }
 function ancestorsOf(source: ConvergeRunState, snapshots: Map<string, string>): string[] {
   const selected: string[] = []; let current = source; const seen = new Set<string>();
@@ -185,6 +192,7 @@ export interface RetainedNativeEvidence {
   target: string;
   reports: string[];
   nativeSourceJsons?: string[];
+  recoveryMaterials?: RecoveryMaterial[];
 }
 export interface LegacyClaimEvidence {
   kind: 'legacy-identity';
@@ -210,8 +218,20 @@ export interface ContentValidatedNative {
  * This never reads paths, authenticates receipts, acquires ownership, writes state,
  * migrates a producer or acknowledges that any filesystem requirement is met.
  */
+// Pure content replays recur through immutable predecessor proofs. Cache only
+// fully validated content, keyed by every supplied byte and selector. Physical
+// reads and authenticated authority are deliberately outside this cache.
+const contentCache=new Map<string,{value:ContentValidatedNative;bytes:number}>();let contentCacheBytes=0;
+function contentKey(input:RetainedNativeEvidence):string {
+  const contentHash=(text:string)=>createHash('sha256').update(text,'utf16le').digest('hex');
+  return sha(JSON.stringify({version:1,target:input.target,source:contentHash(input.sourceJson),reports:input.reports.map(contentHash),
+    ancestors:(input.nativeSourceJsons??[]).map(contentHash),materials:(input.recoveryMaterials??[]).map(row=>[row.sha256,contentHash(row.text)])}));
+}
 export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): ContentValidatedNative {
   try {
+    const cacheKey=contentKey(input);const cached=contentCache.get(cacheKey);
+    if(cached){contentCache.delete(cacheKey);contentCache.set(cacheKey,cached);return structuredClone(cached.value);}
+
     requireSource(Array.isArray(input.reports));
     const lineage = verifyNativeRecoveryLineage(input.sourceJson, input.target, input.nativeSourceJsons);
     const state = lineage.state;
@@ -232,12 +252,24 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
           sources.pathRequirements.push({ kind: 'report', sha256: digest, nativePathSuffix: `.evidence/${digest}.json` });
           return raw!;
         });
+        const storedOccurrences=operationOccurrences(operation,input.recoveryMaterials ?? []);
+        requireSource(!operation.material || state.recovery?.version === 2);
         validateAnchors({ sourceJson, target: state.target, operationId: operation.operationId,
           nativeSourceJsons: ancestorsOf(source, snapshots), anchors: operation.anchors,
-          sourceReceipts: operation.sourceReceipts, reports: selectedReports }, source);
+          sourceReceipts: operation.sourceReceipts, reports: selectedReports,
+          ...(storedOccurrences ? { transfers: storedOccurrences.transfers, dispositions: storedOccurrences.dispositions,
+            carriers: storedOccurrences.carriers } : {}) }, source);
+        const occurrences = deriveNativeOccurrenceEvidence(storedOccurrences ?? {}, { target: state.target, sourceJson,
+          nativeSourceJsons: ancestorsOf(source, snapshots), anchors: [...recoveryAnchors(source), ...operation.anchors],
+          previous: source.recovery?.operations.flatMap(op => { const value=operationOccurrences(op,input.recoveryMaterials ?? []);return value?[value]:[];}) ?? [] });
+        const currentStored=operation.material?nativeMaterial(operation.material,input.recoveryMaterials??[]).currentProjection:undefined;
+        const currentProjection=currentStored?deriveCurrentClaimProjection(source,[...recoveryAnchors(source),...operation.anchors],
+          [...source.recovery?.operations.flatMap(op=>{const value=operationOccurrences(op,input.recoveryMaterials??[]);return value?[value]:[];})??[],...(occurrences?[occurrences]:[])],
+          currentStored.history,ancestorsOf(source,snapshots),sourceJson):undefined;
+        requireSource(!currentStored || isDeepStrictEqual(currentProjection,currentStored));
         requireSource(isDeepStrictEqual(operation, { operationId: operation.operationId,
           sourceVersion: source.version, sourceSha256: sha(sourceJson),
-          anchors: operation.anchors, sourceReceipts: operation.sourceReceipts }));
+          anchors: operation.anchors, sourceReceipts: operation.sourceReceipts, ...(operation.material ? { material: packNativeMaterial({...(occurrences?{occurrences}:{}),...(currentProjection?{currentProjection}:{})}).reference } : occurrences ? { occurrences } : {}) }));
         sources.pathRequirements.push({ kind: 'native-predecessor', sha256: operation.sourceSha256,
           nativePathSuffix: `.recovery-sources/${operation.sourceSha256}.json` });
       }
@@ -251,8 +283,16 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
         ...(entry.pendingRound === undefined ? {} : { recordedPendingRound: entry.pendingRound }),
         ...(migrationPendingRound === undefined ? {} : { migrationPendingRound }) };
     });
-    return { qualification: 'content-only', state, sourceSha256: sha(input.sourceJson),
+    const result:ContentValidatedNative={ qualification: 'content-only', state, sourceSha256: sha(input.sourceJson),
       reservedIdentities: lineage.reservedIdentities, actionableIdentities: effectivePendingIdentities(state), legacyClaims,
       filesystemRequirements: [...new Map(sources.pathRequirements.map(row => [JSON.stringify(row), row])).values()] };
+    const bytes=Buffer.byteLength(JSON.stringify(result));
+    if(bytes<=16*1024*1024){
+      while(contentCache.size>=32||contentCacheBytes+bytes>16*1024*1024){const oldest=contentCache.keys().next().value!;
+        contentCacheBytes-=contentCache.get(oldest)!.bytes;contentCache.delete(oldest);}
+      contentCache.set(cacheKey,{value:structuredClone(result),bytes});contentCacheBytes+=bytes;
+    }
+    return result;
+
   } catch (cause) { throw new Error('native_recovery_content_invalid', { cause }); }
 }

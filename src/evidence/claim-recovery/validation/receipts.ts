@@ -78,3 +78,18 @@ export function matchesPreparedEventReceipt(
       isDeepStrictEqual(raw[field as keyof EventReceipt], event[field] ?? null));
   } catch { return false; }
 }
+
+/** Server acceptance metadata is separate from the original wire assertion. */
+export interface StoredEventReceipt extends EventReceipt {
+  /** Positive safe-integer position in this run's stored event stream. */
+  sequence: number;
+  /** Exact server timestamp, retaining all supplied microsecond precision. */
+  received_at: string;
+}
+
+/** Validate a selected API receipt, including its server-owned chronology. */
+export function isStoredEventReceipt(raw: unknown, scope: EventReceiptScope): raw is StoredEventReceipt {
+  if (!object(raw) || !isEventReceipt(raw, scope) || !Object.hasOwn(raw, 'sequence') ||
+      !Object.hasOwn(raw, 'received_at') || !positiveCounter(raw.sequence)) return false;
+  try { instant(raw.received_at); return true; } catch { return false; }
+}
