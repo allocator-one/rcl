@@ -156,7 +156,7 @@ jobs:
             3.*) ;;
             *) echo "OpenSSL 3 is required for authenticated CMS retention" >&2; exit 1 ;;
           esac
-          if ! openssl list -cipher-algorithms | grep -Fq 'AES-256-GCM'; then
+          if ! openssl list -cipher-algorithms | grep -F 'AES-256-GCM' >/dev/null; then
             echo "OpenSSL AES-256-GCM support is required" >&2
             exit 1
           fi

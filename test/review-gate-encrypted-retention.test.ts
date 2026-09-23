@@ -105,6 +105,12 @@ afterEach(async () => {
 });
 
 describe('encrypted review evidence retention', () => {
+  it('checks AES-GCM support without an early pipeline consumer under pipefail', () => {
+    const script = encryptedRetentionScript();
+    expect(script).toContain("openssl list -cipher-algorithms | grep -F 'AES-256-GCM' >/dev/null");
+    expect(script).not.toContain("openssl list -cipher-algorithms | grep -Fq 'AES-256-GCM'");
+  });
+
   it('round-trips deterministic originals and refuses wrong-key or tampered ciphertext', async () => {
     const root = await mkdtemp(join(tmpdir(), 'rcl-encrypted-retention-test-'));
     roots.push(root);
