@@ -321,32 +321,31 @@ export async function attemptWithRetries<T>(opts: {
   const timeoutHandle = setTimeout(() => controller.abort(), opts.timeoutMs);
   const unlinkAbort = linkAbortSignal(controller, opts.signal);
   let lastErr: unknown = new Error('no attempts made');
+  const abortOutcome = (): AttemptOutcome<T> => {
+    const cancelled = opts.signal?.aborted === true;
+    return {
+      ok: false,
+      timedOut: !cancelled,
+      error: cancelled ? 'Request cancelled' : 'Request timed out',
+    };
+  };
   if (controller.signal.aborted) {
     clearTimeout(timeoutHandle);
     unlinkAbort();
-    return { ok: false, timedOut: false, error: 'Request cancelled' };
+    return abortOutcome();
   }
 
   try {
     for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
       try {
-        return { ok: true, value: await opts.attempt(controller.signal) };
+        const value = await opts.attempt(controller.signal);
+        return controller.signal.aborted ? abortOutcome() : { ok: true, value };
       } catch (err) {
         lastErr = err;
-        if (controller.signal.aborted) {
-          const cancelled = opts.signal?.aborted === true;
-          return { ok: false, timedOut: !cancelled, error: cancelled ? 'Request cancelled' : 'Request timed out' };
-        }
+        if (controller.signal.aborted) return abortOutcome();
         if (opts.isRetryable(err) && attempt < opts.maxRetries) {
           await sleepUntilRetry(retryDelay(attempt), controller.signal);
-          if (controller.signal.aborted) {
-            const cancelled = opts.signal?.aborted === true;
-            return {
-              ok: false,
-              timedOut: !cancelled,
-              error: cancelled ? 'Request cancelled' : 'Request timed out',
-            };
-          }
+          if (controller.signal.aborted) return abortOutcome();
           continue;
         }
         break;

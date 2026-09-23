@@ -97,6 +97,24 @@ describe('attemptWithRetries external cancellation', () => {
     expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
   });
 
+  it('discards a successful result returned after external cancellation', async () => {
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => {
+      controller.abort();
+      return 'stale result';
+    });
+
+    const outcome = await attemptWithRetries({
+      timeoutMs: 1_000,
+      maxRetries: 0,
+      signal: controller.signal,
+      isRetryable: () => false,
+      attempt,
+    });
+
+    expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
+  });
+
   it('cancels a retry delay without starting another attempt', async () => {
     const controller = new AbortController();
     let retryableChecked!: () => void;
