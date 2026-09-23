@@ -305,6 +305,31 @@ function sleepUntilRetry(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+const ATTEMPT_ABORTED = Symbol('attempt aborted');
+
+function awaitAttempt<T>(attempt: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (outcome: 'resolve' | 'reject', value: T | unknown): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      if (outcome === 'resolve') resolve(value as T);
+      else reject(value);
+    };
+    const onAbort = (): void => finish('reject', ATTEMPT_ABORTED);
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+    }
+    attempt.then(
+      (value) => finish('resolve', value),
+      (error: unknown) => finish('reject', error)
+    );
+  });
+}
+
 export type AttemptOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; timedOut: boolean; error: string };
@@ -350,7 +375,7 @@ export async function attemptWithRetries<T>(opts: {
   try {
     for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
       try {
-        const value = await opts.attempt(controller.signal);
+        const value = await awaitAttempt(opts.attempt(controller.signal), controller.signal);
         return controller.signal.aborted ? abortOutcome() : { ok: true, value };
       } catch (err) {
         lastErr = err;

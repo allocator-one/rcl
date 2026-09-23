@@ -57,6 +57,30 @@ const baseOpts = {
 };
 
 describe('applyGating (RCL-23)', () => {
+  it.each([
+    ['verificationTimeoutMs', Number.NaN],
+    ['verificationTimeoutMs', Number.POSITIVE_INFINITY],
+    ['verificationTimeoutMs', 0],
+    ['verificationTimeoutMs', -1],
+    ['verificationTimeoutMs', 2_147_483_648],
+    ['verificationPassTimeoutMs', Number.NaN],
+    ['verificationPassTimeoutMs', Number.POSITIVE_INFINITY],
+    ['verificationPassTimeoutMs', 0],
+    ['verificationPassTimeoutMs', -1],
+    ['verificationPassTimeoutMs', 2_147_483_648],
+  ] as const)('rejects an unsafe direct %s value', async (key, value) => {
+    await expect(applyGating([], { ...baseOpts, [key]: value })).rejects.toThrow(key);
+  });
+
+  it.each(['verificationTimeoutMs', 'verificationPassTimeoutMs'] as const)(
+    'accepts a positive fractional direct %s value',
+    async (key) => {
+      await expect(applyGating([], { ...baseOpts, [key]: 12.5 })).resolves.toMatchObject({
+        findings: [],
+      });
+    }
+  );
+
   it('marks critical findings as gating regardless of model count', async () => {
     const ask = vi.fn();
     const { findings } = await applyGating(

@@ -562,6 +562,13 @@ export async function applyGating(
   findings: ConsensusFinding[],
   options: GatingOptions
 ): Promise<{ findings: ConsensusFinding[]; verification?: VerificationStats }> {
+  const verificationTimeoutMs = resolveTimerDelay(
+    'verificationTimeoutMs', options.verificationTimeoutMs
+  );
+  const verificationPassTimeoutMs = resolveTimerDelay(
+    'verificationPassTimeoutMs',
+    options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+  );
   const annotated: ConsensusFinding[] = new Array(findings.length);
   const candidateIndices: number[] = [];
 
@@ -597,12 +604,6 @@ export async function applyGating(
 
   const now = options.monotonicNow ?? performance.now.bind(performance);
   const started = now();
-  const verificationTimeoutMs = resolveTimerDelay(
-    'verificationTimeoutMs', options.verificationTimeoutMs
-  );
-  const verificationPassTimeoutMs = resolveTimerDelay(
-    'verificationPassTimeoutMs', options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
-  );
   const verificationDeadline = started + verificationPassTimeoutMs;
   const verifierModel = options.verificationModel ?? '(none)';
   const stats: VerificationStats = {
@@ -716,6 +717,54 @@ export async function applyGating(
       constructionFailure = err instanceof Error ? err.message : String(err);
     }
 
+    const passController = new AbortController();
+    const remainingPassMs = verificationDeadline - now();
+    if (remainingPassMs <= 0) {
+      throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+    }
+    const passTimeoutHandle = setTimeout(() => passController.abort(), remainingPassMs);
+
+    function askWithinPassDeadline(
+      prompt: string,
+      callTimeoutMs: number
+    ): Promise<ModelAnswer> {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (outcome: 'resolve' | 'reject', value: ModelAnswer | unknown): void => {
+          if (settled) return;
+          settled = true;
+          passController.signal.removeEventListener('abort', onAbort);
+          if (outcome === 'resolve') resolve(value as ModelAnswer);
+          else reject(value);
+        };
+        const onAbort = (): void =>
+          finish('reject', new VerificationPassTimeoutError(verificationPassTimeoutMs));
+
+        passController.signal.addEventListener('abort', onAbort, { once: true });
+        if (passController.signal.aborted) {
+          onAbort();
+          return;
+        }
+
+        let answerPromise: Promise<ModelAnswer>;
+        try {
+          answerPromise = ask!(
+            options.verificationModel!,
+            VERIFIER_SYSTEM_PROMPT,
+            prompt,
+            { timeoutMs: callTimeoutMs, maxRetries: 1, signal: passController.signal }
+          );
+        } catch (err) {
+          finish('reject', err);
+          return;
+        }
+        answerPromise.then(
+          (value) => finish('resolve', value),
+          (err: unknown) => finish('reject', err)
+        );
+      });
+    }
+
     async function runBatch(batch: number[]): Promise<void> {
       if (ask === undefined) {
         for (const index of batch) failureByIndex.set(index, constructionFailure!);
@@ -732,37 +781,9 @@ export async function applyGating(
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         const callTimeoutMs = Math.max(1, Math.min(verificationTimeoutMs, remainingMs));
-        const controller = new AbortController();
-        const answer = await new Promise<ModelAnswer>((resolve, reject) => {
-          const deadlineTimer = setTimeout(() => {
-            controller.abort();
-            reject(new VerificationPassTimeoutError(verificationPassTimeoutMs));
-          }, remainingMs);
-          let answerPromise: Promise<ModelAnswer>;
-          try {
-            answerPromise = ask(
-              options.verificationModel!,
-              VERIFIER_SYSTEM_PROMPT,
-              verifierPrompt,
-              { timeoutMs: callTimeoutMs, maxRetries: 1, signal: controller.signal }
-            );
-          } catch (err) {
-            clearTimeout(deadlineTimer);
-            reject(err);
-            return;
-          }
-          answerPromise.then(
-            (value) => {
-              clearTimeout(deadlineTimer);
-              resolve(value);
-            },
-            (err: unknown) => {
-              clearTimeout(deadlineTimer);
-              reject(err);
-            }
-          );
-        });
+        const answer = await askWithinPassDeadline(verifierPrompt, callTimeoutMs);
         if (now() >= verificationDeadline) {
+          passController.abort();
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         if (answer.status !== 'success') {
@@ -777,6 +798,7 @@ export async function applyGating(
         });
       } catch (err) {
         if (err instanceof VerificationPassTimeoutError) {
+          passController.abort();
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         const reason = err instanceof Error ? err.message : String(err);
@@ -788,22 +810,28 @@ export async function applyGating(
     // never stalls the queue behind it.
     let nextBatch = 0;
     const width = Math.max(1, Math.min(VERIFIER_CONCURRENCY, batches.length));
-    const workerResults = await Promise.allSettled(
-      Array.from({ length: width }, async () => {
-        while (true) {
-          const batchIndex = nextBatch++;
-          if (batchIndex >= batches.length) return;
-          if (now() >= verificationDeadline) {
-            throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+    let workerResults: PromiseSettledResult<void>[];
+    try {
+      workerResults = await Promise.allSettled(
+        Array.from({ length: width }, async () => {
+          while (true) {
+            const batchIndex = nextBatch++;
+            if (batchIndex >= batches.length) return;
+            if (now() >= verificationDeadline) {
+              passController.abort();
+              throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+            }
+            const batch = batches[batchIndex]!;
+            await runBatch(batch);
+            completedBatches++;
+            completedCandidates += batch.length;
+            reportProgress();
           }
-          const batch = batches[batchIndex]!;
-          await runBatch(batch);
-          completedBatches++;
-          completedCandidates += batch.length;
-          reportProgress();
-        }
-      })
-    );
+        })
+      );
+    } finally {
+      clearTimeout(passTimeoutHandle);
+    }
     const failedWorker = workerResults.find(
       (result): result is PromiseRejectedResult => result.status === 'rejected'
     );

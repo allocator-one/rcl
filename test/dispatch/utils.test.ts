@@ -149,6 +149,47 @@ describe('attemptWithRetries external cancellation', () => {
     }
   });
 
+  it('settles external cancellation when an attempt ignores the signal', async () => {
+    const controller = new AbortController();
+    const outcomePromise = attemptWithRetries({
+      timeoutMs: 10_000,
+      maxRetries: 0,
+      signal: controller.signal,
+      isRetryable: () => false,
+      attempt: async () => new Promise<string>(() => {}),
+    });
+
+    controller.abort();
+
+    await expect(outcomePromise).resolves.toEqual({
+      ok: false,
+      timedOut: false,
+      error: 'Request cancelled',
+    });
+  });
+
+  it('settles an internal timeout when an attempt ignores the signal', async () => {
+    vi.useFakeTimers();
+    try {
+      const outcomePromise = attemptWithRetries({
+        timeoutMs: 100,
+        maxRetries: 0,
+        isRetryable: () => false,
+        attempt: async () => new Promise<string>(() => {}),
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(outcomePromise).resolves.toEqual({
+        ok: false,
+        timedOut: true,
+        error: 'Request timed out',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels a retry delay without starting another attempt', async () => {
     const controller = new AbortController();
     let retryableChecked!: () => void;
