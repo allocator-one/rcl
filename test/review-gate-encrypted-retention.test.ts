@@ -105,10 +105,11 @@ afterEach(async () => {
 });
 
 describe('encrypted review evidence retention', () => {
-  it('checks AES-GCM support without an early pipeline consumer under pipefail', () => {
+  it('uses CMS encryption itself as the AES-GCM capability check', () => {
     const script = encryptedRetentionScript();
-    expect(script).toContain("openssl list -cipher-algorithms | grep -F 'AES-256-GCM' >/dev/null");
-    expect(script).not.toContain("openssl list -cipher-algorithms | grep -Fq 'AES-256-GCM'");
+    expect(script).not.toContain('openssl list -cipher-algorithms');
+    expect(script).toContain('openssl cms -encrypt');
+    expect(script).toContain('-aes-256-gcm');
   });
 
   it('round-trips deterministic originals and refuses wrong-key or tampered ciphertext', async () => {
