@@ -35,3 +35,12 @@ it('refuses an unbound higher report and changed CAS evidence', async () => {
   await writeFile(convergeAttemptStatePath(gitCommonDir, target), JSON.stringify({ version: 2, target, cap: 20, migratedAttempts: 0, attemptsUsed: 4, attempts: [], updatedAt: '2026-01-01T00:00:00.000Z' }));
   await expect(applyRoundGap(manifest, gitCommonDir)).rejects.toThrow('round_gap_attempt_changed');
 });
+
+it('refuses a changed manifest reusing an already applied operation id', async () => {
+  const gitCommonDir = await dir(), target = 'gap-resume';
+  await processRoundReport({ gitCommonDir, target, round: 1, findings: [] });
+  await mkdir(join(gitCommonDir, 'rcl-converge-attempts')); await writeFile(convergeAttemptStatePath(gitCommonDir, target), JSON.stringify({ version: 2, target, cap: 20, migratedAttempts: 0, attemptsUsed: 3, attempts: [], updatedAt: '2026-01-01T00:00:00.000Z' }));
+  const manifest = await previewRoundGap({ target, gapRound: 2, admittingRound: 3, attempt: 2, runId: run, reportSha256: sha, incompleteSha256: 'b'.repeat(64) }, gitCommonDir);
+  await expect(applyRoundGap(manifest, gitCommonDir)).resolves.toBe('applied');
+  await expect(applyRoundGap({ ...manifest, incompleteSha256: 'c'.repeat(64) }, gitCommonDir)).rejects.toThrow('round_gap_operation_conflict');
+});

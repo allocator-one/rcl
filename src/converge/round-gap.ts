@@ -21,6 +21,12 @@ export interface RoundGapManifest {
 const sha256 = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex');
 const digest = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const uuid = (value: unknown) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+type StoredGap = NonNullable<ConvergeRunState['roundGapAudit']>['entries'][number];
+const sameManifest = (a: StoredGap, b: RoundGapManifest) =>
+  a.operationId === b.operationId && a.gapRound === b.gapRound &&
+  a.admittingRound === b.admittingRound && a.attempt === b.attempt && a.runId === b.runId &&
+  a.reportSha256 === b.reportSha256 && a.incompleteSha256 === b.incompleteSha256 &&
+  a.stateSha256 === b.stateSha256 && a.attemptSha256 === b.attemptSha256;
 
 function valid(manifest: RoundGapManifest): void {
   if (!uuid(manifest.operationId) || !manifest.target.trim() || !Number.isSafeInteger(manifest.gapRound) || manifest.gapRound < 1 ||
@@ -54,15 +60,17 @@ export async function applyRoundGap(manifest: RoundGapManifest, gitCommonDir: st
   valid(manifest);
   const previewState = await loadConvergeRunStateEvidence(gitCommonDir, manifest.target);
   if (!previewState) throw new Error('round_gap_state_missing');
-  if (previewState.state.roundGapAudit?.entries.some(entry => entry.operationId === manifest.operationId)) return 'resumed';
+  const prior = previewState.state.roundGapAudit?.entries.find(entry => entry.operationId === manifest.operationId);
+  if (prior) { if (sameManifest(prior, manifest)) return 'resumed'; throw new Error('round_gap_operation_conflict'); }
   if (previewState.sha256 !== manifest.stateSha256) throw new Error('round_gap_state_changed');
   return withNativeTarget(gitCommonDir, manifest.target, async ownership => {
     const stateEvidence = await loadConvergeRunStateEvidence(gitCommonDir, manifest.target);
-    if (!stateEvidence) throw new Error('round_gap_state_missing');
+    if (!stateEvidence || stateEvidence.sha256 !== manifest.stateSha256) throw new Error('round_gap_state_changed');
     const attempts = await attemptEvidence(gitCommonDir, manifest.target);
     if (attempts.sha256 !== manifest.attemptSha256 || attempts.attemptsUsed < manifest.attempt) throw new Error('round_gap_attempt_changed');
     const existing = stateEvidence.state.roundGapAudit?.entries ?? [];
-    if (existing.some(entry => entry.operationId === manifest.operationId)) return 'resumed';
+    const existingOperation = existing.find(entry => entry.operationId === manifest.operationId);
+    if (existingOperation) { if (sameManifest(existingOperation, manifest)) return 'resumed'; throw new Error('round_gap_operation_conflict'); }
     if (existing.some(entry => entry.gapRound === manifest.gapRound || entry.admittingRound === manifest.admittingRound)) throw new Error('round_gap_conflict');
     const max = Math.max(...stateEvidence.state.rounds.map(round => round.round), 0);
     if (max !== manifest.gapRound - 1) throw new Error('round_gap_not_contiguous');
