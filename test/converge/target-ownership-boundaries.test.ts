@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { claimConvergeAttempt, ConvergeAttemptPostClaimError, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
@@ -88,6 +88,18 @@ it('keeps a failed post-claim operation inside ownership without rolling back or
   }
 });
 
+it('preserves the committed claim when post-claim work and target cleanup both fail', async () => {
+  const failure = new Error('Synthetic publication failure');
+  const claim = claimConvergeAttempt({ gitCommonDir: dir, target, afterClaim: async () => {
+    faults.release = true;
+    throw failure;
+  } });
+  await expect(claim).rejects.toMatchObject({
+    name: 'ConvergeAttemptPostClaimError', claim: { target, attempt: 1 }, cause: failure,
+  });
+  expect((await loadConvergeAttemptState(dir, target))?.attemptsUsed).toBe(1);
+});
+
 it('pins attempt ownership inputs before waiting for a target lock', async () => {
   const other = 'synthetic-owner-other';
   const entered = barrier(), release = barrier();
@@ -105,6 +117,44 @@ it('pins attempt ownership inputs before waiting for a target lock', async () =>
     await expect(claim).resolves.toMatchObject({ target, attempt: 1 });
     expect((await loadConvergeAttemptState(dir, target))?.attemptsUsed).toBe(1);
     expect(await loadConvergeAttemptState(dir, other)).toBeUndefined();
+  } finally {
+    release.resolve();
+    await Promise.allSettled([holder, claim]);
+  }
+});
+
+it('keeps attempt state in the canonical directory when a caller symlink is retargeted while waiting', async () => {
+  const canonical = join(dir, 'canonical'), diverted = join(dir, 'diverted'), alias = join(dir, 'alias');
+  await mkdir(canonical); await mkdir(diverted); await symlink(canonical, alias);
+  const entered = barrier(), release = barrier();
+  const holder = withNativeTarget(canonical, target, async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  const claim = claimConvergeAttempt({ gitCommonDir: alias, target });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await unlink(alias); await symlink(diverted, alias);
+    release.resolve();
+    await expect(claim).resolves.toMatchObject({ attempt: 1 });
+    expect((await loadConvergeAttemptState(canonical, target))?.attemptsUsed).toBe(1);
+    expect(await loadConvergeAttemptState(diverted, target)).toBeUndefined();
+  } finally {
+    release.resolve();
+    await Promise.allSettled([holder, claim]);
+  }
+});
+
+it('uses caller lock timing while waiting for target ownership', async () => {
+  const entered = barrier(), release = barrier();
+  const holder = withNativeTarget(dir, target, async () => { entered.resolve(); await release.promise; });
+  await entered.promise;
+  const claim = claimConvergeAttempt({ gitCommonDir: dir, target, lockTimeoutMs: 25, lockRetryMs: 1 });
+  try {
+    const result = await Promise.race([
+      claim.then(() => 'resolved', error => error),
+      new Promise(resolve => setTimeout(() => resolve('late'), 250)),
+    ]);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain('recovery_run_locked');
   } finally {
     release.resolve();
     await Promise.allSettled([holder, claim]);

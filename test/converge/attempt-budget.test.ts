@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
@@ -319,7 +319,7 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 10,
+        lockTimeoutMs: 500,
         lockRetryMs: 1,
       })
     ).rejects.toThrow('move or remove that lock path and retry');
@@ -336,7 +336,7 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 10,
+        lockTimeoutMs: 500,
         lockRetryMs: 1,
       })
     ).rejects.toThrow('move or remove that lock path and retry');
@@ -360,7 +360,7 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 10,
+        lockTimeoutMs: 500,
         lockRetryMs: 1,
       })
     ).rejects.toThrow('If no live converge-attempt process owns it');
@@ -429,7 +429,7 @@ describe('convergence attempt budget', () => {
     const gitCommonDir = await tempGitDir();
     const claim = await claimConvergeAttempt({ gitCommonDir, target: '../../outside target' });
 
-    expect(claim.stateFile.startsWith(join(gitCommonDir, 'rcl-converge-attempts'))).toBe(true);
+    expect(claim.stateFile.startsWith(join(await realpath(gitCommonDir), 'rcl-converge-attempts'))).toBe(true);
     expect(claim.stateFile).not.toContain('../');
   });
 

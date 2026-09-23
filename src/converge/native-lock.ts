@@ -81,13 +81,14 @@ async function readNativeRegistration(path: string): Promise<string> {
 
 /** Existing ordinary storage is not thereby qualified for recovery durability. */
 export function withNativeLock<T>(root: string, target: string, work: () => Promise<T>,
-  hooks: RegistryHooks<NativeLockScope> = {}): Promise<T> {
+  hooks: RegistryHooks<NativeLockScope> = {}, timing: { lockTimeoutMs?: number; lockRetryMs?: number } = {}): Promise<T> {
   return withRegistryLock(root, target, work, {
     scope: nativeScope, validScope: validNativeLockScope, prepareRoot: prepareNativeRoot,
     inspectRegistry: inspectNativeDirectory, sync: syncNativeDirectory, read: readNativeRegistration,
     // Unqualified registrations are never reaped using a PID or elapsed time.
     // Interrupted owners need inspection, including after a reboot.
     mayProbePid: validLockScope,
+    ...timing,
   }, hooks);
 }
 

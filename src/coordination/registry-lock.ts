@@ -30,6 +30,9 @@ export interface RegistryPolicy<Scope> {
   sync: (path: string) => Promise<void>;
   read?: (path: string) => Promise<string>;
   mayProbePid: (scope: Scope) => boolean;
+  /** Bounded waiting policy for callers that expose lock timing as part of their contract. */
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
 }
 
 /** Work completed; only coordination cleanup failed. Never replay the result. */
@@ -68,8 +71,14 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
   const path = join(registry, `${token}.json`);
   let owner: RegistryRegistration<Scope> = { version: 1, pid: process.pid, token, scope, state: 'choosing' };
-  const now = hooks.now ?? (() => performance.now()); const deadline = now() + 5000;
-  const wait = hooks.wait ?? (() => new Promise<void>(resolve => setTimeout(resolve, 25)));
+  const lockTimeoutMs = policy.lockTimeoutMs ?? 5_000;
+  const lockRetryMs = policy.lockRetryMs ?? 25;
+  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs < 1 ||
+      !Number.isSafeInteger(lockRetryMs) || lockRetryMs < 1) {
+    throw new Error('invalid_registry_lock_timing');
+  }
+  const now = hooks.now ?? (() => performance.now()); const deadline = now() + lockTimeoutMs;
+  const wait = hooks.wait ?? (() => new Promise<void>(resolve => setTimeout(resolve, lockRetryMs)));
   const checkTime = () => { if (now() >= deadline) throw new Error('recovery_run_locked'); };
   const read = hooks.read ?? policy.read ?? (async file => (await readStable(file, 2048)).text);
   let published = false;

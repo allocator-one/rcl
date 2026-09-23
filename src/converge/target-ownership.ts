@@ -6,6 +6,11 @@ import { withNativeLock } from './native-lock.js';
 /** Opaque authority; its started operations drain before the registry is released. */
 export interface NativeTargetOwnership { readonly target: string }
 type Qualification = 'ordinary' | 'recovery';
+interface NativeTargetOptions {
+  qualification?: Qualification;
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
+}
 interface Registration {
   commonDir: string; target: string; active: boolean; accepting: boolean;
   qualification: Qualification;
@@ -37,14 +42,19 @@ async function scope<T>(commonDir: string, target: string, qualification: Qualif
 /** Ordinary writers share the qualified protocol without inheriting recovery fallback. */
 export async function withNativeTarget<T>(gitCommonDir: string, target: string,
   work: (ownership: NativeTargetOwnership) => Promise<T>,
-  options: { qualification?: Qualification } = {}): Promise<T> {
+  options: NativeTargetOptions = {}): Promise<T> {
   target = target.trim();
   if (!target) throw new Error('native_target_required');
   const qualification = options.qualification ?? 'ordinary';
   if (qualification !== 'ordinary' && qualification !== 'recovery') throw new Error('native_target_invalid_qualification');
   const commonDir = await realpath(resolve(gitCommonDir));
   const lock = qualification === 'recovery' ? withRecoveryLock : withNativeLock;
-  return lock(join(commonDir, 'rcl-native-target-locks'), target, () => scope(commonDir, target, qualification, work));
+  return qualification === 'ordinary'
+    ? lock(join(commonDir, 'rcl-native-target-locks'), target, () => scope(commonDir, target, qualification, work), {}, {
+      lockTimeoutMs: options.lockTimeoutMs,
+      lockRetryMs: options.lockRetryMs,
+    })
+    : lock(join(commonDir, 'rcl-native-target-locks'), target, () => scope(commonDir, target, qualification, work));
 }
 
 /** Explicit recovery entry point: strict qualification cannot silently fall back. */

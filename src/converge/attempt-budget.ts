@@ -582,6 +582,10 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     lockRetryMs: options.lockRetryMs,
     afterClaim: options.afterClaim,
   };
+  // Use one canonical directory for both target ownership and state paths.
+  // The caller's textual symlink must not be resolved once for a lock and
+  // later again for a state write after it has been retargeted.
+  claimOptions.gitCommonDir = await realpath(resolve(claimOptions.gitCommonDir));
   const { gitCommonDir, target } = claimOptions;
   if (claimOptions.maxAttempts !== undefined) validateCap(claimOptions.maxAttempts);
   let committed: ConvergeAttemptClaim | undefined;
@@ -594,14 +598,27 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
         throw new ConvergeAttemptPostClaimError(committed, error);
       }
       return committed;
-    });
+    }, { lockTimeoutMs: claimOptions.lockTimeoutMs, lockRetryMs: claimOptions.lockRetryMs });
   } catch (error) {
+    const postClaim = findPostClaimError(error);
+    if (postClaim) throw postClaim;
     if (!(error instanceof RegistryCleanupError) || !committed || error.result !== committed) throw error;
     committed.warning = [committed.warning,
       `Attempt ${committed.attempt}/${committed.cap} is durably recorded, but target lock cleanup failed: ${error.message}. ` +
       'Do not retry this claim. Inspect target coordination before further target mutations.'].filter(Boolean).join(' ');
     return committed;
   }
+}
+
+function findPostClaimError(error: unknown): ConvergeAttemptPostClaimError | undefined {
+  if (error instanceof ConvergeAttemptPostClaimError) return error;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const found = findPostClaimError(nested);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
