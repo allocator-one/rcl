@@ -21,6 +21,10 @@ export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
 
 const STATE_VERSION = 2;
 const STATE_DIR = 'rcl-converge-attempts';
+// The native target reservation now also bridges historical recovery clients
+// for the whole critical section. A burst of normal starters may therefore
+// wait behind valid work longer than the accounting lock's 5s retry bound.
+const DEFAULT_TARGET_LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
 
@@ -598,7 +602,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
         throw new ConvergeAttemptPostClaimError(committed, error);
       }
       return committed;
-    }, { lockTimeoutMs: claimOptions.lockTimeoutMs, lockRetryMs: claimOptions.lockRetryMs });
+    }, { lockTimeoutMs: claimOptions.lockTimeoutMs ?? DEFAULT_TARGET_LOCK_TIMEOUT_MS, lockRetryMs: claimOptions.lockRetryMs });
   } catch (error) {
     const postClaim = findPostClaimError(error);
     if (postClaim) throw postClaim;

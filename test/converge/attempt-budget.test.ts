@@ -289,7 +289,7 @@ describe('convergence attempt budget', () => {
           gitCommonDir,
           target: 'rcl-18',
           maxAttempts: 7,
-          lockTimeoutMs: 5_000,
+          lockTimeoutMs: 30_000,
           lockRetryMs: 1,
         })
       )
