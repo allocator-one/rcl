@@ -487,7 +487,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     })),
   };
   state.updatedAt = new Date().toISOString();
-  await writeState(options.gitCommonDir, state, ownership);
+  await writeState(gitCommonDir, state, ownership);
 
   return { roundCap: state.roundCap, counts, findings: annotated };
 }
