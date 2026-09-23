@@ -80,9 +80,9 @@ it('lets contending recovery complete while another owner document is still bein
   let release!: () => void; const paused = new Promise<void>(resolve => { release = resolve; });
   controls.beforeWrite = async () => { reached(); await paused; };
   const entered: string[] = [];
-  const first = withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('first'); });
+  const first = withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('first'); }, { legacy: false });
   await completeContenderBeforeRelease(first, waiting,
-    () => withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('second'); }), release);
+    () => withRecoveryLock(root, 'same destination/org/run', async () => { entered.push('second'); }, { legacy: false }), release);
   expect(entered).toEqual(['second', 'first']);
   expect(await readdir(join(root, `${sha256('same destination/org/run')}.bakery`))).toEqual([]);
 });
@@ -107,7 +107,7 @@ it('retains an existing incomplete lock without entering recovery or overwriting
   const identity = 'same destination/org/run'; const path = join(root, `${sha256(identity)}.lock`);
   await writeFile(path, '{"pid":');
   const work = vi.fn();
-  await expect(withRecoveryLock(root, identity, work)).rejects.toThrow('legacy_recovery_lock_requires_inspection');
+  await expect(withRecoveryLock(root, identity, work)).rejects.toThrow('incomplete_recovery_lock_requires_inspection');
   expect(work).not.toHaveBeenCalled();
   expect(await readFile(path, 'utf8')).toBe('{"pid":');
   expect(await readdir(root)).toEqual([`${sha256(identity)}.lock`]);

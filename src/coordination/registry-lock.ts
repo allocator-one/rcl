@@ -91,14 +91,20 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
     return current as LegacyOwner;
   };
   const create = async (): Promise<boolean> => {
+    let created = false;
     try {
       const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      created = true;
       try { await handle.writeFile(JSON.stringify(owner) + '\n'); await handle.sync(); }
       finally { await handle.close(); }
       await options.sync(root);
       return true;
     } catch (error) {
       if (code(error) === 'EEXIST') return false;
+      if (created) {
+        try { await unlink(path); await options.sync(root); }
+        catch (cleanup) { throw new AggregateError([error, cleanup], 'legacy_recovery_lock_cleanup_failed', { cause: error }); }
+      }
       throw error;
     }
   };
