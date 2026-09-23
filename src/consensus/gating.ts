@@ -722,23 +722,31 @@ export async function applyGating(
         [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
       );
       try {
+        const verifierPrompt = buildVerifierPrompt(candidates, relevantPatches);
         const remainingMs = verificationDeadline - now();
         if (remainingMs <= 0) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         const callTimeoutMs = Math.max(1, Math.min(options.verificationTimeoutMs, remainingMs));
         const controller = new AbortController();
-        const answerPromise = ask(
-          options.verificationModel!,
-          VERIFIER_SYSTEM_PROMPT,
-          buildVerifierPrompt(candidates, relevantPatches),
-          { timeoutMs: callTimeoutMs, maxRetries: 1, signal: controller.signal }
-        );
         const answer = await new Promise<ModelAnswer>((resolve, reject) => {
           const deadlineTimer = setTimeout(() => {
             controller.abort();
             reject(new VerificationPassTimeoutError(verificationPassTimeoutMs));
           }, remainingMs);
+          let answerPromise: Promise<ModelAnswer>;
+          try {
+            answerPromise = ask(
+              options.verificationModel!,
+              VERIFIER_SYSTEM_PROMPT,
+              verifierPrompt,
+              { timeoutMs: callTimeoutMs, maxRetries: 1, signal: controller.signal }
+            );
+          } catch (err) {
+            clearTimeout(deadlineTimer);
+            reject(err);
+            return;
+          }
           answerPromise.then(
             (value) => {
               clearTimeout(deadlineTimer);
@@ -764,7 +772,7 @@ export async function applyGating(
           if (verdict !== undefined) verdictsByIndex.set(findingIndex, verdict);
         });
       } catch (err) {
-        if (err instanceof VerificationPassTimeoutError || now() >= verificationDeadline) {
+        if (err instanceof VerificationPassTimeoutError) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         const reason = err instanceof Error ? err.message : String(err);
