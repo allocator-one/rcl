@@ -123,3 +123,16 @@ it('refuses an unqualified dead legacy owner without probing, unlinking, or ente
   expect(probe).not.toHaveBeenCalled(); expect(work).not.toHaveBeenCalled();
   expect(await readFile(path, 'utf8')).toContain('old-client-token');
 });
+
+it('refuses a dead legacy reservation from another boot before probing or reclaiming it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rcl-original-lock-')); directories.push(root);
+  const identity = 'same destination/org/run'; const path = join(root, `${sha256(identity)}.lock`);
+  const localScope = { platform: 'linux' as const, boot: '11111111-1111-1111-1111-111111111111', namespace: '1:1' };
+  const foreignScope = { ...localScope, boot: '22222222-2222-2222-2222-222222222222' };
+  await writeFile(path, JSON.stringify({ pid: 2147483647, token: 'old-client-token', scope: foreignScope }) + '\n');
+  const probe = vi.fn(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+  const work = vi.fn();
+  await expect(withRecoveryLock(root, identity, work, { scope: async () => localScope, probe })).rejects.toThrow('legacy_recovery_lock_requires_inspection');
+  expect(probe).not.toHaveBeenCalled(); expect(work).not.toHaveBeenCalled();
+  expect(await readFile(path, 'utf8')).toContain('22222222-2222-2222-2222-222222222222');
+});

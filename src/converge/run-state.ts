@@ -6,7 +6,7 @@ import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation,
 import { gapManifest, validateRoundGapAudit, type RoundGapEntry } from './round-gap-schema.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
-import { lockSystemCommand } from '../evidence/original-run/lock-scope.js';
+import * as lockScope from '../evidence/original-run/lock-scope.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
@@ -223,7 +223,7 @@ async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): P
       (process.platform !== 'win32' && (uid === undefined || directory.uid !== uid || (directory.mode & 0o022) !== 0))) {
     throw new Error('unsafe_converge_state_directory');
   }
-  if (process.platform === 'darwin') checkDarwinLockACL(await lockSystemCommand('/bin/ls', ['-lde', stateDir]));
+  if (process.platform === 'darwin') checkDarwinLockACL(await lockScope.lockSystemCommand('/bin/ls', ['-lde', stateDir]));
   await syncNativeDirectory(gitCommonDir);
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {

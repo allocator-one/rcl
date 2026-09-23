@@ -145,7 +145,15 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
     if (!Number.isSafeInteger(existing.pid) || existing.pid < 1 || typeof existing.token !== 'string') {
       throw new Error('invalid_recovery_lock_requires_inspection');
     }
-    if (options.reclaimLegacy === false && !options.qualifiedLegacy?.(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
+    // A scoped document is a modern owner, even when it occupies the legacy
+    // pathname for compatibility. A local PID observation cannot establish
+    // that an owner from another boot or PID namespace is dead. PID-only
+    // documents retain the caller's explicit compatibility policy.
+    if (existing.scope !== undefined) {
+      if (!options.qualifiedLegacy?.(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
+    } else if (options.reclaimLegacy === false) {
+      throw new Error('legacy_recovery_lock_requires_inspection');
+    }
     let alive = true;
     try { (options.probe ?? (pid => process.kill(pid, 0)))(existing.pid); }
     catch (error) { if (code(error) === 'ESRCH') alive = false; }
@@ -174,7 +182,8 @@ export async function withLegacyReservation<T>(root: string, identity: string, o
 
   const release = async () => {
     const current = await readOwner();
-    if (!current || current.pid !== owner.pid || current.token !== owner.token) {
+    if (!current || current.pid !== owner.pid || current.token !== owner.token ||
+        (owner.scope !== undefined && !isDeepStrictEqual(current.scope, owner.scope))) {
       throw new Error('legacy_recovery_lock_owner_changed');
     }
     await unlink(path); await options.sync(root);
@@ -361,5 +370,7 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
     }
   }
   }, { sync, read: hooks.read ?? policy.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait,
-    lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs, onPrepared: hooks.onLegacyPrepared });
+    lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs, onPrepared: hooks.onLegacyPrepared,
+    qualifiedLegacy: owner => policy.validScope((owner as { scope?: unknown }).scope) &&
+      isDeepStrictEqual((owner as { scope: unknown }).scope, scope) });
 }

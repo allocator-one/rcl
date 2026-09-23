@@ -2,14 +2,27 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
 import { claimConvergeAttempt, ConvergeAttemptPostClaimError, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 
-const faults = vi.hoisted(() => ({ release: false, pausePath: '', entered: () => {}, wait: Promise.resolve(), failWrite: false }));
+const faults = vi.hoisted(() => ({ release: false, pausePath: '', entered: () => {}, wait: Promise.resolve(), failWrite: false, unsafeWindowsStateDir: false }));
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs,
+    lstat: async (...args: Parameters<typeof fs.lstat>) => {
+      const info = await fs.lstat(...args);
+      if (faults.unsafeWindowsStateDir && String(args[0]).endsWith('/rcl-converge-runs')) {
+        return new Proxy(info, { get(target, property, receiver) {
+          if (property === 'mode') return 0o40777;
+          if (property === 'uid') return 0;
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+      }
+      return info;
+    },
     unlink: async (...args: Parameters<typeof fs.unlink>) => {
       await fs.unlink(...args);
       if (faults.release && String(args[0]).includes('/rcl-native-target-locks/') && String(args[0]).endsWith('.json')) {
@@ -34,9 +47,10 @@ const geteuid = Object.getOwnPropertyDescriptor(process, 'geteuid');
 function barrier() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-native-boundary-'))); });
 afterEach(async () => {
+  vi.restoreAllMocks();
   Object.defineProperty(process, 'platform', platform);
   if (geteuid) Object.defineProperty(process, 'geteuid', geteuid);
-  faults.release = false; faults.pausePath = ''; faults.failWrite = false;
+  faults.release = false; faults.pausePath = ''; faults.failWrite = false; faults.unsafeWindowsStateDir = false;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -55,7 +69,7 @@ it('preserves ordinary attempt and round operations in the Windows platform bran
 it.each([0o775, 0o777])('refuses an existing group/other-writable convergence state directory (%o)', async mode => {
   const stateDir = join(dir, 'rcl-converge-runs');
   await mkdir(stateDir); await chmod(stateDir, mode);
-  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow('unsafe_converge_state_directory');
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow(/unsafe_(native_lock|converge_state)_directory/);
 });
 
 it('accepts an existing owner-controlled 0755 convergence state directory', async () => {
@@ -73,7 +87,22 @@ it('refuses a symlinked convergence state directory', async () => {
 it('does not require geteuid in the Windows platform branch', async () => {
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   Object.defineProperty(process, 'geteuid', { configurable: true, value: undefined });
+  faults.unsafeWindowsStateDir = true;
   await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
+});
+
+it('fails closed when POSIX cannot identify the current owner', async () => {
+  Object.defineProperty(process, 'geteuid', { configurable: true, value: undefined });
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow(/unsafe_(native_lock|converge_state)_directory/);
+});
+
+it('refuses a harmful Darwin ACL on an otherwise owner-controlled state directory', async () => {
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  const command = vi.spyOn(lockScope, 'lockSystemCommand').mockResolvedValue(
+    'drwx------+ 2 user staff 64 Sep 22 12:00 ' + join(dir, 'rcl-converge-runs') + '\n 0: group:everyone allow list,search\n'
+  );
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow('unsafe_recovery_lock_acl');
+  expect(command).toHaveBeenCalledWith('/bin/ls', ['-lde', join(dir, 'rcl-converge-runs')]);
 });
 
 it('returns a committed attempt after publication with a do-not-retry warning when outer cleanup fails', async () => {
