@@ -69,6 +69,18 @@ export class ConvergeAttemptBudgetExceededError extends Error {
   }
 }
 
+/** A post-claim delivery failed after the attempt was durably consumed. */
+export class ConvergeAttemptPostClaimError extends Error {
+  constructor(readonly claim: ConvergeAttemptClaim, cause: unknown) {
+    super(
+      `Attempt ${claim.attempt}/${claim.cap} is durably recorded, but post-claim delivery failed: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}. Do not retry this claim.`,
+      { cause }
+    );
+    this.name = 'ConvergeAttemptPostClaimError';
+  }
+}
+
 export class ConvergeAttemptStateError extends Error {
   readonly code = 'RCL_CONVERGE_ATTEMPT_STATE';
 
@@ -557,13 +569,30 @@ async function releaseOwnedLock(lockFile: string, owner: AttemptLockOwner): Prom
  * attempt. This makes the cost ceiling independent of agent bookkeeping.
  */
 export async function claimConvergeAttempt(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
-  const target = validateTarget(options.target);
-  if (options.maxAttempts !== undefined) validateCap(options.maxAttempts);
+  // Callers can retain and mutate their options object while this invocation
+  // waits for target ownership. Capture every input before that first await so
+  // the state claim cannot escape the lock selected for this operation.
+  const claimOptions: ClaimOptions = {
+    gitCommonDir: options.gitCommonDir,
+    target: validateTarget(options.target),
+    maxAttempts: options.maxAttempts,
+    now: options.now,
+    recordPid: options.recordPid,
+    lockTimeoutMs: options.lockTimeoutMs,
+    lockRetryMs: options.lockRetryMs,
+    afterClaim: options.afterClaim,
+  };
+  const { gitCommonDir, target } = claimOptions;
+  if (claimOptions.maxAttempts !== undefined) validateCap(claimOptions.maxAttempts);
   let committed: ConvergeAttemptClaim | undefined;
   try {
-    return await withNativeTarget(options.gitCommonDir, target, async () => {
-      committed = await claimConvergeAttemptOwned(options);
-      await options.afterClaim?.(committed);
+    return await withNativeTarget(gitCommonDir, target, async () => {
+      committed = await claimConvergeAttemptOwned(claimOptions);
+      try {
+        await claimOptions.afterClaim?.(committed);
+      } catch (error) {
+        throw new ConvergeAttemptPostClaimError(committed, error);
+      }
       return committed;
     });
   } catch (error) {

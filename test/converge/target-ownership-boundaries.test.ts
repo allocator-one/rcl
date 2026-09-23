@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { claimConvergeAttempt, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { claimConvergeAttempt, ConvergeAttemptPostClaimError, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 
@@ -77,11 +77,37 @@ it('keeps a failed post-claim operation inside ownership without rolling back or
     await new Promise(resolve => setTimeout(resolve, 150));
     expect((await loadConvergeAttemptState(dir, target))?.attemptsUsed).toBe(1);
     release.resolve();
-    await expect(claim).rejects.toBe(failure);
+    await expect(claim).rejects.toBeInstanceOf(ConvergeAttemptPostClaimError);
+    await expect(claim).rejects.toMatchObject({
+      name: 'ConvergeAttemptPostClaimError', claim: { target, attempt: 1 }, cause: failure,
+    });
     expect(await next).toMatchObject({ attempt: 2 });
     expect((await loadConvergeAttemptState(dir, target))?.attempts.map(entry => entry.attempt)).toEqual([1, 2]);
   } finally {
     release.resolve(); await Promise.allSettled([claim, ...(next ? [next] : [])]);
+  }
+});
+
+it('pins attempt ownership inputs before waiting for a target lock', async () => {
+  const other = 'synthetic-owner-other';
+  const entered = barrier(), release = barrier();
+  const holder = withNativeTarget(dir, target, async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+  const options = { gitCommonDir: dir, target };
+  const claim = claimConvergeAttempt(options);
+  void claim.catch(() => {});
+  try {
+    options.target = other;
+    release.resolve();
+    await expect(claim).resolves.toMatchObject({ target, attempt: 1 });
+    expect((await loadConvergeAttemptState(dir, target))?.attemptsUsed).toBe(1);
+    expect(await loadConvergeAttemptState(dir, other)).toBeUndefined();
+  } finally {
+    release.resolve();
+    await Promise.allSettled([holder, claim]);
   }
 });
 
