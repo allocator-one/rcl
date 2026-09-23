@@ -54,17 +54,21 @@ export async function publicLoopback(input=occurrenceFixture(),commandTimeout=25
       if(method==='POST'&&url.pathname==='/api/v1/reviews/converge/events') {
         if(calls.filter(c=>c.method==='POST').length===deferPostCount) {req.socket.destroy();return;}
         for(const event of request.events) {
-          const old=receipts.find(r => r.id===event.id);
+          const destination=rows.find(r => r.source.scope.run_id===event.run_id);
+          if(!destination) throw new Error('unknown synthetic destination');
+          const old=destination.receipts.find(r => r.id===event.id);
           if(old)
             continue;
-          if(event.payload.expected_event_sequence!==sequence) {
+          const currentSequence=Math.max(0,...destination.receipts.map(r=>r.sequence));
+          if(event.payload.expected_event_sequence!==currentSequence) {
             res.writeHead(409);
             res.end('{}');
             return;
           }
-          receipts.push({
+          if(destination===rows[0]) sequence=currentSequence+1;
+          destination.receipts.push({
             ...event,org_id: source.scope.org_id,repo: source.scope.repo,pr_number: source.scope.pr_number,attempt: null,
-            actor_user_id: actor,sequence: ++sequence,received_at: new Date().toISOString()
+            actor_user_id: actor,sequence: currentSequence+1,received_at: new Date().toISOString()
           });
         }
         if(hideAfterPost&&calls.filter(c=>c.method==='POST').length>=hideAfterPostCount) {
@@ -192,7 +196,7 @@ export async function publicLoopback(input=occurrenceFixture(),commandTimeout=25
     });
   }
   return {
-    root,source,original,selection,replaceOriginal,addReceipt: (receipt: any) => { receipts.push({ ...receipt,sequence: ++sequence }); },addSource: (value: typeof source) => { value.scope.base_url=url; rows.push({ source: value,receipts: [value.classification,...value.corrections] }); },selectionPath,manifest,statePath,calls,receipts,command,
+    root,repo,env,source,original,selection,replaceOriginal,addReceipt: (receipt: any) => { receipts.push({ ...receipt,sequence: ++sequence }); },addSource: (value: typeof source) => { value.scope.base_url=url; rows.push({ source: value,receipts: [value.classification,...value.corrections] }); },selectionPath,manifest,statePath,calls,receipts,command,
     preview: () => command(['--preview','--selection',selectionPath,'--manifest',manifest,'--json']),
     execute: async (mode='apply') => command([`--${mode}`,'--manifest',manifest,'--manifest-sha256',sha(await readFile(manifest,'utf8')),'--json']),
     loseAck: () => { loseAck=true; },deferPostAt: (count:number) => {deferPostCount=count;},hideAfterPost: (value=true,count=1) => {

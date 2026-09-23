@@ -86,14 +86,18 @@ export function deliverPreparedClaimEvent(options: ClaimEventDeliveryOptions): P
     if (!receipt) {
       if(options.allowPost===false) throw new Error('claim_adopted_receipt_unavailable');
       await journal.append('claim_event_post_intent', audit);
-      await verifyPinnedContext();
-      // The sink contains bounded transport errors. An unexpected thrown
-      // transport failure is also uncertain; its prose must not enter audit.
-      let outcome: { kind: string; httpStatus?: number };
-      try { outcome = await sink.postEvents([event as unknown as WireEvent]); }
-      catch { outcome = { kind: 'unknown' }; }
+      // Any quota wait precedes the final authenticated source/packet proof.
+      const permit = await sink.reserveRecoveryWrite();
+      let outcome: { kind: string; httpStatus?: number; retryAfterMs?: number };
+      try {
+        await verifyPinnedContext();
+        // Transport failures remain uncertain; their prose never enters audit.
+        try { outcome = await sink.postEvents([event as unknown as WireEvent], { recoveryWritePermit: permit }); }
+        catch { outcome = { kind: 'unknown' }; }
+      } finally { sink.releaseRecoveryWrite(permit); }
       await journal.append('claim_event_post_outcome', { ...audit, kind: outcome.kind,
-        ...(Number.isInteger(outcome.httpStatus) ? { http_status: outcome.httpStatus } : {}) });
+        ...(Number.isInteger(outcome.httpStatus) ? { http_status: outcome.httpStatus } : {}),
+        ...(Number.isInteger(outcome.retryAfterMs) ? { retry_after_ms: outcome.retryAfterMs } : {}) });
       receipt = await readReceipt();
       if (!receipt) throw new Error('claim_event_delivery_unverified');
     }

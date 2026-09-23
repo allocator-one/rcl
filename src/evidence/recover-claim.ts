@@ -28,6 +28,7 @@ import { openJournal,writeExclusive,MAX_RECOVERY_DOCUMENT_BYTES } from './origin
 import { platformPath,readStable,sha256 } from '../telemetry/recovery/files.js';
 import { matchesPreparedEventReceipt } from './event-receipts.js';
 import { openSink,type EvidenceDeps } from './status.js';
+import { RecoveryRequestBudget,type RecoveryClock } from '../telemetry/recovery-request-budget.js';
 const MAX_MATERIAL=64*1024*1024;
 export interface PublicClaimRecoveryOptions {
   preview?: boolean;
@@ -41,6 +42,8 @@ export interface PublicClaimRecoveryOptions {
   manifestSha256?: string;
 }
 export interface PublicClaimRecoveryDeps extends EvidenceDeps {
+  /** Inject elapsed time for quota tests; no runtime environment override exists. */
+  requestClock?: RecoveryClock;
   beforeCheckpoint?: (phase: string) => Promise<void>;
 }
 function decode(text: string): unknown { return decodeRecoveryDocument(text); }
@@ -74,6 +77,7 @@ function errorCode(e: unknown): string { const m=e instanceof Error? e.message:'
  * same native target; no review, accounting reset, outbox or original rewrite. */
 export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions,deps: PublicClaimRecoveryDeps): Promise<number> {
   let stage: 'input'|'remote'|'journal'='input';
+  const requestBudget=new RecoveryRequestBudget(deps.requestClock,ms => deps.stderr(`Recovery request budget: waiting ${Math.ceil(ms/1000)}s before the next request.`));
   try {
     if([options.preview,options.apply,options.resume].filter(Boolean).length!==1)
       throw new Error('choose_exactly_one_recovery_mode');
@@ -103,7 +107,7 @@ export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions
         throw new Error('native_source_changed');
       const ancestors=await readNativeRecoverySourceJsons(commonDir,native.state);
       stage='remote';
-      const sink=await openSink(deps);
+      const sink=await openSink(deps,requestBudget);
       if(!sink)
         return 3;
       const read=await readClaimTargetHistory(sink,selection.source);
@@ -185,7 +189,7 @@ export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions
     else
       existingSplit(selection,material,material.history);
     stage='remote';
-    const sink=await openSink(deps);
+    const sink=await openSink(deps,requestBudget);
     if(!sink)
       return 3;
     const output=await withRecoveryTarget(commonDir,selection.source.target,async (ownership) => {

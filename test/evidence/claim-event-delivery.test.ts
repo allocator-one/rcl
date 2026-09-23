@@ -7,12 +7,13 @@ import { deliverPreparedClaimEvent, type ClaimEventDeliveryOptions } from '../..
 import type { StoredEventReceipt } from '../../src/evidence/event-receipts.js';
 import { openJournal } from '../../src/evidence/original-run/journal.js';
 import { HarnessSink } from '../../src/telemetry/sink.js';
+import { RecoveryRequestBudget } from '../../src/telemetry/recovery-request-budget.js';
 
 const uuid = (n: number) => `00000000-0000-7000-8000-${String(n).padStart(12, '0')}`;
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
-async function fixture() {
+async function fixture(requestBudget?: RecoveryRequestBudget) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-claim-delivery-'))); dirs.push(dir);
   const scope = { base_url: 'https://synthetic.example.test', org_id: uuid(1), run_id: uuid(2), repo: 'synthetic/recovery', pr_number: 7 };
   const actor = uuid(3); const target = 'same-native-target'; const operationId = uuid(4); const manifestSha256 = 'a'.repeat(64);
@@ -24,17 +25,20 @@ async function fixture() {
     pr_number: scope.pr_number, actor_user_id: actor, attempt: null,
     sequence: 9, received_at: '2026-09-22T22:00:01.654321Z' });
   let stored: ReturnType<typeof receipt> | undefined; let loseAck = false; let readFailure = false; let badAck = false; let omitStorage = false;
-  let omitReceiptMetadata = false;
+  let omitReceiptMetadata = false; let rateLimitPost = false;
+  let postObserver = () => {};
   const calls: string[] = []; const bodies: unknown[] = []; const checks: string[] = [];
-  const sink = new HarnessSink({ credential: { url: scope.base_url, token: 'synthetic', source: 'login' }, rclVersion: 'test',
+  const sink = new HarnessSink({ credential: { url: scope.base_url, token: 'synthetic', source: 'login' }, rclVersion: 'test', requestBudget,
     fetchImpl: async (_url, request) => {
       const method = request?.method ?? 'GET'; calls.push(method);
       if (method === 'POST') {
+        postObserver();
         // The exact packet must already be readable when the request starts.
         const packet = JSON.parse(await readFile(join(dir, 'event.json'), 'utf8'));
         expect(packet.event_json).toBe(eventJson);
         bodies.push(JSON.parse(String(request?.body)));
         if (!omitStorage) stored = receipt(); if (badAck) stored!.actor_user_id = uuid(9);
+        if (rateLimitPost) return Response.json({}, { status: 429, headers: { 'Retry-After': '13' } });
         if (loseAck) throw new Error('synthetic connection lost after acceptance');
         return Response.json({ data: { inserted: 1, duplicates: 0 } });
       }
@@ -51,6 +55,7 @@ async function fixture() {
         verifyContext: async () => { checks.push('fresh'); }, ...changes });
     });
   return { dir, scope, actor, target, event, eventJson, receipt, calls, bodies, checks, execute,
+    rateLimitPost: () => { rateLimitPost = true; }, observePost: (fn: () => void) => { postObserver = fn; },
     accept: () => { stored = receipt(); }, loseAck: () => { loseAck = true; },
     omitReceiptMetadata: (omit = true) => { omitReceiptMetadata = omit; },
     failReads: () => { readFailure = true; }, badAck: () => { badAck = true; }, omitStorage: () => { omitStorage = true; } };
@@ -185,5 +190,59 @@ describe('durable claim event delivery', () => {
     await expect(f.execute('apply', {}, undefined, true)).rejects.toThrow('native_target_recovery_not_owned');
     await expect(readFile(join(f.dir, 'event.json'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(f.calls).toEqual([]);
+  });
+});
+
+function quotaClock(onSleep = () => {}) {
+  let now = 0; const waits: number[] = [];
+  return { now: () => now, wallTime: () => Date.now(), waits,
+    sleep: async (ms: number) => { now += ms; waits.push(ms); onSleep(); } };
+}
+
+describe('claim writes across quota waits', () => {
+  it('rechecks the source after waiting for the write reservation and refuses before POST', async () => {
+    let changed = false;
+    const time = quotaClock(() => { changed = true; });
+    const budget = new RecoveryRequestBudget(time);
+    for (let i = 0; i < 239; i++) await budget.acquire();
+    const f = await fixture(budget);
+    await expect(f.execute('apply', { verifyContext: async () => {
+      if (changed) throw new Error('source_changed_during_quota_wait');
+    } })).rejects.toThrow('source_changed_during_quota_wait');
+    expect(time.waits).toEqual([60_000]);
+    expect(f.calls).toEqual(['GET']);
+    expect(JSON.parse(await readFile(join(f.dir, 'event.json'), 'utf8')).event_json).toBe(f.eventJson);
+  });
+
+  it('does not insert a quota wait after the final successful pre-write proof', async () => {
+    const time = quotaClock(); const budget = new RecoveryRequestBudget(time);
+    for (let i = 0; i < 239; i++) await budget.acquire();
+    const f = await fixture(budget); let checks = 0, provedAt = -1, proofWaits = -1;
+    f.observePost(() => { expect(time.now()).toBe(provedAt); expect(time.waits.length).toBe(proofWaits); });
+    expect(await f.execute('apply', { verifyContext: async () => {
+      if (++checks === 3) { provedAt = time.now(); proofWaits = time.waits.length; }
+    } })).toEqual(f.receipt());
+    expect(provedAt).toBe(60_000);
+    expect(f.calls).toEqual(['GET', 'POST', 'GET']);
+  });
+
+  it('preserves an actual POST 429 and acknowledges only its exact subsequent receipt without reposting', async () => {
+    const time = quotaClock(); const f = await fixture(new RecoveryRequestBudget(time)); f.rateLimitPost();
+    expect(await f.execute()).toEqual(f.receipt());
+    expect(f.calls).toEqual(['GET', 'POST', 'GET']);
+    expect(time.waits).toEqual([13_000]);
+    const checkpoints = await Promise.all((await readdir(join(f.dir, 'journal'))).map(async name => JSON.parse(await readFile(join(f.dir, 'journal', name), 'utf8'))));
+    expect(checkpoints.find(c => c.phase === 'claim_event_post_outcome').data).toMatchObject({ kind: 'unavailable', http_status: 429, retry_after_ms: 13_000 });
+  });
+
+  it('keeps an exact rate-rejected packet and safely stops on complete receipt absence', async () => {
+    const time = quotaClock(); const f = await fixture(new RecoveryRequestBudget(time)); f.rateLimitPost(); f.omitStorage();
+    await expect(f.execute()).rejects.toThrow('claim_event_delivery_unverified');
+    expect(f.calls).toEqual(['GET', 'POST', 'GET']);
+    const packet = await readFile(join(f.dir, 'event.json'));
+    f.accept();
+    expect(await f.execute('resume')).toEqual(f.receipt());
+    expect(f.calls).toEqual(['GET', 'POST', 'GET', 'GET']);
+    expect(await readFile(join(f.dir, 'event.json'))).toEqual(packet);
   });
 });

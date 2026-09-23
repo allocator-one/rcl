@@ -7,7 +7,8 @@ const cleanups: Array<() => Promise<void>>=[];
 afterEach(async () => { for(const cleanup of cleanups.splice(0)) await cleanup(); });
 async function interrupted(stage=1,accepted=true) {
   const input=originalFixture();
-  const f=await publicLoopback(input);
+  // A complete adoption can span a real API quota window.
+  const f=await publicLoopback(input,90000);
   cleanups.push(f.cleanup);
   const original=await readFile(f.statePath);
   expect((await f.preview()).exit).toBe(0);
@@ -25,7 +26,7 @@ async function interrupted(stage=1,accepted=true) {
   const apply=async (mode='apply') => f.command(['--'+mode,'--manifest',next,'--manifest-sha256',sha(await readFile(next,'utf8')),'--json']);
   return { ...f,original,oldManifest:manifest,next,adopt,apply };
 }
-describe('public acknowledgment adoption',{timeout:60000},() => {
+describe('public acknowledgment adoption',{timeout:180000},() => {
   it.each([1,2,3])('adopts %i exact acknowledged stages after lost ACK and foreign history, then uses fresh remaining events without reposting',async acceptedCount => {
     const f=await interrupted(acceptedCount);
     const split=(f.calls.find(c => c.method==='POST')!.body as any).events[0];

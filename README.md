@@ -669,6 +669,20 @@ refuses a destination key already present in the authenticated scoped finding,
 verdict, split or classification history. The server transaction also checks
 history outside that client read scope and concurrent changes.
 
+Recovery budgets all JSON reads, original artifact reads and writes together,
+allowing at most 240 requests in each rolling minute against the unchanged
+300/minute API limit. Larger histories wait across windows while retaining every
+proof check. A write slot is reserved before its final source validation, so no
+quota wait is inserted between that proof and the POST. Ordinary telemetry and
+status commands keep their existing transport behavior.
+
+An actual HTTP 429 can delay recovery reads using a valid `Retry-After` value of
+at most 60 seconds, with at most three such waits per operation. Invalid headers
+or sustained competing token/IP traffic stop the operation safely. Writes are
+never retried blindly: exact receipt readback determines whether a write landed;
+if its outcome remains unverified, preserve the same manifest and journal for
+`--resume`. This pacing does not promise completion under unlimited contention.
+
 If an interrupted split operation has accepted stages but unrelated target history
 has advanced, explicitly re-preview it without changing its selection:
 

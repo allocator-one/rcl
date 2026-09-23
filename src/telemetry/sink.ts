@@ -5,6 +5,7 @@ import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
+import type { RecoveryRequestBudget, RecoveryWritePermit, RecoveryRateLimit } from './recovery-request-budget.js';
 
 /**
  * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
@@ -26,6 +27,8 @@ export const MAX_RESPONSE_BYTES = 64 * 1024;
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
+  /** Recovery reserves transport capacity before its final source proof. */
+  recoveryWritePermit?: RecoveryWritePermit;
   /** A shorter delivery budget, including any capability preflight, e.g. a flush's remaining time. */
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
@@ -65,9 +68,11 @@ export type SinkOutcome<T> =
   /** The server understood the request and refused it for good; retrying cannot help. */
   | { kind: 'rejected'; httpStatus: number; error: string; message: string }
   /** Network, timeout or server failure — the delivery is worth retrying. */
-  | { kind: 'unavailable'; reason: string };
+  | { kind: 'unavailable'; reason: string; httpStatus?: number; retryAfterMs?: number; rateLimitReason?: RecoveryRateLimit['reason'] };
 
 export interface SinkOptions {
+  /** Only explicitly selected recovery operations opt into quota scheduling. */
+  requestBudget?: RecoveryRequestBudget;
   credential: HarnessCredential;
   rclVersion: string;
   fetchImpl?: typeof fetch;
@@ -106,6 +111,7 @@ export class HarnessSink {
   private readonly rclVersion: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly requestBudget?: RecoveryRequestBudget;
 
   constructor(options: SinkOptions) {
     // The token travels to the host that minted it, over TLS (loopback
@@ -119,6 +125,7 @@ export class HarnessSink {
     this.rclVersion = options.rclVersion;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.requestBudget = options.requestBudget;
   }
 
   get baseUrl(): string {
@@ -133,14 +140,14 @@ export class HarnessSink {
     if (!Number.isSafeInteger(limit) || limit < 0 || limit > 25_000_000) throw new Error('invalid_artifact_read_limit');
     if (kind !== 'report_json' && kind !== 'report_md') return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: 'Unsupported artifact selection' };
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
-        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual', signal: AbortSignal.timeout(this.timeoutMs),
-      });
+      const { response, rateLimit } = await this.fetchRequest(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
+        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual',
+      }, this.timeoutMs);
       if (response.status !== 200) {
         const text = await readBounded(response, MAX_RESPONSE_BYTES);
         let body: unknown = null;
         try { body = JSON.parse(text ?? 'null'); } catch { /* Untrusted failure text is not a receipt. */ }
-        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body }, () => null);
+        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body, ...(rateLimit ? { rateLimit } : {}) }, () => null);
       }
       const bytes = await readBoundedBytes(response, limit);
       const digest = response.headers.get('x-artifact-sha256');
@@ -149,6 +156,32 @@ export class HarnessSink {
       }
       return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: digest } };
     } catch { return { kind: 'unavailable', reason: 'artifact_read_failed' }; }
+  }
+
+  /** The reservation is scheduling only; callers must still prove source and packet freshness. */
+  async reserveRecoveryWrite(): Promise<RecoveryWritePermit | undefined> {
+    return this.requestBudget?.reserveWrite();
+  }
+
+  releaseRecoveryWrite(permit: RecoveryWritePermit | undefined): void {
+    if (permit) this.requestBudget?.releaseWrite(permit);
+  }
+
+  private async fetchRequest(url: string, init: RequestInit, timeoutMs: number, permit?: RecoveryWritePermit):
+    Promise<{ response: Response; rateLimit?: RecoveryRateLimit }> {
+    for (;;) {
+      if (permit) {
+        if (init.method !== 'POST' || !this.requestBudget) throw new Error('recovery_write_permit_invalid');
+        this.requestBudget.consumeWrite(permit);
+      } else await this.requestBudget?.acquire();
+      const response = await this.fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (response.status !== 429 || !this.requestBudget) return { response };
+      const rateLimit = this.requestBudget.rateLimited(response.headers.get('retry-after'), response.headers.get('date'));
+      // Reads may restart after an explicit rejection. Writes remain receipt-driven;
+      // neither a 429 nor a lost acknowledgment authorizes a blind POST retry.
+      if (init.method !== 'GET' || !rateLimit.retryable) return { response, rateLimit };
+      await response.body?.cancel().catch(() => undefined);
+    }
   }
 
   private headers(contentType: string): Record<string, string> {
@@ -168,22 +201,21 @@ export class HarnessSink {
     body: string | undefined,
     contentType: string,
     options: RequestOptions = {}
-  ): Promise<{ status: number; body: unknown } | { failure: string }> {
+  ): Promise<{ status: number; body: unknown; rateLimit?: RecoveryRateLimit } | { failure: string }> {
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
     try {
-      const response = await this.fetchImpl(`${this.credential.url}${path}`, {
+      const { response, rateLimit } = await this.fetchRequest(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(timeoutMs),
         redirect: 'manual',
-      });
+      }, timeoutMs, options.recoveryWritePermit);
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
       // returns an opaque redirect with status 0. Both read as "redirected".
       if (response.type === 'opaqueredirect') return { status: 302, body: null };
       const text = await readBounded(response, options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
       if (text === null) {
-        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' } };
+        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' }, ...(rateLimit ? { rateLimit } : {}) };
       }
       let parsed: unknown = null;
       if (text !== '') {
@@ -199,14 +231,14 @@ export class HarnessSink {
             : { message: text.slice(0, 200) };
         }
       }
-      return { status: response.status, body: parsed };
+      return { status: response.status, body: parsed, ...(rateLimit ? { rateLimit } : {}) };
     } catch (err) {
       return { failure: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
     }
   }
 
   private classify<T>(
-    result: { status: number; body: unknown } | { failure: string },
+    result: { status: number; body: unknown; rateLimit?: RecoveryRateLimit } | { failure: string },
     onOk: (body: unknown, status: number) => T | null
   ): SinkOutcome<T> {
     if ('failure' in result) return { kind: 'unavailable', reason: result.failure };
@@ -223,6 +255,10 @@ export class HarnessSink {
       return { kind: 'disabled', reason: error, message };
     }
     if (status === 409) return { kind: 'conflict', message };
+    if (status === 429 && result.rateLimit) return {
+      kind: 'unavailable', reason: 'HTTP 429', httpStatus: 429, rateLimitReason: result.rateLimit.reason,
+      ...(result.rateLimit.retryAfterMs !== undefined ? { retryAfterMs: result.rateLimit.retryAfterMs } : {}),
+    };
     if (status >= 500 || status === 429 || status === 408) {
       return { kind: 'unavailable', reason: `HTTP ${status}${message ? ` ${message}` : ''}` };
     }
