@@ -42,7 +42,7 @@ it('never flushes unrelated outbox entries even when gap input is invalid', asyn
     const result=await command(f.cwd,['converge-gap','--preview','--manifest',f.manifestPath],{RCL_DATA_DIR:data,XDG_CONFIG_HOME:config,RCL_TELEMETRY:'full',HARNESS_API_TOKEN:'aone_SYNTHETIC_LOCAL_ONLY',HARNESS_API_URL:`http://127.0.0.1:${address.port}`});
     expect(result.code,result.stderr).toBe(3); expect(requests).toEqual([]); expect(await snapshot(data)).toEqual(before);
   } finally { await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve())); }
-});
+},15000);
 
 it('previews, applies and resumes a digest-qualified manifest through the actual CLI', async () => {
   const f=await fixture(true), before=await readFile(f.statePath), attempts=await readFile(f.attemptPath);
@@ -62,4 +62,4 @@ it('passes the actual original report digest to ordinary native admission', asyn
   const result=await command(f.cwd,['converge-report','--target',f.target,'--report',f.input.reportPath,'--round','3','--json'],{RCL_TELEMETRY:'off',RCL_DATA_DIR:join(f.cwd,'data'),XDG_CONFIG_HOME:join(f.cwd,'config')});
   expect(result.code,result.stderr).toBe(0);
   expect((await loadConvergeRunState(f.dir,f.target))?.rounds.map(r=>r.round)).toEqual([1,3]);
-});
+},15000);

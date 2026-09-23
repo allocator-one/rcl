@@ -32,13 +32,7 @@ async function tempGitDir(): Promise<string> {
   return dir;
 }
 
-async function exitedChildPid(): Promise<number> {
-  const child = spawn(process.execPath, ['-e', '']);
-  const pid = child.pid;
-  if (pid === undefined) throw new Error('Child process did not receive a PID');
-  await once(child, 'exit');
-  return pid;
-}
+const nonexistentPid = 2_147_483_647;
 
 async function runClaimProcess(gitCommonDir: string, target: string, cap: number) {
   const child = spawn(
@@ -256,7 +250,7 @@ describe('convergence attempt budget', () => {
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     const lockFile = `${stateFile}.lock`;
     const token = '00000000-0000-4000-8000-000000000001';
-    const deadPid = await exitedChildPid();
+    const deadPid = nonexistentPid;
     await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
       lockFile,
@@ -281,7 +275,7 @@ describe('convergence attempt budget', () => {
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     const lockFile = `${stateFile}.lock`;
     const token = '00000000-0000-4000-8000-000000000002';
-    const deadPid = await exitedChildPid();
+    const deadPid = nonexistentPid;
     await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
       lockFile,
