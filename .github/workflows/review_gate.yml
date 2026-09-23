@@ -11,7 +11,10 @@
 # reads the pull request through the GitHub API and fetches model keys from
 # Harness under the run-bound credential. The inputs reach the shell through
 # the environment, never by expression interpolation into a command line.
+# harness-review-lifecycle: 1
+# This marker promises the optional attempt_id input and exact run-name below.
 name: Review Council gate
+run-name: Review Council gate · ${{ inputs.attempt_id || 'unregistered' }}
 
 on:
   workflow_dispatch:
@@ -25,6 +28,11 @@ on:
         required: true
         type: string
 
+      attempt_id:
+        description: Harness dispatch attempt UUID (omit only for an unregistered manual run)
+        required: false
+        type: string
+
 permissions:
   contents: read
 
@@ -35,6 +43,7 @@ concurrency:
 jobs:
   attested-review:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     permissions:
       id-token: write
       contents: read
@@ -71,6 +80,11 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           GITHUB_TOKEN: ${{ github.token }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
+          # The runner context is valid only from step level down; at job
+          # level `env` the workflow fails to parse (RCL-67 regression).
+          RCL_DATA_DIR: ${{ runner.temp }}/rcl-gate-data
+          RCL_GATE_EXPORT: ${{ runner.temp }}/rcl-gate-evidence
         run: |
           case "$PR_NUMBER" in
             ''|*[!0-9]*) echo "pr_number must be a pull request number, got: $PR_NUMBER" >&2; exit 2 ;;
@@ -82,8 +96,35 @@ jobs:
             echo "head_sha must be 40 hex characters, got ${#HEAD_SHA}" >&2
             exit 2
           fi
+          if [ -n "$ATTEMPT_ID" ] && ! printf '%s\n' "$ATTEMPT_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            echo "attempt_id must be a lowercase UUID when provided" >&2
+            exit 2
+          fi
+          umask 077
+          mkdir -p "$RCL_GATE_EXPORT" "$RCL_DATA_DIR"
+          python3 - <<'PYMANIFEST'
+          import json, os
+          from pathlib import Path
+          keys = ["GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "PR_NUMBER", "HEAD_SHA", "ATTEMPT_ID"]
+          Path(os.environ["RCL_GATE_EXPORT"], "workflow.json").write_text(json.dumps({k: os.environ.get(k) for k in keys}, sort_keys=True) + "\n")
+          PYMANIFEST
           rcl review "$GITHUB_REPOSITORY#$PR_NUMBER" \
             --attest \
             --expect-head-sha "$HEAD_SHA" \
             --evidence-required \
+            --json-file "$RCL_GATE_EXPORT/report.json" \
+            --markdown "$RCL_GATE_EXPORT/report.md" \
             --ci
+
+      # Private GitHub artifacts retain originals even when delivery/health fails.
+      # Abrupt runner loss before serialization/export remains an unavailable window.
+      - name: Retain original review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-gate-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.attempt_id || 'unregistered' }}
+          path: |
+            ${{ runner.temp }}/rcl-gate-evidence/
+            ${{ runner.temp }}/rcl-gate-data/quarantine/
+          if-no-files-found: warn
+          retention-days: 30
