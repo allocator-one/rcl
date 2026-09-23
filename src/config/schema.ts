@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+/** Node clamps longer timer delays to 1 ms. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+const TimerDelaySchema = z.number().int().positive().max(MAX_TIMER_DELAY_MS);
+
 export const SeveritySchema = z.enum(['critical', 'important', 'minor', 'nitpick']);
 export const CategorySchema = z.enum([
   'security',
@@ -58,9 +63,9 @@ export const GatingSchema = z.object({
   /** Direct-API model for the refutation pass (openrouter/ is rejected). */
   verificationModel: z.string().optional(),
   /** Per-call timeout (ms) for the verification pass. */
-  verificationTimeout: z.number().positive().optional(),
+  verificationTimeout: TimerDelaySchema.optional(),
   /** Whole-pass timeout (ms) across every verification batch. */
-  verificationPassTimeout: z.number().positive().optional(),
+  verificationPassTimeout: TimerDelaySchema.optional(),
 });
 
 /**

@@ -80,7 +80,7 @@ export interface RunHeader {
     min_models: number;
     verification_model?: string;
     verification_timeout_ms: number;
-    verification_pass_timeout_ms: number;
+    verification_pass_timeout_ms?: number;
   };
   spec?: { source: SpecSource; sha256: string };
   context_files: Array<{ path: string; sha256: string }>;

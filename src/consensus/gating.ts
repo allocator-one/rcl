@@ -1,3 +1,4 @@
+import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
 import type { ConsensusFinding } from './types.js';
 import type { ModelAnswer } from '../dispatch/adapter.js';
 import type { FileChange } from '../resolver/types.js';
@@ -137,6 +138,13 @@ export interface ResolvedGatingConfig {
 
 const DIRECT_PROVIDERS = new Set(['anthropic', 'openai', 'google']);
 
+function resolveTimerDelay(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMER_DELAY_MS) {
+    throw new Error(`${name} must be an integer between 1 and ${MAX_TIMER_DELAY_MS}, got ${value}`);
+  }
+  return value;
+}
+
 export const DEFAULT_GATING_CONFIG = {
   mode: 'verified-consensus',
   minModels: 2,
@@ -193,10 +201,14 @@ export function resolveGatingConfig(
     mode: input?.mode ?? DEFAULT_GATING_CONFIG.mode,
     minModels,
     verificationModel,
-    verificationTimeoutMs:
-      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs,
-    verificationPassTimeoutMs:
-      input?.verificationPassTimeout ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs,
+    verificationTimeoutMs: resolveTimerDelay(
+      'gating.verificationTimeout',
+      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs
+    ),
+    verificationPassTimeoutMs: resolveTimerDelay(
+      'gating.verificationPassTimeout',
+      input?.verificationPassTimeout ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+    ),
   };
 }
 
