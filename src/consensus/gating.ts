@@ -142,8 +142,8 @@ export interface ResolvedGatingConfig {
 const DIRECT_PROVIDERS = new Set(['anthropic', 'openai', 'google']);
 
 function resolveTimerDelay(name: string, value: number): number {
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMER_DELAY_MS) {
-    throw new Error(`${name} must be an integer between 1 and ${MAX_TIMER_DELAY_MS}, got ${value}`);
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMER_DELAY_MS) {
+    throw new Error(`${name} must be finite and between 0 and ${MAX_TIMER_DELAY_MS}, got ${value}`);
   }
   return value;
 }
@@ -846,10 +846,13 @@ export async function applyGating(
 export async function applyGatingWithFallback(
   findings: ConsensusFinding[],
   options: GatingOptions
-): Promise<{ findings: ConsensusFinding[]; verification?: VerificationStats; failure?: unknown }> {
+): Promise<
+  | { ok: true; findings: ConsensusFinding[]; verification?: VerificationStats }
+  | { ok: false; findings: ConsensusFinding[]; failure: unknown }
+> {
   try {
-    return await applyGating(findings, options);
+    return { ok: true, ...(await applyGating(findings, options)) };
   } catch (failure) {
-    return { findings, failure };
+    return { ok: false, findings, failure };
   }
 }

@@ -2011,8 +2011,8 @@ async function executeCouncil(
       ...(modelWeights ? { modelWeights } : {}),
     });
     finalFindings = gated.findings;
-    verificationStats = gated.verification;
-    if (gated.failure !== undefined) {
+    verificationStats = gated.ok ? gated.verification : undefined;
+    if (!gated.ok) {
       console.warn(
         `Gating pass failed (${String(gated.failure)}); falling back to severity gating for this round.`
       );

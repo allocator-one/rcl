@@ -309,7 +309,8 @@ export async function attemptWithRetries<T>(opts: {
       } catch (err) {
         lastErr = err;
         if (controller.signal.aborted) {
-          return { ok: false, timedOut: true, error: 'Request timed out' };
+          const cancelled = opts.signal?.aborted === true;
+          return { ok: false, timedOut: !cancelled, error: cancelled ? 'Request cancelled' : 'Request timed out' };
         }
         if (opts.isRetryable(err) && attempt < opts.maxRetries) {
           await sleep(retryDelay(attempt));

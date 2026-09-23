@@ -811,8 +811,6 @@ describe('resolveGatingConfig', () => {
   });
 
   it.each([
-    ['verificationTimeout', 'gating.verificationTimeout', 12.5],
-    ['verificationPassTimeout', 'gating.verificationPassTimeout', 12.5],
     ['verificationTimeout', 'gating.verificationTimeout', 2_147_483_648],
     ['verificationPassTimeout', 'gating.verificationPassTimeout', 2_147_483_648],
   ] as const)('rejects an unsafe %s value', (key, label, value) => {

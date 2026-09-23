@@ -75,7 +75,7 @@ describe('attemptWithRetries external cancellation', () => {
     });
 
     expect(attempt).toHaveBeenCalledTimes(1);
-    expect(outcome).toEqual({ ok: false, timedOut: true, error: 'Request timed out' });
+    expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
   });
 
   it('does not retry after an external abort during a retryable failure', async () => {
@@ -94,6 +94,6 @@ describe('attemptWithRetries external cancellation', () => {
     });
 
     expect(attempt).toHaveBeenCalledTimes(1);
-    expect(outcome).toEqual({ ok: false, timedOut: true, error: 'Request timed out' });
+    expect(outcome).toEqual({ ok: false, timedOut: false, error: 'Request cancelled' });
   });
 });

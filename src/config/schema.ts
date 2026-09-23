@@ -3,7 +3,7 @@ import { z } from 'zod';
 /** Node clamps longer timer delays to 1 ms. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-const TimerDelaySchema = z.number().int().positive().max(MAX_TIMER_DELAY_MS);
+const TimerDelaySchema = z.number().finite().positive().max(MAX_TIMER_DELAY_MS);
 
 export const SeveritySchema = z.enum(['critical', 'important', 'minor', 'nitpick']);
 export const CategorySchema = z.enum([
