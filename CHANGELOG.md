@@ -9,6 +9,12 @@
 - Require the matching backend capability before preparing or resuming the
   selected representation. Keep existing recovery manifests and surrogate
   records compatible; refuse controls in structural fields (RCL-76).
+- Add `rcl converge-gap` preview, apply and resume for one missing terminal-report
+  round. Bind the local audit to exact original report and partial-evidence
+  bytes, actual spent attempt records and immutable native snapshots (RCL-81).
+- Admit only the exact retained later report after durable audit verification.
+  Preserve original round ordinals, attempt budgets and unknown controller exit;
+  do not synthesize a missing report or create approval.
 
 ## 3.8.0 - 2026-09-22
 
