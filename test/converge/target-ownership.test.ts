@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { withNativeTarget, withRecoveryTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
@@ -64,7 +65,7 @@ it('serializes a separately launched native writer under recovery ownership', as
   let child: Promise<unknown> | undefined;
   try {
     await Promise.race([entered.promise, owner]);
-    child = promisify(execFile)(process.execPath, ['--import', 'tsx', worker.pathname, dir, target], { timeout: 10_000 });
+    child = promisify(execFile)(process.execPath, ['--import', 'tsx', fileURLToPath(worker), dir, target], { timeout: 10_000 });
     void child.catch(() => {});
     const deadline = Date.now() + 5000;
     for (;;) {
