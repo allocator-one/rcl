@@ -75,6 +75,7 @@ const GATING = {
   minModels: 2,
   verificationModel: 'google/gemini-3.8-flash',
   verificationTimeoutMs: 60_000,
+  verificationPassTimeoutMs: 180_000,
 };
 
 function baseInput() {
@@ -182,6 +183,7 @@ describe('buildRunHeader', () => {
       min_models: 2,
       verification_model: 'google/gemini-3.8-flash',
       verification_timeout_ms: 60_000,
+      verification_pass_timeout_ms: 180_000,
     });
   });
 

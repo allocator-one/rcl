@@ -59,6 +59,8 @@ export const GatingSchema = z.object({
   verificationModel: z.string().optional(),
   /** Per-call timeout (ms) for the verification pass. */
   verificationTimeout: z.number().positive().optional(),
+  /** Whole-pass timeout (ms) across every verification batch. */
+  verificationPassTimeout: z.number().positive().optional(),
 });
 
 /**

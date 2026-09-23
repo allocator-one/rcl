@@ -1817,6 +1817,14 @@ async function executeCouncil(
   });
   const planText = formatCouncilRunPlan(runPlan);
   const interactive = process.stderr.isTTY === true;
+  const postReviewStage = (stage: string): void => {
+    const line = `Post-review stage: ${stage}`;
+    if (interactive && spinner.isSpinning) {
+      spinner.text = line;
+    } else {
+      process.stderr.write(`${line}\n`);
+    }
+  };
   if (interactive) {
     spinner.text = planText;
     spinner.start();
@@ -1863,6 +1871,8 @@ async function executeCouncil(
   } finally {
     progress.stop();
   }
+
+  postReviewStage('collecting and merging reviewer outputs');
 
   // Merge async results that have arrived from earlier rounds of this
   // target (marked async), then collapse per-chunk reviews back to one per
@@ -1935,7 +1945,7 @@ async function executeCouncil(
     modelWeights = undefined;
   }
 
-  spinner.text = 'Computing consensus...';
+  postReviewStage('computing consensus');
 
   // Deduplicate and compute consensus
   const groups = deduplicateFindings(
@@ -1980,6 +1990,24 @@ async function executeCouncil(
         minModels: gatingConfig.minModels,
         verificationModel: gatingConfig.verificationModel,
         verificationTimeoutMs: gatingConfig.verificationTimeoutMs,
+        verificationPassTimeoutMs: gatingConfig.verificationPassTimeoutMs,
+        onVerificationProgress: (event) => {
+          const line =
+            `Verification ${event.completedBatches}/${event.totalBatches} batches ` +
+            `(${event.completedCandidates}/${event.totalCandidates} findings)`;
+          if (interactive) {
+            spinner.text = line;
+          } else {
+            const stride = Math.max(1, Math.ceil(event.totalBatches / 20));
+            if (
+              event.completedBatches === 0 ||
+              event.completedBatches === event.totalBatches ||
+              event.completedBatches % stride === 0
+            ) {
+              process.stderr.write(`${line}\n`);
+            }
+          }
+        },
         diffFiles: diff.files,
         ...(modelWeights ? { modelWeights } : {}),
       });
@@ -2041,6 +2069,8 @@ async function executeCouncil(
         : {}),
     },
   };
+
+  postReviewStage('assembling the terminal report');
 
   // Self-describing run header (IO-12475 section 5.1), built once the body
   // exists so the CI verdict is recorded uniformly — with or without --ci.
@@ -2126,6 +2156,7 @@ async function executeCouncil(
   // telemetry off the raw report is written as before.
   const delivered =
     runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+  postReviewStage('rendering report artifacts');
   const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
 
   // Output

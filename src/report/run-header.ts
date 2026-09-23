@@ -80,6 +80,7 @@ export interface RunHeader {
     min_models: number;
     verification_model?: string;
     verification_timeout_ms: number;
+    verification_pass_timeout_ms: number;
   };
   spec?: { source: SpecSource; sha256: string };
   context_files: Array<{ path: string; sha256: string }>;
@@ -448,6 +449,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
         ? { verification_model: input.gating.verificationModel }
         : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
+      verification_pass_timeout_ms: input.gating.verificationPassTimeoutMs,
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),

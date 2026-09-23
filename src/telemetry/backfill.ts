@@ -312,7 +312,12 @@ export function buildLegacyReport(input: LegacyReportInput): Pick<BackfillRun, '
     config_sha256: sha256('rcl telemetry backfill'),
     thresholds: { min_consensus_score: 0, min_confidence: 0, dedupe_line_window: 0, jaccard_threshold: 0 },
     // Pre-gating reports carried every finding; no verification pass ran.
-    gating: { mode: 'all-findings', min_models: 0, verification_timeout_ms: 0 },
+    gating: {
+      mode: 'all-findings',
+      min_models: 0,
+      verification_timeout_ms: 0,
+      verification_pass_timeout_ms: 0,
+    },
     context_files: [],
     runner: { kind: 'agent', agent: 'rcl telemetry backfill', host: scrubText(host, 64) },
     started_at: startedAt.toISOString(),

@@ -145,6 +145,81 @@ describe('applyGating (RCL-23)', () => {
     expect(annotated.every((f) => f.gating?.reason === 'none')).toBe(true);
   });
 
+  it('bounds the whole verification pass and stops starting batches at its deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const progress: Array<{ completedBatches: number; totalBatches: number }> = [];
+      const ask = vi.fn(
+        async (): Promise<ModelAnswer> =>
+          new Promise<ModelAnswer>(() => {
+            // Simulate a provider request that never settles on its own.
+          })
+      );
+      const findings = Array.from({ length: 32 }, (_, i) =>
+        makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+      );
+
+      const result = applyGating(findings, {
+        ...baseOpts,
+        verificationPassTimeoutMs: 100,
+        onVerificationProgress: (event) => progress.push(event),
+        ask,
+      });
+      const rejection = expect(result).rejects.toThrow(/verification pass.*100ms/i);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await rejection;
+
+      expect(ask).toHaveBeenCalledTimes(3);
+      expect(ask.mock.calls.every((call) => call[3]!.timeoutMs <= 100)).toBe(true);
+      expect(progress[0]).toMatchObject({ completedBatches: 0, totalBatches: 4 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports bounded verification progress through the final batch', async () => {
+    const progress: Array<{
+      completedBatches: number;
+      totalBatches: number;
+      completedCandidates: number;
+      totalCandidates: number;
+    }> = [];
+    const ask = vi.fn(async (_model, _system, userPrompt): Promise<ModelAnswer> => {
+      const ids = [...userPrompt.matchAll(/^### (F\d+)$/gm)].map((m) => m[1]!);
+      return {
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: JSON.stringify(ids.map((id) => ({ id, verdict: 'refuted' }))),
+        durationMs: 1,
+        status: 'success',
+      };
+    });
+    const findings = Array.from({ length: 20 }, (_, i) =>
+      makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+    );
+
+    await applyGating(findings, {
+      ...baseOpts,
+      verificationPassTimeoutMs: 1_000,
+      onVerificationProgress: (event) => progress.push(event),
+      ask,
+    });
+
+    expect(progress[0]).toEqual({
+      completedBatches: 0,
+      totalBatches: 3,
+      completedCandidates: 0,
+      totalCandidates: 20,
+    });
+    expect(progress.at(-1)).toEqual({
+      completedBatches: 3,
+      totalBatches: 3,
+      completedCandidates: 20,
+      totalCandidates: 20,
+    });
+  });
+
   it('keeps one failed batch from costing the findings in the others', async () => {
     let call = 0;
     const ask = vi.fn(async (_model, _system, userPrompt): Promise<ModelAnswer> => {
@@ -665,6 +740,14 @@ describe('resolveGatingConfig', () => {
     expect(cfg.minModels).toBe(2);
     expect(cfg.verificationModel).not.toMatch(/^openrouter\//);
     expect(cfg.verificationTimeoutMs).toBeLessThanOrEqual(60_000);
+    expect(cfg.verificationPassTimeoutMs).toBeGreaterThanOrEqual(cfg.verificationTimeoutMs);
+    expect(cfg.verificationPassTimeoutMs).toBeLessThanOrEqual(180_000);
+  });
+
+  it('accepts an explicit whole-pass verification timeout', () => {
+    expect(resolveGatingConfig({ verificationPassTimeout: 12_345 }).verificationPassTimeoutMs).toBe(
+      12_345
+    );
   });
 
   it('rejects an openrouter-routed verification model', () => {

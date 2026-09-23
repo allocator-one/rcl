@@ -915,6 +915,7 @@ gating:
   minModels: 2                    # distinct models for consensus gating
   verificationModel: google/gemini-3.8-flash  # direct-API only
   verificationTimeout: 60000      # ms per refutation call (8 candidates per batch, 3 in flight)
+  verificationPassTimeout: 180000 # ms for the complete verification queue
 
 # Output defaults
 output:
