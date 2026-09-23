@@ -1,7 +1,9 @@
+import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
+import { gapManifest, validateRoundGapAudit, type RoundGapEntry } from './round-gap-schema.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
@@ -116,7 +118,7 @@ export interface ConvergeRunState {
   findings: Record<string, FindingEntry>;
   updatedAt: string;
   /** Additive local audit only; entries never stand for an admitted round. */
-  roundGapAudit?: { version: 1; entries: Array<{ operationId: string; gapRound: number; admittingRound: number; attempt: number; runId: string; reportSha256: string; stateSha256: string; attemptSha256: string; incompleteSha256: string }> };
+  roundGapAudit?: { version: 1; entries: RoundGapEntry[] };
   /**
    * The most recent round's classified identities (RCL-30), so
    * `converge-verdict` can decide the round's resolution — in particular
@@ -198,6 +200,7 @@ export async function loadConvergeRunStateEvidence(
       `Invalid converge run state in ${path}; refusing to reset cross-round identity.`
     );
   }
+  validateRoundGapAudit(state as ConvergeRunState);
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
@@ -327,6 +330,15 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     findings: {},
     updatedAt: new Date().toISOString(),
   };
+  const gapEntries = state.roundGapAudit?.entries ?? [];
+  if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
+  for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {
+    const m = gapManifest(entry);
+    if (m.runId !== runId || m.reportSha256 !== options.reportSha256) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
+    const { verifyRoundGapReceipt } = await import('./round-gap.js');
+    const original = await verifyRoundGapReceipt(options.gitCommonDir, entry);
+    if (!isDeepStrictEqual(original.findings, options.findings)) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
+  }
   if (options.maxRounds !== undefined) {
     state.roundCap = validateRoundCap(options.maxRounds);
   }
@@ -341,11 +353,11 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // cap's intent. A state with no recorded rounds adopts whatever round the
   // resumed ledger is on (pre-upgrade runs have history the state lacks).
   const maxRecorded = state.rounds.reduce((max, r) => Math.max(max, r.round), 0);
-  const gapEntries = state.roundGapAudit?.entries ?? [];
-  const admittedThroughGap = options.round > maxRecorded + 1 &&
-    Array.from({ length: options.round - maxRecorded - 1 }, (_, i) => maxRecorded + i + 1)
-      .every(gapRound => gapEntries.some(entry => entry.gapRound === gapRound && entry.admittingRound === options.round &&
-        entry.runId === runId && entry.reportSha256 === options.reportSha256));
+  const gaps = Array.from({ length: Math.max(0, options.round - maxRecorded - 1) }, (_, i) => maxRecorded + i + 1);
+  const admittedThroughGap = gaps.length > 0 && gaps.every(gapRound => gapEntries.some(entry => {
+    const m = gapManifest(entry);
+    return m.gapRound === gapRound && m.admittingRound === options.round && m.runId === runId && m.reportSha256 === options.reportSha256;
+  }));
   if (maxRecorded > 0 && (options.round < maxRecorded || (options.round > maxRecorded + 1 && !admittedThroughGap))) {
     throw new ConvergeRunStateError(
       `Round ${options.round} for ${target} is out of order: recorded rounds reach ` +

@@ -149,7 +149,7 @@ function isNodeError(err: unknown, code: string): err is NodeJS.ErrnoException {
   return err instanceof Error && (err as NodeJS.ErrnoException).code === code;
 }
 
-function validateState(value: unknown, expectedTarget: string, stateFile: string): ConvergeAttemptState {
+export function validateConvergeAttemptState(value: unknown, expectedTarget: string, stateFile: string): ConvergeAttemptState {
   if (typeof value !== 'object' || value === null) {
     throw new ConvergeAttemptStateError(`Invalid convergence attempt state: ${stateFile}`);
   }
@@ -242,7 +242,7 @@ async function readState(stateFile: string, target: string): Promise<ConvergeAtt
   }
 
   try {
-    return validateState(JSON.parse(raw), target, stateFile);
+    return validateConvergeAttemptState(JSON.parse(raw), target, stateFile);
   } catch (err) {
     if (err instanceof ConvergeAttemptStateError) throw err;
     throw new ConvergeAttemptStateError(
