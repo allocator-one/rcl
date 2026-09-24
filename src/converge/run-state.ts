@@ -344,7 +344,10 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
 }
 
 function claimTextSha256(finding: ConsensusFinding): string {
-  return createHash('sha256').update(JSON.stringify([finding.title, finding.description])).digest('hex');
+  const canonicalText = (text: string) => text.normalize('NFC').replace(/\r\n?/g, '\n');
+  return createHash('sha256')
+    .update(JSON.stringify([canonicalText(finding.title), canonicalText(finding.description)]))
+    .digest('hex');
 }
 
 async function processRoundReportOwned(options: ProcessRoundOptions, ownership: NativeTargetOwnership): Promise<RoundReport> {

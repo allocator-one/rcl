@@ -95,6 +95,25 @@ describe('report identity through native classification and telemetry', () => {
     expect(result.findings[0]).toMatchObject({ status: 'new' });
   });
 
+  it('matches canonically equivalent Unicode claim text across report runs', async () => {
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'canonical-claim-text',
+      round: 1,
+      findings: [{ ...first!, title: 'Café access', description: 'Line one\r\nLine two' }],
+    });
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const repeated = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'canonical-claim-text',
+      round: 2,
+      findings: [{ ...later!, title: 'Cafe\u0301 access', description: 'Line one\nLine two' }],
+    });
+
+    expect(repeated.findings[0]).toMatchObject({ status: 'repeat', identity: initial.findings[0]!.identity });
+  });
+
   it('keeps distinct same-location claims separate through verdict resolution', async () => {
     const findings = consensus([42, 42]).map((finding, index) => ({
       ...finding,
