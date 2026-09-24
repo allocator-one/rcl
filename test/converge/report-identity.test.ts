@@ -30,6 +30,42 @@ function consensus(starts: number[], runId = RUN_ID) {
 }
 
 describe('report identity through native classification and telemetry', () => {
+  it('keeps distinct same-location claims separate through verdict resolution', async () => {
+    const findings = consensus([42, 42]).map((finding, index) => ({
+      ...finding,
+      title: index === 0 ? 'Page token is restored as an empty cursor' : 'Folder frontier grows without a bound',
+      description: index === 0 ? 'An empty cursor reaches the provider.' : 'The persisted frontier can exhaust memory.',
+      gating: { reason: 'consensus' as const },
+    }));
+    expect(new Set(findings.map((finding) => finding.identity)).size).toBe(2);
+
+    const classified = await processRoundReport({ gitCommonDir: dir, target: 'same-location', round: 1, findings });
+    expect(new Set(classified.findings.map((finding) => finding.identity)).size).toBe(2);
+    const dismissed = classified.findings[0]!.identity;
+    const outstanding = classified.findings[1]!.identity;
+    const result = await recordVerdicts({ gitCommonDir: dir, target: 'same-location', round: 1,
+      verdicts: [{ key: dismissed, verdict: 'dismissed', reason: 'Cursor is normalized by the caller' }] });
+    expect(result.resolution).toMatchObject({ status: 'unresolved', unresolved: [outstanding] });
+  });
+
+  it('does not exchange same-location identities when later report order reverses', async () => {
+    const first = consensus([42, 42]).map((finding, index) => ({
+      ...finding,
+      title: index === 0 ? 'Empty cursor reaches the provider' : 'Frontier exceeds the storage limit',
+      description: index === 0 ? 'Restore normalizes an empty page token.' : 'Folder queue grows without a bound.',
+    }));
+    const initial = await processRoundReport({ gitCommonDir: dir, target: 'reordered-claims', round: 1, findings: first });
+    const later = consensus([42, 42], '00000000-0000-7000-8000-000000000002')
+      .map((finding, index) => ({
+        ...finding,
+        title: first[1 - index]!.title,
+        description: first[1 - index]!.description,
+      }));
+    const reordered = await processRoundReport({ gitCommonDir: dir, target: 'reordered-claims', round: 2, findings: later });
+    expect(reordered.findings.map((finding) => finding.identity))
+      .toEqual(initial.findings.map((finding) => finding.identity).reverse());
+  });
+
   it('does not reuse a prior run alias before the new run classification arrives', async () => {
     const findings = consensus([11, 19]).map((f) => ({ ...f,
       severity: f.startLine === 19 ? 'critical' as const : 'important' as const }));

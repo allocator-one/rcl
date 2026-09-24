@@ -83,6 +83,8 @@ export interface FindingEntry {
   startLine: number;
   endLine: number;
   title: string;
+  /** Digest of claim text for conservative matching without retaining prose. */
+  claimTextSha256?: string;
   severity: string;
   models: string[];
   firstRound: number;
@@ -328,6 +330,10 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   return { target, runId };
 }
 
+function claimTextSha256(finding: ConsensusFinding): string {
+  return createHash('sha256').update(JSON.stringify([finding.title, finding.description])).digest('hex');
+}
+
 async function processRoundReportOwned(options: ProcessRoundOptions, ownership: NativeTargetOwnership): Promise<RoundReport> {
   const { target, runId } = validateRoundReportInput(options);
   const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
@@ -386,9 +392,24 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const counts: RoundCounts = { new: 0, repeat: 0, suppressed: 0, regating: 0 };
   const annotated: AnnotatedRoundFinding[] = [];
   const severities: Record<string, ConsensusFinding['severity']> = {};
+  // A modern report has already deduplicated findings and allocated a key for
+  // each sighting. Two different report keys may point at the same lines while
+  // describing different claims; one native identity cannot carry both verdicts.
+  const claimedThisRound = new Map<string, string>();
 
   for (const finding of options.findings) {
-    const matched = matchFinding(finding, entries, lineWindow);
+    const reportIdentity = /^report:[0-9a-f-]{36}:[0-9a-f]{16}$/.test(finding.identity ?? '')
+      ? finding.identity
+      : undefined;
+    const textDigest = claimTextSha256(finding);
+    const candidates = reportIdentity
+      ? entries.filter((entry) => {
+          const claimedBy = claimedThisRound.get(entry.key);
+          return (claimedBy === undefined || claimedBy === reportIdentity) &&
+            state.findings[entry.key]?.claimTextSha256 === textDigest;
+        })
+      : entries;
+    const matched = matchFinding(finding, candidates, lineWindow);
 
     if (!matched) {
       const key = availableFindingKey(finding, occupied);
@@ -400,6 +421,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         startLine: finding.startLine,
         endLine: finding.endLine,
         title: finding.title,
+        claimTextSha256: textDigest,
         severity: finding.severity,
         models: [...finding.consensus.models],
         firstRound: options.round,
@@ -408,12 +430,14 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       state.findings[key] = created;
       severities[key] = finding.severity;
       entries.push(created);
+      if (reportIdentity) claimedThisRound.set(key, reportIdentity);
       counts.new++;
       annotated.push({ identity: key, status: 'new', finding });
       continue;
     }
 
     const entry = state.findings[matched.key]!;
+    if (reportIdentity) claimedThisRound.set(entry.key, reportIdentity);
     // Freeze a legacy verdict's implicit severity before updating sightings;
     // later reports must not reinterpret that dismissal as critical.
     const severityAtVerdict = entry.verdictSeverity ?? entry.severity;

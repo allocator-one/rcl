@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.8.4 - 2026-09-24
+
+- Keep distinct modern report findings at the same source location separately
+  addressable in convergence. Match prior native identities only when both
+  location and the claim text digest agree; older entries without that digest
+  receive new identities instead of inheriting an uncertain verdict (RCL-87).
+
 ## 3.8.3 - 2026-09-24
 
 - Supersede the withdrawn 3.8.2 release with its bounded terminal-report
