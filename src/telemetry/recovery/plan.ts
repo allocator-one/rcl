@@ -5,6 +5,7 @@ import type { RunDetail } from '../../evidence/types.js';
 import { UUID_NAMESPACE_RCL_BACKFILL, uuidv5 } from '../../report/uuid.js';
 import { buildLegacyReport } from '../backfill.js';
 import { buildRunEnvelope, type RunEnvelope } from '../envelope.js';
+import { MAX_ENVELOPE_BYTES } from '../envelope-validation.js';
 import { normalizeVerificationEvidence } from '../verification.js';
 import { scrubDeep } from '../scrub.js';
 import type { HarnessSink, SinkOutcome } from '../sink.js';
@@ -219,7 +220,7 @@ async function assess(source: RecoverySource, sink: HarnessSink, destination: Re
     const known = new Set(['source_marked_synthetic', 'source_missing_or_changed', 'source_manifest_mismatch', 'source_binding_requires_transformation', 'repository_not_proven', 'repository_proof_changed', 'ambiguous_repository', 'original_artifact_requires_redaction', 'unsupported_report', 'unsupported_identity_version', 'invalid_legacy_duration', 'invalid_legacy_mtime']);
     return { plan: disposition(source, 'conflict', error instanceof Error && known.has(error.message) ? error.message : 'unusable_source') };
   }
-  if (Buffer.byteLength(JSON.stringify(prepared.envelope)) > 2_000_000) return { plan: disposition(source, 'conflict', 'envelope_too_large') };
+  if (Buffer.byteLength(JSON.stringify(prepared.envelope)) > MAX_ENVELOPE_BYTES) return { plan: disposition(source, 'conflict', 'envelope_too_large') };
   if (prepared.originalId) {
     const original = await getRun(sink, prepared.originalId);
     if (original.kind === 'ok') return withServerState(classifyRecorded(source, prepared, original.value), prepared, original.value);

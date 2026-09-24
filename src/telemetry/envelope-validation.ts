@@ -3,7 +3,9 @@ import type { ArtifactBytes } from './envelope.js';
 import { declareArtifacts } from './envelope.js';
 
 /** Limits of the compatible Harness evidence protocol; validation never rewrites an envelope. */
-export const MAX_ENVELOPE_BYTES = 2_000_000;
+export const MAX_ENVELOPE_BYTES = 4_000_000;
+/** Per-field retained diagnostic character cap; Zod strings retain code-unit semantics. */
+export const MAX_RETAINED_DIAGNOSTIC_CHARS = 2_000_000;
 export const MAX_ARTIFACT_BYTES = 25_000_000;
 export const INT4_MAX = 2_147_483_647;
 
@@ -63,7 +65,7 @@ const finding = z.object({
   severity: z.enum(['critical', 'important', 'minor', 'nitpick']), category: text(64, true),
   title: short, description: optional(text(20_000)), suggested_fix: optional(text(20_000)),
   consensus: optional(map), gating_reason: z.enum(['consensus', 'critical', 'verified', 'none']),
-  verification_verdict: optional(text(32)), verification_model: optional(text(MAX_ENVELOPE_BYTES)), verification_note: optional(text(MAX_ENVELOPE_BYTES)),
+  verification_verdict: optional(text(32)), verification_model: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)), verification_note: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)),
   below_threshold: z.boolean(),
 }).passthrough().superRefine((v, ctx) => {
   if (v.start_line > v.end_line) ctx.addIssue({ code: 'custom', path: ['end_line'], message: 'End precedes start' });
@@ -77,7 +79,7 @@ const call = z.object({
   model: short, role: short, provider: short, lane,
   chunk_index: optional(integer), status: z.enum(['success', 'timeout', 'error', 'parse_failed', 'canceled']),
   duration_ms: optional(integer), input_tokens: optional(integer), output_tokens: optional(integer), reasoning_tokens: optional(integer),
-  dropped_findings: optional(integer), warnings: z.array(text(2_000)).max(50), error: optional(text(MAX_ENVELOPE_BYTES)), async: z.boolean(),
+  dropped_findings: optional(integer), warnings: z.array(text(2_000)).max(50), error: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)), async: z.boolean(),
 }).passthrough();
 
 const envelopeSchema = z.object({
@@ -100,7 +102,7 @@ const envelopeSchema = z.object({
 export function validateRunEnvelope(envelope: unknown, artifacts?: ArtifactBytes): EvidenceDiagnostic[] {
   try {
     const encoded = JSON.stringify(envelope);
-    if (encoded === undefined || Buffer.byteLength(encoded) > MAX_ENVELOPE_BYTES) return [{ path: 'envelope', message: 'Envelope exceeds 2000000 bytes or is not JSON' }];
+    if (encoded === undefined || Buffer.byteLength(encoded) > MAX_ENVELOPE_BYTES) return [{ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' }];
     const result = envelopeSchema.safeParse(envelope);
     if (!result.success) return result.error.issues.slice(0, 20).map((issue) => ({
       path: issue.path.join('.').slice(0, 200), message: issue.message.slice(0, 300),

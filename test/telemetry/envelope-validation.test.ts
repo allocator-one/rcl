@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { validateRunEnvelope } from '../../src/telemetry/envelope-validation.js';
+
+const PROTOCOL_MAX_ENVELOPE_BYTES = 4_000_000;
 import { sampleResult } from './fixtures.js';
 
 describe('validateRunEnvelope', () => {
@@ -59,4 +61,55 @@ describe('validateRunEnvelope', () => {
       }));
     },
   );
+
+  it('accepts an exact 4MB envelope without changing its rows and rejects one byte more', () => {
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result) };
+    const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+    const originalRows = envelope.findings.length;
+    const seed = envelope.findings[0]!;
+    for (let index = 0; index < 210; index++) envelope.findings.push({ ...structuredClone(seed), ref: `padded-${index}`, description: '' });
+    for (const finding of envelope.findings.slice(originalRows)) {
+      const remaining = PROTOCOL_MAX_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify(envelope));
+      if (remaining <= 0) break;
+      finding.description = 'x'.repeat(Math.min(20_000, remaining));
+    }
+    expect(Buffer.byteLength(JSON.stringify(envelope))).toBe(PROTOCOL_MAX_ENVELOPE_BYTES);
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
+    expect(envelope.findings).toHaveLength(originalRows + 210);
+    expect(envelope.findings[0]!.ref).toBe('f001');
+    envelope.findings[1]!.description = `${envelope.findings[1]!.description}x`;
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([{ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' }]);
+  });
+
+  it.each([
+    ['verification_model', (envelope: any) => envelope.findings[0]],
+    ['verification_note', (envelope: any) => envelope.findings[0]],
+    ['call.error', (envelope: any) => envelope.calls[0]],
+  ] as const)('keeps the 2M character cap for %s while the total envelope allows 4MB', (_name, select) => {
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result) };
+    const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+    const target = select(envelope);
+    target[_name === 'call.error' ? 'error' : _name] = 'x'.repeat(2_000_001);
+    expect(Buffer.byteLength(JSON.stringify(envelope))).toBeGreaterThan(2_000_000);
+    expect(validateRunEnvelope(envelope, artifacts)).toContainEqual(expect.objectContaining({ path: _name === 'call.error' ? 'calls.0.error' : `findings.0.${_name}` }));
+  });
+
+  it('measures the total protocol limit in UTF-8 bytes for multibyte content', () => {
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result) };
+    const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+    const seed = envelope.findings[0]!;
+    for (let index = 0; index < 210; index++) envelope.findings.push({ ...structuredClone(seed), ref: `utf8-${index}`, description: '' });
+    for (const finding of envelope.findings.slice(1)) {
+      const remaining = PROTOCOL_MAX_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify(envelope));
+      if (remaining <= 0) break;
+      finding.description = 'é'.repeat(Math.floor(Math.min(20_000, remaining) / 2));
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(envelope));
+    expect(bytes).toBeLessThanOrEqual(PROTOCOL_MAX_ENVELOPE_BYTES);
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
+  });
+
 });
