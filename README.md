@@ -372,6 +372,11 @@ mints it again for the same run id before delivery. Pair it with
 `--expect-head-sha` so a moved pull request fails fast instead of being
 refused at ingest.
 
+Operators recovering the gate's encrypted GitHub artifact must use the
+[review evidence recovery runbook](https://github.com/allocator-one/rcl/blob/main/docs/review-evidence-recovery.md).
+Recovery requires the separately held, version-mapped private key and does not
+confer review or merge approval.
+
 ```yaml
 # .github/workflows/review_gate.yml (dispatched by Harness for one pull request)
 permissions:
