@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
@@ -212,7 +212,7 @@ it('keeps attempt state in the canonical directory when a caller symlink is reta
   const claim = claimConvergeAttempt({ gitCommonDir: alias, target });
   try {
     await Promise.race([contended.promise, claim.then(() => { throw new Error('contender bypassed occupied target'); })]);
-    await unlink(alias); await symlink(diverted, alias, directoryLinkType);
+    await rm(alias, { recursive: true, force: true }); await symlink(diverted, alias, directoryLinkType);
     release.resolve();
     await holder;
     retry.resolve();
