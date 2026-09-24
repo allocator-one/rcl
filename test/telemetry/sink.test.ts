@@ -300,6 +300,46 @@ describe('HarnessSink.getAttestedRunReceipt', () => {
     expect(wrongBytes).toEqual({ kind: 'rejected' });
   });
 
+  it.each([
+    ['an ordinary credential', 'ordinary'],
+    ['a different run id', 'wrong-id'],
+    ['a malformed receipt URL', 'malformed-url'],
+    ['a cross-origin receipt URL', 'cross-origin-url'],
+    ['a same-origin URL on another path', 'wrong-path-url'],
+    ['a receipt URL with a query', 'query-url'],
+    ['a non-existing receipt status', 'bad-meta-status'],
+    ['a missing artifact declaration', 'declaration-count'],
+    ['duplicate artifact declarations', 'duplicate-declaration'],
+  ] as const)('rejects %s', async (_label, mutation) => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const receipt = {
+      id: original.run.id,
+      url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+      envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+      artifacts_declared: structuredClone(original.artifacts_declared),
+    };
+    const body = { data: receipt, meta: { status: 'existing' } };
+
+    if (mutation === 'ordinary') {
+      const { sink: ordinary, requests } = sink(() => ({ status: 200, body }));
+      await expect(ordinary.getAttestedRunReceipt(original, serialized)).resolves.toEqual({ kind: 'rejected' });
+      expect(requests).toHaveLength(0);
+      return;
+    }
+    if (mutation === 'wrong-id') receipt.id = 'another-run';
+    else if (mutation === 'malformed-url') receipt.url = 'not a URL';
+    else if (mutation === 'cross-origin-url') receipt.url = `https://other.example.test/api/v1/reviews/runs/${original.run.id}`;
+    else if (mutation === 'wrong-path-url') receipt.url = `https://harness.example.test/api/v1/reviews/runs/${original.run.id}/artifacts`;
+    else if (mutation === 'query-url') receipt.url = `${receipt.url}?view=receipt`;
+    else if (mutation === 'bad-meta-status') body.meta.status = 'created';
+    else if (mutation === 'declaration-count') receipt.artifacts_declared = receipt.artifacts_declared.slice(0, 1);
+    else if (mutation === 'duplicate-declaration') receipt.artifacts_declared = [receipt.artifacts_declared[0]!, receipt.artifacts_declared[0]!];
+
+    const probe = await attestedSink(() => ({ status: 200, body })).sink.getAttestedRunReceipt(original, serialized);
+    expect(probe).toEqual({ kind: 'rejected' });
+  });
+
   it('runs the actual receipt transport and honors cancellation', async () => {
     const controller = new AbortController();
     const { sink: s, requests } = attestedSink(() => 'hang');

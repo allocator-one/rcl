@@ -405,29 +405,28 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     const sink = runtime.sink;
     deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
     // Recovery stops on refusal; keep organization disablement distinct in the delivery result.
-    const recovered = await recoverAttestedDelivery<RunReceipt, Extract<SinkOutcome<RunReceipt>, { kind: 'disabled' }>>({
-      runId,
-      payload: serializedEnvelope,
-      expiresAt: runtime.attestedExpiresAt,
-      receiptFirst: true,
-      initialAttempts: 1,
-      post: async (payload, signal) => {
-        if (payload !== serializedEnvelope || preparedPost.kind !== 'ready') return { kind: 'rejected' };
-        const outcome = await preparedPost.post({ signal });
-        if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
-        if (outcome.kind === 'conflict') return { kind: 'conflict' };
-        if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };
-        if (outcome.kind === 'rejected') return { kind: 'rejected' };
-        return { kind: 'unavailable' };
-      },
-      receipt: async (_runId, signal) => sink.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
-    });
-    if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
-    else if (recovered.kind === 'recorded') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_missing_receipt', message: 'recorded recovery did not provide a receipt' };
-    else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };
-    else if (recovered.kind === 'disabled') posted = recovered.value;
-    else if (recovered.kind === 'rejected' || recovered.kind === 'receipt_rejected') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_refused', message: recovered.kind };
-    else posted = { kind: 'unavailable', reason: `attested_recovery_${recovered.kind}` };
+    if (!Number.isFinite(Date.parse(runtime.attestedExpiresAt))) {
+      posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_invalid_expiry', message: 'attested expiry must be a valid ISO timestamp' };
+    } else {
+      const recovered = await recoverAttestedDelivery<RunReceipt, Extract<SinkOutcome<RunReceipt>, { kind: 'disabled' }>>({
+        runId, payload: serializedEnvelope, expiresAt: runtime.attestedExpiresAt, receiptFirst: true, initialAttempts: 1,
+        post: async (payload, signal) => {
+          if (payload !== serializedEnvelope || preparedPost.kind !== 'ready') return { kind: 'rejected' };
+          const outcome = await preparedPost.post({ signal });
+          if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
+          if (outcome.kind === 'conflict') return { kind: 'conflict' };
+          if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };
+          if (outcome.kind === 'rejected') return { kind: 'rejected' };
+          return { kind: 'unavailable' };
+        }, receipt: async (_runId, signal) => sink.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
+      });
+      if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
+      else if (recovered.kind === 'recorded') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_missing_receipt', message: 'recorded recovery did not provide a receipt' };
+      else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };
+      else if (recovered.kind === 'disabled') posted = recovered.value;
+      else if (recovered.kind === 'rejected' || recovered.kind === 'receipt_rejected') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_refused', message: recovered.kind };
+      else posted = { kind: 'unavailable', reason: `attested_recovery_${recovered.kind}` };
+    }
   }
   switch (posted.kind) {
     case 'unavailable': {

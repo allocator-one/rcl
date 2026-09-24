@@ -215,7 +215,7 @@ describe('recoverAttestedDelivery', () => {
     let elapsed = 0;
     const deadline = await recoverAttestedDelivery({
       runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW,
-      monotonicNow: () => elapsed, deadlineMs: 99,
+      monotonicNow: () => elapsed, deadlineMs: 99_000,
       post: async () => { elapsed += 20_000; return { kind: 'unavailable' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
     });
 

@@ -168,6 +168,28 @@ describe('the run-bound credential of --attest', () => {
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
   });
 
+  it('retains an unavailable attested POST without recovery requests when its expiry is invalid', async () => {
+    const result = sampleResult();
+    const { fetch, requests } = fakeFetch(() => new TypeError('lost acknowledgement'));
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.5', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: 'not-a-timestamp',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4, retention: { status: 'complete' } });
+    expect(requests.map(request => request.method)).toEqual(['POST']);
+    expect(outcome.line).toContain('attested_recovery_invalid_expiry');
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+    const retained = await runtime.quarantine!.inspect(result.run!.id);
+    expect(retained).toMatchObject({ status: 'complete', manifest: { acknowledged: false, requested_mode: 'attested' } });
+    expect(retained!.manifest!.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'delivery.initial_transport', message: expect.stringContaining('lost acknowledgement') }),
+      expect.objectContaining({ path: 'delivery', message: expect.stringContaining('attested_recovery_invalid_expiry') }),
+    ]));
+  });
+
   it('binds a recovered receipt to the immutable accepted envelope and resumes artifacts without another POST', async () => {
     const result = sampleResult();
     let posts = 0;

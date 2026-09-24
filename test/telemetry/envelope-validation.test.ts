@@ -101,16 +101,20 @@ describe('validateRunEnvelope', () => {
     const artifacts = { report_json: JSON.stringify(result) };
     const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
     const seed = envelope.findings[0]!;
+    const originalRows = envelope.findings.length;
     for (let index = 0; index < 210; index++) envelope.findings.push({ ...structuredClone(seed), ref: `utf8-${index}`, description: '' });
-    for (const finding of envelope.findings.slice(1)) {
-      const remaining = PROTOCOL_MAX_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify(envelope));
-      if (remaining <= 0) break;
-      finding.description = 'é'.repeat(Math.floor(Math.min(20_000, remaining) / 2));
+    let remainingBytes = PROTOCOL_MAX_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify(envelope));
+    for (const finding of envelope.findings.slice(originalRows)) {
+      const characters = Math.floor(Math.min(20_000, remainingBytes) / 2);
+      if (characters === 0) break;
+      finding.description = 'é'.repeat(characters);
+      remainingBytes -= characters * 2;
     }
     const bytes = Buffer.byteLength(JSON.stringify(envelope));
     expect(bytes).toBeLessThanOrEqual(PROTOCOL_MAX_ENVELOPE_BYTES);
+    expect(PROTOCOL_MAX_ENVELOPE_BYTES - bytes).toBeLessThan(2);
     expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
-    envelope.findings[1]!.description = `${envelope.findings[1]!.description}é`;
+    envelope.findings[originalRows]!.description = `${envelope.findings[originalRows]!.description}é`;
     expect(Buffer.byteLength(JSON.stringify(envelope))).toBeGreaterThan(PROTOCOL_MAX_ENVELOPE_BYTES);
     expect(validateRunEnvelope(envelope, artifacts)).toContainEqual({ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' });
   });
