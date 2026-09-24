@@ -670,6 +670,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     recorded.verdictRound = options.round;
     recorded.verdictSeverity = severities?.[key] ?? entry.severity;
     if (reason !== undefined) recorded.verdictReason = reason;
+    else if (verdict === 'fixed') delete recorded.verdictReason;
     updated.push(recorded);
   }
   state.updatedAt = new Date().toISOString();

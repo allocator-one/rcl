@@ -14,6 +14,12 @@
   lowercase `report:<uuid>:<16-hex-digest>` form. Regenerate malformed
   caller-supplied report keys before submitting the report. This guard does
   not reset or rewrite existing convergence history.
+## 3.8.4 - 2026-09-24
+
+- Clear old dismissal explanations when recording a new fixed verdict. Add
+  `converge-verdict --fixed-reason key=reason` to record the current fix explanation
+  through the existing native state and event path. Reject duplicate, conflicting,
+  empty or orphaned reason arguments before changing state (RCL-89).
 
 ## 3.8.3 - 2026-09-24
 
