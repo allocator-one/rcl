@@ -81,13 +81,15 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
   const maxAttempts = cappedOverride(options.maxAttempts, ATTESTED_DELIVERY_MAX_ATTEMPTS, 'maxAttempts', 1);
   const deadlineMs = cappedOverride(options.deadlineMs, ATTESTED_DELIVERY_DEADLINE_MS, 'deadlineMs', 1);
   const expiresAt = Date.parse(options.expiresAt);
+  if (!Number.isFinite(expiresAt)) throw new RangeError('expiresAt must be a valid ISO timestamp');
   const startedAt = monotonicNow();
-  let attempts = Math.min(validOverride(options.initialAttempts, 'initialAttempts', 0), maxAttempts);
+  const initialAttempts = options.initialAttempts ?? (options.receiptFirst ? 1 : 0);
+  let attempts = Math.min(validOverride(initialAttempts, 'initialAttempts', 0), maxAttempts);
 
   const boundary = (): { remainingMs: number } | { stopped: TerminalRecoveryOutcome } => {
     if (options.signal?.aborted) return { stopped: terminalOutcome('cancelled', attempts) };
     const current = now();
-    if (!Number.isFinite(expiresAt) || current >= expiresAt) return { stopped: terminalOutcome('expired', attempts) };
+    if (current >= expiresAt) return { stopped: terminalOutcome('expired', attempts) };
     const elapsedMs = monotonicNow() - startedAt;
     if (elapsedMs >= deadlineMs) return { stopped: terminalOutcome('deadline_exceeded', attempts) };
     const remainingMs = Math.min(deadlineMs - elapsedMs, expiresAt - current);
@@ -100,6 +102,11 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
     return 'stopped' in active ? active.stopped : undefined;
   };
 
+  const failed = (error: unknown): TerminalRecoveryOutcome =>
+    error instanceof ActiveOperationBoundaryError && error.kind === 'deadline_exceeded' && now() >= expiresAt
+      ? terminalOutcome('expired', attempts)
+      : failedOperation(error, attempts);
+
   if (options.receiptFirst) {
     const active = boundary();
     if ('stopped' in active) return active.stopped;
@@ -108,7 +115,7 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
       receipt = await withActiveSignal(options.signal, active.remainingMs,
         signal => options.receipt(options.runId, signal));
     } catch (error) {
-      return failedOperation(error, attempts);
+      return failed(error);
     }
     const afterInitialReceipt = stopped();
     if (afterInitialReceipt) return afterInitialReceipt;
@@ -127,7 +134,7 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
       posted = await withActiveSignal(options.signal, active.remainingMs,
         signal => options.post(options.payload, signal));
     } catch (error) {
-      return failedOperation(error, attempts);
+      return failed(error);
     }
     const afterPost = stopped();
     if (afterPost) return afterPost;
@@ -142,7 +149,7 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
       receipt = await withActiveSignal(options.signal, receiptActive.remainingMs,
         signal => options.receipt(options.runId, signal));
     } catch (error) {
-      return failedOperation(error, attempts);
+      return failed(error);
     }
     const afterReceipt = stopped();
     if (afterReceipt) return afterReceipt;
@@ -159,7 +166,7 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
       await withActiveSignal(options.signal, pauseActive.remainingMs,
         signal => sleep(ATTESTED_DELIVERY_RETRY_PAUSE_MS, signal));
     } catch (error) {
-      return failedOperation(error, attempts);
+      return failed(error);
     }
   }
   return terminalOutcome('attempts_exhausted', attempts);

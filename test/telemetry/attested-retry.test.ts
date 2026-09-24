@@ -324,4 +324,14 @@ describe('recoverAttestedDelivery', () => {
       else delete (AbortSignal as unknown as Record<string, unknown>)['any'];
     }
   });
+  it('rejects an invalid credential expiry before issuing a request', async () => {
+    await expect(recoverAttestedDelivery({ runId: 'run-1', payload: 'immutable', expiresAt: '', post: async () => ({ kind: 'recorded' }), receipt: async () => ({ kind: 'absent' }) })).rejects.toThrow('expiresAt must be a valid ISO timestamp');
+  });
+
+  it('counts the original unavailable post when receiptFirst is enabled without an override', async () => {
+    const post = vi.fn(async () => ({ kind: 'recorded' as const }));
+    const outcome = await recoverAttestedDelivery({ runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, receiptFirst: true, post, receipt: async () => ({ kind: 'absent' }) });
+    expect(outcome).toEqual({ kind: 'recorded', attempts: 2, recovered: true });
+  });
+
 });

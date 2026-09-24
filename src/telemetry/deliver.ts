@@ -411,7 +411,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
       receiptFirst: true,
       initialAttempts: 1,
       post: async (payload, signal) => {
-        const outcome = await sink.postRun(envelope, { signal }, payload);
+        const outcome = await sink.postRun(JSON.parse(payload) as RunEnvelope, { signal }, payload);
         if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
         if (outcome.kind === 'conflict') return { kind: 'conflict' };
         if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };

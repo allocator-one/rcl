@@ -273,14 +273,17 @@ export class HarnessSink {
     const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
     const data = response?.data;
     const envelopeSha256 = createHash('sha256').update(serializedEnvelope, 'utf8').digest('hex');
-    if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string' ||
+    const receiptUrl = typeof data?.['url'] === 'string' ? data['url'] : undefined;
+    const expectedOrigin = new URL(this.credential.url).origin;
+    const receiptOrigin = receiptUrl === undefined ? undefined : (() => { try { return new URL(receiptUrl).origin; } catch { return undefined; } })();
+    if (!data || data['id'] !== envelope.run.id || receiptOrigin !== expectedOrigin ||
       typeof data['envelope_sha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(data['envelope_sha256']) || data['envelope_sha256'] !== envelopeSha256 ||
       response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], envelope.artifacts_declared)) return { kind: 'rejected' };
     return {
       kind: 'recorded',
       value: {
         id: envelope.run.id,
-        url: data['url'],
+        url: receiptUrl!,
         ...(typeof data['received_at'] === 'string' ? { received_at: data['received_at'] } : {}),
         ...(typeof data['repo_verified'] === 'boolean' ? { repo_verified: data['repo_verified'] } : {}),
         ...(typeof data['head_verified'] === 'string' ? { head_verified: data['head_verified'] } : {}),
