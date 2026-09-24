@@ -63,7 +63,7 @@ describe('completed council terminal artifacts', () => {
         verificationTimeoutMs: 60_000, verificationPassTimeoutMs: 100,
       },
       run: {
-        id: runId, rclVersion: '3.8.2', command: 'review',
+        id: runId, rclVersion: '3.8.3', command: 'review',
         target: { kind: 'patch', headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) },
         roster: [...new Set(chunkReviews.map((review) => review.model))].map((model) => ({
           model, role: role.name, provider: 'openai', lane: 'blocking',
