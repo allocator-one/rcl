@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stableFindingKey } from '../../src/consensus/finding-identity.js';
 import { computeConsensus, applyReportThresholds } from '../../src/consensus/voter.js';
-import { processRoundReport, recordVerdicts, loadConvergeRunState } from '../../src/converge/run-state.js';
+import { convergeRunStatePath, processRoundReport, recordVerdicts, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent, roundIdentities } from '../../src/telemetry/events.js';
 import { sampleFinding, sampleResult, sampleReview } from '../telemetry/fixtures.js';
@@ -30,6 +30,304 @@ function consensus(starts: number[], runId = RUN_ID) {
 }
 
 describe('report identity through native classification and telemetry', () => {
+  it('refuses a malformed report-scoped key before it can use legacy matching', async () => {
+    const [finding] = consensus([42]);
+    const target = 'malformed-report-key';
+    const prior = await processRoundReport({
+      gitCommonDir: dir, target, round: 1, findings: [{ ...finding!, identity: undefined }],
+    });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1, verdicts: [
+      { key: prior.findings[0]!.identity, verdict: 'dismissed', reason: 'Legacy claim reviewed' },
+    ] });
+    const state = await loadConvergeRunState(dir, target);
+    await expect(processRoundReport({
+      gitCommonDir: dir,
+      target,
+      round: 2,
+      findings: [{ ...finding!, identity: finding!.identity!.toUpperCase() }],
+    })).rejects.toThrow(/invalid report identity/i);
+    expect(await loadConvergeRunState(dir, target)).toEqual(state);
+  });
+
+  it('rejects report-like identity variants before state writes', async () => {
+    const [finding] = consensus([42]);
+    const identity = finding!.identity!;
+    const variants = [
+      identity.toUpperCase(),
+      ` ${identity}`,
+      `${identity} `,
+      `${identity}\n`,
+      identity.slice(0, -1),
+      `report :${identity.slice('report:'.length)}`,
+      `report\t:${identity.slice('report:'.length)}`,
+    ];
+    variants.push(`re\u200bport:${identity.slice('report:'.length)}`);
+    variants.push(`re\u03c1\u03bfrt:${identity.slice('report:'.length)}`, `reprot:${identity.slice('report:'.length)}`);
+
+    for (const [index, malformedIdentity] of variants.entries()) {
+      const target = `malformed-variant-${index}`;
+      await expect(processRoundReport({
+        gitCommonDir: dir,
+        target,
+        round: 1,
+        findings: [{ ...finding!, identity: malformedIdentity }],
+      })).rejects.toThrow(/invalid report identity/i);
+      expect(await loadConvergeRunState(dir, target)).toBeUndefined();
+    }
+  });
+
+  it('keeps non-report legacy namespaces available', async () => {
+    const [finding] = consensus([42]);
+    const identity = `external:${finding!.identity!.slice('report:'.length)}`;
+    await expect(processRoundReport({
+      gitCommonDir: dir, target: 'external-legacy-key', round: 1, findings: [{ ...finding!, identity }],
+    })).resolves.toMatchObject({ counts: { new: 1 } });
+  });
+
+  it('rejects duplicate canonical report identities before state writes', async () => {
+    const [finding] = consensus([42]);
+    await expect(processRoundReport({
+      gitCommonDir: dir,
+      target: 'duplicate-report-identity',
+      round: 1,
+      findings: [finding!, { ...finding! }],
+    })).rejects.toThrow(/duplicate report identity/i);
+    expect(await loadConvergeRunState(dir, 'duplicate-report-identity')).toBeUndefined();
+  });
+
+  it('keeps mixed modern and legacy claims one-to-one', async () => {
+    const [modern, legacy] = consensus([42, 42]).map((finding, index) => ({
+      ...finding,
+      title: index === 0 ? 'Modern claim' : 'Legacy claim',
+      description: index === 0 ? 'Modern report identity owns this entry.' : 'Legacy input must receive its own entry.',
+    }));
+
+    const result = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'mixed-identity-claims',
+      round: 1,
+      findings: [modern!, { ...legacy!, identity: undefined }],
+    });
+    expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
+  });
+
+  it('keeps identical mixed claims one-to-one in either input order', async () => {
+    const [modern] = consensus([42]);
+    const legacy = { ...modern!, identity: undefined };
+
+    for (const [target, findings] of [
+      ['legacy-first', [legacy, modern!]],
+      ['modern-first', [modern!, legacy]],
+    ] as const) {
+      const result = await processRoundReport({ gitCommonDir: dir, target, round: 1, findings });
+      expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
+    }
+  });
+
+  it('continues to accept all-legacy reports for compatibility', async () => {
+    const [finding] = consensus([42]);
+    const result = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'legacy-only-report',
+      round: 1,
+      findings: [{ ...finding!, identity: undefined }],
+    });
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ status: 'new' });
+  });
+
+  it('preserves a legacy-only identity across a later legacy-only report', async () => {
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'legacy-only-repeat',
+      round: 1,
+      findings: [{ ...first!, identity: undefined }],
+    });
+    const initialState = await loadConvergeRunState(dir, 'legacy-only-repeat');
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const repeated = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'legacy-only-repeat',
+      round: 2,
+      findings: [{ ...later!, identity: undefined, description: 'Legacy report wording changed.' }],
+    });
+
+    expect(repeated.findings[0]).toMatchObject({ status: 'repeat', identity: initial.findings[0]!.identity });
+    expect((await loadConvergeRunState(dir, 'legacy-only-repeat'))!.findings[initial.findings[0]!.identity])
+      .toMatchObject({
+        identityOrigin: 'legacy',
+        claimTextSha256: initialState!.findings[initial.findings[0]!.identity]!.claimTextSha256,
+      });
+  });
+
+  it.each([false, true])('keeps legacy history separate through mixed-report repeats when modern comes first: %s', async (modernFirst) => {
+    const target = `legacy-to-mixed-${modernFirst}`;
+    const [first] = consensus([42]);
+    const legacy = { ...first!, identity: undefined };
+    const initial = await processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [legacy] });
+    const legacyIdentity = initial.findings[0]!.identity;
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1,
+      verdicts: [{ key: legacyIdentity, verdict: 'dismissed', reason: 'Legacy finding was reviewed' }] });
+
+    const [modern] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const mixed = modernFirst ? [modern!, { ...modern!, identity: undefined }] : [{ ...modern!, identity: undefined }, modern!];
+    const transition = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: mixed });
+    const transitionModern = transition.findings.find(({ finding }) => finding.identity !== undefined)!;
+    const transitionLegacy = transition.findings.find(({ finding }) => finding.identity === undefined)!;
+    expect(transitionModern).toMatchObject({ status: 'new' });
+    expect(transitionLegacy).toMatchObject({ status: 'suppressed', identity: legacyIdentity });
+    expect(transitionModern.identity).not.toBe(legacyIdentity);
+
+    const [nextModern] = consensus([42], '00000000-0000-7000-8000-000000000003');
+    const next = modernFirst
+      ? [nextModern!, { ...nextModern!, identity: undefined }]
+      : [{ ...nextModern!, identity: undefined }, nextModern!];
+    const repeated = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: next });
+    expect(repeated.findings.find(({ finding }) => finding.identity !== undefined))
+      .toMatchObject({ status: 'repeat', identity: transitionModern.identity });
+    expect(repeated.findings.find(({ finding }) => finding.identity === undefined))
+      .toMatchObject({ status: 'suppressed', identity: legacyIdentity });
+  });
+
+  it('allocates a fresh modern identity for ambiguous same-digest history without transferring verdicts', async () => {
+    const target = 'ambiguous-modern-history';
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({
+      gitCommonDir: dir,
+      target,
+      round: 1,
+      findings: [first!, { ...first!, identity: `report:${RUN_ID}:ffffffffffffffff` }],
+    });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1,
+      verdicts: [{ key: initial.findings[0]!.identity, verdict: 'dismissed', reason: 'First modern claim was reviewed' }] });
+
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const result = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [later!] });
+
+    expect(result.findings[0]).toMatchObject({ status: 'new' });
+    expect(result.findings[0]!.identity).not.toBe(initial.findings[0]!.identity);
+    expect(result.findings[0]!.identity).not.toBe(initial.findings[1]!.identity);
+  });
+
+  it('replays an immutable modern report without creating new native identities', async () => {
+    const [finding] = consensus([42]);
+    const findings = [finding!, { ...finding!, identity: `report:${RUN_ID}:ffffffffffffffff` }];
+    const first = await processRoundReport({ gitCommonDir: dir, target: 'modern-replay', round: 1, findings });
+    const replay = await processRoundReport({ gitCommonDir: dir, target: 'modern-replay', round: 1, findings });
+    expect(replay.findings.map(({ identity }) => identity)).toEqual(first.findings.map(({ identity }) => identity));
+    expect(Object.keys((await loadConvergeRunState(dir, 'modern-replay'))!.findings)).toHaveLength(2);
+  });
+
+  it('keeps the prior best match for an ambiguous legacy sighting', async () => {
+    const [first] = consensus([42]);
+    const [second] = consensus([50], '00000000-0000-7000-8000-000000000002');
+    const initial = await processRoundReport({ gitCommonDir: dir, target: 'legacy-best-match', round: 1, findings: [{ ...first!, identity: undefined }, { ...second!, identity: undefined }] });
+    const [later] = consensus([46], '00000000-0000-7000-8000-000000000003');
+    const repeated = await processRoundReport({ gitCommonDir: dir, target: 'legacy-best-match', round: 2, findings: [{ ...later!, identity: undefined }] });
+    expect(repeated.findings[0]).toMatchObject({ status: 'repeat', identity: initial.findings[0]!.identity });
+  });
+
+  it('does not carry a modern identity across changed claim text or pre-v4 state', async () => {
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({ gitCommonDir: dir, target: 'modern-drift', round: 1, findings: [first!] });
+    const statePath = convergeRunStatePath(dir, 'modern-drift');
+    const state = JSON.parse(await readFile(statePath, 'utf8')) as { findings: Record<string, Record<string, unknown>> };
+    delete state.findings[initial.findings[0]!.identity]!.identityOrigin;
+    delete state.findings[initial.findings[0]!.identity]!.claimTextSha256;
+    delete state.findings[initial.findings[0]!.identity]!.sourceReportIdentity;
+    await writeFile(statePath, JSON.stringify(state));
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const result = await processRoundReport({ gitCommonDir: dir, target: 'modern-drift', round: 2, findings: [{ ...later!, description: 'A distinct modern claim.' }] });
+    expect(result.findings[0]).toMatchObject({ status: 'new' });
+    expect(result.findings[0]!.identity).not.toBe(initial.findings[0]!.identity);
+  });
+
+  it('rejects malformed report-like keys and non-string text atomically', async () => {
+    const [finding] = consensus([42]);
+    const target = 'atomic-malformed-report';
+    await processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [finding!] });
+    const state = await loadConvergeRunState(dir, target);
+    const confusable = `r\u0435\u0440\u043ert:${finding!.identity!.slice('report:'.length)}`;
+
+    for (const invalid of [
+      { ...finding!, identity: confusable },
+      { ...finding!, description: null },
+    ]) {
+      await expect(processRoundReport({
+        gitCommonDir: dir,
+        target,
+        round: 2,
+        findings: [finding!, invalid as unknown as typeof finding],
+      })).rejects.toThrow(/invalid (report identity|finding text)/i);
+      expect(await loadConvergeRunState(dir, target)).toEqual(state);
+    }
+  });
+
+  it('matches canonically equivalent Unicode claim text across report runs', async () => {
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'canonical-claim-text',
+      round: 1,
+      findings: [{ ...first!, title: 'Café access', description: 'Line one\r\nLine two' }],
+    });
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const repeated = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'canonical-claim-text',
+      round: 2,
+      findings: [{ ...later!, title: 'Cafe\u0301 access', description: 'Line one\nLine two' }],
+    });
+
+    expect(repeated.findings[0]).toMatchObject({ status: 'repeat', identity: initial.findings[0]!.identity });
+  });
+
+  it('keeps distinct same-location claims separate through verdict resolution', async () => {
+    const findings = consensus([42, 42]).map((finding, index) => ({
+      ...finding,
+      title: index === 0 ? 'Page token is restored as an empty cursor' : 'Folder frontier grows without a bound',
+      description: index === 0 ? 'An empty cursor reaches the provider.' : 'The persisted frontier can exhaust memory.',
+      gating: { reason: 'consensus' as const },
+    }));
+    expect(new Set(findings.map((finding) => finding.identity)).size).toBe(2);
+
+    const classified = await processRoundReport({ gitCommonDir: dir, target: 'same-location', round: 1, findings });
+    expect(new Set(classified.findings.map((finding) => finding.identity)).size).toBe(2);
+    const dismissed = classified.findings[0]!.identity;
+    const outstanding = classified.findings[1]!.identity;
+    const result = await recordVerdicts({ gitCommonDir: dir, target: 'same-location', round: 1,
+      verdicts: [{ key: dismissed, verdict: 'dismissed', reason: 'Cursor is normalized by the caller' }] });
+    expect(result.resolution).toMatchObject({ status: 'unresolved', unresolved: [outstanding] });
+    const later = consensus([42, 42], '00000000-0000-7000-8000-000000000002').map((finding, index) => ({
+      ...finding, title: findings[index]!.title, description: findings[index]!.description,
+    }));
+    const next = await processRoundReport({ gitCommonDir: dir, target: 'same-location', round: 2, findings: later });
+    expect(next.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ identity: dismissed, status: 'suppressed' }),
+      expect.objectContaining({ identity: outstanding, status: 'repeat' }),
+    ]));
+  });
+
+  it('does not exchange same-location identities when later report order reverses', async () => {
+    const first = consensus([42, 42]).map((finding, index) => ({
+      ...finding,
+      title: index === 0 ? 'Empty cursor reaches the provider' : 'Frontier exceeds the storage limit',
+      description: index === 0 ? 'Restore normalizes an empty page token.' : 'Folder queue grows without a bound.',
+    }));
+    const initial = await processRoundReport({ gitCommonDir: dir, target: 'reordered-claims', round: 1, findings: first });
+    const later = consensus([42, 42], '00000000-0000-7000-8000-000000000002')
+      .map((finding, index) => ({
+        ...finding,
+        title: first[1 - index]!.title,
+        description: first[1 - index]!.description,
+      }));
+    const reordered = await processRoundReport({ gitCommonDir: dir, target: 'reordered-claims', round: 2, findings: later });
+    expect(reordered.findings.map((finding) => finding.identity))
+      .toEqual(initial.findings.map((finding) => finding.identity).reverse());
+  });
+
   it('does not reuse a prior run alias before the new run classification arrives', async () => {
     const findings = consensus([11, 19]).map((f) => ({ ...f,
       severity: f.startLine === 19 ? 'critical' as const : 'important' as const }));

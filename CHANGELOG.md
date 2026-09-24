@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.8.5 - 2026-09-24
+## 4.0.1 - 2026-09-24
 
 - Raise the complete evidence-envelope transport limit to 4,000,000 bytes while retaining 2,000,000-character limits for individual verification diagnostics. Share the total limit with historical recovery planning so valid retained envelopes are not rejected before their immutable artifacts can be assessed (RCL-88; requires compatible backend acceptance).
 
@@ -14,6 +14,21 @@
   recovery cannot complete. Report a callback rejection that occurs before a
   boundary as `operation_failed`, without retaining exception prose or replaying
   the request blindly.
+
+## 4.0.0 - 2026-09-24
+
+- Keep distinct modern report findings at the same source location separately
+  addressable in convergence. Match prior native identities only when both
+  location and the claim text digest agree; older entries without that digest
+  receive new identities instead of inheriting an uncertain verdict. Refuse
+  malformed report-scoped keys before they can enter legacy matching (RCL-87).
+
+### Breaking change
+
+- `converge-report` now accepts report-scoped identities only in canonical
+  lowercase `report:<uuid>:<16-hex-digest>` form. Regenerate malformed
+  caller-supplied report keys before submitting the report. This guard does
+  not reset or rewrite existing convergence history.
 
 ## 3.8.4 - 2026-09-24
 
