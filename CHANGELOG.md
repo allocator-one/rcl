@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.8.2 - 2026-09-24
+
+- **Missing-report gap recovery** (RCL-81): add `rcl converge-gap --preview`,
+  `--apply`, and `--resume` for one missing report immediately before a retained
+  original report. Recovery binds immutable evidence and native snapshots,
+  preserves the original round and spent attempts, and records the missing
+  report explicitly without inventing approval or reviewer results.
+- **Coordinated recovery writes** (RCL-81): serialize gap operations with normal
+  round, verdict, and budget writers, including compatible older recovery
+  clients. Conflicting ownership and changed evidence fail closed; completed
+  results remain resumable after cleanup failures.
+- **Protected review evidence** (RCL-84): correlate registered GitHub gate runs
+  with their lifecycle attempts and retain authenticated encrypted originals
+  for recovery. The private recovery key remains outside public CI.
+
 ## 3.8.1 - 2026-09-23
 
 - Add explicit `--original-prose control-code-units-v1` recovery for retained
@@ -9,13 +24,6 @@
 - Require the matching backend capability before preparing or resuming the
   selected representation. Keep existing recovery manifests and surrogate
   records compatible; refuse controls in structural fields (RCL-76).
-- Add `rcl converge-gap` preview, apply and resume for one missing terminal-report
-  round after a complete ordinary prefix. Bind the local audit to exact original
-  report and partial-evidence bytes, actual spent attempt records and immutable
-  native snapshots (RCL-81).
-- Admit only the exact retained later report after durable audit verification.
-  Preserve original round ordinals, attempt budgets and unknown controller exit;
-  do not synthesize a missing report or create approval.
 
 ## 3.8.0 - 2026-09-22
 
