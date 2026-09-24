@@ -73,6 +73,7 @@ import {
   ConvergeAttemptStateError,
   resolveGitCommonDir,
 } from './converge/attempt-budget.js';
+import { withNativeTarget } from './converge/target-ownership.js';
 import {
   DEFAULT_CONVERGE_ROUND_CAP,
   HARD_CONVERGE_ROUND_CAP,
@@ -255,7 +256,15 @@ async function attestBeforeReview(
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
 async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
   try {
-    await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
+    const target = events[0]?.converge_target;
+    if (!target || events.some(event => event.converge_target !== target)) {
+      await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
+      return;
+    }
+    const gitCommonDir = await resolveGitCommonDir();
+    await withNativeTarget(gitCommonDir, target, async () => {
+      await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
+    });
   } catch {
     // Evidence of the loop is advisory next to the loop's own durable state.
   }
