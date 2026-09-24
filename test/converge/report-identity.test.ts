@@ -120,6 +120,97 @@ describe('report identity through native classification and telemetry', () => {
     expect(result.findings[0]).toMatchObject({ status: 'new' });
   });
 
+  it('preserves a legacy-only identity across a later legacy-only report', async () => {
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'legacy-only-repeat',
+      round: 1,
+      findings: [{ ...first!, identity: undefined }],
+    });
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const repeated = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'legacy-only-repeat',
+      round: 2,
+      findings: [{ ...later!, identity: undefined }],
+    });
+
+    expect(repeated.findings[0]).toMatchObject({ status: 'repeat', identity: initial.findings[0]!.identity });
+    expect((await loadConvergeRunState(dir, 'legacy-only-repeat'))!.findings[initial.findings[0]!.identity])
+      .toMatchObject({ identityOrigin: 'legacy' });
+  });
+
+  it.each([false, true])('keeps legacy history separate through mixed-report repeats when modern comes first: %s', async (modernFirst) => {
+    const target = `legacy-to-mixed-${modernFirst}`;
+    const [first] = consensus([42]);
+    const legacy = { ...first!, identity: undefined };
+    const initial = await processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [legacy] });
+    const legacyIdentity = initial.findings[0]!.identity;
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1,
+      verdicts: [{ key: legacyIdentity, verdict: 'dismissed', reason: 'Legacy finding was reviewed' }] });
+
+    const [modern] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const mixed = modernFirst ? [modern!, { ...modern!, identity: undefined }] : [{ ...modern!, identity: undefined }, modern!];
+    const transition = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: mixed });
+    const transitionModern = transition.findings.find(({ finding }) => finding.identity !== undefined)!;
+    const transitionLegacy = transition.findings.find(({ finding }) => finding.identity === undefined)!;
+    expect(transitionModern).toMatchObject({ status: 'new' });
+    expect(transitionLegacy).toMatchObject({ status: 'suppressed', identity: legacyIdentity });
+    expect(transitionModern.identity).not.toBe(legacyIdentity);
+
+    const [nextModern] = consensus([42], '00000000-0000-7000-8000-000000000003');
+    const next = modernFirst
+      ? [nextModern!, { ...nextModern!, identity: undefined }]
+      : [{ ...nextModern!, identity: undefined }, nextModern!];
+    const repeated = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: next });
+    expect(repeated.findings.find(({ finding }) => finding.identity !== undefined))
+      .toMatchObject({ status: 'repeat', identity: transitionModern.identity });
+    expect(repeated.findings.find(({ finding }) => finding.identity === undefined))
+      .toMatchObject({ status: 'suppressed', identity: legacyIdentity });
+  });
+
+  it('allocates a fresh modern identity for ambiguous same-digest history without transferring verdicts', async () => {
+    const target = 'ambiguous-modern-history';
+    const [first] = consensus([42]);
+    const initial = await processRoundReport({
+      gitCommonDir: dir,
+      target,
+      round: 1,
+      findings: [first!, { ...first!, identity: `report:${RUN_ID}:ffffffffffffffff` }],
+    });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1,
+      verdicts: [{ key: initial.findings[0]!.identity, verdict: 'dismissed', reason: 'First modern claim was reviewed' }] });
+
+    const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
+    const result = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [later!] });
+
+    expect(result.findings[0]).toMatchObject({ status: 'new' });
+    expect(result.findings[0]!.identity).not.toBe(initial.findings[0]!.identity);
+    expect(result.findings[0]!.identity).not.toBe(initial.findings[1]!.identity);
+  });
+
+  it('rejects malformed report-like keys and non-string text atomically', async () => {
+    const [finding] = consensus([42]);
+    const target = 'atomic-malformed-report';
+    await processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [finding!] });
+    const state = await loadConvergeRunState(dir, target);
+    const confusable = `r\u0435\u0440\u043ert:${finding!.identity!.slice('report:'.length)}`;
+
+    for (const invalid of [
+      { ...finding!, identity: confusable },
+      { ...finding!, description: null },
+    ]) {
+      await expect(processRoundReport({
+        gitCommonDir: dir,
+        target,
+        round: 2,
+        findings: [finding!, invalid as unknown as typeof finding],
+      })).rejects.toThrow(/invalid (report identity|finding text)/i);
+      expect(await loadConvergeRunState(dir, target)).toEqual(state);
+    }
+  });
+
   it('matches canonically equivalent Unicode claim text across report runs', async () => {
     const [first] = consensus([42]);
     const initial = await processRoundReport({

@@ -32,6 +32,16 @@ const STATE_DIR = 'rcl-converge-runs';
 const DEFAULT_LINE_WINDOW = 5;
 const REPORT_IDENTITY = /^report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{16}$/;
 
+// These are the Cyrillic lookalikes for the letters in "report". A malformed
+// modern identity must not fall through to legacy matching because its prefix
+// used visually confusable Unicode.
+const REPORT_PREFIX_CONFUSABLES: Readonly<Record<string, string>> = {
+  '\u0435': 'e',
+  '\u043e': 'o',
+  '\u0440': 'p',
+  '\u0442': 't',
+};
+
 export class ConvergeRoundCapError extends Error {
   readonly code = 'RCL_CONVERGE_ROUND_CAP';
 
@@ -86,6 +96,8 @@ export interface FindingEntry {
   title: string;
   /** Digest of claim text for conservative matching without retaining prose. */
   claimTextSha256?: string;
+  /** Absent in old state: treat it as legacy and never trust its digest for modern matching. */
+  identityOrigin?: 'modern' | 'legacy';
   severity: string;
   models: string[];
   firstRound: number;
@@ -328,10 +340,15 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
     throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
   }
+  if (options.findings.some((finding) => typeof finding.title !== 'string' || typeof finding.description !== 'string')) {
+    throw new ConvergeRunStateError('Invalid finding text: title and description must be strings.');
+  }
+  if (options.findings.some((finding) => finding.identity !== undefined && typeof finding.identity !== 'string')) {
+    throw new ConvergeRunStateError('Invalid finding identity: expected a string when present.');
+  }
   if (options.findings.some((finding) => {
     const identity = finding.identity;
-    return identity !== undefined && identity.trim().replace(/\p{Cf}/gu, '').toLowerCase().startsWith('report:') &&
-      !REPORT_IDENTITY.test(identity);
+    return typeof identity === 'string' && looksLikeReportIdentity(identity) && !REPORT_IDENTITY.test(identity);
   })) {
     throw new ConvergeRunStateError('Invalid report identity; refusing legacy matching for a malformed report key.');
   }
@@ -342,6 +359,15 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
     throw new ConvergeRunStateError('Duplicate report identity; each modern report claim must be independently addressable.');
   }
   return { target, runId };
+}
+
+function looksLikeReportIdentity(identity: string): boolean {
+  const normalized = identity.normalize('NFKC')
+    .replace(/\p{Cf}/gu, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\u0435\u043e\u0440\u0442]/gu, character => REPORT_PREFIX_CONFUSABLES[character]!);
+  return normalized.startsWith('report:');
 }
 
 function claimTextSha256(finding: ConsensusFinding): string {
@@ -415,7 +441,13 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const claimedThisRound = new Map<string, string>();
   const hasModernReportIdentity = options.findings.some((finding) => REPORT_IDENTITY.test(finding.identity ?? ''));
 
-  for (const [findingIndex, finding] of options.findings.entries()) {
+  const indexedFindings = options.findings.map((finding, findingIndex) => ({ finding, findingIndex }));
+  // Modern reservations are allocated first, so mixed input order cannot lend
+  // a modern claim a legacy entry. Keep the caller's report order in output.
+  indexedFindings.sort(({ finding: left }, { finding: right }) =>
+    Number(REPORT_IDENTITY.test(right.identity ?? '')) - Number(REPORT_IDENTITY.test(left.identity ?? '')));
+  const pending = new Map<number, AnnotatedRoundFinding>();
+  for (const { findingIndex, finding } of indexedFindings) {
     const reportIdentity = REPORT_IDENTITY.test(finding.identity ?? '')
       ? finding.identity
       : undefined;
@@ -431,12 +463,18 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         return false;
       }
       const storedDigest = state.findings[entry.key]?.claimTextSha256;
-      if (reportIdentity !== undefined) return storedDigest === textDigest;
-      // Preserve legacy-only matching; mixed reports must not let a legacy
-      // finding attach to a modern digest-backed entry.
-      return !hasModernReportIdentity || storedDigest === undefined;
+      const origin = state.findings[entry.key]?.identityOrigin;
+      if (reportIdentity !== undefined) return origin === 'modern' && storedDigest === textDigest;
+      return origin !== 'modern';
     });
-    const matched = matchFinding(finding, candidates, lineWindow);
+    // A digest is only a conservative continuity check, never a claim key.
+    // When historical modern claims have the same digest and location, there
+    // is no evidence that this sighting belongs to either one. Allocate a new
+    // identity instead of lending either historical verdict to it.
+    const matchingCandidates = candidates.filter(candidate =>
+      matchFinding(finding, [candidate], lineWindow) !== undefined
+    );
+    const matched = matchingCandidates.length === 1 ? matchingCandidates[0] : undefined;
 
     if (!matched) {
       const key = availableFindingKey(finding, occupied);
@@ -449,6 +487,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         endLine: finding.endLine,
         title: finding.title,
         claimTextSha256: textDigest,
+        identityOrigin: reportIdentity ? 'modern' : 'legacy',
         severity: finding.severity,
         models: [...finding.consensus.models],
         firstRound: options.round,
@@ -459,7 +498,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       entries.push(created);
       if (claimToken) claimedThisRound.set(key, claimToken);
       counts.new++;
-      annotated.push({ identity: key, status: 'new', finding });
+      pending.set(findingIndex, { identity: key, status: 'new', finding });
       continue;
     }
 
@@ -490,7 +529,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       // A re-run of the round that first recorded this finding — it is this
       // round's own NEW finding being reprocessed, not a cross-round repeat.
       counts.new++;
-      annotated.push({ identity: entry.key, status: 'new', finding });
+      pending.set(findingIndex, { identity: entry.key, status: 'new', finding });
       continue;
     }
     if (entry.verdict === 'dismissed') {
@@ -509,13 +548,16 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       status = 'repeat';
       counts.repeat++;
     }
-    annotated.push({
+    if (!reportIdentity && entry.claimTextSha256 !== textDigest) delete entry.claimTextSha256;
+    pending.set(findingIndex, {
       identity: entry.key,
       status,
       ...(suppressReason ? { suppressReason } : {}),
       finding,
     });
   }
+
+  annotated.push(...options.findings.map((_, index) => pending.get(index)!));
 
   validateReportIdentityMappings(annotated);
   for (const [key, severity] of Object.entries(severities)) {
