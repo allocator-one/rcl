@@ -30,6 +30,7 @@ export const MIN_CONVERGE_ROUNDS = 2;
 const STATE_VERSION = 1;
 const STATE_DIR = 'rcl-converge-runs';
 const DEFAULT_LINE_WINDOW = 5;
+const REPORT_IDENTITY = /^report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{16}$/;
 
 export class ConvergeRoundCapError extends Error {
   readonly code = 'RCL_CONVERGE_ROUND_CAP';
@@ -327,6 +328,13 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
     throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
   }
+  if (options.findings.some((finding) => {
+    const identity = finding.identity;
+    return identity !== undefined && identity.trim().toLowerCase().startsWith('report:') &&
+      !REPORT_IDENTITY.test(identity);
+  })) {
+    throw new ConvergeRunStateError('Invalid report identity; refusing legacy matching for a malformed report key.');
+  }
   return { target, runId };
 }
 
@@ -398,7 +406,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const claimedThisRound = new Map<string, string>();
 
   for (const finding of options.findings) {
-    const reportIdentity = /^report:[0-9a-f-]{36}:[0-9a-f]{16}$/.test(finding.identity ?? '')
+    const reportIdentity = REPORT_IDENTITY.test(finding.identity ?? '')
       ? finding.identity
       : undefined;
     const textDigest = claimTextSha256(finding);

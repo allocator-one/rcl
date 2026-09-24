@@ -30,6 +30,25 @@ function consensus(starts: number[], runId = RUN_ID) {
 }
 
 describe('report identity through native classification and telemetry', () => {
+  it('refuses a malformed report-scoped key before it can use legacy matching', async () => {
+    const [finding] = consensus([42]);
+    const target = 'malformed-report-key';
+    const prior = await processRoundReport({
+      gitCommonDir: dir, target, round: 1, findings: [{ ...finding!, identity: undefined }],
+    });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1, verdicts: [
+      { key: prior.findings[0]!.identity, verdict: 'dismissed', reason: 'Legacy claim reviewed' },
+    ] });
+    const state = await loadConvergeRunState(dir, target);
+    await expect(processRoundReport({
+      gitCommonDir: dir,
+      target,
+      round: 2,
+      findings: [{ ...finding!, identity: finding!.identity!.toUpperCase() }],
+    })).rejects.toThrow(/invalid report identity/i);
+    expect(await loadConvergeRunState(dir, target)).toEqual(state);
+  });
+
   it('keeps distinct same-location claims separate through verdict resolution', async () => {
     const findings = consensus([42, 42]).map((finding, index) => ({
       ...finding,

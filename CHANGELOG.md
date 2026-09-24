@@ -5,7 +5,8 @@
 - Keep distinct modern report findings at the same source location separately
   addressable in convergence. Match prior native identities only when both
   location and the claim text digest agree; older entries without that digest
-  receive new identities instead of inheriting an uncertain verdict (RCL-87).
+  receive new identities instead of inheriting an uncertain verdict. Refuse
+  malformed report-scoped keys before they can enter legacy matching (RCL-87).
 
 ## 3.8.3 - 2026-09-24
 
