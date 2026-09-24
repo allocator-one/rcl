@@ -418,7 +418,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
         if (outcome.kind === 'rejected' || outcome.kind === 'disabled') return { kind: 'rejected' };
         return { kind: 'unavailable' };
       },
-      receipt: async (_runId, signal) => runtime.sink!.getAttestedRunReceipt(envelope, { signal }),
+      receipt: async (_runId, signal) => runtime.sink!.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
     });
     if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
     else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };

@@ -258,7 +258,7 @@ export class HarnessSink {
    * stop recovery. The server independently restricts this route to the
    * credential's own live run and signed workflow subject.
    */
-  async getAttestedRunReceipt(envelope: RunEnvelope, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+  async getAttestedRunReceipt(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
     if (this.credentialSource !== 'attest') return { kind: 'rejected' };
     if (!envelope.artifacts_declared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
     const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`, undefined, 'application/json', options);
@@ -268,7 +268,9 @@ export class HarnessSink {
     if (result.status !== 200) return { kind: 'rejected' };
     const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
     const data = response?.data;
+    const envelopeSha256 = createHash('sha256').update(serializedEnvelope, 'utf8').digest('hex');
     if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string' ||
+      typeof data['envelope_sha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(data['envelope_sha256']) || data['envelope_sha256'] !== envelopeSha256 ||
       response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], envelope.artifacts_declared)) return { kind: 'rejected' };
     return {
       kind: 'recorded',
