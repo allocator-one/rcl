@@ -95,6 +95,19 @@ describe('recoverAttestedDelivery', () => {
     expect(outcome).toEqual({ kind: post.kind, attempts: 1, recovered: false });
   });
 
+  it('preserves the exact disabled result without a mutable side channel', async () => {
+    const disabled = { reason: 'reviews_disabled' as const, message: 'Review evidence is disabled' };
+    const outcome = await recoverAttestedDelivery<undefined, typeof disabled>({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW,
+      post: async () => ({ kind: 'disabled', value: disabled }),
+      receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+
+    expect(outcome).toEqual({ kind: 'disabled', attempts: 1, recovered: false, value: disabled });
+    if (outcome.kind !== 'disabled') throw new Error(`expected disabled, got ${outcome.kind}`);
+    expect(outcome.value).toBe(disabled);
+  });
+
   it('refuses a blind retry when the receipt cannot be read', async () => {
     let posts = 0;
     const outcome = await recoverAttestedDelivery({
@@ -131,6 +144,20 @@ describe('recoverAttestedDelivery', () => {
 
     expect(outcome).toEqual({ kind: 'operation_failed', attempts: options.attempts, recovered: false });
     expect(JSON.stringify(outcome)).not.toContain('credential=secret');
+  });
+
+  it('keeps an unrelated callback failure when cancellation races the operation', async () => {
+    const controller = new AbortController();
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, signal: controller.signal,
+      post: async () => {
+        controller.abort(new Error('concurrent cancellation'));
+        throw new TypeError('transport decoder failed');
+      },
+      receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+
+    expect(outcome).toEqual({ kind: 'operation_failed', attempts: 1, recovered: false });
   });
 
   it.each([true, false])('reports cancellation when a %s receipt normalizes its abort as unavailable', async (receiptFirst) => {
@@ -195,36 +222,38 @@ describe('recoverAttestedDelivery', () => {
     expect(deadline).toEqual({ kind: 'deadline_exceeded', attempts: 1, recovered: false });
   });
 
-  it('does not start receipt-first or replay transports after a boundary crosses while acquiring its timeout', async () => {
-    async function recover(receiptFirst: boolean, boundary: 'expiry' | 'deadline') {
-      let ticks = 0;
-      const receiptExpired: boolean[] = [];
-      const postExpired: boolean[] = [];
-      const tick = () => ++ticks >= 4 ? 1 : 0;
-      const now = () => NOW + (boundary === 'expiry' ? tick() : 0);
-      const monotonicNow = () => boundary === 'deadline' ? tick() : 0;
-      const stopped = () => boundary === 'expiry' ? now() >= NOW + 1 : monotonicNow() >= 1;
+  it.each([
+    ['maxAttempts', { maxAttempts: 0 }],
+    ['deadlineMs', { deadlineMs: Number.NaN }],
+    ['initialAttempts', { initialAttempts: -1 }],
+  ] as const)('fails fast for an invalid %s override', async (_field, override) => {
+    const post = vi.fn(async () => ({ kind: 'recorded' as const }));
+    const receipt = vi.fn(async () => ({ kind: 'absent' as const }));
 
-      const outcome = await recoverAttestedDelivery({
-        runId: 'run-1', payload: 'immutable', expiresAt: new Date(boundary === 'expiry' ? NOW + 1 : NOW + 60_000).toISOString(),
-        now, monotonicNow, receiptFirst, ...(boundary === 'deadline' ? { deadlineMs: 1 } : {}),
-        initialAttempts: receiptFirst ? 1 : 0,
-        post: async () => { postExpired.push(stopped()); return { kind: 'recorded' }; },
-        receipt: async () => { receiptExpired.push(stopped()); return { kind: 'absent' }; },
-        sleep: async () => {},
-      });
+    await expect(recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW,
+      ...override, post, receipt, sleep: async () => {},
+    })).rejects.toThrow(RangeError);
+    expect(post).not.toHaveBeenCalled();
+    expect(receipt).not.toHaveBeenCalled();
+  });
 
-      return { outcome, receiptExpired, postExpired };
-    }
+  it('returns expired when a post completes after credential expiry', async () => {
+    let now = NOW;
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: new Date(NOW + 1).toISOString(), now: () => now,
+      post: async () => { now = NOW + 1; return { kind: 'recorded' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+    expect(outcome).toEqual({ kind: 'expired', attempts: 1, recovered: false });
+  });
 
-    for (const [boundary, outcome] of [['expiry', 'expired'], ['deadline', 'deadline_exceeded']] as const) {
-      await expect(recover(true, boundary)).resolves.toEqual({
-        outcome: { kind: outcome, attempts: 1, recovered: false }, receiptExpired: [false], postExpired: [],
-      });
-      await expect(recover(false, boundary)).resolves.toEqual({
-        outcome: { kind: 'recorded', attempts: 1, recovered: false }, receiptExpired: [], postExpired: [false],
-      });
-    }
+  it('returns deadline_exceeded when a post completes after the monotonic deadline', async () => {
+    let elapsed = 0;
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, monotonicNow: () => elapsed, deadlineMs: 1,
+      post: async () => { elapsed = 1; return { kind: 'recorded' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+    expect(outcome).toEqual({ kind: 'deadline_exceeded', attempts: 1, recovered: false });
   });
 
   it('aborts an in-flight post at the remaining delivery deadline', async () => {

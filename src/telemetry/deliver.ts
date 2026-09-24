@@ -12,7 +12,7 @@ import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
-import { describeOutcome, HarnessSink, type SinkOutcome } from './sink.js';
+import { describeOutcome, HarnessSink, type RunReceipt, type SinkOutcome } from './sink.js';
 import { recoverAttestedDelivery } from './attested-retry.js';
 
 /**
@@ -401,28 +401,28 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   const deliveryDiagnostics: EvidenceDiagnostic[] = [];
   let posted = await runtime.sink.postRun(envelope, {}, serializedEnvelope);
   if (posted.kind === 'unavailable' && runtime.attested && runtime.attestedExpiresAt !== undefined) {
+    const sink = runtime.sink;
     deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
     // Recovery stops on refusal; keep organization disablement distinct in the delivery result.
-    let disabledOutcome: Extract<SinkOutcome<unknown>, { kind: 'disabled' }> | undefined;
-    const recovered = await recoverAttestedDelivery({
+    const recovered = await recoverAttestedDelivery<RunReceipt, Extract<SinkOutcome<RunReceipt>, { kind: 'disabled' }>>({
       runId,
       payload: serializedEnvelope,
       expiresAt: runtime.attestedExpiresAt,
       receiptFirst: true,
       initialAttempts: 1,
       post: async (payload, signal) => {
-        const outcome = await runtime.sink!.postRun(envelope, { signal }, payload);
+        const outcome = await sink.postRun(envelope, { signal }, payload);
         if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
         if (outcome.kind === 'conflict') return { kind: 'conflict' };
-        if (outcome.kind === 'disabled') disabledOutcome = outcome;
-        if (outcome.kind === 'rejected' || outcome.kind === 'disabled') return { kind: 'rejected' };
+        if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };
+        if (outcome.kind === 'rejected') return { kind: 'rejected' };
         return { kind: 'unavailable' };
       },
-      receipt: async (_runId, signal) => runtime.sink!.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
+      receipt: async (_runId, signal) => sink.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
     });
     if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
     else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };
-    else if (recovered.kind === 'rejected' && disabledOutcome !== undefined) posted = disabledOutcome;
+    else if (recovered.kind === 'disabled') posted = recovered.value;
     else if (recovered.kind === 'rejected' || recovered.kind === 'receipt_rejected') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_refused', message: recovered.kind };
     else posted = { kind: 'unavailable', reason: `attested_recovery_${recovered.kind}` };
   }

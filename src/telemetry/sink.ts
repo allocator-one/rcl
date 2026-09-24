@@ -214,6 +214,10 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
   async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope = JSON.stringify(envelope)): Promise<SinkOutcome<RunReceipt>> {
+    if (serializedEnvelope !== JSON.stringify(envelope)) return {
+      kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch',
+      message: 'The supplied serialized envelope does not match the validated envelope',
+    };
     if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
       // Old servers silently discard unknown provenance. The attested credential
       // may read model-stats, but may not list runs or use an ordinary login.
