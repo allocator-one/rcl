@@ -425,6 +425,11 @@ ordinary credential is substituted. Failed delivery retains bounded, redacted
 transport diagnostics, including the initial error cause, with the original
 recovery evidence.
 
+Operators recovering the gate's encrypted GitHub artifact must use the
+[review evidence recovery runbook](https://github.com/allocator-one/rcl/blob/main/docs/review-evidence-recovery.md).
+Recovery requires the separately held, version-mapped private key and does not
+confer review or merge approval.
+
 ```yaml
 # .github/workflows/review_gate.yml (dispatched by Harness for one pull request)
 permissions:
@@ -1126,6 +1131,7 @@ gating:
   minModels: 2                    # distinct models for consensus gating
   verificationModel: google/gemini-3.8-flash  # direct-API only
   verificationTimeout: 60000      # ms per refutation call (8 candidates per batch, 3 in flight)
+  verificationPassTimeout: 180000 # ms for the complete verification queue
 
 # Output defaults
 output:

@@ -219,6 +219,7 @@ export class AnthropicAdapter implements ReviewAdapter {
     const outcome = await attemptWithRetries({
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries ?? 3,
+      signal: options.signal,
       isRetryable,
       attempt: async (signal) => {
         const response = await this.client.messages.create(

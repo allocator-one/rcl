@@ -27,7 +27,12 @@ export function sampleRunHeader(overrides: Partial<RunHeader> = {}): RunHeader {
     ],
     config_sha256: 'c'.repeat(64),
     thresholds: { min_consensus_score: 0.5, min_confidence: 0.4, dedupe_line_window: 10, jaccard_threshold: 0.3 },
-    gating: { mode: 'verified-consensus', min_models: 2, verification_timeout_ms: 60_000 },
+    gating: {
+      mode: 'verified-consensus',
+      min_models: 2,
+      verification_timeout_ms: 60_000,
+      verification_pass_timeout_ms: 180_000,
+    },
     context_files: [],
     runner: { kind: 'agent', agent: 'claude-code', host: 'mbp' },
     started_at: '2026-09-07T08:44:38.000Z',

@@ -275,7 +275,8 @@ export function writeStateIfUnchanged(gitCommonDir: string, sourceSha256: string
 }
 
 async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
-  // The caller uses the immutable directory captured by target ownership.
+  // Callers pass the immutable directory bound to target ownership; resolving
+  // it here normalizes platform aliases without consulting a mutable caller path.
   gitCommonDir = await realpath(resolve(gitCommonDir));
   const path = convergeRunStatePath(gitCommonDir, state.target);
   const stateDir = join(gitCommonDir, STATE_DIR);

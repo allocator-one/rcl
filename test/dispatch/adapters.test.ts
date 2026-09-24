@@ -263,6 +263,83 @@ describe('truncation detection', () => {
 // candidate. A truncated answer that arrives as a short success is parsed as
 // "no verdicts", which records every candidate unavailable and gates findings
 // the verifier was about to refute (RCL-60).
+describe('ask cancellation', () => {
+  it('anthropic aborts an ask when its caller cancels', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    const controller = new AbortController();
+    setClient(adapter, {
+      messages: {
+        create: (_params: unknown, options: { signal: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () =>
+              reject(new Anthropic.APIUserAbortError())
+            );
+          }),
+      },
+    });
+
+    const pending = adapter.ask('claude-opus-4-8', 's', 'u', {
+      ...OPTS,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'error',
+      error: 'Request cancelled',
+    });
+  });
+
+  it('openai aborts an ask when its caller cancels', async () => {
+    const adapter = new OpenAIAdapter('test-key');
+    const controller = new AbortController();
+    setClient(adapter, {
+      chat: {
+        completions: {
+          create: (_params: unknown, options: { signal: AbortSignal }) =>
+            new Promise((_resolve, reject) => {
+              options.signal.addEventListener('abort', () =>
+                reject(new OpenAI.APIUserAbortError())
+              );
+            }),
+        },
+      },
+    });
+
+    const pending = adapter.ask('gpt-5.5', 's', 'u', {
+      ...OPTS,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'error',
+      error: 'Request cancelled',
+    });
+  });
+
+  it('google aborts an ask when its caller cancels', async () => {
+    const adapter = new GoogleAdapter('test-key');
+    const controller = new AbortController();
+    setClient(adapter, {
+      models: {
+        generateContent: (params: { config: { abortSignal: AbortSignal } }) =>
+          new Promise((_resolve, reject) => {
+            params.config.abortSignal.addEventListener('abort', () => reject(new Error('aborted')));
+          }),
+      },
+    });
+
+    const pending = adapter.ask('gemini-2.5-pro', 's', 'u', { ...OPTS, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'error',
+      error: 'Request cancelled',
+    });
+  });
+});
+
 describe('ask: truncation is an error, not a short answer', () => {
   it('anthropic: stop_reason max_tokens fails the answer', async () => {
     const adapter = new AnthropicAdapter('test-key');
