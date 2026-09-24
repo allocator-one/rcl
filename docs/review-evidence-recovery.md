@@ -5,6 +5,10 @@ one authenticated CMS ciphertext. The GitHub artifact is public to repository
 readers, but its contents are recoverable only with the separately held private
 key. Use this runbook only from an approved operator workstation. Do not run it
 in GitHub Actions, paste key material into a terminal, or enable shell tracing.
+The four shell blocks form one Bash program: put them in one mode-0700 local
+file and run that file with Bash in one noninteractive process. Do not split
+the blocks across shells; the variables and cleanup trap must remain active
+until recovery completes.
 
 Recovery produces a new read-only directory containing byte-for-byte copies of
 the retained originals. It does not deliver evidence to Harness, change review
@@ -46,7 +50,7 @@ not change GitHub, Secret Manager, IAM, the workflow, or Harness.
 Set the receipt values explicitly. The expected ID and digest must come from
 the workflow step summary, not from the artifact API response being checked.
 
-```sh
+```bash
 set -euo pipefail
 set +x
 umask 077
@@ -76,19 +80,19 @@ RCL_RECOVERY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rcl-review-recovery.XXXXXX")"
 PRIVATE_KEY="$RCL_RECOVERY_ROOT/recovery-key.pem"
 cleanup() {
   chmod 600 "$PRIVATE_KEY" 2>/dev/null || true
-  rm -f "$PRIVATE_KEY"
+  rm -f "$PRIVATE_KEY" "$RCL_RECOVERY_ROOT/recovered.tar.partial"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-gh api \
+gh api --paginate --slurp \
   -H 'Accept: application/vnd.github+json' \
   -H 'X-GitHub-Api-Version: 2022-11-28' \
   "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" |
   jq --arg name "$ARTIFACT_NAME" '
-    [.artifacts[] | select(.name == $name)] |
+    [.[] | .artifacts[] | select(.name == $name)] |
     if length == 1 then .[0]
     else error("expected exactly one artifact named " + $name)
     end
@@ -123,7 +127,7 @@ The artifact ZIP must contain exactly one regular file named
 `review-evidence.cms`. Validate names, type, size, CRC, and content before
 writing that file. Do not use a general-purpose unzip command.
 
-```sh
+```bash
 python3 - "$RCL_RECOVERY_ROOT/artifact.zip" "$RCL_RECOVERY_ROOT/review-evidence.cms" <<'PYZIP'
 import os
 import shutil
@@ -169,7 +173,7 @@ openssl cms -cmsout -inform DER \
 CERTIFICATE=.github/review-evidence-recovery.pem
 EXPECTED_CERT_FINGERPRINT='32:8A:57:76:11:C1:EC:F0:AA:8E:A0:9A:A4:75:EF:C0:96:F6:95:59:10:E5:F4:89:E8:7F:C3:F3:E0:1D:69:2B'
 ACTUAL_CERT_FINGERPRINT="$(openssl x509 -in "$CERTIFICATE" -noout -fingerprint -sha256 |
-  sed 's/^sha256 Fingerprint=//')"
+  sed -E 's/^[Ss][Hh][Aa]256 Fingerprint=//')"
 test "$ACTUAL_CERT_FINGERPRINT" = "$EXPECTED_CERT_FINGERPRINT"
 ```
 
@@ -179,7 +183,7 @@ Do this only with approved access. Redirect the secret payload directly to a
 mode-0600 file; never place it in an environment variable, command argument,
 log, clipboard, shell trace, or GitHub Actions job.
 
-```sh
+```bash
 GCP_PROJECT=2989947634
 SECRET_NAME=rcl-review-evidence-recovery-private-key-v1
 SECRET_VERSION=1
@@ -188,7 +192,7 @@ SECRET_VERSION=1
   --secret "$SECRET_NAME" \
   --project "$GCP_PROJECT" > "$PRIVATE_KEY")
 chmod 600 "$PRIVATE_KEY"
-KEY_MODE="$(stat -f '%Lp' "$PRIVATE_KEY" 2>/dev/null || stat -c '%a' "$PRIVATE_KEY")"
+KEY_MODE="$(stat -c '%a' "$PRIVATE_KEY" 2>/dev/null || stat -f '%Lp' "$PRIVATE_KEY")"
 test "$KEY_MODE" = 600
 
 CERT_PUBLIC_KEY_SHA="$(openssl x509 -in "$CERTIFICATE" -pubkey -noout |
@@ -219,7 +223,7 @@ roots, an oversized manifest, undeclared files, size differences, and SHA-256
 differences. It validates every retained byte before creating the output
 directory, then writes each original once with mode 0400 and rechecks its hash.
 
-```sh
+```bash
 python3 - "$RCL_RECOVERY_ROOT/recovered.tar" "$RCL_RECOVERY_ROOT/validated-originals" <<'PYMANIFEST'
 import hashlib
 import json
@@ -233,6 +237,9 @@ source = Path(sys.argv[1])
 destination = Path(sys.argv[2])
 staging = destination.with_name(destination.name + ".partial")
 manifest_limit = 1024 * 1024
+maximum_archive_bytes = 1_100_000_000
+maximum_members = 10_000
+maximum_member_bytes = 1_100_000_000
 digest_pattern = re.compile(r"[0-9a-f]{64}")
 
 def safe_name(name):
@@ -269,18 +276,27 @@ def unique_object(pairs):
     return value
 
 with tarfile.open(source, mode="r:") as archive:
+    if source.stat().st_size > maximum_archive_bytes:
+        raise SystemExit("archive exceeds the recovery bound")
     members = archive.getmembers()
+    if len(members) > maximum_members:
+        raise SystemExit("archive contains too many members")
     names = [member.name for member in members]
+    members_by_name = {member.name: member for member in members}
     if len(names) != len(set(names)):
         raise SystemExit("archive contains duplicate member names")
     if any(not safe_name(name) for name in names):
         raise SystemExit("archive contains an unsafe or non-canonical path")
     if any(not member.isreg() for member in members):
         raise SystemExit("archive contains a non-regular member")
+    if any(member.issparse() for member in members):
+        raise SystemExit("archive contains a sparse member")
+    if any(member.size > maximum_member_bytes for member in members):
+        raise SystemExit("archive member exceeds the recovery bound")
     if names.count("MANIFEST.json") != 1:
         raise SystemExit("archive must contain one MANIFEST.json")
 
-    manifest_member = archive.getmember("MANIFEST.json")
+    manifest_member = members_by_name["MANIFEST.json"]
     if manifest_member.size > manifest_limit:
         raise SystemExit("manifest exceeds 1 MiB")
     manifest_stream = archive.extractfile(manifest_member)
@@ -297,6 +313,7 @@ with tarfile.open(source, mode="r:") as archive:
         raise SystemExit("manifest files must be an array")
 
     declarations = {}
+    declared_bytes = 0
     for entry in manifest["files"]:
         if not isinstance(entry, dict) or set(entry) != {"bytes", "path", "sha256"}:
             raise SystemExit("manifest file entry has unexpected fields")
@@ -311,6 +328,9 @@ with tarfile.open(source, mode="r:") as archive:
             raise SystemExit(f"manifest path is duplicated: {path}")
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             raise SystemExit(f"manifest size is invalid: {path}")
+        declared_bytes += size
+        if size > maximum_member_bytes or declared_bytes > maximum_archive_bytes:
+            raise SystemExit("manifest exceeds the recovery bound")
         if not isinstance(digest, str) or digest_pattern.fullmatch(digest) is None:
             raise SystemExit(f"manifest digest is invalid: {path}")
         declarations[path] = (size, digest)
@@ -319,7 +339,7 @@ with tarfile.open(source, mode="r:") as archive:
     if retained_names != set(declarations):
         raise SystemExit("manifest and archive member sets differ")
     for name, (expected_size, expected_digest) in declarations.items():
-        member = archive.getmember(name)
+        member = members_by_name[name]
         if member.size != expected_size:
             raise SystemExit(f"manifest size differs: {name}")
         if hash_member(archive, member) != expected_digest:
@@ -329,7 +349,7 @@ with tarfile.open(source, mode="r:") as archive:
         raise SystemExit("recovery output already exists")
     staging.mkdir(mode=0o700, parents=False, exist_ok=False)
     for name in sorted(declarations):
-        member = archive.getmember(name)
+        member = members_by_name[name]
         output = staging.joinpath(*PurePosixPath(name).parts)
         output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor = os.open(
