@@ -335,11 +335,6 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   })) {
     throw new ConvergeRunStateError('Invalid report identity; refusing legacy matching for a malformed report key.');
   }
-  const hasReportIdentity = options.findings.some((finding) => REPORT_IDENTITY.test(finding.identity ?? ''));
-  const hasLegacyIdentity = options.findings.some((finding) => !REPORT_IDENTITY.test(finding.identity ?? ''));
-  if (hasReportIdentity && hasLegacyIdentity) {
-    throw new ConvergeRunStateError('Mixed report and legacy finding identities are not supported in one report.');
-  }
   return { target, runId };
 }
 
@@ -413,7 +408,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // describing different claims; one native identity cannot carry both verdicts.
   const claimedThisRound = new Map<string, string>();
 
-  for (const finding of options.findings) {
+  for (const [findingIndex, finding] of options.findings.entries()) {
     const reportIdentity = REPORT_IDENTITY.test(finding.identity ?? '')
       ? finding.identity
       : undefined;
@@ -424,9 +419,8 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       if (claimedBy !== undefined && claimedBy !== reportIdentity) {
         return false;
       }
-
-      return reportIdentity === undefined ||
-        state.findings[entry.key]?.claimTextSha256 === textDigest;
+      const storedDigest = state.findings[entry.key]?.claimTextSha256;
+      return storedDigest === undefined ? reportIdentity === undefined : storedDigest === textDigest;
     });
     const matched = matchFinding(finding, candidates, lineWindow);
 
@@ -449,14 +443,14 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       state.findings[key] = created;
       severities[key] = finding.severity;
       entries.push(created);
-      if (reportIdentity) claimedThisRound.set(key, reportIdentity);
+      claimedThisRound.set(key, reportIdentity ?? `legacy:${findingIndex}`);
       counts.new++;
       annotated.push({ identity: key, status: 'new', finding });
       continue;
     }
 
     const entry = state.findings[matched.key]!;
-    if (reportIdentity) claimedThisRound.set(entry.key, reportIdentity);
+    claimedThisRound.set(entry.key, reportIdentity ?? `legacy:${findingIndex}`);
     // Freeze a legacy verdict's implicit severity before updating sightings;
     // later reports must not reinterpret that dismissal as critical.
     const severityAtVerdict = entry.verdictSeverity ?? entry.severity;

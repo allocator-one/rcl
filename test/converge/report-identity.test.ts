@@ -66,20 +66,20 @@ describe('report identity through native classification and telemetry', () => {
     }
   });
 
-  it('refuses a mixed modern and legacy report before any state is written', async () => {
+  it('keeps mixed modern and legacy claims one-to-one', async () => {
     const [modern, legacy] = consensus([42, 42]).map((finding, index) => ({
       ...finding,
       title: index === 0 ? 'Modern claim' : 'Legacy claim',
       description: index === 0 ? 'Modern report identity owns this entry.' : 'Legacy input must receive its own entry.',
     }));
 
-    await expect(processRoundReport({
+    const result = await processRoundReport({
       gitCommonDir: dir,
       target: 'mixed-identity-claims',
       round: 1,
       findings: [modern!, { ...legacy!, identity: undefined }],
-    })).rejects.toThrow(/mixed report and legacy/i);
-    expect(await loadConvergeRunState(dir, 'mixed-identity-claims')).toBeUndefined();
+    });
+    expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
   });
 
   it('continues to accept all-legacy reports for compatibility', async () => {
