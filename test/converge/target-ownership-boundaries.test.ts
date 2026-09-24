@@ -226,9 +226,9 @@ it('keeps attempt state in the canonical directory when a caller symlink is reta
   }
 });
 
-it('keeps attempt-accounting timing separate from target-ownership timing', async () => {
-  await claimConvergeAttempt({ gitCommonDir: dir, target, lockTimeoutMs: 25, lockRetryMs: 1 });
-  expect(faults.targetTiming).toEqual({ lockTimeoutMs: 30_000, lockRetryMs: undefined });
+it('preserves legacy caller timing for target ownership when dedicated timing is absent', async () => {
+  await claimConvergeAttempt({ gitCommonDir: dir, target, lockTimeoutMs: 1_000, lockRetryMs: 1 });
+  expect(faults.targetTiming).toEqual({ lockTimeoutMs: 1_000, lockRetryMs: 1 });
 });
 
 it('uses dedicated caller timing while waiting for target ownership', async () => {
@@ -238,6 +238,8 @@ it('uses dedicated caller timing while waiting for target ownership', async () =
   const claim = claimConvergeAttempt({
     gitCommonDir: dir,
     target,
+    lockTimeoutMs: 10,
+    lockRetryMs: 2,
     targetLockTimeoutMs: 25,
     targetLockRetryMs: 1,
   });
