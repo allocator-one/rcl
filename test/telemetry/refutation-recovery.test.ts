@@ -82,6 +82,7 @@ function server(existing?: RunEnvelope) {
 describe('reviewed refutation recovery', () => {
   it('plans a valid retained envelope above 2MB without losing rows', async () => {
     const s = await source();
+    const baseFindingCount = s.report.findings.length + (s.report.belowThresholdFindings?.length ?? 0);
     const seed = s.report.findings[0]!;
     for (let index = 0; index < 130; index++) {
       s.report.findings.push({ ...structuredClone(seed), id: `large-${index}`, identity: `identity-${index.toString().padStart(12, '0')}`, description: 'x'.repeat(18_000) });
@@ -93,7 +94,7 @@ describe('reviewed refutation recovery', () => {
     const remote = server();
     const manifest = await planRecovery(inventory, remote.sink);
     expect(manifest.plans[0]).toMatchObject({ action: 'import_history' });
-    expect(manifest.plans[0]!.findings).toHaveLength(132);
+    expect(manifest.plans[0]!.findings).toHaveLength(baseFindingCount + 130);
     expect(remote.requests.every((request) => request.method === 'GET')).toBe(true);
   });
   it('discovers modern reports and deduplicates copies without using their repeated raw finding ids', async () => {
