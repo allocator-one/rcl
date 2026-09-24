@@ -124,9 +124,12 @@ it('rejects duplicate-key manifests instead of accepting the last assertion', as
   await expect(f.apply()).rejects.toThrow('ambiguous');
 });
 
-it('preview creates no audit, lock or native changes and rejects symlink sources', async () => {
+it('preview creates no audit, lock or native changes', async () => {
   const f=await fixture(), before=(await readdir(f.dir)).sort(), state=await readFile(f.statePath), attempts=await readFile(f.attemptPath);
   await previewRoundGap(f.input,f.dir); expect((await readdir(f.dir)).sort()).toEqual(before); expect(await readFile(f.statePath)).toEqual(state); expect(await readFile(f.attemptPath)).toEqual(attempts);
+});
+it.runIf(process.platform !== 'win32')('rejects symlink sources', async () => {
+  const f=await fixture();
   const alias=join(f.dir,'report-link'); await symlink(f.input.reportPath,alias);
   await expect(previewRoundGap({...f.input,reportPath:alias},f.dir)).rejects.toThrow('symlink_file');
 });
