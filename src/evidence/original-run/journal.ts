@@ -26,14 +26,10 @@ export function serializeRecoveryDocument(value: unknown, limit = Infinity): str
 }
 /** Exclusive named publication; a failed write is retained and never overwritten. */
 export async function writeExclusive(path: string, value: unknown, limit = Infinity): Promise<void> {
-  await writeExclusiveBytes(path, Buffer.from(serializeRecoveryDocument(value, limit)));
-}
-/** Exact original bytes with the same exclusive, fsynced recovery publication contract. */
-export async function writeExclusiveBytes(path: string, bytes: Buffer): Promise<void> {
-  const pinned = Buffer.from(bytes);
+  const text = serializeRecoveryDocument(value, limit);
   const file = platformPath(path); await parentSafe(file);
   const handle = await open(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(pinned); await handle.sync(); } finally { await handle.close(); }
+  try { await handle.writeFile(text); await handle.sync(); } finally { await handle.close(); }
   await syncDirectory(dirname(file));
 }
 export { withRecoveryLock } from './lock.js';

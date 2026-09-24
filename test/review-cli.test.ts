@@ -351,35 +351,22 @@ describe('rcl review — --attest (RCL-40)', () => {
     expect(result.stderr).toMatch(/--attest contradicts --no-telemetry/);
   });
 
-  it.each([
-    {
-      source: 'the environment',
-      expected: 'findings',
-      prepare: (_repo: string) => ({ args: [] as string[], env: { RCL_TELEMETRY: 'findings' } }),
-    },
-    {
-      source: 'the project config',
-      expected: 'off',
-      prepare: (repo: string) => {
-        writeFileSync(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n');
-        return { args: [] as string[], env: { RCL_TELEMETRY: '' } };
-      },
-    },
-    {
-      source: 'the explicitly named config',
-      expected: 'envelope',
-      prepare: (repo: string) => {
-        writeFileSync(join(repo, 'alt.yml'), 'harness:\n  telemetry: envelope\n');
-        return { args: ['--config', 'alt.yml'], env: { RCL_TELEMETRY: '' } };
-      },
-    },
-  ])('needs the full telemetry level from $source before any token is requested', ({ expected, prepare }) => {
+  it('needs the full telemetry level, read from the environment and the project config before any token is requested', () => {
     const repo = tempRepository();
-    const { args, env } = prepare(repo);
-    const result = runRcl(['review', 'allocator-one/rcl#42', '--attest', ...args], repo, env);
+    const reduced = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo, { RCL_TELEMETRY: 'findings' });
+    expect(reduced.status).toBe(1);
+    expect(reduced.stderr).toMatch(/--attest needs the telemetry level full \(resolved: findings\)/);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toMatch(new RegExp(`--attest needs the telemetry level full \\(resolved: ${expected}\\)`));
+    writeFileSync(join(repo, '.review-council.yml'), 'harness:\n  telemetry: off\n');
+    const off = runRcl(['review', 'allocator-one/rcl#42', '--attest'], repo);
+    expect(off.status).toBe(1);
+    expect(off.stderr).toMatch(/--attest needs the telemetry level full \(resolved: off\)/);
+
+    // The file --config names is the one read, before any token is requested.
+    writeFileSync(join(repo, 'alt.yml'), 'harness:\n  telemetry: envelope\n');
+    const alt = runRcl(['review', 'allocator-one/rcl#42', '--attest', '--config', 'alt.yml'], repo, { RCL_TELEMETRY: '' });
+    expect(alt.status).toBe(1);
+    expect(alt.stderr).toMatch(/--attest needs the telemetry level full \(resolved: envelope\)/);
   });
 });
 

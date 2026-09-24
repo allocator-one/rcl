@@ -257,48 +257,6 @@ rcl converge-verdict --target rcl-30 --round 2 \
   --fixed 9787c6ea72ae778c --dismissed 'd2baf9675eb450f0=guard already exists'
 ```
 
-### `rcl converge-gap`
-
-A paid attempt and an admitted report round are separate counters. If an original
-later report already carries round 3 while native history ends at round 1, preserve
-that original. Do not relabel it, create an empty round 2, reset budgets, or launch
-reviewers again for bookkeeping.
-
-For one explicitly evidenced missing terminal report, preview a local audit:
-
-```bash
-rcl converge-gap --preview --manifest gap.json --target rcl-81 \
-  --gap-round 2 --admitting-round 3 --attempt 2 --run <original-run-uuid> \
-  --report original-r3.json --report-sha256 <original-json-sha256> \
-  --incomplete terminal-incomplete.md --incomplete-sha256 <original-evidence-sha256>
-rcl converge-gap --apply --manifest gap.json --manifest-sha256 <preview-manifest-sha256>
-# After interruption, reuse exactly the reviewed manifest and original sources:
-rcl converge-gap --resume --manifest gap.json --manifest-sha256 <preview-manifest-sha256>
-rcl converge-report --target rcl-81 --report original-r3.json --round 3 --json
-```
-
-Preview reads bounded original files and the native/attempt ledgers; its only write
-is the requested exclusive manifest. An optional `--evidence <json-path>` supplies
-an array of additional `{ "path": "...", "sha256": "..." }` selections. Apply and
-resume accept only that manifest and its exact byte digest. They share target
-ownership with ordinary writers, retain exact original native, attempt and source
-bytes, and append audit checkpoints before admission becomes available. They leave
-rounds, findings, verdicts, severities, attempts used and caps unchanged. The
-controller exit stays `unknown`; supplied files do not prove global absence.
-Neither audit mode flushes the outbox or sends server events.
-
-This version supports one missing ordinal immediately before the selected original
-report, with an explicit spent record for both ordinals and every earlier ordinary
-round present from round 1. Histories with earlier gaps, including audited gaps,
-are unsupported. Migrated totals without those records, multiple gaps, altered
-sources and unsupported storage refuse.
-The later report keeps its original round, run and contents. Later discovery of
-the missing report needs separate explicit evidence recovery; an ordinary empty
-report cannot fill the reserved gap. Audit is local history, never reviewer health,
-convergence or gate approval. Existing v1 clients preserve its additive metadata
-and still refuse an unadmitted jump, but do not validate the new receipt protocol.
-Use this version for gap admission and recovery; no new backend capability is claimed.
-
 ---
 
 Structured findings include the recorded verifier model and explanation, when present,
@@ -511,7 +469,7 @@ rcl evidence recover-run --preview --manifest original-run.json \
 
 Markdown is optional; its path and digest must be supplied together. The report
 must retain its complete modern header, explicit finding identities, and an exact
-PR or PR-bound patch target. Original run UUID bytes are preserved; only generated operation IDs are canonical lowercase. Recovery
+PR or PR-bound patch target. Original UUIDs must already be lowercase; recovery
 refuses other spellings instead of rewriting identity. Headerless imports, CI/attested/backfill originals,
 unknown mode fields, missing sources and ambiguous bindings refuse. The explicit
 asserted mode is an **operator assertion**, checked against the retained non-CI

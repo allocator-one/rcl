@@ -23,7 +23,7 @@ it('rereads an actual choosing-to-ready inode replacement between lstat and open
   let ready!: () => void; controls.ready = new Promise<void>(resolve => { ready = resolve; });
   let active = 0; let maximum = 0; let completed = 0; let secondTicket = 0;
   const work = async () => { maximum = Math.max(maximum, ++active); await new Promise(r => setImmediate(r)); active--; completed++; };
-  const first = withRecoveryLock(root, identity, work, { legacy: false, onEvent: async event => {
+  const first = withRecoveryLock(root, identity, work, { onEvent: async event => {
     if (event.stage === 'choosing_published') {
       controls.path = join(platformPath(root), `${sha256(identity)}.bakery`, `${event.registration.token}.json`);
       choose(); await holdChoosing;
@@ -32,7 +32,7 @@ it('rereads an actual choosing-to-ready inode replacement between lstat and open
   } });
   try {
     await chosen; controls.armed = true;
-    const second = withRecoveryLock(root, identity, work, { legacy: false, onEvent: async event => {
+    const second = withRecoveryLock(root, identity, work, { onEvent: async event => {
       if (event.stage === 'ticket_selected') secondTicket = event.registration.ticket!;
     } });
     await Promise.all([first, second]);

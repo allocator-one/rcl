@@ -39,25 +39,12 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 async function root() { const path = await mkdtemp(join(tmpdir(), 'rcl-lock-publication-')); roots.push(path); return path; }
-async function registryEntries(path: string) {
-  try { return await readdir(path); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
-}
 
-async function expectPublicationFailure(fault: string, expectedEntries: string[] | undefined) {
+it.each(['write', 'choosing file sync', 'choosing publication', 'ready file sync', 'ready publication', 'ready directory sync'])('enters no work after %s fails and permits a clean retry', async fault => {
   const path = await root(); controls.fault = fault; const work = vi.fn();
   await expect(withRecoveryLock(path, 'run', work)).rejects.toMatchObject({ code: 'EROFS' });
-  expect(work).not.toHaveBeenCalled();
-  expect(await registryEntries(join(path, `${sha256('run')}.bakery`))).toEqual(expectedEntries);
+  expect(work).not.toHaveBeenCalled(); expect(await readdir(join(path, `${sha256('run')}.bakery`))).toEqual([]);
   await expect(withRecoveryLock(path, 'run', async () => 'retry')).resolves.toBe('retry');
-}
-
-it.each(['write', 'choosing file sync', 'choosing publication'])('fails before creating the bakery registry when legacy %s fails', async fault => {
-  await expectPublicationFailure(fault, undefined);
-});
-
-it.each(['ready file sync', 'ready publication', 'ready directory sync'])('leaves an empty bakery registry after %s fails', async fault => {
-  await expectPublicationFailure(fault, []);
 });
 
 it.each(['release unlink', 'release sync'])('does not report successful completion after %s fails', async fault => {
