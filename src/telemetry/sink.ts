@@ -22,7 +22,7 @@ import type { WireEvent } from './events.js';
 export const REQUEST_TIMEOUT_MS = 10_000;
 /** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
 export const MAX_RESPONSE_BYTES = 64 * 1024;
-/** A read carries a run's findings and calls (a 2 MB envelope's worth at most) or a gate status; anything past this is not one. */
+/** A read carries a run's findings and calls (up to the bounded evidence envelope) or a gate status; anything past this is not one. */
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {

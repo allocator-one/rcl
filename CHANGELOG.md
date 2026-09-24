@@ -2,6 +2,8 @@
 
 ## 3.8.4 - 2026-09-24
 
+- Raise the complete evidence-envelope transport limit to 4,000,000 bytes while retaining 2,000,000-character limits for individual verification diagnostics. Share the total limit with historical recovery planning so valid retained envelopes are not rejected before their immutable artifacts can be assessed (RCL-88; requires compatible backend acceptance).
+
 - Recover transient attested envelope delivery inside the same live workflow by
   reading the exact run receipt first and replaying byte-identical evidence only
   after an explicit 404. Bound recovery to three POSTs and a monotonic 20-second
