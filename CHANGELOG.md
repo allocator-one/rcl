@@ -1,12 +1,19 @@
 # Changelog
 
-## 3.8.4 - 2026-09-24
+## 4.0.0 - 2026-09-24
 
 - Keep distinct modern report findings at the same source location separately
   addressable in convergence. Match prior native identities only when both
   location and the claim text digest agree; older entries without that digest
   receive new identities instead of inheriting an uncertain verdict. Refuse
   malformed report-scoped keys before they can enter legacy matching (RCL-87).
+
+### Breaking change
+
+- `converge-report` now accepts report-scoped identities only in canonical
+  lowercase `report:<uuid>:<16-hex-digest>` form. Regenerate malformed
+  caller-supplied report keys before submitting the report. This guard does
+  not reset or rewrite existing convergence history.
 
 ## 3.8.3 - 2026-09-24
 
