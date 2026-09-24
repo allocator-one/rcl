@@ -222,16 +222,21 @@ export function reviewFromParse(opts: {
  */
 export function linkAbortSignal(
   controller: AbortController,
-  external: AbortSignal | undefined
+  external: AbortSignal | undefined,
+  onAbort: () => void = () => {}
 ): () => void {
   if (!external) return () => {};
   if (external.aborted) {
+    onAbort();
     controller.abort();
     return () => {};
   }
-  const onAbort = (): void => controller.abort();
-  external.addEventListener('abort', onAbort, { once: true });
-  return () => external.removeEventListener('abort', onAbort);
+  const abort = (): void => {
+    onAbort();
+    controller.abort();
+  };
+  external.addEventListener('abort', abort, { once: true });
+  return () => external.removeEventListener('abort', abort);
 }
 
 /**
@@ -280,6 +285,51 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleepUntilRetry(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const finish = (): void => {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+
+    signal.addEventListener('abort', finish, { once: true });
+    if (signal.aborted) {
+      finish();
+      return;
+    }
+    timeoutHandle = setTimeout(finish, ms);
+  });
+}
+
+const ATTEMPT_ABORTED = Symbol('attempt aborted');
+
+function awaitAttempt<T>(attempt: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (outcome: 'resolve' | 'reject', value: T | unknown): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      if (outcome === 'resolve') resolve(value as T);
+      else reject(value);
+    };
+    const onAbort = (): void => finish('reject', ATTEMPT_ABORTED);
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+    }
+    attempt.then(
+      (value) => finish('resolve', value),
+      (error: unknown) => finish('reject', error)
+    );
+  });
+}
+
 export type AttemptOutcome<T> =
   | { ok: true; value: T }
   | { ok: false; timedOut: boolean; error: string };
@@ -293,24 +343,46 @@ export type AttemptOutcome<T> =
 export async function attemptWithRetries<T>(opts: {
   timeoutMs: number;
   maxRetries: number;
+  signal?: AbortSignal;
   isRetryable: (err: unknown) => boolean;
   attempt: (signal: AbortSignal) => Promise<T>;
 }): Promise<AttemptOutcome<T>> {
   const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), opts.timeoutMs);
+  let abortCause: 'cancelled' | 'timeout' | undefined;
+  const timeoutHandle = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    abortCause = 'timeout';
+    controller.abort();
+  }, opts.timeoutMs);
+  const unlinkAbort = linkAbortSignal(controller, opts.signal, () => {
+    abortCause ??= 'cancelled';
+  });
   let lastErr: unknown = new Error('no attempts made');
+  const abortOutcome = (): AttemptOutcome<T> => {
+    const timedOut = abortCause === 'timeout';
+    return {
+      ok: false,
+      timedOut,
+      error: timedOut ? 'Request timed out' : 'Request cancelled',
+    };
+  };
+  if (controller.signal.aborted) {
+    clearTimeout(timeoutHandle);
+    unlinkAbort();
+    return abortOutcome();
+  }
 
   try {
     for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
       try {
-        return { ok: true, value: await opts.attempt(controller.signal) };
+        const value = await awaitAttempt(opts.attempt(controller.signal), controller.signal);
+        return controller.signal.aborted ? abortOutcome() : { ok: true, value };
       } catch (err) {
         lastErr = err;
-        if (controller.signal.aborted) {
-          return { ok: false, timedOut: true, error: 'Request timed out' };
-        }
+        if (controller.signal.aborted) return abortOutcome();
         if (opts.isRetryable(err) && attempt < opts.maxRetries) {
-          await sleep(retryDelay(attempt));
+          await sleepUntilRetry(retryDelay(attempt), controller.signal);
+          if (controller.signal.aborted) return abortOutcome();
           continue;
         }
         break;
@@ -318,6 +390,7 @@ export async function attemptWithRetries<T>(opts: {
     }
   } finally {
     clearTimeout(timeoutHandle);
+    unlinkAbort();
   }
 
   const error = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);

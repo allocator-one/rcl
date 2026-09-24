@@ -2,6 +2,15 @@
 
 ## 3.8.2 - 2026-09-24
 
+- Bound the complete single-model verification queue to three minutes while
+  preserving the existing stricter severity fallback when that deadline is
+  reached. Cap each newly started verifier batch to the remaining whole-pass
+  budget, normalize the remaining timeout for integer-only provider SDKs, and
+  stop starting work after expiry (RCL-85).
+- Report post-review stages and bounded verifier batch progress so completed
+  reviewer calls can be distinguished from consensus, verification, report
+  assembly and artifact-write failures. Record the effective whole-pass bound
+  in terminal report evidence.
 - **Missing-report gap recovery** (RCL-81): add `rcl converge-gap --preview`,
   `--apply`, and `--resume` for one missing report immediately before a retained
   original report. Recovery binds immutable evidence and native snapshots,
