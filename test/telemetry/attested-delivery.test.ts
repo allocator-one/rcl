@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -165,6 +166,74 @@ describe('the run-bound credential of --attest', () => {
     expect(postBodies[1]).toBe(postBodies[0]);
     expect(requests.filter((request) => request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`))).toHaveLength(1);
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+  });
+
+  it('binds a recovered receipt to the immutable accepted envelope and resumes artifacts without another POST', async () => {
+    const result = sampleResult();
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) {
+        const posted = JSON.parse(requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!) as { artifacts_declared: unknown };
+        return { status: 200, body: { data: {
+          id: result.run!.id,
+          url: `https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`,
+          envelope_sha256: createHash('sha256').update(requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!, 'utf8').digest('hex'),
+          artifacts_declared: posted.artifacts_declared,
+        }, meta: { status: 'existing' } } };
+      }
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        return new TypeError('lost acknowledgement');
+      }
+      if (request.url.includes('/artifacts/')) {
+        const kind = request.url.slice(request.url.lastIndexOf('/') + 1);
+        return { status: 201, body: { data: { kind, sha256: createHash('sha256').update(request.body ?? '', 'utf8').digest('hex') } } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.5', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
+    expect(posts).toBe(1);
+    expect(requests.filter(request => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(1);
+    expect(requests.filter(request => request.url.includes('/artifacts/')).map(request => request.method)).toEqual(['PUT', 'PUT']);
+  });
+
+  it('rejects a recovered receipt for changed bytes despite the same run identity and declarations', async () => {
+    const result = sampleResult();
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) {
+        const posted = JSON.parse(requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!) as { artifacts_declared: unknown };
+        return { status: 200, body: { data: {
+          id: result.run!.id,
+          url: `https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`,
+          envelope_sha256: createHash('sha256').update(`${requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!} changed`, 'utf8').digest('hex'),
+          artifacts_declared: posted.artifacts_declared,
+        }, meta: { status: 'existing' } } };
+      }
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        return new TypeError('lost acknowledgement');
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.5', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4 });
+    expect(posts).toBe(1);
+    expect(requests.filter(request => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(1);
+    expect(requests.some(request => request.url.includes('/artifacts/'))).toBe(false);
   });
 
   it('preserves disabled status and private originals when the replay disables review evidence', async () => {
