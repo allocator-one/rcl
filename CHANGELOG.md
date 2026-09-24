@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.8.4 - 2026-09-24
+
+- Clear old dismissal explanations when recording a new fixed verdict. Add
+  `converge-verdict --fixed-reason key=reason` to record the current fix explanation
+  through the existing native state and event path. Reject duplicate, conflicting,
+  empty or orphaned reason arguments before changing state (RCL-89).
+
 ## 3.8.3 - 2026-09-24
 
 - Supersede the withdrawn 3.8.2 release with its bounded terminal-report

@@ -700,6 +700,15 @@ program
     [] as string[]
   )
   .option(
+    '--fixed-reason <key=reason>',
+    'Current fix explanation for an identity also passed to --fixed (repeatable)',
+    (val: string, prev: string[]) => {
+      prev.push(val);
+      return prev;
+    },
+    [] as string[]
+  )
+  .option(
     '--dismissed <key=reason>',
     'Finding identity dismissed, with reason (repeatable)',
     (val: string, prev: string[]) => {
@@ -714,6 +723,7 @@ program
       target?: string | boolean;
       round?: string | boolean;
       fixed: string[];
+      fixedReason: string[];
       dismissed: string[];
       json?: boolean;
     }) => {
@@ -725,8 +735,21 @@ program
         if (!Number.isSafeInteger(round) || round < 1) {
           throw new ConvergeRunStateError('--round must be a positive integer.');
         }
+        const fixedReasons = new Map<string, string>();
+        for (const assignment of opts.fixedReason) {
+          const eq = assignment.indexOf('=');
+          const key = assignment.slice(0, eq);
+          const reason = assignment.slice(eq + 1);
+          if (eq < 1 || reason.trim() === '' || !opts.fixed.includes(key)) {
+            throw new ConvergeRunStateError('--fixed-reason requires key=reason for an identity also passed to --fixed.');
+          }
+          if (fixedReasons.has(key)) {
+            throw new ConvergeRunStateError(`Duplicate --fixed-reason for finding "${key}".`);
+          }
+          fixedReasons.set(key, reason);
+        }
         const verdicts = [
-          ...opts.fixed.map((key) => ({ key, verdict: 'fixed' as const })),
+          ...opts.fixed.map((key) => ({ key, verdict: 'fixed' as const, reason: fixedReasons.get(key) })),
           ...opts.dismissed.map((entry) => {
             const eq = entry.indexOf('=');
             return eq === -1
@@ -740,6 +763,9 @@ program
         ];
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
+        }
+        if (new Set(verdicts.map(({ key }) => key)).size !== verdicts.length) {
+          throw new ConvergeRunStateError('Pass each finding identity only once, as either fixed or dismissed.');
         }
         const { entries: updated, resolution } = await recordVerdicts({
           gitCommonDir: await resolveGitCommonDir(),
@@ -789,7 +815,7 @@ program
               verdicts: updated.map((e) => ({
                 identity_key: e.key,
                 verdict: e.verdict,
-                // A dismissal reason is user-authored prose: scrubbed like every other free text that leaves the machine.
+                // Verdict reasons are user-authored prose: scrubbed like every other free text that leaves the machine.
                 ...(e.verdictReason !== undefined ? { reason: scrubText(e.verdictReason, 500) } : {}),
                 severity: e.verdictSeverity ?? e.severity,
                 models: e.models,
