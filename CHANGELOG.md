@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.8.4 - 2026-09-24
+
+- Recover transient attested envelope delivery inside the same live workflow by
+  reading the exact run receipt first and replaying byte-identical evidence only
+  after an explicit 404. Bound recovery to three POSTs and a monotonic 20-second
+  deadline that cannot outlive the workflow credential (RCL-83).
+- Preserve cancellation, conflict, rejection, and organization-disabled status
+  without falling back to ordinary credentials or creating another review.
+  Retain the original evidence with bounded, redacted transport diagnostics when
+  recovery cannot complete.
+
 ## 3.8.3 - 2026-09-24
 
 - Supersede the withdrawn 3.8.2 release with its bounded terminal-report
