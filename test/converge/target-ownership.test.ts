@@ -1,4 +1,6 @@
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { watch, type FSWatcher } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -63,17 +65,33 @@ it('serializes a separately launched native writer under recovery ownership', as
   let authority!: NativeTargetOwnership;
   const owner = withRecoveryTarget(dir, target, async ownership => { authority = ownership; entered.resolve(); await release.promise; });
   let child: Promise<unknown> | undefined;
+  let watcher: FSWatcher | undefined;
   try {
     await Promise.race([entered.promise, owner]);
+    const lockRoot = join(dir, 'rcl-native-target-locks');
+    const lockName = `${createHash('sha256').update(target).digest('hex')}.lock`;
+    const before = await readFile(join(lockRoot, lockName));
+    const parentToken = (JSON.parse(before.toString()) as { token: string }).token;
+    const attempts = new Map<string, Set<string>>();
+    // Each retry publishes a fresh private reservation candidate. Two distinct
+    // candidates for one child owner prove it reached the occupied lock and
+    // retried; a process-start sentinel cannot establish that contention.
+    const contended = new Promise<void>((resolve, reject) => {
+      watcher = watch(lockRoot, (_event, filename) => {
+        const name = filename?.toString();
+        if (!name?.startsWith(`${lockName}.`) || !name.endsWith('.tmp')) return;
+        const [token, candidate, suffix] = name.slice(lockName.length + 1).split('.');
+        if (!token || !candidate || suffix !== 'tmp' || token === parentToken) return;
+        const seen = attempts.get(token) ?? new Set<string>();
+        seen.add(name); attempts.set(token, seen);
+        if (seen.size >= 2) resolve();
+      });
+      watcher.once('error', reject);
+    });
     child = promisify(execFile)(process.execPath, ['--import', 'tsx', fileURLToPath(worker), dir, target], { timeout: 10_000 });
     void child.catch(() => {});
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      try { await readFile(join(dir, 'child-ready')); break; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() >= deadline) throw error; }
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await Promise.race([contended, child.then(() => { throw new Error('writer completed without retrying the occupied target'); })]);
+    expect(await readFile(join(lockRoot, lockName))).toEqual(before);
     await expect(readFile(convergeRunStatePath(dir, target))).rejects.toMatchObject({ code: 'ENOENT' });
     // A separate process must read the state again after obtaining ownership.
     // Install a synthetic valid round while it is waiting, preserving our lock.
@@ -81,6 +99,7 @@ it('serializes a separately launched native writer under recovery ownership', as
       { round: 1, counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } },
     ], findings: {}, updatedAt: new Date().toISOString() }, authority);
   } finally {
+    watcher?.close();
     release.resolve();
     const settled = await Promise.allSettled([owner, ...(child ? [child] : [])]);
     for (const result of settled) if (result.status === 'rejected') throw result.reason;

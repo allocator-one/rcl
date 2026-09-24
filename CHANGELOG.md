@@ -11,6 +11,8 @@
   round, verdict, and budget writers, including compatible older recovery
   clients. Conflicting ownership and changed evidence fail closed; completed
   results remain resumable after cleanup failures.
+- Verify that a separate native writer retries the occupied recovery lock before
+  asserting exclusion, replacing the timing-based process-readiness check.
 - **Protected review evidence** (RCL-84): correlate registered GitHub gate runs
   with their lifecycle attempts and retain authenticated encrypted originals
   for recovery. The private recovery key remains outside public CI.
