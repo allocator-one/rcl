@@ -239,6 +239,7 @@ it('keeps the accounting deadline independent from a held target owner', async (
     releaseOwner.resolve();
     retry.resolve();
     await expect(claim).resolves.toMatchObject({ attempt: 1 });
+    expect(faults.targetTiming).toBeDefined();
     expect(faults.targetTiming?.lockTimeoutMs).not.toBe(25);
     expect(faults.targetTiming?.lockRetryMs).not.toBe(1);
   } finally {
