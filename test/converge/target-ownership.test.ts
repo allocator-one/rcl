@@ -88,7 +88,7 @@ it('serializes a separately launched native writer under recovery ownership', as
       });
       watcher.once('error', reject);
     });
-    child = promisify(execFile)(process.execPath, ['--import', 'tsx', fileURLToPath(worker), dir, target], { timeout: 10_000 });
+    child = promisify(execFile)(process.execPath, ['--import', import.meta.resolve('tsx'), fileURLToPath(worker), dir, target], { timeout: 10_000 });
     void child.catch(() => {});
     await Promise.race([contended, child.then(() => { throw new Error('writer completed without retrying the occupied target'); })]);
     expect(await readFile(join(lockRoot, lockName))).toEqual(before);

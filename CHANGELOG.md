@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Keep attempt-accounting lock timing separate from native target ownership, so
+  a short accounting retry does not prematurely abandon a contended recovery
+  operation. Preserve the explicit native-writer contention proof and improve
+  cross-platform gap-recovery test process, UTF-8, and symlink fixtures
+  (RCL-81).
+
 ## 3.8.2 - 2026-09-24
 
 - Bound the complete single-model verification queue to three minutes while
@@ -20,8 +28,6 @@
   round, verdict, and budget writers, including compatible older recovery
   clients. Conflicting ownership and changed evidence fail closed; completed
   results remain resumable after cleanup failures.
-- Verify that a separate native writer retries the occupied recovery lock before
-  asserting exclusion, replacing the timing-based process-readiness check.
 - **Protected review evidence** (RCL-84): correlate registered GitHub gate runs
   with their lifecycle attempts and retain authenticated encrypted originals
   for recovery. The private recovery key remains outside public CI.
