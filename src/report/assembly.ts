@@ -2,10 +2,12 @@ import { evaluateCiGate } from '../ci.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import type { Config } from '../config/schema.js';
 import { deduplicateFindings } from '../consensus/deduper.js';
+import { deduplicateSemanticFindings } from '../consensus/semantic-deduper.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
 import type { ModelReview, ReviewResult } from '../consensus/types.js';
 import { computeConsensus, applyReportThresholds } from '../consensus/voter.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
+import { materializeRecoveredClaims, type RecoveredProduction } from '../converge/recovered-production.js';
 import type { Diff } from '../resolver/types.js';
 import type { Role } from '../roles/types.js';
 import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-header.js';
@@ -21,6 +23,7 @@ interface CompletedReviewInput {
   diff: Diff;
   gatingConfig: ResolvedGatingConfig;
   modelWeights?: Map<string, number>;
+  recoveredProduction?: RecoveredProduction;
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
 }
 
@@ -41,7 +44,8 @@ export async function assembleCompletedReview(
   dependencies.onStage?.('computing consensus');
 
   // Deduplicate and compute consensus
-  const groups = deduplicateFindings(
+  const deduplicate = input.recoveredProduction ? deduplicateSemanticFindings : deduplicateFindings;
+  const groups = deduplicate(
     reviews,
     config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
     config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
@@ -49,7 +53,7 @@ export async function assembleCompletedReview(
   );
 
   const runId = input.run.id ?? uuidv7();
-  const consensusFindings = computeConsensus(
+  const consensusFindings = materializeRecoveredClaims(computeConsensus(
     runId,
     groups,
     reviews,
@@ -59,7 +63,7 @@ export async function assembleCompletedReview(
       jaccardThreshold: config.thresholds?.jaccardThreshold,
     },
     modelWeights
-  );
+  ), input.recoveredProduction);
 
   const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
     consensusFindings,

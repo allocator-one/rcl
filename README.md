@@ -414,6 +414,17 @@ mints it again for the same run id before delivery. Pair it with
 `--expect-head-sha` so a moved pull request fails fast instead of being
 refused at ingest.
 
+If the completed envelope's POST becomes unavailable, delivery first reads a
+restricted receipt for that same run with its still-live attested credential.
+A matching receipt resumes artifact delivery without another POST; only an
+explicit 404 permits replay of the exact serialized envelope. Recovery allows
+at most three POSTs including the original, with an additional 20-second recovery
+deadline bounded by credential expiry. Conflicts, rejected or unanswered receipts,
+expiry and exhausted retries stop recovery. No reviewer is called again and no
+ordinary credential is substituted. Failed delivery retains bounded, redacted
+transport diagnostics, including the initial error cause, with the original
+recovery evidence.
+
 Operators recovering the gate's encrypted GitHub artifact must use the
 [review evidence recovery runbook](https://github.com/allocator-one/rcl/blob/main/docs/review-evidence-recovery.md).
 Recovery requires the separately held, version-mapped private key and does not
@@ -642,6 +653,164 @@ unanswered; `4` means conflicting destination, evidence or journal bindings; `5`
 journal/lock persistence failed. JSON diagnostics include the stage and next step.
 Even successful delivery does not establish current-head review freshness,
 convergence, attestation or historical accounting repair.
+
+### `rcl evidence recover-claim`
+
+Mode B recovers one explicitly selected claim from an immutable report. It uses
+ordinary authenticated review access, the same native convergence target, and a
+backend advertising the complete `claim_recovery_version: 1` contract. Mode A
+run/artifact delivery and the claim-history index alone do not enable Mode B.
+
+Create an existing private operation directory (mode 0700) on supported local
+storage, then supply a JSON selection:
+
+```json
+{
+  "version": 1,
+  "action": "split",
+  "source": {
+    "scope": {
+      "base_url": "https://harness.infra.one",
+      "org_id": "<organization UUID>",
+      "run_id": "<original run UUID>",
+      "repo": "owner/repository",
+      "pr_number": 123
+    },
+    "target": "existing-native-target",
+    "round": 2,
+    "headSha": "<original Git head>",
+    "reportSha256": "<original report SHA256>"
+  },
+  "findingRef": "f026",
+  "previousIdentity": "<16 lowercase hexadecimal digits>",
+  "identity": "<unused 16 lowercase hexadecimal digits>",
+  "descriptor": {
+    "version": 1,
+    "operation": "src/cache.ts :: read",
+    "invariant": "Expired entries must not be returned.",
+    "evidence": ["The selected original branch returns an expired entry."]
+  },
+  "reason": "Separate this original claim from the shared historical key.",
+  "disposition": {
+    "mode": "fresh",
+    "verdict": "dismissed",
+    "severity": "important",
+    "reason": "Explicit source-backed adjudication of this claim only."
+  }
+}
+```
+
+`findingRef` is positional across kept findings followed by the appendix. A
+reviewer's embedded ID, a location suffix, or a shared native key is not a
+replacement. The original report bytes, original descriptors, review counters,
+and native rounds remain unchanged. The new descriptor is a correction anchor;
+it is never represented as an original producer sighting.
+
+```bash
+rcl evidence recover-claim --preview --selection selection.json \
+  --manifest /private/operation/claim.json --json
+# Inspect the manifest, source scope, carriers, and remaining residuals.
+rcl evidence recover-claim --apply --manifest /private/operation/claim.json \
+  --manifest-sha256 <printed digest> --json
+rcl evidence recover-claim --resume --manifest /private/operation/claim.json \
+  --manifest-sha256 <same digest> --json
+```
+
+Preview performs authenticated reads and creates immutable preparation files.
+Apply journals each operation/event UUID, timestamp and exact payload before its
+POST. Uncertain acknowledgments are resolved by exact selected receipt reads;
+resume reuses the original preparation. Preserve the manifest, adjacent material,
+event inputs/packets, native plan and journal. A changed actor, source, native
+snapshot, event sequence or unplanned receipt requires inspection and a fresh
+preview; it is not silently adopted during an existing operation. A new split
+refuses a destination key already present in the authenticated scoped finding,
+verdict, split or classification history. The server transaction also checks
+history outside that client read scope and concurrent changes.
+
+Recovery budgets all JSON reads, original artifact reads and writes together,
+allowing at most 240 requests in each rolling minute against the unchanged
+300/minute API limit. Larger histories wait across windows while retaining every
+proof check. A write slot is reserved before its final source validation, so no
+quota wait is inserted between that proof and the POST. Ordinary telemetry and
+status commands keep their existing transport behavior.
+
+An actual HTTP 429 can delay recovery reads using a valid `Retry-After` value of
+at most 60 seconds, with at most three such waits per operation. Invalid headers
+or sustained competing token/IP traffic stop the operation safely. Writes are
+never retried blindly: exact receipt readback determines whether a write landed;
+if its outcome remains unverified, preserve the same manifest and journal for
+`--resume`. This pacing does not promise completion under unlimited contention.
+
+If an interrupted split operation has accepted stages but unrelated target history
+has advanced, explicitly re-preview it without changing its selection:
+
+```bash
+rcl evidence recover-claim --preview \
+  --adopt-manifest /private/operation/claim.json \
+  --adopt-manifest-sha256 <original digest> \
+  --manifest /private/operation/adopted.json --json
+# Inspect accepted receipts, replacement links, new history, and residuals.
+rcl evidence recover-claim --apply --manifest /private/operation/adopted.json \
+  --manifest-sha256 <new digest> --json
+```
+
+Adoption preserves each accepted event's original UUID, timestamp, payload and
+actor, and verifies it without POST. Every unaccepted stage requires an explicit
+complete authenticated absence read and gets a new UUID linked to its old one.
+A late old receipt blocks the replacement; inspect it and re-preview the original
+operation to adopt the acknowledged result. Changed original source, destination,
+actor or native state refuses. Keep all prior manifests and their referenced
+files; adoption validates them again before remaining writes. Its history check
+permits new evidence only during the explicit preview, never as automatic
+permission during apply. The server still enforces current CAS and key ownership.
+
+A split transfers only that original occurrence to each proven relevant carrier.
+Other co-key members and unknown source history remain unresolved. Omit
+`disposition` to leave the new claim untriaged. `mode: preserved` additionally
+requires `originalVerdictEventId` and exact original/stored/classification
+descriptors for every affected original co-key member, with the original actor,
+reason, severity and outcome. Descriptorless or mixed old verdicts need fresh
+triage. A fixed assertion remains pending until a conclusive, eligible higher
+round actually started after its server receipt time. A dismissal or transfer
+never supplies review approval for a Git head.
+
+For an existing exact anchor, use `action: disposition` with a new explicit
+disposition, or `action: refresh` without one. Refresh posts no event: it reads
+the complete pinned claim index and exact receipts across the target, then
+updates the local evidence snapshot. Later-arriving earlier source evidence can
+reopen residuals without deleting accepted transfers. Local output records its
+read window and is not current server approval or proof of global history
+completeness. Ordinary native changes invalidate cached standing. The enforced
+backend gate must independently recompute current server obligations.
+
+Recovery writes native version 3 with recovery metadata version 2. Immutable
+material is retained once under digest references; every load verifies all
+referenced content. Missing or changed material refuses. Earlier version-3
+readers that only understand metadata version 1 refuse this format, and released
+version-1/2 readers cannot rewrite it. Do not downgrade, copy partial native
+files, invent a missing native round, or start a new target to evade this boundary.
+Keep each manifest's adjacent `.proofs` directory together with its immutable
+document roots, packets and journal. Ordinary manifests use version 2 and adoption manifests use version 3; unsupported
+manifest or native metadata versions refuse before delivery. Local round output
+retains the snapshot's read window, proof digest and native-validity qualification.
+
+Exit codes are 0 for a prepared or acknowledged operation, 2 for invalid input,
+3 for unavailable ordinary authentication, and 4/5 for remote, proof or local
+checkpoint refusal. A nonzero apply can follow accepted remote
+events; retain its original files and inspect exact receipts before resuming.
+
+
+Recovered native version3 targets resume with the normal `review` and
+`converge-report` commands. Before calling reviewers, `review` validates the
+canonical target and retained recovery sources and pins its native digest in
+`run.converge.recovery_source` (version1). It materializes claim descriptors for
+kept and appendix findings and declares bound classification before the first
+original report serialization. This local predecessor commitment supplies no
+attestation or server approval. Admission verifies it under target ownership;
+if the state changed during review, the completed original remains intact and
+admission refuses. Inspect that conflict rather than rewriting the report.
+Ordinary absent/version1 targets retain their existing report and native format.
+This command does not enable a general version1-to-version2 migration.
 
 ### `rcl evidence recover-finding`
 

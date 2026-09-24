@@ -70,6 +70,7 @@ import {
   ConvergeAttemptStateError,
   resolveGitCommonDir,
 } from './converge/attempt-budget.js';
+import { withNativeTarget } from './converge/target-ownership.js';
 import {
   DEFAULT_CONVERGE_ROUND_CAP,
   HARD_CONVERGE_ROUND_CAP,
@@ -116,7 +117,7 @@ import {
   loadHarnessSettings,
   resolveTelemetryLevel,
 } from './telemetry/deliver.js';
-import { sanitizeForDelivery } from './telemetry/envelope.js';
+import { sanitizeForDelivery, normalizeGeneratedReport } from './telemetry/envelope.js';
 import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
@@ -127,6 +128,8 @@ import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
+import { selectCurrentRecoveredProduction, type RecoveredProduction } from './converge/recovered-production.js';
+import { runPublicClaimRecovery, type PublicClaimRecoveryOptions } from './evidence/recover-claim.js';
 import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
@@ -155,7 +158,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-gap' || name === 'recover-claim' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -416,8 +419,7 @@ program
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           maxAttempts,
-        });
-        await reportConvergeEvents([
+          afterClaim: async claim => await reportConvergeEvents([
           buildEvent({
             kind: 'attempt_claimed',
             convergeTarget: claim.target,
@@ -429,7 +431,8 @@ program
           ...(maxAttempts !== undefined
             ? [buildEvent({ kind: 'cap_changed', convergeTarget: claim.target, attempt: claim.attempt, payload: { kind: 'attempts', to: claim.cap } })]
             : []),
-        ]);
+          ]),
+        });
         if (opts.json) {
           console.log(JSON.stringify(claim));
         } else {
@@ -555,10 +558,12 @@ program
         }
 
         let report: ReviewResult;
+        let reportJson: string;
         let reportSha256: string;
         try {
           const source = await readFile(opts.report);
-          report = JSON.parse(source.toString('utf8')) as ReviewResult;
+          reportJson = source.toString('utf8');
+          report = JSON.parse(reportJson) as ReviewResult;
           reportSha256 = sha256(source);
         } catch (err) {
           throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
@@ -588,68 +593,78 @@ program
             )
           );
         }
-        const result = await processRoundReport({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
-          round,
-          findings: report.findings,
-          reportSha256,
-          ...(maxRounds !== undefined ? { maxRounds } : {}),
-          ...(runId !== undefined ? { runId } : {}),
-        });
-
-        const classified = result.findings.map((f) => ({
-          identity: f.identity,
-          status: f.status,
-          gating: findingGatingReason(f.finding),
-          severity: f.finding.severity,
-          file: f.finding.file,
-          startLine: f.finding.startLine,
-          endLine: f.finding.endLine,
-          title: f.finding.title,
-          ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
-        }));
-        const actionable = classified.filter(
-          (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
-        );
-        await reportConvergeEvents([
-          buildEvent({
-            kind: 'round_processed',
-            convergeTarget: opts.target,
+        const gitCommonDir = await resolveGitCommonDir();
+        await withNativeTarget(gitCommonDir, opts.target, async ownership => {
+          const existing = await loadConvergeRunState(gitCommonDir, opts.target as string);
+          const recoveredReport = existing?.version === 3 || report.run?.gating?.bound_classification_protocol !== undefined;
+          const result = await processRoundReport({
+            gitCommonDir,
+            ownership,
+            reportSha256,
+            target: opts.target as string,
             round,
+            findings: recoveredReport ? [...report.findings, ...(report.belowThresholdFindings ?? [])] : report.findings,
+            ...(recoveredReport ? { evidence: { reportJson } } : {}),
+            ...(maxRounds !== undefined ? { maxRounds } : {}),
             ...(runId !== undefined ? { runId } : {}),
-            payload: {
-              round,
-              round_cap: result.roundCap,
-              counts: result.counts,
-              actionable_gating: actionable.length,
-              // Which identity each sighting was matched to, so the server
-              // can apply standing verdicts to keys that moved (IO-12601).
-              identities: roundIdentities(result.findings),
-            },
-          }),
-          ...(maxRounds !== undefined
-            ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target, round, payload: { kind: 'rounds', to: result.roundCap } })]
-            : []),
-        ]);
+          });
 
-        if (opts.json) {
-          console.log(
-            JSON.stringify(
-              {
-                target: opts.target,
-                round,
-                roundCap: result.roundCap,
-                counts: result.counts,
-                actionableGating: actionable.length,
-                findings: classified,
-              },
-              null,
-              2
-            )
+          const classified = result.findings.map((f) => ({
+            identity: f.identity,
+            status: f.status,
+            gating: f.sighting?.gating ?? findingGatingReason(f.finding),
+            severity: f.finding.severity,
+            file: f.finding.file,
+            startLine: f.finding.startLine,
+            endLine: f.finding.endLine,
+            title: f.finding.title,
+            ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
+          }));
+          const actionable = classified.filter(
+            (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
           );
-          return;
-        }
+          await reportConvergeEvents([
+            buildEvent({
+              kind: 'round_processed',
+              convergeTarget: opts.target as string,
+              round,
+              ...(runId !== undefined ? { runId } : {}),
+              payload: {
+                round,
+                round_cap: result.roundCap,
+                counts: result.counts,
+                actionable_gating: result.actionableIdentities?.length ?? actionable.length,
+                ...(result.classificationVersion ? { classification_version: result.classificationVersion,
+                  report_json_sha256: result.reportBinding!.reportSha256,
+                  ...(result.legacyPendingIdentities ? { legacy_pending_identities: result.legacyPendingIdentities } : {}) } : {}),
+                // Which identity each sighting was matched to, so the server
+                // can apply standing verdicts to keys that moved (IO-12601).
+                identities: roundIdentities(result.findings),
+              },
+            }),
+            ...(maxRounds !== undefined
+              ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target as string, round, payload: { kind: 'rounds', to: result.roundCap } })]
+              : []),
+          ]);
+
+          if (opts.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  target: opts.target as string,
+                  round,
+                  roundCap: result.roundCap,
+                  counts: result.counts,
+                  actionableGating: result.actionableIdentities?.length ?? actionable.length,
+                  ...(result.recoveryProjection ? { recoveryProjection: result.recoveryProjection } : {}),
+                  findings: classified,
+                },
+                null,
+                2
+              )
+            );
+            return;
+          }
 
         console.log(
           `Round ${round}/${result.roundCap} for ${opts.target}: ` +
@@ -665,6 +680,7 @@ program
             chalk.dim(`  [suppressed] ${f.identity} ${f.file}:${f.startLine} — ${f.suppressReason}`)
           );
         }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
@@ -741,9 +757,13 @@ program
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
+        const gitCommonDir = await resolveGitCommonDir();
+        const target = opts.target as string;
+        await withNativeTarget(gitCommonDir, target, async ownership => {
         const { entries: updated, resolution } = await recordVerdicts({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
+          gitCommonDir,
+          ownership,
+          target,
           round,
           verdicts,
         });
@@ -775,14 +795,14 @@ program
         // fail a command whose verdicts are already recorded.
         let roundRun: string | undefined;
         try {
-          roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
+          roundRun = roundRunId(await loadConvergeRunState(gitCommonDir, target), round);
         } catch {
           roundRun = undefined;
         }
         await reportConvergeEvents([
           buildEvent({
             kind: 'verdicts_recorded',
-            convergeTarget: opts.target,
+            convergeTarget: target,
             round,
             ...(roundRun !== undefined ? { runId: roundRun } : {}),
             payload: {
@@ -800,7 +820,7 @@ program
             ? [
                 buildEvent({
                   kind: 'resolution',
-                  convergeTarget: opts.target,
+                  convergeTarget: target,
                   round,
                   ...(roundRun !== undefined ? { runId: roundRun } : {}),
                   payload: {
@@ -848,6 +868,7 @@ program
             }
           }
         }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
@@ -1002,6 +1023,23 @@ evidenceCmd
   .option('--json', 'Print the API run object')
   .action(async (runId: string | undefined, opts: { json?: boolean }) => {
     process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('recover-claim')
+  .description('Recover exact original claims on the same target using authenticated receipts; preserve original reports and accounting')
+  .option('--preview', 'Read exact sources and write a new immutable manifest; no server/native changes')
+  .option('--apply', 'Apply the exact reviewed manifest once')
+  .option('--resume', 'Resolve acknowledgments and resume the same immutable operation')
+  .option('--selection <path>', 'Strict original run/digest/ref and explicit semantic assertion JSON (preview only)')
+  .option('--adopt-manifest <path>', 'Re-preview an interrupted operation with exact acknowledged stages and fresh remaining events')
+  .option('--adopt-manifest-sha256 <sha256>', 'Exact interrupted manifest digest (adoption preview only)')
+  .requiredOption('--manifest <path>', 'Manifest in an existing private recovery directory')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest digest (apply/resume)')
+  .option('--json', 'Print machine-readable status')
+  .action(async (opts: PublicClaimRecoveryOptions) => {
+    const { runPublicClaimRecovery } = await import('./evidence/recover-claim.js');
+    process.exitCode = await runPublicClaimRecovery(opts, evidenceDeps());
   });
 
 evidenceCmd
@@ -1377,6 +1415,7 @@ interface PreparedCouncil {
   /** The blocking council's own models — the roster's `blocking` lane. */
   coreModels: string[];
   converge?: ConvergeContext;
+  recoveredProduction?: RecoveredProduction;
   /** When the command started; the run header records the full wall time. */
   startedAt: Date;
 }
@@ -1412,6 +1451,9 @@ async function prepareCouncil(
     { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
     process.env
   );
+  const recoveredProduction = converge
+    ? await selectCurrentRecoveredProduction(converge)
+    : undefined;
   await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config);
 
@@ -1572,7 +1614,10 @@ async function prepareCouncil(
     ...(spec ? { spec } : {}),
     explicit: explicitReviewers !== undefined,
     coreModels: models,
-    ...(converge ? { converge } : {}),
+    ...(converge ? { converge: { ...converge, ...(recoveredProduction ? { recovery_source: {
+      version: 1 as const, native_sha256: recoveredProduction.nativeSha256,
+    } } : {}) } } : {}),
+    ...(recoveredProduction ? { recoveredProduction } : {}),
     startedAt,
   };
 }
@@ -1997,6 +2042,7 @@ async function executeCouncil(
     diff,
     gatingConfig: prepared.gatingConfig,
     modelWeights,
+    recoveredProduction: prepared.recoveredProduction,
     run: {
       id: extra.attestation?.runId,
       rclVersion: RCL_VERSION,
@@ -2073,7 +2119,7 @@ async function executeCouncil(
       rclVersion: RCL_VERSION,
       config,
       noTelemetry: opts.telemetry === false,
-      ...(attestation ? { credential: attestation.credential } : {}),
+      ...(attestation ? { credential: attestation.credential, attestedExpiresAt: attestation.expiresAt } : {}),
     });
   } catch (err) {
     // Kept for the --evidence-required verdict below, which names the cause.
@@ -2085,8 +2131,9 @@ async function executeCouncil(
   // in. --json-file and --markdown are written from the same view, so the
   // declared digests match the files and nothing raw travels. With
   // telemetry off the raw report is written as before.
+  const produced = prepared.recoveredProduction ? normalizeGeneratedReport(result) : result;
   const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+    runtime && runtime.level !== 'off' ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
   postReviewStage('rendering report artifacts');
   const artifacts = renderReportArtifacts(delivered);
 

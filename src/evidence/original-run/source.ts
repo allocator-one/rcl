@@ -1,3 +1,4 @@
+import { recoverySourceSchema } from '../../report/recovery-source.js';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ReviewResult } from '../../consensus/types.js';
@@ -109,7 +110,14 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   knownKeys(report.run, ['id','rcl_version','command','target','roster','config_sha256','thresholds','gating','spec','context_files','plan','runner','started_at','finished_at','duration_ms','ci_exit_code','converge','provenance'], 'header');
   knownKeys(report.run.runner, ['kind','agent','host','ci_run_id'], 'runner');
   knownKeys(report.run.target, ['kind','repo','pr_number','url','head_sha','base_sha','head_ref','base_ref','diff_sha256','files','additions','deletions'], 'target');
-  if (report.run.converge) knownKeys(report.run.converge, ['target','round','attempt'], 'converge');
+  if (report.run.converge) {
+    knownKeys(report.run.converge, ['target','round','attempt','recovery_source'], 'converge');
+    if (Object.hasOwn(report.run.converge, 'recovery_source') &&
+        (!recoverySourceSchema.safeParse(report.run.converge.recovery_source).success ||
+          report.run.gating.bound_classification_protocol !== 1 || !Number.isSafeInteger(report.run.converge.round))) {
+      throw new Error('unsupported_recovery_source');
+    }
+  }
   if (report.run.spec) knownKeys(report.run.spec, ['source','sha256'], 'spec');
   if (report.run.plan) knownKeys(report.run.plan, ['focus'], 'plan');
   for (const row of report.run.roster) knownKeys(row, ['model','role','provider','lane'], 'roster');
@@ -155,6 +163,8 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
       if (Object.hasOwn(described, 'claimDescriptor')) {
         const parsed = descriptor.safeParse(described.claimDescriptor);
         if (!parsed.success) throw new Error('unsupported_original_descriptor');
+        // Preserve published Mode A's descriptor property order in pinned envelopes.
+        delete wire.claim_descriptor;
         (wire as unknown as Record<string, unknown>).claim_descriptor = parsed.data;
       }
       for (const [source, dest] of [['title','title'],['description','description'],['suggestedFix','suggested_fix']] as const) derive(`${group.root}/${index}/${dest}`, f[source], wire[dest], 'existing_buildRunEnvelope_scrub_and_codepoint_limit');

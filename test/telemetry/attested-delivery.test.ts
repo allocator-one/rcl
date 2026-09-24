@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -136,6 +137,189 @@ describe('the run-bound credential of --attest', () => {
     expect(outcome.spooled).toBe(false);
     expect(outcome.exitCode).toBe(4);
     expect(outcome.line).toMatch(/does not outlive its workflow run/);
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+  });
+
+  it('does a receipt-first, bounded same-workflow replay after an uncertain envelope acknowledgement', async () => {
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${sampleResult().run!.id}`)) return { status: 404, body: { error: 'not_found' } };
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        if (posts === 1) return new TypeError('fetch failed');
+        const envelope = JSON.parse(request.body!) as { run: { id: string } };
+        return { status: 201, body: { data: { id: envelope.run.id, url: `https://harness.example.test/api/v1/reviews/runs/${envelope.run.id}`, artifacts_expected: [] }, meta: { status: 'created' } } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.1', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+    const result = sampleResult();
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
+    const postBodies = requests.filter((request) => request.url.endsWith('/api/v1/reviews/runs')).map((request) => request.body);
+    expect(postBodies).toHaveLength(2);
+    expect(postBodies[1]).toBe(postBodies[0]);
+    expect(requests.filter((request) => request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`))).toHaveLength(1);
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+  });
+
+  it('binds a recovered receipt to the immutable accepted envelope and resumes artifacts without another POST', async () => {
+    const result = sampleResult();
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) {
+        const posted = JSON.parse(requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!) as { artifacts_declared: unknown };
+        return { status: 200, body: { data: {
+          id: result.run!.id,
+          url: `https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`,
+          envelope_sha256: createHash('sha256').update(requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!, 'utf8').digest('hex'),
+          artifacts_declared: posted.artifacts_declared,
+        }, meta: { status: 'existing' } } };
+      }
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        return new TypeError('lost acknowledgement');
+      }
+      if (request.url.includes('/artifacts/')) {
+        const kind = request.url.slice(request.url.lastIndexOf('/') + 1);
+        return { status: 201, body: { data: { kind, sha256: createHash('sha256').update(request.body ?? '', 'utf8').digest('hex') } } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.5', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
+    expect(posts).toBe(1);
+    expect(requests.filter(request => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(1);
+    expect(requests.filter(request => request.url.includes('/artifacts/')).map(request => request.method)).toEqual(['PUT', 'PUT']);
+  });
+
+  it('rejects a recovered receipt for changed bytes despite the same run identity and declarations', async () => {
+    const result = sampleResult();
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) {
+        const posted = JSON.parse(requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!) as { artifacts_declared: unknown };
+        return { status: 200, body: { data: {
+          id: result.run!.id,
+          url: `https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`,
+          envelope_sha256: createHash('sha256').update(`${requests.find(candidate => candidate.url.endsWith('/api/v1/reviews/runs'))!.body!} changed`, 'utf8').digest('hex'),
+          artifacts_declared: posted.artifacts_declared,
+        }, meta: { status: 'existing' } } };
+      }
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        return new TypeError('lost acknowledgement');
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.5', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4 });
+    expect(posts).toBe(1);
+    expect(requests.filter(request => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(1);
+    expect(requests.some(request => request.url.includes('/artifacts/'))).toBe(false);
+  });
+
+  it('preserves disabled status and private originals when the replay disables review evidence', async () => {
+    const secret = 'Abcdef1234567890Abcdef1234567890';
+    const failure = new TypeError('fetch failed', { cause: new Error(`socket reset authorization=Bearer ${secret}`) });
+    const result = sampleResult();
+    let posts = 0;
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) return { status: 404, body: { error: 'not_found' } };
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        posts++;
+        return posts === 1 ? failure : { status: 403, body: { error: 'reviews_disabled', message: 'Review evidence is disabled' } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.1', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'disabled', spooled: false, exitCode: 4, retention: { status: 'complete' } });
+    expect(outcome.line).toContain('has not enabled review evidence for this organization');
+    expect(outcome.line).toContain('original evidence retained');
+    expect(requests.map((request) => request.method)).toEqual(['POST', 'GET', 'POST']);
+    expect(requests[1]!.url).toBe(`https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`);
+    expect(requests[2]!.body).toBe(requests[0]!.body);
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+    const retained = await runtime.quarantine!.inspect(result.run!.id);
+    expect(retained).toMatchObject({ status: 'complete', manifest: { run_id: result.run!.id, requested_mode: 'attested', acknowledged: false } });
+    expect((await stat(retained!.path)).mode & 0o777).toBe(0o700);
+    for (const [kind, bytes] of Object.entries(ARTIFACTS)) {
+      const path = join(retained!.path, retained!.manifest!.artifacts[kind]!.file);
+      expect(await readFile(path, 'utf8')).toBe(bytes);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
+    const diagnostic = retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery.initial_transport');
+    expect(diagnostic?.message).toContain('TypeError: fetch failed; cause: Error: socket reset');
+    expect(diagnostic!.message).not.toContain(secret);
+    expect(retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery')?.message).toContain('organization has not enabled review evidence');
+  });
+
+  it.each([
+    { receiptStatus: 0, status: 'error', posts: 1 },
+    { receiptStatus: 408, status: 'error', posts: 1 },
+    { receiptStatus: 429, status: 'error', posts: 1 },
+    { receiptStatus: 503, status: 'error', posts: 1 },
+    { receiptStatus: 403, status: 'rejected', posts: 1 },
+    { receiptStatus: 404, status: 'conflict', posts: 2 },
+  ])('retains the original safe transport diagnostic when receipt $receiptStatus ends recovery as $status', async ({ receiptStatus, status, posts }) => {
+    const secret = 'Abcdef1234567890Abcdef1234567890';
+    const failure = new TypeError('fetch failed', { cause: new Error(`socket reset authorization=Bearer ${secret}`) });
+    let submitted = 0;
+    const result = sampleResult();
+    const { fetch, requests } = fakeFetch((request) => {
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) {
+        return receiptStatus === 0 ? new TypeError('receipt unavailable') : { status: receiptStatus, body: { error: 'fixture_receipt_failure' } };
+      }
+      if (request.url.endsWith('/api/v1/reviews/runs')) {
+        submitted++;
+        return submitted === 1 ? failure : { status: 409, body: { error: 'conflict' } };
+      }
+      return { status: 404, body: { error: 'not_found' } };
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '3.8.2', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status, spooled: false, exitCode: 4 });
+    expect(requests.filter((request) => request.url.endsWith('/api/v1/reviews/runs'))).toHaveLength(posts);
+    expect(requests.map((request) => request.method)).toEqual(posts === 1 ? ['POST', 'GET'] : ['POST', 'GET', 'POST']);
+    expect(requests[1]!.url).toBe(`https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`);
+    const retained = await runtime.quarantine!.inspect(result.run!.id);
+    expect(retained).toMatchObject({ status: 'complete', manifest: { run_id: result.run!.id, requested_mode: 'attested', acknowledged: false } });
+    const diagnostic = retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery.initial_transport');
+    expect(diagnostic?.message).toContain('TypeError: fetch failed; cause: Error: socket reset');
+    expect(diagnostic!.message).not.toContain(secret);
+    expect(diagnostic!.message.length).toBeLessThanOrEqual(300);
+    if (status === 'error') {
+      expect(outcome.line).toContain('attested_recovery_receipt_unavailable');
+      expect(retained!.manifest!.diagnostics.find((entry) => entry.path === 'delivery')?.message).toContain('attested_recovery_receipt_unavailable');
+    }
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
   });
 

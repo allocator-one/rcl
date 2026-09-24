@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.8.5
+
+- Add preview, apply, and resume for explicit claim recovery from immutable
+  reports and authenticated receipts. Preserve original attribution, round and
+  attempt accounting, native snapshots, and unrelated unresolved claims.
+- Resume recovered targets with bound semantic claim evidence, including later
+  critical re-gating and authenticated current-state refresh. Keep ordinary
+  target grouping unchanged until the separate global identity release.
+- Resolve uncertain acknowledgments from exact receipts and retain recovery
+  journals across interrupted server and local publication.
+
+- Keep native attempt, report and verdict publication inside the same target
+  ownership as their durable writes. Add strict recovery context, event-receipt
+  and preserved-claim validation foundations (RCL-76).
+- Keep accounting-lock timing independent from target ownership and make the
+  child-writer contention checks deterministic with bounded cleanup (RCL-81).
+
 ## 3.8.3 - 2026-09-24
 
 - Supersede the withdrawn 3.8.2 release with its bounded terminal-report

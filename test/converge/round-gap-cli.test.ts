@@ -11,13 +11,14 @@ import { buildEvent } from '../../src/telemetry/events.js';
 import { loadConvergeRunState } from '../../src/converge/run-state.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 const cli = fileURLToPath(new URL('../../src/index.ts',import.meta.url));
+const cliTimeoutMs = 10_000;
 async function command(cwd:string,args:string[],env:NodeJS.ProcessEnv) {
   const inherited = Object.fromEntries(
     ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TMP', 'TEMP', 'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']
       .flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])
   );
   const child=spawn(process.execPath,['--import',import.meta.resolve('tsx'),cli,...args],{
-    cwd,timeout:10_000,killSignal:'SIGKILL',
+    cwd,timeout:cliTimeoutMs,killSignal:'SIGKILL',
     env:{...inherited,...env,TSX_DISABLE_CACHE:'1',NO_COLOR:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull},
   });
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
@@ -62,7 +63,8 @@ it('previews, applies and resumes a digest-qualified manifest through the actual
     expect(result.code,result.stderr).toBe(0); expect(JSON.parse(result.stdout).result).toBe(mode==='apply'?'applied':'resumed');
   }
   expect((await loadConvergeRunState(f.dir,f.target))?.rounds.map(r=>r.round)).toEqual([1]); expect(await readFile(f.attemptPath)).toEqual(attempts);
-},15000);
+// Each of the three independent CLI processes retains its own bounded deadline.
+}, 3 * cliTimeoutMs + 5_000);
 
 it('passes the actual original report digest to ordinary native admission', async () => {
   const f=await fixture(true); await f.prepare(); await f.apply();

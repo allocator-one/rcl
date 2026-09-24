@@ -1,8 +1,13 @@
 import { createHash } from 'node:crypto';
+import { abortSignalWithTimeout } from './abort-signal.js';
+import { claimDescriptorSchema } from '../consensus/claim-identity.js';
+import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
-import type { ArtifactKind, RunEnvelope } from './envelope.js';
+import type { ArtifactDeclaration, ArtifactKind, RunEnvelope } from './envelope.js';
 import type { WireEvent } from './events.js';
+import type { RecoveryRequestBudget, RecoveryWritePermit, RecoveryRateLimit } from './recovery-request-budget.js';
+import type { ReceiptProbe } from './attested-retry.js';
 
 /**
  * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
@@ -24,10 +29,16 @@ export const MAX_RESPONSE_BYTES = 64 * 1024;
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
-  /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
+  /** Recovery reserves transport capacity before its final source proof. */
+  recoveryWritePermit?: RecoveryWritePermit;
+  /** A shorter delivery budget, including any capability preflight, e.g. a flush's remaining time. */
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
+  /** Recovery reads require HTTP 200 and a complete data/meta envelope, never a partial/error answer. */
+  requireCompleteRead?: boolean;
+  /** Cancellation/deadline for an attested same-workflow retry operation. */
+  signal?: AbortSignal;
 }
 
 export interface RunReceipt {
@@ -61,9 +72,11 @@ export type SinkOutcome<T> =
   /** The server understood the request and refused it for good; retrying cannot help. */
   | { kind: 'rejected'; httpStatus: number; error: string; message: string }
   /** Network, timeout or server failure — the delivery is worth retrying. */
-  | { kind: 'unavailable'; reason: string };
+  | { kind: 'unavailable'; reason: string; httpStatus?: number; retryAfterMs?: number; rateLimitReason?: RecoveryRateLimit['reason'] };
 
 export interface SinkOptions {
+  /** Only explicitly selected recovery operations opt into quota scheduling. */
+  requestBudget?: RecoveryRequestBudget;
   credential: HarnessCredential;
   rclVersion: string;
   fetchImpl?: typeof fetch;
@@ -75,11 +88,34 @@ interface ErrorBody {
   message?: string;
 }
 
+const SIGHTING_BINDING_FIELDS = ['version', 'finding_ref', 'report_json_sha256', 'claim_descriptor', 'match_rationale', 'pending_round'];
+
+/** Inspect retained bindings without normalizing or replacing their original values. */
+export function validSightingBinding(entry: Record<string, unknown>): boolean {
+  const key = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 64;
+  return entry.version === 1 && key(entry.identity_key) && key(entry.matched_identity) &&
+    ['new', 'repeat', 'suppressed', 'regating'].includes(entry.status as string) &&
+    typeof entry.finding_ref === 'string' && Buffer.byteLength(entry.finding_ref, 'utf8') > 0 &&
+    Buffer.byteLength(entry.finding_ref, 'utf8') <= 32 &&
+    typeof entry.report_json_sha256 === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(entry.report_json_sha256) &&
+    claimDescriptorSchema.safeParse(entry.claim_descriptor).success &&
+    ['new_claim', 'exact_descriptor', 'supported_paraphrase', 'ambiguous', 'explicit_split'].includes(entry.match_rationale as string) &&
+    (!Object.hasOwn(entry, 'pending_round') || entry.pending_round === null ||
+      (typeof entry.pending_round === 'number' && Number.isSafeInteger(entry.pending_round) && entry.pending_round >= 1));
+}
+
+function remainingRequestOptions(options: RequestOptions, deadline: number | undefined): RequestOptions | null {
+  if (deadline === undefined) return options;
+  const timeoutMs = Math.floor(deadline - performance.now());
+  return timeoutMs < 1 ? null : { ...options, timeoutMs };
+}
+
 export class HarnessSink {
   private readonly credential: HarnessCredential;
   private readonly rclVersion: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly requestBudget?: RecoveryRequestBudget;
 
   constructor(options: SinkOptions) {
     // The token travels to the host that minted it, over TLS (loopback
@@ -93,6 +129,7 @@ export class HarnessSink {
     this.rclVersion = options.rclVersion;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.requestBudget = options.requestBudget;
   }
 
   get baseUrl(): string {
@@ -106,15 +143,18 @@ export class HarnessSink {
   async getArtifact(runId: string, kind: ArtifactKind, limit: number): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>> {
     if (!Number.isSafeInteger(limit) || limit < 0 || limit > 25_000_000) throw new Error('invalid_artifact_read_limit');
     if (kind !== 'report_json' && kind !== 'report_md') return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: 'Unsupported artifact selection' };
+    let dispose: (() => void) | undefined;
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
-        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual', signal: AbortSignal.timeout(this.timeoutMs),
-      });
+      const fetched = await this.fetchRequest(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
+        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual',
+      }, this.timeoutMs);
+      const { response, rateLimit } = fetched;
+      dispose = fetched.dispose;
       if (response.status !== 200) {
         const text = await readBounded(response, MAX_RESPONSE_BYTES);
         let body: unknown = null;
         try { body = JSON.parse(text ?? 'null'); } catch { /* Untrusted failure text is not a receipt. */ }
-        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body }, () => null);
+        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body, ...(rateLimit ? { rateLimit } : {}) }, () => null);
       }
       const bytes = await readBoundedBytes(response, limit);
       const digest = response.headers.get('x-artifact-sha256');
@@ -123,6 +163,41 @@ export class HarnessSink {
       }
       return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: digest } };
     } catch { return { kind: 'unavailable', reason: 'artifact_read_failed' }; }
+    finally { dispose?.(); }
+  }
+
+  /** The reservation is scheduling only; callers must still prove source and packet freshness. */
+  async reserveRecoveryWrite(): Promise<RecoveryWritePermit | undefined> {
+    return this.requestBudget?.reserveWrite();
+  }
+
+  releaseRecoveryWrite(permit: RecoveryWritePermit | undefined): void {
+    if (permit) this.requestBudget?.releaseWrite(permit);
+  }
+
+  private async fetchRequest(url: string, init: RequestInit, timeoutMs: number, permit?: RecoveryWritePermit, parentSignal?: AbortSignal):
+    Promise<{ response: Response; rateLimit?: RecoveryRateLimit; dispose: () => void }> {
+    for (;;) {
+      if (permit) {
+        if (init.method !== 'POST' || !this.requestBudget) throw new Error('recovery_write_permit_invalid');
+        this.requestBudget.consumeWrite(permit);
+      } else await this.requestBudget?.acquire();
+      const lease = abortSignalWithTimeout(parentSignal, timeoutMs);
+      try {
+        const response = await this.fetchImpl(url, { ...init, signal: lease.signal });
+        // Keep the lease until the caller has consumed the response body too.
+        if (response.status !== 429 || !this.requestBudget) return { response, dispose: lease.dispose };
+        const rateLimit = this.requestBudget.rateLimited(response.headers.get('retry-after'), response.headers.get('date'));
+        // Reads may restart after an explicit rejection. Writes remain receipt-driven;
+        // neither a 429 nor a lost acknowledgment authorizes a blind POST retry.
+        if (init.method !== 'GET' || !rateLimit.retryable) return { response, rateLimit, dispose: lease.dispose };
+        await response.body?.cancel().catch(() => undefined);
+        lease.dispose();
+      } catch (error) {
+        lease.dispose();
+        throw error;
+      }
+    }
   }
 
   private headers(contentType: string): Record<string, string> {
@@ -142,39 +217,49 @@ export class HarnessSink {
     body: string | undefined,
     contentType: string,
     options: RequestOptions = {}
-  ): Promise<{ status: number; body: unknown } | { failure: string }> {
+  ): Promise<{ status: number; body: unknown; rateLimit?: RecoveryRateLimit } | { failure: string }> {
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
+    let dispose: (() => void) | undefined;
     try {
-      const response = await this.fetchImpl(`${this.credential.url}${path}`, {
+      const fetched = await this.fetchRequest(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(timeoutMs),
         redirect: 'manual',
-      });
+      }, timeoutMs, options.recoveryWritePermit, options.signal);
+      const { response, rateLimit } = fetched;
+      dispose = fetched.dispose;
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
       // returns an opaque redirect with status 0. Both read as "redirected".
       if (response.type === 'opaqueredirect') return { status: 302, body: null };
       const text = await readBounded(response, options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
       if (text === null) {
-        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' } };
+        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' }, ...(rateLimit ? { rateLimit } : {}) };
       }
       let parsed: unknown = null;
       if (text !== '') {
         try {
-          parsed = JSON.parse(text);
+          if (options.requireCompleteRead) {
+            const decoded = decodeOriginalReport(text, { exactNumbers: true });
+            if (decoded.transformations.length) throw new Error('transformed_receipt');
+            parsed = decoded.value;
+          } else parsed = JSON.parse(text);
         } catch {
-          parsed = { message: text.slice(0, 200) };
+          parsed = options.requireCompleteRead
+            ? { error: 'malformed_response', message: 'invalid or ambiguous complete read response' }
+            : { message: text.slice(0, 200) };
         }
       }
-      return { status: response.status, body: parsed };
+      return { status: response.status, body: parsed, ...(rateLimit ? { rateLimit } : {}) };
     } catch (err) {
-      return { failure: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+      return { failure: transportFailure(err) };
+    } finally {
+      dispose?.();
     }
   }
 
   private classify<T>(
-    result: { status: number; body: unknown } | { failure: string },
+    result: { status: number; body: unknown; rateLimit?: RecoveryRateLimit } | { failure: string },
     onOk: (body: unknown, status: number) => T | null
   ): SinkOutcome<T> {
     if ('failure' in result) return { kind: 'unavailable', reason: result.failure };
@@ -191,6 +276,10 @@ export class HarnessSink {
       return { kind: 'disabled', reason: error, message };
     }
     if (status === 409) return { kind: 'conflict', message };
+    if (status === 429 && result.rateLimit) return {
+      kind: 'unavailable', reason: 'HTTP 429', httpStatus: 429, rateLimitReason: result.rateLimit.reason,
+      ...(result.rateLimit.retryAfterMs !== undefined ? { retryAfterMs: result.rateLimit.retryAfterMs } : {}),
+    };
     if (status >= 500 || status === 429 || status === 408) {
       return { kind: 'unavailable', reason: `HTTP ${status}${message ? ` ${message}` : ''}` };
     }
@@ -205,27 +294,50 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
+  /** Capability is read at the credential's own host; no speculative write. */
+  private async requireEvidenceProtocol(options: RequestOptions, boundClassification = false): Promise<SinkOutcome<{ supported: boolean }>> {
+    // Old servers silently discard unknown provenance. The attested credential
+    // may read model-stats, but may not list runs or use an ordinary login.
+    const attested = this.credential.source === 'attest';
+    const capability = await this.getJson(
+      attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
+      (data, meta) => {
+        if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
+        const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
+        const boundVersion = (meta as { bound_classification_protocol?: unknown } | null)?.bound_classification_protocol;
+        return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 &&
+          (!boundClassification || boundVersion === 1) };
+      }, options
+    );
+    if (capability.kind !== 'ok') return capability;
+    if (!capability.value.supported) return {
+      kind: 'rejected', httpStatus: 0,
+      error: boundClassification ? 'unsupported_bound_classification_protocol' : 'unsupported_evidence_protocol',
+      message: boundClassification
+        ? 'The server has not confirmed evidence protocol 2 and bound classification protocol 1; events were not sent'
+        : 'The server has not confirmed evidence protocol version 2; versioned evidence was not sent',
+    };
+    return capability;
+  }
+
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
-  async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
-    if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
-      // Old servers silently discard unknown provenance. The attested credential
-      // may read model-stats, but may not list runs or use an ordinary login.
-      const attested = this.credential.source === 'attest';
-      const capability = await this.getJson(
-        attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
-        (data, meta) => {
-          if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
-          const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
-          return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 };
-        }, options
-      );
+  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope = JSON.stringify(envelope)): Promise<SinkOutcome<RunReceipt>> {
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
+    const gating = envelope.run.gating;
+    const boundClassification = gating !== null && typeof gating === 'object' && 'bound_classification_protocol' in gating;
+    if (boundClassification && gating.bound_classification_protocol !== 1) return {
+      kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+      message: 'The run must declare bound classification protocol 1; the envelope was not sent',
+    };
+    if (boundClassification || envelope.findings.some((finding) => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined)) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
       if (capability.kind !== 'ok') return capability;
-      if (!capability.value.supported) return {
-        kind: 'rejected', httpStatus: 0, error: 'unsupported_evidence_protocol',
-        message: 'The server has not confirmed evidence protocol version 2; normalization provenance was not sent',
-      };
     }
-    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', remaining);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
@@ -243,6 +355,40 @@ export class HarnessSink {
         status: meta?.status === 'existing' || status === 200 ? 'existing' : 'created',
       };
     });
+  }
+
+  /**
+   * Read the restricted run-bound receipt after an uncertain attested POST.
+   * Only a 404 authorizes a replay; unavailable, rejected or malformed answers
+   * stop recovery. The server independently restricts this route to the
+   * credential's own live run and signed workflow subject.
+   */
+  async getAttestedRunReceipt(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    if (this.credentialSource !== 'attest') return { kind: 'rejected' };
+    if (!envelope.artifacts_declared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`, undefined, 'application/json', options);
+    if ('failure' in result) return { kind: 'unavailable' };
+    if (result.status === 404) return { kind: 'absent' };
+    if (result.status >= 500 || result.status === 429 || result.status === 408) return { kind: 'unavailable' };
+    if (result.status !== 200) return { kind: 'rejected' };
+    const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
+    const data = response?.data;
+    const envelopeSha256 = createHash('sha256').update(serializedEnvelope, 'utf8').digest('hex');
+    if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string' ||
+      typeof data['envelope_sha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(data['envelope_sha256']) || data['envelope_sha256'] !== envelopeSha256 ||
+      response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], envelope.artifacts_declared)) return { kind: 'rejected' };
+    return {
+      kind: 'recorded',
+      value: {
+        id: envelope.run.id,
+        url: data['url'],
+        ...(typeof data['received_at'] === 'string' ? { received_at: data['received_at'] } : {}),
+        ...(typeof data['repo_verified'] === 'boolean' ? { repo_verified: data['repo_verified'] } : {}),
+        ...(typeof data['head_verified'] === 'string' ? { head_verified: data['head_verified'] } : {}),
+        artifacts_expected: envelope.artifacts_declared.map(({ kind }) => kind),
+        status: 'existing',
+      },
+    };
   }
 
   /** `PUT /api/v1/reviews/runs/:id/artifacts/:kind` — the raw bytes, never JSON. */
@@ -280,12 +426,76 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
+    // Retained JSON can violate the producer's type. Refuse the batch before
+    // inspecting provenance so the outbox preserves it and continues other entries.
+    if (events.some(event => event.kind === 'round_processed' &&
+      (event.payload === null || typeof event.payload !== 'object' || Array.isArray(event.payload)))) {
+      return { kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
+        message: 'round_processed payload must be an object; events were not sent' };
+    }
+    let boundClassification = false;
+    let versionedClassification = false;
+    for (const event of events) {
+      if (event.kind !== 'round_processed') continue;
+      const payload = event.payload;
+      const markedClassification = 'classification_version' in payload || 'legacy_pending_identities' in payload;
+      if (markedClassification) {
+        const pending = payload.legacy_pending_identities;
+        if (payload.classification_version !== 1 || typeof payload.report_json_sha256 !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(payload.report_json_sha256) ||
+          !Number.isSafeInteger(event.round) || event.round! < 1 ||
+          !Array.isArray(payload.identities) || !payload.identities.every((identity: unknown) => {
+            if (identity === null || typeof identity !== 'object' || Array.isArray(identity) ||
+              !Object.hasOwn(identity, 'pending_round')) return false;
+            const value = (identity as { pending_round: unknown }).pending_round;
+            return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= event.round!);
+          }) ||
+          ('legacy_pending_identities' in payload && (!Array.isArray(pending) || pending.length === 0 || pending.length > 2000 ||
+            !pending.every((identity: unknown, index: number) => typeof identity === 'string' && /^[a-f0-9]{16}$/.test(identity) &&
+              (index === 0 || pending[index - 1] < identity))))) {
+          return { kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+            message: 'Bound classification requires version 1, a lowercase report digest, pending snapshots and valid optional legacy pending identities; events were not sent' };
+        }
+        boundClassification = true;
+      }
+      const markedSightingRefs = new Set<string>();
+      if (Array.isArray(payload.identities)) {
+        for (const entry of payload.identities) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
+            !SIGHTING_BINDING_FIELDS.some(field => Object.hasOwn(entry, field))) continue;
+          if (!validSightingBinding(entry)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Per-sighting bindings require a complete supported version 1 identity; events were not sent',
+          };
+          if (markedClassification && entry.report_json_sha256 !== payload.report_json_sha256) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use the classification report digest; events were not sent',
+          };
+          if (markedClassification && markedSightingRefs.has(entry.finding_ref as string)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use unique finding references; events were not sent',
+          };
+          if (markedClassification) markedSightingRefs.add(entry.finding_ref as string);
+          versionedClassification = true;
+        }
+      }
+    }
+    if (boundClassification || versionedClassification) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
+      if (capability.kind !== 'ok') return capability;
+    }
+    const body = JSON.stringify({ events });
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
     const result = await this.request(
       'POST',
       '/api/v1/reviews/converge/events',
-      JSON.stringify({ events }),
+      body,
       'application/json',
-      options
+      remaining
     );
     return this.classify(result, (body) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
@@ -307,7 +517,10 @@ export class HarnessSink {
    */
   async getJson<T>(path: string, validate: (data: unknown, meta?: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
     const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
-    return this.classify(result, (body) => {
+    return this.classify(result, (body, status) => {
+      if (options.requireCompleteRead && (status !== 200 || !body || typeof body !== 'object' || Array.isArray(body) ||
+          !Object.hasOwn(body, 'data') || !Object.hasOwn(body, 'meta') ||
+          Object.keys(body).some(key => key !== 'data' && key !== 'meta'))) return null;
       const response = body as { data?: unknown; meta?: unknown } | null;
       return validate(response?.data, response?.meta);
     });
@@ -355,6 +568,30 @@ function hostOnly(raw: string): string {
   } catch {
     return '(unparseable URL)';
   }
+}
+
+/** A transport failure can carry Node's nested `Error.cause`; retain only safe, bounded diagnostics. */
+function transportFailure(err: unknown): string {
+  const describe = (value: unknown): string => value instanceof Error ? `${value.name}: ${value.message}` : String(value);
+  const primary = describe(err);
+  const cause = err instanceof Error ? err.cause : undefined;
+  return scrubText(cause === undefined ? primary : `${primary}; cause: ${describe(cause)}`, 300);
+}
+
+function sameDeclarations(raw: unknown, expected: ArtifactDeclaration[]): boolean {
+  if (!Array.isArray(raw) || raw.length !== expected.length) return false;
+  const byKind = new Map<string, ArtifactDeclaration>();
+  for (const declaration of raw) {
+    if (!declaration || typeof declaration !== 'object') return false;
+    const value = declaration as Record<string, unknown>;
+    if (typeof value['kind'] !== 'string' || typeof value['sha256'] !== 'string' ||
+      typeof value['bytes'] !== 'number' || !Number.isSafeInteger(value['bytes']) || value['bytes'] < 0 || byKind.has(value['kind'])) return false;
+    byKind.set(value['kind'], { kind: value['kind'] as ArtifactKind, sha256: value['sha256'], bytes: value['bytes'] });
+  }
+  return expected.every(declaration => {
+    const actual = byKind.get(declaration.kind);
+    return actual?.sha256 === declaration.sha256 && actual.bytes === declaration.bytes;
+  });
 }
 
 /** Server or network text made safe for a terminal: scrubbed, control characters removed, bounded. */

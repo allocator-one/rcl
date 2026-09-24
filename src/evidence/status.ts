@@ -1,4 +1,5 @@
 import { openReadSink } from '../telemetry/read-sink.js';
+import type { RecoveryRequestBudget } from '../telemetry/recovery-request-budget.js';
 import { describeOutcome, type HarnessSink } from '../telemetry/sink.js';
 import { formatGateStatus, safeJson, text } from './format.js';
 import { getGateStatus } from './reads.js';
@@ -35,9 +36,10 @@ export interface StatusOptions {
 }
 
 /** The read sink, or `null` after telling the user why there is none. */
-export async function openSink(deps: EvidenceDeps): Promise<HarnessSink | null> {
+export async function openSink(deps: EvidenceDeps, requestBudget?: RecoveryRequestBudget): Promise<HarnessSink | null> {
   const opened = await openReadSink({
     rclVersion: deps.rclVersion,
+    ...(requestBudget ? { requestBudget } : {}),
     ...(deps.env !== undefined ? { env: deps.env } : {}),
     ...(deps.cwd !== undefined ? { cwd: deps.cwd } : {}),
     ...(deps.credentialsPath !== undefined ? { credentialsPath: deps.credentialsPath } : {}),

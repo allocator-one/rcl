@@ -17,13 +17,23 @@ export function platformPath(path: string): string {
 }
 
 /** Stable, bounded, regular-file read. In particular, opening a FIFO cannot block. */
-export async function readStable(path: string, limit = MAX_REPORT_BYTES): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
-  if (constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined) throw new Error('safe_file_flags_unavailable');
+export async function readStable(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean } = {}): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
+  return readStableFile(path, limit, options, true);
+}
+
+/** Ordinary native storage preserves platform compatibility; it does not qualify recovery inputs. */
+export function readOrdinaryNativeFile(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean } = {}): ReturnType<typeof readStable> {
+  return readStableFile(path, limit, options, false);
+}
+
+async function readStableFile(path: string, limit: number, options: { sync?: boolean }, strict: boolean): ReturnType<typeof readStable> {
+  if (strict && (constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined)) throw new Error('safe_file_flags_unavailable');
   const canonical = platformPath(path);
   if (await realpath(dirname(canonical)) !== dirname(canonical)) throw new Error('symlink_directory');
   const entry = await lstat(canonical);
   if (!entry.isFile()) throw new Error(entry.isSymbolicLink() ? 'symlink_file' : 'not_regular');
-  const handle = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const flags = !strict && options.sync ? constants.O_RDWR : constants.O_RDONLY;
+  const handle = await open(canonical, flags | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
     const before = await handle.stat();
     if (!before.isFile()) throw new Error('not_regular');
@@ -36,6 +46,9 @@ export async function readStable(path: string, limit = MAX_REPORT_BYTES): Promis
       if (bytesRead === 0) break;
       length += bytesRead;
     }
+    // Resuming a retained write can require a fresh durability acknowledgment.
+    // Keep the flush inside the same descriptor and subsequent stability checks.
+    if (options.sync) await handle.sync();
     const after = await handle.stat();
     const current = await lstat(canonical);
     if (length !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs ||

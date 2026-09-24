@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
+import { buildRunEnvelope, type RunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { describeOutcome, HarnessSink } from '../../src/telemetry/sink.js';
 import { fakeFetch, sampleResult } from './fixtures.js';
@@ -104,6 +104,19 @@ describe('HarnessSink.postRun', () => {
     expect(down).toEqual({ kind: 'unavailable', reason: 'TypeError: fetch failed' });
   });
 
+  it('keeps a bounded, redacted causal transport diagnostic for an unavailable request', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const cause = new Error(`socket reset authorization=Bearer ${'Abcdef1234567890Abcdef1234567890'}`);
+    const failure = new TypeError('fetch failed', { cause });
+
+    const outcome = await sink(() => failure).sink.postRun(envelope);
+
+    expect(outcome).toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('TypeError: fetch failed') });
+    expect((outcome as { reason: string }).reason).toContain('cause: Error: socket reset');
+    expect((outcome as { reason: string }).reason).not.toContain('Abcdef1234567890');
+    expect((outcome as { reason: string }).reason.length).toBeLessThanOrEqual(300);
+  });
+
   it('never sends the token anywhere but the credential host, and never follows a redirect with it', async () => {
     const { sink: s, requests } = sink((request) => ({ status: 201, body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] } } }));
     await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
@@ -182,6 +195,89 @@ describe('HarnessSink.postRun', () => {
       expect(wire).toContain(CREDENTIAL.token);
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe('HarnessSink.getAttestedRunReceipt', () => {
+  const attested = { url: 'https://harness.example.test', token: 'rbc_minted', source: 'attest' as const };
+
+  function attestedSink(handler: Parameters<typeof fakeFetch>[0]) {
+    const { fetch, requests } = fakeFetch(handler);
+    return { sink: new HarnessSink({ credential: attested, rclVersion: '3.8.1', fetchImpl: fetch, timeoutMs: 500 }), requests };
+  }
+
+  function envelope(): RunEnvelope {
+    return buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+  }
+
+  it('accepts only an own-run receipt whose complete artifact declarations bind the original envelope', async () => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const { sink: s, requests } = attestedSink(() => ({
+      status: 200,
+      body: { data: {
+        id: original.run.id,
+        url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+        received_at: '2026-09-23T12:00:00Z', repo_verified: true, head_verified: 'current',
+        envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+        artifacts_declared: original.artifacts_declared,
+      }, meta: { status: 'existing' } },
+    }));
+
+    const receipt = await s.getAttestedRunReceipt(original, serialized);
+
+    expect(receipt).toMatchObject({ kind: 'recorded', value: { id: original.run.id, artifacts_expected: ['report_json', 'report_md'] } });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: 'GET', url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+      headers: { authorization: 'Bearer rbc_minted' }, redirect: 'manual',
+    });
+  });
+
+  it('permits replay only after an explicit own-run absence, never after a rejected or mismatched receipt', async () => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const absent = await attestedSink(() => ({ status: 404, body: { error: 'not_found' } })).sink.getAttestedRunReceipt(original, serialized);
+    expect(absent).toEqual({ kind: 'absent' });
+
+    const forbidden = await attestedSink(() => ({ status: 403, body: { error: 'run_bound_credential' } })).sink.getAttestedRunReceipt(original, serialized);
+    expect(forbidden).toEqual({ kind: 'rejected' });
+
+    const mismatched = await attestedSink(() => ({
+      status: 200,
+      body: { data: { id: original.run.id, url: 'u', artifacts_declared: [{ ...original.artifacts_declared[0]!, sha256: '0'.repeat(64) }] }, meta: { status: 'existing' } },
+    })).sink.getAttestedRunReceipt(original, serialized);
+    expect(mismatched).toEqual({ kind: 'rejected' });
+
+    const wrongBytes = await attestedSink(() => ({
+      status: 200,
+      body: { data: {
+        id: original.run.id, url: 'u', artifacts_declared: original.artifacts_declared,
+        envelope_sha256: createHash('sha256').update(`${serialized} `, 'utf8').digest('hex'),
+      }, meta: { status: 'existing' } },
+    })).sink.getAttestedRunReceipt(original, serialized);
+    expect(wrongBytes).toEqual({ kind: 'rejected' });
+  });
+
+  it('runs the actual receipt transport and honors cancellation when AbortSignal.any is unavailable', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+    const controller = new AbortController();
+    const { sink: s, requests } = attestedSink(() => 'hang');
+
+    try {
+      Object.defineProperty(AbortSignal, 'any', { value: undefined, configurable: true });
+      const original = envelope();
+      const pending = s.getAttestedRunReceipt(original, JSON.stringify(original), { signal: controller.signal, timeoutMs: 60_000 });
+      setTimeout(() => controller.abort(new Error('fixture cancellation')), 10);
+
+      expect(await pending).toEqual({ kind: 'unavailable' });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.signal?.aborted).toBe(true);
+      expect(requests[0]!.signal?.reason).toMatchObject({ message: 'fixture cancellation' });
+    } finally {
+      if (descriptor) Object.defineProperty(AbortSignal, 'any', descriptor);
+      else delete (AbortSignal as unknown as Record<string, unknown>)['any'];
     }
   });
 });
