@@ -27,6 +27,7 @@ on:
         description: Head commit the round must find on the pull request (the review fails fast otherwise)
         required: true
         type: string
+
       attempt_id:
         description: Harness dispatch attempt UUID (omit only for an unregistered manual run)
         required: false
@@ -41,7 +42,8 @@ concurrency:
 
 jobs:
   attested-review:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
     permissions:
       id-token: write
       contents: read
@@ -52,14 +54,17 @@ jobs:
       # The workflow's own commit on the default branch — the installer
       # script lives here; the pull request is never checked out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
         with:
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        timeout-minutes: 5
         with:
           node-version: 22
 
       - name: Install Review Council
+        timeout-minutes: 10
         run: |
           # Same private-prefix install as review.yml: the hosted toolcache is
           # world-writable by design, which the installer refuses as a prefix.
@@ -74,11 +79,16 @@ jobs:
           echo "$RUNTIME_PREFIX/bin" >> "$GITHUB_PATH"
 
       - name: Attested review
+        timeout-minutes: 325
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           GITHUB_TOKEN: ${{ github.token }}
           ATTEMPT_ID: ${{ inputs.attempt_id }}
+          # The runner context is valid only from step level down; at job
+          # level `env` the workflow fails to parse (RCL-67 regression).
+          RCL_DATA_DIR: ${{ runner.temp }}/rcl-gate-data
+          RCL_GATE_EXPORT: ${{ runner.temp }}/rcl-gate-evidence
         run: |
           case "$PR_NUMBER" in
             ''|*[!0-9]*) echo "pr_number must be a pull request number, got: $PR_NUMBER" >&2; exit 2 ;;
@@ -90,12 +100,181 @@ jobs:
             echo "head_sha must be 40 hex characters, got ${#HEAD_SHA}" >&2
             exit 2
           fi
-          if [ -n "$ATTEMPT_ID" ] && ! printf '%s\n' "$ATTEMPT_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
-            echo "attempt_id must be a lowercase UUID when provided" >&2
-            exit 2
+          if [ -n "$ATTEMPT_ID" ]; then
+            case "$ATTEMPT_ID" in
+              *$'\n'*) echo "attempt_id must be a lowercase UUID when provided" >&2; exit 2 ;;
+            esac
+            if ! printf '%s\n' "$ATTEMPT_ID" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+              echo "attempt_id must be a lowercase UUID when provided" >&2
+              exit 2
+            fi
           fi
+          umask 077
+          mkdir -p "$RCL_GATE_EXPORT" "$RCL_DATA_DIR/quarantine"
+          # The public artifact contains only RCL's delivery-sanitized reports
+          # and recovery records. Never enable parse-failure answer retention
+          # for this gate: malformed answers can echo the reviewed diff.
+          cat > "$RCL_DATA_DIR/public-artifact.yml" <<'YAML'
+          harness:
+            telemetry: full
+            parseFailures: false
+          YAML
+          python3 - <<'PYMANIFEST'
+          import json, os
+          from pathlib import Path
+          keys = ["GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "PR_NUMBER", "HEAD_SHA", "ATTEMPT_ID"]
+          Path(os.environ["RCL_GATE_EXPORT"], "workflow.json").write_text(json.dumps({k: os.environ.get(k) for k in keys}, sort_keys=True) + "\n")
+          PYMANIFEST
+          set +e
           rcl review "$GITHUB_REPOSITORY#$PR_NUMBER" \
             --attest \
             --expect-head-sha "$HEAD_SHA" \
             --evidence-required \
-            --ci
+            --json-file "$RCL_GATE_EXPORT/report.json" \
+            --markdown "$RCL_GATE_EXPORT/report.md" \
+            --ci \
+            --config "$RCL_DATA_DIR/public-artifact.yml"
+          REVIEW_EXIT=$?
+          set -e
+          printf '%s\n' "$REVIEW_EXIT" > "$RCL_GATE_EXPORT/exit-status"
+          exit "$REVIEW_EXIT"
+
+      # The public repository stores only authenticated ciphertext. Recovery
+      # requires the separately held private identity for this dedicated cert.
+      - name: Prepare encrypted review evidence
+        if: always()
+        timeout-minutes: 4
+        env:
+          RCL_GATE_EXPORT: ${{ runner.temp }}/rcl-gate-evidence
+          RCL_QUARANTINE: ${{ runner.temp }}/rcl-gate-data/quarantine
+          RCL_RECOVERY_DIR: ${{ runner.temp }}/rcl-gate-recovery
+          RCL_RECOVERY_CERT: ${{ github.workspace }}/.github/review-evidence-recovery.pem
+        run: |
+          set -euo pipefail
+          umask 077
+          case "$(openssl version | awk '{print $2}')" in
+            3.*) ;;
+            *) echo "OpenSSL 3 is required for authenticated CMS retention" >&2; exit 1 ;;
+          esac
+          python3 - "$RCL_RECOVERY_DIR" <<'PYCLEAN'
+          import shutil, sys
+          shutil.rmtree(sys.argv[1], ignore_errors=True)
+          PYCLEAN
+          mkdir -p "$RCL_RECOVERY_DIR"
+          ARCHIVE="$(mktemp "$RUNNER_TEMP/rcl-review-evidence.XXXXXX")"
+          CIPHERTEXT="$RCL_RECOVERY_DIR/review-evidence.cms"
+          trap 'unlink "$ARCHIVE" 2>/dev/null || true' EXIT
+          python3 - "$ARCHIVE" "$RCL_GATE_EXPORT" "$RCL_QUARANTINE" <<'PYARCHIVE'
+          import hashlib
+          import io
+          import json
+          import sys
+          import tarfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          roots = (("evidence", Path(sys.argv[2])), ("quarantine", Path(sys.argv[3])))
+          retained = []
+          for prefix, root in roots:
+              if not root.exists():
+                  continue
+              if root.is_symlink() or not root.is_dir():
+                  raise SystemExit(f"retention root is not a directory: {root}")
+              for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                  if path.is_symlink():
+                      raise SystemExit(f"refusing retained symlink: {path}")
+                  if path.is_dir():
+                      continue
+                  if not path.is_file():
+                      raise SystemExit(f"refusing non-regular retained path: {path}")
+                  relative = path.relative_to(root)
+                  member = Path(prefix, *relative.parts).as_posix()
+                  digest = hashlib.sha256()
+                  with path.open("rb") as source:
+                      for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                          digest.update(chunk)
+                  retained.append((member, path, path.stat().st_size, digest.hexdigest()))
+
+          if not retained:
+              raise SystemExit("no review evidence is available to retain")
+
+          manifest = {
+              "files": [
+                  {"bytes": size, "path": name, "sha256": digest}
+                  for name, _path, size, digest in retained
+              ],
+              "schema": "rcl-review-evidence-archive-v1",
+          }
+          manifest_bytes = (
+              json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+          ).encode()
+
+          def add_bytes(bundle, name, data):
+              info = tarfile.TarInfo(name)
+              info.size = len(data)
+              info.mtime = 0
+              info.mode = 0o600
+              info.uid = 0
+              info.gid = 0
+              info.uname = ""
+              info.gname = ""
+              bundle.addfile(info, io.BytesIO(data))
+
+          def add_file(bundle, name, path, size):
+              info = tarfile.TarInfo(name)
+              info.size = size
+              info.mtime = 0
+              info.mode = 0o600
+              info.uid = 0
+              info.gid = 0
+              info.uname = ""
+              info.gname = ""
+              with path.open("rb") as source:
+                  bundle.addfile(info, source)
+
+          with tarfile.open(archive, "w", format=tarfile.PAX_FORMAT) as bundle:
+              add_bytes(bundle, "MANIFEST.json", manifest_bytes)
+              for name, path, size, _digest in retained:
+                  add_file(bundle, name, path, size)
+          PYARCHIVE
+          openssl x509 -in "$RCL_RECOVERY_CERT" -noout -pubkey >/dev/null
+          openssl cms -encrypt \
+            -binary \
+            -outform DER \
+            -aes-256-gcm \
+            -in "$ARCHIVE" \
+            -out "$CIPHERTEXT" \
+            "$RCL_RECOVERY_CERT"
+          test -s "$CIPHERTEXT"
+          openssl cms -cmsout -inform DER -in "$CIPHERTEXT" -noout
+
+      - name: Retain encrypted review evidence
+        id: retain-original-review-evidence
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-gate-encrypted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rcl-gate-recovery/review-evidence.cms
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record retained evidence receipt
+        if: always()
+        timeout-minutes: 1
+        env:
+          ARTIFACT_ID: ${{ steps.retain-original-review-evidence.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.retain-original-review-evidence.outputs.artifact-digest }}
+        run: |
+          case "$ARTIFACT_ID" in
+            ''|*[!0-9]*) echo "retained evidence artifact id is missing" >&2; exit 1 ;;
+          esac
+          case "$ARTIFACT_DIGEST" in
+            ????????* ) ;;
+            * ) echo "retained evidence artifact SHA-256 digest is missing" >&2; exit 1 ;;
+          esac
+          if ! printf '%s\n' "$ARTIFACT_DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "retained evidence artifact digest is not SHA-256" >&2
+            exit 1
+          fi
+          printf '%s\n' "Retained encrypted evidence artifact $ARTIFACT_ID SHA-256: $ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
