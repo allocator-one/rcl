@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   applyGating,
+  applyGatingWithFallback,
   resolveGatingConfig,
   relevantPatchExcerpt,
 } from '../../src/consensus/gating.js';
@@ -56,6 +57,30 @@ const baseOpts = {
 };
 
 describe('applyGating (RCL-23)', () => {
+  it.each([
+    ['verificationTimeoutMs', Number.NaN],
+    ['verificationTimeoutMs', Number.POSITIVE_INFINITY],
+    ['verificationTimeoutMs', 0],
+    ['verificationTimeoutMs', -1],
+    ['verificationTimeoutMs', 2_147_483_648],
+    ['verificationPassTimeoutMs', Number.NaN],
+    ['verificationPassTimeoutMs', Number.POSITIVE_INFINITY],
+    ['verificationPassTimeoutMs', 0],
+    ['verificationPassTimeoutMs', -1],
+    ['verificationPassTimeoutMs', 2_147_483_648],
+  ] as const)('rejects an unsafe direct %s value', async (key, value) => {
+    await expect(applyGating([], { ...baseOpts, [key]: value })).rejects.toThrow(key);
+  });
+
+  it.each(['verificationTimeoutMs', 'verificationPassTimeoutMs'] as const)(
+    'accepts a positive fractional direct %s value',
+    async (key) => {
+      await expect(applyGating([], { ...baseOpts, [key]: 12.5 })).resolves.toMatchObject({
+        findings: [],
+      });
+    }
+  );
+
   it('marks critical findings as gating regardless of model count', async () => {
     const ask = vi.fn();
     const { findings } = await applyGating(
@@ -143,6 +168,166 @@ describe('applyGating (RCL-23)', () => {
     expect(ask.mock.calls.length).toBeGreaterThan(1);
     expect(verification).toMatchObject({ candidates: 20, refuted: 20, unavailable: 0 });
     expect(annotated.every((f) => f.gating?.reason === 'none')).toBe(true);
+  });
+
+  it('uses a monotonic clock when the wall clock moves backwards', async () => {
+    let monotonicNow = 0;
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(-1_000_000);
+    const ask = vi.fn(async (): Promise<ModelAnswer> => {
+      monotonicNow = 100;
+      return {
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[]',
+        durationMs: 1,
+        status: 'success',
+      };
+    });
+
+    try {
+      await expect(
+        applyGating([makeFinding()], {
+          ...baseOpts,
+          verificationPassTimeoutMs: 100,
+          monotonicNow: () => monotonicNow,
+          ask,
+        })
+      ).rejects.toThrow(/verification pass.*100ms/i);
+    } finally {
+      wallClock.mockRestore();
+    }
+  });
+
+  it('rejects when final progress processing crosses the pass deadline', async () => {
+    let monotonicNow = 0;
+    const ask = vi.fn(
+      async (): Promise<ModelAnswer> => ({
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: '[{"id":"F1","verdict":"confirmed"}]',
+        durationMs: 1,
+        status: 'success',
+      })
+    );
+
+    await expect(
+      applyGating([makeFinding()], {
+        ...baseOpts,
+        verificationPassTimeoutMs: 100,
+        monotonicNow: () => monotonicNow,
+        onVerificationProgress: (event) => {
+          if (event.completedBatches === event.totalBatches) monotonicNow = 100;
+        },
+        ask,
+      })
+    ).rejects.toThrow(/verification pass.*100ms/i);
+  });
+
+  it('bounds the whole verification pass and stops starting batches at its deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const progress: Array<{ completedBatches: number; totalBatches: number }> = [];
+      const ask = vi.fn(
+        async (): Promise<ModelAnswer> =>
+          new Promise<ModelAnswer>(() => {
+            // Simulate a provider request that never settles on its own.
+          })
+      );
+      const findings = Array.from({ length: 32 }, (_, i) =>
+        makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+      );
+
+      const result = applyGating(findings, {
+        ...baseOpts,
+        verificationPassTimeoutMs: 100,
+        onVerificationProgress: (event) => progress.push(event),
+        ask,
+      });
+      const rejection = expect(result).rejects.toThrow(/verification pass.*100ms/i);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await rejection;
+
+      expect(ask).toHaveBeenCalledTimes(3);
+      expect(ask.mock.calls.every((call) => call[3]!.timeoutMs <= 100)).toBe(true);
+      expect(ask.mock.calls.every((call) => call[3]!.signal?.aborted)).toBe(true);
+      expect(progress[0]).toMatchObject({ completedBatches: 0, totalBatches: 4 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns original strict-severity findings when a bounded verifier pass times out', async () => {
+    vi.useFakeTimers();
+    try {
+      const ask = vi.fn(
+        async (): Promise<ModelAnswer> =>
+          new Promise<ModelAnswer>(() => {
+            // The test ask ignores cancellation, so the outer deadline must retain the result.
+          })
+      );
+      const findings = Array.from({ length: 32 }, (_, i) =>
+        makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+      );
+      const result = applyGatingWithFallback(findings, {
+        ...baseOpts,
+        verificationPassTimeoutMs: 100,
+        ask,
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+      const fallback = await result;
+
+      expect(ask).toHaveBeenCalledTimes(3);
+      expect(fallback.ok).toBe(false);
+      expect(fallback.failure).toBeInstanceOf(Error);
+      expect(fallback.findings).toEqual(findings);
+      expect(fallback.findings.every((finding) => finding.gating === undefined)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports bounded verification progress through the final batch', async () => {
+    const progress: Array<{
+      completedBatches: number;
+      totalBatches: number;
+      completedCandidates: number;
+      totalCandidates: number;
+    }> = [];
+    const ask = vi.fn(async (_model, _system, userPrompt): Promise<ModelAnswer> => {
+      const ids = [...userPrompt.matchAll(/^### (F\d+)$/gm)].map((m) => m[1]!);
+      return {
+        model: 'google/gemini-3.6-flash',
+        provider: 'google',
+        text: JSON.stringify(ids.map((id) => ({ id, verdict: 'refuted' }))),
+        durationMs: 1,
+        status: 'success',
+      };
+    });
+    const findings = Array.from({ length: 20 }, (_, i) =>
+      makeFinding({ id: `f${i}`, title: `finding ${i}`, models: [`m${i}`] })
+    );
+
+    await applyGating(findings, {
+      ...baseOpts,
+      verificationPassTimeoutMs: 1_000,
+      onVerificationProgress: (event) => progress.push(event),
+      ask,
+    });
+
+    expect(progress[0]).toEqual({
+      completedBatches: 0,
+      totalBatches: 3,
+      completedCandidates: 0,
+      totalCandidates: 20,
+    });
+    expect(progress.at(-1)).toEqual({
+      completedBatches: 3,
+      totalBatches: 3,
+      completedCandidates: 20,
+      totalCandidates: 20,
+    });
   });
 
   it('keeps one failed batch from costing the findings in the others', async () => {
@@ -665,6 +850,21 @@ describe('resolveGatingConfig', () => {
     expect(cfg.minModels).toBe(2);
     expect(cfg.verificationModel).not.toMatch(/^openrouter\//);
     expect(cfg.verificationTimeoutMs).toBeLessThanOrEqual(60_000);
+    expect(cfg.verificationPassTimeoutMs).toBeGreaterThanOrEqual(cfg.verificationTimeoutMs);
+    expect(cfg.verificationPassTimeoutMs).toBeLessThanOrEqual(180_000);
+  });
+
+  it('accepts an explicit whole-pass verification timeout', () => {
+    expect(resolveGatingConfig({ verificationPassTimeout: 12_345 }).verificationPassTimeoutMs).toBe(
+      12_345
+    );
+  });
+
+  it.each([
+    ['verificationTimeout', 'gating.verificationTimeout', 2_147_483_648],
+    ['verificationPassTimeout', 'gating.verificationPassTimeout', 2_147_483_648],
+  ] as const)('rejects an unsafe %s value', (key, label, value) => {
+    expect(() => resolveGatingConfig({ [key]: value })).toThrow(label);
   });
 
   it('rejects an openrouter-routed verification model', () => {

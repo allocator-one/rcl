@@ -1,5 +1,42 @@
 # Changelog
 
+## 3.8.3 - 2026-09-24
+
+- Supersede the withdrawn 3.8.2 release with its bounded terminal-report
+  aggregation, missing-report recovery, and protected-evidence support.
+- Preserve the completed-review path from consensus through bounded
+  verification, the self-describing run header, and matching JSON and Markdown
+  terminal artifacts. Add a deterministic regression for a saturated council,
+  a failed reviewer, and a verifier that ignores cancellation (RCL-85).
+- Keep attempt-accounting lock timing separate from target-ownership timing so
+  short accounting probes cannot prematurely fail coordinated native and
+  recovery writers. Harden the cross-platform and isolated-process recovery
+  regressions (RCL-81).
+
+## 3.8.2 - 2026-09-24 (withdrawn)
+
+- Bound the complete single-model verification queue to three minutes while
+  preserving the existing stricter severity fallback when that deadline is
+  reached. Cap each newly started verifier batch to the remaining whole-pass
+  budget, normalize the remaining timeout for integer-only provider SDKs, and
+  stop starting work after expiry (RCL-85).
+- Report post-review stages and bounded verifier batch progress so completed
+  reviewer calls can be distinguished from consensus, verification, report
+  assembly and artifact-write failures. Record the effective whole-pass bound
+  in terminal report evidence.
+- **Missing-report gap recovery** (RCL-81): add `rcl converge-gap --preview`,
+  `--apply`, and `--resume` for one missing report immediately before a retained
+  original report. Recovery binds immutable evidence and native snapshots,
+  preserves the original round and spent attempts, and records the missing
+  report explicitly without inventing approval or reviewer results.
+- **Coordinated recovery writes** (RCL-81): serialize gap operations with normal
+  round, verdict, and budget writers, including compatible older recovery
+  clients. Conflicting ownership and changed evidence fail closed; completed
+  results remain resumable after cleanup failures.
+- **Protected review evidence** (RCL-84): correlate registered GitHub gate runs
+  with their lifecycle attempts and retain authenticated encrypted originals
+  for recovery. The private recovery key remains outside public CI.
+
 ## 3.8.1 - 2026-09-23
 
 - Add explicit `--original-prose control-code-units-v1` recovery for retained

@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
 import type { ConsensusFinding } from './types.js';
 import type { ModelAnswer } from '../dispatch/adapter.js';
 import type { FileChange } from '../resolver/types.js';
@@ -61,7 +63,7 @@ export type AskFn = (
   model: string,
   systemPrompt: string,
   userPrompt: string,
-  options: { timeoutMs: number; maxRetries: number }
+  options: { timeoutMs: number; maxRetries: number; signal?: AbortSignal }
 ) => Promise<ModelAnswer>;
 
 export interface GatingOptions {
@@ -74,6 +76,12 @@ export interface GatingOptions {
    */
   verificationModel: string | undefined;
   verificationTimeoutMs: number;
+  /** Whole verification-lane budget across all queued batches. */
+  verificationPassTimeoutMs?: number;
+  /** Observable batch progress for interactive and redirected CLI output. */
+  onVerificationProgress?: (progress: VerificationProgress) => void;
+  /** Monotonic time source; injectable for deterministic deadline tests. */
+  monotonicNow?: () => number;
   /** Test seam; defaults to the verification model's own adapter. */
   ask?: AskFn;
   /**
@@ -101,11 +109,26 @@ export interface VerificationStats {
   durationMs: number;
 }
 
+export interface VerificationProgress {
+  completedBatches: number;
+  totalBatches: number;
+  completedCandidates: number;
+  totalCandidates: number;
+}
+
+export class VerificationPassTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Verification pass exceeded its whole-pass deadline of ${timeoutMs}ms`);
+    this.name = 'VerificationPassTimeoutError';
+  }
+}
+
 export interface GatingConfigInput {
   mode?: 'verified-consensus' | 'all-findings';
   minModels?: number;
   verificationModel?: string;
   verificationTimeout?: number;
+  verificationPassTimeout?: number;
 }
 
 export interface ResolvedGatingConfig {
@@ -113,17 +136,29 @@ export interface ResolvedGatingConfig {
   minModels: number;
   verificationModel: string | undefined;
   verificationTimeoutMs: number;
+  verificationPassTimeoutMs: number;
 }
 
 const DIRECT_PROVIDERS = new Set(['anthropic', 'openai', 'google']);
 
+function resolveTimerDelay(name: string, value: number): number {
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMER_DELAY_MS) {
+    throw new Error(`${name} must be finite and between 0 and ${MAX_TIMER_DELAY_MS}, got ${value}`);
+  }
+  return value;
+}
+
 export const DEFAULT_GATING_CONFIG = {
   mode: 'verified-consensus',
   minModels: 2,
-  // Use the stable Flash council member for this latency-sensitive pass;
-  // each verifier batch is capped at 60 s so it cannot dominate round time.
+  // Use the stable Flash council member for this latency-sensitive pass.
+  // Individual batches and the complete queue both have explicit bounds.
   verificationModel: 'google/gemini-3.8-flash',
   verificationTimeoutMs: 60_000,
+  // Bound the complete queue to three per-call windows. Large finding sets
+  // may span many batches; without a pass deadline those waves can keep a
+  // completed council run alive indefinitely.
+  verificationPassTimeoutMs: 180_000,
 } as const;
 
 /**
@@ -169,8 +204,14 @@ export function resolveGatingConfig(
     mode: input?.mode ?? DEFAULT_GATING_CONFIG.mode,
     minModels,
     verificationModel,
-    verificationTimeoutMs:
-      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs,
+    verificationTimeoutMs: resolveTimerDelay(
+      'gating.verificationTimeout',
+      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs
+    ),
+    verificationPassTimeoutMs: resolveTimerDelay(
+      'gating.verificationPassTimeout',
+      input?.verificationPassTimeout ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+    ),
   };
 }
 
@@ -521,6 +562,13 @@ export async function applyGating(
   findings: ConsensusFinding[],
   options: GatingOptions
 ): Promise<{ findings: ConsensusFinding[]; verification?: VerificationStats }> {
+  const verificationTimeoutMs = resolveTimerDelay(
+    'verificationTimeoutMs', options.verificationTimeoutMs
+  );
+  const verificationPassTimeoutMs = resolveTimerDelay(
+    'verificationPassTimeoutMs',
+    options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+  );
   const annotated: ConsensusFinding[] = new Array(findings.length);
   const candidateIndices: number[] = [];
 
@@ -554,7 +602,9 @@ export async function applyGating(
     return { findings: annotated };
   }
 
-  const started = Date.now();
+  const now = options.monotonicNow ?? performance.now.bind(performance);
+  const started = now();
+  const verificationDeadline = started + verificationPassTimeoutMs;
   const verifierModel = options.verificationModel ?? '(none)';
   const stats: VerificationStats = {
     model: verifierModel,
@@ -624,7 +674,7 @@ export async function applyGating(
     for (const findingIndex of verifiable) {
       markUnavailable(findingIndex, 'no direct-API verifier available in the configured roster');
     }
-    stats.durationMs = Date.now() - started;
+    stats.durationMs = now() - started;
     return { findings: annotated, verification: stats };
   }
 
@@ -639,6 +689,17 @@ export async function applyGating(
     for (let i = 0; i < verifiable.length; i += VERIFIER_BATCH_SIZE) {
       batches.push(verifiable.slice(i, i + VERIFIER_BATCH_SIZE));
     }
+
+    let completedBatches = 0;
+    let completedCandidates = 0;
+    const reportProgress = (): void =>
+      options.onVerificationProgress?.({
+        completedBatches,
+        totalBatches: batches.length,
+        completedCandidates,
+        totalCandidates: verifiable.length,
+      });
+    reportProgress();
 
     // Adapter construction can throw (e.g. a missing provider key) — it
     // must hit the same fail-safe path as a failed call, never abort the
@@ -656,6 +717,54 @@ export async function applyGating(
       constructionFailure = err instanceof Error ? err.message : String(err);
     }
 
+    const passController = new AbortController();
+    const remainingPassMs = verificationDeadline - now();
+    if (remainingPassMs <= 0) {
+      throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+    }
+    const passTimeoutHandle = setTimeout(() => passController.abort(), remainingPassMs);
+
+    function askWithinPassDeadline(
+      prompt: string,
+      callTimeoutMs: number
+    ): Promise<ModelAnswer> {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (outcome: 'resolve' | 'reject', value: ModelAnswer | unknown): void => {
+          if (settled) return;
+          settled = true;
+          passController.signal.removeEventListener('abort', onAbort);
+          if (outcome === 'resolve') resolve(value as ModelAnswer);
+          else reject(value);
+        };
+        const onAbort = (): void =>
+          finish('reject', new VerificationPassTimeoutError(verificationPassTimeoutMs));
+
+        passController.signal.addEventListener('abort', onAbort, { once: true });
+        if (passController.signal.aborted) {
+          onAbort();
+          return;
+        }
+
+        let answerPromise: Promise<ModelAnswer>;
+        try {
+          answerPromise = ask!(
+            options.verificationModel!,
+            VERIFIER_SYSTEM_PROMPT,
+            prompt,
+            { timeoutMs: callTimeoutMs, maxRetries: 1, signal: passController.signal }
+          );
+        } catch (err) {
+          finish('reject', err);
+          return;
+        }
+        answerPromise.then(
+          (value) => finish('resolve', value),
+          (err: unknown) => finish('reject', err)
+        );
+      });
+    }
+
     async function runBatch(batch: number[]): Promise<void> {
       if (ask === undefined) {
         for (const index of batch) failureByIndex.set(index, constructionFailure!);
@@ -666,12 +775,20 @@ export async function applyGating(
         [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
       );
       try {
-        const answer = await ask(
-          options.verificationModel!,
-          VERIFIER_SYSTEM_PROMPT,
-          buildVerifierPrompt(candidates, relevantPatches),
-          { timeoutMs: options.verificationTimeoutMs, maxRetries: 1 }
-        );
+        const verifierPrompt = buildVerifierPrompt(candidates, relevantPatches);
+        const remainingMs = verificationDeadline - now();
+        if (remainingMs <= 0) {
+          throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+        }
+        // performance.now() leaves a fractional remaining budget, while
+        // provider SDKs such as OpenAI require integer millisecond timeouts.
+        // Round down so the adapter's own bound never exceeds the pass.
+        const callTimeoutMs = Math.max(1, Math.floor(Math.min(verificationTimeoutMs, remainingMs)));
+        const answer = await askWithinPassDeadline(verifierPrompt, callTimeoutMs);
+        if (now() >= verificationDeadline) {
+          passController.abort();
+          throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+        }
         if (answer.status !== 'success') {
           const reason = answer.error ?? answer.status;
           for (const index of batch) failureByIndex.set(index, reason);
@@ -683,6 +800,10 @@ export async function applyGating(
           if (verdict !== undefined) verdictsByIndex.set(findingIndex, verdict);
         });
       } catch (err) {
+        if (err instanceof VerificationPassTimeoutError) {
+          passController.abort();
+          throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+        }
         const reason = err instanceof Error ? err.message : String(err);
         for (const index of batch) failureByIndex.set(index, reason);
       }
@@ -692,13 +813,41 @@ export async function applyGating(
     // never stalls the queue behind it.
     let nextBatch = 0;
     const width = Math.max(1, Math.min(VERIFIER_CONCURRENCY, batches.length));
-    await Promise.all(
-      Array.from({ length: width }, async () => {
-        while (nextBatch < batches.length) {
-          await runBatch(batches[nextBatch++]!);
-        }
-      })
+    let workerResults: PromiseSettledResult<void>[];
+    try {
+      workerResults = await Promise.allSettled(
+        Array.from({ length: width }, async () => {
+          try {
+            while (true) {
+              const batchIndex = nextBatch++;
+              if (batchIndex >= batches.length) return;
+              if (now() >= verificationDeadline) {
+                passController.abort();
+                throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+              }
+              const batch = batches[batchIndex]!;
+              await runBatch(batch);
+              completedBatches++;
+              completedCandidates += batch.length;
+              reportProgress();
+            }
+          } catch (err) {
+            passController.abort();
+            throw err;
+          }
+        })
+      );
+      if (now() >= verificationDeadline) {
+        passController.abort();
+        throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+      }
+    } finally {
+      clearTimeout(passTimeoutHandle);
+    }
+    const failedWorker = workerResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
     );
+    if (failedWorker !== undefined) throw failedWorker.reason;
   }
 
   verifiable.forEach((findingIndex) => {
@@ -736,6 +885,26 @@ export async function applyGating(
     annotated[findingIndex] = { ...finding, gating };
   });
 
-  stats.durationMs = Date.now() - started;
+  stats.durationMs = now() - started;
   return { findings: annotated, verification: stats };
+}
+
+
+/**
+ * Apply verifier annotations without allowing a failed verification lane to
+ * discard the completed council result. Callers receive the unannotated
+ * findings, which the CI gate evaluates with strict severity fallback.
+ */
+export async function applyGatingWithFallback(
+  findings: ConsensusFinding[],
+  options: GatingOptions
+): Promise<
+  | { ok: true; findings: ConsensusFinding[]; verification?: VerificationStats }
+  | { ok: false; findings: ConsensusFinding[]; failure: unknown }
+> {
+  try {
+    return { ok: true, ...(await applyGating(findings, options)) };
+  } catch (failure) {
+    return { ok: false, findings, failure };
+  }
 }
