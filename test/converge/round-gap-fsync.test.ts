@@ -15,6 +15,8 @@ vi.mock('node:fs/promises',async importOriginal=>{
   }};
 });
 afterEach(()=>{fault.suffix='';fault.fail=false;fault.failed=0;fault.synced=0;fault.skip=0;});
+// Each case performs multiple real durable fsync retries under injected I/O failure.
+const durableFsyncTimeout = 15_000;
 it.each(['native-before.json','attempts-before.json','source-0.bin','native-after.json'])(
   'refuses persistent initial fsync failure and resyncs identical retained %s before success',async suffix=>{
     const f=await fixture();await f.prepare();const before=await readFile(f.statePath);
@@ -24,7 +26,7 @@ it.each(['native-before.json','attempts-before.json','source-0.bin','native-afte
     expect(fault.failed).toBe(2);expect(await readFile(f.statePath)).toEqual(before);
     fault.fail=false;expect(await f.apply('resume')).toBe('applied');expect(fault.synced).toBeGreaterThan(0);
     expect((await loadConvergeRunState(f.dir,f.target))?.roundGapAudit?.entries).toHaveLength(1);
-  });
+  }, durableFsyncTimeout);
 it('resyncs a fully written checkpoint after failed initial file fsync before native mutation',async()=>{
   const f=await fixture();await f.prepare();const before=await readFile(f.statePath);
   fault.suffix='00000001.json';fault.fail=true;
@@ -32,7 +34,7 @@ it('resyncs a fully written checkpoint after failed initial file fsync before na
   await expect(f.apply('resume')).rejects.toThrow('synthetic fsync EIO');
   expect(await readFile(f.statePath)).toEqual(before);fault.fail=false;
   expect(await f.apply('resume')).toBe('applied');expect(fault.synced).toBeGreaterThan(0);
-});
+}, durableFsyncTimeout);
 it('resyncs the native directory before acknowledging a renamed but not durably synced audit',async()=>{
   const f=await fixture();await f.prepare();fault.suffix='rcl-converge-runs';fault.fail=true;fault.skip=1;
   await expect(f.apply()).rejects.toThrow('synthetic fsync EIO');
@@ -40,4 +42,4 @@ it('resyncs the native directory before acknowledging a renamed but not durably 
   await expect(f.apply('resume')).rejects.toThrow('synthetic fsync EIO');
   fault.fail=false;expect(await f.apply('resume')).toBe('resumed');expect(fault.synced).toBeGreaterThan(0);
   expect(await readFile(f.statePath)).toEqual(committed);
-});
+}, durableFsyncTimeout);
