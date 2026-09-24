@@ -330,7 +330,7 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   }
   if (options.findings.some((finding) => {
     const identity = finding.identity;
-    return identity !== undefined && identity.trim().toLowerCase().startsWith('report:') &&
+    return identity !== undefined && identity.trim().replace(/\p{Cf}/gu, '').toLowerCase().startsWith('report:') &&
       !REPORT_IDENTITY.test(identity);
   })) {
     throw new ConvergeRunStateError('Invalid report identity; refusing legacy matching for a malformed report key.');

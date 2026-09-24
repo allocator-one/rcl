@@ -53,6 +53,7 @@ describe('report identity through native classification and telemetry', () => {
     const [finding] = consensus([42]);
     const identity = finding!.identity!;
     const variants = [identity.toUpperCase(), ` ${identity}`, `${identity} `, identity.slice(0, -1)];
+    variants.push(`re\u200bport:${identity.slice('report:'.length)}`);
 
     for (const [index, malformedIdentity] of variants.entries()) {
       const target = `malformed-variant-${index}`;
