@@ -49,21 +49,50 @@ describe('report identity through native classification and telemetry', () => {
     expect(await loadConvergeRunState(dir, target)).toEqual(state);
   });
 
-  it('does not let a legacy finding reuse an entry claimed by a modern report key', async () => {
+  it('rejects report-like identity variants before state writes', async () => {
+    const [finding] = consensus([42]);
+    const identity = finding!.identity!;
+    const variants = [identity.toUpperCase(), ` ${identity}`, `${identity} `, identity.slice(0, -1)];
+
+    for (const [index, malformedIdentity] of variants.entries()) {
+      const target = `malformed-variant-${index}`;
+      await expect(processRoundReport({
+        gitCommonDir: dir,
+        target,
+        round: 1,
+        findings: [{ ...finding!, identity: malformedIdentity }],
+      })).rejects.toThrow(/invalid report identity/i);
+      expect(await loadConvergeRunState(dir, target)).toBeUndefined();
+    }
+  });
+
+  it('refuses a mixed modern and legacy report before any state is written', async () => {
     const [modern, legacy] = consensus([42, 42]).map((finding, index) => ({
       ...finding,
       title: index === 0 ? 'Modern claim' : 'Legacy claim',
       description: index === 0 ? 'Modern report identity owns this entry.' : 'Legacy input must receive its own entry.',
     }));
 
-    const result = await processRoundReport({
+    await expect(processRoundReport({
       gitCommonDir: dir,
       target: 'mixed-identity-claims',
       round: 1,
       findings: [modern!, { ...legacy!, identity: undefined }],
+    })).rejects.toThrow(/mixed report and legacy/i);
+    expect(await loadConvergeRunState(dir, 'mixed-identity-claims')).toBeUndefined();
+  });
+
+  it('continues to accept all-legacy reports for compatibility', async () => {
+    const [finding] = consensus([42]);
+    const result = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'legacy-only-report',
+      round: 1,
+      findings: [{ ...finding!, identity: undefined }],
     });
 
-    expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ status: 'new' });
   });
 
   it('keeps distinct same-location claims separate through verdict resolution', async () => {

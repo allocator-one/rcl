@@ -335,6 +335,11 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   })) {
     throw new ConvergeRunStateError('Invalid report identity; refusing legacy matching for a malformed report key.');
   }
+  const hasReportIdentity = options.findings.some((finding) => REPORT_IDENTITY.test(finding.identity ?? ''));
+  const hasLegacyIdentity = options.findings.some((finding) => !REPORT_IDENTITY.test(finding.identity ?? ''));
+  if (hasReportIdentity && hasLegacyIdentity) {
+    throw new ConvergeRunStateError('Mixed report and legacy finding identities are not supported in one report.');
+  }
   return { target, runId };
 }
 
