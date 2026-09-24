@@ -1,18 +1,40 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
 import { claimConvergeAttempt, ConvergeAttemptPostClaimError, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 
-const faults = vi.hoisted(() => ({ release: false, pausePath: '', entered: () => {}, wait: Promise.resolve(), failWrite: false }));
+const faults = vi.hoisted(() => ({ release: false, pausePath: '', entered: () => {}, wait: Promise.resolve(), failWrite: false,
+  unsafeWindowsStateDir: false, ownershipWait: undefined as (() => Promise<void>) | undefined }));
+vi.mock('../../src/converge/native-lock.js', async original => {
+  const locks = await original<typeof import('../../src/converge/native-lock.js')>();
+  return { ...locks, withNativeLock: ((...args: Parameters<typeof locks.withNativeLock>) => {
+    const [root, target, work, hooks = {}, timing] = args;
+    return locks.withNativeLock(root, target, work,
+      faults.ownershipWait ? { ...hooks, wait: faults.ownershipWait } : hooks, timing);
+  }) as typeof locks.withNativeLock };
+});
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs,
+    lstat: async (...args: Parameters<typeof fs.lstat>) => {
+      const info = await fs.lstat(...args);
+      if (faults.unsafeWindowsStateDir && String(args[0]).replaceAll('\\', '/').endsWith('/rcl-converge-runs')) {
+        return new Proxy(info, { get(target, property, receiver) {
+          if (property === 'mode') return 0o40777;
+          if (property === 'uid') return 0;
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+      }
+      return info;
+    },
     unlink: async (...args: Parameters<typeof fs.unlink>) => {
       await fs.unlink(...args);
-      if (faults.release && String(args[0]).includes('/rcl-native-target-locks/') && String(args[0]).endsWith('.json')) {
+      if (faults.release && String(args[0]).replaceAll('\\', '/').includes('/rcl-native-target-locks/') && String(args[0]).endsWith('.json')) {
         faults.release = false;
         throw Object.assign(new Error('Synthetic outer cleanup acknowledgment lost'), { code: 'EIO' });
       }
@@ -30,12 +52,22 @@ vi.mock('node:fs/promises', async original => {
 let dir: string;
 const target = 'synthetic-owner-boundary';
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+const geteuid = Object.getOwnPropertyDescriptor(process, 'geteuid');
 function barrier() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-native-boundary-'))); });
 afterEach(async () => {
+  vi.restoreAllMocks();
   Object.defineProperty(process, 'platform', platform);
-  faults.release = false; faults.pausePath = ''; faults.failWrite = false;
+  if (geteuid) Object.defineProperty(process, 'geteuid', geteuid); else delete (process as { geteuid?: unknown }).geteuid;
+  faults.release = false; faults.pausePath = ''; faults.failWrite = false; faults.unsafeWindowsStateDir = false;
+  faults.ownershipWait = undefined;
   await rm(dir, { recursive: true, force: true });
+});
+
+it('refuses recovery timing overrides before acquiring a target lock', async () => {
+  const work = vi.fn();
+  await expect(withNativeTarget(dir, target, work, { qualification: 'recovery', lockTimeoutMs: 1 })).rejects.toThrow('native_target_recovery_timing_unsupported');
+  expect(work).not.toHaveBeenCalled();
 });
 
 it('preserves ordinary attempt and round operations in the Windows platform branch', async () => {
@@ -48,6 +80,46 @@ it('preserves ordinary attempt and round operations in the Windows platform bran
   const recovery = vi.fn();
   await expect(withRecoveryTarget(dir, target, recovery)).rejects.toThrow('unsupported_recovery_lock_scope');
   expect(recovery).not.toHaveBeenCalled();
+});
+
+it.runIf(process.platform !== 'win32').each([0o775, 0o777])('refuses an existing group/other-writable convergence state directory (%o)', async mode => {
+  const stateDir = join(dir, 'rcl-converge-runs');
+  await mkdir(stateDir); await chmod(stateDir, mode);
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow(/unsafe_(native_lock|converge_state)_directory/);
+});
+
+it.runIf(process.platform !== 'win32')('accepts an existing owner-controlled 0755 convergence state directory', async () => {
+  const stateDir = join(dir, 'rcl-converge-runs');
+  await mkdir(stateDir); await chmod(stateDir, 0o755);
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
+});
+
+it('refuses a symlinked convergence state directory', async () => {
+  const real = join(dir, 'real-state'); await mkdir(real);
+  await symlink(real, join(dir, 'rcl-converge-runs'));
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow('unsafe_converge_state_directory');
+});
+
+it('does not require geteuid in the Windows platform branch', async () => {
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  Object.defineProperty(process, 'geteuid', { configurable: true, value: undefined });
+  faults.unsafeWindowsStateDir = true;
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
+});
+
+it('fails closed when POSIX cannot identify the current owner', async () => {
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+  Object.defineProperty(process, 'geteuid', { configurable: true, value: undefined });
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow(/unsafe_(native_lock|converge_state)_directory/);
+});
+
+it('refuses a harmful Darwin ACL on an otherwise owner-controlled state directory', async () => {
+  Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+  const command = vi.spyOn(lockScope, 'lockSystemCommand').mockResolvedValue(
+    'drwx------+ 2 user staff 64 Sep 22 12:00 ' + join(dir, 'rcl-converge-runs') + '\n 0: group:everyone allow list,search\n'
+  );
+  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).rejects.toThrow('unsafe_recovery_lock_acl');
+  expect(command).toHaveBeenCalledWith('/bin/ls', ['-lde', join(dir, 'rcl-converge-runs')]);
 });
 
 it('returns a committed attempt after publication with a do-not-retry warning when outer cleanup fails', async () => {
@@ -64,6 +136,7 @@ it('returns a committed attempt after publication with a do-not-retry warning wh
 
 it('keeps a failed post-claim operation inside ownership without rolling back or duplicating the attempt', async () => {
   const entered = barrier(), release = barrier();
+  const contended = barrier(), retry = barrier();
   const failure = new Error('Synthetic publication failure');
   const claim = claimConvergeAttempt({ gitCommonDir: dir, target, afterClaim: async () => {
     entered.resolve(); await release.promise; throw failure;
@@ -72,19 +145,21 @@ it('keeps a failed post-claim operation inside ownership without rolling back or
   let next: ReturnType<typeof claimConvergeAttempt> | undefined;
   try {
     await Promise.race([entered.promise, claim]);
+    faults.ownershipWait = async () => { contended.resolve(); await retry.promise; };
     next = claimConvergeAttempt({ gitCommonDir: dir, target });
     void next.catch(() => {});
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await Promise.race([contended.promise, next.then(() => { throw new Error('contender bypassed occupied target'); })]);
     expect((await loadConvergeAttemptState(dir, target))?.attemptsUsed).toBe(1);
     release.resolve();
     await expect(claim).rejects.toBeInstanceOf(ConvergeAttemptPostClaimError);
     await expect(claim).rejects.toMatchObject({
       name: 'ConvergeAttemptPostClaimError', claim: { target, attempt: 1 }, cause: failure,
     });
+    retry.resolve();
     expect(await next).toMatchObject({ attempt: 2 });
     expect((await loadConvergeAttemptState(dir, target))?.attempts.map(entry => entry.attempt)).toEqual([1, 2]);
   } finally {
-    release.resolve(); await Promise.allSettled([claim, ...(next ? [next] : [])]);
+    release.resolve(); retry.resolve(); await Promise.allSettled([claim, ...(next ? [next] : [])]);
   }
 });
 
@@ -127,18 +202,23 @@ it('keeps attempt state in the canonical directory when a caller symlink is reta
   const canonical = join(dir, 'canonical'), diverted = join(dir, 'diverted'), alias = join(dir, 'alias');
   await mkdir(canonical); await mkdir(diverted); await symlink(canonical, alias);
   const entered = barrier(), release = barrier();
+  const contended = barrier(), retry = barrier();
   const holder = withNativeTarget(canonical, target, async () => { entered.resolve(); await release.promise; });
   await entered.promise;
+  faults.ownershipWait = async () => { contended.resolve(); await retry.promise; };
   const claim = claimConvergeAttempt({ gitCommonDir: alias, target });
   try {
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await Promise.race([contended.promise, claim.then(() => { throw new Error('contender bypassed occupied target'); })]);
     await unlink(alias); await symlink(diverted, alias);
     release.resolve();
+    await holder;
+    retry.resolve();
     await expect(claim).resolves.toMatchObject({ attempt: 1 });
     expect((await loadConvergeAttemptState(canonical, target))?.attemptsUsed).toBe(1);
     expect(await loadConvergeAttemptState(diverted, target)).toBeUndefined();
   } finally {
     release.resolve();
+    retry.resolve();
     await Promise.allSettled([holder, claim]);
   }
 });
@@ -163,6 +243,7 @@ it('uses caller lock timing while waiting for target ownership', async () => {
 
 it.each([false, true])('drains a started owned write before release and surfaces detached failure=%s', async failure => {
   const entered = barrier(), releaseWrite = barrier();
+  const contended = barrier(), retry = barrier();
   faults.pausePath = join(dir, 'rcl-converge-runs'); faults.entered = entered.resolve;
   faults.wait = releaseWrite.promise; faults.failWrite = failure;
   let detached: Promise<void> | undefined, settled = false;
@@ -175,19 +256,22 @@ it.each([false, true])('drains a started owned write before release and surfaces
   let second: Promise<void> | undefined;
   try {
     await entered.promise;
-    await new Promise(resolve => setTimeout(resolve, 100));
-    expect.soft(settled).toBe(false);
+    faults.ownershipWait = async () => { contended.resolve(); await retry.promise; };
     second = withNativeTarget(dir, target, async ownership => {
       await writeState(dir, { ...state, roundCap: 15 }, ownership);
     });
     void second.catch(() => {});
+    await Promise.race([contended.promise, second.then(() => { throw new Error('contender bypassed pending owned write'); })]);
+    expect(settled).toBe(false);
     releaseWrite.resolve();
     if (failure) await expect(first).rejects.toThrow('Synthetic detached write failure');
     else await expect(first).resolves.toBeUndefined();
+    retry.resolve();
     await second;
     expect((await loadConvergeRunState(dir, target))?.roundCap).toBe(15);
   } finally {
     releaseWrite.resolve();
+    retry.resolve();
     await Promise.allSettled([first, ...(second ? [second] : []), ...(detached ? [detached] : [])]);
   }
 });

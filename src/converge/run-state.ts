@@ -1,9 +1,22 @@
+import { readStable } from '../telemetry/recovery/files.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
+import { isDeepStrictEqual } from 'node:util';
+import { ownedNativeTargetCommonDir, withOwnedNativeOperation, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { gapManifest, validateRoundGapAudit, type RoundGapEntry } from './round-gap-schema.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
-import type { ConsensusFinding } from '../consensus/types.js';
+import { serializeRecoveryDocument } from '../evidence/original-run/journal.js';
+import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
+import * as lockScope from '../evidence/original-run/lock-scope.js';
+import { effectivePendingIdentities, validateNativeRecoveryState, type NativeRecoveryMetadata } from './recovery-state.js';
+import { recoveryProjectionFreshness, type RecoveryProjectionFreshness } from '../evidence/claim-recovery/validation/current-projection.js';
+import { bindRoundEvidence, processSemanticRound, validateSemanticState, verifyRoundBinding, type ReportBinding, type SemanticSighting } from './semantic-state.js';
+export { migrateConvergeState } from './semantic-state.js';
+import type { ClaimDescriptor } from '../consensus/claim-identity.js';
+import type { ConsensusFinding, ReviewResult } from '../consensus/types.js';
+import { describeReportCollision, type ReportIdentityConflict, type ReportCollisionContext, type ReportCollisionDiagnostic } from './report-collision.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
   availableFindingKey,
@@ -55,6 +68,15 @@ export class ConvergeRunStateError extends Error {
   }
 }
 
+export class ReportIdentityConflictError extends ConvergeRunStateError {
+  diagnostic?: ReportCollisionDiagnostic;
+  context?: ReportCollisionContext;
+  constructor(readonly conflicts: ReportIdentityConflict[]) {
+    super(`Report identity ${conflicts[0]!.reportIdentity} has conflicting classifications; preserve the original report and accounting. See converge-report --help for the recorded-claim recovery boundaries.`);
+    this.name = 'ReportIdentityConflictError';
+  }
+}
+
 export function validateRoundCap(maxRounds: number): number {
   if (
     !Number.isSafeInteger(maxRounds) ||
@@ -92,6 +114,8 @@ export interface FindingEntry {
    * pre-2.1.1 states — the retained `severity` is frozen before new sightings.
    */
   verdictSeverity?: string;
+  claimDescriptor?: ClaimDescriptor;
+  pendingRound?: number;
 }
 
 export interface RoundCounts {
@@ -102,7 +126,10 @@ export interface RoundCounts {
 }
 
 export interface ConvergeRunState {
-  version: typeof STATE_VERSION;
+  version: 1 | 2 | 3;
+  recovery?: NativeRecoveryMetadata;
+  sightings?: SemanticSighting[];
+  migration?: { sourceSha256: string; snapshotPath: string; migratedAt: string };
   target: string;
   roundCap: number;
   /** `runId` is the report's `run.id` (rcl ≥ 3.0), which converge-verdict sends with every verdict. */
@@ -110,11 +137,14 @@ export interface ConvergeRunState {
     round: number;
     counts: RoundCounts;
     runId?: string;
+    reportBinding?: ReportBinding;
     /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
     severities?: Record<string, ConsensusFinding['severity']>;
   }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
+  /** Additive local audit only; entries never stand for an admitted round. */
+  roundGapAudit?: { version: 1; entries: RoundGapEntry[] };
   /**
    * The most recent round's classified identities (RCL-30), so
    * `converge-verdict` can decide the round's resolution — in particular
@@ -134,11 +164,19 @@ export interface AnnotatedRoundFinding {
   status: FindingStatus;
   suppressReason?: string;
   finding: ConsensusFinding;
+  sighting?: SemanticSighting;
 }
 
 export interface RoundReport {
   roundCap: number;
   counts: RoundCounts;
+  actionableIdentities?: string[];
+  recoveryProjection?: RecoveryProjectionFreshness;
+  /** Validated semantic round binding; callers must not publish its local sourcePath. */
+  reportBinding?: ReportBinding;
+  classificationVersion?: 1;
+  /** Migrated obligations have no invented semantic sighting or report ref. */
+  legacyPendingIdentities?: string[];
   findings: AnnotatedRoundFinding[];
 }
 
@@ -183,25 +221,68 @@ export async function loadConvergeRunStateEvidence(
       { cause: err }
     );
   }
-  const state = parsed as Partial<ConvergeRunState>;
+  const state = parsed as Partial<ConvergeRunState> | null;
   if (
-    state.version !== STATE_VERSION ||
+    !state || typeof state !== 'object' ||
+    (state.version !== 1 && state.version !== 2 && state.version !== 3) ||
     state.target !== target ||
     !Number.isSafeInteger(state.roundCap) ||
     !Array.isArray(state.rounds) ||
     typeof state.findings !== 'object' ||
-    state.findings === null
+    state.findings === null || Array.isArray(state.findings)
   ) {
     throw new ConvergeRunStateError(
       `Invalid converge run state in ${path}; refusing to reset cross-round identity.`
     );
   }
+  if (state.version === 2) await validateSemanticState(state as ConvergeRunState, gitCommonDir);
+  if (state.version === 3) {
+    const canonical = await readStable(path, 64 * 1024 * 1024);
+    if (!canonical.raw.equals(raw)) throw new ConvergeRunStateError('Native recovery state changed during validation.');
+    await validateNativeRecoveryState(state as ConvergeRunState, gitCommonDir, raw);
+  }
+  validateRoundGapAudit(state as ConvergeRunState);
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
-/** Persist only under live explicit target authority; started writes drain before release. */
 export function writeState(gitCommonDir: string, state: ConvergeRunState, ownership: NativeTargetOwnership): Promise<void> {
   return withOwnedNativeOperation(ownership, gitCommonDir, state.target, () => writeStateOwned(gitCommonDir, state));
+}
+
+async function validateOrdinaryNextState(gitCommonDir: string, state: ConvergeRunState, bytes: string): Promise<void> {
+  validateRoundGapAudit(state);
+  if (state.version === 2) await validateSemanticState(state, gitCommonDir);
+  if (state.version === 3) await validateNativeRecoveryState(state, gitCommonDir, Buffer.from(bytes));
+}
+
+/** Exact ordinary CAS for retained transitions; strict recovery apply remains separate. */
+export function writeStateIfUnchanged(gitCommonDir: string, sourceSha256: string,
+  next: ConvergeRunState, ownership: NativeTargetOwnership): Promise<'written' | 'already-written'> {
+  const bytes = serializeRecoveryDocument(next);
+  const state = JSON.parse(bytes) as ConvergeRunState;
+  const afterSha256 = createHash('sha256').update(bytes).digest('hex');
+  return withOwnedNativeOperation(ownership, gitCommonDir, state.target, async () => {
+    if (!/^[a-f0-9]{64}$/.test(sourceSha256)) throw new ConvergeRunStateError('Invalid retained native source digest.');
+    await validateOrdinaryNextState(gitCommonDir, state, bytes);
+    const current = await loadConvergeRunStateEvidence(gitCommonDir, state.target);
+    if (current?.sha256 === afterSha256) {
+      const commonDir = await realpath(resolve(gitCommonDir)); const stateDir = join(commonDir, STATE_DIR);
+      if (await realpath(stateDir) !== stateDir) throw new Error('symlink_directory');
+      const path = convergeRunStatePath(commonDir, state.target);
+      const handle = await open(path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+      try {
+        if (!(await handle.stat()).isFile() || createHash('sha256').update(await handle.readFile()).digest('hex') !== afterSha256) {
+          throw new ConvergeRunStateError('Native state changed during retained transition readback.');
+        }
+        await handle.sync();
+      } finally { await handle.close(); }
+      await syncNativeDirectory(stateDir); await syncNativeDirectory(commonDir);
+      return 'already-written';
+    }
+    if (current?.sha256 !== sourceSha256) throw new ConvergeRunStateError('Native state changed after this transition was prepared.');
+    await writeStateOwned(gitCommonDir, state);
+    return 'written';
+  });
 }
 
 async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
@@ -209,6 +290,12 @@ async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): P
   const path = convergeRunStatePath(gitCommonDir, state.target);
   const stateDir = join(gitCommonDir, STATE_DIR);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const directory = await lstat(stateDir), uid = process.geteuid?.();
+  if (!directory.isDirectory() || directory.isSymbolicLink() ||
+      (process.platform !== 'win32' && (uid === undefined || directory.uid !== uid || (directory.mode & 0o022) !== 0))) {
+    throw new Error('unsafe_converge_state_directory');
+  }
+  if (process.platform === 'darwin') checkDarwinLockACL(await lockScope.lockSystemCommand('/bin/ls', ['-lde', stateDir]));
   await syncNativeDirectory(gitCommonDir);
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
@@ -247,37 +334,34 @@ export interface ReportIdentityMapping {
   status: FindingStatus;
   suppressReason?: string;
   finding: { identity?: string };
+  sighting?: SemanticSighting;
 }
 
 /** Refuse ambiguous legacy report keys before persisting or publishing classifications. */
 export function validateReportIdentityMappings(findings: readonly ReportIdentityMapping[]): void {
   const seen = new Map<string, ReportIdentityMapping>();
-  for (const f of findings) {
+  const groups = new Map<string, ReportIdentityConflict>();
+  const conflicted = new Set<string>();
+  for (const [index, f] of findings.entries()) {
     const key = f.finding.identity?.trim() || f.identity;
+    const group = groups.get(key) ?? { reportIdentity: key, members: [] };
+    group.members.push({ index, identity: f.identity, status: f.status });
+    groups.set(key, group);
     const previous = seen.get(key);
+    if (previous && (previous.sighting || f.sighting)) throw new ConvergeRunStateError(`Duplicate described report identity ${key}.`);
     if (previous && (previous.identity !== f.identity || previous.status !== f.status ||
         (previous.suppressReason || undefined) !== (f.suppressReason || undefined))) {
-      throw new ConvergeRunStateError(
-        `Report identity ${key} has conflicting classifications; preserve the report for supported finding-ref recovery.`
-      );
+      conflicted.add(key);
     }
     seen.set(key, f);
   }
+  if (conflicted.size > 0) throw new ReportIdentityConflictError([...conflicted].sort().map(key => groups.get(key)!));
 }
 
 /**
- * Dedupe one round's findings against every prior round of this run,
- * enforce the round cap, and persist the updated identity ledger.
- *
- * Suppression rule (RCL-30): a dismissal is terminal on its evidence. A
- * finding DISMISSED in an earlier round stays 'suppressed' no matter how many
- * models raise it again — identity matching is location-anchored, so a claim
- * about different code is a new identity, not a repeat sighting. The one
- * re-gate trigger is escalation: a sighting turned critical after a
- * non-critical dismissal is 'regating' and goes back in front of triage.
- * (Before 2.1.1 fresh ≥2-model corroboration also re-gated; on large diffs
- * that reopened popular false positives every round — see allocator-one#7774,
- * 24 rounds.)
+ * Process an original report through semantic v2 matching, or preserve the
+ * explicit descriptor-less legacy path. Described claims never fall back to
+ * location-only verdict inheritance; v1 state first requires migration.
  */
 export interface ProcessRoundOptions {
   gitCommonDir: string;
@@ -288,35 +372,69 @@ export interface ProcessRoundOptions {
   lineWindow?: number;
   /** The report's own run id, kept so verdicts can be bound to the round's run. */
   runId?: string;
+  /** Exact source bytes for legacy gap admission. */
+  reportSha256?: string;
+  evidence?: { reportJson: string };
+  /** The CLI keeps target ownership through its dependent event publication. */
   ownership?: NativeTargetOwnership;
 }
 
-export async function processRoundReport(options: ProcessRoundOptions): Promise<RoundReport> {
-  const { target } = validateRoundReportInput(options);
-  return options.ownership
-    ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership))
-    : withNativeTarget(options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership));
-}
-
-function validateRoundReportInput(options: ProcessRoundOptions): { target: string; runId?: string } {
+/** Validate immutable caller input before even creating target-coordination files. */
+export function validateRoundReportInput(options: ProcessRoundOptions) {
   const target = options.target.trim();
   if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
-  // A blank id is no binding at all; only a real one is persisted.
   const runId = options.runId?.trim() || undefined;
-  if (!Number.isSafeInteger(options.round) || options.round < 1) {
-    throw new ConvergeRunStateError('round must be a positive integer.');
-  }
-  if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
+  if (!Number.isSafeInteger(options.round) || options.round < 1) throw new ConvergeRunStateError('round must be a positive integer.');
+  if (options.findings.some(finding => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
     throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
   }
-  return { target, runId };
+  const binding = options.evidence ? bindRoundEvidence(options) : undefined;
+  const gating = binding ? (JSON.parse(options.evidence!.reportJson) as ReviewResult).run?.gating : undefined;
+  if (gating && Object.hasOwn(gating, 'bound_classification_protocol')) {
+    if (gating.bound_classification_protocol !== 1) throw new ConvergeRunStateError('Unsupported bound classification protocol.');
+    if (options.findings.some(finding => finding.claimDescriptor === undefined)) {
+      throw new ConvergeRunStateError('Declared bound classifications require semantic claim descriptors before native admission.');
+    }
+  }
+  return { target, runId, binding, gating };
+}
+
+export async function processRoundReport(options: ProcessRoundOptions): Promise<RoundReport> {
+  validateRoundReportInput(options);
+  if (options.ownership) {
+    return withOwnedNativeOperation(options.ownership, options.gitCommonDir, options.target,
+      ownership => processRoundReportOwned(options, ownership));
+  }
+  return withNativeTarget(options.gitCommonDir, options.target, ownership => processRoundReportOwned(options, ownership));
 }
 
 async function processRoundReportOwned(options: ProcessRoundOptions, ownership: NativeTargetOwnership): Promise<RoundReport> {
-  const { target, runId } = validateRoundReportInput(options);
+  const { target, runId, binding, gating } = validateRoundReportInput(options);
+  const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
+  options = { ...options, gitCommonDir };
+  const observed = await readState(gitCommonDir, target);
+  const marked = gating?.bound_classification_protocol !== undefined;
+  const semantic = observed?.version === 2 || observed?.version === 3 ||
+    options.findings.some(finding => finding.claimDescriptor !== undefined) || marked ||
+    (binding !== undefined && options.findings.length === 0 && observed?.version !== 1);
+  if (semantic) {
+    if (observed?.version === 1) {
+      throw new ConvergeRunStateError('Declared bound classifications require explicit v1 migration before native admission.');
+    }
+    if (!binding) {
+      throw new ConvergeRunStateError('Described claims require immutable original report evidence.');
+    }
+    if (observed?.version === 3 && gating?.bound_classification_protocol !== 1) {
+      throw new ConvergeRunStateError('Recovered-v3 continuation requires a marked immutable original report.');
+    }
+    if (options.findings.some(finding => finding.claimDescriptor === undefined)) {
+      throw new ConvergeRunStateError('Semantic classifications require a descriptor for every admitted sighting.');
+    }
+    return processSemanticRound(options, binding, ownership);
+  }
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
-  const state: ConvergeRunState = (await readState(options.gitCommonDir, target)) ?? {
+  const state: ConvergeRunState = observed ?? {
     version: STATE_VERSION,
     target,
     roundCap: DEFAULT_CONVERGE_ROUND_CAP,
@@ -324,6 +442,32 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     findings: {},
     updatedAt: new Date().toISOString(),
   };
+  const gapEntries = state.roundGapAudit?.entries ?? [];
+  if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) {
+    throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
+  }
+  for (const entry of gapEntries.filter(candidate => gapManifest(candidate).admittingRound === options.round)) {
+    const manifest = gapManifest(entry);
+    if (manifest.runId !== runId || manifest.reportSha256 !== options.reportSha256) {
+      throw new ConvergeRunStateError('round_gap_original_report_mismatch');
+    }
+    const { verifyRoundGapReceipt } = await import('./round-gap.js');
+    const original = await verifyRoundGapReceipt(gitCommonDir, entry);
+    if (!isDeepStrictEqual(original.findings, options.findings)) {
+      throw new ConvergeRunStateError('round_gap_original_report_mismatch');
+    }
+  }
+  const existingRound = state.rounds.find(r => r.round === options.round);
+  if (existingRound && binding && !existingRound.reportBinding) {
+    throw new ConvergeRunStateError('Legacy round has no original binding; ordinary replay cannot attach new historical evidence.');
+  }
+  if (existingRound?.reportBinding) {
+    if (existingRound.reportBinding.reportSha256 !== binding?.reportSha256) {
+      throw new ConvergeRunStateError('Round is already bound to different immutable report bytes.');
+    }
+    // A matching caller digest cannot recreate an absent or changed retained original.
+    await verifyRoundBinding(existingRound.reportBinding, target, options.round, existingRound.runId!);
+  }
   if (options.maxRounds !== undefined) {
     state.roundCap = validateRoundCap(options.maxRounds);
   }
@@ -338,7 +482,13 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // cap's intent. A state with no recorded rounds adopts whatever round the
   // resumed ledger is on (pre-upgrade runs have history the state lacks).
   const maxRecorded = state.rounds.reduce((max, r) => Math.max(max, r.round), 0);
-  if (maxRecorded > 0 && (options.round < maxRecorded || options.round > maxRecorded + 1)) {
+  const gaps = Array.from({ length: Math.max(0, options.round - maxRecorded - 1) }, (_, index) => maxRecorded + index + 1);
+  const admittedThroughGap = gaps.length === 1 && gaps.every(gapRound => gapEntries.some(entry => {
+    const manifest = gapManifest(entry);
+    return manifest.gapRound === gapRound && manifest.admittingRound === options.round &&
+      manifest.runId === runId && manifest.reportSha256 === options.reportSha256;
+  }));
+  if (maxRecorded > 0 && (options.round < maxRecorded || (options.round > maxRecorded + 1 && !admittedThroughGap))) {
     throw new ConvergeRunStateError(
       `Round ${options.round} for ${target} is out of order: recorded rounds reach ` +
         `${maxRecorded}; only round ${maxRecorded} (re-run) or ${maxRecorded + 1} is accepted.`
@@ -373,6 +523,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         models: [...finding.consensus.models],
         firstRound: options.round,
         lastRound: options.round,
+        ...(findingGatingReason(finding) !== 'none' ? { pendingRound: options.round } : {}),
       };
       state.findings[key] = created;
       severities[key] = finding.severity;
@@ -414,6 +565,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     if (entry.verdict === 'dismissed') {
       if (finding.severity === 'critical' && severityAtVerdict !== 'critical') {
         status = 'regating';
+        if (findingGatingReason(finding) !== 'none') entry.pendingRound = options.round;
         counts.regating++;
       } else {
         status = 'suppressed';
@@ -425,6 +577,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       }
     } else {
       status = 'repeat';
+      if (!entry.verdict && findingGatingReason(finding) !== 'none') entry.pendingRound = options.round;
       counts.repeat++;
     }
     annotated.push({
@@ -435,7 +588,15 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     });
   }
 
-  validateReportIdentityMappings(annotated);
+  try { validateReportIdentityMappings(annotated); }
+  catch (error) {
+    if (error instanceof ReportIdentityConflictError) {
+      error.context = { target, round: options.round, nativeVersion: state.version,
+        ...(existingRound ? { nativeRound: { runId: existingRound.runId, reportSha256: existingRound.reportBinding?.reportSha256 } } : {}) };
+      error.diagnostic = describeReportCollision(error.conflicts, error.context, options.evidence?.reportJson);
+    }
+    throw error;
+  }
   for (const [key, severity] of Object.entries(severities)) {
     state.findings[key]!.severity = severity;
   }
@@ -445,7 +606,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
+    { round: options.round, counts, severities, ...(binding ? { reportBinding: binding } : {}), ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,
@@ -456,9 +617,18 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     })),
   };
   state.updatedAt = new Date().toISOString();
+  if (binding && options.evidence) {
+    const { retainReportEvidence } = await import('./semantic-state.js');
+    await retainReportEvidence(options.evidence.reportJson, binding);
+  }
   await writeState(options.gitCommonDir, state, ownership);
 
-  return { roundCap: state.roundCap, counts, findings: annotated };
+  return {
+    roundCap: state.roundCap,
+    counts,
+    findings: annotated,
+    actionableIdentities: effectivePendingIdentities(state),
+  };
 }
 
 /**
@@ -476,6 +646,7 @@ export interface RoundResolution {
   /** Identities recorded fixed this round (any status — every fix changes the patch). */
   fixedThisRound: number;
   status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
+  recoveryProjection?: RecoveryProjectionFreshness;
 }
 
 export interface RecordVerdictsResult {
@@ -498,27 +669,61 @@ export interface RecordVerdictsOptions {
   target: string;
   round: number;
   verdicts: Array<{ key: string; verdict: FindingVerdict; reason?: string }>;
+  requireVerifiedBinding?: boolean;
+  /** Hold the ordinary command's precision/event writes under this same target. */
   ownership?: NativeTargetOwnership;
 }
 
 export async function recordVerdicts(options: RecordVerdictsOptions): Promise<RecordVerdictsResult> {
-  return options.ownership
-    ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, options.target, ownership => recordVerdictsOwned(options, ownership))
-    : withNativeTarget(options.gitCommonDir, options.target, ownership => recordVerdictsOwned(options, ownership));
+  if (options.ownership) {
+    return withOwnedNativeOperation(options.ownership, options.gitCommonDir, options.target,
+      ownership => recordVerdictsOwned(options, ownership));
+  }
+  return withNativeTarget(options.gitCommonDir, options.target, ownership => recordVerdictsOwned(options, ownership));
 }
 
 async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: NativeTargetOwnership): Promise<RecordVerdictsResult> {
   const target = options.target.trim();
-  const state = await readState(options.gitCommonDir, target);
+  const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
+  options = { ...options, gitCommonDir };
+  const state = await readState(gitCommonDir, target);
   if (!state) {
     throw new ConvergeRunStateError(
       `No converge run state for ${target} — run converge-report before recording verdicts.`
     );
   }
+  if (state.version === 2 || state.version === 3) {
+    const reviewed = state.rounds.find((round) => round.round === options.round);
+    if (!reviewed) {
+      throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
+    }
+    if (options.requireVerifiedBinding && reviewed.runId) {
+      if (!reviewed.reportBinding) {
+        throw new ConvergeRunStateError(
+          'Legacy round has no verified original report binding; preserve it for supported binding recovery.'
+        );
+      }
+      await verifyRoundBinding(reviewed.reportBinding, target, options.round, reviewed.runId);
+    } else if (state.version === 3 && reviewed.reportBinding) {
+      await verifyRoundBinding(reviewed.reportBinding, target, options.round, reviewed.runId!);
+    }
+    const prepared = prepareVerdicts(state, { ...options, recordedAt: new Date().toISOString() });
+    await writeState(options.gitCommonDir, prepared.state, ownership);
+    return prepared.result;
+  }
   const reviewedRound = state.rounds.find((r) => r.round === options.round);
   if (!reviewedRound) {
     throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
   }
+  if (options.requireVerifiedBinding && reviewedRound.runId) {
+    if (!reviewedRound.reportBinding) {
+      throw new ConvergeRunStateError(
+        'Legacy round has no verified original report binding; preserve it for supported binding recovery.'
+      );
+    }
+    await verifyRoundBinding(reviewedRound.reportBinding, target, options.round, reviewedRound.runId);
+  }
+  const pendingBeforeTriage = effectivePendingIdentities(state);
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
   for (const { key, verdict, reason } of options.verdicts) {
@@ -533,9 +738,17 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     const recorded = entry.verdictRound !== undefined && entry.verdictRound > options.round
       ? { ...entry, verdictReason: undefined }
       : entry;
+    const verdictSeverity = severities?.[key] ?? entry.severity;
+    if (
+      recorded === entry &&
+      entry.pendingRound !== undefined &&
+      verdictClearsPending(state, key, entry.pendingRound, options.round, verdictSeverity)
+    ) {
+      delete entry.pendingRound;
+    }
     recorded.verdict = verdict;
     recorded.verdictRound = options.round;
-    recorded.verdictSeverity = severities?.[key] ?? entry.severity;
+    recorded.verdictSeverity = verdictSeverity;
     if (reason !== undefined) recorded.verdictReason = reason;
     updated.push(recorded);
   }
@@ -547,18 +760,25 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     const actionable = state.lastAnnotations.identities.filter(
       (a) => (a.status === 'new' || a.status === 'regating') && a.gating !== 'none'
     );
-    const unresolved = actionable
-      .filter((a) => {
-        const entry = state.findings[a.identity];
-        return !entry || entry.verdict === undefined || entry.verdictRound !== options.round;
-      })
-      .map((a) => a.identity);
+    const unresolved = [...new Set([
+      ...effectivePendingIdentities(state),
+      ...actionable
+        .filter((a) => {
+          const entry = state.findings[a.identity];
+          return !entry || entry.verdict === undefined || entry.verdictRound !== options.round;
+        })
+        .map((a) => a.identity),
+    ])].sort();
     const fixedThisRound = Object.values(state.findings).filter(
       (e) => e.verdict === 'fixed' && e.verdictRound === options.round
     ).length;
     resolution = {
       round: options.round,
-      actionable: actionable.length,
+      actionable: new Set([
+        ...actionable.map((identity) => identity.identity),
+        ...pendingBeforeTriage,
+        ...unresolved,
+      ]).size,
       unresolved,
       fixedThisRound,
       status:
@@ -570,4 +790,109 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     };
   }
   return { entries: updated, ...(resolution ? { resolution } : {}) };
+}
+
+/** Pure ordinary verdict projection for retained persistence before any write. */
+export function prepareVerdicts(
+  source: ConvergeRunState,
+  options: Omit<RecordVerdictsOptions, 'gitCommonDir' | 'ownership' | 'requireVerifiedBinding'> & {
+    recordedAt: string;
+  }
+): { state: ConvergeRunState; result: RecordVerdictsResult } {
+  const target = options.target.trim();
+  if (!target || source.target !== target || ![1, 2, 3].includes(source.version)) {
+    throw new ConvergeRunStateError('Native verdict preparation target or version conflict.');
+  }
+  if (!Number.isFinite(Date.parse(options.recordedAt))) {
+    throw new ConvergeRunStateError('Invalid retained verdict timestamp.');
+  }
+
+  const state = structuredClone(source);
+  const reviewedRound = state.rounds.find((round) => round.round === options.round);
+  if (!reviewedRound) {
+    throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
+  }
+
+  const pendingBeforeTriage = effectivePendingIdentities(state);
+  const updated: FindingEntry[] = [];
+  const severities = reviewedRound.severities;
+
+  for (const { key, verdict, reason } of options.verdicts) {
+    const entry = state.findings[key];
+    if (!entry) {
+      throw new ConvergeRunStateError(`Unknown finding key "${key}" for target ${target}.`);
+    }
+    if (severities !== undefined && severities[key] === undefined) {
+      throw new ConvergeRunStateError(`Finding "${key}" was not sighted in round ${options.round}.`);
+    }
+
+    // Emit delayed evidence without replacing a newer round's active verdict.
+    const recorded = entry.verdictRound !== undefined && entry.verdictRound > options.round
+      ? { ...entry, verdictReason: undefined }
+      : entry;
+    const verdictSeverity = severities?.[key] ?? entry.severity;
+    if (
+      recorded === entry &&
+      entry.pendingRound !== undefined &&
+      verdictClearsPending(state, key, entry.pendingRound, options.round, verdictSeverity)
+    ) {
+      delete entry.pendingRound;
+    }
+    recorded.verdict = verdict;
+    recorded.verdictRound = options.round;
+    recorded.verdictSeverity = verdictSeverity;
+    if (reason !== undefined) recorded.verdictReason = reason;
+    updated.push(recorded);
+  }
+
+  state.updatedAt = options.recordedAt;
+
+  let resolution: RoundResolution | undefined;
+  if (state.lastAnnotations && state.lastAnnotations.round === options.round) {
+    const actionable = state.lastAnnotations.identities.filter(
+      (identity) => (identity.status === 'new' || identity.status === 'regating') && identity.gating !== 'none'
+    );
+    // An untriaged earlier claim remains an obligation even if this report
+    // calls it repeat or does not contain it. A zero-new round cannot erase it.
+    const unresolved = [...new Set([
+      ...effectivePendingIdentities(state),
+      ...actionable
+        .filter((identity) => {
+          const entry = state.findings[identity.identity];
+          return !entry || entry.verdict === undefined || entry.verdictRound !== options.round;
+        })
+        .map((identity) => identity.identity),
+    ])].sort();
+    const fixedThisRound = Object.values(state.findings).filter(
+      (entry) => entry.verdict === 'fixed' && entry.verdictRound === options.round
+    ).length;
+    resolution = {
+      round: options.round,
+      actionable: new Set([
+        ...actionable.map((identity) => identity.identity),
+        ...pendingBeforeTriage,
+        ...unresolved,
+      ]).size,
+      unresolved,
+      fixedThisRound,
+      ...(recoveryProjectionFreshness(state) ? { recoveryProjection: recoveryProjectionFreshness(state) } : {}),
+      status:
+        unresolved.length > 0
+          ? 'unresolved'
+          : fixedThisRound > 0
+            ? 'fixes-pending-fresh-round'
+            : 'converged-dismissal-only',
+    };
+  }
+
+  return { state, result: { entries: updated, ...(resolution ? { resolution } : {}) } };
+}
+
+/** A nongating followup cannot lower the severity needed for a critical pending source. */
+export function verdictClearsPending(state: ConvergeRunState, key: string, pendingRound: number,
+  verdictRound: number, verdictSeverity: string | undefined): boolean {
+  // Match the pinned pure validator: legacy rounds can lack a severity ledger.
+  // Their retained entry remains the conservative evidence for critical triage.
+  const severity = state.rounds.find(round => round.round === pendingRound)?.severities?.[key] ?? state.findings[key]?.severity;
+  return verdictRound >= pendingRound && (severity !== 'critical' || verdictSeverity === 'critical');
 }

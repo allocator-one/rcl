@@ -1,37 +1,47 @@
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { claimConvergeAttempt, convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
 
+const controls = vi.hoisted(() => ({ wait: undefined as (() => Promise<void>) | undefined }));
+vi.mock('../../src/converge/native-lock.js', async original => {
+  const locks = await original<typeof import('../../src/converge/native-lock.js')>();
+  return { ...locks, withNativeLock: ((...args: Parameters<typeof locks.withNativeLock>) => {
+    const [root, target, work, hooks = {}, timing] = args;
+    return locks.withNativeLock(root, target, work, controls.wait ? { ...hooks, wait: controls.wait } : hooks, timing);
+  }) as typeof locks.withNativeLock };
+});
+
 let dir: string;
 const target = 'synthetic-main-writer';
 function barrier() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-main-owner-'))); });
-afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { controls.wait = undefined; await rm(dir, { recursive: true, force: true }); });
 
 it.each(['report', 'verdict', 'attempt'])('excludes the main %s writer for the entire recovery target transaction', async kind => {
   const initial = kind === 'verdict' ? await processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [sampleFinding()] }) : undefined;
   const path = kind === 'attempt' ? convergeAttemptStatePath(dir, target) : convergeRunStatePath(dir, target);
   const before = initial ? await readFile(path) : undefined;
-  const entered = barrier(), release = barrier();
+  const entered = barrier(), release = barrier(), contended = barrier(), retry = barrier();
   const owner = withRecoveryTarget(dir, target, async () => { entered.resolve(); await release.promise; });
   let writer: Promise<unknown> | undefined;
   try {
     await Promise.race([entered.promise, owner]);
+    controls.wait = async () => { contended.resolve(); await retry.promise; };
     writer = kind === 'attempt' ? claimConvergeAttempt({ gitCommonDir: dir, target })
       : kind === 'report' ? processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })
         : recordVerdicts({ gitCommonDir: dir, target, round: 1,
           verdicts: [{ key: initial!.findings[0]!.identity, verdict: 'dismissed', reason: 'Synthetic guard' }] });
     void writer.catch(() => {});
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await Promise.race([contended.promise, writer.then(() => { throw new Error('writer bypassed occupied target'); })]);
     if (before) expect(await readFile(path)).toEqual(before);
     else await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
   } finally {
-    release.resolve();
+    release.resolve(); retry.resolve();
     const settled = await Promise.allSettled([owner, ...(writer ? [writer] : [])]);
     for (const result of settled) if (result.status === 'rejected') throw result.reason;
   }

@@ -47,6 +47,9 @@ export async function withNativeTarget<T>(gitCommonDir: string, target: string,
   if (!target) throw new Error('native_target_required');
   const qualification = options.qualification ?? 'ordinary';
   if (qualification !== 'ordinary' && qualification !== 'recovery') throw new Error('native_target_invalid_qualification');
+  if (qualification === 'recovery' && (options.lockTimeoutMs !== undefined || options.lockRetryMs !== undefined)) {
+    throw new Error('native_target_recovery_timing_unsupported');
+  }
   const commonDir = await realpath(resolve(gitCommonDir));
   const lock = qualification === 'recovery' ? withRecoveryLock : withNativeLock;
   return qualification === 'ordinary'
@@ -70,6 +73,13 @@ export async function assertNativeTargetOwnership(ownership: NativeTargetOwnersh
   const commonDir = await realpath(resolve(gitCommonDir));
   if (!registration?.active || !registration.accepting || registration.target !== target.trim() ||
       registration.commonDir !== commonDir) throw new Error('native_target_not_owned');
+}
+
+/** Return the immutable canonical repository directory bound when ownership was acquired. */
+export async function ownedNativeTargetCommonDir(ownership: NativeTargetOwnership,
+  gitCommonDir: string, target: string): Promise<string> {
+  await assertNativeTargetOwnership(ownership, gitCommonDir, target);
+  return registrations.get(ownership)!.commonDir;
 }
 
 /** Recovery effects require authority acquired through strict filesystem qualification. */

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, rename, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { readStable, sha256 } from '../telemetry/recovery/files.js';
@@ -10,9 +10,11 @@ export interface RegistryRegistration<Scope> {
   version: 1; pid: number; token: string; scope: Scope;
   state: 'choosing' | 'ready'; ticket?: number;
 }
-type LockStage = 'choosing_published' | 'ticket_selected' | 'ready_published' | 'before_reap' | 'after_reap' | 'scan_complete';
+type LockStage = 'legacy_reserved' | 'choosing_published' | 'ticket_selected' | 'ready_published' | 'before_reap' | 'after_reap' | 'scan_complete';
 /** Internal deterministic test seams. The CLI never accepts these overrides. */
 export interface RegistryHooks<Scope> {
+  /** Test-only pause after private legacy preparation, before atomic publication. */
+  onLegacyPrepared?: () => Promise<void>;
   scope?: () => Promise<Scope>;
   token?: () => string;
   probe?: (pid: number) => void;
@@ -35,6 +37,179 @@ export interface RegistryPolicy<Scope> {
   lockRetryMs?: number;
 }
 
+/** Options for the pre-3.8 recovery-lock compatibility reservation.
+ *
+ * Older clients serialize solely with `<sha256(identity)>.lock`.  New clients
+ * hold that pathname for their entire bakery critical section, so either
+ * protocol observes the other.  Reclaim deliberately retains the old
+ * PID-only semantics: this document has no boot or namespace binding.
+ */
+export interface LegacyReservationOptions {
+  sync: (path: string) => Promise<void>;
+  read?: (path: string) => Promise<string>;
+  probe?: (pid: number) => void;
+  now?: () => number;
+  wait?: () => Promise<void>;
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
+  onPrepared?: () => Promise<void>;
+  /** Legacy owner documents lack scope, so strict recovery must not reclaim them. */
+  reclaimLegacy?: boolean;
+  qualifiedLegacy?: (owner: unknown) => boolean;
+  /** A scoped compatibility owner may be probed only under the caller's policy. */
+  mayProbeLegacy?: (owner: LegacyOwner) => boolean;
+}
+
+interface LegacyOwner { pid: number; token: string; scope?: unknown }
+
+/**
+ * Reserve the legacy recovery-lock pathname for the duration of `work`.
+ * Creation, stale-owner reclamation, and release are all ownership checked so
+ * the bridge cannot be a check-then-act preflight beside the bakery registry.
+ */
+export async function withLegacyReservation<T>(root: string, identity: string, owner: LegacyOwner,
+  work: () => Promise<T>, options: LegacyReservationOptions = { sync: async () => {} }): Promise<T> {
+  const timeout = options.lockTimeoutMs ?? 5_000;
+  const retry = options.lockRetryMs ?? 25;
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || !Number.isSafeInteger(retry) || retry < 1) {
+    throw new Error('invalid_registry_lock_timing');
+  }
+  const now = options.now ?? (() => performance.now());
+  const deadline = now() + timeout;
+  const wait = options.wait ?? (() => new Promise<void>(resolve => setTimeout(resolve, retry)));
+  const checkTime = () => { if (now() >= deadline) throw new Error('recovery_run_locked'); };
+  const path = join(root, `${sha256(identity)}.lock`);
+  const reclaim = `${path}.reclaim`;
+  const read = options.read ?? (async file => (await readStable(file, 2048)).text);
+  const readOwner = async (): Promise<LegacyOwner | undefined> => {
+    let text: string;
+    try { text = await read(path); }
+    catch (error) {
+      if (code(error) === 'ENOENT') return undefined;
+      if (error instanceof Error && error.message === 'changing_source') return undefined;
+      throw error;
+    }
+    let current: unknown;
+    try { current = JSON.parse(text); }
+    catch { throw new Error('incomplete_recovery_lock_requires_inspection'); }
+    if (!current || typeof current !== 'object' || !Number.isSafeInteger((current as LegacyOwner).pid) ||
+        (current as LegacyOwner).pid < 1 || typeof (current as LegacyOwner).token !== 'string') {
+      throw new Error('invalid_recovery_lock_requires_inspection');
+    }
+    return current as LegacyOwner;
+  };
+  const create = async (): Promise<boolean> => {
+    let created = false;
+    let published = false;
+    const temporary = `${path}.${owner.token}.${randomUUID()}.tmp`;
+    try {
+      const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      created = true;
+      try { await options.onPrepared?.(); await handle.writeFile(JSON.stringify(owner) + '\n'); await handle.sync(); }
+      finally { await handle.close(); }
+      // Link publication gives legacy readers either no owner or a complete,
+      // fsynced document. They must never parse our private write in flight.
+      await link(temporary, path); published = true;
+      await unlink(temporary); created = false;
+      await options.sync(root);
+      return true;
+    } catch (error) {
+      if (code(error) === 'EEXIST') return false;
+      if (published) {
+        try { await unlink(path); await options.sync(root); }
+        catch (cleanup) { throw new AggregateError([error, cleanup], 'legacy_recovery_lock_cleanup_failed', { cause: error }); }
+      }
+      throw error;
+    } finally {
+      if (created) {
+        try { await unlink(temporary); }
+        catch (cleanup) { if (code(cleanup) !== 'ENOENT') throw cleanup; }
+      }
+    }
+  };
+
+  for (;;) {
+    let reclaiming = false;
+    try { await lstat(reclaim); reclaiming = true; }
+    catch (error) { if (code(error) !== 'ENOENT') throw error; }
+    if (reclaiming) throw new Error('legacy_recovery_lock_requires_inspection');
+    if (await create()) break;
+    let snapshot: Awaited<ReturnType<typeof readStable>>;
+    try { snapshot = await readStable(path, 2048); }
+    catch (error) {
+      if (code(error) === 'ENOENT') continue;
+      if (error instanceof Error && error.message === 'changing_source') { checkTime(); await wait(); continue; }
+      throw error;
+    }
+    let existing: LegacyOwner;
+    try { existing = JSON.parse(snapshot.text) as LegacyOwner; }
+    catch { throw new Error('incomplete_recovery_lock_requires_inspection'); }
+    if (!Number.isSafeInteger(existing.pid) || existing.pid < 1 || typeof existing.token !== 'string') {
+      throw new Error('invalid_recovery_lock_requires_inspection');
+    }
+    // A scoped document is a modern owner, even when it occupies the legacy
+    // pathname for compatibility. A local PID observation cannot establish
+    // that an owner from another boot or PID namespace is dead. PID-only
+    // documents retain the caller's explicit compatibility policy.
+    if (existing.scope !== undefined) {
+      if (!options.qualifiedLegacy?.(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
+      if (options.mayProbeLegacy && !options.mayProbeLegacy(existing)) throw new Error('legacy_recovery_lock_requires_inspection');
+    } else if (options.reclaimLegacy === false) {
+      throw new Error('legacy_recovery_lock_requires_inspection');
+    }
+    let alive = true;
+    try { (options.probe ?? (pid => process.kill(pid, 0)))(existing.pid); }
+    catch (error) { if (code(error) === 'ESRCH') alive = false; }
+    if (!alive) {
+      try {
+        await mkdir(reclaim, { mode: 0o700 });
+      } catch (error) {
+        if (code(error) === 'EEXIST') throw new Error('legacy_recovery_lock_requires_inspection');
+        if (code(error) === 'ENOENT') continue;
+        throw error;
+      }
+      try {
+        if ((await readStable(path, 2048)).sha256 === snapshot.sha256) {
+          await unlink(path); await options.sync(root);
+        }
+      } catch (error) {
+        if (code(error) !== 'ENOENT') throw error;
+      } finally {
+        try { await rmdir(reclaim); }
+        catch (error) { if (code(error) !== 'ENOENT') throw error; }
+      }
+      continue;
+    }
+    checkTime(); await wait();
+  }
+
+  const release = async () => {
+    const current = await readOwner();
+    if (!current || current.pid !== owner.pid || current.token !== owner.token ||
+        (owner.scope !== undefined && !isDeepStrictEqual(current.scope, owner.scope))) {
+      throw new Error('legacy_recovery_lock_owner_changed');
+    }
+    await unlink(path); await options.sync(root);
+  };
+  let failed = false; let failure: unknown; let completed = false; let result: T;
+  try { result = await work(); completed = true; return result; }
+  catch (error) {
+    if (error instanceof RegistryCleanupError) { result = error.result as T; completed = true; failure = error; }
+    else { failed = true; failure = error; }
+    throw error;
+  } finally {
+    try { await release(); }
+    catch (error) {
+      if (completed) {
+        const cause = failure ? new AggregateError([failure, error], 'recovery_lock_cleanup_failed', { cause: failure }) : error;
+        throw new RegistryCleanupError(result!, cause);
+      }
+      if (failed) throw new AggregateError([failure, error], 'recovery_lock_cleanup_failed', { cause: failure });
+      throw error;
+    }
+  }
+}
+
 /** Work completed; only coordination cleanup failed. Never replay the result. */
 export class RegistryCleanupError<T = unknown> extends Error {
   constructor(readonly result: T, cause: unknown) {
@@ -55,11 +230,9 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   if (!policy.validScope(scope)) throw new Error('unsupported_recovery_lock_scope');
   root = await policy.prepareRoot(root);
   const key = sha256(identity);
-  for (const legacy of [`${key}.lock`, `${key}.lock.reclaim`]) {
-    try { await lstat(join(root, legacy)); }
-    catch (error) { if (code(error) === 'ENOENT') continue; throw error; }
-    throw new Error('legacy_recovery_lock_requires_inspection');
-  }
+  const token = (hooks.token ?? randomUUID)();
+  if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
+  return withLegacyReservation(root, identity, { pid: process.pid, token, scope }, async () => {
   // Keep this directory permanently: removing it on release could split two
   // contenders across different inodes of the same registry pathname.
   const registry = join(root, `${key}.bakery`);
@@ -67,8 +240,6 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   catch (error) { if (code(error) !== 'EEXIST') throw error; }
   await sync(root);
   await policy.inspectRegistry(registry);
-  const token = (hooks.token ?? randomUUID)();
-  if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
   const path = join(registry, `${token}.json`);
   let owner: RegistryRegistration<Scope> = { version: 1, pid: process.pid, token, scope, state: 'choosing' };
   const lockTimeoutMs = policy.lockTimeoutMs ?? 5_000;
@@ -163,6 +334,7 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   };
   let failed = false; let failure: unknown; let completed = false; let result: T;
   try {
+    await emit('legacy_reserved');
     await publish(owner, true); await emit('choosing_published');
     const peers = await scan();
     const maximum = peers.reduce((max, peer) => Math.max(max, peer.ticket ?? 0), 0);
@@ -207,4 +379,9 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
       throw error;
     }
   }
+  }, { sync, read: hooks.read ?? policy.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait,
+    lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs, onPrepared: hooks.onLegacyPrepared,
+    qualifiedLegacy: owner => policy.validScope((owner as { scope?: unknown }).scope) &&
+      isDeepStrictEqual((owner as { scope: unknown }).scope, scope),
+    mayProbeLegacy: owner => policy.validScope(owner.scope) && policy.mayProbePid(owner.scope) });
 }

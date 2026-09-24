@@ -2,7 +2,7 @@
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
-import { readdir, readFile, writeFile } from 'fs/promises';
+import { readdir, readFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -37,7 +37,8 @@ import {
   spoolAsyncCalls,
   launchAsyncWorkers,
   runAsyncWorker,
-  collectAsyncResults,
+  collectAsyncObservations,
+  AsyncCollectionError,
   currentBranchLabel,
   MAX_ASYNC_CALLS_PER_ROUND,
 } from './dispatch/async-lane.js';
@@ -78,11 +79,17 @@ import {
   DEFAULT_CONVERGE_ROUND_CAP,
   HARD_CONVERGE_ROUND_CAP,
   processRoundReport,
-  recordVerdicts,
+  migrateConvergeState,
+  loadConvergeRunState,
   findingGatingReason,
   ConvergeRoundCapError,
   ConvergeRunStateError,
+  ReportIdentityConflictError,
 } from './converge/run-state.js';
+import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
+import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
+import { readStable, sha256 } from './telemetry/recovery/files.js';
+import { describeReportCollision } from './converge/report-collision.js';
 import {
   appendCalls,
   appendOutcomes,
@@ -118,7 +125,7 @@ import {
   loadHarnessSettings,
   resolveTelemetryLevel,
 } from './telemetry/deliver.js';
-import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { sanitizeForDelivery, normalizeGeneratedReport, type ArtifactBytes } from './telemetry/envelope.js';
 import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
@@ -129,6 +136,8 @@ import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
+import { selectCurrentRecoveredProduction, materializeRecoveredClaims, type RecoveredProduction } from './converge/recovered-production.js';
+import { runPublicClaimRecovery, type PublicClaimRecoveryOptions } from './evidence/recover-claim.js';
 import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
@@ -136,7 +145,15 @@ import { runBackfill } from './telemetry/backfill.js';
 import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemetry/recovery/command.js';
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
-import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
+import { recordVerdictOperation, retryVerdictOperation, type PersistenceStore } from './persistence/verdict-operation.js';
+import { verdictPersistenceDependencies, printPersistenceResult, printPersistenceRetentionFailure } from './persistence/cli.js';
+import { retryCallOperation } from './persistence/call-operation.js';
+import { callPersistenceRoot, persistenceKind, recordReviewCalls, printCallPersistence, callPersistenceExit } from './persistence/call-cli.js';
+import { retryReportOperation, type ReportKind } from './persistence/report-operation.js';
+import { recordReviewReports, printReportPersistence, reportPersistenceExit } from './persistence/report-cli.js';
+import { retryAsyncOperation, type AsyncPersistenceResult } from './persistence/async-operation.js';
+import { printAsyncPersistence, asyncPersistenceExit, recordReviewAsync, finishReviewAsync } from './persistence/async-cli.js';
+import { buildReviewCompletion, reviewCompletionExit, reviewCompletionJson } from './persistence/review-completion.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -155,9 +172,11 @@ program
 // worker is not a user command.
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
+  // Selected persistence and evidence validation must not flush unrelated queued work.
+  if (actionCommand.parent?.name() === 'persistence' || name === 'converge-report' || name === 'converge-verdict' || name === 'converge-migrate') return;
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-gap' || name === 'recover-claim' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -476,6 +495,50 @@ program
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
 program
+  .command('converge-gap')
+  .description('Preview, apply or resume one evidenced missing-terminal-report audit gap; never creates a round, finding, verdict or attempt')
+  .option('--preview')
+  .option('--apply')
+  .option('--resume')
+  .requiredOption('--manifest <path>', 'Exclusive preview manifest; existing reviewed manifest for apply/resume')
+  .option('--target <target>')
+  .option('--gap-round <number>')
+  .option('--admitting-round <number>')
+  .option('--attempt <number>')
+  .option('--run <uuid>')
+  .option('--report <path>', 'Exact original report JSON')
+  .option('--report-sha256 <sha256>')
+  .option('--incomplete <path>', 'Available incomplete-run evidence; does not prove global absence')
+  .option('--incomplete-sha256 <sha256>')
+  .option('--evidence <path>', 'Optional JSON array of additional {path, sha256} selections')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest bytes; required for apply/resume')
+  .option('--json')
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      if ([opts.preview, opts.apply, opts.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_round_gap_mode');
+      const gitCommonDir = await resolveGitCommonDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
+        if (![opts.target, opts.gapRound, opts.admittingRound, opts.attempt, opts.run, opts.report, opts.reportSha256, opts.incomplete, opts.incompleteSha256].every(value => typeof value === 'string')) throw new Error('round_gap_preview_arguments_required');
+        const evidence = typeof opts.evidence === 'string' ? JSON.parse((await readStable(opts.evidence, 1024 * 1024)).text) : undefined;
+        const manifest = await previewRoundGap({ target: opts.target as string, gapRound: Number(opts.gapRound), admittingRound: Number(opts.admittingRound), attempt: Number(opts.attempt), runId: opts.run as string,
+          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string,
+          incompletePath: opts.incomplete as string, incompleteSha256: opts.incompleteSha256 as string, ...(evidence !== undefined ? { evidence } : {}) }, gitCommonDir);
+        await writeExclusive(opts.manifest as string, manifest, 1024 * 1024);
+        result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)), accounting: 'unchanged', scope: 'local audit only; no admission or approval' };
+      } else {
+        if ([opts.target, opts.gapRound, opts.admittingRound, opts.attempt, opts.run, opts.report, opts.reportSha256, opts.incomplete, opts.incompleteSha256, opts.evidence].some(value => value !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
+        result = { mode: opts.apply ? 'apply' : 'resume', result: await applyRoundGap({ manifest: opts.manifest as string, manifestSha256: opts.manifestSha256 as string, mode: opts.apply ? 'apply' : 'resume' }, gitCommonDir), accounting: 'unchanged', scope: 'local audit only; no admission or approval' };
+      }
+      console.log(JSON.stringify(result));
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_GAP', message: error instanceof Error ? error.message : String(error) } }));
+      process.exitCode = 3;
+    }
+  });
+
+program
   .command('converge-report')
   .description(
     'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating'
@@ -488,6 +551,19 @@ program
     `Round cap override (default ${DEFAULT_CONVERGE_ROUND_CAP}, hard maximum ${HARD_CONVERGE_ROUND_CAP})`
   )
   .option('--json', 'Output JSON')
+  .addHelpText('after', `
+Identity conflicts preserve the original report and accounting (exit 3).
+JSON errors include exact original run/digest/positional refs when available.
+There is no finding-ref admission flag. For semantic claim recovery, use evidence
+recover-claim preview/apply/resume: it requires authenticated review access, the
+same native target, a private manifest directory, and a backend advertising the
+complete claim_recovery_version: 1 contract. It never admits this round.
+evidence recover-finding remains a v1 recorded-finding correction requiring an
+exact same-round native verdict and matching server evidence. evidence
+retriage-finding is a new source-backed judgment on a unique run-qualified key.
+See each command's --help and the README. Missing bindings require preserved
+evidence and the supported recovery prerequisites, never a reset or cap increase.
+`)
   .action(
     async (opts: {
       target?: string | boolean;
@@ -496,6 +572,7 @@ program
       maxRounds?: string | boolean;
       json?: boolean;
     }) => {
+      let originalReportJson: string | undefined;
       try {
         if (typeof opts.target !== 'string' || opts.target.trim() === '') {
           throw new ConvergeRunStateError('--target is required.');
@@ -518,8 +595,14 @@ program
         }
 
         let report: ReviewResult;
+        let reportJson: string;
+        let reportSha256: string;
         try {
-          report = JSON.parse(await readFile(opts.report, 'utf-8')) as ReviewResult;
+          const reportBytes = await readFile(opts.report);
+          reportJson = reportBytes.toString('utf8');
+          if (!Buffer.from(reportJson, 'utf8').equals(reportBytes)) throw new Error('Report is not valid UTF-8.');
+          reportSha256 = sha256(reportBytes);
+          report = JSON.parse(reportJson) as ReviewResult;
         } catch (err) {
           throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
             cause: err,
@@ -528,6 +611,7 @@ program
         if (!Array.isArray(report.findings)) {
           throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
         }
+        originalReportJson = reportJson;
 
         // The round remembers the report's run id only when it is a UUID and
         // the report was produced for this converge target (a report copied
@@ -541,6 +625,16 @@ program
           reportRunId !== undefined && typeof reportTarget === 'string' && reportTarget.trim() === opts.target.trim()
             ? reportRunId
             : undefined;
+        if (
+          runId !== undefined &&
+          (!Number.isSafeInteger(report.run?.converge?.round) ||
+            report.run!.converge!.round! < 1 ||
+            report.run!.converge!.round !== round)
+        ) {
+          throw new ConvergeRunStateError(
+            `Report converge.round must be the positive integer ${round}; refusing to bind another or missing round.`
+          );
+        }
         if (reportRunId !== undefined && runId === undefined) {
           console.error(
             chalk.yellow(
@@ -550,12 +644,19 @@ program
         }
         const gitCommonDir = await resolveGitCommonDir();
         await withNativeTarget(gitCommonDir, opts.target, async ownership => {
+          const existing = await loadConvergeRunState(gitCommonDir, opts.target as string);
+          const allFindings = [...report.findings, ...(report.belowThresholdFindings ?? [])];
+          const semanticReport = existing?.version === 2 || existing?.version === 3 ||
+            report.run?.gating?.bound_classification_protocol !== undefined ||
+            allFindings.some(finding => finding.claimDescriptor !== undefined);
           const result = await processRoundReport({
             gitCommonDir,
             ownership,
             target: opts.target as string,
             round,
-            findings: report.findings,
+            findings: semanticReport ? allFindings : report.findings,
+            reportSha256,
+            ...(semanticReport || runId !== undefined ? { evidence: { reportJson } } : {}),
             ...(maxRounds !== undefined ? { maxRounds } : {}),
             ...(runId !== undefined ? { runId } : {}),
           });
@@ -563,7 +664,7 @@ program
           const classified = result.findings.map((f) => ({
             identity: f.identity,
             status: f.status,
-            gating: findingGatingReason(f.finding),
+            gating: f.sighting?.gating ?? findingGatingReason(f.finding),
             severity: f.finding.severity,
             file: f.finding.file,
             startLine: f.finding.startLine,
@@ -571,9 +672,10 @@ program
             title: f.finding.title,
             ...(f.suppressReason ? { suppressReason: f.suppressReason } : {}),
           }));
-          const actionable = classified.filter(
+          const actionableIdentities = new Set(result.actionableIdentities ?? classified.filter(
             (f) => (f.status === 'new' || f.status === 'regating') && f.gating !== 'none'
-          );
+          ).map((finding) => finding.identity));
+          const actionable = classified.filter((finding) => actionableIdentities.has(finding.identity));
           await reportConvergeEvents([
             buildEvent({
               kind: 'round_processed',
@@ -584,7 +686,10 @@ program
                 round,
                 round_cap: result.roundCap,
                 counts: result.counts,
-                actionable_gating: actionable.length,
+                actionable_gating: actionableIdentities.size,
+                ...(result.classificationVersion ? { classification_version: result.classificationVersion,
+                  report_json_sha256: result.reportBinding!.reportSha256,
+                  ...(result.legacyPendingIdentities ? { legacy_pending_identities: result.legacyPendingIdentities } : {}) } : {}),
                 // Which identity each sighting was matched to, so the server
                 // can apply standing verdicts to keys that moved (IO-12601).
                 identities: roundIdentities(result.findings),
@@ -603,7 +708,9 @@ program
                   round,
                   roundCap: result.roundCap,
                   counts: result.counts,
-                  actionableGating: actionable.length,
+                  actionableGating: actionableIdentities.size,
+                  actionableIdentities: [...actionableIdentities].sort(),
+                  ...(result.recoveryProjection ? { recoveryProjection: result.recoveryProjection } : {}),
                   findings: classified,
                 },
                 null,
@@ -617,10 +724,15 @@ program
             `Round ${round}/${result.roundCap} for ${opts.target}: ` +
               `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
               `${result.counts.suppressed} suppressed, ${result.counts.regating} regating · ` +
-              `${actionable.length} actionable gating finding(s)`
+              `${actionableIdentities.size} actionable gating finding(s)`
           );
           for (const f of actionable) {
             console.log(`  [${f.status}] ${f.identity} ${f.file}:${f.startLine} — ${f.title}`);
+          }
+          for (const identity of actionableIdentities) {
+            if (!classified.some((finding) => finding.identity === identity)) {
+              console.log(`  [unresolved] ${identity} — gating claim from an earlier round still needs triage`);
+            }
           }
           for (const f of classified.filter((c) => c.status === 'suppressed')) {
             console.log(
@@ -630,14 +742,17 @@ program
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        const details = err instanceof ReportIdentityConflictError && err.context
+          ? describeReportCollision(err.conflicts, err.context, originalReportJson) : undefined;
         if (opts.json) {
           const code =
             err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
               ? err.code
               : 'RCL_CONVERGE_REPORT_ERROR';
-          console.error(JSON.stringify({ error: { code, message } }));
+          console.error(JSON.stringify({ error: { code, message, ...(details ? { details } : {}) } }));
         } else {
           console.error(chalk.red(message));
+          if (details) console.error(JSON.stringify(details, null, 2));
         }
         // Exit 2 = round-cap consent boundary (mirrors converge-attempt);
         // exit 3 = state/infrastructure failure.
@@ -645,6 +760,35 @@ program
       }
     }
   );
+
+program
+  .command('converge-migrate')
+  .description('Preview an additive legacy-state migration; preserve original bytes and require explicit --apply')
+  .option('--target [key]', 'Existing convergence target key')
+  .option('--apply', 'Preserve the original snapshot and publish semantic v2 state without transferring legacy verdicts')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { target?: string | boolean; apply?: boolean; json?: boolean }) => {
+    try {
+      if (typeof opts.target !== 'string' || opts.target.trim() === '') {
+        throw new ConvergeRunStateError('--target is required.');
+      }
+      const receipt = await migrateConvergeState({
+        gitCommonDir: await resolveGitCommonDir(), target: opts.target, apply: opts.apply === true,
+      });
+      if (opts.json) console.log(JSON.stringify(receipt, null, 2));
+      else {
+        console.log(`${receipt.status}: ${opts.target}, state v${receipt.fromVersion} → v${receipt.toVersion}; ` +
+          `${receipt.roundCount} recorded rounds, cap ${receipt.roundCap}, ${receipt.legacyIdentityCount} legacy identities.`);
+        if (receipt.status === 'preview') console.log('Use --apply to preserve the original snapshot and migrate. Legacy claims still require source-backed recovery.');
+        if (receipt.snapshotPath) console.log(`Original state: ${receipt.snapshotPath}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_MIGRATION', message } }));
+      else console.error(chalk.red(message));
+      process.exitCode = 3;
+    }
+  });
 
 // Record triage outcomes for finding identities (RCL-24; the precision
 // history these verdicts build feeds RCL-27's model weighting).
@@ -705,117 +849,11 @@ program
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
         const gitCommonDir = await resolveGitCommonDir();
-        await withNativeTarget(gitCommonDir, opts.target, async ownership => {
-          const { entries: updated, resolution } = await recordVerdicts({
-            gitCommonDir,
-            ownership,
-            target: opts.target as string,
-            round,
-            verdicts,
-          });
-          // Feed the cross-run precision history (RCL-27) — fail-soft, the
-          // verdicts above are already durably recorded.
-          try {
-            const ts = new Date().toISOString();
-            await appendOutcomes(
-              updated
-                .filter((e) => e.verdict !== undefined && e.models.length > 0)
-                .map((e) => ({
-                  ts,
-                  verdict: e.verdict!,
-                  models: e.models,
-                  severity: e.verdictSeverity ?? e.severity,
-                  target: opts.target as string,
-                  findingKey: e.key,
-                  source: 'live' as const,
-                }))
-            );
-          } catch (err) {
-            // Advisory history; verdict recording must not fail over it —
-            // but say so, or a broken store silently stops learning.
-            console.warn(
-              `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
-            );
-          }
-          // The run id binding is advisory: an unreadable state file must not
-          // fail a command whose verdicts are already recorded.
-          let roundRun: string | undefined;
-          try {
-            roundRun = roundRunId(await loadConvergeRunState(gitCommonDir, opts.target as string), round);
-          } catch {
-            roundRun = undefined;
-          }
-          await reportConvergeEvents([
-            buildEvent({
-              kind: 'verdicts_recorded',
-              convergeTarget: opts.target as string,
-              round,
-              ...(roundRun !== undefined ? { runId: roundRun } : {}),
-              payload: {
-                verdicts: updated.map((e) => ({
-                  identity_key: e.key,
-                  verdict: e.verdict,
-                  // A dismissal reason is user-authored prose: scrubbed like every other free text that leaves the machine.
-                  ...(e.verdictReason !== undefined ? { reason: scrubText(e.verdictReason, 500) } : {}),
-                  severity: e.verdictSeverity ?? e.severity,
-                  models: e.models,
-                })),
-              },
-            }),
-            ...(resolution
-              ? [
-                  buildEvent({
-                    kind: 'resolution',
-                    convergeTarget: opts.target as string,
-                    round,
-                    ...(roundRun !== undefined ? { runId: roundRun } : {}),
-                    payload: {
-                      status: resolution.status,
-                      actionable: resolution.actionable,
-                      unresolved: resolution.unresolved.length,
-                      fixed_this_round: resolution.fixedThisRound,
-                    },
-                  }),
-                ]
-              : []),
-          ]);
-          if (opts.json) {
-            console.log(
-              JSON.stringify({
-                target: opts.target as string,
-                round,
-                recorded: verdicts.length,
-                ...(resolution ? { resolution } : {}),
-              })
-            );
-          } else {
-            console.log(`Recorded ${verdicts.length} verdict(s) for ${opts.target} round ${round}.`);
-            if (resolution) {
-              switch (resolution.status) {
-                case 'converged-dismissal-only':
-                  console.log(
-                    `Round ${round} resolution: all ${resolution.actionable} gating finding(s) dismissed, ` +
-                      'nothing fixed — the reviewed patch is unchanged, so this round CONVERGES. ' +
-                      'No confirmation round is required (RCL-30).'
-                  );
-                  break;
-                case 'fixes-pending-fresh-round':
-                  console.log(
-                    `Round ${round} resolution: ${resolution.fixedThisRound} fix(es) recorded — ` +
-                      'the patch changes; commit, push, and run a fresh exact-head round.'
-                  );
-                  break;
-                case 'unresolved':
-                  console.log(
-                    `Round ${round} resolution: ${resolution.unresolved.length} gating identity(ies) ` +
-                      `still untriaged: ${resolution.unresolved.join(', ')}`
-                  );
-                  break;
-              }
-            }
-          }
-        });
+        const result = await recordVerdictOperation({ gitCommonDir, target: opts.target, round, verdicts, requireVerifiedBinding: true },
+          await verdictPersistenceDependencies(RCL_VERSION));
+        printPersistenceResult(result, opts.json);
       } catch (err) {
+        if (printPersistenceRetentionFailure(err, opts.json)) return;
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
           console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_VERDICT', message } }));
@@ -826,6 +864,51 @@ program
       }
     }
   );
+
+const persistence = program.command('persistence').description('Retry retained local persistence operations');
+persistence.command('retry')
+  .description('Retry only persistence from one immutable operation without running reviewers or repeating triage')
+  .requiredOption('--manifest <path>', 'Retained immutable operation manifest')
+  .requiredOption('--manifest-sha256 <digest>', 'Exact SHA-256 printed with the original operation')
+  .option('--stores <names>', 'Selected stores: native,outcomes,server for verdicts; calls; artifacts; async_admission,async_delivery_receipt')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { manifest: string; manifestSha256: string; stores?: string; json?: boolean }) => {
+    try {
+      const reference = { manifest: opts.manifest, manifest_sha256: opts.manifestSha256 };
+      const kind = await persistenceKind(reference);
+      if (kind === 'rcl-async-persistence') {
+        const result = await retryAsyncOperation({ ...reference, storageRoot: await callPersistenceRoot(),
+          ...(opts.stores !== undefined ? { stores: opts.stores.split(',') } : {}) });
+        printAsyncPersistence(result, opts.json, line => console.log(line));
+        process.exitCode = asyncPersistenceExit(result);
+        return;
+      }
+      if (kind === 'rcl-report-persistence') {
+        const result = await retryReportOperation({ ...reference, storageRoot: await callPersistenceRoot(),
+          ...(opts.stores !== undefined ? { stores: opts.stores.split(',') } : {}) });
+        printReportPersistence(result, opts.json, line => console.log(line));
+        process.exitCode = reportPersistenceExit(result);
+        return;
+      }
+      if (kind === 'rcl-call-persistence') {
+        const result = await retryCallOperation({ ...reference, storageRoot: await callPersistenceRoot(),
+          ...(opts.stores !== undefined ? { stores: opts.stores.split(',') } : {}) });
+        printCallPersistence(result, opts.json, line => console.log(line));
+        process.exitCode = callPersistenceExit(result);
+        return;
+      }
+      const result = await retryVerdictOperation({ ...reference,
+        gitCommonDir: await resolveGitCommonDir(),
+        ...(opts.stores !== undefined ? { stores: opts.stores.split(',') as PersistenceStore[] } : {}),
+      }, await verdictPersistenceDependencies(RCL_VERSION));
+      printPersistenceResult(result, opts.json);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_PERSISTENCE_RETRY', message } }));
+      else console.error(chalk.red(`Persistence retry refused: ${message}`));
+      process.exitCode = 3;
+    }
+  });
 
 // Evidence delivery operations (IO-12475 section 8.10).
 const telemetry = program
@@ -969,6 +1052,24 @@ evidenceCmd
   .option('--json', 'Print the API run object')
   .action(async (runId: string | undefined, opts: { json?: boolean }) => {
     process.exitCode = await runEvidenceShow(runId ?? '', opts, evidenceDeps());
+  });
+
+evidenceCmd
+  .command('recover-claim')
+  .description('Recover exact original claims on the same target using authenticated receipts; preserve original reports and accounting')
+  .addHelpText('after', '\nPreview/apply/resume require authenticated review access, the same native target, a private manifest directory, and a backend with the complete claim_recovery_version: 1 contract.\n')
+  .option('--preview', 'Read exact sources and write a new immutable manifest; no server/native changes')
+  .option('--apply', 'Apply the exact reviewed manifest once')
+  .option('--resume', 'Resolve acknowledgments and resume the same immutable operation')
+  .option('--selection <path>', 'Strict original run/digest/ref and explicit semantic assertion JSON (preview only)')
+  .option('--adopt-manifest <path>', 'Re-preview an interrupted operation with exact acknowledged stages and fresh remaining events')
+  .option('--adopt-manifest-sha256 <sha256>', 'Exact interrupted manifest digest (adoption preview only)')
+  .requiredOption('--manifest <path>', 'Manifest in an existing private recovery directory')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest digest (apply/resume)')
+  .option('--json', 'Print machine-readable status')
+  .action(async (opts: PublicClaimRecoveryOptions) => {
+    const { runPublicClaimRecovery } = await import('./evidence/recover-claim.js');
+    process.exitCode = await runPublicClaimRecovery(opts, evidenceDeps());
   });
 
 evidenceCmd
@@ -1344,6 +1445,7 @@ interface PreparedCouncil {
   /** The blocking council's own models — the roster's `blocking` lane. */
   coreModels: string[];
   converge?: ConvergeContext;
+  recoveredProduction?: RecoveredProduction;
   /** When the command started; the run header records the full wall time. */
   startedAt: Date;
 }
@@ -1379,6 +1481,9 @@ async function prepareCouncil(
     { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
     process.env
   );
+  const recoveredProduction = converge
+    ? await selectCurrentRecoveredProduction(converge)
+    : undefined;
   await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config);
 
@@ -1539,7 +1644,10 @@ async function prepareCouncil(
     ...(spec ? { spec } : {}),
     explicit: explicitReviewers !== undefined,
     coreModels: models,
-    ...(converge ? { converge } : {}),
+    ...(converge ? { converge: { ...converge, ...(recoveredProduction ? { recovery_source: {
+      version: 1 as const, native_sha256: recoveredProduction.nativeSha256,
+    } } : {}) } } : {}),
+    ...(recoveredProduction ? { recoveredProduction } : {}),
     startedAt,
   };
 }
@@ -1879,34 +1987,30 @@ async function executeCouncil(
   // target (marked async), then collapse per-chunk reviews back to one per
   // (model, role) reviewer.
   let arrivedAsync: ModelReview[] = [];
+  let arrivedAsyncObservations: Array<{ resultFile: string }> = [];
   if (asyncStoreDir && asyncKey) {
     try {
-      arrivedAsync = await collectAsyncResults(asyncStoreDir, asyncKey);
+      const collected = await collectAsyncObservations(asyncStoreDir, asyncKey);
+      arrivedAsync = collected.map(({ review }) => review);
+      arrivedAsyncObservations = collected.map(({ resultFile }) => ({ resultFile }));
     } catch (err) {
+      if (err instanceof AsyncCollectionError) {
+        arrivedAsync = err.partialReviews;
+        arrivedAsyncObservations = err.partialObservations.map(({ resultFile }) => ({ resultFile }));
+      }
       console.warn(`Could not collect async reviewer results: ${String(err)}`);
     }
   }
   const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
 
-  // RCL-27: every call feeds the cross-run model history (fail-soft — the
-  // stats store must never break a review).
-  try {
-    const ts = new Date().toISOString();
-    await appendCalls(
-      [...chunkReviews, ...arrivedAsync].map((r) => ({
-        ts,
-        model: r.model,
-        role: r.role,
-        durationMs: r.durationMs,
-        status: r.status,
-        source: 'live' as const,
-      }))
-    );
-  } catch (err) {
-    // Stats are advisory; reviews must not fail over them — but a broken
-    // store should not be invisible either.
-    console.warn(`Model-stats store unavailable (call history not recorded): ${String(err)}`);
-  }
+  // Allocate this run's identity once. A retained physical-call batch is not
+  // proof that aggregation, rendering, native admission or delivery completed.
+  const runId = extra.attestation?.runId ?? uuidv7();
+  const callTimestamp = new Date().toISOString();
+  const callPersistence = await recordReviewCalls(runId, RCL_VERSION,
+    [...chunkReviews, ...arrivedAsync].map(r => ({ ts: callTimestamp, model: r.model,
+      role: r.role, durationMs: r.durationMs, status: r.status, source: 'live' as const })));
+  printCallPersistence(callPersistence, opts.json);
 
   // Trailing-precision weights scale each model's consensus vote. An empty
   // history means no weighting (and no weight noise in the report).
@@ -1956,8 +2060,7 @@ async function executeCouncil(
     config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
   );
 
-  const runId = extra.attestation?.runId ?? uuidv7();
-  const consensusFindings = computeConsensus(
+  const consensusFindings = materializeRecoveredClaims(computeConsensus(
     runId,
     groups,
     reviews,
@@ -1967,7 +2070,7 @@ async function executeCouncil(
       jaccardThreshold: config.thresholds?.jaccardThreshold,
     },
     modelWeights
-  );
+  ), prepared.recoveredProduction);
 
   const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
     consensusFindings,
@@ -2123,7 +2226,7 @@ async function executeCouncil(
       rclVersion: RCL_VERSION,
       config,
       noTelemetry: opts.telemetry === false,
-      ...(attestation ? { credential: attestation.credential } : {}),
+      ...(attestation ? { credential: attestation.credential, attestedExpiresAt: attestation.expiresAt } : {}),
     });
   } catch (err) {
     // Kept for the --evidence-required verdict below, which names the cause.
@@ -2135,9 +2238,12 @@ async function executeCouncil(
   // in. --json-file and --markdown are written from the same view, so the
   // declared digests match the files and nothing raw travels. With
   // telemetry off the raw report is written as before.
+  const produced = normalizeGeneratedReport(result);
   const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+    runtime && runtime.level !== 'off' ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
   const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
+
+  const outputDiagnostics: Array<{ path: string; message: string }> = [];
 
   // Output
   if (opts.json) {
@@ -2146,18 +2252,24 @@ async function executeCouncil(
     printReviewSummary(result);
   }
 
-  const outputDiagnostics: Array<{ path: string; message: string }> = [];
-  for (const [kind, path, label] of [
-    ['report_json', opts.jsonFile, 'JSON'], ['report_md', opts.markdown, 'Markdown'],
-  ] as const) {
-    if (!path) continue;
-    try {
-      await writeFile(path, artifacts[kind] ?? '', 'utf-8');
-      console.log(chalk.dim(`${label} written to: ${path}`));
-    } catch (error) {
-      const message = `Could not write ${label}: ${scrubText(String(error), 300)}`;
-      outputDiagnostics.push({ path: `output.${kind}`, message });
-      process.stderr.write(chalk.red(message) + '\n');
+  const requestedOutputs: Array<{ kind: ReportKind; path: string }> = [
+    ...(opts.jsonFile ? [{ kind: 'report_json' as const, path: opts.jsonFile }] : []),
+    ...(opts.markdown ? [{ kind: 'report_md' as const, path: opts.markdown }] : []),
+  ];
+  const reportPersistence = await recordReviewReports(run.id, RCL_VERSION,
+    { report_json: artifacts.report_json, report_md: artifacts.report_md ?? '' }, requestedOutputs);
+  printReportPersistence(reportPersistence, opts.json);
+  for (const output of reportPersistence.outputs) {
+    if (output.status !== 'succeeded') outputDiagnostics.push({ path: `output.${output.kind}`, message: output.reason ?? 'report_output_failed' });
+  }
+
+  let asyncPersistence: AsyncPersistenceResult | undefined;
+  if (asyncStoreDir && asyncKey && arrivedAsyncObservations.length > 0) {
+    asyncPersistence = await recordReviewAsync({ runId: run.id, asyncStore: asyncStoreDir, targetKey: asyncKey,
+      report: reportPersistence.retry, resultFiles: arrivedAsyncObservations.map(o => o.resultFile) });
+    if (asyncPersistence.stores.async_admission.status !== 'succeeded') {
+      outputDiagnostics.push({ path: 'async.report_admission', message: asyncPersistence.stores.async_admission.reason ??
+        asyncPersistence.stores.retention.reason ?? 'async_admission_not_recorded' });
     }
   }
 
@@ -2177,19 +2289,30 @@ async function executeCouncil(
   // A failed requested output must not prevent delivery or immutable recovery
   // retention of the rendered originals. Try both files before any exit code.
   const evidenceRequired = opts.evidenceRequired === true;
-  const delivery: DeliveryOutcome = runtime
-    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics }).catch((err: unknown) => ({
-        status: 'error' as const,
-        line: `Evidence delivery failed: ${scrubText(String(err), 300)}`,
-        exitCode: evidenceRequired ? (4 as const) : (0 as const),
-        spooled: false,
-      }))
-    : {
-        status: 'off',
-        line: evidenceRequired ? `Evidence not sent: telemetry could not be set up (${runtimeError ?? 'unknown cause'})` : '',
-        exitCode: evidenceRequired ? 4 : 0,
-        spooled: false,
-      };
+  let actualDelivery: DeliveryOutcome | undefined;
+  let deliveryError: string | undefined;
+  if (runtime) {
+    try { actualDelivery = await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics }); }
+    catch (err) { deliveryError = scrubText(String(err), 300); }
+  }
+  const delivery: DeliveryOutcome = actualDelivery ?? {
+    status: 'error', runId: run.id, spooled: false, exitCode: evidenceRequired ? 4 : 0,
+    line: deliveryError !== undefined ? `Evidence delivery failed: ${deliveryError}`
+      : `Evidence not sent: telemetry could not be set up (${runtimeError ?? 'unknown cause'})`,
+  };
+  if (asyncPersistence) {
+    // Only an actual returned outcome can become an async delivery receipt.
+    // Explicit-off results omit runId; bind only that known local observation.
+    if (actualDelivery) {
+      const outcome = actualDelivery.status === 'off' && actualDelivery.runId === undefined
+        ? { ...actualDelivery, runId: run.id } : actualDelivery;
+      asyncPersistence = await finishReviewAsync(asyncPersistence, outcome);
+    } else {
+      asyncPersistence.status = 'incomplete';
+      asyncPersistence.selected_stores = ['async_admission', 'async_delivery_receipt'];
+    }
+    printAsyncPersistence(asyncPersistence, opts.json);
+  }
   if (delivery.line !== '') process.stderr.write(chalk.dim(delivery.line) + '\n');
   // The flush hint is honest only when something was spooled to flush.
   const evidenceFailure = [
@@ -2204,22 +2327,29 @@ async function executeCouncil(
         : undefined,
   ].filter((part): part is string => part !== undefined).join(' ');
 
-  // CI mode: fail on a fully-failed run or on blocking findings. The gate
-  // verdict keeps its exit code — pipelines branch on it — and an evidence
-  // failure is reported beside it.
-  if (opts.ci) {
-    const verdict = evaluateCiGate(result);
-    if (verdict.exitCode !== 0) {
-      console.error(chalk.red(`\n${verdict.message}`));
-      if (delivery.exitCode !== 0) console.error(chalk.red(evidenceFailure));
-      process.exit(verdict.exitCode);
-    }
+  const completion = buildReviewCompletion({ runId: run.id, reportJson: artifacts.report_json,
+    calls: callPersistence, reports: reportPersistence, delivery, ...(asyncPersistence ? { async: asyncPersistence } : {}) });
+  if (opts.json) process.stderr.write(reviewCompletionJson(completion) + '\n');
+  else {
+    const incomplete = Object.entries(completion.stores).filter(([, fact]) =>
+      fact.status !== 'succeeded' && fact.status !== 'not-applicable');
+    process.stderr.write(`Review recording: ${completion.status}.${incomplete.length
+      ? ' ' + incomplete.map(([name, fact]) => `${name}: ${fact.status}${fact.reason ? ` (${fact.reason})` : ''}`).join('; ') + '.' : ''}\n`);
   }
-  if (delivery.exitCode !== 0) {
-    console.error(chalk.red(evidenceFailure));
-    process.exit(delivery.exitCode);
+
+  // Recording diagnostics precede CI/evidence exits and never replace a failing
+  // review verdict. Optional remote delivery remains diagnostic-only.
+  const ciVerdict = opts.ci ? evaluateCiGate(result) : { exitCode: 0 };
+  if (ciVerdict.exitCode !== 0) console.error(chalk.red(`\n${ciVerdict.message}`));
+  if (delivery.exitCode !== 0) console.error(chalk.red(evidenceFailure));
+  const asyncEvidenceFailed = evidenceRequired && asyncPersistence?.status === 'incomplete';
+  if (asyncEvidenceFailed && asyncPersistence) {
+    const reason = asyncPersistence.stores.retention.reason ?? asyncPersistence.stores.async_admission.reason ??
+      asyncPersistence.stores.async_delivery_receipt.reason ?? 'incomplete async recording';
+    console.error(chalk.red(`Evidence was not completely recorded (--evidence-required): async provenance persistence failed (${reason}).`));
   }
-  if (outputDiagnostics.length > 0) process.exitCode = 1;
+  process.exitCode = reviewCompletionExit(completion, { ciExitCode: ciVerdict.exitCode,
+    requiredEvidenceExitCode: delivery.exitCode || (asyncEvidenceFailed ? 4 : 0) });
 }
 
 async function runDiscuss(
