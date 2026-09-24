@@ -10,7 +10,6 @@ import { loadConfig } from './config/loader.js';
 import { applyHarnessModelKeys } from './config/harness.js';
 import {
   DEFAULT_MODELS,
-  DEFAULT_THRESHOLDS,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_ASYNC_TIMEOUT_MS,
   DEFAULT_QUORUM_FRACTION,
@@ -42,13 +41,11 @@ import {
   MAX_ASYNC_CALLS_PER_ROUND,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
-import { deduplicateFindings } from './consensus/deduper.js';
-import { computeConsensus, applyReportThresholds } from './consensus/voter.js';
-import { applyGatingWithFallback, resolveGatingConfig } from './consensus/gating.js';
+import { resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
-import { toJson } from './output/json.js';
-import { toMarkdown } from './output/markdown.js';
+import { renderReportArtifacts, writeReportArtifacts } from './output/artifacts.js';
+import { assembleCompletedReview } from './report/assembly.js';
 import {
   assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
@@ -96,7 +93,6 @@ import {
 import { buildSeedRecords } from './models/seed.js';
 import {
   buildRoster,
-  buildRunHeader,
   describeRunTarget,
   detectRunner,
   parseSpecSource,
@@ -120,7 +116,7 @@ import {
   loadHarnessSettings,
   resolveTelemetryLevel,
 } from './telemetry/deliver.js';
-import { sanitizeForDelivery, type ArtifactBytes } from './telemetry/envelope.js';
+import { sanitizeForDelivery } from './telemetry/envelope.js';
 import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
@@ -1922,9 +1918,8 @@ async function executeCouncil(
 
   postReviewStage('collecting and merging reviewer outputs');
 
-  // Merge async results that have arrived from earlier rounds of this
-  // target (marked async), then collapse per-chunk reviews back to one per
-  // (model, role) reviewer.
+  // Collect async results from earlier rounds of this target (marked async).
+  // Report assembly collapses the completed calls to one (model, role) review.
   let arrivedAsync: ModelReview[] = [];
   if (asyncStoreDir && asyncKey) {
     try {
@@ -1933,7 +1928,6 @@ async function executeCouncil(
       console.warn(`Could not collect async reviewer results: ${String(err)}`);
     }
   }
-  const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
 
   // RCL-27: every call feeds the cross-run model history (fail-soft — the
   // stats store must never break a review).
@@ -1993,166 +1987,58 @@ async function executeCouncil(
     modelWeights = undefined;
   }
 
-  postReviewStage('computing consensus');
-
-  // Deduplicate and compute consensus
-  const groups = deduplicateFindings(
-    reviews,
-    config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
-    config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
-    config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
-  );
-
-  const runId = extra.attestation?.runId ?? uuidv7();
-  const consensusFindings = computeConsensus(
-    runId,
-    groups,
-    reviews,
+  const result = await assembleCompletedReview({
+    chunkReviews,
+    arrivedAsync,
+    asyncLaunched,
+    startTime,
     roleMap,
-    {
-      lineWindow: config.thresholds?.dedupeLineWindow,
-      jaccardThreshold: config.thresholds?.jaccardThreshold,
-    },
-    modelWeights
-  );
-
-  const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
-    consensusFindings,
-    {
-      minConfidence: config.thresholds?.minConfidence,
-      minConsensusScore: config.thresholds?.minConsensusScore,
-    }
-  );
-
-  // Convergence gating (RCL-23): annotate every kept finding with why it
-  // does or does not gate; single-model blocking findings get one batched
-  // refutation call to a fast direct-API model.
-  const { gatingConfig } = prepared;
-  let finalFindings = reportFindings;
-  let gatedAppendix = droppedFindings;
-  let verificationStats: ReviewResult['stats']['verification'];
-  if (gatingConfig.mode === 'verified-consensus') {
-    spinner.text = 'Verifying single-model findings...';
-    const gated = await applyGatingWithFallback(reportFindings, {
-      minModels: gatingConfig.minModels,
-      verificationModel: gatingConfig.verificationModel,
-      verificationTimeoutMs: gatingConfig.verificationTimeoutMs,
-      verificationPassTimeoutMs: gatingConfig.verificationPassTimeoutMs,
-      onVerificationProgress: (event) => {
-        const line =
-          `Verification ${event.completedBatches}/${event.totalBatches} batches ` +
-          `(${event.completedCandidates}/${event.totalCandidates} findings)`;
-        if (interactive) {
-          spinner.text = line;
-        } else {
-          const stride = Math.max(1, Math.ceil(event.totalBatches / 20));
-          if (
-            event.completedBatches === 0 ||
-            event.completedBatches === event.totalBatches ||
-            event.completedBatches % stride === 0
-          ) {
-            process.stderr.write(`${line}\n`);
-          }
-        }
-      },
-      diffFiles: diff.files,
-      ...(modelWeights ? { modelWeights } : {}),
-    });
-    finalFindings = gated.findings;
-    verificationStats = gated.ok ? gated.verification : undefined;
-    if (!gated.ok) {
-      console.warn(
-        `Gating pass failed (${String(gated.failure)}); falling back to severity gating for this round.`
-      );
-    } else {
-      // Appendix findings never block convergence; mark them so the report
-      // JSON carries a gating reason on every finding.
-      gatedAppendix = droppedFindings.map((f) => ({ ...f, gating: { reason: 'none' as const } }));
-    }
-  }
-
-  const keepAppendix = config.output?.belowThresholdAppendix ?? true;
-  const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
-  const body: ReviewResult = {
-    reviews,
-    findings: finalFindings,
-    ...(keepAppendix && gatedAppendix.length > 0
-      ? { belowThresholdFindings: gatedAppendix }
-      : {}),
-    stats: {
-      totalReviews: reviews.length,
-      successfulReviews: reviews.filter((r) => r.status === 'success').length,
-      totalRawFindings,
-      totalDeduped: consensusFindings.length,
-      belowThreshold: droppedFindings.length,
-      durationMs: Date.now() - startTime,
-      ...(asyncLaunched > 0 ? { asyncLaunched } : {}),
-      ...(arrivedAsync.length > 0
-        ? { asyncMerged: mergeChunkReviews(arrivedAsync).length }
-        : {}),
-      // Per-call (pre-merge) so a straggler canceled on one chunk stays
-      // visible even when its other chunks succeeded.
-      ...(chunkReviews.some((r) => r.status === 'canceled')
-        ? {
-            canceledCalls: chunkReviews
-              .filter((r) => r.status === 'canceled')
-              .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
-          }
-        : {}),
-      ...(verificationStats ? { verification: verificationStats } : {}),
-      // Applied weights for this run's models, so the report shows what
-      // scaled the votes (RCL-27).
-      ...(modelWeights
-        ? {
-            modelWeights: Object.fromEntries(
-              [...new Set(reviews.map((r) => r.model))].map((m) => [
-                m,
-                modelWeights.get(m) ?? 1,
-              ])
-            ),
-          }
-        : {}),
-    },
-  };
-
-  postReviewStage('assembling the terminal report');
-
-  // Self-describing run header (IO-12475 section 5.1), built once the body
-  // exists so the CI verdict is recorded uniformly — with or without --ci.
-  const run = buildRunHeader({
-    // Reuse the id that scoped the report keys, including an attested run id.
-    id: runId,
-    rclVersion: RCL_VERSION,
-    command: extra.command,
-    target: extra.target,
-    diff,
-    roster: buildRoster({
-      assignments,
-      asyncAssignments,
-      coreModels: prepared.coreModels,
-      explicit: prepared.explicit,
-      gating: prepared.gatingConfig,
-    }),
     config,
-    thresholds: {
-      minConsensusScore: config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
-      minConfidence: config.thresholds?.minConfidence ?? DEFAULT_THRESHOLDS.minConfidence,
-      dedupeLineWindow: config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
-      jaccardThreshold: config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
+    diff,
+    gatingConfig: prepared.gatingConfig,
+    modelWeights,
+    run: {
+      id: extra.attestation?.runId,
+      rclVersion: RCL_VERSION,
+      command: extra.command,
+      target: extra.target,
+      roster: buildRoster({
+        assignments,
+        asyncAssignments,
+        coreModels: prepared.coreModels,
+        explicit: prepared.explicit,
+        gating: prepared.gatingConfig,
+      }),
+      ...(prepared.spec ? { spec: prepared.spec } : {}),
+      contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
+      // Record the effective focus that shaped the plan prompts.
+      ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
+      runner: detectRunner(process.env, hostname()),
+      startedAt: prepared.startedAt,
+      ...(prepared.converge ? { converge: prepared.converge } : {}),
     },
-    gating: prepared.gatingConfig,
-    ...(prepared.spec ? { spec: prepared.spec } : {}),
-    contextFiles: contextDocs.map((d) => ({ path: d.label, sha256: d.sha256 })),
-    // The plan focus shapes the prompts, so the header records the effective
-    // mode (the prompt builder treats an unset focus as comprehensive).
-    ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
-    runner: detectRunner(process.env, hostname()),
-    startedAt: prepared.startedAt,
-    finishedAt: new Date(),
-    ciExitCode: evaluateCiGate(body).exitCode,
-    ...(prepared.converge ? { converge: prepared.converge } : {}),
+  }, {
+    onStage: postReviewStage,
+    onVerificationStart: () => { spinner.text = 'Verifying single-model findings...'; },
+    onVerificationProgress: (event) => {
+      const line =
+        `Verification ${event.completedBatches}/${event.totalBatches} batches ` +
+        `(${event.completedCandidates}/${event.totalCandidates} findings)`;
+      if (interactive) {
+        spinner.text = line;
+      } else {
+        const stride = Math.max(1, Math.ceil(event.totalBatches / 20));
+        if (
+          event.completedBatches === 0 ||
+          event.completedBatches === event.totalBatches ||
+          event.completedBatches % stride === 0
+        ) {
+          process.stderr.write(`${line}\n`);
+        }
+      }
+    },
   });
-  const result: ReviewResult = { run, ...body };
+  const { run } = result;
 
   spinner.succeed('Review complete');
   process.stderr.write(
@@ -2202,7 +2088,7 @@ async function executeCouncil(
   const delivered =
     runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
   postReviewStage('rendering report artifacts');
-  const artifacts: ArtifactBytes = { report_json: toJson(delivered), report_md: toMarkdown(delivered) };
+  const artifacts = renderReportArtifacts(delivered);
 
   // Output
   if (opts.json) {
@@ -2211,20 +2097,10 @@ async function executeCouncil(
     printReviewSummary(result);
   }
 
-  const outputDiagnostics: Array<{ path: string; message: string }> = [];
-  for (const [kind, path, label] of [
-    ['report_json', opts.jsonFile, 'JSON'], ['report_md', opts.markdown, 'Markdown'],
-  ] as const) {
-    if (!path) continue;
-    try {
-      await writeFile(path, artifacts[kind] ?? '', 'utf-8');
-      console.log(chalk.dim(`${label} written to: ${path}`));
-    } catch (error) {
-      const message = `Could not write ${label}: ${scrubText(String(error), 300)}`;
-      outputDiagnostics.push({ path: `output.${kind}`, message });
-      process.stderr.write(chalk.red(message) + '\n');
-    }
-  }
+  const outputDiagnostics = await writeReportArtifacts(artifacts, opts, {
+    onWritten: (label, path) => console.log(chalk.dim(`${label} written to: ${path}`)),
+    onError: (message) => process.stderr.write(chalk.red(message) + '\n'),
+  });
 
   if (opts.post && !diff.metadata) {
     console.log(chalk.yellow('--post ignored: no PR to post to for a local diff.'));

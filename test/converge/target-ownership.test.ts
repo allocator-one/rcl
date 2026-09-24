@@ -65,7 +65,8 @@ it('serializes a separately launched native writer under recovery ownership', as
   let child: Promise<unknown> | undefined;
   try {
     await Promise.race([entered.promise, owner]);
-    child = promisify(execFile)(process.execPath, ['--import', 'tsx', fileURLToPath(worker), dir, target], { timeout: 10_000 });
+    child = promisify(execFile)(process.execPath,
+      ['--import', import.meta.resolve('tsx'), fileURLToPath(worker), dir, target, '100'], { timeout: 10_000 });
     void child.catch(() => {});
     const deadline = Date.now() + 5000;
     for (;;) {
@@ -73,7 +74,8 @@ it('serializes a separately launched native writer under recovery ownership', as
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() >= deadline) throw error; }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await expect(child).rejects.toMatchObject({ stderr: expect.stringContaining('recovery_run_locked') });
+    child = undefined;
     await expect(readFile(convergeRunStatePath(dir, target))).rejects.toMatchObject({ code: 'ENOENT' });
     // A separate process must read the state again after obtaining ownership.
     // Install a synthetic valid round while it is waiting, preserving our lock.
@@ -85,5 +87,7 @@ it('serializes a separately launched native writer under recovery ownership', as
     const settled = await Promise.allSettled([owner, ...(child ? [child] : [])]);
     for (const result of settled) if (result.status === 'rejected') throw result.reason;
   }
+  await promisify(execFile)(process.execPath,
+    ['--import', import.meta.resolve('tsx'), fileURLToPath(worker), dir, target], { timeout: 10_000 });
   expect((await loadConvergeRunState(dir, target))?.rounds.map(round => round.round)).toEqual([1, 2]);
 }, 15_000);

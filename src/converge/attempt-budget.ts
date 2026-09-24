@@ -106,6 +106,9 @@ interface ClaimOptions {
   recordPid?: number;
   lockTimeoutMs?: number;
   lockRetryMs?: number;
+  /** Target ownership has a different contention profile from attempt accounting. */
+  targetLockTimeoutMs?: number;
+  targetLockRetryMs?: number;
   /** Runs after durable accounting and before target ownership is released. */
   afterClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
 }
@@ -584,6 +587,8 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     recordPid: options.recordPid,
     lockTimeoutMs: options.lockTimeoutMs,
     lockRetryMs: options.lockRetryMs,
+    targetLockTimeoutMs: options.targetLockTimeoutMs,
+    targetLockRetryMs: options.targetLockRetryMs,
     afterClaim: options.afterClaim,
   };
   // Use one canonical directory for both target ownership and state paths.
@@ -602,7 +607,13 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
         throw new ConvergeAttemptPostClaimError(committed, error);
       }
       return committed;
-    }, { lockTimeoutMs: claimOptions.lockTimeoutMs ?? DEFAULT_TARGET_LOCK_TIMEOUT_MS, lockRetryMs: claimOptions.lockRetryMs });
+    }, {
+      lockTimeoutMs:
+        claimOptions.targetLockTimeoutMs ??
+          claimOptions.lockTimeoutMs ??
+          DEFAULT_TARGET_LOCK_TIMEOUT_MS,
+      lockRetryMs: claimOptions.targetLockRetryMs ?? claimOptions.lockRetryMs,
+    });
   } catch (error) {
     const postClaim = findPostClaimError(error);
     if (postClaim) throw postClaim;

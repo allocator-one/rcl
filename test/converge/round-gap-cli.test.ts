@@ -12,10 +12,15 @@ import { loadConvergeRunState } from '../../src/converge/run-state.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 const cli = fileURLToPath(new URL('../../src/index.ts',import.meta.url));
 async function command(cwd:string,args:string[],env:NodeJS.ProcessEnv) {
+  const inherited = Object.fromEntries(
+    ['PATH', 'HOME', 'USERPROFILE', 'TMPDIR', 'TMP', 'TEMP', 'SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT']
+      .flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])
+  );
   const child=spawn(process.execPath,['--import',import.meta.resolve('tsx'),cli,...args],{
     cwd,timeout:10_000,killSignal:'SIGKILL',
-    env:{...process.env,...env,TSX_DISABLE_CACHE:'1',NO_COLOR:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull},
+    env:{...inherited,...env,TSX_DISABLE_CACHE:'1',NO_COLOR:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull},
   });
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   let stdout='',stderr=''; child.stdout.on('data',c=>stdout+=c); child.stderr.on('data',c=>stderr+=c);
   const {code,signal}=await new Promise<{code:number|null;signal:NodeJS.Signals|null}>((resolve,reject)=>{
     child.on('error',reject);child.on('close',(code,signal)=>resolve({code,signal}));
