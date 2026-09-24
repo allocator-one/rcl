@@ -3,8 +3,9 @@
 The Review Council gate retains its exported evidence and quarantine files as
 one authenticated CMS ciphertext. The GitHub artifact is public to repository
 readers, but its contents are recoverable only with the separately held private
-key. Use this runbook only from an approved operator workstation. Do not run it
-in GitHub Actions, paste key material into a terminal, or enable shell tracing.
+key. Use this runbook only from an approved operator workstation with encrypted
+local storage and no synced or backed-up recovery directory. Do not run it in
+GitHub Actions, paste key material into a terminal, or enable shell tracing.
 The four shell blocks form one Bash program: put them in one mode-0700 local
 file and run that file with Bash in one noninteractive process. Do not split
 the blocks across shells; the variables and cleanup trap must remain active
