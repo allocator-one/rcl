@@ -30,17 +30,8 @@ export const MIN_CONVERGE_ROUNDS = 2;
 const STATE_VERSION = 1;
 const STATE_DIR = 'rcl-converge-runs';
 const DEFAULT_LINE_WINDOW = 5;
-const REPORT_IDENTITY = /^report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{16}$/;
-
-// These are the Cyrillic lookalikes for the letters in "report". A malformed
-// modern identity must not fall through to legacy matching because its prefix
-// used visually confusable Unicode.
-const REPORT_PREFIX_CONFUSABLES: Readonly<Record<string, string>> = {
-  '\u0435': 'e',
-  '\u043e': 'o',
-  '\u0440': 'p',
-  '\u0442': 't',
-};
+const REPORT_IDENTITY = /^report:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{16}(?![\s\S])/;
+const REPORT_IDENTITY_SHAPE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[0-9a-f]{16}/i;
 
 export class ConvergeRoundCapError extends Error {
   readonly code = 'RCL_CONVERGE_ROUND_CAP';
@@ -98,6 +89,8 @@ export interface FindingEntry {
   claimTextSha256?: string;
   /** Absent in old state: treat it as legacy and never trust its digest for modern matching. */
   identityOrigin?: 'modern' | 'legacy';
+  /** Exact report key makes a retry of the immutable source report idempotent. */
+  sourceReportIdentity?: string;
   severity: string;
   models: string[];
   firstRound: number;
@@ -354,7 +347,8 @@ function validateRoundReportInput(options: ProcessRoundOptions): { target: strin
   }
   const reportIdentities = options.findings
     .map((finding) => finding.identity)
-    .filter((identity): identity is string => REPORT_IDENTITY.test(identity ?? ''));
+    .filter((identity): identity is string => typeof identity === 'string')
+    .filter(identity => REPORT_IDENTITY.test(identity));
   if (new Set(reportIdentities).size !== reportIdentities.length) {
     throw new ConvergeRunStateError('Duplicate report identity; each modern report claim must be independently addressable.');
   }
@@ -365,9 +359,8 @@ function looksLikeReportIdentity(identity: string): boolean {
   const normalized = identity.normalize('NFKC')
     .replace(/\p{Cf}/gu, '')
     .trim()
-    .toLowerCase()
-    .replace(/[\u0435\u043e\u0440\u0442]/gu, character => REPORT_PREFIX_CONFUSABLES[character]!);
-  return normalized.startsWith('report:');
+    .toLowerCase();
+  return normalized.startsWith('report:') || REPORT_IDENTITY_SHAPE.test(normalized);
 }
 
 function claimTextSha256(finding: ConsensusFinding): string {
@@ -464,7 +457,10 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       }
       const storedDigest = state.findings[entry.key]?.claimTextSha256;
       const origin = state.findings[entry.key]?.identityOrigin;
-      if (reportIdentity !== undefined) return origin === 'modern' && storedDigest === textDigest;
+      if (reportIdentity !== undefined) {
+        return origin === 'modern' &&
+          (state.findings[entry.key]?.sourceReportIdentity === reportIdentity || storedDigest === textDigest);
+      }
       return origin !== 'modern';
     });
     // A digest is only a conservative continuity check, never a claim key.
@@ -474,7 +470,14 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     const matchingCandidates = candidates.filter(candidate =>
       matchFinding(finding, [candidate], lineWindow) !== undefined
     );
-    const matched = matchingCandidates.length === 1 ? matchingCandidates[0] : undefined;
+    const exactSource = reportIdentity === undefined
+      ? []
+      : matchingCandidates.filter(candidate => state.findings[candidate.key]?.sourceReportIdentity === reportIdentity);
+    const matched = reportIdentity === undefined
+      ? matchFinding(finding, candidates, lineWindow)
+      : exactSource.length === 1
+        ? exactSource[0]
+        : matchingCandidates.length === 1 ? matchingCandidates[0] : undefined;
 
     if (!matched) {
       const key = availableFindingKey(finding, occupied);
@@ -488,6 +491,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         title: finding.title,
         claimTextSha256: textDigest,
         identityOrigin: reportIdentity ? 'modern' : 'legacy',
+        ...(reportIdentity ? { sourceReportIdentity: reportIdentity } : {}),
         severity: finding.severity,
         models: [...finding.consensus.models],
         firstRound: options.round,
