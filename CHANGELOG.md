@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.8.2 - 2026-09-23
+## 3.8.2 - 2026-09-24
 
 - Bound the complete single-model verification queue to three minutes while
   preserving the existing stricter severity fallback when that deadline is
@@ -11,6 +11,18 @@
   reviewer calls can be distinguished from consensus, verification, report
   assembly and artifact-write failures. Record the effective whole-pass bound
   in terminal report evidence.
+- **Missing-report gap recovery** (RCL-81): add `rcl converge-gap --preview`,
+  `--apply`, and `--resume` for one missing report immediately before a retained
+  original report. Recovery binds immutable evidence and native snapshots,
+  preserves the original round and spent attempts, and records the missing
+  report explicitly without inventing approval or reviewer results.
+- **Coordinated recovery writes** (RCL-81): serialize gap operations with normal
+  round, verdict, and budget writers, including compatible older recovery
+  clients. Conflicting ownership and changed evidence fail closed; completed
+  results remain resumable after cleanup failures.
+- **Protected review evidence** (RCL-84): correlate registered GitHub gate runs
+  with their lifecycle attempts and retain authenticated encrypted originals
+  for recovery. The private recovery key remains outside public CI.
 
 ## 3.8.1 - 2026-09-23
 

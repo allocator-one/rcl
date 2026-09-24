@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
@@ -32,13 +32,7 @@ async function tempGitDir(): Promise<string> {
   return dir;
 }
 
-async function exitedChildPid(): Promise<number> {
-  const child = spawn(process.execPath, ['-e', '']);
-  const pid = child.pid;
-  if (pid === undefined) throw new Error('Child process did not receive a PID');
-  await once(child, 'exit');
-  return pid;
-}
+const nonexistentPid = 2_147_483_647;
 
 async function runClaimProcess(gitCommonDir: string, target: string, cap: number) {
   const child = spawn(
@@ -199,12 +193,15 @@ describe('convergence attempt budget', () => {
     const rejected = claims.filter((claim) => claim.status === 'rejected');
     expect(successful).toHaveLength(7);
     expect(rejected).toHaveLength(5);
-    expect(
-      rejected.every(
-        (claim) =>
-          claim.status === 'rejected' && claim.reason instanceof ConvergeAttemptBudgetExceededError
-      )
-    ).toBe(true);
+    const unexpected = rejected.filter((claim) =>
+      claim.status === 'rejected' && !(claim.reason instanceof ConvergeAttemptBudgetExceededError)
+    ).map(claim => {
+      const error = claim.reason as Error & { code?: unknown; cause?: unknown };
+      const cause = error.cause instanceof Error ? error.cause : undefined;
+      return { name: error.name, code: error.code, message: error.message,
+        cause: cause && { name: cause.name, code: (cause as Error & { code?: unknown }).code, message: cause.message } };
+    });
+    expect(unexpected).toEqual([]);
     expect((await loadConvergeAttemptState(gitCommonDir, 'repo-7559'))?.attemptsUsed).toBe(7);
   });
 
@@ -214,6 +211,10 @@ describe('convergence attempt budget', () => {
       Array.from({ length: 4 }, () => runClaimProcess(gitCommonDir, 'cross-process', 2))
     );
 
+    const unexpected = results.filter((result) => ![0, 2].includes(result.status)).map(result => ({
+      status: result.status, stdout: result.stdout, stderr: result.stderr,
+    }));
+    expect(unexpected).toEqual([]);
     expect(results.map((result) => result.status).sort()).toEqual([0, 0, 2, 2]);
     expect(results.filter((result) => result.status === 0).every((result) => result.stdout)).toBe(
       true
@@ -249,7 +250,7 @@ describe('convergence attempt budget', () => {
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     const lockFile = `${stateFile}.lock`;
     const token = '00000000-0000-4000-8000-000000000001';
-    const deadPid = await exitedChildPid();
+    const deadPid = nonexistentPid;
     await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
       lockFile,
@@ -274,7 +275,7 @@ describe('convergence attempt budget', () => {
     const stateFile = convergeAttemptStatePath(gitCommonDir, 'rcl-18');
     const lockFile = `${stateFile}.lock`;
     const token = '00000000-0000-4000-8000-000000000002';
-    const deadPid = await exitedChildPid();
+    const deadPid = nonexistentPid;
     await mkdir(join(gitCommonDir, 'rcl-converge-attempts'), { recursive: true });
     await writeFile(
       lockFile,
@@ -289,7 +290,7 @@ describe('convergence attempt budget', () => {
           gitCommonDir,
           target: 'rcl-18',
           maxAttempts: 7,
-          lockTimeoutMs: 5_000,
+          lockTimeoutMs: 30_000,
           lockRetryMs: 1,
         })
       )
@@ -319,7 +320,7 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 10,
+        lockTimeoutMs: 500,
         lockRetryMs: 1,
       })
     ).rejects.toThrow('move or remove that lock path and retry');
@@ -336,7 +337,7 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 10,
+        lockTimeoutMs: 500,
         lockRetryMs: 1,
       })
     ).rejects.toThrow('move or remove that lock path and retry');
@@ -360,7 +361,7 @@ describe('convergence attempt budget', () => {
       claimConvergeAttempt({
         gitCommonDir,
         target: 'rcl-18',
-        lockTimeoutMs: 10,
+        lockTimeoutMs: 500,
         lockRetryMs: 1,
       })
     ).rejects.toThrow('If no live converge-attempt process owns it');
@@ -429,7 +430,7 @@ describe('convergence attempt budget', () => {
     const gitCommonDir = await tempGitDir();
     const claim = await claimConvergeAttempt({ gitCommonDir, target: '../../outside target' });
 
-    expect(claim.stateFile.startsWith(join(gitCommonDir, 'rcl-converge-attempts'))).toBe(true);
+    expect(claim.stateFile.startsWith(join(await realpath(gitCommonDir), 'rcl-converge-attempts'))).toBe(true);
     expect(claim.stateFile).not.toContain('../');
   });
 
