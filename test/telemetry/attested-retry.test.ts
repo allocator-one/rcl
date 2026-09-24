@@ -149,6 +149,26 @@ describe('recoverAttestedDelivery', () => {
     expect(budget).toEqual({ kind: 'attempts_exhausted', attempts: 2, recovered: false });
   });
 
+  it('does not allow callers to raise the attested delivery attempt or deadline ceilings', async () => {
+    let posts = 0;
+    const attempts = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, maxAttempts: 99,
+      post: async () => { posts++; return { kind: 'unavailable' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+
+    expect(attempts).toEqual({ kind: 'attempts_exhausted', attempts: 3, recovered: false });
+    expect(posts).toBe(3);
+
+    let elapsed = 0;
+    const deadline = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW,
+      monotonicNow: () => elapsed, deadlineMs: 99,
+      post: async () => { elapsed += 20_000; return { kind: 'unavailable' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    });
+
+    expect(deadline).toEqual({ kind: 'deadline_exceeded', attempts: 1, recovered: false });
+  });
+
   it('does not start receipt-first or replay transports after a boundary crosses while acquiring its timeout', async () => {
     async function recover(receiptFirst: boolean, boundary: 'expiry' | 'deadline') {
       let ticks = 0;

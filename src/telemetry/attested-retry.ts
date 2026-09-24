@@ -57,8 +57,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
   const now = options.now ?? Date.now;
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
   const sleep = options.sleep ?? abortableSleep;
-  const maxAttempts = validBound(options.maxAttempts, ATTESTED_DELIVERY_MAX_ATTEMPTS);
-  const deadlineMs = validBound(options.deadlineMs, ATTESTED_DELIVERY_DEADLINE_MS);
+  const maxAttempts = cappedBound(options.maxAttempts, ATTESTED_DELIVERY_MAX_ATTEMPTS);
+  const deadlineMs = cappedBound(options.deadlineMs, ATTESTED_DELIVERY_DEADLINE_MS);
   const expiresAt = Date.parse(options.expiresAt);
   const startedAt = monotonicNow();
   let attempts = Math.min(validBound(options.initialAttempts, 0), maxAttempts);
@@ -146,6 +146,10 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
 
 function validBound(value: number | undefined, fallback: number): number {
   return value === undefined ? fallback : Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function cappedBound(value: number | undefined, ceiling: number): number {
+  return Math.min(validBound(value, ceiling), ceiling);
 }
 
 function outcome<T>(kind: AttestedRecoveryOutcome<T>['kind'], attempts: number, recovered = false, value?: T): AttestedRecoveryOutcome<T> {
