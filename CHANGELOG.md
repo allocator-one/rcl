@@ -2,13 +2,18 @@
 
 ## 3.8.3 - 2026-09-24
 
-- Keep attempt-accounting lock timing separate from native target ownership, so
-  a short accounting retry does not prematurely abandon a contended recovery
-  operation. Preserve the explicit native-writer contention proof and improve
-  cross-platform gap-recovery test process, UTF-8, and symlink fixtures
-  (RCL-81).
+- Supersede the withdrawn 3.8.2 release with its bounded terminal-report
+  aggregation, missing-report recovery, and protected-evidence support.
+- Preserve the completed-review path from consensus through bounded
+  verification, the self-describing run header, and matching JSON and Markdown
+  terminal artifacts. Add a deterministic regression for a saturated council,
+  a failed reviewer, and a verifier that ignores cancellation (RCL-85).
+- Keep attempt-accounting lock timing separate from target-ownership timing so
+  short accounting probes cannot prematurely fail coordinated native and
+  recovery writers. Harden the cross-platform and isolated-process recovery
+  regressions (RCL-81).
 
-## 3.8.2 - 2026-09-24
+## 3.8.2 - 2026-09-24 (withdrawn)
 
 - Bound the complete single-model verification queue to three minutes while
   preserving the existing stricter severity fallback when that deadline is
