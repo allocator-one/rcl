@@ -780,7 +780,10 @@ export async function applyGating(
         if (remainingMs <= 0) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
-        const callTimeoutMs = Math.max(1, Math.min(verificationTimeoutMs, remainingMs));
+        // performance.now() leaves a fractional remaining budget, while
+        // provider SDKs such as OpenAI require integer millisecond timeouts.
+        // Round down so the adapter's own bound never exceeds the pass.
+        const callTimeoutMs = Math.max(1, Math.floor(Math.min(verificationTimeoutMs, remainingMs)));
         const answer = await askWithinPassDeadline(verifierPrompt, callTimeoutMs);
         if (now() >= verificationDeadline) {
           passController.abort();

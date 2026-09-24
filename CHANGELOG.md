@@ -5,7 +5,8 @@
 - Bound the complete single-model verification queue to three minutes while
   preserving the existing stricter severity fallback when that deadline is
   reached. Cap each newly started verifier batch to the remaining whole-pass
-  budget and stop starting work after expiry (RCL-85).
+  budget, normalize the remaining timeout for integer-only provider SDKs, and
+  stop starting work after expiry (RCL-85).
 - Report post-review stages and bounded verifier batch progress so completed
   reviewer calls can be distinguished from consensus, verification, report
   assembly and artifact-write failures. Record the effective whole-pass bound
