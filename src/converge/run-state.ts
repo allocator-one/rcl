@@ -410,13 +410,16 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       ? finding.identity
       : undefined;
     const textDigest = claimTextSha256(finding);
-    const candidates = reportIdentity
-      ? entries.filter((entry) => {
-          const claimedBy = claimedThisRound.get(entry.key);
-          return (claimedBy === undefined || claimedBy === reportIdentity) &&
-            state.findings[entry.key]?.claimTextSha256 === textDigest;
-        })
-      : entries;
+    const candidates = entries.filter((entry) => {
+      const claimedBy = claimedThisRound.get(entry.key);
+
+      if (claimedBy !== undefined && claimedBy !== reportIdentity) {
+        return false;
+      }
+
+      return reportIdentity === undefined ||
+        state.findings[entry.key]?.claimTextSha256 === textDigest;
+    });
     const matched = matchFinding(finding, candidates, lineWindow);
 
     if (!matched) {

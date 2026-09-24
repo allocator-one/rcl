@@ -49,6 +49,23 @@ describe('report identity through native classification and telemetry', () => {
     expect(await loadConvergeRunState(dir, target)).toEqual(state);
   });
 
+  it('does not let a legacy finding reuse an entry claimed by a modern report key', async () => {
+    const [modern, legacy] = consensus([42, 42]).map((finding, index) => ({
+      ...finding,
+      title: index === 0 ? 'Modern claim' : 'Legacy claim',
+      description: index === 0 ? 'Modern report identity owns this entry.' : 'Legacy input must receive its own entry.',
+    }));
+
+    const result = await processRoundReport({
+      gitCommonDir: dir,
+      target: 'mixed-identity-claims',
+      round: 1,
+      findings: [modern!, { ...legacy!, identity: undefined }],
+    });
+
+    expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
+  });
+
   it('keeps distinct same-location claims separate through verdict resolution', async () => {
     const findings = consensus([42, 42]).map((finding, index) => ({
       ...finding,
