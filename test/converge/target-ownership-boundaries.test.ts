@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as lockScope from '../../src/evidence/original-run/lock-scope.js';
-import { claimConvergeAttempt, ConvergeAttemptPostClaimError, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { claimConvergeAttempt, ConvergeAttemptPostClaimError, convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 
@@ -212,7 +212,7 @@ it('keeps attempt state in the canonical directory when a caller symlink is reta
   const claim = claimConvergeAttempt({ gitCommonDir: alias, target });
   try {
     await Promise.race([contended.promise, claim.then(() => { throw new Error('contender bypassed occupied target'); })]);
-    await unlink(alias); await symlink(diverted, alias, directoryLinkType);
+    await rm(alias, { recursive: true, force: true }); await symlink(diverted, alias, directoryLinkType);
     release.resolve();
     await holder;
     retry.resolve();
@@ -226,9 +226,36 @@ it('keeps attempt state in the canonical directory when a caller symlink is reta
   }
 });
 
-it('preserves legacy caller timing for target ownership when dedicated timing is absent', async () => {
-  await claimConvergeAttempt({ gitCommonDir: dir, target, lockTimeoutMs: 1_000, lockRetryMs: 1 });
-  expect(faults.targetTiming).toEqual({ lockTimeoutMs: 1_000, lockRetryMs: 1 });
+it('keeps the accounting deadline independent from a held target owner', async () => {
+  const entered = barrier(), releaseOwner = barrier(), contended = barrier(), retry = barrier();
+  const holder = withNativeTarget(dir, target, async () => { entered.resolve(); await releaseOwner.promise; });
+  await entered.promise;
+  faults.ownershipWait = async () => { contended.resolve(); await retry.promise; };
+  const claim = claimConvergeAttempt({ gitCommonDir: dir, target, lockTimeoutMs: 25, lockRetryMs: 1 });
+  void claim.catch(() => {});
+  try {
+    await contended.promise;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    releaseOwner.resolve();
+    retry.resolve();
+    await expect(claim).resolves.toMatchObject({ attempt: 1 });
+    expect(faults.targetTiming).toBeDefined();
+    expect(faults.targetTiming?.lockTimeoutMs).not.toBe(25);
+    expect(faults.targetTiming?.lockRetryMs).not.toBe(1);
+  } finally {
+    releaseOwner.resolve(); retry.resolve();
+    await Promise.allSettled([holder, claim]);
+  }
+});
+
+it('uses lockTimeoutMs and lockRetryMs for the actual attempt-accounting lock', async () => {
+  const stateDir = join(dir, 'rcl-converge-attempts');
+  const stateFile = convergeAttemptStatePath(dir, target);
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(`${stateFile}.lock`, `${JSON.stringify({ pid: process.pid, claimedAt: new Date().toISOString(), token: '00000000-0000-4000-8000-000000000001' })}\n`);
+
+  await expect(claimConvergeAttempt({ gitCommonDir: dir, target, lockTimeoutMs: 25, lockRetryMs: 1 }))
+    .rejects.toThrow('Timed out waiting for convergence attempt lock');
 });
 
 it('uses dedicated caller timing while waiting for target ownership', async () => {
@@ -238,8 +265,6 @@ it('uses dedicated caller timing while waiting for target ownership', async () =
   const claim = claimConvergeAttempt({
     gitCommonDir: dir,
     target,
-    lockTimeoutMs: 10,
-    lockRetryMs: 2,
     targetLockTimeoutMs: 25,
     targetLockRetryMs: 1,
   });

@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.8.4 - 2026-09-24
+## 3.8.5 - 2026-09-24
 
 - Raise the complete evidence-envelope transport limit to 4,000,000 bytes while retaining 2,000,000-character limits for individual verification diagnostics. Share the total limit with historical recovery planning so valid retained envelopes are not rejected before their immutable artifacts can be assessed (RCL-88; requires compatible backend acceptance).
 
@@ -11,7 +11,16 @@
 - Preserve cancellation, conflict, rejection, and organization-disabled status
   without falling back to ordinary credentials or creating another review.
   Retain the original evidence with bounded, redacted transport diagnostics when
-  recovery cannot complete.
+  recovery cannot complete. Report a callback rejection that occurs before a
+  boundary as `operation_failed`, without retaining exception prose or replaying
+  the request blindly.
+
+## 3.8.4 - 2026-09-24
+
+- Clear old dismissal explanations when recording a new fixed verdict. Add
+  `converge-verdict --fixed-reason key=reason` to record the current fix explanation
+  through the existing native state and event path. Reject duplicate, conflicting,
+  empty or orphaned reason arguments before changing state (RCL-89).
 
 ## 3.8.3 - 2026-09-24
 

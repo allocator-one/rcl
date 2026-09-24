@@ -246,6 +246,10 @@ verdicts, even when its findings look unchanged.
 `converge-verdict` records triage outcomes per finding identity —
 `--fixed <key>` and `--dismissed '<key>=<reason>'` (both repeatable) — which
 drives later-round suppression and accrues the per-model precision history.
+Add `--fixed-reason '<key>=<reason>'` to attach the current fix explanation to
+an identity also passed to `--fixed`. A fixed verdict without this option clears
+any prior explanation; it never reuses an earlier dismissal reason. Each identity
+may appear once per command, and each fixed reason must be nonempty and unique.
 Once every gating identity of the current round is triaged, it also reports
 the round's resolution: `converged-dismissal-only` (everything dismissed,
 nothing fixed — the round converges on the spot, no confirmation round),
@@ -254,7 +258,9 @@ nothing fixed — the round converges on the spot, no confirmation round),
 ```bash
 rcl converge-report --target rcl-30 --report report-r2.json --round 2 --json
 rcl converge-verdict --target rcl-30 --round 2 \
-  --fixed 9787c6ea72ae778c --dismissed 'd2baf9675eb450f0=guard already exists'
+  --fixed 9787c6ea72ae778c \
+  --fixed-reason '9787c6ea72ae778c=callback failures now have a distinct outcome' \
+  --dismissed 'd2baf9675eb450f0=guard already exists'
 ```
 
 ### `rcl converge-gap`

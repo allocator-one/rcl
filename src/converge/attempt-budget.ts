@@ -608,11 +608,8 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
       }
       return committed;
     }, {
-      lockTimeoutMs:
-        claimOptions.targetLockTimeoutMs ??
-          claimOptions.lockTimeoutMs ??
-          DEFAULT_TARGET_LOCK_TIMEOUT_MS,
-      lockRetryMs: claimOptions.targetLockRetryMs ?? claimOptions.lockRetryMs,
+      lockTimeoutMs: claimOptions.targetLockTimeoutMs ?? DEFAULT_TARGET_LOCK_TIMEOUT_MS,
+      lockRetryMs: claimOptions.targetLockRetryMs,
     });
   } catch (error) {
     const postClaim = findPostClaimError(error);
