@@ -52,7 +52,15 @@ describe('report identity through native classification and telemetry', () => {
   it('rejects report-like identity variants before state writes', async () => {
     const [finding] = consensus([42]);
     const identity = finding!.identity!;
-    const variants = [identity.toUpperCase(), ` ${identity}`, `${identity} `, `${identity}\n`, identity.slice(0, -1)];
+    const variants = [
+      identity.toUpperCase(),
+      ` ${identity}`,
+      `${identity} `,
+      `${identity}\n`,
+      identity.slice(0, -1),
+      `report :${identity.slice('report:'.length)}`,
+      `report\t:${identity.slice('report:'.length)}`,
+    ];
     variants.push(`re\u200bport:${identity.slice('report:'.length)}`);
     variants.push(`re\u03c1\u03bfrt:${identity.slice('report:'.length)}`, `reprot:${identity.slice('report:'.length)}`);
 

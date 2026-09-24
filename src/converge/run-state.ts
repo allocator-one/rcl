@@ -364,7 +364,7 @@ function looksLikeReportIdentity(identity: string): boolean {
     .replace(/[\u043e\u03bf]/gu, 'o')
     .replace(/[\u0440\u03c1]/gu, 'p')
     .replace(/[\u0442\u03c4]/gu, 't');
-  const prefix = normalized.split(':', 1)[0];
+  const prefix = normalized.split(':', 1)[0].trim();
   return prefix === 'report' || (prefix === 'reprot' && REPORT_IDENTITY_SHAPE.test(normalized));
 }
 
