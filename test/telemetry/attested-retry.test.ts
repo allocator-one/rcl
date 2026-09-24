@@ -107,6 +107,32 @@ describe('recoverAttestedDelivery', () => {
     expect(posts).toBe(1);
   });
 
+  it.each([
+    ['receipt probe', {
+      receiptFirst: true,
+      initialAttempts: 1,
+      post: async () => ({ kind: 'unavailable' as const }),
+      receipt: async () => { throw new Error('credential=secret'); },
+      attempts: 1,
+    }],
+    ['replay post', {
+      receiptFirst: false,
+      initialAttempts: 0,
+      post: async () => { throw new Error('credential=secret'); },
+      receipt: async () => ({ kind: 'absent' as const }),
+      attempts: 1,
+    }],
+  ] as const)('reports a rejected %s as an accurate bounded operation failure', async (_label, options) => {
+    const outcome = await recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW,
+      receiptFirst: options.receiptFirst, initialAttempts: options.initialAttempts,
+      post: options.post, receipt: options.receipt, sleep: async () => {},
+    });
+
+    expect(outcome).toEqual({ kind: 'operation_failed', attempts: options.attempts, recovered: false });
+    expect(JSON.stringify(outcome)).not.toContain('credential=secret');
+  });
+
   it.each([true, false])('reports cancellation when a %s receipt normalizes its abort as unavailable', async (receiptFirst) => {
     const controller = new AbortController();
     const outcome = await recoverAttestedDelivery({

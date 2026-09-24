@@ -21,7 +21,7 @@ export type DeliveryAttempt<T = undefined> =
 export type ReceiptProbe<T = undefined> = { kind: 'recorded'; value?: T } | { kind: 'absent' } | { kind: 'unavailable' } | { kind: 'rejected' };
 
 export type AttestedRecoveryOutcome<T = undefined> = {
-  kind: 'recorded' | 'conflict' | 'rejected' | 'receipt_unavailable' | 'receipt_rejected' | 'expired' | 'cancelled' | 'deadline_exceeded' | 'attempts_exhausted';
+  kind: 'recorded' | 'conflict' | 'rejected' | 'receipt_unavailable' | 'receipt_rejected' | 'operation_failed' | 'expired' | 'cancelled' | 'deadline_exceeded' | 'attempts_exhausted';
   attempts: number;
   recovered: boolean;
   value?: T;
@@ -86,8 +86,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
     try {
       receipt = await withActiveSignal(options.signal, active.remainingMs,
         signal => options.receipt(options.runId, signal));
-    } catch {
-      return stopped() ?? outcome('deadline_exceeded', attempts);
+    } catch (error) {
+      return failedOperation(error, stopped, attempts);
     }
     if (receipt.kind === 'recorded') return outcome('recorded', attempts, true, receipt.value);
     const afterInitialReceipt = stopped();
@@ -105,8 +105,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
     try {
       posted = await withActiveSignal(options.signal, active.remainingMs,
         signal => options.post(options.payload, signal));
-    } catch {
-      return stopped() ?? outcome('deadline_exceeded', attempts);
+    } catch (error) {
+      return failedOperation(error, stopped, attempts);
     }
     if (posted.kind === 'recorded') return outcome('recorded', attempts, attempts > 1, posted.value);
     if (posted.kind === 'conflict') return outcome('conflict', attempts);
@@ -120,8 +120,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
     try {
       receipt = await withActiveSignal(options.signal, receiptActive.remainingMs,
         signal => options.receipt(options.runId, signal));
-    } catch {
-      return stopped() ?? outcome('deadline_exceeded', attempts);
+    } catch (error) {
+      return failedOperation(error, stopped, attempts);
     }
     if (receipt.kind === 'recorded') return outcome('recorded', attempts, true, receipt.value);
     const afterReceipt = stopped();
@@ -137,8 +137,8 @@ export async function recoverAttestedDelivery<T = undefined>(options: AttestedRe
     try {
       await withActiveSignal(options.signal, pauseActive.remainingMs,
         signal => sleep(ATTESTED_DELIVERY_RETRY_PAUSE_MS, signal));
-    } catch {
-      return stopped() ?? outcome('deadline_exceeded', attempts);
+    } catch (error) {
+      return failedOperation(error, stopped, attempts);
     }
   }
   return outcome('attempts_exhausted', attempts);
@@ -156,11 +156,26 @@ function outcome<T>(kind: AttestedRecoveryOutcome<T>['kind'], attempts: number, 
   return { kind, attempts, recovered, ...(value === undefined ? {} : { value }) };
 }
 
+function failedOperation<T>(error: unknown, stopped: () => AttestedRecoveryOutcome<T> | undefined, attempts: number): AttestedRecoveryOutcome<T> {
+  return stopped() ?? outcome(error instanceof ActiveOperationBoundaryError ? error.kind : 'operation_failed', attempts);
+}
+
+class ActiveOperationBoundaryError extends Error {
+  constructor(readonly kind: 'cancelled' | 'deadline_exceeded') {
+    super(kind);
+  }
+}
+
 /** Bound one in-flight operation and release its timer/listener when it settles. */
 async function withActiveSignal<T>(parent: AbortSignal | undefined, remainingMs: number, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const lease = abortSignalWithTimeout(parent, remainingMs);
   try {
     return await operation(lease.signal);
+  } catch (error) {
+    if (lease.signal.aborted) {
+      throw new ActiveOperationBoundaryError(parent?.aborted ? 'cancelled' : 'deadline_exceeded');
+    }
+    throw error;
   } finally {
     lease.dispose();
   }
