@@ -260,25 +260,18 @@ describe('HarnessSink.getAttestedRunReceipt', () => {
     expect(wrongBytes).toEqual({ kind: 'rejected' });
   });
 
-  it('runs the actual receipt transport and honors cancellation when AbortSignal.any is unavailable', async () => {
-    const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+  it('runs the actual receipt transport and honors cancellation', async () => {
     const controller = new AbortController();
     const { sink: s, requests } = attestedSink(() => 'hang');
 
-    try {
-      Object.defineProperty(AbortSignal, 'any', { value: undefined, configurable: true });
-      const original = envelope();
-      const pending = s.getAttestedRunReceipt(original, JSON.stringify(original), { signal: controller.signal, timeoutMs: 60_000 });
-      setTimeout(() => controller.abort(new Error('fixture cancellation')), 10);
+    const original = envelope();
+    const pending = s.getAttestedRunReceipt(original, JSON.stringify(original), { signal: controller.signal, timeoutMs: 60_000 });
+    setTimeout(() => controller.abort(new Error('fixture cancellation')), 10);
 
-      expect(await pending).toEqual({ kind: 'unavailable' });
-      expect(requests).toHaveLength(1);
-      expect(requests[0]!.signal?.aborted).toBe(true);
-      expect(requests[0]!.signal?.reason).toMatchObject({ message: 'fixture cancellation' });
-    } finally {
-      if (descriptor) Object.defineProperty(AbortSignal, 'any', descriptor);
-      else delete (AbortSignal as unknown as Record<string, unknown>)['any'];
-    }
+    expect(await pending).toEqual({ kind: 'unavailable' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.signal?.aborted).toBe(true);
+    expect(requests[0]!.signal?.reason).toMatchObject({ message: 'fixture cancellation' });
   });
 });
 
