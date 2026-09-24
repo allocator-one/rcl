@@ -10,6 +10,7 @@ import {
   validateSha,
 } from '../../src/report/run-header.js';
 import { uuidv7 } from '../../src/report/uuid.js';
+import type { RunHeader } from '../../src/report/run-header.js';
 import type { Diff, FileChange } from '../../src/resolver/types.js';
 import type { Config } from '../../src/config/schema.js';
 import type { Role } from '../../src/roles/types.js';
@@ -75,6 +76,7 @@ const GATING = {
   minModels: 2,
   verificationModel: 'google/gemini-3.8-flash',
   verificationTimeoutMs: 60_000,
+  verificationPassTimeoutMs: 180_000,
 };
 
 function baseInput() {
@@ -182,7 +184,17 @@ describe('buildRunHeader', () => {
       min_models: 2,
       verification_model: 'google/gemini-3.8-flash',
       verification_timeout_ms: 60_000,
+      verification_pass_timeout_ms: 180_000,
     });
+  });
+
+  it('permits legacy run headers that predate the whole-pass timeout field', () => {
+    const gating: RunHeader['gating'] = {
+      mode: 'verified-consensus',
+      min_models: 2,
+      verification_timeout_ms: 60_000,
+    };
+    expect(gating).not.toHaveProperty('verification_pass_timeout_ms');
   });
 
   it('carries spec and context digests, defaulting context to an empty list', () => {

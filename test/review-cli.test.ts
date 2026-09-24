@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +60,53 @@ function runRcl(args: string[], cwd: string, extraEnv: Record<string, string> = 
       OPENROUTER_API_KEY: '',
     },
     timeout: 30_000,
+  });
+}
+
+function runRclAsync(
+  args: string[],
+  cwd: string,
+  extraEnv: Record<string, string> = {},
+  timeoutMs = 30_000
+) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
+      cwd,
+      env: {
+        ...process.env,
+        ...extraEnv,
+        NODE_NO_WARNINGS: '1',
+        RCL_NO_HARNESS_KEYS: '1',
+        ACTIONS_ID_TOKEN_REQUEST_URL: '',
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: '',
+        ANTHROPIC_API_KEY: '',
+        OPENAI_API_KEY: '',
+        GEMINI_API_KEY: '',
+        GOOGLE_API_KEY: '',
+        OPENROUTER_API_KEY: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    const timeoutHandle = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`rcl did not exit within ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.on('error', (error) => {
+      clearTimeout(timeoutHandle);
+      reject(error);
+    });
+    child.on('close', (status) => {
+      clearTimeout(timeoutHandle);
+      resolve({ status, stdout, stderr });
+    });
   });
 }
 
@@ -415,4 +464,119 @@ describe('rcl review — completed report output failure', () => {
     expect(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).diagnostics)
       .toContainEqual(expect.objectContaining({ path: `output.${failed === 'json' ? 'report_json' : 'report_md'}` }));
   });
+});
+
+describe('rcl review — bounded verification fallback', () => {
+  it('writes a strict-severity CI report when the whole verification pass times out', async () => {
+    const repo = tempRepository();
+    const reportPath = join(repo, 'report.json');
+    writeFileSync(
+      join(repo, 'change.patch'),
+      'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;\n'
+    );
+    writeFileSync(
+      join(repo, 'config.json'),
+      JSON.stringify({
+        models: ['openai-compat/fixture'],
+        secondaryModels: [],
+        asyncModels: [],
+        thresholds: { minConsensusScore: 0, minConfidence: 0 },
+        gating: {
+          verificationModel: 'openai-compat/fixture',
+          verificationTimeout: 5_000,
+          verificationPassTimeout: 100,
+        },
+        harness: { telemetry: 'off' },
+      })
+    );
+
+    let requests = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      requests++;
+      if (requests > 1) return;
+
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          id: 'chatcmpl-review',
+          object: 'chat.completion',
+          created: 0,
+          model: 'fixture',
+          choices: [
+            {
+              index: 0,
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: JSON.stringify({
+                  findings: [
+                    {
+                      id: 'f1',
+                      file: 'a.ts',
+                      startLine: 1,
+                      endLine: 1,
+                      severity: 'important',
+                      category: 'correctness',
+                      title: 'Synthetic blocking finding',
+                      description: 'The fixture finding must fall back to strict severity gating.',
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        })
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+
+    try {
+      const result = await runRclAsync(
+        [
+          'review',
+          'change.patch',
+          '--config',
+          'config.json',
+          '--reviewer',
+          'openai-compat/fixture:general',
+          '--head-sha',
+          'a'.repeat(40),
+          '--base-sha',
+          'b'.repeat(40),
+          '--json-file',
+          reportPath,
+          '--no-telemetry',
+          '--ci',
+        ],
+        repo,
+        {
+          OPENAI_COMPAT_BASE_URL: `http://127.0.0.1:${port}/v1`,
+          RCL_DATA_DIR: join(repo, 'rcl-data'),
+        },
+        5_000
+      );
+
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toMatch(/Gating pass failed .*falling back to severity gating/i);
+      expect(requests).toBe(2);
+      const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+      expect(report.run.gating.verification_pass_timeout_ms).toBe(100);
+      expect(report.stats.verification).toBeUndefined();
+      expect(report.findings).toEqual([
+        expect.objectContaining({
+          severity: 'important',
+          title: 'Synthetic blocking finding',
+        }),
+      ]);
+      expect(report.findings[0]).not.toHaveProperty('gating');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      );
+    }
+  }, 10_000);
 });

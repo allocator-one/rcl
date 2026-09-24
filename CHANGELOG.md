@@ -1,7 +1,37 @@
 # Changelog
 
-## 3.8.2 - 2026-09-24
+## Unreleased
 
+- Keep native attempt, report and verdict publication inside the same target
+  ownership as their durable writes. Add strict recovery context, event-receipt
+  and preserved-claim validation foundations (RCL-76).
+- Keep accounting-lock timing independent from target ownership and make the
+  child-writer contention checks deterministic with bounded cleanup (RCL-81).
+
+## 3.8.3 - 2026-09-24
+
+- Supersede the withdrawn 3.8.2 release with its bounded terminal-report
+  aggregation, missing-report recovery, and protected-evidence support.
+- Preserve the completed-review path from consensus through bounded
+  verification, the self-describing run header, and matching JSON and Markdown
+  terminal artifacts. Add a deterministic regression for a saturated council,
+  a failed reviewer, and a verifier that ignores cancellation (RCL-85).
+- Keep attempt-accounting lock timing separate from target-ownership timing so
+  short accounting probes cannot prematurely fail coordinated native and
+  recovery writers. Harden the cross-platform and isolated-process recovery
+  regressions (RCL-81).
+
+## 3.8.2 - 2026-09-24 (withdrawn)
+
+- Bound the complete single-model verification queue to three minutes while
+  preserving the existing stricter severity fallback when that deadline is
+  reached. Cap each newly started verifier batch to the remaining whole-pass
+  budget, normalize the remaining timeout for integer-only provider SDKs, and
+  stop starting work after expiry (RCL-85).
+- Report post-review stages and bounded verifier batch progress so completed
+  reviewer calls can be distinguished from consensus, verification, report
+  assembly and artifact-write failures. Record the effective whole-pass bound
+  in terminal report evidence.
 - **Missing-report gap recovery** (RCL-81): add `rcl converge-gap --preview`,
   `--apply`, and `--resume` for one missing report immediately before a retained
   original report. Recovery binds immutable evidence and native snapshots,
@@ -11,8 +41,6 @@
   round, verdict, and budget writers, including compatible older recovery
   clients. Conflicting ownership and changed evidence fail closed; completed
   results remain resumable after cleanup failures.
-- Verify that a separate native writer retries the occupied recovery lock before
-  asserting exclusion, replacing the timing-based process-readiness check.
 - **Protected review evidence** (RCL-84): correlate registered GitHub gate runs
   with their lifecycle attempts and retain authenticated encrypted originals
   for recovery. The private recovery key remains outside public CI.

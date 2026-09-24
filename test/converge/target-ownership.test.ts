@@ -1,8 +1,6 @@
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
-import { watch, type FSWatcher } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { fork } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,33 +62,36 @@ it('serializes a separately launched native writer under recovery ownership', as
   const entered = deferred(), release = deferred();
   let authority!: NativeTargetOwnership;
   const owner = withRecoveryTarget(dir, target, async ownership => { authority = ownership; entered.resolve(); await release.promise; });
-  let child: Promise<unknown> | undefined;
-  let watcher: FSWatcher | undefined;
+  let child: ReturnType<typeof fork> | undefined;
+  let childExit: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
+  let ordinaryWriterCommitted = false;
   try {
     await Promise.race([entered.promise, owner]);
     const lockRoot = join(dir, 'rcl-native-target-locks');
     const lockName = `${createHash('sha256').update(target).digest('hex')}.lock`;
     const before = await readFile(join(lockRoot, lockName));
-    const parentToken = (JSON.parse(before.toString()) as { token: string }).token;
-    const attempts = new Map<string, Set<string>>();
-    // Each retry publishes a fresh private reservation candidate. Two distinct
-    // candidates for one child owner prove it reached the occupied lock and
-    // retried; a process-start sentinel cannot establish that contention.
-    const contended = new Promise<void>((resolve, reject) => {
-      watcher = watch(lockRoot, (_event, filename) => {
-        const name = filename?.toString();
-        if (!name?.startsWith(`${lockName}.`) || !name.endsWith('.tmp')) return;
-        const [token, candidate, suffix] = name.slice(lockName.length + 1).split('.');
-        if (!token || !candidate || suffix !== 'tmp' || token === parentToken) return;
-        const seen = attempts.get(token) ?? new Set<string>();
-        seen.add(name); attempts.set(token, seen);
-        if (seen.size >= 2) resolve();
-      });
-      watcher.once('error', reject);
+    // The fixture invokes processRoundReport without an ownership token. It
+    // wraps only the real legacy link publication and reports two exact
+    // EEXIST retries through complete IPC messages.
+    child = fork(fileURLToPath(worker), [dir, target], {
+      execArgv: ['--import', import.meta.resolve('tsx')],
+      serialization: 'json',
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
-    child = promisify(execFile)(process.execPath, ['--import', 'tsx', fileURLToPath(worker), dir, target], { timeout: 10_000 });
-    void child.catch(() => {});
-    await Promise.race([contended, child.then(() => { throw new Error('writer completed without retrying the occupied target'); })]);
+    childExit = new Promise(resolve => child!.once('exit', (code, signal) => resolve({ code, signal })));
+    const retries = new Promise<void>((resolve, reject) => {
+      let count = 0;
+      child!.on('message', message => {
+        if (!message || typeof message !== 'object') return;
+        const event = message as { type?: unknown; pid?: unknown };
+        if (event.type === 'legacy_lock_retry' && event.pid === child!.pid && ++count === 2) resolve();
+        if (event.type === 'ordinary_writer_committed' && event.pid === child!.pid) ordinaryWriterCommitted = true;
+      });
+      child!.once('error', reject);
+    });
+    await Promise.race([retries, childExit.then(exit => {
+      throw new Error(`ordinary writer exited before observing retries: ${exit.code ?? exit.signal}`);
+    })]);
     expect(await readFile(join(lockRoot, lockName))).toEqual(before);
     await expect(readFile(convergeRunStatePath(dir, target))).rejects.toMatchObject({ code: 'ENOENT' });
     // A separate process must read the state again after obtaining ownership.
@@ -99,10 +100,21 @@ it('serializes a separately launched native writer under recovery ownership', as
       { round: 1, counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } },
     ], findings: {}, updatedAt: new Date().toISOString() }, authority);
   } finally {
-    watcher?.close();
     release.resolve();
-    const settled = await Promise.allSettled([owner, ...(child ? [child] : [])]);
-    for (const result of settled) if (result.status === 'rejected') throw result.reason;
+    await owner;
+    let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    try {
+      if (childExit) {
+        exit = await Promise.race([
+          childExit,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ordinary writer did not exit after release')), 5_000)),
+        ]);
+      }
+    } finally {
+      if (child && child.exitCode === null) child.kill();
+    }
+    expect(exit).toEqual({ code: 0, signal: null });
+    expect(ordinaryWriterCommitted).toBe(true);
   }
   expect((await loadConvergeRunState(dir, target))?.rounds.map(round => round.round)).toEqual([1, 2]);
 }, 15_000);
