@@ -68,6 +68,14 @@ describe('report identity through native classification and telemetry', () => {
     }
   });
 
+  it('keeps non-report legacy namespaces available', async () => {
+    const [finding] = consensus([42]);
+    const identity = `external:${finding!.identity!.slice('report:'.length)}`;
+    await expect(processRoundReport({
+      gitCommonDir: dir, target: 'external-legacy-key', round: 1, findings: [{ ...finding!, identity }],
+    })).resolves.toMatchObject({ counts: { new: 1 } });
+  });
+
   it('rejects duplicate canonical report identities before state writes', async () => {
     const [finding] = consensus([42]);
     await expect(processRoundReport({

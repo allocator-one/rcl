@@ -359,8 +359,13 @@ function looksLikeReportIdentity(identity: string): boolean {
   const normalized = identity.normalize('NFKC')
     .replace(/\p{Cf}/gu, '')
     .trim()
-    .toLowerCase();
-  return normalized.startsWith('report:') || REPORT_IDENTITY_SHAPE.test(normalized);
+    .toLowerCase()
+    .replace(/[\u0435\u03b5]/gu, 'e')
+    .replace(/[\u043e\u03bf]/gu, 'o')
+    .replace(/[\u0440\u03c1]/gu, 'p')
+    .replace(/[\u0442\u03c4]/gu, 't');
+  const prefix = normalized.split(':', 1)[0];
+  return prefix === 'report' || (prefix === 'reprot' && REPORT_IDENTITY_SHAPE.test(normalized));
 }
 
 function claimTextSha256(finding: ConsensusFinding): string {
