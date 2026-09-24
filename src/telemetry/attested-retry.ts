@@ -83,17 +83,18 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
   const expiresAt = Date.parse(options.expiresAt);
   if (!Number.isFinite(expiresAt)) throw new RangeError('expiresAt must be a valid ISO timestamp');
   const startedAt = monotonicNow();
+  const expiresInMs = expiresAt - now();
   const initialAttempts = options.initialAttempts ?? (options.receiptFirst ? 1 : 0);
   let attempts = Math.min(validOverride(initialAttempts, 'initialAttempts', 0), maxAttempts);
 
   const boundary = (): { remainingMs: number } | { stopped: TerminalRecoveryOutcome } => {
     if (options.signal?.aborted) return { stopped: terminalOutcome('cancelled', attempts) };
     const current = now();
-    if (current >= expiresAt) return { stopped: terminalOutcome('expired', attempts) };
     const elapsedMs = monotonicNow() - startedAt;
+    if (current >= expiresAt || elapsedMs >= expiresInMs) return { stopped: terminalOutcome('expired', attempts) };
     if (elapsedMs >= deadlineMs) return { stopped: terminalOutcome('deadline_exceeded', attempts) };
-    const remainingMs = Math.min(deadlineMs - elapsedMs, expiresAt - current);
-    if (remainingMs <= 0) return { stopped: terminalOutcome(expiresAt - current <= deadlineMs - elapsedMs ? 'expired' : 'deadline_exceeded', attempts) };
+    const remainingMs = Math.min(deadlineMs - elapsedMs, expiresInMs - elapsedMs);
+    if (remainingMs <= 0) return { stopped: terminalOutcome(expiresInMs <= deadlineMs ? 'expired' : 'deadline_exceeded', attempts) };
     return { remainingMs };
   };
 

@@ -53,8 +53,28 @@ describe('HarnessSink.postRun', () => {
   it('refuses a supplied serialization that differs from the validated envelope', async () => {
     const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     const { sink: s, requests } = sink(() => ({ status: 201, body: {} }));
-    await expect(s.postRun(envelope, {}, `${JSON.stringify(envelope)} `)).resolves.toMatchObject({ kind: 'rejected', error: 'serialized_envelope_mismatch' });
+    expect(s.preparePostRun(envelope, `${JSON.stringify(envelope)} `)).toMatchObject({ kind: 'rejected', error: 'serialized_envelope_mismatch' });
     expect(requests).toHaveLength(0);
+  });
+
+  it('reuses retained envelope bytes and identity across prepared posts', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const serialized = JSON.stringify(envelope);
+    const originalRunId = envelope.run.id;
+    const { sink: s, requests } = sink((request) => ({
+      status: 200,
+      body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] }, meta: { status: 'existing' } },
+    }));
+    const prepared = s.preparePostRun(envelope, serialized);
+    expect(prepared.kind).toBe('ready');
+    if (prepared.kind !== 'ready') return;
+
+    envelope.run.id = '00000000-0000-4000-8000-000000000099';
+    await expect(prepared.post()).resolves.toMatchObject({ kind: 'ok', value: { id: originalRunId } });
+    await expect(prepared.post()).resolves.toMatchObject({ kind: 'ok', value: { id: originalRunId } });
+
+    expect(requests.map((request) => request.body)).toEqual([serialized, serialized]);
+    expect(envelope.run.id).toBe('00000000-0000-4000-8000-000000000099');
   });
 
   it('refuses a receipt that names another run or forgets which artifacts it expects', async () => {

@@ -67,6 +67,10 @@ export type SinkOutcome<T> =
   /** Network, timeout or server failure — the delivery is worth retrying. */
   | { kind: 'unavailable'; reason: string };
 
+export type PreparedPostRun =
+  | Extract<SinkOutcome<RunReceipt>, { kind: 'rejected' }>
+  | { kind: 'ready'; post: (options?: RequestOptions) => Promise<SinkOutcome<RunReceipt>> };
+
 export interface SinkOptions {
   credential: HarnessCredential;
   rclVersion: string;
@@ -212,12 +216,26 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
-  /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
-  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope = JSON.stringify(envelope)): Promise<SinkOutcome<RunReceipt>> {
+  /** Retain one validated envelope and its exact bytes for an initial POST and any replay. */
+  preparePostRun(envelope: RunEnvelope, serializedEnvelope = JSON.stringify(envelope)): PreparedPostRun {
     if (serializedEnvelope !== JSON.stringify(envelope)) return {
       kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch',
       message: 'The supplied serialized envelope does not match the validated envelope',
     };
+    const retainedEnvelope = JSON.parse(serializedEnvelope) as RunEnvelope;
+    return {
+      kind: 'ready',
+      post: (options = {}) => this.postPreparedRun(retainedEnvelope, serializedEnvelope, options),
+    };
+  }
+
+  /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
+  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope = JSON.stringify(envelope)): Promise<SinkOutcome<RunReceipt>> {
+    const prepared = this.preparePostRun(envelope, serializedEnvelope);
+    return prepared.kind === 'ready' ? prepared.post(options) : prepared;
+  }
+
+  private async postPreparedRun(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions): Promise<SinkOutcome<RunReceipt>> {
     if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
       // Old servers silently discard unknown provenance. The attested credential
       // may read model-stats, but may not list runs or use an ordinary login.

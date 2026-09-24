@@ -399,7 +399,8 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   // attested replay; no retry rebuilds the envelope or run identity.
   const serializedEnvelope = JSON.stringify(envelope);
   const deliveryDiagnostics: EvidenceDiagnostic[] = [];
-  let posted = await runtime.sink.postRun(envelope, {}, serializedEnvelope);
+  const preparedPost = runtime.sink.preparePostRun(envelope, serializedEnvelope);
+  let posted = preparedPost.kind === 'ready' ? await preparedPost.post() : preparedPost;
   if (posted.kind === 'unavailable' && runtime.attested && runtime.attestedExpiresAt !== undefined) {
     const sink = runtime.sink;
     deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
@@ -411,7 +412,8 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
       receiptFirst: true,
       initialAttempts: 1,
       post: async (payload, signal) => {
-        const outcome = await sink.postRun(JSON.parse(payload) as RunEnvelope, { signal }, payload);
+        if (payload !== serializedEnvelope || preparedPost.kind !== 'ready') return { kind: 'rejected' };
+        const outcome = await preparedPost.post({ signal });
         if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
         if (outcome.kind === 'conflict') return { kind: 'conflict' };
         if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };
@@ -421,6 +423,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
       receipt: async (_runId, signal) => sink.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
     });
     if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
+    else if (recovered.kind === 'recorded') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_missing_receipt', message: 'recorded recovery did not provide a receipt' };
     else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };
     else if (recovered.kind === 'disabled') posted = recovered.value;
     else if (recovered.kind === 'rejected' || recovered.kind === 'receipt_rejected') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_refused', message: recovered.kind };

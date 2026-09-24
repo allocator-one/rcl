@@ -110,6 +110,9 @@ describe('validateRunEnvelope', () => {
     const bytes = Buffer.byteLength(JSON.stringify(envelope));
     expect(bytes).toBeLessThanOrEqual(PROTOCOL_MAX_ENVELOPE_BYTES);
     expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
+    envelope.findings[1]!.description = `${envelope.findings[1]!.description}é`;
+    expect(Buffer.byteLength(JSON.stringify(envelope))).toBeGreaterThan(PROTOCOL_MAX_ENVELOPE_BYTES);
+    expect(validateRunEnvelope(envelope, artifacts)).toContainEqual({ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' });
   });
 
 });
