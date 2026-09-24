@@ -407,6 +407,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // each sighting. Two different report keys may point at the same lines while
   // describing different claims; one native identity cannot carry both verdicts.
   const claimedThisRound = new Map<string, string>();
+  const hasModernReportIdentity = options.findings.some((finding) => REPORT_IDENTITY.test(finding.identity ?? ''));
 
   for (const finding of options.findings) {
     const reportIdentity = REPORT_IDENTITY.test(finding.identity ?? '')
@@ -420,7 +421,10 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         return false;
       }
       const storedDigest = state.findings[entry.key]?.claimTextSha256;
-      return storedDigest === undefined ? reportIdentity === undefined : storedDigest === textDigest;
+      if (reportIdentity !== undefined) return storedDigest === textDigest;
+      // Preserve legacy-only matching; mixed reports must not let a legacy
+      // finding attach to a modern digest-backed entry.
+      return !hasModernReportIdentity || storedDigest === undefined;
     });
     const matched = matchFinding(finding, candidates, lineWindow);
 
