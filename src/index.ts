@@ -256,15 +256,7 @@ async function attestBeforeReview(
 /** Converge commands report their events fail-soft; nothing they do depends on it. */
 async function reportConvergeEvents(events: WireEvent[]): Promise<void> {
   try {
-    const target = events[0]?.converge_target;
-    if (!target || events.some(event => event.converge_target !== target)) {
-      await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
-      return;
-    }
-    const gitCommonDir = await resolveGitCommonDir();
-    await withNativeTarget(gitCommonDir, target, async () => {
-      await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
-    });
+    await emitConvergeEvents(await createTelemetryRuntime({ rclVersion: RCL_VERSION }), events);
   } catch {
     // Evidence of the loop is advisory next to the loop's own durable state.
   }
@@ -429,8 +421,7 @@ program
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           maxAttempts,
-        });
-        await reportConvergeEvents([
+          afterClaim: async claim => await reportConvergeEvents([
           buildEvent({
             kind: 'attempt_claimed',
             convergeTarget: claim.target,
@@ -442,7 +433,8 @@ program
           ...(maxAttempts !== undefined
             ? [buildEvent({ kind: 'cap_changed', convergeTarget: claim.target, attempt: claim.attempt, payload: { kind: 'attempts', to: claim.cap } })]
             : []),
-        ]);
+          ]),
+        });
         if (opts.json) {
           console.log(JSON.stringify(claim));
         } else {
@@ -601,9 +593,13 @@ program
             )
           );
         }
+        const gitCommonDir = await resolveGitCommonDir();
+        const target = opts.target as string;
+        await withNativeTarget(gitCommonDir, target, async ownership => {
         const result = await processRoundReport({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
+          gitCommonDir,
+          ownership,
+          target,
           round,
           findings: report.findings,
           reportSha256,
@@ -628,7 +624,7 @@ program
         await reportConvergeEvents([
           buildEvent({
             kind: 'round_processed',
-            convergeTarget: opts.target,
+            convergeTarget: target,
             round,
             ...(runId !== undefined ? { runId } : {}),
             payload: {
@@ -642,7 +638,7 @@ program
             },
           }),
           ...(maxRounds !== undefined
-            ? [buildEvent({ kind: 'cap_changed', convergeTarget: opts.target, round, payload: { kind: 'rounds', to: result.roundCap } })]
+            ? [buildEvent({ kind: 'cap_changed', convergeTarget: target, round, payload: { kind: 'rounds', to: result.roundCap } })]
             : []),
         ]);
 
@@ -678,6 +674,7 @@ program
             chalk.dim(`  [suppressed] ${f.identity} ${f.file}:${f.startLine} — ${f.suppressReason}`)
           );
         }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
@@ -754,9 +751,13 @@ program
         if (verdicts.length === 0) {
           throw new ConvergeRunStateError('Nothing to record: pass --fixed and/or --dismissed.');
         }
+        const gitCommonDir = await resolveGitCommonDir();
+        const target = opts.target as string;
+        await withNativeTarget(gitCommonDir, target, async ownership => {
         const { entries: updated, resolution } = await recordVerdicts({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
+          gitCommonDir,
+          ownership,
+          target,
           round,
           verdicts,
         });
@@ -788,14 +789,14 @@ program
         // fail a command whose verdicts are already recorded.
         let roundRun: string | undefined;
         try {
-          roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
+          roundRun = roundRunId(await loadConvergeRunState(gitCommonDir, target), round);
         } catch {
           roundRun = undefined;
         }
         await reportConvergeEvents([
           buildEvent({
             kind: 'verdicts_recorded',
-            convergeTarget: opts.target,
+            convergeTarget: target,
             round,
             ...(roundRun !== undefined ? { runId: roundRun } : {}),
             payload: {
@@ -813,7 +814,7 @@ program
             ? [
                 buildEvent({
                   kind: 'resolution',
-                  convergeTarget: opts.target,
+                  convergeTarget: target,
                   round,
                   ...(roundRun !== undefined ? { runId: roundRun } : {}),
                   payload: {
@@ -861,6 +862,7 @@ program
             }
           }
         }
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
