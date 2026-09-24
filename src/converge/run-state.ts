@@ -548,7 +548,6 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       status = 'repeat';
       counts.repeat++;
     }
-    if (!reportIdentity && entry.claimTextSha256 !== textDigest) delete entry.claimTextSha256;
     pending.set(findingIndex, {
       identity: entry.key,
       status,

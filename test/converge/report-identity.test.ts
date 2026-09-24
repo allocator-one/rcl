@@ -128,17 +128,21 @@ describe('report identity through native classification and telemetry', () => {
       round: 1,
       findings: [{ ...first!, identity: undefined }],
     });
+    const initialState = await loadConvergeRunState(dir, 'legacy-only-repeat');
     const [later] = consensus([42], '00000000-0000-7000-8000-000000000002');
     const repeated = await processRoundReport({
       gitCommonDir: dir,
       target: 'legacy-only-repeat',
       round: 2,
-      findings: [{ ...later!, identity: undefined }],
+      findings: [{ ...later!, identity: undefined, description: 'Legacy report wording changed.' }],
     });
 
     expect(repeated.findings[0]).toMatchObject({ status: 'repeat', identity: initial.findings[0]!.identity });
     expect((await loadConvergeRunState(dir, 'legacy-only-repeat'))!.findings[initial.findings[0]!.identity])
-      .toMatchObject({ identityOrigin: 'legacy' });
+      .toMatchObject({
+        identityOrigin: 'legacy',
+        claimTextSha256: initialState!.findings[initial.findings[0]!.identity]!.claimTextSha256,
+      });
   });
 
   it.each([false, true])('keeps legacy history separate through mixed-report repeats when modern comes first: %s', async (modernFirst) => {
