@@ -67,6 +67,17 @@ describe('report identity through native classification and telemetry', () => {
     }
   });
 
+  it('rejects duplicate canonical report identities before state writes', async () => {
+    const [finding] = consensus([42]);
+    await expect(processRoundReport({
+      gitCommonDir: dir,
+      target: 'duplicate-report-identity',
+      round: 1,
+      findings: [finding!, { ...finding! }],
+    })).rejects.toThrow(/duplicate report identity/i);
+    expect(await loadConvergeRunState(dir, 'duplicate-report-identity')).toBeUndefined();
+  });
+
   it('keeps mixed modern and legacy claims one-to-one', async () => {
     const [modern, legacy] = consensus([42, 42]).map((finding, index) => ({
       ...finding,
@@ -81,6 +92,19 @@ describe('report identity through native classification and telemetry', () => {
       findings: [modern!, { ...legacy!, identity: undefined }],
     });
     expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
+  });
+
+  it('keeps identical mixed claims one-to-one in either input order', async () => {
+    const [modern] = consensus([42]);
+    const legacy = { ...modern!, identity: undefined };
+
+    for (const [target, findings] of [
+      ['legacy-first', [legacy, modern!]],
+      ['modern-first', [modern!, legacy]],
+    ] as const) {
+      const result = await processRoundReport({ gitCommonDir: dir, target, round: 1, findings });
+      expect(new Set(result.findings.map((finding) => finding.identity)).size).toBe(2);
+    }
   });
 
   it('continues to accept all-legacy reports for compatibility', async () => {
