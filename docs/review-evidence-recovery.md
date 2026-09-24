@@ -55,6 +55,7 @@ the workflow step summary, not from the artifact API response being checked.
 set -euo pipefail
 set +x
 umask 077
+REPOSITORY_ROOT="$(git rev-parse --show-toplevel)"
 
 REPOSITORY=allocator-one/rcl
 : "${RUN_ID:?set the workflow run ID from the receipt}"
@@ -170,8 +171,12 @@ PYZIP
 test "$(find "$RCL_RECOVERY_ROOT" -maxdepth 1 -type f -name 'review-evidence.cms' | wc -l | tr -d ' ')" = 1
 openssl cms -cmsout -inform DER \
   -in "$RCL_RECOVERY_ROOT/review-evidence.cms" -noout
+CMS_DETAILS="$(openssl cms -cmsout -inform DER \
+  -in "$RCL_RECOVERY_ROOT/review-evidence.cms" -print)"
+grep -Fq 'contentType: id-smime-ct-authEnvelopedData' <<< "$CMS_DETAILS"
+grep -Fq 'algorithm: aes-256-gcm' <<< "$CMS_DETAILS"
 
-CERTIFICATE=.github/review-evidence-recovery.pem
+CERTIFICATE="$REPOSITORY_ROOT/.github/review-evidence-recovery.pem"
 EXPECTED_CERT_FINGERPRINT='32:8A:57:76:11:C1:EC:F0:AA:8E:A0:9A:A4:75:EF:C0:96:F6:95:59:10:E5:F4:89:E8:7F:C3:F3:E0:1D:69:2B'
 ACTUAL_CERT_FINGERPRINT="$(openssl x509 -in "$CERTIFICATE" -noout -fingerprint -sha256 |
   sed -E 's/^[Ss][Hh][Aa]256 Fingerprint=//')"
@@ -230,6 +235,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -276,12 +282,15 @@ def unique_object(pairs):
         value[key] = item
     return value
 
+if source.stat().st_size > maximum_archive_bytes:
+    raise SystemExit("archive exceeds the recovery bound")
+
 with tarfile.open(source, mode="r:") as archive:
-    if source.stat().st_size > maximum_archive_bytes:
-        raise SystemExit("archive exceeds the recovery bound")
-    members = archive.getmembers()
-    if len(members) > maximum_members:
-        raise SystemExit("archive contains too many members")
+    members = []
+    for member in archive:
+        members.append(member)
+        if len(members) > maximum_members:
+            raise SystemExit("archive contains too many members")
     names = [member.name for member in members]
     members_by_name = {member.name: member for member in members}
     if len(names) != len(set(names)):
@@ -349,30 +358,42 @@ with tarfile.open(source, mode="r:") as archive:
     if destination.exists() or staging.exists():
         raise SystemExit("recovery output already exists")
     staging.mkdir(mode=0o700, parents=False, exist_ok=False)
-    for name in sorted(declarations):
-        member = members_by_name[name]
-        output = staging.joinpath(*PurePosixPath(name).parts)
-        output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(
-            output,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o400,
-        )
-        digest = hashlib.sha256()
-        total = 0
-        stream = archive.extractfile(member)
-        if stream is None:
-            raise SystemExit(f"cannot reread archive member: {name}")
-        with os.fdopen(descriptor, "wb") as writer:
-            while chunk := stream.read(1024 * 1024):
-                total += len(chunk)
-                digest.update(chunk)
-                writer.write(chunk)
-        expected_size, expected_digest = declarations[name]
-        if total != expected_size or digest.hexdigest() != expected_digest:
-            raise SystemExit(f"member changed during extraction: {name}")
-        output.chmod(0o400)
-    staging.rename(destination)
+    try:
+        for name in sorted(declarations):
+            member = members_by_name[name]
+            output = staging.joinpath(*PurePosixPath(name).parts)
+            output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(
+                output,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o400,
+            )
+            digest = hashlib.sha256()
+            total = 0
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise SystemExit(f"cannot reread archive member: {name}")
+            with os.fdopen(descriptor, "wb") as writer:
+                while chunk := stream.read(1024 * 1024):
+                    total += len(chunk)
+                    digest.update(chunk)
+                    writer.write(chunk)
+            expected_size, expected_digest = declarations[name]
+            if total != expected_size or digest.hexdigest() != expected_digest:
+                raise SystemExit(f"member changed during extraction: {name}")
+            output.chmod(0o400)
+        staging.rename(destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+for directory in sorted(
+    (path for path in destination.rglob("*") if path.is_dir()),
+    key=lambda path: len(path.parts),
+    reverse=True,
+):
+    directory.chmod(0o500)
+destination.chmod(0o500)
 PYMANIFEST
 ```
 
