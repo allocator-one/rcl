@@ -323,9 +323,9 @@ describe('ask cancellation', () => {
     const controller = new AbortController();
     setClient(adapter, {
       models: {
-        generateContent: (_params: unknown, options: { config: { abortSignal: AbortSignal } }) =>
+        generateContent: (params: { config: { abortSignal: AbortSignal } }) =>
           new Promise((_resolve, reject) => {
-            options.config.abortSignal.addEventListener('abort', () => reject(new Error('aborted')));
+            params.config.abortSignal.addEventListener('abort', () => reject(new Error('aborted')));
           }),
       },
     });
