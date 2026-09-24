@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.8.3 - 2026-09-24
 
 - Keep attempt-accounting lock timing separate from native target ownership, so
   a short accounting retry does not prematurely abandon a contended recovery
