@@ -203,24 +203,26 @@ describe('timeout classification', () => {
   it('anthropic Fable stream abort is classified as timeout', async () => {
     vi.useFakeTimers();
     const adapter = new AnthropicAdapter('test-key');
+    const stream = vi.fn((_params: unknown, opts: { signal: AbortSignal }) => ({
+      finalMessage: () =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener('abort', () => reject(new Anthropic.APIUserAbortError()));
+        }),
+    }));
     setClient(adapter, {
       messages: {
-        stream: (_params: unknown, opts: { signal: AbortSignal }) => ({
-          finalMessage: () =>
-            new Promise((_resolve, reject) => {
-              opts.signal.addEventListener('abort', () => reject(new Anthropic.APIUserAbortError()));
-            }),
-        }),
+        stream,
       },
     });
 
     const pending = adapter.review('claude-fable-5-1', 'general', 's', 'u', {
       timeoutMs: 50,
-      maxRetries: 0,
+      maxRetries: 3,
     });
     await vi.advanceTimersByTimeAsync(60);
 
     expect((await pending).status).toBe('timeout');
+    expect(stream).toHaveBeenCalledTimes(1);
   });
 
   it('anthropic: SDK abort error is classified as timeout', async () => {
@@ -572,6 +574,50 @@ describe('ask: truncation is an error, not a short answer', () => {
 });
 
 describe('retry behavior', () => {
+  it('anthropic Fable: retries a streamed connection error and succeeds', async () => {
+    vi.useFakeTimers();
+    const adapter = new AnthropicAdapter('test-key');
+    const stream = vi.fn()
+      .mockReturnValueOnce({
+        finalMessage: vi.fn().mockRejectedValue(new Anthropic.APIConnectionError({
+          message: 'Connection lost while reading response',
+        })),
+      })
+      .mockReturnValueOnce(anthropicStreamResponse(anthropicToolResponse()));
+    setClient(adapter, { messages: { stream } });
+
+    const pending = adapter.review('claude-fable-5-1', 'general', 's', 'u', {
+      timeoutMs: 60000,
+      maxRetries: 1,
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+
+    expect((await pending).status).toBe('success');
+    expect(stream).toHaveBeenCalledTimes(2);
+  });
+
+  it('anthropic Fable: retries a premature stream end, then fails at its retry limit', async () => {
+    vi.useFakeTimers();
+    const adapter = new AnthropicAdapter('test-key');
+    const stream = vi.fn().mockReturnValue({
+      finalMessage: vi.fn().mockRejectedValue(new Anthropic.AnthropicError(
+        'stream ended without producing a Message with role=assistant',
+      )),
+    });
+    setClient(adapter, { messages: { stream } });
+
+    const pending = adapter.review('claude-fable-5-1', 'general', 's', 'u', {
+      timeoutMs: 60000,
+      maxRetries: 1,
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+    const review = await pending;
+
+    expect(review.status).toBe('error');
+    expect(review.error).toContain('stream ended without producing a Message');
+    expect(stream).toHaveBeenCalledTimes(2);
+  });
+
   it('anthropic: retries a 529 overloaded error and succeeds', async () => {
     vi.useFakeTimers();
     const adapter = new AnthropicAdapter('test-key');

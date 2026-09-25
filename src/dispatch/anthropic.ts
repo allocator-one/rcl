@@ -21,6 +21,19 @@ function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
+function isRetryableReview(err: unknown, stream: boolean): boolean {
+  if (isRetryable(err)) return true;
+  if (!stream) return false;
+
+  // The SDK can reject finalMessage() without an HTTP status when a stream
+  // disconnects or ends before message_stop. Retry only those known transient
+  // failures; an abort, invalid request, or malformed response stays terminal.
+  return err instanceof Anthropic.APIConnectionError ||
+    (err instanceof Anthropic.AnthropicError &&
+      (err.message === 'stream ended without producing a Message with role=assistant' ||
+        err.message === 'request ended without sending any chunks'));
+}
+
 interface ModelProfile {
   maxTokens: number;
   effort?: 'medium';
@@ -207,7 +220,7 @@ export class AnthropicAdapter implements ReviewAdapter {
               error: 'Request timed out',
             };
           }
-          if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
+          if (isRetryableReview(err, profile.stream) && attempt < (options.maxRetries ?? 3)) {
             await sleep(retryDelay(attempt));
             continue;
           }
