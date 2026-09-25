@@ -8,6 +8,9 @@
 
 - Support complete evidence envelopes up to 4,000,000 bytes while retaining bounded diagnostics and compatibility with the backend evidence contract (RCL-88; requires compatible backend support).
 
+- Let omitted verifier call timeouts inherit the bounded whole-pass budget, while
+  preserving an explicit smaller per-call cap for callers that need one (RCL-104).
+
 ## 4.1.1 - 2026-09-25
 
 - Use automatic tool choice for Anthropic reviews. Claude Fable 5.1 rejects
@@ -39,21 +42,6 @@
 - Send `max_completion_tokens` to every OpenAI `gpt-5`+ and o-series model.
   `gpt-6-*` rejected the legacy `max_tokens` with HTTP 400, which would have
   killed the OpenAI seat on every call (RCL-99).
-
-## 4.0.1 - 2026-09-24
-
-- Raise the complete evidence-envelope transport limit to 4,000,000 bytes while retaining 2,000,000-character limits for individual verification diagnostics. Share the total limit with historical recovery planning so valid retained envelopes are not rejected before their immutable artifacts can be assessed (RCL-88; requires compatible backend acceptance).
-
-- Recover transient attested envelope delivery inside the same live workflow by
-  reading the exact run receipt first and replaying byte-identical evidence only
-  after an explicit 404. Bound recovery to three POSTs and a monotonic 20-second
-  deadline that cannot outlive the workflow credential (RCL-83).
-- Preserve cancellation, conflict, rejection, and organization-disabled status
-  without falling back to ordinary credentials or creating another review.
-  Retain the original evidence with bounded, redacted transport diagnostics when
-  recovery cannot complete. Report a callback rejection that occurs before a
-  boundary as `operation_failed`, without retaining exception prose or replaying
-  the request blindly.
 
 ## 4.0.0 - 2026-09-24
 

@@ -154,9 +154,9 @@ export const DEFAULT_GATING_CONFIG = {
   // Use the stable Flash council member for this latency-sensitive pass.
   // Individual batches and the complete queue both have explicit bounds.
   verificationModel: 'google/gemini-3.8-flash',
-  // Bound the complete queue to three review-call windows. Large finding sets
-  // may span many batches; without a pass deadline those waves can keep a
-  // completed council run alive indefinitely.
+  // Bound the complete queue. Large finding sets may span many batches; without
+  // a pass deadline those waves can keep a completed council run alive
+  // indefinitely.
   verificationPassTimeoutMs: 180_000,
 } as const;
 
