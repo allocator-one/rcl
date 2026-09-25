@@ -6,6 +6,7 @@ import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge
 import { claimConvergeAttempt, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
+import { assertNativeTargetOwnership, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 
 const directories: string[] = [];
 const target = 'fixture-launch';
@@ -32,6 +33,23 @@ afterEach(async () => {
 });
 
 describe('native guarded review launch', () => {
+  it('passes existing target ownership to checkpoint work and expires it after launch', async () => {
+    const options = await fixture();
+    let retainedOwnership!: NativeTargetOwnership;
+    options.run = async (context, ownership) => {
+      expect(context.attempt).toBe(1);
+      await assertNativeTargetOwnership(ownership, options.gitCommonDir, target);
+      retainedOwnership = ownership;
+      return completion;
+    };
+
+    await guardReviewLaunch(options);
+
+    await expect(assertNativeTargetOwnership(retainedOwnership, options.gitCommonDir, target))
+      .rejects.toThrow('native_target_not_owned');
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
   it('validates before claiming and derives the first round without admitting it', async () => {
     const options = await fixture();
     options.validate = vi.fn(async () => {
@@ -40,7 +58,7 @@ describe('native guarded review launch', () => {
 
     await guardReviewLaunch(options);
 
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 1 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 1 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
     expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({
       rounds: [], lastLaunch: { status: 'completed', attempt: 1, round: 1, runId: completion.runId },
@@ -86,7 +104,7 @@ describe('native guarded review launch', () => {
 
     await guardReviewLaunch({ ...options, inputSha256: 'd'.repeat(64) });
 
-    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('refuses a round-cap override beyond the existing hard maximum before claiming', async () => {
@@ -116,7 +134,7 @@ describe('native guarded review launch', () => {
     await expect(guardReviewLaunch(options)).rejects.toThrow(/legacy|unknown|retry/i);
     await guardReviewLaunch({ ...options, retryReason: 'Original process is terminal; corrected launcher fixture passed.' });
 
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
   });
 
@@ -128,7 +146,7 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
     await guardReviewLaunch({ ...options, retryReason: 'Legacy launch audited; no native round was admitted.' });
 
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 8 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 8 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target))
       .toMatchObject({ attemptsUsed: 8, migratedAttempts: 7 });
   });
@@ -142,7 +160,7 @@ describe('native guarded review launch', () => {
     await expect(guardReviewLaunch(changed)).rejects.toThrow('infrastructure_failure');
     await guardReviewLaunch({ ...changed, retryReason: 'Credentials repaired and independently checked.' });
 
-    expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('allows explicit cap consent without an extra preclaim or reset', async () => {
@@ -154,7 +172,7 @@ describe('native guarded review launch', () => {
     await guardReviewLaunch({ ...options, retryReason: 'Launcher repaired.', maxAttempts: 2 });
 
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ cap: 2, attemptsUsed: 2 });
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('does not turn stop-upstream into stop-review, while explicit stop-review prevents launch', async () => {
@@ -189,7 +207,7 @@ describe('native guarded review launch', () => {
     await expect(guardReviewLaunch(options)).rejects.toThrow(/fix|unchanged/i);
     await guardReviewLaunch({ ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64) });
 
-    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('does not let an infrastructure retry defer admitted in-scope blockers', async () => {

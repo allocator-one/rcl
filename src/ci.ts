@@ -1,4 +1,5 @@
 import type { ReviewResult } from './consensus/types.js';
+import { assertReviewerHealth, type ReviewerHealth } from './report/reviewer-health.js';
 
 export interface CiVerdict {
   exitCode: number;
@@ -11,9 +12,19 @@ export interface CiVerdict {
  * A run where every reviewer errored produces zero findings — which without
  * this check looks identical to "clean" and exits 0, greenlighting code that
  * was never actually reviewed. That case fails first; blocking findings fail
- * second.
+ * second. New proof-bearing reports pass a validated frozen-matrix health
+ * projection; legacy callers retain the original zero-success rule.
  */
-export function evaluateCiGate(result: ReviewResult): CiVerdict {
+export function evaluateCiGate(result: ReviewResult, health?: ReviewerHealth): CiVerdict {
+  if (health !== undefined) {
+    assertReviewerHealth(health);
+    if (!health.conclusive) {
+      return {
+        exitCode: 1,
+        message: `CI: ${health.successfulSeats.length}/${health.policy.seatCount} blocking reviewers completed every required chunk; ${health.policy.minimumSuccessful} required. Reviewer health is inconclusive. Exiting with code 1.`,
+      };
+    }
+  }
   if (result.stats.successfulReviews === 0) {
     return {
       exitCode: 1,

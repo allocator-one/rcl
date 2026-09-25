@@ -10,6 +10,7 @@ import {
   writeState, ConvergeRoundCapError, type ConvergeRunState,
 } from './run-state.js';
 import type { ConvergeContext } from '../report/run-header.js';
+import type { NativeTargetOwnership } from './target-ownership.js';
 import { scrubText } from '../telemetry/scrub.js';
 
 const completionSchema = z.object({
@@ -53,7 +54,8 @@ export interface GuardedLaunchOptions {
   retryReason?: string;
   validate: () => Promise<void>;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
-  run: (context: ConvergeContext) => Promise<GuardedLaunchCompletion>;
+  /** Reuse this ownership for durable reviewer checkpoints; never take a second target lock. */
+  run: (context: ConvergeContext, ownership: NativeTargetOwnership) => Promise<GuardedLaunchCompletion>;
 }
 
 export class ReviewLaunchRefused extends Error {
@@ -168,7 +170,7 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
         await options.onClaim?.(claimed);
         const completion = completionSchema.parse(await options.run({
           target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
-        }));
+        }, ownership));
         state.lastLaunch = { ...state.lastLaunch!, ...completion, status: 'completed' };
       } catch (error) {
         state.lastLaunch!.status = 'failed';
