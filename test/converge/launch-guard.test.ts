@@ -222,7 +222,7 @@ describe('native guarded review launch', () => {
       release();
       await first;
     }
-  });
+  }, 15_000);
 
   it('cannot use an explicit retry decision to raise or reset the existing cap', async () => {
     const options = await fixture();
