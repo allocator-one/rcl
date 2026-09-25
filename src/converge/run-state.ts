@@ -8,6 +8,7 @@ import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js
 import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
 import * as lockScope from '../evidence/original-run/lock-scope.js';
 import type { ConsensusFinding } from '../consensus/types.js';
+import type { GuardedLaunchState } from './launch-guard.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
   availableFindingKey,
@@ -127,6 +128,7 @@ export interface ConvergeRunState {
   }>;
   findings: Record<string, FindingEntry>;
   updatedAt: string;
+  lastLaunch?: GuardedLaunchState;
   /** Additive local audit only; entries never stand for an admitted round. */
   roundGapAudit?: { version: 1; entries: RoundGapEntry[] };
   /**
@@ -164,6 +166,11 @@ function stateBaseName(target: string): string {
 
 export function convergeRunStatePath(gitCommonDir: string, target: string): string {
   return join(resolve(gitCommonDir), STATE_DIR, `${stateBaseName(target)}.json`);
+}
+
+export function initialConvergeRunState(target: string): ConvergeRunState {
+  return { version: STATE_VERSION, target, roundCap: DEFAULT_CONVERGE_ROUND_CAP,
+    rounds: [], findings: {}, updatedAt: new Date().toISOString() };
 }
 
 async function readState(
@@ -380,14 +387,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, target);
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
-  const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? {
-    version: STATE_VERSION,
-    target,
-    roundCap: DEFAULT_CONVERGE_ROUND_CAP,
-    rounds: [],
-    findings: {},
-    updatedAt: new Date().toISOString(),
-  };
+  const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
   for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {
@@ -676,22 +676,26 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   state.updatedAt = new Date().toISOString();
   await writeState(gitCommonDir, state, ownership);
 
-  let resolution: RoundResolution | undefined;
-  if (state.lastAnnotations && state.lastAnnotations.round === options.round) {
+  const resolution = resolveRoundResolution(state, options.round);
+  return { entries: updated, ...(resolution ? { resolution } : {}) };
+}
+
+export function resolveRoundResolution(state: ConvergeRunState, round: number): RoundResolution | undefined {
+  if (state.lastAnnotations && state.lastAnnotations.round === round) {
     const actionable = state.lastAnnotations.identities.filter(
       (a) => (a.status === 'new' || a.status === 'regating') && a.gating !== 'none'
     );
     const unresolved = actionable
       .filter((a) => {
         const entry = state.findings[a.identity];
-        return !entry || entry.verdict === undefined || entry.verdictRound !== options.round;
+        return !entry || entry.verdict === undefined || entry.verdictRound !== round;
       })
       .map((a) => a.identity);
     const fixedThisRound = Object.values(state.findings).filter(
-      (e) => e.verdict === 'fixed' && e.verdictRound === options.round
+      (e) => e.verdict === 'fixed' && e.verdictRound === round
     ).length;
-    resolution = {
-      round: options.round,
+    return {
+      round,
       actionable: actionable.length,
       unresolved,
       fixedThisRound,
@@ -703,5 +707,4 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
             : 'converged-dismissal-only',
     };
   }
-  return { entries: updated, ...(resolution ? { resolution } : {}) };
 }

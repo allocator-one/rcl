@@ -124,7 +124,7 @@ async function fetchModelKeys(
   }
 }
 
-function missingProviders(env: Record<string, string | undefined>): string[] {
+export function missingProviders(env: Record<string, string | undefined>): string[] {
   const isSet = (name: string) => (env[name] ?? '').trim() !== '';
   return Object.entries(PROVIDER_ENV_VARS)
     .filter(([provider, envVar]) => {

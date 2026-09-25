@@ -68,7 +68,8 @@ export function buildExplicitAssignments(
 export function buildRoleAssignments(
   models: string[],
   roles: Role[],
-  secondaryModels: string[] = []
+  secondaryModels: string[] = [],
+  deterministic = false
 ): ReviewAssignment[] {
   const assignments: ReviewAssignment[] = [];
 
@@ -89,7 +90,7 @@ export function buildRoleAssignments(
   // Specialized roles: shuffled round-robin across ALL models (primary + secondary)
   const allModels = [...new Set([...models, ...secondaryModels])];
   if (specializedRoles.length > 0 && allModels.length > 0) {
-    const shuffledModels = shuffle(allModels);
+    const shuffledModels = deterministic ? allModels : shuffle(allModels);
     specializedRoles.forEach((role, index) => {
       const model = shuffledModels[index % shuffledModels.length]!;
       assignments.push({
@@ -112,9 +113,10 @@ export function buildAssignments(opts: {
   secondaryModels?: string[];
   explicitReviewers?: ReviewerPair[];
   roleMap: Map<string, Role>;
+  deterministic?: boolean;
 }): ReviewAssignment[] {
   if (opts.explicitReviewers && opts.explicitReviewers.length > 0) {
     return buildExplicitAssignments(opts.explicitReviewers, opts.roleMap);
   }
-  return buildRoleAssignments(opts.models, opts.roles, opts.secondaryModels);
+  return buildRoleAssignments(opts.models, opts.roles, opts.secondaryModels, opts.deterministic);
 }

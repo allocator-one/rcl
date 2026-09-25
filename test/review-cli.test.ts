@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,8 +18,11 @@ import type { ReviewAdapter } from '../src/dispatch/adapter.js';
 import { Quarantine } from '../src/telemetry/quarantine.js';
 import { buildRunEnvelope } from '../src/telemetry/envelope.js';
 import { sampleResult } from './telemetry/fixtures.js';
+import { loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
+import { loadConvergeRunState, processRoundReport } from '../src/converge/run-state.js';
+import { sha256Hex } from '../src/report/run-header.js';
 
-const cliEntrypoint = fileURLToPath(new URL('../src/index.ts', import.meta.url));
+const cliEntrypoint = process.env['RCL_TEST_REVIEW_ENTRYPOINT'] ?? fileURLToPath(new URL('../src/index.ts', import.meta.url));
 const tsxImport = import.meta.resolve('tsx');
 const tempDirs: string[] = [];
 const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -67,7 +70,8 @@ function runRclAsync(
   args: string[],
   cwd: string,
   extraEnv: Record<string, string> = {},
-  timeoutMs = 30_000
+  timeoutMs = 30_000,
+  onSpawn?: (child: ChildProcess) => void
 ) {
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
@@ -87,6 +91,7 @@ function runRclAsync(
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    onSpawn?.(child);
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
@@ -114,6 +119,168 @@ afterEach(() => {
   for (const directory of tempDirs.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+interface GuardedCliFixture {
+  repo: string;
+  args: string[];
+  env: Record<string, string>;
+  calls: () => number;
+  holdResponses: () => void;
+  firstRequest: Promise<void>;
+}
+
+async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<void>): Promise<void> {
+  const repo = tempRepository();
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, env: GIT_ENV, encoding: 'utf8' }).trim();
+  writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n');
+  writeFileSync(join(repo, 'config.json'), JSON.stringify({
+    models: ['openai-compat/fixture'], secondaryModels: [], asyncModels: [],
+    roles: ['general', 'security-auditor'], harness: { telemetry: 'off' },
+  }));
+  let calls = 0;
+  let holdResponses = false;
+  let notifyRequest: () => void = () => {};
+  const firstRequest = new Promise<void>(resolve => { notifyRequest = resolve; });
+  const server = createServer((request, response) => {
+    request.resume();
+    calls++;
+    notifyRequest();
+    if (holdResponses) return;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
+      choices: [{ index: 0, finish_reason: 'stop', message: {
+        role: 'assistant', content: JSON.stringify({ findings: [] }),
+      } }],
+    }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    await work({
+      repo,
+      args: ['review', 'change.patch', '--guarded-converge', '--converge-target', 'guarded-fixture',
+        '--head-sha', head, '--base-sha', head, '--json-file', 'report.json',
+        '--config', 'config.json', '--no-telemetry'],
+      env: { OPENAI_COMPAT_BASE_URL: `http://127.0.0.1:${port}/v1`,
+        OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RCL_DATA_DIR: join(repo, 'rcl-data') },
+      calls: () => calls,
+      holdResponses: () => { holdResponses = true; },
+      firstRequest,
+    });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}
+
+describe('rcl review — guarded native launch', () => {
+  it('claims and binds one launch only after successful preflight', async () => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync(fixture.args, fixture.repo, fixture.env);
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(fixture.calls()).toBe(2);
+      expect(JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8')).run.converge)
+        .toEqual({ target: 'guarded-fixture', round: 1, attempt: 1 });
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
+        .toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
+
+  it.each([
+    { args: ['--round', '27'], error: /wrong_round.*round 1/i },
+    { args: ['--json-file', 'missing-directory/report.json'], error: /ENOENT|output/i },
+    { args: ['--reviewer', 'openai/fixture:general'], error: /missing_provider_credentials/i },
+    { args: ['--context', 'missing-context.md'], error: /unreadable_context/i },
+    { args: ['--spec', 'missing-spec.md'], error: /unreadable_spec/i },
+    { args: ['--config', 'missing-config.json'], error: /ConfigError/i },
+    { args: ['--markdown', 'report.json'], error: /output_collision/i },
+    { args: ['--attempt', '1'], error: /incompatible_launch/i },
+    { args: ['--role', 'general'], error: /insufficient_reviewers/i },
+    { args: ['--reviewer', 'openai-compat/fixture:general', '--reviewer', 'openai-compat/fixture:missing-role'], error: /invalid_reviewers/i },
+    { args: ['--launch-intent', 'stop-review'], error: /review_stopped/i },
+    { args: ['--launch-intent', 'retry-delivery'], error: /delivery_only/i },
+  ])('refuses predictable failures without an attempt: $args', async scenario => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync([...fixture.args, ...scenario.args], fixture.repo, fixture.env);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(scenario.error);
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  }, 40_000);
+
+  it('does not launch again while a completed report awaits native admission', async () => {
+    await withGuardedFixture(async fixture => {
+      const first = await runRclAsync(fixture.args, fixture.repo, fixture.env);
+      expect(first.status, first.stderr).toBe(0);
+
+      const second = await runRclAsync([...fixture.args, '--json-file', 'second.json'], fixture.repo, fixture.env);
+
+      expect(second.status).toBe(1);
+      expect(second.stderr).toContain('report_not_admitted');
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
+        .toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
+
+  it('does not spend on base-tip movement but requires review of a changed head', async () => {
+    await withGuardedFixture(async fixture => {
+      const first = await runRclAsync([...fixture.args, '--launch-intent', 'stop-upstream'], fixture.repo, fixture.env);
+      expect(first.status, first.stderr).toBe(0);
+      const bytes = readFileSync(join(fixture.repo, 'report.json'), 'utf8');
+      const report = JSON.parse(bytes);
+      await processRoundReport({ gitCommonDir: join(fixture.repo, '.git'), target: 'guarded-fixture',
+        round: 1, findings: report.findings, runId: report.run.id, reportSha256: sha256Hex(bytes) });
+
+      const unchanged = await runRclAsync([...fixture.args, '--base-sha', 'b'.repeat(40), '--json-file', 'second.json'], fixture.repo, fixture.env);
+      expect(unchanged.status, unchanged.stderr).toBe(1);
+      expect(unchanged.stderr).toContain('inputs_unchanged');
+      expect(fixture.calls()).toBe(2);
+      const changed = await runRclAsync([...fixture.args, '--head-sha', 'c'.repeat(40), '--json-file', 'second.json'], fixture.repo, fixture.env);
+
+      expect(changed.status, changed.stderr).toBe(0);
+      expect(fixture.calls()).toBe(4);
+      expect(JSON.parse(readFileSync(join(fixture.repo, 'second.json'), 'utf8')).run.converge)
+        .toEqual({ target: 'guarded-fixture', round: 2, attempt: 2 });
+    });
+  }, 40_000);
+
+  it.skipIf(process.platform === 'win32')('preserves uncertain dispatch after an actual process loss and refuses automatic retry', async () => {
+    await withGuardedFixture(async fixture => {
+      fixture.holdResponses();
+      let child: ChildProcess | undefined;
+      const first = runRclAsync(fixture.args, fixture.repo, fixture.env, 30_000, process => { child = process; });
+      await Promise.race([fixture.firstRequest, first.then(result => {
+        throw new Error(`Review did not dispatch: ${result.stderr}`);
+      })]);
+      try {
+        const conflicting = await runRclAsync([...fixture.args, '--json-file', 'conflict.json'], fixture.repo, fixture.env);
+        expect(conflicting.status).not.toBe(0);
+        expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
+          .toMatchObject({ attemptsUsed: 1 });
+        expect(child!.exitCode).toBeNull();
+      } finally {
+        child!.kill('SIGKILL');
+      }
+      await first;
+      const calls = fixture.calls();
+      expect(await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture'))
+        .toMatchObject({ lastLaunch: { status: 'pending', pid: child!.pid } });
+
+      const second = await runRclAsync([...fixture.args, '--json-file', 'second.json'], fixture.repo, fixture.env);
+
+      expect(second.status).toBe(1);
+      expect(second.stderr).toContain('dispatch_unknown');
+      expect(fixture.calls()).toBe(calls);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
+        .toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
 });
 
 describe('rcl review — exact-head binding flags', () => {
