@@ -12,7 +12,8 @@ import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
-import { describeOutcome, HarnessSink } from './sink.js';
+import { describeOutcome, HarnessSink, type RunReceipt, type SinkOutcome } from './sink.js';
+import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 
 /**
  * Evidence delivery for a finished review and for the converge commands
@@ -38,6 +39,8 @@ export interface TelemetryRuntime {
    * outlive the workflow run, so nothing recorded under it is spooled.
    */
   attested?: boolean;
+  /** The current run-bound credential expiry; retries must finish before it. */
+  attestedExpiresAt?: string;
   /** Why there is no credential, when telemetry would otherwise apply. */
   note?: string;
   sink?: HarnessSink;
@@ -68,6 +71,8 @@ export interface RuntimeOptions {
    * attestation is the membership proof), and an attested run never spools.
    */
   credential?: HarnessCredential;
+  /** The expiry from the attestation that supplied `credential`. */
+  attestedExpiresAt?: string;
 }
 
 const ENV_OFF = new Set(['off', '0', 'false', 'no', 'none', 'disabled']);
@@ -161,6 +166,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     runtime.repoManaged = true;
     runtime.credential = options.credential;
     runtime.attested = options.credential.source === 'attest';
+    runtime.attestedExpiresAt = options.attestedExpiresAt;
     runtime.sink = new HarnessSink({
       credential: options.credential,
       rclVersion: options.rclVersion,
@@ -389,10 +395,42 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   const host = credentialHost(runtime.credential);
   await noticeBefore(runtime);
 
-  const posted = await runtime.sink.postRun(envelope);
+  // Hold one immutable serialization for the first POST and every bounded
+  // attested replay; no retry rebuilds the envelope or run identity.
+  const serializedEnvelope = JSON.stringify(envelope);
+  const deliveryDiagnostics: EvidenceDiagnostic[] = [];
+  const preparedPost = runtime.sink.preparePostRun(envelope, serializedEnvelope);
+  let posted = preparedPost.kind === 'ready' ? await preparedPost.post() : preparedPost;
+  if (posted.kind === 'unavailable' && runtime.attested && runtime.attestedExpiresAt !== undefined) {
+    const sink = runtime.sink;
+    deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
+    // Recovery stops on refusal; keep organization disablement distinct in the delivery result.
+    if (parseAttestedExpiry(runtime.attestedExpiresAt) === undefined) {
+      posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_invalid_expiry', message: 'attested expiry must be a valid ISO timestamp' };
+    } else {
+      const recovered = await recoverAttestedDelivery<RunReceipt, Extract<SinkOutcome<RunReceipt>, { kind: 'disabled' }>>({
+        runId, payload: serializedEnvelope, expiresAt: runtime.attestedExpiresAt, receiptFirst: true, initialAttempts: 1,
+        post: async (payload, signal) => {
+          if (payload !== serializedEnvelope || preparedPost.kind !== 'ready') return { kind: 'rejected' };
+          const outcome = await preparedPost.post({ signal });
+          if (outcome.kind === 'ok') return { kind: 'recorded', value: outcome.value };
+          if (outcome.kind === 'conflict') return { kind: 'conflict' };
+          if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };
+          if (outcome.kind === 'rejected') return { kind: 'rejected' };
+          return { kind: 'unavailable' };
+        }, receipt: async (_runId, signal) => preparedPost.kind === 'ready' ? preparedPost.receipt({ signal }) : Promise.resolve({ kind: 'rejected' as const }),
+      });
+      if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
+      else if (recovered.kind === 'recorded') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_missing_receipt', message: 'recorded recovery did not provide a receipt' };
+      else if (recovered.kind === 'conflict') posted = { kind: 'conflict', message: 'attested recovery found a conflicting run' };
+      else if (recovered.kind === 'disabled') posted = recovered.value;
+      else if (recovered.kind === 'rejected' || recovered.kind === 'receipt_rejected') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_refused', message: recovered.kind };
+      else posted = { kind: 'unavailable', reason: `attested_recovery_${recovered.kind}` };
+    }
+  }
   switch (posted.kind) {
     case 'unavailable': {
-      const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: describeOutcome(posted) }]);
+      const retention = await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: describeOutcome(posted) }]);
       if (runtime.attested) {
         // The run-bound credential ends with the workflow run; a flush later
         // would have to use another credential and record an asserted run.
@@ -427,16 +465,21 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
         };
       }
     }
-    case 'disabled':
+    case 'disabled': {
+      const retention = deliveryDiagnostics.length > 0
+        ? await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: describeOutcome(posted) }])
+        : undefined;
       return {
         status: 'disabled',
+        ...(retention ? { retention } : {}),
         runId,
         spooled: false,
-        line: `Evidence not sent: ${host} has not enabled review evidence for this organization`,
+        line: `Evidence not sent: ${host} has not enabled review evidence for this organization${retention ? `; ${retentionLine(retention, runId)}` : ''}`,
         exitCode: exitFor('disabled', evidenceRequired),
       };
+    }
     case 'conflict': {
-      const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: describeOutcome(posted) }]);
+      const retention = await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: describeOutcome(posted) }]);
       return {
         status: 'conflict',
         retention,
@@ -447,7 +490,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
       };
     }
     case 'rejected': {
-      const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: describeOutcome(posted) }]);
+      const retention = await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: describeOutcome(posted) }]);
       return {
         status: 'rejected',
         retention,
@@ -538,7 +581,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   // but subsequently refused, including an organization cap changed mid-flight.
   const artifactsOutstanding = Object.keys(pendingArtifacts).length + artifactsRefused;
   const retention = artifactsOutstanding > 0 || pendingEvents.length > 0
-    ? await retainRun(runtime, input, envelope, [{ path: 'delivery', message: notes.join('; ') }], true)
+    ? await retainRun(runtime, input, envelope, [...deliveryDiagnostics, { path: 'delivery', message: notes.join('; ') }], true)
     : undefined;
   if (retention) notes.push(retentionLine(retention, runId));
   return {

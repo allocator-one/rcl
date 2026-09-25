@@ -2169,7 +2169,7 @@ async function executeCouncil(
       rclVersion: RCL_VERSION,
       config,
       noTelemetry: opts.telemetry === false,
-      ...(attestation ? { credential: attestation.credential } : {}),
+      ...(attestation ? { credential: attestation.credential, attestedExpiresAt: attestation.expiresAt } : {}),
     });
   } catch (err) {
     // Kept for the --evidence-required verdict below, which names the cause.

@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
+import { abortSignalWithTimeout } from './abort-signal.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
-import type { ArtifactKind, RunEnvelope } from './envelope.js';
+import type { ArtifactDeclaration, ArtifactKind, RunEnvelope } from './envelope.js';
+import type { ReceiptProbe } from './attested-retry.js';
 import type { WireEvent } from './events.js';
 
 /**
@@ -20,7 +22,7 @@ import type { WireEvent } from './events.js';
 export const REQUEST_TIMEOUT_MS = 10_000;
 /** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
 export const MAX_RESPONSE_BYTES = 64 * 1024;
-/** A read carries a run's findings and calls (a 2 MB envelope's worth at most) or a gate status; anything past this is not one. */
+/** A read carries a run's findings and calls (up to the bounded evidence envelope) or a gate status; anything past this is not one. */
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
@@ -28,6 +30,8 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
+  /** Cancellation/deadline for an attested same-workflow retry operation. */
+  signal?: AbortSignal;
 }
 
 export interface RunReceipt {
@@ -62,6 +66,12 @@ export type SinkOutcome<T> =
   | { kind: 'rejected'; httpStatus: number; error: string; message: string }
   /** Network, timeout or server failure — the delivery is worth retrying. */
   | { kind: 'unavailable'; reason: string };
+
+export type PreparedPostRun =
+  | Extract<SinkOutcome<RunReceipt>, { kind: 'rejected' }>
+  | { kind: 'ready'; serializedEnvelope: string; post: (options?: RequestOptions) => Promise<SinkOutcome<RunReceipt>>; receipt: (options?: RequestOptions) => Promise<ReceiptProbe<RunReceipt>> };
+
+interface PreparedRunBinding { runId: string; hasLocationProvenance: boolean; artifactsDeclared: ArtifactDeclaration[]; }
 
 export interface SinkOptions {
   credential: HarnessCredential;
@@ -144,12 +154,13 @@ export class HarnessSink {
     options: RequestOptions = {}
   ): Promise<{ status: number; body: unknown } | { failure: string }> {
     const timeoutMs = Math.max(1, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
+    const signal = abortSignalWithTimeout(options.signal, timeoutMs);
     try {
       const response = await this.fetchImpl(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
         ...(body !== undefined ? { body } : {}),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal.signal,
         redirect: 'manual',
       });
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
@@ -169,7 +180,9 @@ export class HarnessSink {
       }
       return { status: response.status, body: parsed };
     } catch (err) {
-      return { failure: err instanceof Error ? `${err.name}: ${err.message}` : String(err) };
+      return { failure: transportFailure(err) };
+    } finally {
+      signal.dispose();
     }
   }
 
@@ -205,9 +218,22 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
+  /** Retain immutable delivery primitives and exact bytes for one POST and any replay. */
+  preparePostRun(envelope: RunEnvelope, serializedEnvelope?: string): PreparedPostRun {
+    const canonicalEnvelope = JSON.stringify(envelope);
+    if (serializedEnvelope !== undefined && serializedEnvelope !== canonicalEnvelope) return { kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch', message: 'The supplied serialized envelope does not match the validated envelope' };
+    const binding: PreparedRunBinding = { runId: envelope.run.id, hasLocationProvenance: envelope.findings.some((finding) => finding.location_provenance !== undefined), artifactsDeclared: structuredClone(envelope.artifacts_declared) };
+    return { kind: 'ready', serializedEnvelope: canonicalEnvelope, post: (options = {}) => this.postPreparedRun(binding, canonicalEnvelope, options), receipt: (options = {}) => this.getPreparedReceipt(binding, canonicalEnvelope, options) };
+  }
+
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
-  async postRun(envelope: RunEnvelope, options: RequestOptions = {}): Promise<SinkOutcome<RunReceipt>> {
-    if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
+  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope?: string): Promise<SinkOutcome<RunReceipt>> {
+    const prepared = this.preparePostRun(envelope, serializedEnvelope);
+    return prepared.kind === 'ready' ? prepared.post(options) : prepared;
+  }
+
+  private async postPreparedRun(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions): Promise<SinkOutcome<RunReceipt>> {
+    if (binding.hasLocationProvenance) {
       // Old servers silently discard unknown provenance. The attested credential
       // may read model-stats, but may not list runs or use an ordinary login.
       const attested = this.credential.source === 'attest';
@@ -225,12 +251,12 @@ export class HarnessSink {
         message: 'The server has not confirmed evidence protocol version 2; normalization provenance was not sent',
       };
     }
-    const result = await this.request('POST', '/api/v1/reviews/runs', JSON.stringify(envelope), 'application/json', options);
+    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', options);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
       // server expects; anything else is not a receipt.
-      if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string') return null;
+      if (!data || data['id'] !== binding.runId || typeof data['url'] !== 'string') return null;
       if (!Array.isArray(data['artifacts_expected']) || !data['artifacts_expected'].every((k) => typeof k === 'string')) return null;
       const meta = (body as { meta?: { status?: string } }).meta;
       return {
@@ -243,6 +269,51 @@ export class HarnessSink {
         status: meta?.status === 'existing' || status === 200 ? 'existing' : 'created',
       };
     });
+  }
+
+  /**
+   * Read the restricted run-bound receipt after an uncertain attested POST.
+   * Only a 404 authorizes a replay; unavailable, rejected or malformed answers
+   * stop recovery. The server independently restricts this route to the
+   * credential's own live run and signed workflow subject.
+   */
+  async getAttestedRunReceipt(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    const prepared = this.preparePostRun(envelope, serializedEnvelope);
+    return prepared.kind === 'ready' ? prepared.receipt(options) : { kind: 'rejected' };
+  }
+
+  private async getPreparedReceipt(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    if (this.credential.source !== 'attest') return { kind: 'rejected' };
+    if (!binding.artifactsDeclared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', { ...options, maxResponseBytes: MAX_READ_RESPONSE_BYTES });
+    if ('failure' in result) return { kind: 'unavailable' };
+    if (result.status === 404) return { kind: 'absent' };
+    if (result.status >= 500 || result.status === 429 || result.status === 408) return { kind: 'unavailable' };
+    if (result.status !== 200) return { kind: 'rejected' };
+    const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
+    const data = response?.data;
+    const envelopeSha256 = createHash('sha256').update(serializedEnvelope, 'utf8').digest('hex');
+    const receiptUrl = typeof data?.['url'] === 'string' ? data['url'] : undefined;
+    const credentialLocation = new URL(this.credential.url);
+    const expectedOrigin = credentialLocation.origin;
+    const basePath = credentialLocation.pathname.replace(/\/$/, '');
+    const expectedPath = `${basePath}/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`;
+    const receiptLocation = receiptUrl === undefined ? undefined : (() => { try { return new URL(receiptUrl); } catch { return undefined; } })();
+    if (!data || data['id'] !== binding.runId || receiptLocation?.origin !== expectedOrigin || receiptLocation.pathname !== expectedPath || receiptLocation.search !== '' || receiptLocation.hash !== '' ||
+      typeof data['envelope_sha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(data['envelope_sha256']) || data['envelope_sha256'] !== envelopeSha256 ||
+      response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], binding.artifactsDeclared)) return { kind: 'rejected' };
+    return {
+      kind: 'recorded',
+      value: {
+        id: binding.runId,
+        url: receiptUrl!,
+        ...(typeof data['received_at'] === 'string' ? { received_at: data['received_at'] } : {}),
+        ...(typeof data['repo_verified'] === 'boolean' ? { repo_verified: data['repo_verified'] } : {}),
+        ...(typeof data['head_verified'] === 'string' ? { head_verified: data['head_verified'] } : {}),
+        artifacts_expected: binding.artifactsDeclared.map(({ kind }) => kind),
+        status: 'existing',
+      },
+    };
   }
 
   /** `PUT /api/v1/reviews/runs/:id/artifacts/:kind` — the raw bytes, never JSON. */
@@ -355,6 +426,33 @@ function hostOnly(raw: string): string {
   } catch {
     return '(unparseable URL)';
   }
+}
+
+/** A transport failure can carry Node's nested `Error.cause`; retain only safe, bounded diagnostics. */
+function transportFailure(err: unknown): string {
+  const describe = (value: unknown): string => {
+    try { return value instanceof Error ? `${value.name}: ${value.message}` : String(value); }
+    catch { return '[unstringifiable diagnostic]'; }
+  };
+  const primary = describe(err);
+  const cause = err instanceof Error ? err.cause : undefined;
+  return scrubText(cause === undefined ? primary : `${primary}; cause: ${describe(cause)}`, 300);
+}
+
+function sameDeclarations(raw: unknown, expected: ArtifactDeclaration[]): boolean {
+  if (!Array.isArray(raw) || raw.length !== expected.length) return false;
+  const byKind = new Map<string, ArtifactDeclaration>();
+  for (const declaration of raw) {
+    if (!declaration || typeof declaration !== 'object') return false;
+    const value = declaration as Record<string, unknown>;
+    if (typeof value['kind'] !== 'string' || typeof value['sha256'] !== 'string' ||
+      typeof value['bytes'] !== 'number' || !Number.isSafeInteger(value['bytes']) || value['bytes'] < 0 || byKind.has(value['kind'])) return false;
+    byKind.set(value['kind'], { kind: value['kind'] as ArtifactKind, sha256: value['sha256'], bytes: value['bytes'] });
+  }
+  return expected.every(declaration => {
+    const actual = byKind.get(declaration.kind);
+    return actual?.sha256 === declaration.sha256 && actual.bytes === declaration.bytes;
+  });
 }
 
 /** Server or network text made safe for a terminal: scrubbed, control characters removed, bounded. */
