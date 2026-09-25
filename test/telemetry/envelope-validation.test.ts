@@ -79,7 +79,7 @@ describe('validateRunEnvelope', () => {
     expect(envelope.findings).toHaveLength(originalRows + 210);
     expect(envelope.findings[0]!.ref).toBe('f001');
     envelope.findings[1]!.description = `${envelope.findings[1]!.description}x`;
-    expect(validateRunEnvelope(envelope, artifacts)).toEqual([{ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' }]);
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([{ path: 'envelope', message: `Envelope exceeds ${PROTOCOL_MAX_ENVELOPE_BYTES} bytes or is not JSON` }]);
   });
 
   it.each([
@@ -116,7 +116,7 @@ describe('validateRunEnvelope', () => {
     expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
     envelope.findings[originalRows]!.description = `${envelope.findings[originalRows]!.description}é`;
     expect(Buffer.byteLength(JSON.stringify(envelope))).toBeGreaterThan(PROTOCOL_MAX_ENVELOPE_BYTES);
-    expect(validateRunEnvelope(envelope, artifacts)).toContainEqual({ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' });
+    expect(validateRunEnvelope(envelope, artifacts)).toContainEqual({ path: 'envelope', message: `Envelope exceeds ${PROTOCOL_MAX_ENVELOPE_BYTES} bytes or is not JSON` });
   });
 
 });

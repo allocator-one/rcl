@@ -170,7 +170,7 @@ describe('recoverAttestedDelivery', () => {
       sleep: async () => {},
     });
 
-    expect(outcome).toEqual({ kind: 'cancelled', attempts: receiptFirst ? 1 : 1, recovered: false });
+    expect(outcome).toEqual({ kind: 'cancelled', attempts: 1, recovered: false });
   });
 
   it('refuses replay after expiry, cancellation, the deadline, or the finite attempt budget', async () => {
