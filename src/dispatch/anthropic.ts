@@ -21,6 +21,22 @@ function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
+interface ModelProfile {
+  maxTokens: number;
+  effort?: 'medium';
+  stream: boolean;
+}
+
+const DEFAULT_PROFILE: ModelProfile = { maxTokens: 16384, stream: false };
+const FABLE_51_PROFILE: ModelProfile = { maxTokens: 32768, effort: 'medium', stream: true };
+
+function profileFor(modelId: string): ModelProfile {
+  // Claude 4.6+ uses dateless pinned API IDs; this profile applies to the
+  // documented Fable 5.1 ID only, without guessing future model capabilities.
+  // https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
+  return modelId === 'claude-fable-5-1' ? FABLE_51_PROFILE : DEFAULT_PROFILE;
+}
+
 export class AnthropicAdapter implements ReviewAdapter {
   name = 'anthropic';
   provider = 'anthropic';
@@ -52,7 +68,7 @@ export class AnthropicAdapter implements ReviewAdapter {
     const modelId = stripKnownProviderPrefix(model);
     // Fable 5.1 counts adaptive thinking against max_tokens. Large review
     // chunks exhausted the old ceiling before any complete findings arrived.
-    const fable51 = modelId === 'claude-fable-5-1';
+    const profile = profileFor(modelId);
 
     try {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
@@ -60,8 +76,8 @@ export class AnthropicAdapter implements ReviewAdapter {
           // Use tool use for reliable JSON extraction
           const request = {
               model: modelId,
-              max_tokens: fable51 ? 32768 : 16384,
-              ...(fable51 ? { output_config: { effort: 'medium' as const } } : {}),
+              max_tokens: profile.maxTokens,
+              ...(profile.effort ? { output_config: { effort: profile.effort } } : {}),
               system: systemPrompt,
               messages: [{ role: 'user' as const, content: userPrompt }],
               tools: [
@@ -109,7 +125,7 @@ export class AnthropicAdapter implements ReviewAdapter {
             signal: controller.signal,
             timeout: options.timeoutMs + 30_000,
           };
-          const response = fable51
+          const response = profile.stream
             ? await this.client.messages.stream(request, requestOptions).finalMessage()
             : await this.client.messages.create(request, requestOptions);
           const usage = usageFromAnthropic(response.usage);
