@@ -69,7 +69,9 @@ export type SinkOutcome<T> =
 
 export type PreparedPostRun =
   | Extract<SinkOutcome<RunReceipt>, { kind: 'rejected' }>
-  | { kind: 'ready'; post: (options?: RequestOptions) => Promise<SinkOutcome<RunReceipt>> };
+  | { kind: 'ready'; serializedEnvelope: string; post: (options?: RequestOptions) => Promise<SinkOutcome<RunReceipt>>; receipt: (options?: RequestOptions) => Promise<ReceiptProbe<RunReceipt>> };
+
+interface PreparedRunBinding { runId: string; hasLocationProvenance: boolean; artifactsDeclared: ArtifactDeclaration[]; }
 
 export interface SinkOptions {
   credential: HarnessCredential;
@@ -216,19 +218,12 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
-  /** Retain one validated envelope and its exact bytes for an initial POST and any replay. */
+  /** Retain immutable delivery primitives and exact bytes for one POST and any replay. */
   preparePostRun(envelope: RunEnvelope, serializedEnvelope?: string): PreparedPostRun {
     const canonicalEnvelope = JSON.stringify(envelope);
-    if (serializedEnvelope !== undefined && serializedEnvelope !== canonicalEnvelope) return {
-      kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch',
-      message: 'The supplied serialized envelope does not match the validated envelope',
-    };
-    const retainedBytes = serializedEnvelope ?? canonicalEnvelope;
-    const retainedEnvelope = JSON.parse(retainedBytes) as RunEnvelope;
-    return {
-      kind: 'ready',
-      post: (options = {}) => this.postPreparedRun(retainedEnvelope, retainedBytes, options),
-    };
+    if (serializedEnvelope !== undefined && serializedEnvelope !== canonicalEnvelope) return { kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch', message: 'The supplied serialized envelope does not match the validated envelope' };
+    const binding: PreparedRunBinding = { runId: envelope.run.id, hasLocationProvenance: envelope.findings.some((finding) => finding.location_provenance !== undefined), artifactsDeclared: structuredClone(envelope.artifacts_declared) };
+    return { kind: 'ready', serializedEnvelope: canonicalEnvelope, post: (options = {}) => this.postPreparedRun(binding, canonicalEnvelope, options), receipt: (options = {}) => this.getPreparedReceipt(binding, canonicalEnvelope, options) };
   }
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
@@ -237,8 +232,8 @@ export class HarnessSink {
     return prepared.kind === 'ready' ? prepared.post(options) : prepared;
   }
 
-  private async postPreparedRun(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions): Promise<SinkOutcome<RunReceipt>> {
-    if (envelope.findings.some((finding) => finding.location_provenance !== undefined)) {
+  private async postPreparedRun(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions): Promise<SinkOutcome<RunReceipt>> {
+    if (binding.hasLocationProvenance) {
       // Old servers silently discard unknown provenance. The attested credential
       // may read model-stats, but may not list runs or use an ordinary login.
       const attested = this.credential.source === 'attest';
@@ -261,7 +256,7 @@ export class HarnessSink {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
       // server expects; anything else is not a receipt.
-      if (!data || data['id'] !== envelope.run.id || typeof data['url'] !== 'string') return null;
+      if (!data || data['id'] !== binding.runId || typeof data['url'] !== 'string') return null;
       if (!Array.isArray(data['artifacts_expected']) || !data['artifacts_expected'].every((k) => typeof k === 'string')) return null;
       const meta = (body as { meta?: { status?: string } }).meta;
       return {
@@ -283,9 +278,14 @@ export class HarnessSink {
    * credential's own live run and signed workflow subject.
    */
   async getAttestedRunReceipt(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    const prepared = this.preparePostRun(envelope, serializedEnvelope);
+    return prepared.kind === 'ready' ? prepared.receipt(options) : { kind: 'rejected' };
+  }
+
+  private async getPreparedReceipt(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
     if (this.credentialSource !== 'attest') return { kind: 'rejected' };
-    if (!envelope.artifacts_declared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
-    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`, undefined, 'application/json', options);
+    if (!binding.artifactsDeclared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', options);
     if ('failure' in result) return { kind: 'unavailable' };
     if (result.status === 404) return { kind: 'absent' };
     if (result.status >= 500 || result.status === 429 || result.status === 408) return { kind: 'unavailable' };
@@ -297,20 +297,20 @@ export class HarnessSink {
     const credentialLocation = new URL(this.credential.url);
     const expectedOrigin = credentialLocation.origin;
     const basePath = credentialLocation.pathname.replace(/\/$/, '');
-    const expectedPath = `${basePath}/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`;
+    const expectedPath = `${basePath}/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`;
     const receiptLocation = receiptUrl === undefined ? undefined : (() => { try { return new URL(receiptUrl); } catch { return undefined; } })();
-    if (!data || data['id'] !== envelope.run.id || receiptLocation?.origin !== expectedOrigin || receiptLocation.pathname !== expectedPath || receiptLocation.search !== '' || receiptLocation.hash !== '' ||
+    if (!data || data['id'] !== binding.runId || receiptLocation?.origin !== expectedOrigin || receiptLocation.pathname !== expectedPath || receiptLocation.search !== '' || receiptLocation.hash !== '' ||
       typeof data['envelope_sha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(data['envelope_sha256']) || data['envelope_sha256'] !== envelopeSha256 ||
-      response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], envelope.artifacts_declared)) return { kind: 'rejected' };
+      response?.meta?.['status'] !== 'existing' || !sameDeclarations(data['artifacts_declared'], binding.artifactsDeclared)) return { kind: 'rejected' };
     return {
       kind: 'recorded',
       value: {
-        id: envelope.run.id,
+        id: binding.runId,
         url: receiptUrl!,
         ...(typeof data['received_at'] === 'string' ? { received_at: data['received_at'] } : {}),
         ...(typeof data['repo_verified'] === 'boolean' ? { repo_verified: data['repo_verified'] } : {}),
         ...(typeof data['head_verified'] === 'string' ? { head_verified: data['head_verified'] } : {}),
-        artifacts_expected: envelope.artifacts_declared.map(({ kind }) => kind),
+        artifacts_expected: binding.artifactsDeclared.map(({ kind }) => kind),
         status: 'existing',
       },
     };

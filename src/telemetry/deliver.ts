@@ -418,7 +418,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
           if (outcome.kind === 'disabled') return { kind: 'disabled', value: outcome };
           if (outcome.kind === 'rejected') return { kind: 'rejected' };
           return { kind: 'unavailable' };
-        }, receipt: async (_runId, signal) => sink.getAttestedRunReceipt(envelope, serializedEnvelope, { signal }),
+        }, receipt: async (_runId, signal) => preparedPost.kind === 'ready' ? preparedPost.receipt({ signal }) : Promise.resolve({ kind: 'rejected' as const }),
       });
       if (recovered.kind === 'recorded' && recovered.value !== undefined) posted = { kind: 'ok', httpStatus: 200, value: recovered.value };
       else if (recovered.kind === 'recorded') posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_missing_receipt', message: 'recorded recovery did not provide a receipt' };

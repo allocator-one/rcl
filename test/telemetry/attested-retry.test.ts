@@ -270,7 +270,9 @@ describe('recoverAttestedDelivery', () => {
     const outcome = await recoverAttestedDelivery({
       runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, deadlineMs: 1,
       post: async (_payload, signal) => new Promise((resolve, reject) => {
-        signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true });
+        const rejectForAbort = () => { aborted = true; reject(signal.reason); };
+        if (signal.aborted) rejectForAbort();
+        else signal.addEventListener('abort', rejectForAbort, { once: true });
       }),
       receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
     });
