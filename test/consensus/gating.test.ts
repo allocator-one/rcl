@@ -849,8 +849,7 @@ describe('resolveGatingConfig', () => {
     expect(cfg.mode).toBe('verified-consensus');
     expect(cfg.minModels).toBe(2);
     expect(cfg.verificationModel).not.toMatch(/^openrouter\//);
-    expect(cfg.verificationTimeoutMs).toBeLessThanOrEqual(60_000);
-    expect(cfg.verificationPassTimeoutMs).toBeGreaterThanOrEqual(cfg.verificationTimeoutMs);
+    expect(cfg.verificationTimeoutMs).toBe(cfg.verificationPassTimeoutMs);
     expect(cfg.verificationPassTimeoutMs).toBeLessThanOrEqual(180_000);
   });
 
@@ -858,6 +857,30 @@ describe('resolveGatingConfig', () => {
     expect(resolveGatingConfig({ verificationPassTimeout: 12_345 }).verificationPassTimeoutMs).toBe(
       12_345
     );
+  });
+
+  it('uses the whole-pass budget for an implicit verifier call timeout', async () => {
+    const cfg = resolveGatingConfig({ verificationPassTimeout: 180_000 });
+    const ask = vi.fn(async (): Promise<ModelAnswer> => ({
+      model: 'google/gemini-3.6-flash',
+      provider: 'google',
+      text: '[{"id":"F1","verdict":"refuted","reason":"guard exists"}]',
+      durationMs: 1,
+      status: 'success',
+    }));
+
+    await applyGating([makeFinding()], {
+      minModels: cfg.minModels,
+      verificationModel: cfg.verificationModel,
+      verificationTimeoutMs: cfg.verificationTimeoutMs,
+      verificationPassTimeoutMs: cfg.verificationPassTimeoutMs,
+      diffFiles: [diffFile('src/a.ts')],
+      ask,
+    });
+
+    expect(cfg.verificationTimeoutMs).toBe(180_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeGreaterThan(60_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeLessThanOrEqual(180_000);
   });
 
   it.each([
