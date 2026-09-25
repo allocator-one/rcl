@@ -910,7 +910,7 @@ queued live reviews as a recovery shortcut.
 
 ## Config File
 
-Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.
+Place `.review-council.yml` in your project root and run `rcl` from there. rcl looks only in the current working directory, not in parent directories. Use `--config <path>` for a file elsewhere. All fields are optional.
 
 ```yaml
 # Blocking council (provider-prefixed names) — every round waits for these.
@@ -1003,7 +1003,7 @@ spec: SPEC.md
 # githubToken: ghp_...
 ```
 
-Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`, `review-council.config.js`.
+Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`. Executable JS config is never discovered: rcl often runs in untrusted checkouts with provider keys in the environment.
 
 For converging patch reviews, async collection uses `--converge-target` (or
 `RCL_CONVERGE_TARGET`), not the patch pathname. Each round can keep a distinct,
