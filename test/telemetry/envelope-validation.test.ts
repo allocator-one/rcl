@@ -69,10 +69,12 @@ describe('validateRunEnvelope', () => {
     const originalRows = envelope.findings.length;
     const seed = envelope.findings[0]!;
     for (let index = 0; index < 210; index++) envelope.findings.push({ ...structuredClone(seed), ref: `padded-${index}`, description: '' });
+    let remaining = PROTOCOL_MAX_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify(envelope));
     for (const finding of envelope.findings.slice(originalRows)) {
-      const remaining = PROTOCOL_MAX_ENVELOPE_BYTES - Buffer.byteLength(JSON.stringify(envelope));
       if (remaining <= 0) break;
-      finding.description = 'x'.repeat(Math.min(20_000, remaining));
+      const chunk = Math.min(20_000, remaining);
+      finding.description = 'x'.repeat(chunk);
+      remaining -= chunk;
     }
     expect(Buffer.byteLength(JSON.stringify(envelope))).toBe(PROTOCOL_MAX_ENVELOPE_BYTES);
     expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);

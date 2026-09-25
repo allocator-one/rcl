@@ -37,6 +37,32 @@ describe('abortSignalWithTimeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+
+  it('aborts with TimeoutError when the lease expires', () => {
+    vi.useFakeTimers();
+    const lease = abortSignalWithTimeout(undefined, 1_000);
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(lease.signal.aborted).toBe(true);
+    expect(lease.signal.reason).toBeInstanceOf(DOMException);
+    expect((lease.signal.reason as DOMException).name).toBe('TimeoutError');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('propagates a parent abort after creation and releases the timer', () => {
+    vi.useFakeTimers();
+    const parent = new AbortController();
+    const lease = abortSignalWithTimeout(parent.signal, 1_000);
+    const reason = new Error('parent stopped');
+
+    parent.abort(reason);
+
+    expect(lease.signal.aborted).toBe(true);
+    expect(lease.signal.reason).toBe(reason);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('stays active after disposal even when its former timeout and parent fire', () => {
     vi.useFakeTimers();
     const parent = new AbortController();
