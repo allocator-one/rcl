@@ -21,6 +21,38 @@ function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
+function isRetryableReview(err: unknown, stream: boolean): boolean {
+  if (isRetryable(err)) return true;
+  if (!stream) return false;
+
+  // The SDK can reject finalMessage() without an HTTP status when a stream
+  // disconnects, receives a transient SSE error, or ends before message_stop.
+  // An abort, invalid request, or malformed response stays terminal.
+  if (err instanceof Anthropic.APIError && err.status === undefined &&
+      (err.type === 'overloaded_error' || err.type === 'api_error' ||
+        err.type === 'rate_limit_error' || err.type === 'timeout_error')) return true;
+  return err instanceof Anthropic.APIConnectionError ||
+    (err instanceof Anthropic.AnthropicError &&
+      (err.message === 'stream ended without producing a Message with role=assistant' ||
+        err.message === 'request ended without sending any chunks'));
+}
+
+interface ModelProfile {
+  maxTokens: number;
+  effort?: 'medium';
+  stream: boolean;
+}
+
+const DEFAULT_PROFILE: ModelProfile = { maxTokens: 16384, stream: false };
+const FABLE_51_PROFILE: ModelProfile = { maxTokens: 32768, effort: 'medium', stream: true };
+
+function profileFor(modelId: string): ModelProfile {
+  // Claude 4.6+ uses dateless pinned API IDs; this profile applies to the
+  // documented Fable 5.1 ID only, without guessing future model capabilities.
+  // https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
+  return modelId === 'claude-fable-5-1' ? FABLE_51_PROFILE : DEFAULT_PROFILE;
+}
+
 export class AnthropicAdapter implements ReviewAdapter {
   name = 'anthropic';
   provider = 'anthropic';
@@ -50,17 +82,20 @@ export class AnthropicAdapter implements ReviewAdapter {
 
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
+    // Fable 5.1 counts adaptive thinking against max_tokens. Large review
+    // chunks exhausted the old ceiling before any complete findings arrived.
+    const profile = profileFor(modelId);
 
     try {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
         try {
           // Use tool use for reliable JSON extraction
-          const response = await this.client.messages.create(
-            {
+          const request: Anthropic.MessageCreateParamsNonStreaming = {
               model: modelId,
-              max_tokens: 16384,
+              max_tokens: profile.maxTokens,
+              ...(profile.effort ? { output_config: { effort: profile.effort } } : {}),
               system: systemPrompt,
-              messages: [{ role: 'user', content: userPrompt }],
+              messages: [{ role: 'user' as const, content: userPrompt }],
               tools: [
                 {
                   name: 'report_findings',
@@ -98,12 +133,17 @@ export class AnthropicAdapter implements ReviewAdapter {
                 },
               ],
               tool_choice: { type: 'auto' as const },
-            },
-            // Buffer above our own timeout so the SDK's request timeout
-            // (600s default) never wins the race and misclassifies a
-            // timeout as a generic error.
-            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
-          );
+            };
+          // Fable's larger output budget requires the SDK's streaming path.
+          // finalMessage() keeps the same complete-response parsing and
+          // truncation checks used by the nonstreaming path.
+          const requestOptions = {
+            signal: controller.signal,
+            timeout: options.timeoutMs + 30_000,
+          };
+          const response = profile.stream
+            ? await this.client.messages.stream(request, requestOptions).finalMessage()
+            : await this.client.messages.create(request, requestOptions);
           const usage = usageFromAnthropic(response.usage);
 
           if (response.stop_reason === 'max_tokens') {
@@ -183,7 +223,7 @@ export class AnthropicAdapter implements ReviewAdapter {
               error: 'Request timed out',
             };
           }
-          if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
+          if (isRetryableReview(err, profile.stream) && attempt < (options.maxRetries ?? 3)) {
             await sleep(retryDelay(attempt));
             continue;
           }
