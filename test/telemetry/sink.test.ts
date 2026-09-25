@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
+import { buildRunEnvelope, type RunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { describeOutcome, HarnessSink } from '../../src/telemetry/sink.js';
 import { fakeFetch, sampleResult } from './fixtures.js';
@@ -48,6 +48,33 @@ describe('HarnessSink.postRun', () => {
     const { sink: s } = sink((request) => ({ status: 200, body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] }, meta: { status: 'existing' } } }));
     const outcome = await s.postRun(buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } }));
     expect(outcome).toMatchObject({ kind: 'ok', value: { status: 'existing' } });
+  });
+
+  it('refuses a supplied serialization that differs from the validated envelope', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const { sink: s, requests } = sink(() => ({ status: 201, body: {} }));
+    expect(s.preparePostRun(envelope, `${JSON.stringify(envelope)} `)).toMatchObject({ kind: 'rejected', error: 'serialized_envelope_mismatch' });
+    expect(requests).toHaveLength(0);
+  });
+
+  it('reuses retained envelope bytes and identity across prepared posts', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const serialized = JSON.stringify(envelope);
+    const originalRunId = envelope.run.id;
+    const { sink: s, requests } = sink((request) => ({
+      status: 200,
+      body: { data: { id: runIdOf(request), url: 'u', artifacts_expected: [] }, meta: { status: 'existing' } },
+    }));
+    const prepared = s.preparePostRun(envelope, serialized);
+    expect(prepared.kind).toBe('ready');
+    if (prepared.kind !== 'ready') return;
+
+    envelope.run.id = '00000000-0000-4000-8000-000000000099';
+    await expect(prepared.post()).resolves.toMatchObject({ kind: 'ok', value: { id: originalRunId } });
+    await expect(prepared.post()).resolves.toMatchObject({ kind: 'ok', value: { id: originalRunId } });
+
+    expect(requests.map((request) => request.body)).toEqual([serialized, serialized]);
+    expect(envelope.run.id).toBe('00000000-0000-4000-8000-000000000099');
   });
 
   it('refuses a receipt that names another run or forgets which artifacts it expects', async () => {
@@ -102,6 +129,28 @@ describe('HarnessSink.postRun', () => {
     expect(await sink(() => ({ status: 429 })).sink.postRun(envelope)).toMatchObject({ kind: 'unavailable' });
     const down = await sink(() => new TypeError('fetch failed')).sink.postRun(envelope);
     expect(down).toEqual({ kind: 'unavailable', reason: 'TypeError: fetch failed' });
+  });
+
+  it('retains an unavailable outcome when a transport cause cannot be stringified', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const failure = new TypeError('fetch failed', { cause: Object.create(null) });
+
+    await expect(sink(() => failure).sink.postRun(envelope)).resolves.toEqual({
+      kind: 'unavailable', reason: 'TypeError: fetch failed; cause: [unstringifiable diagnostic]',
+    });
+  });
+
+  it('keeps a bounded, redacted causal transport diagnostic for an unavailable request', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const cause = new Error(`socket reset authorization=Bearer ${'Abcdef1234567890Abcdef1234567890'}`);
+    const failure = new TypeError('fetch failed', { cause });
+
+    const outcome = await sink(() => failure).sink.postRun(envelope);
+
+    expect(outcome).toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('TypeError: fetch failed') });
+    expect((outcome as { reason: string }).reason).toContain('cause: Error: socket reset');
+    expect((outcome as { reason: string }).reason).not.toContain('Abcdef1234567890');
+    expect((outcome as { reason: string }).reason.length).toBeLessThanOrEqual(300);
   });
 
   it('never sends the token anywhere but the credential host, and never follows a redirect with it', async () => {
@@ -183,6 +232,156 @@ describe('HarnessSink.postRun', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe('HarnessSink.getAttestedRunReceipt', () => {
+  const attested = { url: 'https://harness.example.test', token: 'rbc_minted', source: 'attest' as const };
+
+  function attestedSink(handler: Parameters<typeof fakeFetch>[0]) {
+    const { fetch, requests } = fakeFetch(handler);
+    return { sink: new HarnessSink({ credential: attested, rclVersion: '3.8.1', fetchImpl: fetch, timeoutMs: 500 }), requests };
+  }
+
+  function envelope(): RunEnvelope {
+    return buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+  }
+
+  it('accepts only an own-run receipt whose complete artifact declarations bind the original envelope', async () => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const { sink: s, requests } = attestedSink(() => ({
+      status: 200,
+      body: { data: {
+        id: original.run.id,
+        url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+        received_at: '2026-09-23T12:00:00Z', repo_verified: true, head_verified: 'current',
+        envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+        artifacts_declared: original.artifacts_declared,
+      }, meta: { status: 'existing' } },
+    }));
+
+    const receipt = await s.getAttestedRunReceipt(original, serialized);
+
+    expect(receipt).toMatchObject({ kind: 'recorded', value: { id: original.run.id, artifacts_expected: ['report_json', 'report_md'] } });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: 'GET', url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+      headers: { authorization: 'Bearer rbc_minted' }, redirect: 'manual',
+    });
+  });
+
+  it('accepts an own-run receipt under a configured base path', async () => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const { fetch } = fakeFetch(() => ({ status: 200, body: { data: {
+      id: original.run.id, url: `https://harness.example.test/harness/api/v1/reviews/runs/${original.run.id}`,
+      envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'), artifacts_declared: original.artifacts_declared,
+    }, meta: { status: 'existing' } } }));
+    const prefixed = new HarnessSink({ credential: { ...attested, url: 'https://harness.example.test/harness' }, rclVersion: '3.8.1', fetchImpl: fetch, timeoutMs: 500 });
+    await expect(prefixed.getAttestedRunReceipt(original, serialized)).resolves.toMatchObject({ kind: 'recorded' });
+  });
+
+  it('permits replay only after an explicit own-run absence, never after a rejected or mismatched receipt', async () => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const validReceipt = {
+      id: original.run.id,
+      url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+      received_at: '2026-09-23T12:00:00Z',
+      repo_verified: true,
+      head_verified: 'current',
+      envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+      artifacts_declared: original.artifacts_declared,
+    };
+    const absent = await attestedSink(() => ({ status: 404, body: { error: 'not_found' } })).sink.getAttestedRunReceipt(original, serialized);
+    expect(absent).toEqual({ kind: 'absent' });
+
+    const forbidden = await attestedSink(() => ({ status: 403, body: { error: 'run_bound_credential' } })).sink.getAttestedRunReceipt(original, serialized);
+    expect(forbidden).toEqual({ kind: 'rejected' });
+
+    const mismatched = await attestedSink(() => ({
+      status: 200,
+      body: { data: {
+        ...validReceipt,
+        artifacts_declared: original.artifacts_declared.map((declaration, index) =>
+          index === 0 ? { ...declaration, sha256: '0'.repeat(64) } : declaration),
+      }, meta: { status: 'existing' } },
+    })).sink.getAttestedRunReceipt(original, serialized);
+    expect(mismatched).toEqual({ kind: 'rejected' });
+
+    const wrongBytes = await attestedSink(() => ({
+      status: 200,
+      body: { data: {
+        ...validReceipt,
+        envelope_sha256: createHash('sha256').update(`${serialized} `, 'utf8').digest('hex'),
+      }, meta: { status: 'existing' } },
+    })).sink.getAttestedRunReceipt(original, serialized);
+    expect(wrongBytes).toEqual({ kind: 'rejected' });
+  });
+
+  it.each([
+    ['a server failure', () => ({ status: 503 })],
+    ['a transport failure', () => new TypeError('fetch failed')],
+  ])('treats receipt %s as unavailable rather than authorizing a replay', async (_label, respond) => {
+    const original = envelope();
+    const probe = await attestedSink(respond).sink.getAttestedRunReceipt(original, JSON.stringify(original));
+
+    expect(probe).toEqual({ kind: 'unavailable' });
+  });
+
+  it.each([
+    ['an ordinary credential', 'ordinary'],
+    ['a different run id', 'wrong-id'],
+    ['a malformed receipt URL', 'malformed-url'],
+    ['a cross-origin receipt URL', 'cross-origin-url'],
+    ['a same-origin URL on another path', 'wrong-path-url'],
+    ['a receipt URL with a query', 'query-url'],
+    ['a non-existing receipt status', 'bad-meta-status'],
+    ['a missing artifact declaration', 'declaration-count'],
+    ['duplicate artifact declarations', 'duplicate-declaration'],
+  ] as const)('rejects %s', async (_label, mutation) => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const receipt = {
+      id: original.run.id,
+      url: `https://harness.example.test/api/v1/reviews/runs/${original.run.id}`,
+      envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'),
+      artifacts_declared: structuredClone(original.artifacts_declared),
+    };
+    const body = { data: receipt, meta: { status: 'existing' } };
+
+    if (mutation === 'ordinary') {
+      const { sink: ordinary, requests } = sink(() => ({ status: 200, body }));
+      await expect(ordinary.getAttestedRunReceipt(original, serialized)).resolves.toEqual({ kind: 'rejected' });
+      expect(requests).toHaveLength(0);
+      return;
+    }
+    if (mutation === 'wrong-id') receipt.id = 'another-run';
+    else if (mutation === 'malformed-url') receipt.url = 'not a URL';
+    else if (mutation === 'cross-origin-url') receipt.url = `https://other.example.test/api/v1/reviews/runs/${original.run.id}`;
+    else if (mutation === 'wrong-path-url') receipt.url = `https://harness.example.test/api/v1/reviews/runs/${original.run.id}/artifacts`;
+    else if (mutation === 'query-url') receipt.url = `${receipt.url}?view=receipt`;
+    else if (mutation === 'bad-meta-status') body.meta.status = 'created';
+    else if (mutation === 'declaration-count') receipt.artifacts_declared = receipt.artifacts_declared.slice(0, 1);
+    else if (mutation === 'duplicate-declaration') receipt.artifacts_declared = [receipt.artifacts_declared[0]!, receipt.artifacts_declared[0]!];
+
+    const probe = await attestedSink(() => ({ status: 200, body })).sink.getAttestedRunReceipt(original, serialized);
+    expect(probe).toEqual({ kind: 'rejected' });
+  });
+
+  it('runs the actual receipt transport and honors cancellation', async () => {
+    const controller = new AbortController();
+    const { sink: s, requests } = attestedSink(() => 'hang');
+
+    const original = envelope();
+    const pending = s.getAttestedRunReceipt(original, JSON.stringify(original), { signal: controller.signal, timeoutMs: 60_000 });
+    expect(requests).toHaveLength(1);
+    controller.abort(new Error('fixture cancellation'));
+
+    expect(await pending).toEqual({ kind: 'unavailable' });
+    expect(requests[0]!.signal?.aborted).toBe(true);
+    expect(requests[0]!.signal?.reason).toMatchObject({ message: 'fixture cancellation' });
   });
 });
 

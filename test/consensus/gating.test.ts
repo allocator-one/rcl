@@ -859,6 +859,30 @@ describe('resolveGatingConfig', () => {
     );
   });
 
+  it('uses the whole-pass budget for an implicit verifier call timeout', async () => {
+    const cfg = resolveGatingConfig({ verificationPassTimeout: 180_000 });
+    const ask = vi.fn(async (): Promise<ModelAnswer> => ({
+      model: 'google/gemini-3.6-flash',
+      provider: 'google',
+      text: '[{"id":"F1","verdict":"refuted","reason":"guard exists"}]',
+      durationMs: 1,
+      status: 'success',
+    }));
+
+    await applyGating([makeFinding()], {
+      minModels: cfg.minModels,
+      verificationModel: cfg.verificationModel,
+      verificationTimeoutMs: cfg.verificationTimeoutMs,
+      verificationPassTimeoutMs: cfg.verificationPassTimeoutMs,
+      diffFiles: [diffFile('src/a.ts')],
+      ask,
+    });
+
+    expect(cfg.verificationTimeoutMs).toBe(180_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeGreaterThan(60_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeLessThanOrEqual(180_000);
+  });
+
   it.each([
     { verificationPassTimeout: 180_000, verificationTimeout: undefined, expectedTimeout: 180_000 },
     { verificationPassTimeout: 90_000, verificationTimeout: undefined, expectedTimeout: 90_000 },

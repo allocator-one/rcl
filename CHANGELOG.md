@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.1.4 - 2026-09-25
+
+- Bind attested recovery receipts and preserve byte-identical evidence replay, including bounded recovery for unavailable attested delivery (RCL-83; requires compatible backend support).
+
+- Support complete evidence envelopes up to 4,000,000 bytes while retaining bounded diagnostics and compatibility with the backend evidence contract (RCL-88; requires compatible backend support).
+
 ## 4.1.3 - 2026-09-25
 
 - Let verifier batches use the remaining whole-pass deadline when no separate
