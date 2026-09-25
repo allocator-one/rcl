@@ -58,7 +58,26 @@ describe('SDK client construction', () => {
     expect((adapter as unknown as { client: OpenAI }).client.maxRetries).toBe(0);
   });
 
-  it('anthropic retries with auto tool use after the SDK reports an unsupported forced tool choice', async () => {
+  it.each([
+    ['an earlier model', 'claude-fable-5', anthropicToolResponse()],
+    ['Fable 5.1 tool use', 'anthropic/claude-fable-5-1', anthropicToolResponse()],
+    ['Fable 5.1 text JSON', 'anthropic/claude-fable-5-1', { content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' }],
+  ])('anthropic uses automatic tool choice and accepts %s', async (_kind, model, response) => {
+    const create = vi.fn().mockResolvedValueOnce(response);
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { create } });
+
+    const review = await adapter.review(model, 'general', 's', 'u', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0]).toMatchObject({
+      tools: [expect.objectContaining({ name: 'report_findings' })],
+      tool_choice: { type: 'auto' },
+    });
+  });
+
+  it('anthropic does not retry an unsupported tool choice request', async () => {
     const payload = {
       type: 'error',
       error: {
@@ -67,43 +86,16 @@ describe('SDK client construction', () => {
       },
       request_id: 'req_011CfQWXHUsADG78BBDDYRN9',
     };
-    const create = vi.fn()
-      .mockRejectedValueOnce(new Anthropic.BadRequestError(400, payload, 'request'))
-      .mockResolvedValueOnce({ content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' });
+    const create = vi.fn().mockRejectedValueOnce(new Anthropic.BadRequestError(400, payload, 'request'));
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, { messages: { create } });
 
     const review = await adapter.review('claude-fable-5', 'general', 's', 'u', OPTS);
 
-    expect(review.status).toBe('success');
-    expect(create.mock.calls[0]![0]).toMatchObject({
-      tool_choice: { type: 'any' },
-      tools: [expect.objectContaining({ name: 'report_findings' })],
-    });
-    expect(create.mock.calls[1]![0]).not.toHaveProperty('tool_choice');
-    expect(create.mock.calls[1]![0]).toMatchObject({
-      tools: [expect.objectContaining({ name: 'report_findings' })],
-    });
-  });
-
-  it.each([
-    ['tool use', anthropicToolResponse()],
-    ['text JSON', { content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' }],
-  ])('anthropic Fable 5.1 omits forced tool choice and accepts %s', async (_kind, response) => {
-    const create = vi.fn().mockResolvedValueOnce(response);
-    const adapter = new AnthropicAdapter('test-key');
-    setClient(adapter, { messages: { create } });
-
-    const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 's', 'u', OPTS);
-
-    expect(review.status).toBe('success');
+    expect(review.status).toBe('error');
     expect(create).toHaveBeenCalledTimes(1);
-    expect(create.mock.calls[0]![0]).toMatchObject({
-      model: 'claude-fable-5-1',
-      tools: [expect.objectContaining({ name: 'report_findings' })],
-    });
-    expect(create.mock.calls[0]![0]).not.toHaveProperty('tool_choice');
   });
+
 });
 
 describe('timeout classification', () => {

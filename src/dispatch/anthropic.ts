@@ -21,17 +21,6 @@ function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
-function rejectsToolChoice(err: unknown): boolean {
-  return err instanceof Anthropic.APIError && err.status === 400 && /tool_choice.*not supported/i.test(err.message);
-}
-
-/** Fable/Mythos 5.1 retain tools but reject forced `any` and named tool use. */
-function supportsForcedToolChoice(model: string): boolean {
-  return !['claude-fable-5-1', 'claude-mythos-5-1'].some(
-    unsupported => model === unsupported || model.startsWith(`${unsupported}-`)
-  );
-}
-
 export class AnthropicAdapter implements ReviewAdapter {
   name = 'anthropic';
   provider = 'anthropic';
@@ -61,7 +50,6 @@ export class AnthropicAdapter implements ReviewAdapter {
 
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
-    let useForcedToolChoice = supportsForcedToolChoice(modelId);
 
     try {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
@@ -110,7 +98,7 @@ export class AnthropicAdapter implements ReviewAdapter {
                   },
                 },
               ],
-              ...(useForcedToolChoice ? { tool_choice: { type: 'any' as const } } : {}),
+              tool_choice: { type: 'auto' as const },
             },
             // Buffer above our own timeout so the SDK's request timeout
             // (600s default) never wins the race and misclassifies a
@@ -195,11 +183,6 @@ export class AnthropicAdapter implements ReviewAdapter {
               status: 'timeout',
               error: 'Request timed out',
             };
-          }
-          if (useForcedToolChoice && rejectsToolChoice(err)) {
-            useForcedToolChoice = false;
-            attempt--;
-            continue;
           }
           if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
             await sleep(retryDelay(attempt));
