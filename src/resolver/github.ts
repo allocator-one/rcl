@@ -1,6 +1,7 @@
-import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
+import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
+import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
 
 export interface GitHubTarget {
   owner: string;
@@ -136,9 +137,7 @@ async function fetchChangedFiles(
     pull_number: target.number,
     per_page: 100,
   });
-  const recheck = (
-    await octokit.pulls.get({ owner: target.owner, repo: target.repo, pull_number: target.number })
-  ).data;
+  const recheck = (await getGitHubPullRequest(octokit, target)).data;
   if (recheck.head.sha !== pr.head.sha || recheck.base.sha !== pr.base.sha) {
     throw new Error(
       `PR #${target.number} moved (${pr.base.sha}...${pr.head.sha} → ${recheck.base.sha}...${recheck.head.sha}) while its ${listed.length} files were being listed — rerun the review.`
@@ -159,19 +158,8 @@ export async function fetchPRDiff(
   token?: string,
   octokitClient?: Octokit
 ): Promise<Diff> {
-  const octokit =
-    octokitClient ??
-    new Octokit({
-      auth: token ?? process.env['GITHUB_TOKEN'],
-    });
-
-  const pr = (
-    await octokit.pulls.get({
-      owner: target.owner,
-      repo: target.repo,
-      pull_number: target.number,
-    })
-  ).data;
+  const octokit = octokitClient ?? await createGitHubClient(token);
+  const pr = (await getGitHubPullRequest(octokit, target)).data;
 
   // Exact-head binding: the files come from a compare pinned to the base and
   // head object ids this very response named (see fetchChangedFiles for the

@@ -3,7 +3,7 @@ import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, ConfigError } from '../../src/config/loader.js';
-import { DEFAULT_MODELS, DEFAULT_SECONDARY_MODELS } from '../../src/config/defaults.js';
+import { DEFAULT_MODELS, DEFAULT_SECONDARY_MODELS, DEFAULT_ASYNC_MODELS } from '../../src/config/defaults.js';
 
 let dir: string;
 let savedOpenRouterKey: string | undefined;
@@ -117,8 +117,8 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
   it('defaults the blocking council to the three direct-API models', async () => {
     const config = await loadConfig(undefined, dir);
     expect(config.models).toEqual([
-      'anthropic/claude-fable-5',
-      'openai/gpt-5.6-sol',
+      'anthropic/claude-fable-5-1',
+      'openai/gpt-6-sol',
       'google/gemini-3.8-flash',
     ]);
   });
@@ -174,6 +174,13 @@ describe('quorum and timeout defaults (RCL-26)', () => {
 });
 
 describe('OpenRouter default degradation', () => {
+  it('preserves the default fleet for guarded preflight instead of silently removing providers', async () => {
+    delete process.env['OPENROUTER_API_KEY'];
+    const config = await loadConfig(undefined, dir, { preserveDefaultRoster: true });
+
+    expect(config.asyncModels).toEqual([...DEFAULT_ASYNC_MODELS]);
+  });
+
   it('drops openrouter/ models from both default lists when OPENROUTER_API_KEY is unset', async () => {
     delete process.env['OPENROUTER_API_KEY'];
     const config = await loadConfig(undefined, dir);

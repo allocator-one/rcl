@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Default blocking council moves to `anthropic/claude-fable-5-1` and
+  `openai/gpt-6-sol`; `google/gemini-3.8-flash` and the async `kimi-k3` seat
+  are unchanged. Consensus weights are keyed by model id, so both new models
+  start at the neutral weight until they accrue 20 triaged outcomes (RCL-99).
+- Send `max_completion_tokens` to every OpenAI `gpt-5`+ and o-series model.
+  `gpt-6-*` rejected the legacy `max_tokens` with HTTP 400, which would have
+  killed the OpenAI seat on every call (RCL-99).
+
 ## 4.0.1 - 2026-09-24
 
 - Raise the complete evidence-envelope transport limit to 4,000,000 bytes while retaining 2,000,000-character limits for individual verification diagnostics. Share the total limit with historical recovery planning so valid retained envelopes are not rejected before their immutable artifacts can be assessed (RCL-88; requires compatible backend acceptance).

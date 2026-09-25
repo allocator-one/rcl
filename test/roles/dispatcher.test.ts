@@ -166,6 +166,21 @@ describe('buildRoleAssignments', () => {
 });
 
 describe('buildAssignments', () => {
+  it('keeps guarded specialization assignments stable across launches', () => {
+    const roles = [generalRole, specializedA, specializedB];
+    const options = { models: ['openai/model', 'anthropic/model'], roles,
+      roleMap: new Map(roles.map(role => [role.name, role])), deterministic: true };
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const first = buildAssignments(options);
+      random.mockReturnValue(0.999);
+      expect(buildAssignments(options)).toEqual(first);
+      expect(random).not.toHaveBeenCalled();
+    } finally {
+      random.mockRestore();
+    }
+  });
+
   const allRoles = [generalRole, specializedA, specializedB];
   const roleMap = new Map<string, Role>(allRoles.map((r) => [r.name, r]));
 

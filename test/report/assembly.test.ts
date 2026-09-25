@@ -135,5 +135,12 @@ describe('completed council terminal artifacts', () => {
     expect(await readFile(sibling, 'utf8')).toBe(md);
     expect(await readFile(jsonFile, 'utf8')).toBe(json);
     expect(await readFile(markdown, 'utf8')).toBe(md);
+
+    await writeFile(jsonFile, 'preserved');
+    const exclusiveFailure = await writeReportArtifacts(artifacts, { jsonFile, exclusive: true });
+    expect(exclusiveFailure).toEqual([
+      { path: 'output.report_json', message: expect.stringMatching(/Could not write JSON:.*EEXIST/) },
+    ]);
+    expect(await readFile(jsonFile, 'utf8')).toBe('preserved');
   });
 });

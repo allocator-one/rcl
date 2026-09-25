@@ -35,7 +35,7 @@ export const SEARCH_PLACES = [
   '.review-council.json',
 ];
 
-export async function loadConfig(configPath?: string, searchFrom?: string): Promise<Config> {
+export async function loadConfig(configPath?: string, searchFrom?: string, options: { preserveDefaultRoster?: boolean } = {}): Promise<Config> {
   const cwd = searchFrom ?? process.cwd();
   const explorer = cosmiconfig('review-council', {
     searchPlaces: SEARCH_PLACES,
@@ -57,7 +57,7 @@ export async function loadConfig(configPath?: string, searchFrom?: string): Prom
   }
 
   if (!result || result.isEmpty) {
-    return buildDefaultConfig();
+    return buildDefaultConfig(options.preserveDefaultRoster);
   }
 
   const parsed = ConfigSchema.safeParse(result.config);
@@ -68,7 +68,7 @@ export async function loadConfig(configPath?: string, searchFrom?: string): Prom
     throw new ConfigError(`Invalid config at ${result.filepath}:\n${issues}`);
   }
 
-  return mergeWithDefaults(parsed.data);
+  return mergeWithDefaults(parsed.data, options.preserveDefaultRoster);
 }
 
 /**
@@ -82,9 +82,10 @@ export async function loadConfig(configPath?: string, searchFrom?: string): Prom
  */
 function dropOpenRouterDefaultsWithoutKey(
   models: readonly string[],
-  listName: string
+  listName: string,
+  preserveDefaultRoster = false
 ): string[] {
-  if (process.env['OPENROUTER_API_KEY']?.trim()) return [...models];
+  if (preserveDefaultRoster || process.env['OPENROUTER_API_KEY']?.trim()) return [...models];
   const kept = models.filter((m) => !m.startsWith('openrouter/'));
   const dropped = models.length - kept.length;
   if (dropped > 0) {
@@ -99,11 +100,11 @@ function dropOpenRouterDefaultsWithoutKey(
   return kept;
 }
 
-function buildDefaultConfig(): Config {
+function buildDefaultConfig(preserveDefaultRoster = false): Config {
   return {
-    models: dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models'),
-    secondaryModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models'),
-    asyncModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_ASYNC_MODELS, 'async models'),
+    models: dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models', preserveDefaultRoster),
+    secondaryModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models', preserveDefaultRoster),
+    asyncModels: dropOpenRouterDefaultsWithoutKey(DEFAULT_ASYNC_MODELS, 'async models', preserveDefaultRoster),
     thresholds: { ...DEFAULT_THRESHOLDS },
     timeout: DEFAULT_TIMEOUT_MS,
     asyncTimeout: DEFAULT_ASYNC_TIMEOUT_MS,
@@ -114,14 +115,14 @@ function buildDefaultConfig(): Config {
   };
 }
 
-function mergeWithDefaults(config: Config): Config {
+function mergeWithDefaults(config: Config, preserveDefaultRoster = false): Config {
   return {
-    models: config.models ?? dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models'),
+    models: config.models ?? dropOpenRouterDefaultsWithoutKey(DEFAULT_MODELS, 'models', preserveDefaultRoster),
     secondaryModels:
       config.secondaryModels ??
       (config.models
         ? []
-        : dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models')),
+        : dropOpenRouterDefaultsWithoutKey(DEFAULT_SECONDARY_MODELS, 'secondary models', preserveDefaultRoster)),
     // Same containment rule as secondaryModels: an explicit `models` list
     // means "send code to exactly these providers" — default async reviewers
     // must not leak the diff to a provider the user configured away from.
@@ -129,7 +130,7 @@ function mergeWithDefaults(config: Config): Config {
       config.asyncModels ??
       (config.models
         ? []
-        : dropOpenRouterDefaultsWithoutKey(DEFAULT_ASYNC_MODELS, 'async models')),
+        : dropOpenRouterDefaultsWithoutKey(DEFAULT_ASYNC_MODELS, 'async models', preserveDefaultRoster)),
     roles: config.roles,
     reviewers: config.reviewers,
     customRoles: config.customRoles,

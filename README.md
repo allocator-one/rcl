@@ -91,6 +91,10 @@ Review a PR, a local diff, or uncommitted work.
 | `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` |
 | `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
+| `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
+| `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
+| `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
+| `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
 
@@ -103,8 +107,8 @@ Review a PR, a local diff, or uncommitted work.
 ```bash
 # Use explicit model:role pairs
 rcl review owner/repo#7 \
-  --reviewer claude-opus-4-6:security-auditor \
-  --reviewer gpt-5.4:bug-hunter
+  --reviewer claude-fable-5-1:security-auditor \
+  --reviewer gpt-6-sol:bug-hunter
 
 # Spec compliance review with context
 rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/
@@ -145,7 +149,7 @@ rcl discuss --report report.json --finding f003 "Is this exploitable given the s
 
 # Attach code as context, or ask different models
 rcl discuss --report report.json --finding f003 --context src/auth.ts "Does the middleware at line 12 not already cover this?"
-rcl discuss --report report.json --finding f003 --models anthropic/claude-fable-5 "Summarize the strongest counterargument."
+rcl discuss --report report.json --finding f003 --models anthropic/claude-fable-5-1 "Summarize the strongest counterargument."
 ```
 
 Model-generated finding ids can collide; when `--finding <id>` is ambiguous the error lists `<id>:<n>` disambiguators. Findings in the below-threshold appendix are addressable too. Answers come back in parallel, respecting the configured `timeout`, `maxRetries`, and `reasoningEffort`. There is no session state: each `discuss` is one independent round built from the report file.
@@ -161,9 +165,38 @@ rcl roles show <name>      # Show system prompt and details for a role
 
 ---
 
+### Guarded convergence launches
+
+```bash
+rcl review change.patch --guarded-converge --converge-target repo-123 \
+  --head-sha <captured-head> --base-sha <captured-base> --json-file fresh-report.json
+```
+
+Keep this command foreground inside a persistent host task/session. It validates
+inputs, credentials and fresh output paths before claiming; native target
+ownership spans claim through completion. Do not call `converge-attempt` first
+or supply `--attempt`. RCL derives the next round from admitted state and rejects
+a conflicting `--round`. Existing caps and all spent attempts are retained.
+Guarded assignment order is stable and missing credentials never shrink the roster.
+
+Process and triage the original report before another launch. Unchanged reviewed
+inputs, including mere upstream base-tip movement, do not need another council.
+A real fix needs a fresh resulting head; unresolved native blockers refuse another
+launch. Unknown/failed dispatch requires an explicit `--retry-reason` after
+recovery, even if the head changed. This does not refund attempts or promise
+exactly-once provider billing. Credential presence cannot prove provider availability.
+
+`--launch-intent stop-upstream` never cancels review. `stop-review` and
+`retry-delivery` refuse new reviewer dispatch; cancel an existing review only
+through its retained host handle. Retry evidence with `rcl telemetry flush --run
+<run-id>`, not another council. Intent interpretation and finding adjudication
+remain human/agent decisions; native/enforced evidence and CI still gate merging.
+
 ### `rcl converge-attempt`
 
-Machine-enforced safety guard used by the generated `rcl-converge` skill.
+Low-level accounting command retained for legacy callers. The generated
+`rcl-converge` skill instead uses `review --guarded-converge`; do not preclaim
+an attempt for that path.
 Each call atomically and durably consumes one per-target attempt under the
 repository's common Git directory, so the budget survives sessions, linked
 worktrees, and abrupt system restarts.
@@ -921,15 +954,15 @@ queued live reviews as a recovery shortcut.
 
 ## Config File
 
-Place `.review-council.yml` in your project root (or any parent directory). All fields are optional.
+Place `.review-council.yml` in your project root and run `rcl` from there. rcl looks only in the current working directory, not in parent directories. Use `--config <path>` for a file elsewhere. All fields are optional.
 
 ```yaml
 # Blocking council (provider-prefixed names) — every round waits for these.
 # Shown here: the actual defaults. Keep slow/aggregator-routed models out of
 # this list; give them an async seat instead.
 models:
-  - anthropic/claude-fable-5
-  - openai/gpt-5.6-sol
+  - anthropic/claude-fable-5-1
+  - openai/gpt-6-sol
   - google/gemini-3.8-flash
 
 # Async bonus reviewers — fired with each round, never awaited. Results that
@@ -947,9 +980,9 @@ roles:
 
 # Or pin explicit model:role pairs
 reviewers:
-  - model: anthropic/claude-opus-4-6
+  - model: anthropic/claude-fable-5-1
     role: security-auditor
-  - model: openai/gpt-5.4
+  - model: openai/gpt-6-sol
     role: bug-hunter
 
 # Custom role overrides (extends a built-in or creates new)
@@ -1014,7 +1047,7 @@ spec: SPEC.md
 # githubToken: ghp_...
 ```
 
-Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`, `review-council.config.js`.
+Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`. Executable JS config is never discovered: rcl often runs in untrusted checkouts with provider keys in the environment.
 
 For converging patch reviews, async collection uses `--converge-target` (or
 `RCL_CONVERGE_TARGET`), not the patch pathname. Each round can keep a distinct,
@@ -1051,11 +1084,19 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 
 ## Environment Variables
 
+Explicit GitHub PR fetches and review posting use a nonempty `githubToken`
+configuration value first, then `GITHUB_TOKEN`, then the existing
+`gh auth token --hostname github.com` login. The fallback is noninteractive
+and bounded; if unavailable, public anonymous reads still work. A PR 404
+explains how to check private-repository access without exposing credentials.
+Local patch reviews do not read GitHub credentials.
+
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | API key for Claude models |
 | `OPENAI_API_KEY` | API key for OpenAI models |
-| `GEMINI_API_KEY` | API key for Google Gemini models |
+| `GOOGLE_API_KEY` | Preferred Google Gemini API key; empty or whitespace-only values fall through |
+| `GEMINI_API_KEY` | Google Gemini API key when `GOOGLE_API_KEY` is absent or blank; also used for Harness-injected keys |
 | `OPENROUTER_API_KEY` | API key for [OpenRouter](https://openrouter.ai) models (`openrouter/…` prefix) |
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
