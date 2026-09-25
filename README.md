@@ -103,8 +103,8 @@ Review a PR, a local diff, or uncommitted work.
 ```bash
 # Use explicit model:role pairs
 rcl review owner/repo#7 \
-  --reviewer claude-opus-4-6:security-auditor \
-  --reviewer gpt-5.4:bug-hunter
+  --reviewer claude-fable-5-1:security-auditor \
+  --reviewer gpt-6-sol:bug-hunter
 
 # Spec compliance review with context
 rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/
@@ -145,7 +145,7 @@ rcl discuss --report report.json --finding f003 "Is this exploitable given the s
 
 # Attach code as context, or ask different models
 rcl discuss --report report.json --finding f003 --context src/auth.ts "Does the middleware at line 12 not already cover this?"
-rcl discuss --report report.json --finding f003 --models anthropic/claude-fable-5 "Summarize the strongest counterargument."
+rcl discuss --report report.json --finding f003 --models anthropic/claude-fable-5-1 "Summarize the strongest counterargument."
 ```
 
 Model-generated finding ids can collide; when `--finding <id>` is ambiguous the error lists `<id>:<n>` disambiguators. Findings in the below-threshold appendix are addressable too. Answers come back in parallel, respecting the configured `timeout`, `maxRetries`, and `reasoningEffort`. There is no session state: each `discuss` is one independent round built from the report file.
@@ -917,8 +917,8 @@ Place `.review-council.yml` in your project root (or any parent directory). All 
 # Shown here: the actual defaults. Keep slow/aggregator-routed models out of
 # this list; give them an async seat instead.
 models:
-  - anthropic/claude-fable-5
-  - openai/gpt-5.6-sol
+  - anthropic/claude-fable-5-1
+  - openai/gpt-6-sol
   - google/gemini-3.8-flash
 
 # Async bonus reviewers — fired with each round, never awaited. Results that
@@ -936,9 +936,9 @@ roles:
 
 # Or pin explicit model:role pairs
 reviewers:
-  - model: anthropic/claude-opus-4-6
+  - model: anthropic/claude-fable-5-1
     role: security-auditor
-  - model: openai/gpt-5.4
+  - model: openai/gpt-6-sol
     role: bug-hunter
 
 # Custom role overrides (extends a built-in or creates new)

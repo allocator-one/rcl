@@ -51,8 +51,7 @@ export class OpenAIAdapter implements ReviewAdapter {
 
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
-    // Use max_completion_tokens for gpt-5.x and o-series; max_tokens for everything else
-    const usesCompletionTokens = modelId.startsWith('gpt-5') || /^o[134]/.test(modelId);
+    const usesCompletionTokens = usesMaxCompletionTokens(modelId);
 
     try {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
@@ -170,7 +169,7 @@ export class OpenAIAdapter implements ReviewAdapter {
   ): Promise<ModelAnswer> {
     const start = Date.now();
     const modelId = stripKnownProviderPrefix(model);
-    const usesCompletionTokens = modelId.startsWith('gpt-5') || /^o[134]/.test(modelId);
+    const usesCompletionTokens = usesMaxCompletionTokens(modelId);
 
     const outcome = await attemptWithRetries({
       timeoutMs: options.timeoutMs,
@@ -213,4 +212,15 @@ export class OpenAIAdapter implements ReviewAdapter {
           error: outcome.error,
         };
   }
+}
+
+/**
+ * gpt-5+ and the o-series reject `max_tokens` with HTTP 400. Match by major
+ * version so the next generation does not silently fall back to the legacy
+ * parameter.
+ */
+function usesMaxCompletionTokens(modelId: string): boolean {
+  const gptMajor = /^gpt-(\d+)/.exec(modelId);
+  if (gptMajor) return Number(gptMajor[1]) >= 5;
+  return /^o[134]/.test(modelId);
 }

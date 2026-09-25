@@ -557,6 +557,59 @@ describe('openai-compat request parameters', () => {
 // green check for code nobody looked at, `successfulReviews` keeps the CI
 // "nothing was reviewed" guard quiet, and consensus counts the refuser as a
 // relevant reviewer that found nothing (RCL-13).
+// OpenAI rejects max_tokens on reasoning-era models with HTTP 400, so a
+// wrong parameter is a dead reviewer, not a degraded one.
+describe('openai request parameters', () => {
+  function capturingClient(captured: Array<Record<string, unknown>>) {
+    return {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            captured.push(params);
+            return Promise.resolve(openaiResponse());
+          },
+        },
+      },
+    };
+  }
+
+  it.each(['gpt-5.6-sol', 'gpt-6-sol', 'openai/gpt-6-sol', 'gpt-10-sol', 'o3'])(
+    '%s reviews with max_completion_tokens',
+    async (model) => {
+      const captured: Array<Record<string, unknown>> = [];
+      const adapter = new OpenAIAdapter('test-key');
+      setClient(adapter, capturingClient(captured));
+
+      await adapter.review(model, 'general', 's', 'u', OPTS);
+
+      expect(captured[0]).toHaveProperty('max_completion_tokens', 16384);
+      expect(captured[0]).not.toHaveProperty('max_tokens');
+    }
+  );
+
+  it('gpt-6 asks with max_completion_tokens', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, capturingClient(captured));
+
+    await adapter.ask('gpt-6-sol', 's', 'u', OPTS);
+
+    expect(captured[0]).toHaveProperty('max_completion_tokens');
+    expect(captured[0]).not.toHaveProperty('max_tokens');
+  });
+
+  it('a legacy chat model keeps max_tokens', async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, capturingClient(captured));
+
+    await adapter.review('gpt-4.1', 'general', 's', 'u', OPTS);
+
+    expect(captured[0]).toHaveProperty('max_tokens', 16384);
+    expect(captured[0]).not.toHaveProperty('max_completion_tokens');
+  });
+});
+
 describe('refusal detection', () => {
   it('anthropic: stop_reason refusal is an error carrying the category', async () => {
     const adapter = new AnthropicAdapter('test-key');

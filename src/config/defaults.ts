@@ -8,8 +8,8 @@
  * multi-model findings still surface.
  */
 export const DEFAULT_MODELS = [
-  'anthropic/claude-fable-5',
-  'openai/gpt-5.6-sol',
+  'anthropic/claude-fable-5-1',
+  'openai/gpt-6-sol',
   'google/gemini-3.8-flash',
 ] as const;
 
