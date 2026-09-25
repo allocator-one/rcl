@@ -170,6 +170,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     runtime.sink = new HarnessSink({
       credential: options.credential,
       rclVersion: options.rclVersion,
+      ...(options.attestedExpiresAt !== undefined ? { attestedExpiresAt: options.attestedExpiresAt } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     });
     return runtime;
@@ -192,6 +193,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     runtime.sink = new HarnessSink({
       credential: resolved.credential,
       rclVersion: options.rclVersion,
+      ...(options.attestedExpiresAt !== undefined ? { attestedExpiresAt: options.attestedExpiresAt } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     });
   }

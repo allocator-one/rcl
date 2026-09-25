@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.1.5 - 2026-09-26
+
+- Allow up to two minutes for evidence artifact uploads and exact-byte downloads
+  within the existing 25 MB bound. Ordinary requests retain their ten-second
+  default. Shorter caller deadlines, cancellation and known attestation expiry
+  still limit transfers; legacy attested credentials without expiry retain the
+  ten-second cap (RCL-88).
+
 ## 4.1.4 - 2026-09-25
 
 - Bind attested recovery receipts and preserve byte-identical evidence replay, including bounded recovery for unavailable attested delivery (RCL-83; requires compatible backend support).
