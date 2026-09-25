@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 4.1.1 - 2026-09-25
+
+- Bind attested recovery receipts and preserve byte-identical evidence replay, including bounded recovery for unavailable attested delivery (RCL-83; requires compatible backend support).
+
+- Support complete evidence envelopes up to 4,000,000 bytes while retaining bounded diagnostics and compatibility with the backend evidence contract (RCL-88; requires compatible backend support).
+
+## 4.1.0 - 2026-09-25
+
+- Add opt-in `review --guarded-converge` to validate inputs, credentials and
+  report destinations before claiming an attempt, derive the round from native
+  state, and serialize dispatch through existing target ownership. Preserve
+  spent attempts and refuse blind retries, duplicate councils and delivery-only
+  relaunches. Keep guarded reviewer assignment stable and distinguish stopping
+  optional upstream synchronization from stopping review (RCL-94).
+- Preserve existing report files, reject aliased output destinations, and allow
+  explicit bounded recovery when a late JSON write failure leaves no recoverable
+  report. Retained reports and evidence-delivery retries reuse the original run
+  instead of spending another council (RCL-94).
+- Resolve private-PR credentials through explicit configuration, `GITHUB_TOKEN`,
+  then a bounded `gh auth token` lookup. Captured-patch reviews do not seek GitHub
+  credentials; inaccessible PRs receive an actionable diagnostic (RCL-28).
+- Skip empty Google credential aliases so valid Gemini or Harness credentials
+  remain available (RCL-82).
 - Default blocking council moves to `anthropic/claude-fable-5-1` and
   `openai/gpt-6-sol`; `google/gemini-3.8-flash` and the async `kimi-k3` seat
   are unchanged. Consensus weights are keyed by model id, so both new models
