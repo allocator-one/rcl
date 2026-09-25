@@ -97,7 +97,7 @@ export class AnthropicAdapter implements ReviewAdapter {
                   },
                 },
               ],
-              tool_choice: { type: 'any' as const },
+              tool_choice: { type: 'auto' as const },
             },
             // Buffer above our own timeout so the SDK's request timeout
             // (600s default) never wins the race and misclassifies a

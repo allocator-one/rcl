@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 4.1.1 - 2026-09-25
+
+- Use automatic tool choice for Anthropic reviews. Claude Fable 5.1 rejects
+  forced tool choice with HTTP 400; automatic selection preserves the existing
+  structured-tool and JSON-text parsing paths without retrying invalid requests
+  or counting missing review output as approval (RCL-101).
+
 ## 4.1.0 - 2026-09-25
 
 - Add opt-in `review --guarded-converge` to validate inputs, credentials and
