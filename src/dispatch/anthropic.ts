@@ -90,7 +90,7 @@ export class AnthropicAdapter implements ReviewAdapter {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
         try {
           // Use tool use for reliable JSON extraction
-          const request = {
+          const request: Anthropic.MessageCreateParamsNonStreaming = {
               model: modelId,
               max_tokens: profile.maxTokens,
               ...(profile.effort ? { output_config: { effort: profile.effort } } : {}),
