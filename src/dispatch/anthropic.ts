@@ -97,7 +97,10 @@ export class AnthropicAdapter implements ReviewAdapter {
                   },
                 },
               ],
-              tool_choice: { type: 'any' as const },
+              // Some compatible Claude deployments reject forced tool choice.
+              // Keep the schema available while accepting either tool use or
+              // the parseable text fallback below.
+              tool_choice: { type: 'auto' as const },
             },
             // Buffer above our own timeout so the SDK's request timeout
             // (600s default) never wins the race and misclassifies a

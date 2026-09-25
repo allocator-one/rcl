@@ -57,6 +57,19 @@ describe('SDK client construction', () => {
     const adapter = new OpenAICompatAdapter({ apiKey: 'test-key' });
     expect((adapter as unknown as { client: OpenAI }).client.maxRetries).toBe(0);
   });
+
+  it('anthropic permits models that reject forced tool selection', async () => {
+    const create = vi.fn().mockResolvedValue(anthropicToolResponse());
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { create } });
+
+    await adapter.review('claude-fable-5-1', 'general', 's', 'u', OPTS);
+
+    expect(create.mock.calls[0]![0]).toMatchObject({
+      tool_choice: { type: 'auto' },
+      tools: [expect.objectContaining({ name: 'report_findings' })],
+    });
+  });
 });
 
 describe('timeout classification', () => {
