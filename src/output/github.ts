@@ -1,7 +1,8 @@
-import { Octokit } from '@octokit/rest';
+import type { Octokit } from '@octokit/rest';
 import type { ConsensusFinding, ReviewResult } from '../consensus/types.js';
 import type { PRMetadata, FileChange } from '../resolver/types.js';
 import { sanitizeInline, sanitizeBlock, fencedCodeBlock } from './sanitize.js';
+import { createGitHubClient, getGitHubPullRequest } from '../resolver/github-client.js';
 
 function buildCommentBody(finding: ConsensusFinding): string {
   const { consensus } = finding;
@@ -186,18 +187,10 @@ export async function postGitHubReview(
   files?: FileChange[],
   octokitClient?: Octokit
 ): Promise<void> {
-  const octokit =
-    octokitClient ??
-    new Octokit({
-      auth: token ?? process.env['GITHUB_TOKEN'],
-    });
+  const octokit = octokitClient ?? await createGitHubClient(token);
 
   // Get the latest commit SHA for the PR
-  const prResponse = await octokit.pulls.get({
-    owner: metadata.owner,
-    repo: metadata.repo,
-    pull_number: metadata.number,
-  });
+  const prResponse = await getGitHubPullRequest(octokit, metadata);
   const commitSha = prResponse.data.head.sha;
 
   // Commentable RIGHT-side lines per file, from the diff patches.

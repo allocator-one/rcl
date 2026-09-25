@@ -1040,6 +1040,13 @@ For the full algorithm, see [CONSENSUS_V2_SPEC.md](./CONSENSUS_V2_SPEC.md).
 
 ## Environment Variables
 
+Explicit GitHub PR fetches and review posting use a nonempty `githubToken`
+configuration value first, then `GITHUB_TOKEN`, then the existing
+`gh auth token --hostname github.com` login. The fallback is noninteractive
+and bounded; if unavailable, public anonymous reads still work. A PR 404
+explains how to check private-repository access without exposing credentials.
+Local patch reviews do not read GitHub credentials.
+
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | API key for Claude models |

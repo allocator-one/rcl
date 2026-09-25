@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -117,6 +117,54 @@ afterEach(() => {
 });
 
 describe('rcl review — exact-head binding flags', () => {
+  it('reviews a captured patch without reading gh credentials', async () => {
+    const repo = tempRepository();
+    const marker = join(repo, 'gh-called');
+    const binaries = join(repo, 'bin');
+    mkdirSync(binaries);
+    writeFileSync(join(binaries, 'gh'),
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'called');\nprocess.stdout.write('fixture-token');\n`,
+      { mode: 0o700 });
+    writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n');
+    writeFileSync(join(repo, 'config.json'), JSON.stringify({
+      models: ['openai-compat/fixture'], secondaryModels: [], asyncModels: [],
+      harness: { telemetry: 'off' },
+    }));
+    let calls = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      calls++;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
+        choices: [{ index: 0, finish_reason: 'stop', message: {
+          role: 'assistant', content: JSON.stringify({ findings: [] }),
+        } }],
+      }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const result = await runRclAsync([
+        'review', 'change.patch', '--config', 'config.json',
+        '--reviewer', 'openai-compat/fixture:general', '--no-telemetry',
+      ], repo, {
+        PATH: `${binaries}:${process.env['PATH'] ?? ''}`,
+        GITHUB_TOKEN: '', GH_TOKEN: '',
+        OPENAI_COMPAT_BASE_URL: `http://127.0.0.1:${port}/v1`,
+        RCL_DATA_DIR: join(repo, 'rcl-data'),
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(calls).toBe(1);
+      expect(existsSync(marker)).toBe(false);
+      expect(result.stdout + result.stderr).not.toContain('fixture-token');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 40_000);
+
   it('--expect-head-sha fails fast before anything is reviewed when HEAD differs', () => {
     const repo = tempRepository();
     const result = runRcl(['review', '--staged', '--expect-head-sha', 'f'.repeat(40)], repo);
