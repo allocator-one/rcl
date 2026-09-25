@@ -574,6 +574,57 @@ describe('ask: truncation is an error, not a short answer', () => {
 });
 
 describe('retry behavior', () => {
+  it.each(['overloaded_error', 'api_error'] as const)(
+    'anthropic Fable: retries a statusless SSE %s event and succeeds',
+    async (type) => {
+      vi.useFakeTimers();
+      const adapter = new AnthropicAdapter('test-key');
+      const stream = vi.fn()
+        .mockReturnValueOnce({
+          finalMessage: vi.fn().mockRejectedValue(new Anthropic.APIError(
+            undefined,
+            { error: { type, message: 'Transient stream failure' } },
+            undefined,
+            new Headers(),
+            type,
+          )),
+        })
+        .mockReturnValueOnce(anthropicStreamResponse(anthropicToolResponse()));
+      setClient(adapter, { messages: { stream } });
+
+      const pending = adapter.review('claude-fable-5-1', 'general', 's', 'u', {
+        timeoutMs: 60000,
+        maxRetries: 1,
+      });
+      await vi.advanceTimersByTimeAsync(1100);
+
+      expect((await pending).status).toBe('success');
+      expect(stream).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('anthropic Fable: does not retry a statusless SSE invalid request', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    const stream = vi.fn().mockReturnValue({
+      finalMessage: vi.fn().mockRejectedValue(new Anthropic.APIError(
+        undefined,
+        { error: { type: 'invalid_request_error', message: 'Invalid request' } },
+        undefined,
+        new Headers(),
+        'invalid_request_error',
+      )),
+    });
+    setClient(adapter, { messages: { stream } });
+
+    const review = await adapter.review('claude-fable-5-1', 'general', 's', 'u', {
+      timeoutMs: 60000,
+      maxRetries: 2,
+    });
+
+    expect(review.status).toBe('error');
+    expect(stream).toHaveBeenCalledTimes(1);
+  });
+
   it('anthropic Fable: retries a streamed connection error and succeeds', async () => {
     vi.useFakeTimers();
     const adapter = new AnthropicAdapter('test-key');

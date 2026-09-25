@@ -26,8 +26,11 @@ function isRetryableReview(err: unknown, stream: boolean): boolean {
   if (!stream) return false;
 
   // The SDK can reject finalMessage() without an HTTP status when a stream
-  // disconnects or ends before message_stop. Retry only those known transient
-  // failures; an abort, invalid request, or malformed response stays terminal.
+  // disconnects, receives a transient SSE error, or ends before message_stop.
+  // An abort, invalid request, or malformed response stays terminal.
+  if (err instanceof Anthropic.APIError && err.status === undefined &&
+      (err.type === 'overloaded_error' || err.type === 'api_error' ||
+        err.type === 'rate_limit_error' || err.type === 'timeout_error')) return true;
   return err instanceof Anthropic.APIConnectionError ||
     (err instanceof Anthropic.AnthropicError &&
       (err.message === 'stream ended without producing a Message with role=assistant' ||
