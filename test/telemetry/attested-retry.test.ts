@@ -202,6 +202,15 @@ describe('recoverAttestedDelivery', () => {
     expect(budget).toEqual({ kind: 'attempts_exhausted', attempts: 2, recovered: false });
   });
 
+  it.each(['cancelled', 'expired', 'deadline_exceeded'] as const)('stops during retry backoff when %s', async (expected) => {
+    const controller = new AbortController(); let epoch = NOW; let elapsed = 0; let posts = 0;
+    const outcome = await recoverAttestedDelivery({ runId: 'run-1', payload: 'immutable', expiresAt: new Date(NOW + (expected === 'deadline_exceeded' ? 100 : 10)).toISOString(), now: () => epoch, monotonicNow: () => elapsed, deadlineMs: 10, signal: controller.signal,
+      post: async () => { posts++; return { kind: 'unavailable' }; }, receipt: async () => ({ kind: 'absent' }),
+      sleep: async () => { if (expected === 'cancelled') controller.abort(); if (expected === 'expired') epoch += 10; if (expected === 'deadline_exceeded') elapsed += 10; },
+    });
+    expect(outcome).toMatchObject({ kind: expected, attempts: 1 }); expect(posts).toBe(1);
+  });
+
   it('does not allow callers to raise the attested delivery attempt or deadline ceilings', async () => {
     let posts = 0;
     const attempts = await recoverAttestedDelivery({

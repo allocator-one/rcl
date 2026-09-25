@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
-import { validateRunEnvelope } from '../../src/telemetry/envelope-validation.js';
+import { MAX_ENVELOPE_BYTES, validateRunEnvelope } from '../../src/telemetry/envelope-validation.js';
 
-const PROTOCOL_MAX_ENVELOPE_BYTES = 4_000_000;
+const PROTOCOL_MAX_ENVELOPE_BYTES = MAX_ENVELOPE_BYTES;
 import { sampleResult } from './fixtures.js';
 
 describe('validateRunEnvelope', () => {
