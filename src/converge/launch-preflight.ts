@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
-import { access, lstat } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { access, lstat, realpath } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { missingProviders } from '../config/harness.js';
 import { ReviewLaunchRefused } from './launch-guard.js';
 
@@ -19,12 +19,17 @@ export function validateLaunchProviders(providers: readonly string[], env = proc
 
 export async function validateLaunchOutputs(paths: { jsonFile?: string; markdown?: string }): Promise<void> {
   if (!paths.jsonFile) throw new ReviewLaunchRefused('report_required', 'Guarded convergence requires --json-file to retain the original report.');
-  const outputs = [paths.jsonFile, paths.markdown].filter((path): path is string => path !== undefined).map(path => resolve(path));
+  const outputs = await Promise.all(
+    [paths.jsonFile, paths.markdown].filter((path): path is string => path !== undefined).map(async path => {
+      const parent = dirname(path);
+      await access(parent, constants.W_OK);
+      return join(await realpath(parent), basename(path));
+    })
+  );
   if (new Set(outputs).size !== outputs.length) {
     throw new ReviewLaunchRefused('output_collision', 'JSON and Markdown reports need distinct output paths.');
   }
   for (const path of outputs) {
-    await access(dirname(path), constants.W_OK);
     try {
       await lstat(path);
     } catch (error) {

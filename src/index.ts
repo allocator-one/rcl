@@ -2191,7 +2191,7 @@ async function executeCouncil(
     printReviewSummary(result);
   }
 
-  const outputDiagnostics = await writeReportArtifacts(artifacts, opts, {
+  const outputDiagnostics = await writeReportArtifacts(artifacts, { ...opts, exclusive: opts.guardedConverge }, {
     onWritten: (label, path) => console.log(chalk.dim(`${label} written to: ${path}`)),
     onError: (message) => process.stderr.write(chalk.red(message) + '\n'),
   });

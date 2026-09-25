@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { validateLaunchOutputs, validateLaunchProviders } from '../../src/converge/launch-preflight.js';
@@ -34,5 +34,16 @@ describe('guarded launch preflight', () => {
     await expect(validateLaunchOutputs({ jsonFile })).resolves.toBeUndefined();
     await writeFile(jsonFile, 'original');
     await expect(validateLaunchOutputs({ jsonFile })).rejects.toThrow('output_exists');
+  });
+
+  it('rejects report paths that resolve to the same parent through an alias', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'rcl-preflight-'));
+    const alias = `${directory}-alias`;
+    directories.push(directory, alias);
+    await symlink(directory, alias);
+
+    await expect(validateLaunchOutputs({
+      jsonFile: join(directory, 'report.json'), markdown: join(alias, 'report.json'),
+    })).rejects.toThrow('output_collision');
   });
 });
