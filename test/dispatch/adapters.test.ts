@@ -58,17 +58,22 @@ describe('SDK client construction', () => {
     expect((adapter as unknown as { client: OpenAI }).client.maxRetries).toBe(0);
   });
 
-  it('anthropic permits models that reject forced tool selection', async () => {
-    const create = vi.fn().mockResolvedValue(anthropicToolResponse());
+  it('anthropic retries without tools when a model rejects tool choice', async () => {
+    const create = vi.fn()
+      .mockRejectedValueOnce(new Anthropic.BadRequestError(400, { error: { message: 'tool_choice is not supported' } }, 'request'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' });
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, { messages: { create } });
 
-    await adapter.review('claude-fable-5-1', 'general', 's', 'u', OPTS);
+    const review = await adapter.review('claude-fable-5-1', 'general', 's', 'u', OPTS);
 
+    expect(review.status).toBe('success');
     expect(create.mock.calls[0]![0]).toMatchObject({
-      tool_choice: { type: 'auto' },
+      tool_choice: { type: 'any' },
       tools: [expect.objectContaining({ name: 'report_findings' })],
     });
+    expect(create.mock.calls[1]![0]).not.toHaveProperty('tool_choice');
+    expect(create.mock.calls[1]![0]).not.toHaveProperty('tools');
   });
 });
 

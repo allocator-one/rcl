@@ -21,6 +21,10 @@ function isRetryable(err: unknown): boolean {
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
+function rejectsToolChoice(err: unknown): boolean {
+  return err instanceof Anthropic.APIError && err.status === 400 && /tool_choice.*not supported/i.test(err.message);
+}
+
 export class AnthropicAdapter implements ReviewAdapter {
   name = 'anthropic';
   provider = 'anthropic';
@@ -50,18 +54,20 @@ export class AnthropicAdapter implements ReviewAdapter {
 
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
+    let useTools = true;
 
     try {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
         try {
-          // Use tool use for reliable JSON extraction
+          // Use tool use for reliable JSON extraction when the model supports
+          // it. The prompt and parser also deliberately support text JSON.
           const response = await this.client.messages.create(
             {
               model: modelId,
               max_tokens: 16384,
               system: systemPrompt,
               messages: [{ role: 'user', content: userPrompt }],
-              tools: [
+              ...(useTools ? { tools: [
                 {
                   name: 'report_findings',
                   description: 'Report code review findings as structured JSON',
@@ -96,11 +102,7 @@ export class AnthropicAdapter implements ReviewAdapter {
                     required: ['findings'],
                   },
                 },
-              ],
-              // Some compatible Claude deployments reject forced tool choice.
-              // Keep the schema available while accepting either tool use or
-              // the parseable text fallback below.
-              tool_choice: { type: 'auto' as const },
+              ], tool_choice: { type: 'any' as const } } : {}),
             },
             // Buffer above our own timeout so the SDK's request timeout
             // (600s default) never wins the race and misclassifies a
@@ -185,6 +187,11 @@ export class AnthropicAdapter implements ReviewAdapter {
               status: 'timeout',
               error: 'Request timed out',
             };
+          }
+          if (useTools && rejectsToolChoice(err)) {
+            useTools = false;
+            attempt--;
+            continue;
           }
           if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
             await sleep(retryDelay(attempt));
