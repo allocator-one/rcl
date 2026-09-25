@@ -131,6 +131,15 @@ describe('HarnessSink.postRun', () => {
     expect(down).toEqual({ kind: 'unavailable', reason: 'TypeError: fetch failed' });
   });
 
+  it('retains an unavailable outcome when a transport cause cannot be stringified', async () => {
+    const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    const failure = new TypeError('fetch failed', { cause: Object.create(null) });
+
+    await expect(sink(() => failure).sink.postRun(envelope)).resolves.toEqual({
+      kind: 'unavailable', reason: 'TypeError: fetch failed; cause: [unstringifiable diagnostic]',
+    });
+  });
+
   it('keeps a bounded, redacted causal transport diagnostic for an unavailable request', async () => {
     const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     const cause = new Error(`socket reset authorization=Bearer ${'Abcdef1234567890Abcdef1234567890'}`);

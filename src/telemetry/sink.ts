@@ -430,7 +430,10 @@ function hostOnly(raw: string): string {
 
 /** A transport failure can carry Node's nested `Error.cause`; retain only safe, bounded diagnostics. */
 function transportFailure(err: unknown): string {
-  const describe = (value: unknown): string => value instanceof Error ? `${value.name}: ${value.message}` : String(value);
+  const describe = (value: unknown): string => {
+    try { return value instanceof Error ? `${value.name}: ${value.message}` : String(value); }
+    catch { return '[unstringifiable diagnostic]'; }
+  };
   const primary = describe(err);
   const cause = err instanceof Error ? err.cause : undefined;
   return scrubText(cause === undefined ? primary : `${primary}; cause: ${describe(cause)}`, 300);
