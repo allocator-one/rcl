@@ -14,7 +14,9 @@ import {
 
 const VERSION = 1;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
+export const MAX_CHECKPOINT_PROOF_BYTES = 25 * 1024 * 1024;
 const integer = z.number().int().nonnegative().safe();
+const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation']);
 const bindingReferenceSchema = z.object({ name: bindingNameSchema, file: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
   .refine(binding => binding.file === bindingFile(binding.name));
@@ -39,6 +41,31 @@ const resultSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('success'), chunk: integer, reviewBytes: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('failure'), chunk: integer, reviewBytes: z.string().min(1), possiblyBilled: z.boolean() }).strict(),
 ]);
+const resultReferenceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('success'), chunk: integer, reviewSha256: digestSchema, resultFile: z.string() }).strict(),
+  z.object({ kind: z.literal('failure'), chunk: integer, reviewSha256: digestSchema, resultFile: z.string(), possiblyBilled: z.boolean() }).strict(),
+]);
+const recordBase = { sequence: integer.min(1), previousDigest: digestSchema, digest: digestSchema };
+const attemptRecord = { cell: z.string().min(1), paidAttempt: attemptSchema };
+const journalRecordSchema = z.discriminatedUnion('type', [
+  z.object({ ...recordBase, type: z.literal('binding'), binding: bindingReferenceSchema }).strict(),
+  z.object({ ...recordBase, ...attemptRecord, type: z.literal('intent') }).strict(),
+  z.object({ ...recordBase, ...attemptRecord, type: z.literal('result'), result: resultReferenceSchema }).strict(),
+  z.object({ ...recordBase, ...attemptRecord, type: z.literal('uncertain'), reason: z.string().refine(value => !!value.trim() && !/[\0\r\n]/.test(value)) }).strict(),
+  z.object({ ...recordBase, type: z.literal('finalization'), finalizedDigest: digestSchema }).strict(),
+]);
+const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), source: z.string().optional(), operation: z.string().optional() }).strict();
+const proofWireSchema = z.object({ version: z.literal(1), plan: z.unknown(), records: z.array(z.unknown()),
+  outcomes: z.array(z.object({ resultFile: z.string(), reviewBytes: z.string() }).strict()), bindings: bindingsSchema }).strict();
+const frozenPlanSchema = z.object({
+  version: z.literal(1), digest: digestSchema, target: z.string(), headSha: z.string(), mergeBaseSha: z.string(),
+  patchSha256: digestSchema, configSha256: digestSchema, specSha256: digestSchema, contextSha256: digestSchema, toolsSha256: digestSchema,
+  parser: z.object({ name: z.string(), version: integer.min(1) }).strict(),
+  roster: z.array(z.object({ seat: z.string(), model: z.string(), role: z.string(), route: z.string() }).strict()),
+  chunks: z.array(z.object({ index: integer, total: integer.min(1), digest: digestSchema }).strict()),
+  prompts: z.array(z.object({ seat: z.string(), chunk: integer, systemSha256: digestSchema, userSha256: digestSchema }).strict()),
+  cells: z.array(z.object({ id: z.string(), seat: z.string(), chunk: integer, route: z.string(), model: z.string(), role: z.string(), chunkDigest: digestSchema, systemPromptSha256: digestSchema, userPromptSha256: digestSchema }).strict()),
+}).strict();
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface CheckpointPlanInput {
@@ -59,6 +86,9 @@ export type CheckpointBindings = Partial<Record<CheckpointBindingName, string>>;
 export type CheckpointResult = { kind: 'success'; chunk: number; reviewBytes: string } | { kind: 'failure'; chunk: number; reviewBytes: string; possiblyBilled: boolean };
 export interface JournalRecord { sequence: number; previousDigest: string; digest: string; type: 'binding' | 'intent' | 'result' | 'uncertain' | 'finalization'; binding?: { name: CheckpointBindingName; file: string; sha256: string }; cell?: string; paidAttempt?: PaidAttempt; result?: { kind: 'success' | 'failure'; chunk: number; reviewSha256: string; resultFile: string; possiblyBilled?: boolean }; reason?: string; finalizedDigest?: string }
 export interface CheckpointState { records: JournalRecord[]; outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }>; successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }>; uncertain: Array<{ cell: string; paidAttempt: PaidAttempt }>; finalized: boolean }
+type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
+export type CheckpointProof = DeepReadonly<{ version: 1; bytes: string; digest: string; plan: FrozenCheckpointPlan; state: CheckpointState; bindings: CheckpointBindings }>;
+const validatedProofs = new WeakSet<object>();
 
 function sha256(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex'); }
 function canonical(value: Json): string {
@@ -145,7 +175,8 @@ async function syncExisting(path: string, expected?: string, preserveBom = false
   await syncNativeDirectory(resolve(path, '..'));
 }
 function decodePlan(text: string): FrozenCheckpointPlan {
-  let plan: FrozenCheckpointPlan; try { plan = JSON.parse(text) as FrozenCheckpointPlan; } catch { throw new Error('checkpoint_invalid_plan'); }
+  boundedBytes(text);
+  let plan: FrozenCheckpointPlan; try { plan = frozenPlanSchema.parse(JSON.parse(text)); } catch { throw new Error('checkpoint_invalid_plan'); }
   const recalculated = freezeCheckpointPlan(plan);
   if (plan.version !== VERSION || plan.digest !== recalculated.digest || canonical(plan as unknown as Json) !== canonical(recalculated as unknown as Json)) throw new Error('checkpoint_invalid_plan');
   return recalculated;
@@ -178,6 +209,106 @@ function validateResult(result: CheckpointResult, cell: CheckpointCell): void {
   if (item.model !== cell.model || item.role !== cell.role || item.provider !== cell.route) throw new Error('checkpoint_result_cell_mismatch');
   if ((result.kind === 'success') !== (item.status === 'success')) throw new Error('checkpoint_result_cell_mismatch');
 }
+
+
+function boundedOpaqueBytes(bytes: string): void {
+  boundedBytes(bytes);
+  if (Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('checkpoint_invalid_bytes');
+}
+
+function validateRecordChain(input: unknown[], plan: FrozenCheckpointPlan): JournalRecord[] {
+  let previous = plan.digest;
+  return input.map((value, index) => {
+    const parsed = journalRecordSchema.safeParse(value);
+    if (!parsed.success) throw new Error('checkpoint_invalid_record');
+    const record = parsed.data, { digest, ...unsigned } = record;
+    boundedBytes(canonical(record as unknown as Json));
+    if (record.sequence !== index + 1 || record.previousDigest !== previous || digest !== recordDigest(unsigned)) throw new Error('checkpoint_invalid_record');
+    if (record.type === 'result' && !validResultReference(record.result, record.cell, record.paidAttempt)) throw new Error('checkpoint_invalid_record');
+    previous = digest;
+    return record;
+  });
+}
+
+/** One semantic validator for both private files and portable proof bytes. */
+function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], resultBytes: Map<string, string>, suppliedBindings: CheckpointBindings): { state: CheckpointState; bindings: CheckpointBindings } {
+  const cells = new Set(plan.cells.map(cell => cell.id));
+  const intents = new Map<string, PaidAttempt>(), terminalAttempts = new Map<string, JournalRecord>(), outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }> = [], successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }> = [];
+  const successfulCells = new Set<string>(), attemptIds = new Set<string>(), bindings: CheckpointBindings = {}; let finalized = false;
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    if (record.type === 'binding') {
+      const parsed = bindingReferenceSchema.safeParse(record.binding);
+      if (!parsed.success || Object.keys(record).some(key => !['sequence', 'previousDigest', 'digest', 'type', 'binding'].includes(key))) throw new Error('checkpoint_invalid_binding');
+      if (finalized || intents.size) throw new Error('checkpoint_binding_closed');
+      const binding = parsed.data;
+      if (Object.hasOwn(bindings, binding.name)) throw new Error('checkpoint_duplicate_binding');
+      const bytes = suppliedBindings[binding.name];
+      if (typeof bytes !== 'string') throw new Error('checkpoint_missing_binding');
+      boundedOpaqueBytes(bytes);
+      if (sha256(bytes) !== binding.sha256) throw new Error('checkpoint_binding_tampered');
+      bindings[binding.name] = bytes;
+      continue;
+    }
+    if (Object.hasOwn(record, 'binding')) throw new Error('checkpoint_invalid_record');
+    if (record.type === 'finalization') { if (finalized || !record.finalizedDigest || index !== records.length - 1 || record.finalizedDigest !== sha256(canonical(records.slice(0, -1) as unknown as Json))) throw new Error('checkpoint_invalid_finalization'); finalized = true; continue; }
+    if (finalized || !record.cell || !record.paidAttempt || !cells.has(record.cell) || !validAttempt(record.paidAttempt)) throw new Error('checkpoint_invalid_record');
+    const key = `${record.cell}\0${record.paidAttempt.id}`;
+    if (record.type === 'intent') { if (successfulCells.has(record.cell)) throw new Error('checkpoint_success_immutable'); if (intents.has(key) || attemptIds.has(record.paidAttempt.id)) throw new Error('checkpoint_duplicate_attempt'); intents.set(key, record.paidAttempt); attemptIds.add(record.paidAttempt.id); continue; }
+    if (!intents.has(key) || intents.get(key)!.kind !== record.paidAttempt.kind) throw new Error('checkpoint_missing_intent');
+    if (record.type === 'uncertain') continue;
+    if (record.type === 'result') {
+      if (!record.result || terminalAttempts.has(key) || successfulCells.has(record.cell) || !validResultReference(record.result, record.cell, record.paidAttempt)) throw new Error('checkpoint_invalid_record');
+      terminalAttempts.set(key, record);
+      const bytes = resultBytes.get(record.result.resultFile);
+      if (typeof bytes !== 'string') throw new Error('checkpoint_missing_result');
+      boundedOpaqueBytes(bytes);
+      if (sha256(bytes) !== record.result.reviewSha256) throw new Error('checkpoint_result_tampered');
+      const cell = plan.cells.find(candidate => candidate.id === record.cell)!; const result: CheckpointResult = record.result.kind === 'success' ? { kind: 'success', chunk: record.result.chunk, reviewBytes: bytes } : { kind: 'failure', chunk: record.result.chunk, reviewBytes: bytes, possiblyBilled: record.result.possiblyBilled === true }; validateResult(result, cell); outcomes.push({ cell: record.cell, paidAttempt: record.paidAttempt, result }); if (record.result.kind === 'success') { successfulCells.add(record.cell); successes.push({ cell: record.cell, paidAttempt: record.paidAttempt, reviewBytes: bytes }); }
+    }
+  }
+  const uncertain = [...intents.entries()].filter(([key]) => !terminalAttempts.has(key)).map(([key, paidAttempt]) => ({ cell: key.split('\0')[0]!, paidAttempt }));
+  if (Object.keys(bindings).length !== Object.keys(suppliedBindings).length || terminalAttempts.size !== resultBytes.size) throw new Error('checkpoint_unreferenced_bytes');
+  return { state: { records, outcomes, successes, uncertain, finalized }, bindings };
+}
+
+/** Structural integrity only: this brand does not attest providers or source authority. */
+export function isCheckpointProof(value: unknown): value is CheckpointProof {
+  return typeof value === 'object' && value !== null && validatedProofs.has(value);
+}
+
+/** Decode canonical portable bytes using the same plan, chain and outcome validation as disk reads. */
+export function decodeCheckpointProof(bytes: string, expectedPlan?: FrozenCheckpointPlan | CheckpointProof['plan']): CheckpointProof {
+  if (typeof bytes !== 'string') throw new Error('checkpoint_invalid_proof');
+  if (Buffer.byteLength(bytes, 'utf8') > MAX_CHECKPOINT_PROOF_BYTES) throw new Error('checkpoint_proof_too_large');
+  let value: unknown;
+  try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_proof'); }
+  const parsed = proofWireSchema.safeParse(value);
+  if (!parsed.success) throw new Error('checkpoint_invalid_proof');
+  const wire = parsed.data;
+  if (canonical(wire as unknown as Json) !== bytes) throw new Error('checkpoint_proof_noncanonical');
+  const plan = decodePlan(canonical(wire.plan as Json));
+  if (expectedPlan && !matchingPlan(plan, decodePlan(canonical(expectedPlan as unknown as Json)))) throw new Error('checkpoint_plan_mismatch');
+  const records = validateRecordChain(wire.records, plan);
+  const references = records.filter(record => record.type === 'result');
+  if (references.length !== wire.outcomes.length) throw new Error('checkpoint_proof_outcomes_mismatch');
+  const resultBytes = new Map<string, string>();
+  for (const [index, outcome] of wire.outcomes.entries()) {
+    if (references[index]!.result!.resultFile !== outcome.resultFile || resultBytes.has(outcome.resultFile)) throw new Error('checkpoint_proof_outcomes_mismatch');
+    resultBytes.set(outcome.resultFile, outcome.reviewBytes);
+  }
+  const { state, bindings } = validateHistory(plan, records, resultBytes, wire.bindings);
+  if (!state.finalized) throw new Error('checkpoint_proof_unsealed');
+  const proof: CheckpointProof = deepFreeze({ version: 1 as const, bytes, digest: sha256(bytes), plan, state, bindings });
+  validatedProofs.add(proof);
+  return proof;
+}
+
+/** Export only a validated sealed journal. No live provider or lineage authority is inferred. */
+export function exportCheckpointProof(journal: CheckpointJournal): Promise<CheckpointProof> {
+  return journal.exportProof();
+}
+
 
 
 export class CheckpointJournal {
@@ -237,52 +368,44 @@ export class CheckpointJournal {
   /** Exact immutable metadata bytes; validates the entire journal without writing. */
   async readBindings(): Promise<CheckpointBindings> { return (await this.readValidated()).bindings; }
 
-  private async readValidated(): Promise<{ state: CheckpointState; bindings: CheckpointBindings }> {
+  async exportProof(): Promise<CheckpointProof> {
+    const { state, bindings } = await this.readValidated(MAX_CHECKPOINT_PROOF_BYTES);
+    if (!state.finalized) throw new Error('checkpoint_proof_unsealed');
+    let outcomeIndex = 0;
+    const outcomes = state.records.filter(record => record.type === 'result').map(record => ({
+      resultFile: record.result!.resultFile, reviewBytes: state.outcomes[outcomeIndex++]!.result.reviewBytes,
+    }));
+    const bytes = canonical({ version: 1, plan: this.plan, records: state.records, outcomes, bindings } as unknown as Json);
+    return decodeCheckpointProof(bytes, this.plan);
+  }
+
+  private async readValidated(maxRetainedBytes?: number): Promise<{ state: CheckpointState; bindings: CheckpointBindings }> {
     await inspectDirectory(this.path); await inspectDirectory(join(this.path, 'events')); await inspectDirectory(join(this.path, 'results'));
     const actual = decodePlan((await readSafe(join(this.path, 'plan.json'))).trim());
     if (!matchingPlan(actual, this.plan)) throw new Error('checkpoint_plan_mismatch');
+    let retainedBytes = 0;
+    const retain = (bytes: string): string => {
+      retainedBytes += Buffer.byteLength(bytes, 'utf8');
+      if (maxRetainedBytes !== undefined && retainedBytes > maxRetainedBytes) throw new Error('checkpoint_proof_too_large');
+      return bytes;
+    };
+    retain(canonical(actual as unknown as Json));
     const names = (await readdir(join(this.path, 'events'))).sort();
-    let previous = this.plan.digest; const records: JournalRecord[] = [];
+    const rawRecords: unknown[] = [];
     for (let i = 0; i < names.length; i++) {
       if (names[i] !== eventFile(i + 1)) throw new Error('checkpoint_sequence_gap');
-      let record: JournalRecord; try { record = JSON.parse(await readSafe(join(this.path, 'events', names[i]!))) as JournalRecord; } catch (error) { if (error instanceof Error && error.message === 'checkpoint_symlink') throw error; throw new Error('checkpoint_invalid_record'); }
-      const { digest, ...unsigned } = record;
-      if (record.sequence !== i + 1 || record.previousDigest !== previous || digest !== recordDigest(unsigned) || !['binding', 'intent', 'result', 'uncertain', 'finalization'].includes(record.type)) throw new Error('checkpoint_invalid_record');
-      previous = digest; records.push(record);
+      let record: unknown;
+      try { record = JSON.parse(await readSafe(join(this.path, 'events', names[i]!))); }
+      catch (error) { if (error instanceof Error && error.message === 'checkpoint_symlink') throw error; throw new Error('checkpoint_invalid_record'); }
+      retain(canonical(record as Json)); rawRecords.push(record);
     }
-    const cells = new Set(this.plan.cells.map(cell => cell.id));
-    const intents = new Map<string, PaidAttempt>(), terminalAttempts = new Map<string, JournalRecord>(), outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }> = [], successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }> = [];
-    const successfulCells = new Set<string>(), attemptIds = new Set<string>(), bindings: CheckpointBindings = {}; let finalized = false;
-    for (let index = 0; index < records.length; index++) {
-      const record = records[index]!;
-      if (record.type === 'binding') {
-        const parsed = bindingReferenceSchema.safeParse(record.binding);
-        if (!parsed.success || Object.keys(record).some(key => !['sequence', 'previousDigest', 'digest', 'type', 'binding'].includes(key))) throw new Error('checkpoint_invalid_binding');
-        if (finalized || intents.size) throw new Error('checkpoint_binding_closed');
-        const binding = parsed.data;
-        if (Object.hasOwn(bindings, binding.name)) throw new Error('checkpoint_duplicate_binding');
-        const bytes = await readSafe(join(this.path, binding.file), true);
-        if (sha256(bytes) !== binding.sha256) throw new Error('checkpoint_binding_tampered');
-        bindings[binding.name] = bytes;
-        continue;
-      }
-      if (Object.hasOwn(record, 'binding')) throw new Error('checkpoint_invalid_record');
-      if (record.type === 'finalization') { if (finalized || !record.finalizedDigest || index !== records.length - 1 || record.finalizedDigest !== sha256(canonical(records.slice(0, -1) as unknown as Json))) throw new Error('checkpoint_invalid_finalization'); finalized = true; continue; }
-      if (finalized || !record.cell || !record.paidAttempt || !cells.has(record.cell) || !validAttempt(record.paidAttempt)) throw new Error('checkpoint_invalid_record');
-      const key = `${record.cell}\0${record.paidAttempt.id}`;
-      if (record.type === 'intent') { if (intents.has(key) || attemptIds.has(record.paidAttempt.id)) throw new Error('checkpoint_duplicate_attempt'); intents.set(key, record.paidAttempt); attemptIds.add(record.paidAttempt.id); continue; }
-      if (!intents.has(key) || intents.get(key)!.kind !== record.paidAttempt.kind) throw new Error('checkpoint_missing_intent');
-      if (record.type === 'uncertain') continue;
-      if (record.type === 'result') {
-        if (!record.result || terminalAttempts.has(key) || successfulCells.has(record.cell) || !validResultReference(record.result, record.cell, record.paidAttempt)) throw new Error('checkpoint_invalid_record');
-        terminalAttempts.set(key, record);
-        const bytes = await readSafe(join(this.path, 'results', record.result.resultFile));
-        if (sha256(bytes) !== record.result.reviewSha256) throw new Error('checkpoint_result_tampered');
-        const cell = this.plan.cells.find(candidate => candidate.id === record.cell)!; const result: CheckpointResult = record.result.kind === 'success' ? { kind: 'success', chunk: record.result.chunk, reviewBytes: bytes } : { kind: 'failure', chunk: record.result.chunk, reviewBytes: bytes, possiblyBilled: record.result.possiblyBilled === true }; validateResult(result, cell); outcomes.push({ cell: record.cell, paidAttempt: record.paidAttempt, result }); if (record.result.kind === 'success') { successfulCells.add(record.cell); successes.push({ cell: record.cell, paidAttempt: record.paidAttempt, reviewBytes: bytes }); }
-      }
+    const records = validateRecordChain(rawRecords, this.plan);
+    const resultBytes = new Map<string, string>(), suppliedBindings: CheckpointBindings = {};
+    for (const record of records) {
+      if (record.binding) suppliedBindings[record.binding.name] = retain(await readSafe(join(this.path, record.binding.file), true));
+      if (record.result) resultBytes.set(record.result.resultFile, retain(await readSafe(join(this.path, 'results', record.result.resultFile), true)));
     }
-    const uncertain = [...intents.entries()].filter(([key]) => !terminalAttempts.has(key)).map(([key, paidAttempt]) => ({ cell: key.split('\0')[0]!, paidAttempt }));
-    return { state: { records, outcomes, successes, uncertain, finalized }, bindings };
+    return validateHistory(this.plan, records, resultBytes, suppliedBindings);
   }
 
   private async write<T>(ownership: NativeTargetOwnership, operation: () => Promise<T>): Promise<T> {
@@ -305,9 +428,9 @@ export class CheckpointJournal {
       await syncExisting(path, bytes, true);
     }
     if (record.result) {
-      const path = join(this.path, 'results', record.result.resultFile), bytes = await readSafe(path);
+      const path = join(this.path, 'results', record.result.resultFile), bytes = await readSafe(path, true);
       if (sha256(bytes) !== record.result.reviewSha256) throw new Error('checkpoint_result_tampered');
-      await syncExisting(path, bytes);
+      await syncExisting(path, bytes, true);
     }
     await syncExisting(join(this.path, 'events', eventFile(record.sequence)), `${canonical(record as unknown as Json)}\n`);
   }
@@ -409,7 +532,7 @@ export class CheckpointJournal {
       try { await writeExclusive(resultPath, captured.reviewBytes); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        await syncExisting(resultPath, captured.reviewBytes);
+        await syncExisting(resultPath, captured.reviewBytes, true);
       }
       await this.append({ type: 'result', cell, paidAttempt: attempt, result: { kind: captured.kind, chunk: captured.chunk, reviewSha256: sha256(captured.reviewBytes), resultFile, ...(captured.kind === 'failure' ? { possiblyBilled: captured.possiblyBilled } : {}) } });
     });

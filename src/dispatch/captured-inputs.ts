@@ -118,7 +118,7 @@ export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedRev
  * fresh target/input check; source lineage and producer authority are separate
  * mandatory admission checks. Legacy reports without this capture cannot pass.
  */
-export function decodeCapturedInputs(bytes: string, expectedPlan: FrozenCheckpointPlan): CapturedReviewerInputs {
+export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): CapturedReviewerInputs {
   const parsed = captureSchema.safeParse(decodeCanonical(bytes));
   if (!parsed.success) throw new Error('capture_invalid_document');
   const captured = parsed.data, plan = validatedPlan(captured.plan), expected = validatedPlan(expectedPlan);

@@ -10,6 +10,7 @@ import type { Diff } from '../resolver/types.js';
 import type { Role } from '../roles/types.js';
 import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-header.js';
 import { uuidv7 } from './uuid.js';
+import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
 
 interface CompletedReviewInput {
   chunkReviews: ModelReview[];
@@ -21,6 +22,8 @@ interface CompletedReviewInput {
   diff: Diff;
   gatingConfig: ResolvedGatingConfig;
   modelWeights?: Map<string, number>;
+  /** Validated original-seat health for proof-bearing reports; never deserialized counts. */
+  reviewerHealth?: ReviewerHealth;
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
 }
 
@@ -28,6 +31,12 @@ interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monotonicNow
   onStage?: (stage: string) => void;
   onVerificationStart?: () => void;
   onWarning?: (warning: string) => void;
+  /** Indices refer to the merged voting reviews in the returned report. */
+  onFindingContributions?: (groups: Array<{
+    reportIdentity: string;
+    disposition: 'kept' | 'below_threshold';
+    contributions: Array<{ reviewIndex: number; findingIndex: number }>;
+  }>) => void;
 }
 
 /** Assemble retained reviewer outputs through consensus, bounded gating, and the run header. */
@@ -36,6 +45,7 @@ export async function assembleCompletedReview(
   dependencies: AssemblyDependencies = {}
 ): Promise<ReviewResult & { run: RunHeader }> {
   const { chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff, gatingConfig, modelWeights } = input;
+  if (input.reviewerHealth !== undefined) assertReviewerHealth(input.reviewerHealth);
   const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
 
   dependencies.onStage?.('computing consensus');
@@ -45,7 +55,8 @@ export async function assembleCompletedReview(
     reviews,
     config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
     config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
-    config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
+    config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
+    dependencies.onFindingContributions !== undefined
   );
 
   const runId = input.run.id ?? uuidv7();
@@ -75,7 +86,7 @@ export async function assembleCompletedReview(
   let finalFindings = reportFindings;
   let gatedAppendix = droppedFindings;
   let verificationStats: ReviewResult['stats']['verification'];
-  if (gatingConfig.mode === 'verified-consensus') {
+  if (gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
     dependencies.onVerificationStart?.();
     const gated = await applyGatingWithFallback(reportFindings, {
       minModels: gatingConfig.minModels,
@@ -102,6 +113,13 @@ export async function assembleCompletedReview(
   }
 
   const keepAppendix = config.output?.belowThresholdAppendix ?? true;
+  if (dependencies.onFindingContributions) {
+    const kept = new Set(reportFindings.map(finding => finding.identity));
+    dependencies.onFindingContributions(consensusFindings.map((finding, index) => ({
+      reportIdentity: finding.identity!, disposition: kept.has(finding.identity) ? 'kept' : 'below_threshold',
+      contributions: groups[index]!.contributions!.map(reference => ({ ...reference })),
+    })));
+  }
   const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
   const body: ReviewResult = {
     reviews,
@@ -162,7 +180,7 @@ export async function assembleCompletedReview(
       jaccardThreshold: config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
     },
     finishedAt: new Date(),
-    ciExitCode: evaluateCiGate(body).exitCode,
+    ciExitCode: evaluateCiGate(body, input.reviewerHealth).exitCode,
   });
   return { run, ...body };
 }

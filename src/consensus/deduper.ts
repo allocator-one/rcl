@@ -254,6 +254,8 @@ interface TaggedFinding {
   finding: Finding;
   model: string;
   role: string;
+  /** Present only for opt-in recovery lineage. */
+  contributions?: Array<{ reviewIndex: number; findingIndex: number }>;
 }
 
 export function linesOverlap(
@@ -324,6 +326,20 @@ function chooseRepresentative(members: TaggedFinding[]): TaggedFinding {
       return curr;
     return best;
   });
+}
+
+function collectMemberContributions(members: readonly TaggedFinding[]): Array<{ reviewIndex: number; findingIndex: number }> {
+  const refs = new Map<string, { reviewIndex: number; findingIndex: number }>();
+  for (const member of members) for (const ref of member.contributions ?? []) {
+    refs.set(`${ref.reviewIndex}:${ref.findingIndex}`, ref);
+  }
+  return [...refs.values()].sort((left, right) => left.reviewIndex - right.reviewIndex || left.findingIndex - right.findingIndex);
+}
+
+/** Only destructive dedupe sites carry lineage onto their chosen survivor. */
+function chooseCollapsedRepresentative(members: TaggedFinding[], collectContributions: boolean): TaggedFinding {
+  const representative = chooseRepresentative(members);
+  return collectContributions ? { ...representative, contributions: collectMemberContributions(members) } : representative;
 }
 
 /**
@@ -1173,7 +1189,7 @@ function mergeAgreementNeighborhoods(
  * review. Collapse same-(model, role) members so a single reviewer never
  * counts twice in consensus scores or the elevation support guard.
  */
-function collapseSameReviewer(members: TaggedFinding[]): TaggedFinding[] {
+function collapseSameReviewer(members: TaggedFinding[], collectContributions: boolean): TaggedFinding[] {
   const byReviewer = new Map<string, TaggedFinding[]>();
   for (const m of members) {
     const key = `${m.model}::${m.role}`;
@@ -1182,7 +1198,7 @@ function collapseSameReviewer(members: TaggedFinding[]): TaggedFinding[] {
     byReviewer.set(key, existing);
   }
   return [...byReviewer.values()].map((group) =>
-    group.length === 1 ? group[0]! : chooseRepresentative(group)
+    group.length === 1 && !collectContributions ? group[0]! : chooseCollapsedRepresentative(group, collectContributions)
   );
 }
 
@@ -1193,28 +1209,34 @@ function collapseSameReviewer(members: TaggedFinding[]): TaggedFinding[] {
  */
 function dedupeWithinReview(
   review: ModelReview,
+  reviewIndex: number,
   jaccardThreshold: number,
-  lineWindow: number
+  lineWindow: number,
+  collectContributions: boolean
 ): TaggedFinding[] {
-  const tagged: TaggedFinding[] = review.findings.map((finding) => ({
+  const tagged: TaggedFinding[] = review.findings.map((finding, findingIndex) => ({
     finding,
     model: review.model,
     role: review.role,
+    ...(collectContributions ? { contributions: [{ reviewIndex, findingIndex }] } : {}),
   }));
-  return groupTagged(tagged, jaccardThreshold, lineWindow).map((g) => chooseRepresentative(g));
+  return groupTagged(tagged, jaccardThreshold, lineWindow).map((group) =>
+    chooseCollapsedRepresentative(group, collectContributions)
+  );
 }
 
 export function deduplicateFindings(
   reviews: ModelReview[],
   jaccardThreshold: number = DEFAULT_THRESHOLDS.jaccardThreshold,
   lineWindow: number = DEFAULT_THRESHOLDS.dedupeLineWindow,
-  minConsensusScore: number = DEFAULT_THRESHOLDS.minConsensusScore
+  minConsensusScore: number = DEFAULT_THRESHOLDS.minConsensusScore,
+  collectContributions = false
 ): DeduplicatedGroup[] {
   // Flatten all findings with attribution, deduplicating within each review first
   const all: TaggedFinding[] = [];
-  for (const review of reviews) {
+  for (const [reviewIndex, review] of reviews.entries()) {
     if (review.status !== 'success') continue;
-    all.push(...dedupeWithinReview(review, jaccardThreshold, lineWindow));
+    all.push(...dedupeWithinReview(review, reviewIndex, jaccardThreshold, lineWindow, collectContributions));
   }
 
   if (all.length === 0) return [];
@@ -1222,7 +1244,7 @@ export function deduplicateFindings(
   const strictGroups: TaggedFinding[][] = [];
   for (const members of groupTagged(all, jaccardThreshold, lineWindow)) {
     for (const coherent of splitIncoherent(members, jaccardThreshold, lineWindow)) {
-      strictGroups.push(collapseSameReviewer(coherent));
+      strictGroups.push(collapseSameReviewer(coherent, collectContributions));
     }
   }
 
@@ -1237,10 +1259,11 @@ export function deduplicateFindings(
     lineWindow,
     minimumReviewers
   ).map((members) => {
-    const collapsed = collapseSameReviewer(members);
+    const collapsed = collapseSameReviewer(members, collectContributions);
     return {
       representative: chooseRepresentative(collapsed).finding,
-      members: collapsed,
+      members: collapsed.map(({ finding, model, role }) => ({ finding, model, role })),
+      ...(collectContributions ? { contributions: collectMemberContributions(collapsed) } : {}),
     };
   });
 
