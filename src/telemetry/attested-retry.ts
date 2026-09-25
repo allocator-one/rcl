@@ -118,9 +118,9 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
     } catch (error) {
       return failed(error);
     }
+    if (receipt.kind === 'recorded') return recordedOutcome(attempts, true, receipt.value);
     const afterInitialReceipt = stopped();
     if (afterInitialReceipt) return afterInitialReceipt;
-    if (receipt.kind === 'recorded') return recordedOutcome(attempts, true, receipt.value);
     if (receipt.kind === 'unavailable') return terminalOutcome('receipt_unavailable', attempts);
     if (receipt.kind === 'rejected') return terminalOutcome('receipt_rejected', attempts);
   }
@@ -137,12 +137,12 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
     } catch (error) {
       return failed(error);
     }
-    const afterPost = stopped();
-    if (afterPost) return afterPost;
     if (posted.kind === 'recorded') return recordedOutcome(attempts, attempts > 1, posted.value);
     if (posted.kind === 'conflict') return terminalOutcome('conflict', attempts);
     if (posted.kind === 'disabled') return disabledOutcome(attempts, posted.value);
     if (posted.kind === 'rejected') return terminalOutcome('rejected', attempts);
+    const afterPost = stopped();
+    if (afterPost) return afterPost;
     const receiptActive = boundary();
     if ('stopped' in receiptActive) return receiptActive.stopped;
     let receipt: ReceiptProbe<TRecorded>;
@@ -152,9 +152,9 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
     } catch (error) {
       return failed(error);
     }
+    if (receipt.kind === 'recorded') return recordedOutcome(attempts, true, receipt.value);
     const afterReceipt = stopped();
     if (afterReceipt) return afterReceipt;
-    if (receipt.kind === 'recorded') return recordedOutcome(attempts, true, receipt.value);
     if (receipt.kind === 'unavailable') return terminalOutcome('receipt_unavailable', attempts);
     if (receipt.kind === 'rejected') return terminalOutcome('receipt_rejected', attempts);
 

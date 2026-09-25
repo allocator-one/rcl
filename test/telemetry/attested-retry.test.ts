@@ -238,22 +238,22 @@ describe('recoverAttestedDelivery', () => {
     expect(receipt).not.toHaveBeenCalled();
   });
 
-  it('returns expired when a post completes after credential expiry', async () => {
+  it('preserves a recorded post that completes at credential expiry', async () => {
     let now = NOW;
     const outcome = await recoverAttestedDelivery({
       runId: 'run-1', payload: 'immutable', expiresAt: new Date(NOW + 1).toISOString(), now: () => now,
       post: async () => { now = NOW + 1; return { kind: 'recorded' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
     });
-    expect(outcome).toEqual({ kind: 'expired', attempts: 1, recovered: false });
+    expect(outcome).toEqual({ kind: 'recorded', attempts: 1, recovered: false });
   });
 
-  it('returns deadline_exceeded when a post completes after the monotonic deadline', async () => {
+  it('preserves a recorded post that completes at the monotonic deadline', async () => {
     let elapsed = 0;
     const outcome = await recoverAttestedDelivery({
       runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, monotonicNow: () => elapsed, deadlineMs: 1,
       post: async () => { elapsed = 1; return { kind: 'recorded' }; }, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
     });
-    expect(outcome).toEqual({ kind: 'deadline_exceeded', attempts: 1, recovered: false });
+    expect(outcome).toEqual({ kind: 'recorded', attempts: 1, recovered: false });
   });
 
   it('aborts an in-flight post at the remaining delivery deadline', async () => {
