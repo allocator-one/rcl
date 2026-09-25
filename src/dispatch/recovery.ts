@@ -36,6 +36,8 @@ export interface ReviewerRecoveryOptions {
   reasoningEffort?: RunnerOptions['reasoningEffort'];
   signal?: AbortSignal;
   auditLateReview?: RunnerOptions['auditLateReview'];
+  /** Audit-only callback pinned to the durable physical intent from its wave. */
+  auditLateAttempt?: (review: ModelReview, callIndex: number, paidAttempt: PaidAttempt) => void | Promise<void>;
   onLateAuditError?: RunnerOptions['onLateAuditError'];
 }
 
@@ -110,6 +112,9 @@ export function recoveryAttemptsFromCheckpoint(state: CheckpointState): Recovery
 export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions): Promise<ReviewerRecoveryResult> {
   const startedAt = performance.now();
   input = { ...input };
+  if ((input.auditLateAttempt || input.auditLateReview) && typeof input.onLateAuditError !== 'function') {
+    throw new Error('Late review audit requires an error sink');
+  }
   const plan = freezeCheckpointPlan(input.plan);
   if (plan.digest !== input.plan.digest || plan.digest !== input.expectedPlan.digest ||
     JSON.stringify(plan.cells) !== JSON.stringify(input.plan.cells) ||
@@ -226,7 +231,17 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
               await input.journal.recordResult(cell.id, attempt, result, input.ownership);
             }
           },
-          auditLateReview: input.auditLateReview,
+          auditLateReview: input.auditLateAttempt ? async (review, index) => {
+            // This closure retains this wave's map, so a later retry can never
+            // substitute its new paid intent for a delayed earlier response.
+            const attempt = inFlight.get(index);
+            if (!attempt) throw new Error('recovery_missing_late_paid_intent');
+            const callbacks = [Promise.resolve().then(() => input.auditLateAttempt!(structuredClone(review), index, { ...attempt }))];
+            if (input.auditLateReview) callbacks.push(Promise.resolve().then(() => input.auditLateReview!(structuredClone(review), index)));
+            const failures = (await Promise.allSettled(callbacks)).filter(result => result.status === 'rejected').map(result => result.reason);
+            if (failures.length === 1) throw failures[0];
+            if (failures.length > 1) throw new AggregateError(failures, 'late_audit_callbacks_failed');
+          } : input.auditLateReview,
           onLateAuditError: input.onLateAuditError,
         });
         // Provider cancellation can win while an already-started intent fsync

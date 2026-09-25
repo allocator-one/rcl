@@ -10,7 +10,7 @@ import { CheckpointJournal, exportCheckpointProof, freezeCheckpointPlan,
   type CheckpointProof, type CheckpointResult } from '../../src/dispatch/checkpoint.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
-import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
+import { assembleCheckpointReview, deriveCheckpointConsensus } from '../../src/report/checkpoint-assembly.js';
 import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
@@ -104,6 +104,33 @@ function asyncReview(model: string, item: Finding, status: ModelReview['status']
 }
 
 describe('proof-bound checkpoint assembly', () => {
+  it('rebuilds the same findings and raw contribution map without clocks or verification', async () => {
+    const f = fixture({ chunks: 1 });
+    const source = await proof(f, [
+      { cell: 's0:0', id: 'old-success', findings: [finding('same-id')] },
+      { cell: 's1:0', id: 'old-failed', status: 'error', findings: [finding('failed', 'failed.ts')] },
+    ]);
+    const args = input(f, source, await proof(f, [{ cell: 's1:0', id: 'new-success', findings: [finding('same-id')] }]));
+    args.supplementalAsync = captureSupplementalAsync([asyncReview('bonus', finding('bonus', 'bonus.ts'))], 1);
+    const assembled = await assembleCheckpointReview(args);
+    const before = stableStringify(args), clock = vi.spyOn(Date, 'now').mockImplementation(() => { throw new Error('clock forbidden'); });
+    try {
+      const derived = deriveCheckpointConsensus(args);
+      expect(derived.consensus.reviews).toEqual(assembled.report.reviews);
+      expect(derived.consensus.reportFindings).toEqual(assembled.report.findings);
+      expect(derived.contributions).toEqual(assembled.contributions);
+      expect(derived.observations).toEqual(assembled.observations);
+      expect(derived.projection.health).toBe(args.projection.health);
+      expect(stableStringify(args)).toBe(before);
+    } finally { clock.mockRestore(); }
+    // A verified-consensus capture can also be derived offline; no verifier
+    // dependency exists on this synchronous boundary.
+    const verified = fixture({ chunks: 1, verified: true });
+    const rows = rowsFor(verified, ['s0', 's1'], 'complete'); rows[0]!.findings = [finding('retained')];
+    const verifiedArgs = input(verified, await proof(verified, rows), await proof(verified, []));
+    expect(deriveCheckpointConsensus(verifiedArgs).consensus.reportFindings).toHaveLength(1);
+  });
+
   it('derives retained critical findings and health from the same projection despite unrelated extra inputs', async () => {
     const f = fixture(), rows = rowsFor(f, ['s0', 's1'], 'source');
     rows[0]!.findings = [finding('retained')];

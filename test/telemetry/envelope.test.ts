@@ -199,6 +199,18 @@ describe('buildRunEnvelope', () => {
     expect(verbose.reviews[1]!.error).toBe('JSON parse error at position 12\n[code omitted]');
   });
 
+  it('excludes private checkpoint prompt evidence from the ordinary delivery view without rewriting it', () => {
+    const evidence = { checkpoint: '{"prompt":"PRIVATE original prompt token=example-secret"}',
+      supplemental_async: '{"raw":"PRIVATE async result"}' };
+    const bytes = JSON.stringify(evidence), result = { ...sampleResult(), reviewerEvidence: evidence };
+    for (const parseFailures of [false, true]) {
+      const delivered = sanitizeForDelivery(result, { parseFailures });
+      expect(Object.hasOwn(delivered, 'reviewerEvidence')).toBe(false);
+      expect(JSON.stringify(delivered)).not.toContain('PRIVATE');
+      expect(JSON.stringify(result.reviewerEvidence)).toBe(bytes);
+    }
+  });
+
   it('refuses a report without a run header', () => {
     const result = sampleResult();
     delete result.run;

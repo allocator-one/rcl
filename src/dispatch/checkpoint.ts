@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readdir, realpath } from 'node:fs/promises';
 import { join, relative, resolve, basename } from 'node:path';
 import { z } from 'zod';
 import { originalRawFindingSchema } from '../telemetry/recovery/source.js';
+import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
 import {
   assertNativeTargetOwnership,
@@ -17,7 +18,7 @@ const MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_CHECKPOINT_PROOF_BYTES = 25 * 1024 * 1024;
 const integer = z.number().int().nonnegative().safe();
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
-const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation']);
+const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation', 'launch']);
 const bindingReferenceSchema = z.object({ name: bindingNameSchema, file: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
   .refine(binding => binding.file === bindingFile(binding.name));
 const attemptSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9._:-]{1,160}$/), kind: z.enum(['paid', 'unknown']) }).strict();
@@ -56,7 +57,13 @@ const journalRecordSchema = z.discriminatedUnion('type', [
   z.object({ ...recordBase, ...attemptRecord, type: z.literal('uncertain'), reason: z.string().refine(value => !!value.trim() && !/[\0\r\n]/.test(value)) }).strict(),
   z.object({ ...recordBase, type: z.literal('finalization'), finalizedDigest: digestSchema }).strict(),
 ]);
-const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), source: z.string().optional(), operation: z.string().optional() }).strict();
+const lateRecordSchema = z.object({ ...recordBase, ...attemptRecord,
+  version: z.literal(1), type: z.literal('late-result'), planDigest: digestSchema,
+  finalizationDigest: digestSchema, intentDigest: digestSchema, reviewSha256: digestSchema, reviewBytes: z.string().min(1),
+}).strict();
+// Inline JSON escaping can enlarge a valid raw 8 MiB review. Main file bounds stay unchanged.
+const lateFileOptions = Object.freeze({ maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), source: z.string().optional(), operation: z.string().optional(), launch: z.string().optional() }).strict();
 const proofWireSchema = z.object({ version: z.literal(1), plan: z.unknown(), records: z.array(z.unknown()),
   outcomes: z.array(z.object({ resultFile: z.string(), reviewBytes: z.string() }).strict()), bindings: bindingsSchema }).strict();
 const frozenPlanSchema = z.object({
@@ -89,6 +96,7 @@ export type CheckpointResult = { kind: 'success'; chunk: number; reviewBytes: st
 export interface JournalRecord { sequence: number; previousDigest: string; digest: string; type: 'binding' | 'intent' | 'result' | 'uncertain' | 'finalization'; binding?: { name: CheckpointBindingName; file: string; sha256: string }; cell?: string; paidAttempt?: PaidAttempt; result?: { kind: 'success' | 'failure'; chunk: number; reviewSha256: string; resultFile: string; possiblyBilled?: boolean }; reason?: string; finalizedDigest?: string }
 export interface CheckpointState { records: JournalRecord[]; outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }>; successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }>; uncertain: Array<{ cell: string; paidAttempt: PaidAttempt }>; finalized: boolean }
 type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
+export type CheckpointLateAuditRecord = DeepReadonly<z.infer<typeof lateRecordSchema>>;
 export type CheckpointProof = DeepReadonly<{ version: 1; bytes: string; digest: string; plan: FrozenCheckpointPlan; state: CheckpointState; bindings: CheckpointBindings }>;
 const validatedProofs = new WeakSet<object>();
 
@@ -142,37 +150,37 @@ async function ensurePrivateChild(parent: string, child: string): Promise<string
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   await inspectDirectory(path); await syncNativeDirectory(parent); return path;
 }
-async function readSafe(path: string, preserveBom = false): Promise<string> {
-  const entry = await lstat(path); if (!entry.isFile() || entry.isSymbolicLink() || entry.size > MAX_FILE_BYTES || (entry.mode & 0o7777) !== 0o600 || (process.geteuid && entry.uid !== process.geteuid())) throw new Error('checkpoint_symlink');
+async function readSafe(path: string, preserveBom = false, options: { maxBytes?: number; singleLink?: boolean } = {}): Promise<string> {
+  const entry = await lstat(path); if (!entry.isFile() || entry.isSymbolicLink() || entry.size > (options.maxBytes ?? MAX_FILE_BYTES) || options.singleLink && entry.nlink !== 1 || (entry.mode & 0o7777) !== 0o600 || (process.geteuid && entry.uid !== process.geteuid())) throw new Error('checkpoint_symlink');
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink()) throw new Error('checkpoint_changing_source'); return new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(bytes); } finally { await handle.close(); }
+  try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs || options.singleLink && before.nlink !== 1) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink() || options.singleLink && (after.nlink !== 1 || current.nlink !== 1)) throw new Error('checkpoint_changing_source'); return new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(bytes); } finally { await handle.close(); }
 }
 
-async function writeExclusive(path: string, bytes: string): Promise<void> {
-  boundedBytes(bytes);
+async function writeExclusive(path: string, bytes: string, maxBytes = MAX_FILE_BYTES): Promise<void> {
+  boundedBytes(bytes, maxBytes);
   const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
   await syncNativeDirectory(resolve(path, '..'));
 }
-function boundedBytes(bytes: string): void {
-  if (Buffer.byteLength(bytes, 'utf8') > MAX_FILE_BYTES) throw new Error('checkpoint_file_too_large');
+function boundedBytes(bytes: string, maxBytes = MAX_FILE_BYTES): void {
+  if (Buffer.byteLength(bytes, 'utf8') > maxBytes) throw new Error('checkpoint_file_too_large');
 }
 
 /** An identical visible file is not proof that a previous fsync succeeded. */
-async function syncExisting(path: string, expected?: string, preserveBom = false): Promise<void> {
+async function syncExisting(path: string, expected?: string, preserveBom = false, options: { maxBytes?: number; singleLink?: boolean } = {}): Promise<void> {
   await inspectDirectory(resolve(path, '..'));
   const entry = await lstat(path);
-  const bytes = await readSafe(path, preserveBom);
+  const bytes = await readSafe(path, preserveBom, options);
   if (expected !== undefined && bytes !== expected) throw new Error('checkpoint_changing_source');
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev || opened.size !== entry.size ||
-      opened.mtimeMs !== entry.mtimeMs || opened.ctimeMs !== entry.ctimeMs) throw new Error('checkpoint_changing_source');
+      opened.mtimeMs !== entry.mtimeMs || opened.ctimeMs !== entry.ctimeMs || options.singleLink && opened.nlink !== 1) throw new Error('checkpoint_changing_source');
     await handle.sync();
     const current = await lstat(path);
     if (current.ino !== opened.ino || current.dev !== opened.dev || current.mtimeMs !== opened.mtimeMs ||
-      current.ctimeMs !== opened.ctimeMs || current.isSymbolicLink()) throw new Error('checkpoint_changing_source');
+      current.ctimeMs !== opened.ctimeMs || current.isSymbolicLink() || options.singleLink && current.nlink !== 1) throw new Error('checkpoint_changing_source');
   } finally { await handle.close(); }
   await syncNativeDirectory(resolve(path, '..'));
 }
@@ -201,14 +209,19 @@ function snapshotResult(value: CheckpointResult): CheckpointResult {
 }
 function resultFileFor(cell: string, attempt: PaidAttempt): string { return `${sha256(cell).slice(0, 16)}-${sha256(attempt.id).slice(0, 16)}.json`; }
 function validResultReference(value: NonNullable<JournalRecord['result']>, cell: string, attempt: PaidAttempt): boolean { return Number.isSafeInteger(value.chunk) && value.chunk >= 0 && (value.kind === 'success' || value.kind === 'failure') && /^[a-f0-9]{64}$/.test(value.reviewSha256) && value.resultFile === resultFileFor(cell, attempt) && basename(value.resultFile) === value.resultFile && (value.kind !== 'failure' || typeof value.possiblyBilled === 'boolean'); }
-function validateResult(result: CheckpointResult, cell: CheckpointCell): void {
-  if (!Number.isSafeInteger(result.chunk) || result.chunk !== cell.chunk || typeof result.reviewBytes !== 'string' || !result.reviewBytes) throw new Error('checkpoint_result_cell_mismatch');
-  boundedBytes(result.reviewBytes);
-  let review: unknown; try { review = JSON.parse(result.reviewBytes); } catch { throw new Error('checkpoint_invalid_result'); }
+function validateReviewBytes(bytes: string, cell: CheckpointCell): z.infer<typeof reviewSchema> {
+  if (typeof bytes !== 'string' || !bytes) throw new Error('checkpoint_invalid_result');
+  boundedBytes(bytes);
+  let review: unknown; try { review = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_result'); }
   const parsed = reviewSchema.safeParse(review);
   if (!parsed.success) throw new Error('checkpoint_invalid_result');
   const item = parsed.data;
   if (item.model !== cell.model || item.role !== cell.role || item.provider !== cell.route) throw new Error('checkpoint_result_cell_mismatch');
+  return item;
+}
+function validateResult(result: CheckpointResult, cell: CheckpointCell): void {
+  if (!Number.isSafeInteger(result.chunk) || result.chunk !== cell.chunk || typeof result.reviewBytes !== 'string' || !result.reviewBytes) throw new Error('checkpoint_result_cell_mismatch');
+  const item = validateReviewBytes(result.reviewBytes, cell);
   if ((result.kind === 'success') !== (item.status === 'success')) throw new Error('checkpoint_result_cell_mismatch');
 }
 
@@ -369,6 +382,72 @@ export class CheckpointJournal {
 
   /** Exact immutable metadata bytes; validates the entire journal without writing. */
   async readBindings(): Promise<CheckpointBindings> { return (await this.readValidated()).bindings; }
+
+  /** Late observations are audit-only and never enter the sealed main proof or accounting. */
+  async readLateAudit(): Promise<readonly CheckpointLateAuditRecord[]> {
+    return this.readLateAuditValidated(await this.read());
+  }
+
+  private async readLateAuditValidated(state: CheckpointState): Promise<readonly CheckpointLateAuditRecord[]> {
+    const path = join(this.path, 'late-audit');
+    try { await lstat(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Object.freeze([]); throw error; }
+    await inspectDirectory(path);
+    if (!state.finalized) throw new Error('checkpoint_late_requires_finalization');
+    const finalization = state.records.at(-1)!;
+    const names = (await readdir(path)).sort(), records: CheckpointLateAuditRecord[] = [], attempts = new Set<string>();
+    let previous = finalization.digest;
+    for (const [index, name] of names.entries()) {
+      if (name !== eventFile(index + 1)) throw new Error('checkpoint_late_unknown_entry');
+      const bytes = await readSafe(join(path, name), true, lateFileOptions);
+      let value: unknown;
+      try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_late_record'); }
+      const parsed = lateRecordSchema.safeParse(value);
+      if (!parsed.success) throw new Error('checkpoint_invalid_late_record');
+      const record = parsed.data, { digest, ...unsigned } = record;
+      if (record.sequence !== index + 1 || record.previousDigest !== previous || digest !== sha256(canonical(unsigned as unknown as Json)) ||
+        bytes !== `${canonical(record as unknown as Json)}\n` || record.planDigest !== this.plan.digest || record.finalizationDigest !== finalization.digest || attempts.has(record.paidAttempt.id)) throw new Error('checkpoint_invalid_late_record');
+      const intent = state.records.find(row => row.type === 'intent' && row.cell === record.cell && row.paidAttempt?.id === record.paidAttempt.id && row.paidAttempt.kind === record.paidAttempt.kind);
+      const cell = this.plan.cells.find(cell => cell.id === record.cell);
+      if (!intent || !cell || intent.digest !== record.intentDigest) throw new Error('checkpoint_late_missing_intent');
+      boundedOpaqueBytes(record.reviewBytes); validateReviewBytes(record.reviewBytes, cell);
+      if (sha256(record.reviewBytes) !== record.reviewSha256) throw new Error('checkpoint_late_tampered');
+      attempts.add(record.paidAttempt.id); previous = digest; records.push(record);
+    }
+    return deepFreeze(records);
+  }
+
+  private async syncLateRecord(record: CheckpointLateAuditRecord): Promise<void> {
+    await syncExisting(join(this.path, 'late-audit', eventFile(record.sequence)), `${canonical(record as unknown as Json)}\n`, true, lateFileOptions);
+  }
+
+  /** Caller retains live original ownership while draining; no ownership is created here. */
+  async recordLateResult(cell: string, paidAttempt: PaidAttempt, rawReviewBytes: string, ownership: NativeTargetOwnership): Promise<void> {
+    const attempt = snapshotAttempt(paidAttempt);
+    this.cell(cell); validateReviewBytes(rawReviewBytes, this.plan.cells.find(candidate => candidate.id === cell)!); boundedOpaqueBytes(rawReviewBytes);
+    return this.write(ownership, async () => {
+      const state = await this.read();
+      if (!state.finalized) throw new Error('checkpoint_late_requires_finalization');
+      const intent = state.records.find(row => row.type === 'intent' && row.cell === cell && row.paidAttempt?.id === attempt.id && row.paidAttempt.kind === attempt.kind);
+      if (!intent) throw new Error('checkpoint_late_missing_intent');
+      const records = await this.readLateAuditValidated(state);
+      const prior = records.find(record => record.paidAttempt.id === attempt.id);
+      if (prior && prior.reviewBytes !== rawReviewBytes) throw new Error('checkpoint_late_conflict');
+      const finalizationDigest = state.records.at(-1)!.digest;
+      const unsigned = { version: 1 as const, type: 'late-result' as const, sequence: records.length + 1, previousDigest: records.at(-1)?.digest ?? finalizationDigest,
+        planDigest: this.plan.digest, finalizationDigest, intentDigest: intent.digest, cell, paidAttempt: attempt,
+        reviewSha256: sha256(rawReviewBytes), reviewBytes: rawReviewBytes };
+      const record = { ...unsigned, digest: sha256(canonical(unsigned as unknown as Json)) };
+      const bytes = `${canonical(record as unknown as Json)}\n`;
+      boundedBytes(bytes, lateFileOptions.maxBytes);
+      const path = await ensurePrivateChild(this.path, 'late-audit');
+      // Reflush acknowledged history too: a prior process may have lost an fsync acknowledgment.
+      for (const existing of records) await this.syncLateRecord(existing);
+      if (prior) return;
+      await writeExclusive(join(path, eventFile(record.sequence)), bytes, lateFileOptions.maxBytes);
+      await this.syncLateRecord(record);
+    });
+  }
 
   async exportProof(): Promise<CheckpointProof> {
     const { state, bindings } = await this.readValidated(MAX_CHECKPOINT_PROOF_BYTES);

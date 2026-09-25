@@ -250,6 +250,10 @@ export function buildRunEnvelope(
  */
 export function sanitizeForDelivery(result: ReviewResult, options: { parseFailures?: boolean } = {}): ReviewResult {
   const parseFailures = options.parseFailures === true;
+  // Checkpoint proofs contain exact prompts and raw outcomes. They belong only
+  // in the explicitly private evidence artifact: scrubbing would break their
+  // hashes, while the ordinary top-level spread would disclose them unchanged.
+  const { reviewerEvidence: _privateEvidence, ...ordinaryResult } = result as ReviewResult & { reviewerEvidence?: unknown };
   const finding = (f: ConsensusFinding): ConsensusFinding => ({
     ...f,
     ...(f.locationProvenance !== undefined ? { locationProvenance: scrubLocationProvenance(f.locationProvenance) } : {}),
@@ -291,7 +295,7 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
     };
   };
   return {
-    ...result,
+    ...ordinaryResult,
     ...(result.run ? { run: scrubRunHeader(result.run) } : {}),
     reviews: result.reviews.map(review),
     findings: result.findings.map(finding),

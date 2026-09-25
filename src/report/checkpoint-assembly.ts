@@ -6,6 +6,7 @@ import { isCapturedAggregationInputs } from './aggregation-inputs.js';
 import { assembleCompletedReview, type AssemblyDependencies, type CompletedReviewInput } from './assembly.js';
 import { isCheckpointReportProjection, type CheckpointContribution, type CheckpointReportProjection } from './checkpoint-projection.js';
 import { assertReviewerRunBindings } from './reviewer-evidence.js';
+import { deriveConsensusAssembly, type ConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
 import { buildRunHeader, diffDigest, stableStringify } from './run-header.js';
 import { isSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 
@@ -38,6 +39,10 @@ export interface CheckpointAssemblyResult {
   observations: CheckpointAssemblyObservation[];
   /** Raw lineage and successor-only physical attempts; merged reviews are not a billing ledger. */
   projection: CheckpointReportProjection;
+}
+export interface CheckpointConsensusResult extends Pick<CheckpointAssemblyResult, 'contributions' | 'observations' | 'projection'> {
+  /** Deterministic pre-verification bodies; no gate approval is inferred. */
+  consensus: ConsensusAssembly;
 }
 
 interface ReviewWithOrigins {
@@ -105,10 +110,7 @@ function blockingReviews(projection: CheckpointReportProjection): ReviewWithOrig
  * Callers still establish complete source authority, async snapshot inheritance,
  * current native launch ownership and server admission outside this adapter.
  */
-export async function assembleCheckpointReview(
-  input: CheckpointAssemblyInput,
-  dependencies: AssemblyDependencies = {},
-): Promise<CheckpointAssemblyResult> {
+function prepareCheckpointAssembly(input: CheckpointAssemblyInput) {
   if (!isCheckpointReportProjection(input?.projection)) throw new Error('checkpoint_assembly_unvalidated_projection');
   if (!isSupplementalAsync(input.supplementalAsync)) throw new Error('checkpoint_assembly_unvalidated_async');
   const { projection, supplementalAsync } = input;
@@ -135,7 +137,7 @@ export async function assembleCheckpointReview(
   }
   const gatingConfig = { ...aggregation.gating }, thresholds = { ...aggregation.thresholds };
   const header = buildRunHeader({ ...run, config, diff, gating: gatingConfig, thresholds,
-    finishedAt: new Date(), ciExitCode: 1 });
+    finishedAt: run.startedAt, ciExitCode: 1 });
   assertReviewerRunBindings(header, successor.proof, captured);
 
   const blocking = blockingReviews(projection);
@@ -172,14 +174,14 @@ export async function assembleCheckpointReview(
     if (seen.size !== expected.size) throw new Error('checkpoint_assembly_missing_contribution');
   }
   checkConservation(merged.filter(item => item.review.status === 'success').flatMap(item => item.origins.flat()));
-  let contributions: CheckpointAssemblyContribution[] | undefined;
-  const report = await assembleCompletedReview({ chunkReviews: blocking.map(item => item.review),
+  const completedInput: CompletedReviewInput = { chunkReviews: blocking.map(item => item.review),
     arrivedAsync: asyncInputs.map(item => item.review), asyncLaunched: supplementalAsync.asyncLaunched,
     startTime: input.startTime, roleMap: new Map(aggregation.roles.map(item => [item.name, structuredClone(item.role) as Role])),
     config, diff, gatingConfig, reviewerHealth: projection.health, run,
     ...(aggregation.modelWeights === undefined ? {} : { modelWeights: new Map(aggregation.modelWeights.map(item => [item.model, item.weight])) }),
-  }, { ...dependencies, onFindingContributions(groups) {
-    contributions = groups.map(group => ({ reportIdentity: group.reportIdentity, disposition: group.disposition,
+  };
+  function mapContributions(groups: ConsensusAssemblyContribution[]): CheckpointAssemblyContribution[] {
+    const contributions = groups.map(group => ({ reportIdentity: group.reportIdentity, disposition: group.disposition,
       origins: group.contributions.flatMap(reference => {
         const origins = merged[reference.reviewIndex]?.origins[reference.findingIndex];
         if (!origins?.length) throw new Error('checkpoint_assembly_invalid_dedupe_reference');
@@ -187,6 +189,30 @@ export async function assembleCheckpointReview(
       }),
     }));
     checkConservation(contributions.flatMap(group => group.origins));
+    return contributions;
+  }
+  return { completedInput, mapContributions, observations, projection };
+}
+
+/** Rebuild findings and attribution without any provider, clock, or admission side effect. */
+export function deriveCheckpointConsensus(input: CheckpointAssemblyInput): CheckpointConsensusResult {
+  const prepared = prepareCheckpointAssembly(input), completed = prepared.completedInput;
+  const consensus = deriveConsensusAssembly({ runId: completed.run.id!, chunkReviews: completed.chunkReviews,
+    arrivedAsync: completed.arrivedAsync, roleMap: completed.roleMap, thresholds: completed.config.thresholds,
+    modelWeights: completed.modelWeights, collectContributions: true });
+  return { consensus, contributions: prepared.mapContributions(consensus.contributions!),
+    observations: prepared.observations, projection: prepared.projection };
+}
+
+/** Assemble and gate using exactly the same retained finding projection as offline reconstruction. */
+export async function assembleCheckpointReview(
+  input: CheckpointAssemblyInput,
+  dependencies: AssemblyDependencies = {},
+): Promise<CheckpointAssemblyResult> {
+  const { completedInput, mapContributions, observations, projection } = prepareCheckpointAssembly(input);
+  let contributions: CheckpointAssemblyContribution[] | undefined;
+  const report = await assembleCompletedReview(completedInput, { ...dependencies, onFindingContributions(groups) {
+    contributions = mapContributions(groups);
     dependencies.onFindingContributions?.(structuredClone(groups));
   } });
   if (contributions === undefined) throw new Error('checkpoint_assembly_missing_projection');

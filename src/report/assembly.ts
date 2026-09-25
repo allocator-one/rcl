@@ -1,16 +1,15 @@
 import { evaluateCiGate } from '../ci.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import type { Config } from '../config/schema.js';
-import { deduplicateFindings } from '../consensus/deduper.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
 import type { ModelReview, ReviewResult } from '../consensus/types.js';
-import { computeConsensus, applyReportThresholds } from '../consensus/voter.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
 import type { Diff } from '../resolver/types.js';
 import type { Role } from '../roles/types.js';
 import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-header.js';
 import { uuidv7 } from './uuid.js';
 import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
+import { deriveConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
 
 export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
@@ -32,11 +31,7 @@ export interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monot
   onVerificationStart?: () => void;
   onWarning?: (warning: string) => void;
   /** Indices refer to the merged voting reviews in the returned report. */
-  onFindingContributions?: (groups: Array<{
-    reportIdentity: string;
-    disposition: 'kept' | 'below_threshold';
-    contributions: Array<{ reviewIndex: number; findingIndex: number }>;
-  }>) => void;
+  onFindingContributions?: (groups: ConsensusAssemblyContribution[]) => void;
 }
 
 /** Assemble retained reviewer outputs through consensus, bounded gating, and the run header. */
@@ -46,39 +41,12 @@ export async function assembleCompletedReview(
 ): Promise<ReviewResult & { run: RunHeader }> {
   const { chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff, gatingConfig, modelWeights } = input;
   if (input.reviewerHealth !== undefined) assertReviewerHealth(input.reviewerHealth);
-  const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
-
   dependencies.onStage?.('computing consensus');
-
-  // Deduplicate and compute consensus
-  const groups = deduplicateFindings(
-    reviews,
-    config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
-    config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
-    config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
-    dependencies.onFindingContributions !== undefined
-  );
-
   const runId = input.run.id ?? uuidv7();
-  const consensusFindings = computeConsensus(
-    runId,
-    groups,
-    reviews,
-    roleMap,
-    {
-      lineWindow: config.thresholds?.dedupeLineWindow,
-      jaccardThreshold: config.thresholds?.jaccardThreshold,
-    },
-    modelWeights
-  );
-
-  const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
-    consensusFindings,
-    {
-      minConfidence: config.thresholds?.minConfidence,
-      minConsensusScore: config.thresholds?.minConsensusScore,
-    }
-  );
+  const { reviews, consensusFindings, reportFindings, droppedFindings, contributions } = deriveConsensusAssembly({
+    runId, chunkReviews, arrivedAsync, roleMap, thresholds: config.thresholds, modelWeights,
+    collectContributions: dependencies.onFindingContributions !== undefined,
+  });
 
   // Convergence gating (RCL-23): annotate every kept finding with why it
   // does or does not gate; single-model blocking findings get one batched
@@ -114,11 +82,7 @@ export async function assembleCompletedReview(
 
   const keepAppendix = config.output?.belowThresholdAppendix ?? true;
   if (dependencies.onFindingContributions) {
-    const kept = new Set(reportFindings.map(finding => finding.identity));
-    dependencies.onFindingContributions(consensusFindings.map((finding, index) => ({
-      reportIdentity: finding.identity!, disposition: kept.has(finding.identity) ? 'kept' : 'below_threshold',
-      contributions: groups[index]!.contributions!.map(reference => ({ ...reference })),
-    })));
+    dependencies.onFindingContributions(contributions!);
   }
   const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
   const body: ReviewResult = {

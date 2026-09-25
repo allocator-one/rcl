@@ -5,13 +5,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, exportCheckpointProof } from '../../src/dispatch/checkpoint.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
+import { createOriginalLaunch, encodeOriginalLaunch, type OriginalLaunch } from '../../src/dispatch/original-launch.js';
+import { MAX_ARTIFACT_BYTES } from '../../src/telemetry/envelope-validation.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
 import { chunkDiff } from '../../src/prepare/chunker.js';
 import { buildPrompt } from '../../src/prepare/prompt-builder.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
-import { buildRunHeader, diffDigest, stableStringify } from '../../src/report/run-header.js';
-import { describeReviewerEvidence, inspectReviewerEvidenceReport, reviewerSourceBinding, validateReviewerReportChain } from '../../src/report/reviewer-evidence.js';
+import { buildRunHeader, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
+import { assertReviewerRunBindings, MAX_REVIEWER_REPORT_BYTES, describeReviewerEvidence, inspectReviewerEvidenceReport, reviewerSourceBinding, validateReviewerReportChain } from '../../src/report/reviewer-evidence.js';
 import type { Diff } from '../../src/resolver/types.js';
 
 const roots: string[] = [];
@@ -39,16 +41,17 @@ async function fixture(nativeTarget = target, withAggregation = false) {
     target: { kind: 'pr', repo: 'allocator-one/rcl', prNumber: 105, headSha: plan.headSha, baseSha: 'c'.repeat(40) },
     diff, roster: assignments.map(a => ({ model: a.model, provider: a.provider, role: a.role.name, lane: 'blocking' })),
     config, thresholds: { minConsensusScore: 0.5, minConfidence: 0.5, dedupeLineWindow: 3, jaccardThreshold: 0.5 },
-    gating: { mode: 'all-findings', minModels: 2, verificationTimeoutMs: 1000, verificationPassTimeoutMs: 1000 },
+    gating: { mode: 'all-findings', minModels: 2, verificationModel: undefined, verificationTimeoutMs: 1000, verificationPassTimeoutMs: 1000 },
     runner: { kind: 'agent' }, startedAt: new Date(1000), finishedAt: new Date(2000), ciExitCode: 1,
     converge: { target: nativeTarget, round, attempt: round } });
   return { commonDir, plan, captured, header, supplementalAsync: withAggregation ? captureSupplementalAsync([], 2) : undefined };
 }
 
-async function original(input: Awaited<ReturnType<typeof fixture>>) {
+async function original(input: Awaited<ReturnType<typeof fixture>>, launch?: OriginalLaunch) {
   return withNativeTarget(input.commonDir, input.plan.target, async ownership => {
     const journal = await CheckpointJournal.create({ commonDir: input.commonDir, namespace: 'original', plan: input.plan, ownership });
     await journal.bind('captured-inputs', input.captured.bytes, ownership);
+    if (launch) await journal.bind('launch', encodeOriginalLaunch(launch), ownership);
     await journal.finalize(ownership);
     const proof = await exportCheckpointProof(journal);
     const bytes = JSON.stringify({ run: { ...input.header(ids[0]!, 1), reviewer_evidence: describeReviewerEvidence(proof, input.supplementalAsync) },
@@ -150,4 +153,91 @@ it('binds aggregation and raw async snapshot hashes and refuses omitted or subst
     expect(() => inspectReviewerEvidenceReport(JSON.stringify(report), input.plan)).toThrow();
   }
   expect(() => describeReviewerEvidence(source.proof)).toThrow('reviewer_missing_async_snapshot');
+});
+
+function launchFor(input: Awaited<ReturnType<typeof fixture>>) {
+  return createOriginalLaunch({ runId: ids[0]!, target: input.plan.target, originalNativeClaim: { attempt: 1, round: 1 },
+    capturedInputsSha256: input.captured.digest, planDigest: input.plan.digest,
+    startedAtMs: 1000, expiresAtMs: 2000, maxPhysicalCalls: 2, maxAttemptsPerCell: 1 });
+}
+
+async function proofWithBindings(input: Awaited<ReturnType<typeof fixture>>,
+  bindings: Array<['launch' | 'source' | 'operation', string]>) {
+  return withNativeTarget(input.commonDir, input.plan.target, async ownership => {
+    const journal = await CheckpointJournal.create({ commonDir: input.commonDir, namespace: 'bound-proof', plan: input.plan, ownership });
+    await journal.bind('captured-inputs', input.captured.bytes, ownership);
+    for (const [name, bytes] of bindings) await journal.bind(name, bytes, ownership);
+    await journal.finalize(ownership);
+    return exportCheckpointProof(journal);
+  });
+}
+
+describe('original launch report binding', () => {
+  it('exposes the exact launch and digest without treating missing legacy launch as execution proof', async () => {
+    const input = await fixture('rcl-105'), launch = launchFor(input), source = await original(input, launch);
+    expect(source.launch).toEqual(launch);
+    expect(Object.isFrozen(source.launch)).toBe(true);
+    expect(source.descriptor).toMatchObject({ kind: 'original', launch_sha256: sha256Hex(encodeOriginalLaunch(launch)) });
+    expect(assertReviewerRunBindings(input.header(ids[0]!, 1), source.proof, input.captured)).toBe(target);
+    // Expiry is historical execution metadata; structural inspection is not a new launch.
+    expect(source.launch!.expiresAtMs).toBe(2000);
+    const legacy = await original(await fixture());
+    expect(legacy.launch).toBeUndefined();
+    expect(legacy.descriptor).not.toHaveProperty('launch_sha256');
+  });
+
+  it('refuses substituted run UUID or native claim before aggregation and during artifact inspection', async () => {
+    const input = await fixture(), source = await original(input, launchFor(input));
+    for (const change of [
+      (run: any) => { run.id = ids[1]; },
+      (run: any) => { run.converge.attempt = 2; },
+      (run: any) => { run.converge.round = 2; },
+      (run: any) => { delete run.converge; },
+    ]) {
+      const report = JSON.parse(source.reportBytes); change(report.run);
+      expect(() => assertReviewerRunBindings(report.run, source.proof, input.captured)).toThrow('reviewer_report_launch_mismatch');
+      expect(() => inspectReviewerEvidenceReport(JSON.stringify(report), input.plan)).toThrow('reviewer_report_launch_mismatch');
+    }
+  });
+
+  it.each(['target', 'planDigest', 'capturedInputsSha256'] as const)('refuses launch with changed %s', async field => {
+    const input = await fixture(), launch = launchFor(input);
+    const altered = { ...launch, [field]: field === 'target' ? 'another-target' : 'f'.repeat(64) };
+    const proof = await proofWithBindings(input, [['launch', encodeOriginalLaunch(altered)]]);
+    expect(() => describeReviewerEvidence(proof)).toThrow('reviewer_original_launch_mismatch');
+    expect(() => assertReviewerRunBindings(input.header(ids[0]!, 1), proof, input.captured)).toThrow('reviewer_original_launch_mismatch');
+  });
+
+  it.each([['source'], ['operation'], ['source', 'operation']] as const)('refuses launch mixed with %j', async (...names) => {
+    const input = await fixture(), launch = launchFor(input);
+    const operation = createRecoveryOperation({ operationId: ids[2]!, successorRunId: ids[1]!, sourceRunId: ids[0]!,
+      sourceReportSha256: 'a'.repeat(64), sourceCheckpointSha256: 'b'.repeat(64),
+      capturedInputsSha256: input.captured.digest, planDigest: input.plan.digest, target: input.plan.target,
+      originalNativeClaim: { attempt: 1, round: 1 }, startedAtMs: 1000, expiresAtMs: 2000, maxAdditionalCalls: 2, maxAttemptsPerCell: 2 });
+    const bytes = { source: stableStringify({ run_id: ids[0], report_sha256: 'a'.repeat(64), checkpoint_sha256: 'b'.repeat(64) }),
+      operation: encodeRecoveryOperation(operation) };
+    const proof = await proofWithBindings(input, [['launch', encodeOriginalLaunch(launch)], ...names.map(name => [name, bytes[name]] as ['source' | 'operation', string])]);
+    expect(() => describeReviewerEvidence(proof)).toThrow('reviewer_mixed_launch_bindings');
+    expect(() => assertReviewerRunBindings(input.header(ids[0]!, 1), proof, input.captured)).toThrow('reviewer_mixed_launch_bindings');
+  });
+
+  it('refuses malformed launch bytes and omitted or altered launch digest', async () => {
+    const input = await fixture(), source = await original(input, launchFor(input));
+    const malformed = await proofWithBindings(input, [['launch', '{}']]);
+    expect(() => describeReviewerEvidence(malformed)).toThrow('original_launch_invalid_document');
+    expect(() => assertReviewerRunBindings(input.header(ids[0]!, 1), malformed, input.captured)).toThrow('original_launch_invalid_document');
+    for (const digest of [undefined, 'f'.repeat(64)]) {
+      const raw = JSON.parse(source.reportBytes);
+      raw.run.reviewer_evidence.launch_sha256 = digest;
+      expect(() => inspectReviewerEvidenceReport(JSON.stringify(raw))).toThrow('reviewer_descriptor_mismatch');
+    }
+  });
+
+  it('refuses a complete report one byte above the shared decimal artifact limit', async () => {
+    const source = await original(await fixture());
+    const bytes = source.reportBytes + ' '.repeat(MAX_ARTIFACT_BYTES + 1 - Buffer.byteLength(source.reportBytes));
+    expect(Buffer.byteLength(bytes)).toBe(25_000_001);
+    expect(() => inspectReviewerEvidenceReport(bytes)).toThrow('reviewer_report_invalid_bytes');
+    expect(MAX_REVIEWER_REPORT_BYTES).toBe(MAX_ARTIFACT_BYTES);
+  });
 });
