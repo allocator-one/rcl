@@ -552,11 +552,6 @@ describe('openai-compat request parameters', () => {
   });
 });
 
-// A provider that declines does so IN-BAND: HTTP 200, no content. Recording
-// that as a clean review is the dangerous failure mode — the run reports a
-// green check for code nobody looked at, `successfulReviews` keeps the CI
-// "nothing was reviewed" guard quiet, and consensus counts the refuser as a
-// relevant reviewer that found nothing (RCL-13).
 // OpenAI rejects max_tokens on reasoning-era models with HTTP 400, so a
 // wrong parameter is a dead reviewer, not a degraded one.
 describe('openai request parameters', () => {
@@ -610,6 +605,11 @@ describe('openai request parameters', () => {
   });
 });
 
+// A provider that declines does so IN-BAND: HTTP 200, no content. Recording
+// that as a clean review is the dangerous failure mode — the run reports a
+// green check for code nobody looked at, `successfulReviews` keeps the CI
+// "nothing was reviewed" guard quiet, and consensus counts the refuser as a
+// relevant reviewer that found nothing (RCL-13).
 describe('refusal detection', () => {
   it('anthropic: stop_reason refusal is an error carrying the category', async () => {
     const adapter = new AnthropicAdapter('test-key');
