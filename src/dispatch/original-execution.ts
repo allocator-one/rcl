@@ -44,7 +44,7 @@ export async function bindOriginalCouncil(input: BindOriginalCouncilOptions): Pr
 
 export interface OriginalExecutionOptions extends Pick<ReviewerRecoveryOptions,
   'commonDir' | 'ownership' | 'journal' | 'expectedPlan' | 'adapterFactory' | 'signal' |
-  'auditLateReview' | 'auditLateAttempt' | 'onLateAuditError'> {
+  'auditLateReview' | 'auditLateAttempt' | 'onLateAuditError' | 'onPhysicalReviewComplete'> {
   launch: OriginalLaunch;
   runtimeBounds?: OriginalRuntimeBounds;
   nowMs?: () => number;
@@ -81,6 +81,7 @@ export async function executeCapturedOriginal(input: OriginalExecutionOptions): 
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
       reasoningEffort: captured.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
       adapterFactory: options.adapterFactory, signal: options.signal,
+      onPhysicalReviewComplete: options.onPhysicalReviewComplete,
       auditLateReview: options.auditLateReview, auditLateAttempt: options.auditLateAttempt,
       onLateAuditError: options.onLateAuditError });
   });

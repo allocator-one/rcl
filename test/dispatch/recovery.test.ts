@@ -17,7 +17,9 @@ vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
     const handle = await actual.open(...args);
-    if (!writeGate.active || !String(args[0]).endsWith('/events/00000001.json') || (Number(args[1]) & 1) !== 1) return handle;
+    const path = String(args[0]);
+    if (!writeGate.active || !(path.endsWith('/events/00000001.json') || path.includes('/.staging/')) ||
+      (Number(args[1]) & 1) !== 1) return handle;
     return new Proxy(handle, { get(target, key) {
       if (key === 'writeFile') return async (...writeArgs: Parameters<typeof handle.writeFile>) => {
         writeGate.started(); await writeGate.wait; return handle.writeFile(...writeArgs);

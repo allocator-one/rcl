@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, realpath } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises';
 import { join, relative, resolve, basename } from 'node:path';
 import { z } from 'zod';
 import { originalRawFindingSchema } from '../telemetry/recovery/source.js';
@@ -63,6 +63,14 @@ const lateRecordSchema = z.object({ ...recordBase, ...attemptRecord,
 }).strict();
 // Inline JSON escaping can enlarge a valid raw 8 MiB review. Main file bounds stay unchanged.
 const lateFileOptions = Object.freeze({ maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+const terminalPayloadSchema = z.object({ reportBytes: z.string().min(1), reviewerArtifactBytes: z.string().min(1) }).strict();
+const terminalManifestSchema = z.object({ version: z.literal(1), planDigest: digestSchema, finalizationDigest: digestSchema,
+  reportSha256: digestSchema, reviewerArtifactSha256: digestSchema,
+  reportByteLength: integer.min(1).max(MAX_ARTIFACT_BYTES), reviewerArtifactByteLength: integer.min(1).max(MAX_ARTIFACT_BYTES),
+}).strict();
+const terminalPayloadOptions = Object.freeze({ maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+const terminalManifestOptions = Object.freeze({ singleLink: true });
+const terminalFileNames = ['manifest.json', 'report.json', 'reviewer-artifact.json'];
 const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), source: z.string().optional(), operation: z.string().optional(), launch: z.string().optional() }).strict();
 const proofWireSchema = z.object({ version: z.literal(1), plan: z.unknown(), records: z.array(z.unknown()),
   outcomes: z.array(z.object({ resultFile: z.string(), reviewBytes: z.string() }).strict()), bindings: bindingsSchema }).strict();
@@ -97,6 +105,12 @@ export interface JournalRecord { sequence: number; previousDigest: string; diges
 export interface CheckpointState { records: JournalRecord[]; outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }>; successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }>; uncertain: Array<{ cell: string; paidAttempt: PaidAttempt }>; finalized: boolean }
 type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 export type CheckpointLateAuditRecord = DeepReadonly<z.infer<typeof lateRecordSchema>>;
+export interface TerminalCheckpointReport {
+  readonly reportBytes: string;
+  readonly reviewerArtifactBytes: string;
+  readonly reportSha256: string;
+  readonly reviewerArtifactSha256: string;
+}
 export type CheckpointProof = DeepReadonly<{ version: 1; bytes: string; digest: string; plan: FrozenCheckpointPlan; state: CheckpointState; bindings: CheckpointBindings }>;
 const validatedProofs = new WeakSet<object>();
 
@@ -161,6 +175,34 @@ async function writeExclusive(path: string, bytes: string, maxBytes = MAX_FILE_B
   const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
   await syncNativeDirectory(resolve(path, '..'));
+}
+
+/** Event records are staged outside the observed journal namespace before an exclusive link publishes them. */
+async function publishEventExclusive(journalPath: string, name: string, bytes: string): Promise<void> {
+  boundedBytes(bytes);
+  const eventDirectory = join(journalPath, 'events');
+  const targetDirectory = resolve(journalPath, '..');
+  await inspectDirectory(eventDirectory);
+  const stagingDirectory = await ensurePrivateChild(targetDirectory, '.staging');
+  const staged = join(stagingDirectory, `${randomUUID()}.pending`);
+  const published = join(eventDirectory, name);
+  let stagedCreated = false, linked = false;
+  try {
+    await writeExclusive(staged, bytes);
+    stagedCreated = true;
+    await link(staged, published);
+    linked = true;
+    // The event name is durable before removing the otherwise invisible staging link.
+    await syncNativeDirectory(eventDirectory);
+  } finally {
+    if (stagedCreated) {
+      try { await unlink(staged); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      await syncNativeDirectory(stagingDirectory);
+    }
+  }
+  // Preserve the acknowledged file and directory durability boundary used by replay.
+  if (linked) await syncExisting(published, bytes);
 }
 function boundedBytes(bytes: string, maxBytes = MAX_FILE_BYTES): void {
   if (Buffer.byteLength(bytes, 'utf8') > maxBytes) throw new Error('checkpoint_file_too_large');
@@ -362,6 +404,18 @@ export class CheckpointJournal {
     await journal.read();
     return journal;
   }
+
+  /**
+   * Structural inspection only: validate the stored plan and complete history.
+   * This supplies no freshness, source authority or recovery eligibility proof.
+   * Callers needing an expected input binding must still use openRead(expected).
+   */
+  static async inspectRead(path: string): Promise<CheckpointJournal> {
+    const canonicalPath = resolve(path);
+    await inspectDirectory(canonicalPath);
+    const stored = decodePlan((await readSafe(join(canonicalPath, 'plan.json'))).trim());
+    return CheckpointJournal.openRead(canonicalPath, stored);
+  }
   static async openWrite(input: { commonDir: string; namespace: string; plan: FrozenCheckpointPlan; ownership: NativeTargetOwnership }): Promise<CheckpointJournal> {
     const { namespace, ownership, commonDir: requestedCommonDir } = input;
     const plan = freezeCheckpointPlan(input.plan);
@@ -382,6 +436,89 @@ export class CheckpointJournal {
 
   /** Exact immutable metadata bytes; validates the entire journal without writing. */
   async readBindings(): Promise<CheckpointBindings> { return (await this.readValidated()).bindings; }
+
+  /**
+   * Retain opaque terminal bytes after sealing, under the caller's ownership.
+   * Exact orphan payloads can resume; no existing bytes are replaced. The final
+   * manifest publishes the pair and does not confer producer authority.
+   */
+  async retainTerminalReport(input: { reportBytes: string; reviewerArtifactBytes: string }, ownership: NativeTargetOwnership): Promise<void> {
+    const parsed = terminalPayloadSchema.safeParse(input);
+    if (!parsed.success) throw new Error('checkpoint_invalid_terminal_report');
+    const captured = parsed.data;
+    for (const bytes of Object.values(captured)) {
+      boundedBytes(bytes, MAX_ARTIFACT_BYTES);
+      if (Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('checkpoint_invalid_bytes');
+    }
+    return this.write(ownership, async () => {
+      const state = await this.read();
+      if (!state.finalized) throw new Error('checkpoint_terminal_report_requires_finalization');
+      const directory = join(this.path, 'terminal-report'), names = await this.terminalReportEntries();
+      const payloads = [['report.json', captured.reportBytes], ['reviewer-artifact.json', captured.reviewerArtifactBytes]] as const;
+      if (names?.includes('manifest.json')) {
+        const published = await this.readTerminalReportValidated(state);
+        if (published!.reportBytes !== captured.reportBytes || published!.reviewerArtifactBytes !== captured.reviewerArtifactBytes) {
+          throw new Error('checkpoint_terminal_report_conflict');
+        }
+      } else {
+        // Validate every surviving orphan before writing any missing file. A
+        // truncated/conflicting payload is evidence of failure, never a prefix
+        // that can be repaired or attributed to this caller's report.
+        for (const [name, bytes] of payloads) {
+          if (names?.includes(name) && await readSafe(join(directory, name), true, terminalPayloadOptions) !== bytes) {
+            throw new Error('checkpoint_terminal_report_conflict');
+          }
+        }
+      }
+      await ensurePrivateChild(this.path, 'terminal-report');
+      for (const [name, bytes] of payloads) {
+        const path = join(directory, name);
+        if (!names?.includes(name)) await writeExclusive(path, bytes, MAX_ARTIFACT_BYTES);
+        await syncExisting(path, bytes, true, terminalPayloadOptions);
+      }
+      const manifest = { version: 1, planDigest: this.plan.digest, finalizationDigest: state.records.at(-1)!.digest,
+        reportSha256: sha256(captured.reportBytes), reviewerArtifactSha256: sha256(captured.reviewerArtifactBytes),
+        reportByteLength: Buffer.byteLength(captured.reportBytes, 'utf8'), reviewerArtifactByteLength: Buffer.byteLength(captured.reviewerArtifactBytes, 'utf8') };
+      const bytes = `${canonical(manifest as unknown as Json)}\n`, path = join(directory, 'manifest.json');
+      if (!names?.includes('manifest.json')) await writeExclusive(path, bytes);
+      await syncExisting(path, bytes, true, terminalManifestOptions);
+    });
+  }
+
+  /** Exact private payloads only after complete publication; no report semantics are inferred. */
+  async readTerminalReport(): Promise<TerminalCheckpointReport | undefined> {
+    return this.readTerminalReportValidated(await this.read());
+  }
+
+  private async terminalReportEntries(): Promise<string[] | undefined> {
+    const path = join(this.path, 'terminal-report');
+    try { await lstat(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    await inspectDirectory(path);
+    const names = (await readdir(path)).sort();
+    if (names.some(name => !terminalFileNames.includes(name))) throw new Error('checkpoint_terminal_report_unknown_entry');
+    return names;
+  }
+
+  private async readTerminalReportValidated(state: CheckpointState): Promise<TerminalCheckpointReport | undefined> {
+    const names = await this.terminalReportEntries();
+    if (names === undefined) return undefined;
+    if (!state.finalized) throw new Error('checkpoint_terminal_report_requires_finalization');
+    if (names.length !== terminalFileNames.length) throw new Error('checkpoint_terminal_report_incomplete');
+    const path = join(this.path, 'terminal-report'), bytes = await readSafe(join(path, 'manifest.json'), true, terminalManifestOptions);
+    let value: unknown;
+    try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_terminal_manifest'); }
+    const parsed = terminalManifestSchema.safeParse(value);
+    if (!parsed.success) throw new Error('checkpoint_invalid_terminal_manifest');
+    const manifest = parsed.data;
+    if (bytes !== `${canonical(manifest as unknown as Json)}\n` || manifest.planDigest !== this.plan.digest ||
+      manifest.finalizationDigest !== state.records.at(-1)!.digest) throw new Error('checkpoint_invalid_terminal_manifest');
+    const reportBytes = await readSafe(join(path, 'report.json'), true, terminalPayloadOptions);
+    const reviewerArtifactBytes = await readSafe(join(path, 'reviewer-artifact.json'), true, terminalPayloadOptions);
+    if (Buffer.byteLength(reportBytes, 'utf8') !== manifest.reportByteLength || Buffer.byteLength(reviewerArtifactBytes, 'utf8') !== manifest.reviewerArtifactByteLength ||
+      sha256(reportBytes) !== manifest.reportSha256 || sha256(reviewerArtifactBytes) !== manifest.reviewerArtifactSha256) throw new Error('checkpoint_terminal_report_tampered');
+    return Object.freeze({ reportBytes, reviewerArtifactBytes, reportSha256: manifest.reportSha256, reviewerArtifactSha256: manifest.reviewerArtifactSha256 });
+  }
 
   /** Late observations are audit-only and never enter the sealed main proof or accounting. */
   async readLateAudit(): Promise<readonly CheckpointLateAuditRecord[]> {
@@ -475,9 +612,18 @@ export class CheckpointJournal {
     const rawRecords: unknown[] = [];
     for (let i = 0; i < names.length; i++) {
       if (names[i] !== eventFile(i + 1)) throw new Error('checkpoint_sequence_gap');
+      let bytes = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { bytes = await readSafe(join(this.path, 'events', names[i]!)); break; }
+        catch (error) {
+          if (error instanceof Error && error.message === 'checkpoint_changing_source' && attempt < 2) continue;
+          if (error instanceof Error && error.message === 'checkpoint_symlink') throw error;
+          throw new Error('checkpoint_invalid_record');
+        }
+      }
       let record: unknown;
-      try { record = JSON.parse(await readSafe(join(this.path, 'events', names[i]!))); }
-      catch (error) { if (error instanceof Error && error.message === 'checkpoint_symlink') throw error; throw new Error('checkpoint_invalid_record'); }
+      try { record = JSON.parse(bytes); }
+      catch { throw new Error('checkpoint_invalid_record'); }
       retain(canonical(record as Json)); rawRecords.push(record);
     }
     const records = validateRecordChain(rawRecords, this.plan);
@@ -524,7 +670,7 @@ export class CheckpointJournal {
     const previousDigest = state.records.at(-1)?.digest ?? this.plan.digest;
     const unsigned = { ...record, sequence: state.records.length + 1, previousDigest } as Omit<JournalRecord, 'digest'>;
     const complete = { ...unsigned, digest: recordDigest(unsigned) };
-    await writeExclusive(join(this.path, 'events', eventFile(complete.sequence)), `${canonical(complete as unknown as Json)}\n`);
+    await publishEventExclusive(this.path, eventFile(complete.sequence), `${canonical(complete as unknown as Json)}\n`);
   }
   private cell(cell: string): void { if (!this.plan.cells.some(candidate => candidate.id === cell)) throw new Error('checkpoint_unknown_cell'); }
 

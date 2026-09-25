@@ -12,6 +12,24 @@ import {
 import type { ConvergeContext } from '../report/run-header.js';
 import type { NativeTargetOwnership } from './target-ownership.js';
 import { scrubText } from '../telemetry/scrub.js';
+import { hasSuccessfulQuorum, resolveQuorumPolicy } from '../dispatch/quorum.js';
+
+const reviewerQuorumSchema = z.object({
+  version: z.literal(1),
+  fraction: z.number().finite(),
+  seatCount: z.number().int().nonnegative().safe(),
+  minimumSuccessful: z.number().int().nonnegative().safe(),
+}).strict().refine(policy => {
+  try { return resolveQuorumPolicy(policy.seatCount, policy.fraction).minimumSuccessful === policy.minimumSuccessful; }
+  catch { return false; }
+}, 'Invalid frozen reviewer quorum policy');
+
+// Rerun guard metadata only. This is not native/server report admission authority.
+const reviewerHealthSchema = z.object({
+  version: z.literal(1),
+  policy: reviewerQuorumSchema,
+  successfulSeats: z.number().int().nonnegative().safe(),
+}).strict().refine(summary => summary.successfulSeats <= summary.policy.seatCount);
 
 const completionSchema = z.object({
   runId: z.string().uuid(),
@@ -20,7 +38,11 @@ const completionSchema = z.object({
   totalReviews: z.number().int().positive().safe(),
   deliveryPending: z.boolean(),
   hardFailure: z.boolean().optional(),
-}).refine(value => value.successfulReviews <= value.totalReviews);
+  reviewerHealth: reviewerHealthSchema.optional(),
+}).refine(value => value.successfulReviews <= value.totalReviews)
+  .refine(value => value.reviewerHealth === undefined ||
+    value.reviewerHealth.successfulSeats === value.successfulReviews && value.reviewerHealth.policy.seatCount === value.totalReviews,
+  'Reviewer health must match the completion counters');
 
 const launchSchema = z.object({
   status: z.enum(['pending', 'completed', 'failed']),
@@ -37,7 +59,8 @@ const launchSchema = z.object({
   totalReviews: z.number().int().positive().safe().optional(),
   deliveryPending: z.boolean().optional(),
   hardFailure: z.boolean().optional(),
-}).strict().refine(value => value.status !== 'completed' || completionSchema.safeParse(value).success);
+  reviewerHealth: reviewerHealthSchema.optional(),
+}).strict().refine(value => (value.status !== 'completed' && value.reviewerHealth === undefined) || completionSchema.safeParse(value).success);
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
 export type GuardedLaunchCompletion = z.infer<typeof completionSchema>;
@@ -118,7 +141,9 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
-  const healthy = previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
+  const healthy = previous.reviewerHealth
+    ? hasSuccessfulQuorum(previous.reviewerHealth.policy, previous.reviewerHealth.successfulSeats)
+    : previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
     refuse('report_not_admitted', `Process the existing report for run ${previous.runId}; do not rerun its reviewers.`);
   }

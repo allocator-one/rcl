@@ -16,6 +16,7 @@ import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
+  DEFAULT_THRESHOLDS,
 } from './config/defaults.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
@@ -29,6 +30,20 @@ import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
+import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
+import { bindOriginalCouncil, executeCapturedOriginal } from './dispatch/original-execution.js';
+import { assertOriginalLaunchBudget, createOriginalLaunch, type OriginalLaunch } from './dispatch/original-launch.js';
+import { createCheckpointLateAudit, type CheckpointLateAudit } from './dispatch/late-audit.js';
+import type { CheckpointJournal } from './dispatch/checkpoint.js';
+import { withNativeTarget, type NativeTargetOwnership } from './converge/target-ownership.js';
+import { retainedLaunchInputSha256, processRetainedRoundReport } from './converge/retained-report.js';
+import { AGGREGATION_ALGORITHM, captureAggregationInputs } from './report/aggregation-inputs.js';
+import { assembleCheckpointReview, type CheckpointAssemblyInput } from './report/checkpoint-assembly.js';
+import { projectCheckpointReport, type CheckpointReportProjection } from './report/checkpoint-projection.js';
+import { captureSupplementalAsync } from './report/supplemental-async.js';
+import { describeReviewerEvidence } from './report/reviewer-evidence.js';
+import { serializeReviewerArtifact } from './report/reviewer-artifact.js';
+import { inspectReviewerStatus, formatReviewerStatus } from './evidence/reviewer-status.js';
 import {
   partitionAsyncAssignments,
   asyncTargetKey,
@@ -45,7 +60,7 @@ import { resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
 import { renderReportArtifacts, writeReportArtifacts } from './output/artifacts.js';
-import { assembleCompletedReview } from './report/assembly.js';
+import { assembleCompletedReview, type CompletedReviewInput, type AssemblyDependencies } from './report/assembly.js';
 import {
   assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
@@ -159,8 +174,9 @@ program
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
+  if (actionCommand.parent?.name() === 'reviewers') return;
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-report' || name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -309,6 +325,7 @@ program
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
+  .option('--retain-reviewers', 'Privately retain exact reviewer inputs and results for guarded patch reviews')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
@@ -322,6 +339,21 @@ program
   )
   .action(async (target: string | undefined, opts) => {
     await runReview(target, opts);
+  });
+
+const reviewersCommand = program.command('reviewers').description('Inspect retained reviewer work without provider calls');
+reviewersCommand.command('status <target>')
+  .description('Read a selected local checkpoint; does not authorize recovery or approve a review')
+  .requiredOption('--run <uuid>', 'Exact retained run UUID')
+  .option('--json', 'Print machine-readable status')
+  .action(async (target: string, opts: { run: string; json?: boolean }) => {
+    try {
+      const status = await inspectReviewerStatus({ commonDir: await resolveGitCommonDir(), target, runId: opts.run });
+      console.log(opts.json ? JSON.stringify(status, null, 2) : formatReviewerStatus(status));
+    } catch (error) {
+      console.error(scrubText(error instanceof Error ? error.message : String(error), 500));
+      process.exitCode = 1;
+    }
   });
 
 // review-plan command
@@ -565,10 +597,13 @@ program
         }
 
         let report: ReviewResult;
+        let reportBytes: string;
         let reportSha256: string;
         try {
           const source = await readFile(opts.report);
-          report = JSON.parse(source.toString('utf8')) as ReviewResult;
+          reportBytes = source.toString('utf8');
+          if (!Buffer.from(reportBytes, 'utf8').equals(source)) throw new Error('Report must contain valid UTF-8.');
+          report = JSON.parse(reportBytes) as ReviewResult;
           reportSha256 = sha256(source);
         } catch (err) {
           throw new ConvergeRunStateError(`Could not read report JSON: ${opts.report}`, {
@@ -598,14 +633,19 @@ program
             )
           );
         }
-        const result = await processRoundReport({
-          gitCommonDir: await resolveGitCommonDir(),
-          target: opts.target,
-          round,
-          findings: report.findings,
-          reportSha256,
-          ...(maxRounds !== undefined ? { maxRounds } : {}),
-          ...(runId !== undefined ? { runId } : {}),
+        const gitCommonDir = await resolveGitCommonDir(), convergeTarget = opts.target.trim();
+        const result = await withNativeTarget(gitCommonDir, convergeTarget, async ownership => {
+          // Resolve the route while owning the target: deleting a report marker
+          // cannot make an already retained launch fall through legacy intake.
+          const state = await loadConvergeRunState(gitCommonDir, convergeTarget);
+          if (report.run?.reviewer_evidence !== undefined || state?.lastLaunch?.reviewerHealth !== undefined) {
+            return processRetainedRoundReport({ gitCommonDir, target: convergeTarget, round, reportBytes,
+              currentHeadSha: (await resolveGitHeads()).headSha ?? '', ownership,
+              ...(maxRounds !== undefined ? { maxRounds } : {}) });
+          }
+          return processRoundReport({ gitCommonDir, target: convergeTarget, round, findings: report.findings,
+            reportSha256, ownership, ...(maxRounds !== undefined ? { maxRounds } : {}),
+            ...(runId !== undefined ? { runId } : {}) });
         });
 
         const classified = result.findings.map((f) => ({
@@ -1390,6 +1430,7 @@ interface CouncilCliOpts {
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
+  retainReviewers?: boolean;
   /** Retain guarded output creation semantics inside the post-claim execution. */
   exclusiveOutputs?: boolean;
   launchIntent?: GuardedLaunchOptions['intent'];
@@ -1415,6 +1456,8 @@ interface PreparedCouncil {
   contextFiles: string[];
   /** Digest and provenance of the spec the spec-compliance role was given. */
   spec?: { source: SpecSource; sha256: string };
+  /** Exact bytes from the single spec read, retained only in private checkpoints. */
+  specBytes: string;
   /** Explicit --reviewer pairs: every seat is blocking, none is secondary. */
   explicit: boolean;
   /** The blocking council's own models — the roster's `blocking` lane. */
@@ -1457,6 +1500,16 @@ async function prepareCouncil(
   );
   await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
+
+  if (opts.retainReviewers) {
+    // Freeze effective values before either launch identity or input capture.
+    config.thresholds = { ...DEFAULT_THRESHOLDS, ...config.thresholds };
+    config.output = { ...config.output, belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true };
+    if (resolveTelemetryLevel(config, { noTelemetry: opts.telemetry === false }, process.env) !== 'off') {
+      throw new ReviewLaunchRefused('reviewer_evidence_backend_unsupported',
+        'Reviewer retention requires a compatible evidence backend. This development operation currently supports --no-telemetry only; it cannot supply a server merge gate.');
+    }
+  }
 
   // Validate mutually exclusive role options
   const roleOptionCount = [opts.role, opts.roles, opts.reviewer?.length].filter(Boolean).length;
@@ -1618,6 +1671,7 @@ async function prepareCouncil(
     gatingConfig,
     contextFiles,
     ...(spec ? { spec } : {}),
+    specBytes: specContent ?? '',
     explicit: explicitReviewers !== undefined,
     coreModels: models,
     ...(converge ? { converge } : {}),
@@ -1633,6 +1687,9 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   const spinner = ora('Loading configuration...').start();
 
   try {
+    if (opts.retainReviewers && !opts.guardedConverge) {
+      throw new ReviewLaunchRefused('reviewer_retention_requires_guard', 'Retaining reviewer inputs requires --guarded-converge and its owned native claim.');
+    }
     if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
       throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
@@ -1670,6 +1727,11 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
           gitMode ? `--${gitMode} resolves HEAD itself` : 'a PR target resolves its heads from GitHub'
         }.`
       );
+    }
+    if (opts.retainReviewers && (!patchTarget || !opts.headSha || !opts.baseSha ||
+      !(opts.forPr ?? process.env['RCL_FOR_PR'])?.trim())) {
+      throw new ReviewLaunchRefused('reviewer_retention_requires_binding',
+        'Retaining reviewer inputs requires a patch file, --head-sha, --base-sha (effective merge base), and --for-pr.');
     }
     if (opts.headSha !== undefined) validateSha(opts.headSha, '--head-sha');
     if (opts.baseSha !== undefined) validateSha(opts.baseSha, '--base-sha');
@@ -1821,6 +1883,27 @@ async function prepareCouncilWork(
   return { chunks, chunkAssignments, contextDocs, prompts };
 }
 
+interface RetainedCouncilContext {
+  commonDir: string;
+  ownership: NativeTargetOwnership;
+  captured: CapturedPreparedCouncil;
+  launch: OriginalLaunch;
+  journal: CheckpointJournal;
+  lateAudit: CheckpointLateAudit;
+}
+
+async function loadCouncilWeights(opts: CouncilCliOpts, attestation?: Attestation): Promise<Map<string, number> | undefined> {
+  try {
+    const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd(), opts.config), { noTelemetry: opts.telemetry === false }, process.env);
+    const loaded = await loadMergedWeights({ rclVersion: RCL_VERSION, timeoutMs: 3_000,
+      serverEnabled: level !== 'off', ...(attestation ? { credential: attestation.credential } : {}) });
+    return loaded.size > 0 ? loaded : undefined;
+  } catch (err) {
+    console.warn(`Model weights unavailable (consensus unweighted): ${scrubText(err instanceof Error ? err.message : String(err), 300)}`);
+    return undefined;
+  }
+}
+
 async function executeCouncil(
   spinner: Spinner,
   prepared: PreparedCouncil,
@@ -1834,7 +1917,8 @@ async function executeCouncil(
     /** `--attest`: the run-bound credential and the run id it binds (RCL-40). */
     attestation?: Attestation;
   },
-  preparedWork?: Awaited<ReturnType<typeof prepareCouncilWork>>
+  preparedWork?: Awaited<ReturnType<typeof prepareCouncilWork>>,
+  retained?: RetainedCouncilContext
 ): Promise<GuardedLaunchCompletion> {
   const { config, roleMap, assignments, asyncAssignments } = prepared;
   const planContext = extra.focus !== undefined ? { focus: extra.focus } : undefined;
@@ -1843,16 +1927,29 @@ async function executeCouncil(
   if (opts.guardedConverge) {
     const roster = buildRoster({ assignments, asyncAssignments, coreModels: prepared.coreModels,
       explicit: prepared.explicit, gating: prepared.gatingConfig });
+    const commonDir = await resolveGitCommonDir();
+    const captured = opts.retainReviewers ? capturePreparedCouncil({
+      target: prepared.converge!.target, headSha: extra.target.headSha!, mergeBaseSha: extra.target.baseSha!,
+      diff, assignments, chunks, prompts, config, specBytes: prepared.specBytes, contextDocs,
+      compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: AGGREGATION_ALGORITHM },
+      aggregationInputs: captureAggregationInputs({ algorithm: AGGREGATION_ALGORITHM,
+        diffSha256: diffDigest(diff.files), roleMap, thresholds: { ...DEFAULT_THRESHOLDS, ...config.thresholds },
+        gating: prepared.gatingConfig, modelWeights: await loadCouncilWeights(opts),
+        belowThresholdAppendix: config.output!.belowThresholdAppendix!,
+      }),
+    }) : undefined;
     let completion: GuardedLaunchCompletion | undefined;
     const claim = await guardReviewLaunch({
-      gitCommonDir: await resolveGitCommonDir(),
+      gitCommonDir: commonDir,
       target: prepared.converge!.target,
       headSha: extra.target.headSha ?? '',
-      inputSha256: sha256Hex(stableStringify({
-        head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
-        diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
-        asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
-      })),
+      inputSha256: captured
+        ? retainedLaunchInputSha256(captured.captured.digest, { target: extra.target, roster, spec: prepared.spec })
+        : sha256Hex(stableStringify({
+          head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
+          diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
+          asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
+        })),
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,
@@ -1864,6 +1961,13 @@ async function executeCouncil(
           throw new ReviewLaunchRefused('insufficient_reviewers', 'Convergence needs at least two reviewer assignments for a conclusive round.');
         }
         await validateLaunchOutputs(opts);
+        if (captured) {
+          const plan = buildCouncilRunPlan({ totalCalls: chunkAssignments.length, reviewers: assignments.length,
+            chunks: chunks.length, concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+            timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS });
+          const perCell = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
+          assertOriginalLaunchBudget(plan.timeoutBoundMs, chunkAssignments.length * perCell, perCell);
+        }
       },
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
@@ -1872,10 +1976,33 @@ async function executeCouncil(
         })]);
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
       },
-      run: async converge => {
-        completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
-          { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
-        return completion;
+      run: async (converge, ownership) => {
+        let session: RetainedCouncilContext | undefined;
+        if (captured) {
+          const startedAtMs = Date.now();
+          const plan = buildCouncilRunPlan({ totalCalls: chunkAssignments.length, reviewers: assignments.length,
+            chunks: chunks.length, concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+            timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS });
+          const maxAttemptsPerCell = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
+          const launch = createOriginalLaunch({ runId: uuidv7(), target: converge.target,
+            originalNativeClaim: { attempt: converge.attempt!, round: converge.round! },
+            capturedInputsSha256: captured.captured.digest, planDigest: captured.plan.digest,
+            startedAtMs, expiresAtMs: startedAtMs + plan.timeoutBoundMs,
+            maxPhysicalCalls: chunkAssignments.length * maxAttemptsPerCell, maxAttemptsPerCell });
+          const journal = await bindOriginalCouncil({ commonDir, ownership, captured: captured.captured, launch });
+          const lateAudit = createCheckpointLateAudit({ commonDir, ownership, journal, onError: (error) => {
+            process.stderr.write(`Late reviewer response could not be retained: ${scrubText(String(error), 300)}\n`);
+          } });
+          session = { commonDir, ownership, captured, launch, journal, lateAudit };
+        }
+        try {
+          completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
+            { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work, session);
+          return completion;
+        } finally {
+          // Drain only responses already observed; never wait for a hanging provider.
+          if (session && (await session.journal.read()).finalized) await session.lateAudit.drain();
+        }
       },
     });
     if (claim.warning) process.stderr.write(`${claim.warning}\n`);
@@ -1974,7 +2101,7 @@ async function executeCouncil(
   }
 
   const progress = new CouncilProgressReporter({
-    totalCalls,
+    totalCalls: retained?.launch.maxPhysicalCalls ?? totalCalls,
     interactive,
     updateInteractive: (text) => {
       spinner.text = text;
@@ -1987,7 +2114,17 @@ async function executeCouncil(
 
   let chunkReviews: ModelReview[];
   try {
-    chunkReviews = await runReviews(
+    if (retained) {
+      const executed = await executeCapturedOriginal({ commonDir: retained.commonDir, ownership: retained.ownership,
+        journal: retained.journal, expectedPlan: retained.captured.plan, launch: retained.launch,
+        onPhysicalReviewComplete: review => progress.complete(review),
+        auditLateAttempt: retained.lateAudit.accept,
+        onLateAuditError: error => process.stderr.write(`Late reviewer audit failed: ${scrubText(String(error), 300)}\n`),
+      });
+      chunkReviews = executed.reviews;
+      await retained.journal.finalize(retained.ownership);
+      await retained.lateAudit.flushAfterFinalization();
+    } else chunkReviews = await runReviews(
       chunkAssignments.map((ca) => ca.assignment),
       prompts,
       {
@@ -2012,6 +2149,14 @@ async function executeCouncil(
     progress.stop();
   }
 
+  const projection: CheckpointReportProjection | undefined = retained ? projectCheckpointReport({ sources: [],
+    successor: { runId: retained.launch.runId, proof: await retained.journal.exportProof() },
+    policy: retained.captured.captured.policy,
+  }) : undefined;
+  if (projection) process.stderr.write(`Retained ${projection.allPhysicalAttempts.length} physical attempts; ` +
+    `${projection.health.successfulSeats.length}/${projection.health.policy.seatCount} complete reviewers ` +
+    `(${projection.health.policy.minimumSuccessful} required).\n`);
+
   postReviewStage('collecting and merging reviewer outputs');
 
   // Collect async results from earlier rounds of this target (marked async).
@@ -2030,7 +2175,7 @@ async function executeCouncil(
   try {
     const ts = new Date().toISOString();
     await appendCalls(
-      [...chunkReviews, ...arrivedAsync].map((r) => ({
+      [...(projection ? projection.newPhysicalAttempts.flatMap(attempt => attempt.review ? [attempt.review] : []) : chunkReviews), ...arrivedAsync].map((r) => ({
         ts,
         model: r.model,
         role: r.role,
@@ -2067,23 +2212,9 @@ async function executeCouncil(
     }
   }
 
-  let modelWeights: Map<string, number> | undefined;
-  try {
-    const level = resolveTelemetryLevel(await loadHarnessSettings(process.cwd(), opts.config), { noTelemetry: opts.telemetry === false }, process.env);
-    const loaded = await loadMergedWeights({
-      rclVersion: RCL_VERSION,
-      timeoutMs: 3_000,
-      serverEnabled: level !== 'off',
-      ...(attestation ? { credential: attestation.credential } : {}),
-    });
-    if (loaded.size > 0) modelWeights = loaded;
-  } catch (err) {
-    // Weights are advisory; the review runs unweighted, but not silently.
-    console.warn(`Model weights unavailable (consensus unweighted): ${scrubText(err instanceof Error ? err.message : String(err), 300)}`);
-    modelWeights = undefined;
-  }
+  const modelWeights = retained ? undefined : await loadCouncilWeights(opts, attestation);
 
-  const result = await assembleCompletedReview({
+  const assemblyInput: CompletedReviewInput = {
     chunkReviews,
     arrivedAsync,
     asyncLaunched,
@@ -2094,7 +2225,7 @@ async function executeCouncil(
     gatingConfig: prepared.gatingConfig,
     modelWeights,
     run: {
-      id: extra.attestation?.runId,
+      id: retained?.launch.runId ?? extra.attestation?.runId,
       rclVersion: RCL_VERSION,
       command: extra.command,
       target: extra.target,
@@ -2113,7 +2244,8 @@ async function executeCouncil(
       startedAt: prepared.startedAt,
       ...(prepared.converge ? { converge: prepared.converge } : {}),
     },
-  }, {
+  };
+  const assemblyDependencies: AssemblyDependencies = {
     onStage: postReviewStage,
     onVerificationStart: () => { spinner.text = 'Verifying single-model findings...'; },
     onVerificationProgress: (event) => {
@@ -2133,7 +2265,16 @@ async function executeCouncil(
         }
       }
     },
-  });
+  };
+  const checkpointAssembly: CheckpointAssemblyInput | undefined = projection ? {
+    projection, supplementalAsync: captureSupplementalAsync(arrivedAsync.map(review => JSON.stringify(review)), asyncLaunched),
+    diff, startTime, run: assemblyInput.run,
+  } : undefined;
+  const result = checkpointAssembly
+    ? (await assembleCheckpointReview(checkpointAssembly, assemblyDependencies)).report
+    : await assembleCompletedReview(assemblyInput, assemblyDependencies);
+  if (checkpointAssembly) result.run.reviewer_evidence = describeReviewerEvidence(
+    projection!.proofs.at(-1)!.proof, checkpointAssembly.supplementalAsync);
   const { run } = result;
 
   spinner.succeed('Review complete');
@@ -2180,11 +2321,18 @@ async function executeCouncil(
   // failure reduced to the parser message unless harness.parseFailures opts
   // in. --json-file and --markdown are written from the same view, so the
   // declared digests match the files and nothing raw travels. With
-  // telemetry off the raw report is written as before.
+  // Legacy telemetry-off output stays raw; retained reviews always separate
+  // sanitized ordinary output from the exact private reviewer artifact.
   const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(result, { parseFailures: runtime.parseFailures }) : result;
+    retained || (runtime && runtime.level !== 'off')
+      ? sanitizeForDelivery(result, { parseFailures: runtime?.parseFailures ?? false }) : result;
   postReviewStage('rendering report artifacts');
   const artifacts = renderReportArtifacts(delivered);
+  if (retained && checkpointAssembly) {
+    const reviewerArtifact = serializeReviewerArtifact({ assembly: checkpointAssembly, reportBytes: artifacts.report_json,
+      representation: { version: 1, parseFailures: runtime?.parseFailures ?? false } });
+    await retained.journal.retainTerminalReport({ reportBytes: artifacts.report_json, reviewerArtifactBytes: reviewerArtifact.bytes }, retained.ownership);
+  }
 
   // Output
   if (opts.json) {
@@ -2241,15 +2389,17 @@ async function executeCouncil(
         : undefined,
   ].filter((part): part is string => part !== undefined).join(' ');
   if (opts.exclusiveOutputs && outputDiagnostics.some(diagnostic => diagnostic.path === 'output.report_json') &&
-    !delivery.spooled && delivery.status !== 'recorded' && delivery.retention?.status !== 'complete') {
+    !retained && !delivery.spooled && delivery.status !== 'recorded' && delivery.retention?.status !== 'complete') {
     throw new ReviewLaunchRefused('report_write_failed',
       'The JSON report could not be retained. This attempt remains spent; correct the output path before an explicit bounded retry.');
   }
   const completion: GuardedLaunchCompletion = {
     runId: run.id,
     reportJsonSha256: sha256Hex(artifacts.report_json),
-    successfulReviews: result.stats.successfulReviews,
-    totalReviews: result.stats.totalReviews,
+    successfulReviews: projection?.health.successfulSeats.length ?? result.stats.successfulReviews,
+    totalReviews: projection?.health.policy.seatCount ?? result.stats.totalReviews,
+    ...(projection ? { reviewerHealth: { version: 1 as const, policy: projection.health.policy,
+      successfulSeats: projection.health.successfulSeats.length } } : {}),
     deliveryPending: delivery.spooled || delivery.exitCode !== 0,
     hardFailure: chunkReviews.some(review => review.status === 'error' || review.status === 'parse_failed'),
   };
@@ -2258,7 +2408,7 @@ async function executeCouncil(
   // verdict keeps its exit code — pipelines branch on it — and an evidence
   // failure is reported beside it.
   if (opts.ci) {
-    const verdict = evaluateCiGate(result);
+    const verdict = evaluateCiGate(result, projection?.health);
     if (verdict.exitCode !== 0) {
       console.error(chalk.red(`\n${verdict.message}`));
       if (delivery.exitCode !== 0) console.error(chalk.red(evidenceFailure));

@@ -4,6 +4,7 @@ import type { ResolvedGatingConfig } from '../consensus/gating.js';
 import type { Diff, FileChange } from '../resolver/types.js';
 import type { ReviewAssignment } from '../roles/types.js';
 import { detectProvider } from '../roles/dispatcher.js';
+import type { ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
 import { uuidv7 } from './uuid.js';
 
 /**
@@ -98,6 +99,8 @@ export interface RunHeader {
   provenance?: 'live' | 'backfill';
   /** Original immutable modern report, only on a non-gating historical import. */
   historical_source?: { original_run_id: string; report_sha256: string };
+  /** Compact binding only; raw prompts and results stay in the private artifact. */
+  reviewer_evidence?: ReviewerEvidenceDescriptor;
 }
 
 export interface ResolvedThresholds {

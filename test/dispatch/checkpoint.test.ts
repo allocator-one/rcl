@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type CheckpointPlanInput } from '../../src/dispatch/checkpoint.js';
 
-const durability = vi.hoisted(() => ({ failPath: '', synced: [] as string[] }));
+const durability = vi.hoisted(() => ({ failPath: '', synced: [] as string[], pauseStagedWrite: false, stagedWriteStarted: undefined as (() => void) | undefined, stagedWriteRelease: undefined as Promise<void> | undefined, stagedWriteUsed: false }));
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
@@ -19,12 +19,25 @@ vi.mock('node:fs/promises', async original => {
       }
       return sync();
     };
-    return handle;
+    return new Proxy(handle, {
+      get(file, property) {
+        if (property === 'writeFile') return async (...writeArgs: Parameters<typeof file.writeFile>) => {
+          if (durability.pauseStagedWrite && !durability.stagedWriteUsed && (path.includes('/.staging/') || path.includes('/events/'))) {
+            durability.stagedWriteUsed = true;
+            durability.stagedWriteStarted?.();
+            await durability.stagedWriteRelease;
+          }
+          return file.writeFile(...writeArgs);
+        };
+        const value = Reflect.get(file, property, file);
+        return typeof value === 'function' ? value.bind(file) : value;
+      },
+    });
   } };
 });
 
 const roots: string[] = [];
-afterEach(async () => { durability.failPath = ''; durability.synced = []; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { durability.failPath = ''; durability.synced = []; durability.pauseStagedWrite = false; durability.stagedWriteStarted = undefined; durability.stagedWriteRelease = undefined; durability.stagedWriteUsed = false; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function root() { const path = await realpath(await mkdtemp(join(tmpdir(), 'rcl-checkpoint-'))); roots.push(path); return path; }
 const target = 'allocator-one/rcl#105', namespace = 'rcl-105-fixture';
 function plan(overrides: Partial<CheckpointPlanInput> = {}): CheckpointPlanInput {
@@ -50,6 +63,25 @@ describe('checkpoint journal', () => {
   it('retains a failed attempt then accepts a new successful paid attempt without overwriting history', async () => { const commonDir = await root(); let store!: CheckpointJournal; const bytes = JSON.stringify({ model: 'openai/gpt-6-sol', role: 'general', provider: 'openai', status: 'success', durationMs: 1, findings: [{ id: 'f1', file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', title: 'Original title', description: 'Original finding' }] }); await withNativeTarget(commonDir, target, async ownership => { store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership); await store.recordResult('blocking/general:0', { id: 'one', kind: 'paid' }, failure(), ownership); await store.recordIntent('blocking/general:0', { id: 'two', kind: 'paid' }, ownership); await store.recordResult('blocking/general:0', { id: 'two', kind: 'paid' }, { kind: 'success', chunk: 0, reviewBytes: bytes }, ownership); const state = await store.read(); expect(state.successes[0]?.reviewBytes).toBe(bytes); expect(state.records.filter(record => record.type === 'result')).toHaveLength(2); }); await expect(withNativeTarget(commonDir, target, ownership => store.recordResult('blocking/general:0', { id: 'three', kind: 'paid' }, failure(), ownership))).rejects.toThrow('checkpoint_success_immutable'); });
   it('keeps interrupted intent uncertain and changed duplicate identities refuse', async () => { const commonDir = await root(); let store!: CheckpointJournal; await withNativeTarget(commonDir, target, async ownership => { store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'possibly-billed', kind: 'unknown' }, ownership); expect((await store.read()).uncertain).toEqual([{ cell: 'blocking/general:0', paidAttempt: { id: 'possibly-billed', kind: 'unknown' } }]); }); await expect(withNativeTarget(commonDir, target, ownership => store.recordIntent('blocking/general:0', { id: 'possibly-billed', kind: 'paid' }, ownership))).rejects.toThrow('checkpoint_duplicate_attempt'); });
   it('serializes appends and rejects released/cross-target ownership', async () => { const commonDir = await root(); let released!: NativeTargetOwnership, writable!: CheckpointJournal; await withNativeTarget(commonDir, target, async ownership => { released = ownership; writable = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await Promise.all([writable.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership), writable.recordUncertain('blocking/general:0', { id: 'one', kind: 'paid' }, 'interrupted', ownership)]); expect((await writable.read()).records.map(record => record.sequence)).toEqual([1, 2]); }); await expect(writable.recordIntent('blocking/general:0', { id: 'late', kind: 'paid' }, released)).rejects.toThrow('native_target_not_owned'); await expect(withNativeTarget(commonDir, 'another-target', other => writable.recordIntent('blocking/general:0', { id: 'bad', kind: 'paid' }, other))).rejects.toThrow('native_target_not_owned'); });
+  it('does not expose an incomplete staged event to a concurrent read', async () => {
+    const commonDir = await root();
+    await withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership });
+      let started!: () => void, release!: () => void;
+      const writingStarted = new Promise<void>(resolve => { started = resolve; });
+      durability.pauseStagedWrite = true;
+      durability.stagedWriteStarted = started;
+      durability.stagedWriteRelease = new Promise<void>(resolve => { release = resolve; });
+      const writing = store.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership);
+      await writingStarted;
+      try {
+        const reader = await CheckpointJournal.openRead(checkpointPath(commonDir, target, namespace), freezeCheckpointPlan(plan()));
+        expect((await reader.read()).records).toEqual([]);
+      } finally { release(); await writing; }
+      expect((await store.read()).records).toHaveLength(1);
+    });
+  });
+
   it('reads without writes and rejects symlink, partial, and result-path escape data', async () => { const commonDir = await root(), path = checkpointPath(commonDir, target, namespace); await withNativeTarget(commonDir, target, async ownership => { const store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership); }); const before = await readdir(path); await CheckpointJournal.openRead(path, freezeCheckpointPlan(plan())); expect(await readdir(path)).toEqual(before); const events = join(path, 'events'); await unlink(join(events, '00000001.json')); await symlink('../plan.json', join(events, '00000001.json')); await expect(CheckpointJournal.openRead(path, freezeCheckpointPlan(plan()))).rejects.toThrow('checkpoint_symlink'); await rm(path, { recursive: true, force: true }); await withNativeTarget(commonDir, target, async ownership => { const store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership); await store.recordResult('blocking/general:0', { id: 'one', kind: 'paid' }, { kind: 'success', chunk: 0, reviewBytes: JSON.stringify({ model: 'openai/gpt-6-sol', role: 'general', provider: 'openai', status: 'success', durationMs: 1, findings: [] }) }, ownership); }); const event = join(path, 'events', '00000002.json'); await writeFile(event, (await (await import('node:fs/promises')).readFile(event, 'utf8')).replace(/"resultFile":"[^"]+"/, '"resultFile":"../plan.json"')); await expect(CheckpointJournal.openRead(path, freezeCheckpointPlan(plan()))).rejects.toThrow('checkpoint_invalid_record'); });
   it('seals incomplete evidence with uncertain work intact and rejects all later writes', async () => { const commonDir = await root(); let store!: CheckpointJournal; await withNativeTarget(commonDir, target, async ownership => { store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'one', kind: 'unknown' }, ownership); await store.finalize(ownership); const sealed = await store.read(); expect(sealed.finalized).toBe(true); expect(sealed.uncertain).toEqual([{ cell: 'blocking/general:0', paidAttempt: { id: 'one', kind: 'unknown' } }]); }); await expect(withNativeTarget(commonDir, target, ownership => store.recordIntent('blocking/general:0', { id: 'two', kind: 'paid' }, ownership))).rejects.toThrow('checkpoint_finalized'); });
 });

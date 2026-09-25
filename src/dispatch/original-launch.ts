@@ -46,6 +46,13 @@ function integer(value: unknown, error: string, minimum: number, maximum = Numbe
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(error);
 }
 function digest(value: unknown, error: string): asserts value is string { if (typeof value !== 'string' || !SHA256.test(value)) throw new Error(error); }
+/** Validate effective execution limits before the native attempt is claimed. */
+export function assertOriginalLaunchBudget(durationMs: number, maxPhysicalCalls: number, maxAttemptsPerCell: number): void {
+  integer(durationMs, 'original_launch_invalid_duration', 1, MAX_TIMER_DELAY_MS);
+  integer(maxPhysicalCalls, 'original_launch_invalid_max_physical_calls', 1, MAX_LIMIT);
+  integer(maxAttemptsPerCell, 'original_launch_invalid_max_attempts_per_cell', 1, MAX_LIMIT);
+}
+
 function target(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.length > 512 || !value.trim() || /[\0\r\n]/.test(value)) throw new Error('original_launch_invalid_target');
 }

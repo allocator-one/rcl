@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -21,6 +21,7 @@ import { sampleResult } from './telemetry/fixtures.js';
 import { loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport } from '../src/converge/run-state.js';
 import { sha256Hex } from '../src/report/run-header.js';
+import { CheckpointJournal, checkpointPath } from '../src/dispatch/checkpoint.js';
 
 const cliEntrypoint = process.env['RCL_TEST_REVIEW_ENTRYPOINT'] ?? fileURLToPath(new URL('../src/index.ts', import.meta.url));
 const tsxImport = import.meta.resolve('tsx');
@@ -126,6 +127,7 @@ interface GuardedCliFixture {
   args: string[];
   env: Record<string, string>;
   calls: () => number;
+  failCall: (call: number) => void;
   holdResponses: () => void;
   releaseResponses: () => void;
   firstRequest: Promise<void>;
@@ -140,6 +142,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
     roles: ['general', 'security-auditor'], harness: { telemetry: 'off' },
   }));
   let calls = 0;
+  let failingCall: number | undefined;
   let holdResponses = false;
   const pendingResponses: Array<() => void> = [];
   let notifyRequest: () => void = () => {};
@@ -148,7 +151,13 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
     request.resume();
     calls++;
     notifyRequest();
+    const call = calls;
     const respond = () => {
+      if (call === failingCall) {
+        response.writeHead(401, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'Fixture rejected credential', type: 'authentication_error' } }));
+        return;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({
         id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
@@ -171,6 +180,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
       env: { OPENAI_COMPAT_BASE_URL: `http://127.0.0.1:${port}/v1`,
         OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RCL_DATA_DIR: join(repo, 'rcl-data') },
       calls: () => calls,
+      failCall: call => { failingCall = call; },
       holdResponses: () => { holdResponses = true; },
       releaseResponses: () => {
         holdResponses = false;
@@ -185,6 +195,137 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
 }
 
 describe('rcl review — guarded native launch', () => {
+  it('retains actual reviewer inputs and immutable terminal artifacts privately in the guarded review command', async () => {
+    await withGuardedFixture(async fixture => {
+      writeFileSync(join(fixture.repo, 'spec.md'), 'PRIVATE retained council specification');
+      fixture.holdResponses();
+      const running = runRclAsync([...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105',
+        '--spec', 'spec.md'], fixture.repo, fixture.env);
+      await fixture.firstRequest;
+      try {
+        const targetDirectory = dirname(checkpointPath(realpathSync(join(fixture.repo, '.git')),
+          'guarded-fixture', '019921a0-0000-7000-8000-000000000001'));
+        const runs = readdirSync(targetDirectory).filter(name => name !== '.staging');
+        expect(runs).toHaveLength(1);
+        const active = await CheckpointJournal.inspectRead(join(targetDirectory, runs[0]!));
+        const bindings = await active.readBindings();
+        expect(bindings['captured-inputs']).toContain('PRIVATE retained council specification');
+        expect(JSON.parse(bindings.launch!)).toMatchObject({ originalNativeClaim: { attempt: 1, round: 1 } });
+        expect((await active.read()).finalized).toBe(false);
+      } finally { fixture.releaseResponses(); }
+      const result = await running;
+      expect(result.status, result.stderr).toBe(0);
+      const reportBytes = readFileSync(join(fixture.repo, 'report.json'), 'utf8'), report = JSON.parse(reportBytes);
+      expect(report.run.reviewer_evidence.kind).toBe('original');
+      expect(fixture.calls()).toBe(2);
+      expect(reportBytes).not.toContain('PRIVATE retained council specification');
+      expect(report.reviewerEvidence).toBeUndefined();
+      const journal = await CheckpointJournal.inspectRead(checkpointPath(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture', report.run.id));
+      expect((await journal.read()).successes).toHaveLength(2);
+      expect((await journal.read()).finalized).toBe(true);
+      const retained = await journal.readTerminalReport();
+      expect(retained!.reportBytes).toBe(reportBytes);
+      expect(retained!.reviewerArtifactBytes).toContain('PRIVATE retained council specification');
+      const status = await runRclAsync(['reviewers', 'status', 'guarded-fixture', '--run', report.run.id, '--json'],
+        fixture.repo, fixture.env);
+      expect(status.status, status.stderr).toBe(0);
+      expect(status.stdout).not.toContain('PRIVATE');
+      expect(fixture.calls()).toBe(2);
+      const admitted = await runRclAsync(['converge-report', '--target', 'guarded-fixture', '--round', '1',
+        '--report', 'report.json', '--json'], fixture.repo, { ...fixture.env, RCL_TELEMETRY: 'off' });
+      expect(admitted.status, admitted.stderr).toBe(0);
+      expect(JSON.parse(admitted.stdout).actionableGating).toBe(0);
+      expect((await loadConvergeRunState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture'))!.rounds)
+        .toHaveLength(1);
+      expect(fixture.calls()).toBe(2);
+    });
+  }, 40_000);
+
+  it('preserves strict original-seat quorum through retained assembly and launch completion', async () => {
+    await withGuardedFixture(async fixture => {
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.roles.push('performance-engineer');
+      config.quorumFraction = 1;
+      config.maxRetries = 0;
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.failCall(3);
+      const args = [...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105', '--ci'];
+      const result = await runRclAsync(args, fixture.repo, fixture.env);
+      expect(result.status, result.stderr).toBe(1);
+      expect(fixture.calls()).toBe(3);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      expect(report.run.ci_exit_code).toBe(1);
+      expect(report.stats).toMatchObject({ successfulReviews: 2, totalReviews: 3 });
+      const commonDir = realpathSync(join(fixture.repo, '.git'));
+      const state = await loadConvergeRunState(commonDir, 'guarded-fixture');
+      expect(state).toMatchObject({ rounds: [], lastLaunch: { status: 'completed', reviewerHealth: {
+        version: 1, successfulSeats: 2, policy: { version: 1, fraction: 1, seatCount: 3, minimumSuccessful: 3 },
+      } } });
+      const journal = await CheckpointJournal.inspectRead(checkpointPath(commonDir, 'guarded-fixture', report.run.id));
+      expect((await journal.read()).successes).toHaveLength(2);
+      expect((await journal.read()).outcomes).toHaveLength(3);
+      expect(await journal.readTerminalReport()).toBeDefined();
+      const refused = await runRclAsync(['converge-report', '--target', 'guarded-fixture', '--round', '1',
+        '--report', 'report.json', '--json'], fixture.repo, { ...fixture.env, RCL_TELEMETRY: 'off' });
+      expect(refused.status).toBe(3);
+      expect(refused.stderr).toContain('retained_report_inconclusive');
+      const stripped = structuredClone(report);
+      delete stripped.run.reviewer_evidence;
+      writeFileSync(join(fixture.repo, 'stripped.json'), JSON.stringify(stripped));
+      const strippedRefused = await runRclAsync(['converge-report', '--target', 'guarded-fixture', '--round', '1',
+        '--report', 'stripped.json', '--json'], fixture.repo, { ...fixture.env, RCL_TELEMETRY: 'off' });
+      expect(strippedRefused.status).toBe(3);
+      expect((await loadConvergeRunState(commonDir, 'guarded-fixture'))!.rounds).toEqual([]);
+      const retry = await runRclAsync(args.map(arg => arg === 'report.json' ? 'retry.json' : arg), fixture.repo, fixture.env);
+      expect(retry.status).toBe(1);
+      expect(retry.stderr).toContain('infrastructure_failure');
+      expect(fixture.calls()).toBe(3);
+      expect(await loadConvergeAttemptState(commonDir, 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
+
+  it('refuses reviewer retention without a guarded claim before any provider request', async () => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync([...fixture.args.filter(arg => arg !== '--guarded-converge'), '--retain-reviewers'],
+        fixture.repo, fixture.env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('reviewer_retention_requires_guard');
+      expect(fixture.calls()).toBe(0);
+    });
+  }, 40_000);
+
+  it.each(['missing-binding', 'unsupported-backend'])('refuses retained %s before a native claim or provider call', async reason => {
+    await withGuardedFixture(async fixture => {
+      let args = [...fixture.args, '--retain-reviewers'];
+      if (reason === 'unsupported-backend') {
+        const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+        config.harness.telemetry = 'full';
+        writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+        args = [...args.filter(arg => arg !== '--no-telemetry'), '--for-pr', 'allocator-one/rcl#105'];
+      }
+      const result = await runRclAsync(args, fixture.repo, { ...fixture.env, RCL_TELEMETRY: '' });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain(reason === 'missing-binding'
+        ? 'reviewer_retention_requires_binding' : 'reviewer_evidence_backend_unsupported');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toBeUndefined();
+    });
+  }, 40_000);
+
+  it('refuses invalid retention time bounds without spending a native attempt', async () => {
+    await withGuardedFixture(async fixture => {
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.timeout = 2_147_483_648;
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      const result = await runRclAsync([...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'],
+        fixture.repo, fixture.env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('original_launch_invalid_duration');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toBeUndefined();
+    });
+  }, 40_000);
+
   it('claims and binds one launch only after successful preflight', async () => {
     await withGuardedFixture(async fixture => {
       const result = await runRclAsync(fixture.args, fixture.repo, fixture.env);
@@ -195,6 +336,30 @@ describe('rcl review — guarded native launch', () => {
         .toEqual({ target: 'guarded-fixture', round: 1, attempt: 1 });
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
+
+  it('keeps a privately retained terminal report reusable after a late output collision', async () => {
+    await withGuardedFixture(async fixture => {
+      fixture.holdResponses();
+      const args = [...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'];
+      const running = runRclAsync(args, fixture.repo, fixture.env);
+      await fixture.firstRequest;
+      writeFileSync(join(fixture.repo, 'report.json'), 'preserved');
+      fixture.releaseResponses();
+      const result = await running;
+      expect(result.status).toBe(1);
+      expect(readFileSync(join(fixture.repo, 'report.json'), 'utf8')).toBe('preserved');
+      const commonDir = realpathSync(join(fixture.repo, '.git'));
+      const state = await loadConvergeRunState(commonDir, 'guarded-fixture');
+      expect(state!.lastLaunch!.status).toBe('completed');
+      const journal = await CheckpointJournal.inspectRead(checkpointPath(commonDir, 'guarded-fixture', state!.lastLaunch!.runId!));
+      expect((await journal.readTerminalReport())!.reportSha256).toBe(state!.lastLaunch!.reportJsonSha256);
+      const retry = await runRclAsync([...args, '--json-file', 'retry.json'], fixture.repo, fixture.env);
+      expect(retry.status).toBe(1);
+      expect(retry.stderr).toContain('report_not_admitted');
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(commonDir, 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
     });
   }, 40_000);
 

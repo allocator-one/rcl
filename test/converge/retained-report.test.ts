@@ -1,0 +1,253 @@
+import { mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { Finding, ModelReview } from '../../src/consensus/types.js';
+import type { Config } from '../../src/config/schema.js';
+import type { Diff } from '../../src/resolver/types.js';
+import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
+import { CheckpointJournal, checkpointPath, exportCheckpointProof, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
+import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
+import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
+import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
+import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
+import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
+import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
+import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
+import { serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
+import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
+import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { convergeRunStatePath, loadConvergeRunState, resolveRoundResolution } from '../../src/converge/run-state.js';
+import { processRetainedRoundReport, retainedLaunchInputSha256 } from '../../src/converge/retained-report.js';
+
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+async function directory() { const path = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-round-'))); roots.push(path); return path; }
+const role = { name: 'general', systemPrompt: 'Review.', focus: [], description: 'General', isSpecialized: false };
+const runId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const policy = { version: 1 as const, fraction: 2 / 3 };
+const thresholds = { minConsensusScore: 0, minConfidence: 0, dedupeLineWindow: 5, jaccardThreshold: 0.3 };
+const emptyAsync = () => captureSupplementalAsync([], 0);
+function finding(id: string, file = 'tenant.ts'): Finding {
+  return { id, file, startLine: 1, endLine: 1, severity: 'critical', category: 'security',
+    title: 'Missing tenant isolation', description: 'An unrelated tenant can read this record.' };
+}
+function fixture(options: { models?: string[]; chunks?: number; appendix?: boolean; minConfidence?: number;
+  aggregation?: boolean; verified?: boolean; missingThresholds?: boolean } = {}) {
+  const models = options.models ?? ['model-a', 'model-b', 'model-c'];
+  const chunks = options.chunks ?? 2;
+  const diff: Diff = { source: 'local', files: [{ filename: 'tenant.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, language: 'typescript' }] };
+  const patchBytes = stableStringify(diff.files.map(file => ({ filename: file.filename, status: file.status,
+    previousFilename: null, patch: file.patch, additions: file.additions, deletions: file.deletions, blobSha: null })));
+  const resolvedThresholds = { ...thresholds, minConfidence: options.minConfidence ?? 0 };
+  const config: Config = { quorumFraction: policy.fraction, thresholds: resolvedThresholds,
+    output: { belowThresholdAppendix: options.appendix ?? true } };
+  if (options.missingThresholds) delete config.thresholds;
+  const configBytes = stableStringify(config), specBytes = 'Exact spec', contextBytes = '[]';
+  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } });
+  const chunkBytes = Array.from({ length: chunks }, (_, chunk) => `chunk ${chunk}`);
+  const plan = freezeCheckpointPlan({ target: 'rcl-105', headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+    patchSha256: diffDigest(diff.files), configSha256: configDigest(config), specSha256: sha256Hex(specBytes),
+    contextSha256: sha256Hex(contextBytes), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 },
+    roster: models.map((model, index) => ({ seat: `s${index}`, model, role: role.name, route: 'fake' })),
+    chunks: chunkBytes.map((bytes, index) => ({ index, total: chunks, digest: sha256Hex(bytes) })),
+    prompts: chunkBytes.flatMap((_, chunk) => models.map((_, seat) => ({ seat: `s${seat}`, chunk,
+      systemSha256: sha256Hex('system'), userSha256: sha256Hex(`prompt ${chunk}`) }))),
+  });
+  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: plan.patchSha256,
+    roleMap: new Map([[role.name, role]]), thresholds: resolvedThresholds,
+    gating: { mode: options.verified ? 'verified-consensus' : 'all-findings', minModels: 2,
+      verificationModel: options.verified ? 'google/gemini-3.8-flash' : undefined,
+      verificationTimeoutMs: 100, verificationPassTimeoutMs: 100 },
+    modelWeights: new Map([[models[0]!, 0.75]]), belowThresholdAppendix: options.appendix ?? true });
+  const capture = captureReviewerInputs({ plan, policy, patchBytes, configBytes, specBytes, contextBytes, toolsBytes,
+    chunkBytes, assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
+    prompts: plan.cells.map(cell => ({ systemPrompt: 'system', userPrompt: `prompt ${cell.chunk}` })),
+    ...(options.aggregation === false ? {} : { aggregation }) });
+  expect(sha256Hex(patchBytes)).toBe(plan.patchSha256);
+  return { plan, capture, diff, config };
+}
+
+async function retained(options: { seats?: number; partial?: boolean; seal?: boolean; terminal?: boolean; substitutedProof?: boolean; supplemented?: boolean; verified?: boolean; minorityError?: boolean; deliveryPending?: boolean } = {}) {
+  const f = fixture({ chunks: 2, verified: options.verified });
+  const gitCommonDir = await directory(), target = f.plan.target, id = runId(10);
+  const run = { id, rclVersion: '4.1.3', command: 'review' as const,
+    target: { kind: 'patch' as const, repo: 'allocator-one/rcl', prNumber: 105,
+      headSha: f.plan.headSha, baseSha: f.plan.mergeBaseSha },
+    roster: f.plan.roster.map(seat => ({ model: seat.model, role: seat.role, provider: seat.route, lane: 'blocking' as const })),
+    spec: { source: 'flag' as const, sha256: f.plan.specSha256 }, contextFiles: [], runner: { kind: 'agent' as const },
+    startedAt: new Date(1000), converge: { target, round: 1, attempt: 1 } };
+  let reportBytes = '';
+  await guardReviewLaunch({ gitCommonDir, target, headSha: f.plan.headSha,
+    inputSha256: retainedLaunchInputSha256(f.capture.digest, run), maxAttempts: 3, maxRounds: 3,
+    validate: async () => {}, run: async (claim, ownership) => {
+      run.converge = claim as typeof run.converge;
+      const launch = createOriginalLaunch({ runId: id, target, originalNativeClaim: { attempt: 1, round: 1 },
+        capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, startedAtMs: 1000, expiresAtMs: 2000,
+        maxPhysicalCalls: 6, maxAttemptsPerCell: 1 });
+      const createJournal = async (commonDir: string, owner: NativeTargetOwnership, suffix: string) => {
+        const journal = await CheckpointJournal.create({ commonDir, namespace: id, plan: f.plan, ownership: owner });
+        await journal.bind('captured-inputs', f.capture.bytes, owner);
+        await journal.bind(options.supplemented ? 'source' : 'launch', options.supplemented ? '{}' : encodeOriginalLaunch(launch), owner);
+        for (const cell of f.plan.cells) {
+          const seat = Number(cell.seat.slice(1));
+          if (seat >= (options.seats ?? 2) && !options.minorityError || options.partial && cell.chunk > 0) continue;
+          const failed = options.minorityError && seat >= (options.seats ?? 2);
+          const attempt = { id: `${suffix}-${cell.id}`, kind: 'paid' as const };
+          const review: ModelReview = { model: cell.model, role: cell.role, provider: cell.route, status: failed ? 'error' : 'success', ...(failed ? { error: 'HTTP 400 invalid request' } : {}),
+            durationMs: 1, findings: seat === 0 && cell.chunk === 0 ? [{ ...finding('original-critical'), severity: options.verified ? 'important' : 'critical' }] : [] };
+          await journal.recordIntent(cell.id, attempt, owner);
+          await journal.recordResult(cell.id, attempt, failed ? { kind: 'failure', chunk: cell.chunk, reviewBytes: JSON.stringify(review), possiblyBilled: false }
+            : { kind: 'success', chunk: cell.chunk, reviewBytes: JSON.stringify(review) }, owner);
+        }
+        if (options.seal !== false) await journal.finalize(owner);
+        return journal;
+      };
+      const journal = await createJournal(gitCommonDir, ownership, 'original');
+      if (options.seal === false || options.supplemented) {
+        reportBytes = JSON.stringify({ run: { id }, findings: [] });
+        return { runId: id, reportJsonSha256: sha256Hex(reportBytes), totalReviews: 3, successfulReviews: 0, deliveryPending: false };
+      }
+      let proof = await exportCheckpointProof(journal);
+      if (options.substitutedProof) {
+        const other = await directory();
+        proof = await withNativeTarget(other, target, async owner => exportCheckpointProof(await createJournal(other, owner, 'substituted')));
+      }
+      const projection = projectCheckpointReport({ sources: [], successor: { runId: id, proof }, policy });
+      const assembly = { projection, supplementalAsync: emptyAsync(), diff: f.diff, startTime: 1000, run };
+      const { report } = await assembleCheckpointReview(assembly, { ask: async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success', durationMs: 1, text: '[]' }) });
+      reportBytes = JSON.stringify(sanitizeForDelivery(report));
+      const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation: { version: 1, parseFailures: false } });
+      if (options.terminal !== false) await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
+      const health = projection.health;
+      return { runId: id, reportJsonSha256: sha256Hex(reportBytes), totalReviews: health.policy.seatCount,
+        successfulReviews: health.successfulSeats.length, deliveryPending: options.deliveryPending ?? false, hardFailure: options.minorityError ?? false,
+        reviewerHealth: { version: 1, policy: health.policy, successfulSeats: health.successfulSeats.length } };
+    } });
+  return { gitCommonDir, target, id, reportBytes, currentHeadSha: f.plan.headSha, round: 1, maxRounds: 3,
+    checkpoint: checkpointPath(gitCommonDir, target, id), f, run };
+}
+async function nativeBytes(f: Awaited<ReturnType<typeof retained>>) {
+  return Promise.all([convergeRunStatePath(f.gitCommonDir, f.target), convergeAttemptStatePath(f.gitCommonDir, f.target)].map(path => readFile(path)));
+}
+async function alterState(f: Awaited<ReturnType<typeof retained>>, mutate: (value: any) => void, attempt = false) {
+  const path = (attempt ? convergeAttemptStatePath : convergeRunStatePath)(f.gitCommonDir, f.target);
+  const state = JSON.parse(await readFile(path, 'utf8')); mutate(state); await writeFile(path, JSON.stringify(state));
+}
+
+describe('native admission of an original retained report', () => {
+  it('admits conclusive complete seats while retaining actionable findings and replays without another round or attempt', async () => {
+    const f = await retained(), attempts = (await nativeBytes(f))[1];
+    const first = await processRetainedRoundReport(f);
+    expect(first.roundCap).toBe(3);
+    expect(resolveRoundResolution((await loadConvergeRunState(f.gitCommonDir, f.target))!, 1)!.status).toBe('unresolved');
+    expect(first.findings).toHaveLength(1);
+    expect(first.findings[0]!.finding.severity).toBe('critical');
+    expect(first.findings[0]!.finding.description).toBe('An unrelated tenant can read this record.');
+    const replay = await processRetainedRoundReport(f);
+    expect(replay).toEqual(first);
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.rounds).toHaveLength(1);
+    expect((await nativeBytes(f))[1]).toEqual(attempts);
+    expect(await loadConvergeAttemptState(f.gitCommonDir, f.target)).toMatchObject({ attemptsUsed: 1, cap: 3 });
+  });
+
+  it('refuses expired existing ownership rather than taking a replacement target lock', async () => {
+    const f = await retained(); let expired!: NativeTargetOwnership;
+    await withNativeTarget(f.gitCommonDir, f.target, async owner => { expired = owner; });
+    const before = await nativeBytes(f);
+    await expect(processRetainedRoundReport({ ...f, ownership: expired })).rejects.toThrow('native_target_not_owned');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('reuses live ownership for the entire validation and admission instead of acquiring a second target lock', async () => {
+    const f = await retained();
+    await withNativeTarget(f.gitCommonDir, f.target, async ownership => {
+      const result = await processRetainedRoundReport({ ...f, ownership });
+      expect(result.findings).toHaveLength(1);
+      expect(resolveRoundResolution((await loadConvergeRunState(f.gitCommonDir, f.target))!, 1)!.status).toBe('unresolved');
+    });
+  });
+
+  it('leaves provider-dependent refutation annotations non-admitted until verifier authority exists', async () => {
+    const f = await retained({ verified: true }), before = await nativeBytes(f);
+    expect(JSON.parse(f.reportBytes).findings[0].gating).toMatchObject({ reason: 'none', verification: { verdict: 'unavailable' } });
+    await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_verifier_evidence_required');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('admits a conclusive original quorum despite a permanent minority failure and pending delivery', async () => {
+    const f = await retained({ minorityError: true, deliveryPending: true });
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.lastLaunch).toMatchObject({
+      hardFailure: true, deliveryPending: true, successfulReviews: 2, totalReviews: 3 });
+    const attempts = (await nativeBytes(f))[1];
+    const admitted = await processRetainedRoundReport(f);
+    expect(admitted.findings).toHaveLength(1);
+    expect(resolveRoundResolution((await loadConvergeRunState(f.gitCommonDir, f.target))!, 1)!.status).toBe('unresolved');
+    expect((await nativeBytes(f))[1]).toEqual(attempts);
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.lastLaunch).toMatchObject({ hardFailure: true, deliveryPending: true });
+  });
+
+  it('refuses partial seats despite enough successful individual chunk calls and preserves native counters', async () => {
+    const f = await retained({ seats: 3, partial: true }), before = await nativeBytes(f);
+    await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_inconclusive_health');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it.each(['status', 'run', 'head', 'input', 'round', 'attempt', 'hash', 'successes', 'total', 'policy', 'spent'])(
+    'refuses native %s mismatch before admission without changing either native file', async kind => {
+      const f = await retained();
+      await alterState(f, state => {
+        if (kind === 'spent') { state.attemptsUsed = 0; state.attempts = []; return; }
+        const launch = state.lastLaunch;
+        if (kind === 'status') launch.status = 'pending';
+        if (kind === 'run') launch.runId = runId(99);
+        if (kind === 'head') launch.headSha = 'c'.repeat(40);
+        if (kind === 'input') launch.inputSha256 = 'c'.repeat(64);
+        if (kind === 'round') launch.round = 2;
+        if (kind === 'attempt') launch.attempt = 2;
+        if (kind === 'hash') launch.reportJsonSha256 = 'c'.repeat(64);
+        if (kind === 'successes') launch.successfulReviews = 3;
+        if (kind === 'total') launch.totalReviews = 4;
+        if (kind === 'policy') launch.reviewerHealth.policy.fraction = 1;
+      }, kind === 'spent');
+      const before = await nativeBytes(f);
+      await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_native_launch_mismatch');
+      expect(await nativeBytes(f)).toEqual(before);
+    });
+
+  it('refuses current-head drift and any byte change to the exact ordinary report', async () => {
+    const f = await retained(), before = await nativeBytes(f);
+    await expect(processRetainedRoundReport({ ...f, currentHeadSha: 'c'.repeat(40) })).rejects.toThrow('retained_report_head_mismatch');
+    await expect(processRetainedRoundReport({ ...f, reportBytes: f.reportBytes + '\n' })).rejects.toThrow('retained_report_terminal_mismatch');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('refuses an otherwise valid artifact from a different local journal proof', async () => {
+    const f = await retained({ substitutedProof: true }), before = await nativeBytes(f);
+    await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_checkpoint_mismatch');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it.each(['main', 'terminal'])('refuses a missing sealed %s before native admission', async kind => {
+    const f = await retained(kind === 'main' ? { seal: false } : { terminal: false }), before = await nativeBytes(f);
+    await expect(processRetainedRoundReport(f)).rejects.toThrow(kind === 'main' ? 'retained_report_unsealed_checkpoint' : 'retained_report_missing_terminal');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('refuses supplemented native authority without pretending the source is an original launch', async () => {
+    const f = await retained({ supplemented: true }), before = await nativeBytes(f);
+    await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_supplemented_authority_unsupported');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('binds target metadata, original roster order, spec and exact capture in the retained-only launch digest', () => {
+    const f = fixture(), run = { target: { kind: 'patch' as const, repo: 'allocator-one/rcl', prNumber: 105, headSha: f.plan.headSha, baseSha: f.plan.mergeBaseSha },
+      roster: f.plan.roster.map(seat => ({ model: seat.model, role: seat.role, provider: seat.route, lane: 'blocking' as const })), spec: { source: 'flag' as const, sha256: f.plan.specSha256 } };
+    const digest = retainedLaunchInputSha256(f.capture.digest, run);
+    expect(digest).toBe(retainedLaunchInputSha256(f.capture.digest, structuredClone(run)));
+    for (const changed of [{ ...run, target: { ...run.target, prNumber: 106 } }, { ...run, roster: [...run.roster].reverse() },
+      { ...run, spec: { ...run.spec, sha256: 'c'.repeat(64) } }]) expect(retainedLaunchInputSha256(f.capture.digest, changed)).not.toBe(digest);
+    expect(retainedLaunchInputSha256('c'.repeat(64), run)).not.toBe(digest);
+  });
+});

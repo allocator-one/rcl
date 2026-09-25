@@ -35,6 +35,12 @@ export interface ReviewerRecoveryOptions {
   adapterFactory?: RunnerOptions['adapterFactory'];
   reasoningEffort?: RunnerOptions['reasoningEffort'];
   signal?: AbortSignal;
+  /**
+   * Newly durable physical results only, including failures; never retained or
+   * uncertain placeholders. Receives isolated copies. Rejection stops dispatch
+   * through the acceptance boundary without undoing recorded results or spend.
+   */
+  onPhysicalReviewComplete?: (review: ModelReview, callIndex: number, paidAttempt: PaidAttempt) => void | Promise<void>;
   auditLateReview?: RunnerOptions['auditLateReview'];
   /** Audit-only callback pinned to the durable physical intent from its wave. */
   auditLateAttempt?: (review: ModelReview, callIndex: number, paidAttempt: PaidAttempt) => void | Promise<void>;
@@ -229,6 +235,9 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
                 ? { kind: 'success' as const, chunk: cell.chunk, reviewBytes: JSON.stringify(review) }
                 : { kind: 'failure' as const, chunk: cell.chunk, reviewBytes: JSON.stringify(review), possiblyBilled: true };
               await input.journal.recordResult(cell.id, attempt, result, input.ownership);
+              // Observe the exact persisted snapshot, not a provider-owned object
+              // that may have changed while the durable write was pending.
+              await input.onPhysicalReviewComplete?.(JSON.parse(result.reviewBytes) as ModelReview, index, { ...attempt });
             }
           },
           auditLateReview: input.auditLateAttempt ? async (review, index) => {
