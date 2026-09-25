@@ -35,7 +35,7 @@ function messageStart(): string {
 }
 
 async function withLocalSse(
-  responseEvents: string,
+  responseEvents: string | string[],
   run: (adapter: AnthropicAdapter, requests: object[]) => Promise<void>,
 ): Promise<void> {
   const requests: object[] = [];
@@ -44,7 +44,7 @@ async function withLocalSse(
     for await (const chunk of request) body += String(chunk);
     requests.push(JSON.parse(body) as object);
     response.writeHead(200, { 'content-type': 'text/event-stream' });
-    response.end(responseEvents);
+    response.end(Array.isArray(responseEvents) ? responseEvents[requests.length - 1] : responseEvents);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
 
@@ -136,6 +136,40 @@ describe('Anthropic Fable streaming over real SDK SSE', () => {
       expect(review.status).toBe('error');
       expect(review.findings).toEqual([]);
       expect(review.error).toContain('stream ended without producing a Message');
+    });
+  });
+
+  it('retries a statusless SSE overloaded_error and accepts the next complete tool response', async () => {
+    const overloaded = event('error', {
+      error: { type: 'overloaded_error', message: 'Overloaded' },
+    });
+    const recovered = [
+      messageStart(),
+      event('content_block_start', {
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_local_test', name: 'report_findings', input: {} },
+      }),
+      event('content_block_delta', {
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: JSON.stringify({ findings: [FINDING] }) },
+      }),
+      event('content_block_stop', { index: 0 }),
+      event('message_delta', {
+        delta: { stop_reason: 'tool_use', stop_sequence: null },
+        usage: { output_tokens: 18 },
+      }),
+      event('message_stop', {}),
+    ].join('');
+
+    await withLocalSse([overloaded, recovered], async (adapter, requests) => {
+      const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', {
+        timeoutMs: 5000,
+        maxRetries: 1,
+      });
+
+      expect(requests).toHaveLength(2);
+      expect(review.status).toBe('success');
+      expect(review.findings).toEqual([FINDING]);
     });
   });
 });
