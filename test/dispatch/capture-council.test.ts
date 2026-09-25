@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { buildPrompt, type ContextDoc } from '../../src/prepare/prompt-builder.js';
 import { chunkDiff, formatChunkForPrompt } from '../../src/prepare/chunker.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
+import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
+import { decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
 import type { Config } from '../../src/config/schema.js';
 import type { Diff, FileChange } from '../../src/resolver/types.js';
@@ -59,4 +61,39 @@ describe('capture prepared council', () => {
     const changed = { ...input, diff: { ...input.diff, files: [{ ...input.diff.files[0]!, patch: `${input.diff.files[0]!.patch} +changed` }, ...input.diff.files.slice(1)] } };
     expect(() => capturePreparedCouncil(changed)).toThrow();
   });
+});
+
+function aggregationFor(input: Awaited<ReturnType<typeof fixture>>, weight = 1) {
+  return captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: diffDigest(input.diff.files),
+    roleMap: new Map([[role.name, role]]), modelWeights: new Map([[assignments[0]!.model, weight]]),
+    thresholds: { minConsensusScore: 0.4, minConfidence: 0.2, dedupeLineWindow: 5, jaccardThreshold: 0.3 },
+    gating: { mode: 'all-findings', minModels: 2, verificationModel: undefined, verificationTimeoutMs: 1000, verificationPassTimeoutMs: 1000 },
+    belowThresholdAppendix: true });
+}
+
+it('binds the exact actual aggregation snapshot into the existing captured-input document', async () => {
+  const input = await fixture(), aggregation = aggregationFor(input);
+  const { captured, plan } = capturePreparedCouncil({ ...input, aggregationInputs: aggregation });
+  expect(captured.aggregation?.bytes).toBe(aggregation.bytes);
+  expect(() => capturePreparedCouncil({ ...input, aggregationInputs: aggregation,
+    compatibility: { ...input.compatibility, aggregation: { name: 'different-algorithm', version: 1 } } }))
+    .toThrow('capture_incompatible_aggregation');
+  expect(decodeCapturedInputs(captured.bytes, plan).aggregation?.digest).toBe(aggregation.digest);
+  const different = capturePreparedCouncil({ ...input, aggregationInputs: aggregationFor(input, 0.5) });
+  expect(different.captured.digest).not.toBe(captured.digest);
+  expect(different.plan.digest).toBe(plan.digest);
+  const raw = JSON.parse(captured.bytes);
+  raw.blobs[aggregation.digest] += ' ';
+  expect(() => decodeCapturedInputs(stableStringify(raw), plan)).toThrow();
+  expect(() => capturePreparedCouncil({ ...input, aggregationInputs: JSON.parse(JSON.stringify(aggregation)) }))
+    .toThrow('capture_unvalidated_aggregation');
+});
+
+it('refuses an aggregation snapshot for a different captured patch', async () => {
+  const input = await fixture(), aggregation = aggregationFor(input);
+  const changed = captureAggregationInputs({ algorithm: aggregation.algorithm, thresholds: { ...aggregation.thresholds },
+    gating: { ...aggregation.gating }, belowThresholdAppendix: aggregation.belowThresholdAppendix,
+    roleMap: new Map(aggregation.roles.map(item => [item.name, { ...item.role, focus: [...item.role.focus] }])),
+    modelWeights: undefined, diffSha256: 'f'.repeat(64) });
+  expect(() => capturePreparedCouncil({ ...input, aggregationInputs: changed })).toThrow('aggregation_diff_mismatch');
 });

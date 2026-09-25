@@ -1,3 +1,4 @@
+import type { CapturedAggregationInputs } from '../report/aggregation-inputs.js';
 import type { Config } from '../config/schema.js';
 import { formatChunkForPrompt, chunkDiff, type Chunk } from '../prepare/chunker.js';
 import type { ContextDoc, BuiltPrompt } from '../prepare/prompt-builder.js';
@@ -32,6 +33,7 @@ export interface CapturePreparedCouncilInput {
   /** Exact documents already read by the caller; this factory never re-reads them. */
   contextDocs: readonly ContextDoc[];
   compatibility: CouncilCompatibility;
+  aggregationInputs?: CapturedAggregationInputs;
 }
 export interface CapturedPreparedCouncil {
   plan: FrozenCheckpointPlan;
@@ -39,8 +41,8 @@ export interface CapturedPreparedCouncil {
   patchBytes: string;
   configBytes: string;
   aggregation: CouncilCompatibility['aggregation'];
-  /** The caller must separately freeze actual aggregation inputs before report construction. */
-  aggregationRequirement: 'freeze_actual_aggregation_inputs_before_report_construction';
+  /** Missing static input snapshots remain explicit and cannot enter proof-aware assembly. */
+  aggregationRequirement: 'captured' | 'freeze_actual_aggregation_inputs_before_report_construction';
 }
 
 function freeze<T>(value: T): T {
@@ -124,6 +126,7 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
     chunkBytes,
     assignments,
     prompts: [...input.prompts],
+    ...(input.aggregationInputs !== undefined ? { aggregation: input.aggregationInputs } : {}),
   });
   const decoded = decodeCapturedInputs(captured.bytes, plan);
   return freeze({
@@ -132,6 +135,6 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
     patchBytes,
     configBytes,
     aggregation: { ...input.compatibility.aggregation },
-    aggregationRequirement: 'freeze_actual_aggregation_inputs_before_report_construction' as const,
+    aggregationRequirement: input.aggregationInputs ? 'captured' as const : 'freeze_actual_aggregation_inputs_before_report_construction' as const,
   });
 }

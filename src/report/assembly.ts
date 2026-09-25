@@ -12,7 +12,7 @@ import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-heade
 import { uuidv7 } from './uuid.js';
 import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
 
-interface CompletedReviewInput {
+export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
   arrivedAsync: ModelReview[];
   asyncLaunched: number;
@@ -27,7 +27,7 @@ interface CompletedReviewInput {
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
 }
 
-interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monotonicNow' | 'onVerificationProgress'> {
+export interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monotonicNow' | 'onVerificationProgress'> {
   onStage?: (stage: string) => void;
   onVerificationStart?: () => void;
   onWarning?: (warning: string) => void;

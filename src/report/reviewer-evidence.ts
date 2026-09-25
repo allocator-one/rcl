@@ -1,16 +1,18 @@
 import { z } from 'zod';
+import { decodeSupplementalAsync, isSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { decodeCapturedInputs, type CapturedReviewerInputs } from '../dispatch/captured-inputs.js';
 import { decodeCheckpointProof, isCheckpointProof, type CheckpointProof, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
 import { decodeRecoveryOperation, type RecoveryOperation } from '../dispatch/recovery-operation.js';
 import { originalRunReportSchema, UUID } from '../telemetry/recovery/source.js';
-import { sha256Hex, stableStringify } from './run-header.js';
+import { sha256Hex, stableStringify, type RunHeader } from './run-header.js';
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/), uuid = z.string().regex(UUID);
 const sourceSchema = z.object({ run_id: uuid, report_sha256: hash, checkpoint_sha256: hash }).strict();
 const common = {
   version: z.literal(1), checkpoint_schema: z.literal(1), plan_sha256: hash,
   checkpoint_sha256: hash, captured_inputs_sha256: hash,
+  aggregation_sha256: hash.optional(), supplemental_async_sha256: hash.optional(),
   policy: z.object({ version: z.literal(1), fraction: z.number().min(2 / 3).max(1) }).strict(),
 };
 export const reviewerEvidenceDescriptorSchema = z.discriminatedUnion('kind', [
@@ -32,6 +34,7 @@ export interface InspectedReviewerReport {
   readonly descriptor: ReviewerEvidenceDescriptor;
   readonly proof: CheckpointProof;
   readonly captured: CapturedReviewerInputs;
+  readonly supplementalAsync?: SupplementalAsync;
   readonly operation?: RecoveryOperation;
   readonly nativeClaim?: { target: string; attempt?: number; round?: number };
 }
@@ -57,11 +60,16 @@ function capturedProof(proof: CheckpointProof): CapturedReviewerInputs {
 }
 
 /** Compact descriptor derived from the existing sealed journal, never its own report hash. */
-export function describeReviewerEvidence(proof: CheckpointProof): ReviewerEvidenceDescriptor {
+export function describeReviewerEvidence(proof: CheckpointProof, supplementalAsync?: SupplementalAsync): ReviewerEvidenceDescriptor {
   const captured = capturedProof(proof);
+  if (captured.aggregation && !isSupplementalAsync(supplementalAsync)) throw new Error('reviewer_missing_async_snapshot');
+  if (supplementalAsync && (!isSupplementalAsync(supplementalAsync) || !captured.aggregation)) {
+    throw new Error('reviewer_missing_aggregation_snapshot');
+  }
   const base = { version: 1 as const, checkpoint_schema: 1 as const, plan_sha256: proof.plan.digest,
     checkpoint_sha256: proof.digest, captured_inputs_sha256: captured.digest,
-    policy: { version: 1 as const, fraction: captured.policy.fraction } };
+    policy: { version: 1 as const, fraction: captured.policy.fraction },
+    ...(captured.aggregation ? { aggregation_sha256: captured.aggregation.digest, supplemental_async_sha256: supplementalAsync!.digest } : {}) };
   const sourceBytes = proof.bindings.source, operationBytes = proof.bindings.operation;
   if (sourceBytes === undefined && operationBytes === undefined) return freeze({ ...base, kind: 'original' });
   if (sourceBytes === undefined || operationBytes === undefined) throw new Error('reviewer_successor_missing_bindings');
@@ -97,12 +105,31 @@ export function inspectReviewerEvidenceReport(
   if (!report.success || !raw || typeof raw !== 'object') throw new Error('reviewer_invalid_report');
   const input = raw as Record<string, unknown>, rawRun = input.run as Record<string, unknown>;
   const descriptor = reviewerEvidenceDescriptorSchema.safeParse(rawRun.reviewer_evidence);
-  const artifact = z.object({ checkpoint: z.string() }).strict().safeParse(input.reviewerEvidence);
+  const artifact = z.object({ checkpoint: z.string(), supplemental_async: z.string().optional() }).strict().safeParse(input.reviewerEvidence);
   if (!descriptor.success || !artifact.success) throw new Error('reviewer_report_missing_proof');
   const proof = decodeCheckpointProof(artifact.data.checkpoint, expectedPlan);
-  const actual = describeReviewerEvidence(proof);
+  const supplementalAsync = artifact.data.supplemental_async === undefined ? undefined : decodeSupplementalAsync(artifact.data.supplemental_async);
+  const actual = describeReviewerEvidence(proof, supplementalAsync);
   if (stableStringify(actual) !== stableStringify(descriptor.data)) throw new Error('reviewer_descriptor_mismatch');
   const captured = capturedProof(proof), run = report.data.run;
+  const target = assertReviewerRunBindings(run, proof, captured, expectedPrTarget);
+  const operation = actual.kind === 'supplemented' ? decodeRecoveryOperation(proof.bindings.operation!) : undefined;
+  if (operation && operation.successorRunId !== run.id) throw new Error('reviewer_report_successor_mismatch');
+  const result = freeze({ reportBytes, reportSha256: sha256Hex(reportBytes), runId: run.id, prTarget: target,
+    descriptor: actual, proof, captured, ...(operation ? { operation } : {}),
+    ...(supplementalAsync ? { supplementalAsync } : {}),
+    ...(run.converge ? { nativeClaim: run.converge } : {}) });
+  inspected.add(result);
+  return result;
+}
+
+/** Check the original target and prepared inputs before aggregation can dispatch verification. */
+export function assertReviewerRunBindings(
+  run: Pick<RunHeader, 'target' | 'converge' | 'roster' | 'config_sha256' | 'context_files'> & { spec?: { sha256: string } },
+  proof: CheckpointProof, captured: CapturedReviewerInputs, expectedPrTarget?: string,
+): string {
+  if (!isCheckpointProof(proof) || proof.bindings['captured-inputs'] !== captured.bytes ||
+    captured.plan.digest !== proof.plan.digest) throw new Error('reviewer_checkpoint_missing_capture');
   const target = run.target.repo && run.target.pr_number ? `${run.target.repo.toLowerCase()}#${run.target.pr_number}` : undefined;
   // Native convergence uses an opaque accounting key (for example rcl-105).
   // Keep it distinct from the actual PR; neither key can replace the other.
@@ -124,13 +151,7 @@ export function inspectReviewerEvidenceReport(
   if (stableStringify(run.context_files) !== stableStringify(context.map(doc => ({ path: doc.label, sha256: doc.sha256 })))) {
     throw new Error('reviewer_report_context_mismatch');
   }
-  const operation = actual.kind === 'supplemented' ? decodeRecoveryOperation(proof.bindings.operation!) : undefined;
-  if (operation && operation.successorRunId !== run.id) throw new Error('reviewer_report_successor_mismatch');
-  const result = freeze({ reportBytes, reportSha256: sha256Hex(reportBytes), runId: run.id, prTarget: target,
-    descriptor: actual, proof, captured, ...(operation ? { operation } : {}),
-    ...(run.converge ? { nativeClaim: run.converge } : {}) });
-  inspected.add(result);
-  return result;
+  return target;
 }
 
 /** Validate oldest-to-newest immutable ancestry; does not grant producer authority or approval. */
@@ -147,6 +168,7 @@ export function validateReviewerReportChain(reports: readonly InspectedReviewerR
       if (report.descriptor.kind !== 'original') throw new Error('reviewer_lineage_missing_origin');
     } else {
       if (report.descriptor.kind !== 'supplemented' || !report.operation) throw new Error('reviewer_lineage_missing_source');
+      if (report.supplementalAsync?.digest !== previous.supplementalAsync?.digest) throw new Error('reviewer_lineage_async_mismatch');
       if (report.prTarget !== previous.prTarget) throw new Error('reviewer_lineage_target_mismatch');
       const source = report.descriptor.source, operation = report.operation;
       if (source.run_id !== previous.runId || source.report_sha256 !== previous.reportSha256 || source.checkpoint_sha256 !== previous.proof.digest ||

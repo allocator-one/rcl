@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { decodeAggregationInputs, isCapturedAggregationInputs, type CapturedAggregationInputs } from '../report/aggregation-inputs.js';
 import { ConfigSchema, type Config } from '../config/schema.js';
 import type { BuiltPrompt } from '../prepare/prompt-builder.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
@@ -21,6 +22,7 @@ const captureSchema = z.object({
   plan: z.unknown(),
   policy: z.object({ version: z.literal(1), fraction: z.number().finite() }).strict(),
   blobs: z.record(digest, z.string()),
+  aggregationSha256: digest.optional(),
   roles: z.array(z.object({ cell: text, sha256: digest }).strict()).max(CAPTURED_INPUT_LIMITS.cells),
 }).strict();
 
@@ -36,6 +38,8 @@ export interface CaptureReviewerInputs {
   chunkBytes: string[];
   assignments: ReviewAssignment[];
   prompts: BuiltPrompt[];
+  /** Actual static aggregation values captured before the first provider intent. */
+  aggregation?: CapturedAggregationInputs;
 }
 
 export interface CapturedReviewerInputs extends Omit<CaptureReviewerInputs, 'policy'> {
@@ -109,7 +113,14 @@ export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedRev
     add(prompt.systemPrompt, cell.systemPromptSha256); add(prompt.userPrompt, cell.userPromptSha256);
     return { cell: cell.id, sha256: add(stableStringify(assignment.role)) };
   });
-  const bytes = stableStringify({ version: 1, plan, policy: input.policy, blobs, roles });
+  let aggregationSha256: string | undefined;
+  if (input.aggregation !== undefined) {
+    if (!isCapturedAggregationInputs(input.aggregation)) throw new Error('capture_unvalidated_aggregation');
+    const aggregation = decodeAggregationInputs(input.aggregation.bytes, plan.patchSha256);
+    aggregationSha256 = add(aggregation.bytes, aggregation.digest);
+  }
+  const bytes = stableStringify({ version: 1, plan, policy: input.policy, blobs, roles,
+    ...(aggregationSha256 !== undefined ? { aggregationSha256 } : {}) });
   return decodeCapturedInputs(bytes, plan);
 }
 
@@ -153,7 +164,13 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
     assignments.push({ model: cell.model, provider: cell.route, role: role.data });
     prompts.push({ systemPrompt: get(cell.systemPromptSha256), userPrompt: get(cell.userPromptSha256) });
   });
+  const aggregation = captured.aggregationSha256 === undefined ? undefined
+    : decodeAggregationInputs(get(captured.aggregationSha256), plan.patchSha256);
+  if (aggregation && stableStringify(aggregation.algorithm) !== stableStringify(tools.data.aggregation)) {
+    throw new Error('capture_incompatible_aggregation');
+  }
   if (Object.keys(captured.blobs).length !== referenced.size) throw new Error('capture_unreferenced_blob');
   return freeze({ version: 1, bytes, digest: sha256Hex(bytes), plan, policy, config: config.data,
-    patchBytes, configBytes, specBytes, contextBytes, toolsBytes, chunkBytes, assignments, prompts });
+    patchBytes, configBytes, specBytes, contextBytes, toolsBytes, chunkBytes, assignments, prompts,
+    ...(aggregation !== undefined ? { aggregation } : {}) });
 }

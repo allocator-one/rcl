@@ -37,6 +37,8 @@ const reviewSchema = z.object({
   error: z.string().optional(), droppedFindings: integer.optional(), warnings: z.array(z.string()).optional(),
   async: z.literal(false).optional(),
 }).strict();
+/** Strict raw blocking-review wire schema, shared by supplemental async capture. */
+export const blockingCheckpointReviewSchema = reviewSchema;
 const resultSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('success'), chunk: integer, reviewBytes: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('failure'), chunk: integer, reviewBytes: z.string().min(1), possiblyBilled: z.boolean() }).strict(),
