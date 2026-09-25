@@ -1051,7 +1051,8 @@ Local patch reviews do not read GitHub credentials.
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | API key for Claude models |
 | `OPENAI_API_KEY` | API key for OpenAI models |
-| `GEMINI_API_KEY` | API key for Google Gemini models |
+| `GOOGLE_API_KEY` | Preferred Google Gemini API key; empty or whitespace-only values fall through |
+| `GEMINI_API_KEY` | Google Gemini API key when `GOOGLE_API_KEY` is absent or blank; also used for Harness-injected keys |
 | `OPENROUTER_API_KEY` | API key for [OpenRouter](https://openrouter.ai) models (`openrouter/…` prefix) |
 | `GITHUB_TOKEN` | GitHub personal access token (PR fetch and post) |
 | `RCL_DEBUG` | Set to any value to print full error stack traces |
