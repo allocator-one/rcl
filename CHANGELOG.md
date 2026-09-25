@@ -2,14 +2,26 @@
 
 ## Unreleased
 
-## 4.1.2 - 2026-09-25
+## 4.1.4 - 2026-09-25
 
 - Bind attested recovery receipts and preserve byte-identical evidence replay, including bounded recovery for unavailable attested delivery (RCL-83; requires compatible backend support).
 
 - Support complete evidence envelopes up to 4,000,000 bytes while retaining bounded diagnostics and compatibility with the backend evidence contract (RCL-88; requires compatible backend support).
 
-- Let omitted verifier call timeouts inherit the bounded whole-pass budget, while
-  preserving an explicit smaller per-call cap for callers that need one (RCL-104).
+## 4.1.3 - 2026-09-25
+
+- Let verifier batches use the remaining whole-pass deadline when no separate
+  per-call timeout is configured, instead of imposing a 60-second default.
+  Explicit per-call limits, outer cancellation, unavailable results and review
+  accounting remain unchanged (RCL-104).
+
+## 4.1.2 - 2026-09-25
+
+- Stream Claude Fable 5.1 reviewer responses with a 32,768-token output ceiling
+  and medium effort. This gives large review chunks room for thinking and
+  complete findings while preserving fail-closed truncation, timeout, and
+  schema checks. Other Claude model requests keep their previous settings
+  (RCL-103).
 
 ## 4.1.1 - 2026-09-25
 
@@ -57,7 +69,6 @@
   lowercase `report:<uuid>:<16-hex-digest>` form. Regenerate malformed
   caller-supplied report keys before submitting the report. This guard does
   not reset or rewrite existing convergence history.
-
 ## 3.8.4 - 2026-09-24
 
 - Clear old dismissal explanations when recording a new fixed verdict. Add

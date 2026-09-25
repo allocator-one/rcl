@@ -884,6 +884,35 @@ describe('resolveGatingConfig', () => {
   });
 
   it.each([
+    { verificationPassTimeout: 180_000, verificationTimeout: undefined, expectedTimeout: 180_000 },
+    { verificationPassTimeout: 90_000, verificationTimeout: undefined, expectedTimeout: 90_000 },
+    { verificationPassTimeout: 180_000, verificationTimeout: 30_000, expectedTimeout: 30_000 },
+  ])('dispatches the resolved verifier budget: $expectedTimeout ms', async ({ verificationPassTimeout, verificationTimeout, expectedTimeout }) => {
+    const config = resolveGatingConfig({ verificationPassTimeout, verificationTimeout });
+    const ask = vi.fn(async (): Promise<ModelAnswer> => ({
+      model: config.verificationModel!,
+      provider: 'google',
+      text: '[{"id":"F1","verdict":"refuted","reason":"guard exists"}]',
+      durationMs: 1,
+      status: 'success',
+    }));
+
+    await applyGating([makeFinding()], {
+      minModels: config.minModels,
+      verificationModel: config.verificationModel,
+      verificationTimeoutMs: config.verificationTimeoutMs,
+      verificationPassTimeoutMs: config.verificationPassTimeoutMs,
+      diffFiles: [diffFile('src/a.ts')],
+      ask,
+    });
+
+    expect(config.verificationTimeoutMs).toBe(expectedTimeout);
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeGreaterThan(expectedTimeout - 5_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeLessThanOrEqual(expectedTimeout);
+  });
+
+  it.each([
     ['verificationTimeout', 'gating.verificationTimeout', 2_147_483_648],
     ['verificationPassTimeout', 'gating.verificationPassTimeout', 2_147_483_648],
   ] as const)('rejects an unsafe %s value', (key, label, value) => {
