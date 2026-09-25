@@ -292,8 +292,10 @@ export class HarnessSink {
     const data = response?.data;
     const envelopeSha256 = createHash('sha256').update(serializedEnvelope, 'utf8').digest('hex');
     const receiptUrl = typeof data?.['url'] === 'string' ? data['url'] : undefined;
-    const expectedOrigin = new URL(this.credential.url).origin;
-    const expectedPath = `/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`;
+    const credentialLocation = new URL(this.credential.url);
+    const expectedOrigin = credentialLocation.origin;
+    const basePath = credentialLocation.pathname.replace(/\/$/, '');
+    const expectedPath = `${basePath}/api/v1/reviews/runs/${encodeURIComponent(envelope.run.id)}`;
     const receiptLocation = receiptUrl === undefined ? undefined : (() => { try { return new URL(receiptUrl); } catch { return undefined; } })();
     if (!data || data['id'] !== envelope.run.id || receiptLocation?.origin !== expectedOrigin || receiptLocation.pathname !== expectedPath || receiptLocation.search !== '' || receiptLocation.hash !== '' ||
       typeof data['envelope_sha256'] !== 'string' || !/^[a-f0-9]{64}$/.test(data['envelope_sha256']) || data['envelope_sha256'] !== envelopeSha256 ||

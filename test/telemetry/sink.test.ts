@@ -262,6 +262,17 @@ describe('HarnessSink.getAttestedRunReceipt', () => {
     });
   });
 
+  it('accepts an own-run receipt under a configured base path', async () => {
+    const original = envelope();
+    const serialized = JSON.stringify(original);
+    const { fetch } = fakeFetch(() => ({ status: 200, body: { data: {
+      id: original.run.id, url: `https://harness.example.test/harness/api/v1/reviews/runs/${original.run.id}`,
+      envelope_sha256: createHash('sha256').update(serialized, 'utf8').digest('hex'), artifacts_declared: original.artifacts_declared,
+    }, meta: { status: 'existing' } } }));
+    const prefixed = new HarnessSink({ credential: { ...attested, url: 'https://harness.example.test/harness' }, rclVersion: '3.8.1', fetchImpl: fetch, timeoutMs: 500 });
+    await expect(prefixed.getAttestedRunReceipt(original, serialized)).resolves.toMatchObject({ kind: 'recorded' });
+  });
+
   it('permits replay only after an explicit own-run absence, never after a rejected or mismatched receipt', async () => {
     const original = envelope();
     const serialized = JSON.stringify(original);
