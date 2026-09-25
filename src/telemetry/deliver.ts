@@ -13,7 +13,7 @@ import { ensureNoticeShown } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, type RunReceipt, type SinkOutcome } from './sink.js';
-import { recoverAttestedDelivery } from './attested-retry.js';
+import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 
 /**
  * Evidence delivery for a finished review and for the converge commands
@@ -405,7 +405,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     const sink = runtime.sink;
     deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
     // Recovery stops on refusal; keep organization disablement distinct in the delivery result.
-    if (!Number.isFinite(Date.parse(runtime.attestedExpiresAt))) {
+    if (parseAttestedExpiry(runtime.attestedExpiresAt) === undefined) {
       posted = { kind: 'rejected', httpStatus: 0, error: 'attested_recovery_invalid_expiry', message: 'attested expiry must be a valid ISO timestamp' };
     } else {
       const recovered = await recoverAttestedDelivery<RunReceipt, Extract<SinkOutcome<RunReceipt>, { kind: 'disabled' }>>({

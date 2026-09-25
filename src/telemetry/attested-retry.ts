@@ -11,6 +11,13 @@ export const ATTESTED_DELIVERY_MAX_ATTEMPTS = 3;
 export const ATTESTED_DELIVERY_DEADLINE_MS = 20_000;
 export const ATTESTED_DELIVERY_RETRY_PAUSE_MS = 250;
 
+/** Parse the canonical absolute timestamp minted with an attested credential. */
+export function parseAttestedExpiry(value: string): number | undefined {
+  const parsed = Date.parse(value);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+    Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : undefined;
+}
+
 export type DeliveryAttempt<TRecorded = undefined, TDisabled = never> =
   | { kind: 'recorded'; value?: TRecorded }
   | { kind: 'unavailable' }
@@ -80,8 +87,8 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
   const sleep = options.sleep ?? abortableSleep;
   const maxAttempts = cappedOverride(options.maxAttempts, ATTESTED_DELIVERY_MAX_ATTEMPTS, 'maxAttempts', 1);
   const deadlineMs = cappedOverride(options.deadlineMs, ATTESTED_DELIVERY_DEADLINE_MS, 'deadlineMs', 1);
-  const expiresAt = Date.parse(options.expiresAt);
-  if (!Number.isFinite(expiresAt)) throw new RangeError('expiresAt must be a valid ISO timestamp');
+  const expiresAt = parseAttestedExpiry(options.expiresAt);
+  if (expiresAt === undefined) throw new RangeError('expiresAt must be a valid ISO timestamp');
   const startedAt = monotonicNow();
   const expiresInMs = expiresAt - now();
   const initialAttempts = options.initialAttempts ?? (options.receiptFirst ? 1 : 0);

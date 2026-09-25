@@ -217,20 +217,22 @@ export class HarnessSink {
   }
 
   /** Retain one validated envelope and its exact bytes for an initial POST and any replay. */
-  preparePostRun(envelope: RunEnvelope, serializedEnvelope = JSON.stringify(envelope)): PreparedPostRun {
-    if (serializedEnvelope !== JSON.stringify(envelope)) return {
+  preparePostRun(envelope: RunEnvelope, serializedEnvelope?: string): PreparedPostRun {
+    const canonicalEnvelope = JSON.stringify(envelope);
+    if (serializedEnvelope !== undefined && serializedEnvelope !== canonicalEnvelope) return {
       kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch',
       message: 'The supplied serialized envelope does not match the validated envelope',
     };
-    const retainedEnvelope = JSON.parse(serializedEnvelope) as RunEnvelope;
+    const retainedBytes = serializedEnvelope ?? canonicalEnvelope;
+    const retainedEnvelope = JSON.parse(retainedBytes) as RunEnvelope;
     return {
       kind: 'ready',
-      post: (options = {}) => this.postPreparedRun(retainedEnvelope, serializedEnvelope, options),
+      post: (options = {}) => this.postPreparedRun(retainedEnvelope, retainedBytes, options),
     };
   }
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
-  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope = JSON.stringify(envelope)): Promise<SinkOutcome<RunReceipt>> {
+  async postRun(envelope: RunEnvelope, options: RequestOptions = {}, serializedEnvelope?: string): Promise<SinkOutcome<RunReceipt>> {
     const prepared = this.preparePostRun(envelope, serializedEnvelope);
     return prepared.kind === 'ready' ? prepared.post(options) : prepared;
   }
