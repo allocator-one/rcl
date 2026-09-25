@@ -573,7 +573,9 @@ describe('openai request parameters', () => {
     'gpt-6-sol',
     'openai/gpt-6-sol',
     'gpt-10-sol',
+    'o1',
     'o3',
+    'o4-mini',
     'o5-mini',
   ])('%s reviews with max_completion_tokens', async (model) => {
     const captured: Array<Record<string, unknown>> = [];
@@ -597,16 +599,19 @@ describe('openai request parameters', () => {
     expect(captured[0]).not.toHaveProperty('max_tokens');
   });
 
-  it('a legacy chat model keeps max_tokens', async () => {
-    const captured: Array<Record<string, unknown>> = [];
-    const adapter = new OpenAIAdapter('test-key');
-    setClient(adapter, capturingClient(captured));
+  it.each(['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'chatgpt-4o-latest'])(
+    '%s keeps max_tokens',
+    async (model) => {
+      const captured: Array<Record<string, unknown>> = [];
+      const adapter = new OpenAIAdapter('test-key');
+      setClient(adapter, capturingClient(captured));
 
-    await adapter.review('gpt-4.1', 'general', 's', 'u', OPTS);
+      await adapter.review(model, 'general', 's', 'u', OPTS);
 
-    expect(captured[0]).toHaveProperty('max_tokens', 16384);
-    expect(captured[0]).not.toHaveProperty('max_completion_tokens');
-  });
+      expect(captured[0]).toHaveProperty('max_tokens', 16384);
+      expect(captured[0]).not.toHaveProperty('max_completion_tokens');
+    }
+  );
 });
 
 // A provider that declines does so IN-BAND: HTTP 200, no content. Recording
