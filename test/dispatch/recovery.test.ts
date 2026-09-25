@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
-import { recoverReviewerAssignments } from '../../src/dispatch/recovery.js';
+import { recoverCapturedAssignments, recoverReviewerAssignments } from '../../src/dispatch/recovery.js';
+import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
+import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
 import type { RecoveryAttempt } from '../../src/dispatch/recovery-policy.js';
 import type { ModelReview } from '../../src/consensus/types.js';
 import type { ReviewAssignment } from '../../src/roles/types.js';
@@ -54,7 +56,78 @@ async function runFixture(work: (input: ReturnType<typeof fixture>, commonDir: s
   await work(fixture(), commonDir);
 }
 
+function capturedFixture(input: ReturnType<typeof fixture>) {
+  const configBytes = JSON.stringify({ concurrency: 1, quorumFraction: 2 / 3, reasoningEffort: 'high', timeout: 1000 });
+  const contextBytes = '[]';
+  const toolsBytes = '{"aggregation":{"name":"consensus","version":1},"parser":{"name":"findings-json","version":1}}';
+  const plan = freezeCheckpointPlan({ ...input.plan, configSha256: hash(configBytes),
+    contextSha256: hash(contextBytes), toolsSha256: hash(toolsBytes) });
+  return captureReviewerInputs({ ...input, plan, policy: { version: 1, fraction: 2 / 3 },
+    patchBytes: 'patch', configBytes, specBytes: 'spec', contextBytes, toolsBytes, chunkBytes: ['patch'] });
+}
+
+function recoveryOperation(planDigest: string, capturedInputsSha256: string) {
+  return createRecoveryOperation({ operationId: '11111111-1111-4111-8111-111111111111',
+    sourceRunId: '01a0daa6-b575-759b-942c-e879460be5bf', successorRunId: '22222222-2222-4222-8222-222222222222',
+    sourceReportSha256: hash('source report'), sourceCheckpointSha256: hash('source checkpoint'),
+    capturedInputsSha256, planDigest, target, originalNativeClaim: { attempt: 1, round: 1 },
+    startedAtMs: 1000, expiresAtMs: 3000, maxAdditionalCalls: 1, maxAttemptsPerCell: 3 });
+}
+
 describe('owned missing-review executor', () => {
+  it('refuses legacy journals without captured inputs before any paid dispatch', async () => runFixture(async (input, commonDir) => {
+    const called = vi.fn();
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace: 'no-capture', plan: input.plan, ownership });
+      await expect(recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: input.plan,
+        sourceAttempts: input.sourceAttempts, operation: recoveryOperation(input.plan.digest, hash('missing')),
+        nowMs: () => 1500,
+        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) })).rejects.toThrow('recovery_missing_bindings');
+      expect(called).not.toHaveBeenCalled();
+      expect((await journal.read()).records).toEqual([]);
+    })).rejects.toThrow('recovery_missing_bindings');
+  }));
+
+  it('uses saved inputs and spends only the saved remaining call budget across reopen', async () => runFixture(async (input, commonDir) => {
+    const captured = capturedFixture(input);
+    const operation = recoveryOperation(captured.plan.digest, captured.digest);
+    const called = vi.fn(async (model: string) => input.review(model, 'error'));
+    const run = async (create: boolean) => withNativeTarget(commonDir, target, async ownership => {
+      const open = { commonDir, namespace: 'captured-restart', plan: captured.plan, ownership };
+      const journal = await (create ? CheckpointJournal.create(open) : CheckpointJournal.openWrite(open));
+      if (create) {
+        await journal.bind('captured-inputs', captured.bytes, ownership);
+        await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
+      }
+      return recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: captured.plan,
+        sourceAttempts: input.sourceAttempts, operation, nowMs: () => 1500,
+        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
+    });
+    expect((await run(true)).preview.nextAction).toBe('call_limit');
+    expect((await run(false)).preview.nextAction).toBe('call_limit');
+    expect(called).toHaveBeenCalledTimes(1);
+    expect(called.mock.calls[0]!.slice(2, 4)).toEqual(['system', 'patch']);
+    expect((called.mock.calls[0] as unknown[])[4]).toMatchObject({ maxRetries: 0, timeoutMs: 1000 });
+  }));
+
+  it('does not renew an expired saved operation or accept a changed source binding', async () => runFixture(async (input, commonDir) => {
+    const captured = capturedFixture(input), operation = recoveryOperation(captured.plan.digest, captured.digest);
+    const called = vi.fn();
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace: 'expired', plan: captured.plan, ownership });
+      await journal.bind('captured-inputs', captured.bytes, ownership);
+      await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
+      const options = { commonDir, ownership, journal, expectedPlan: captured.plan,
+        sourceAttempts: input.sourceAttempts, operation, nowMs: () => operation.expiresAtMs + 1,
+        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) };
+      expect((await recoverCapturedAssignments(options)).preview.nextAction).toBe('time_limit');
+      await expect(recoverCapturedAssignments({ ...options,
+        operation: { ...operation, sourceReportSha256: hash('substitution') } })).rejects.toThrow('recovery_operation_mismatch');
+      expect(called).not.toHaveBeenCalled();
+      expect((await journal.read()).records.filter(record => record.type === 'intent')).toEqual([]);
+    })).rejects.toThrow('recovery_operation_mismatch');
+  }));
+
   it('uses one new call from M-1, retains the original finding and does no work on repeat', async () => runFixture(async (input, commonDir) => {
     const finding = { id: 'original', file: 'x.ts', startLine: 1, endLine: 1, severity: 'critical' as const,
       category: 'security' as const, title: 'Retained concern', description: 'Do not drop me.' };

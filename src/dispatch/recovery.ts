@@ -9,6 +9,10 @@ import { previewReviewerRecovery, type RecoveryAttempt, type RecoveryPreview } f
 import { resolveQuorumPolicy } from './quorum.js';
 import { reviewCallIdentity, runReviews, type RunnerOptions } from './runner.js';
 import { retryDelay } from './utils.js';
+import { DEFAULT_CONCURRENCY, DEFAULT_REASONING_EFFORT, DEFAULT_TIMEOUT_MS } from '../config/defaults.js';
+import { decodeCapturedInputs } from './captured-inputs.js';
+import { decodeRecoveryOperation, encodeRecoveryOperation, remainingRecoveryBudget,
+  type RecoveryOperation, type RecoveryRuntimeBounds } from './recovery-operation.js';
 
 export interface ReviewerRecoveryOptions {
   commonDir: string;
@@ -44,6 +48,46 @@ export interface ReviewerRecoveryResult {
   stoppedBy?: 'canceled' | 'no_dispatch';
   /** Setup failures are diagnostics, never newly billed or successful attempts. */
   setupFailures?: Array<{ cell: string; review: ModelReview }>;
+}
+
+export type CapturedRecoveryOptions = Omit<ReviewerRecoveryOptions,
+  'plan' | 'assignments' | 'prompts' | 'fraction' | 'maxAdditionalCalls' | 'maxAttemptsPerCell' | 'remainingMs' |
+  'timeoutMs' | 'concurrency' | 'reasoningEffort'> & {
+  /** Exact operation already claimed and bound by the outer source/authority validator. */
+  operation: RecoveryOperation;
+  runtimeBounds?: RecoveryRuntimeBounds;
+  nowMs?: () => number;
+};
+
+/**
+ * Internal execution boundary for saved inputs and limits. This is not a CLI
+ * admission path: the caller still validates source report/lineage, server
+ * support, producer authority and the native launch claim before invoking it.
+ * Only the existing journal supplies prompts and persisted spend/time caps.
+ */
+export async function recoverCapturedAssignments(options: CapturedRecoveryOptions): Promise<ReviewerRecoveryResult> {
+  const expectedOperation = encodeRecoveryOperation(options.operation);
+  const expectedPlan = freezeCheckpointPlan(options.expectedPlan);
+  const sourceAttempts = structuredClone(options.sourceAttempts);
+  const runtimeBounds = options.runtimeBounds === undefined ? undefined : structuredClone(options.runtimeBounds);
+  const capturedOptions = { ...options, expectedPlan, sourceAttempts, runtimeBounds };
+  return withOwnedNativeOperation(options.ownership, options.commonDir, expectedPlan.target, async ownership => {
+    const bindings = await capturedOptions.journal.readBindings();
+    if (bindings['captured-inputs'] === undefined || bindings.operation === undefined) throw new Error('recovery_missing_bindings');
+    const operation = decodeRecoveryOperation(bindings.operation);
+    if (bindings.operation !== expectedOperation || operation.target !== expectedPlan.target ||
+      operation.planDigest !== expectedPlan.digest) throw new Error('recovery_operation_mismatch');
+    const captured = decodeCapturedInputs(bindings['captured-inputs'], expectedPlan);
+    if (captured.digest !== operation.capturedInputsSha256) throw new Error('recovery_captured_inputs_mismatch');
+    const budget = remainingRecoveryBudget(operation, (capturedOptions.nowMs ?? Date.now)(), runtimeBounds);
+    return recoverReviewerAssignments({ ...capturedOptions, ownership, plan: captured.plan,
+      assignments: captured.assignments, prompts: captured.prompts, fraction: captured.policy.fraction,
+      timeoutMs: captured.config.timeout ?? DEFAULT_TIMEOUT_MS,
+      concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
+      reasoningEffort: captured.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+      remainingMs: budget.remainingMs, maxAdditionalCalls: budget.maxAdditionalCalls,
+      maxAttemptsPerCell: budget.maxAttemptsPerCell });
+  });
 }
 
 /** Read physical attempts without counting a reused source success as a new call. */

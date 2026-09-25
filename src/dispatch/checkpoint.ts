@@ -15,6 +15,9 @@ import {
 const VERSION = 1;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const integer = z.number().int().nonnegative().safe();
+const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation']);
+const bindingReferenceSchema = z.object({ name: bindingNameSchema, file: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
+  .refine(binding => binding.file === bindingFile(binding.name));
 const attemptSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9._:-]{1,160}$/), kind: z.enum(['paid', 'unknown']) }).strict();
 const rawFindingSchema = originalRawFindingSchema.extend({
   locationProvenance: z.object({
@@ -51,8 +54,10 @@ export interface CheckpointCell {
 }
 export interface FrozenCheckpointPlan extends CheckpointPlanInput { version: 1; cells: CheckpointCell[]; digest: string }
 export interface PaidAttempt { id: string; kind: 'paid' | 'unknown' }
+export type CheckpointBindingName = z.infer<typeof bindingNameSchema>;
+export type CheckpointBindings = Partial<Record<CheckpointBindingName, string>>;
 export type CheckpointResult = { kind: 'success'; chunk: number; reviewBytes: string } | { kind: 'failure'; chunk: number; reviewBytes: string; possiblyBilled: boolean };
-export interface JournalRecord { sequence: number; previousDigest: string; digest: string; type: 'intent' | 'result' | 'uncertain' | 'finalization'; cell?: string; paidAttempt?: PaidAttempt; result?: { kind: 'success' | 'failure'; chunk: number; reviewSha256: string; resultFile: string; possiblyBilled?: boolean }; reason?: string; finalizedDigest?: string }
+export interface JournalRecord { sequence: number; previousDigest: string; digest: string; type: 'binding' | 'intent' | 'result' | 'uncertain' | 'finalization'; binding?: { name: CheckpointBindingName; file: string; sha256: string }; cell?: string; paidAttempt?: PaidAttempt; result?: { kind: 'success' | 'failure'; chunk: number; reviewSha256: string; resultFile: string; possiblyBilled?: boolean }; reason?: string; finalizedDigest?: string }
 export interface CheckpointState { records: JournalRecord[]; outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }>; successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }>; uncertain: Array<{ cell: string; paidAttempt: PaidAttempt }>; finalized: boolean }
 
 function sha256(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex'); }
@@ -105,10 +110,10 @@ async function ensurePrivateChild(parent: string, child: string): Promise<string
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   await inspectDirectory(path); await syncNativeDirectory(parent); return path;
 }
-async function readSafe(path: string): Promise<string> {
+async function readSafe(path: string, preserveBom = false): Promise<string> {
   const entry = await lstat(path); if (!entry.isFile() || entry.isSymbolicLink() || entry.size > MAX_FILE_BYTES || (entry.mode & 0o7777) !== 0o600 || (process.geteuid && entry.uid !== process.geteuid())) throw new Error('checkpoint_symlink');
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink()) throw new Error('checkpoint_changing_source'); return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } finally { await handle.close(); }
+  try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink()) throw new Error('checkpoint_changing_source'); return new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(bytes); } finally { await handle.close(); }
 }
 
 async function writeExclusive(path: string, bytes: string): Promise<void> {
@@ -122,10 +127,10 @@ function boundedBytes(bytes: string): void {
 }
 
 /** An identical visible file is not proof that a previous fsync succeeded. */
-async function syncExisting(path: string, expected?: string): Promise<void> {
+async function syncExisting(path: string, expected?: string, preserveBom = false): Promise<void> {
   await inspectDirectory(resolve(path, '..'));
   const entry = await lstat(path);
-  const bytes = await readSafe(path);
+  const bytes = await readSafe(path, preserveBom);
   if (expected !== undefined && bytes !== expected) throw new Error('checkpoint_changing_source');
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -147,6 +152,7 @@ function decodePlan(text: string): FrozenCheckpointPlan {
 }
 function matchingPlan(actual: FrozenCheckpointPlan, expected: FrozenCheckpointPlan): boolean { return actual.digest === expected.digest && canonical(actual as unknown as Json) === canonical(expected as unknown as Json); }
 function eventFile(sequence: number): string { return `${String(sequence).padStart(8, '0')}.json`; }
+function bindingFile(name: CheckpointBindingName): string { return `binding-${name}.data`; }
 
 function validAttempt(value: PaidAttempt): boolean { return attemptSchema.safeParse(value).success; }
 function snapshotAttempt(value: PaidAttempt): PaidAttempt {
@@ -226,7 +232,12 @@ export class CheckpointJournal {
 
   getPlan(): FrozenCheckpointPlan { return this.plan; }
 
-  async read(): Promise<CheckpointState> {
+  async read(): Promise<CheckpointState> { return (await this.readValidated()).state; }
+
+  /** Exact immutable metadata bytes; validates the entire journal without writing. */
+  async readBindings(): Promise<CheckpointBindings> { return (await this.readValidated()).bindings; }
+
+  private async readValidated(): Promise<{ state: CheckpointState; bindings: CheckpointBindings }> {
     await inspectDirectory(this.path); await inspectDirectory(join(this.path, 'events')); await inspectDirectory(join(this.path, 'results'));
     const actual = decodePlan((await readSafe(join(this.path, 'plan.json'))).trim());
     if (!matchingPlan(actual, this.plan)) throw new Error('checkpoint_plan_mismatch');
@@ -236,14 +247,26 @@ export class CheckpointJournal {
       if (names[i] !== eventFile(i + 1)) throw new Error('checkpoint_sequence_gap');
       let record: JournalRecord; try { record = JSON.parse(await readSafe(join(this.path, 'events', names[i]!))) as JournalRecord; } catch (error) { if (error instanceof Error && error.message === 'checkpoint_symlink') throw error; throw new Error('checkpoint_invalid_record'); }
       const { digest, ...unsigned } = record;
-      if (record.sequence !== i + 1 || record.previousDigest !== previous || digest !== recordDigest(unsigned) || !['intent', 'result', 'uncertain', 'finalization'].includes(record.type)) throw new Error('checkpoint_invalid_record');
+      if (record.sequence !== i + 1 || record.previousDigest !== previous || digest !== recordDigest(unsigned) || !['binding', 'intent', 'result', 'uncertain', 'finalization'].includes(record.type)) throw new Error('checkpoint_invalid_record');
       previous = digest; records.push(record);
     }
     const cells = new Set(this.plan.cells.map(cell => cell.id));
     const intents = new Map<string, PaidAttempt>(), terminalAttempts = new Map<string, JournalRecord>(), outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }> = [], successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }> = [];
-    const successfulCells = new Set<string>(), attemptIds = new Set<string>(); let finalized = false;
+    const successfulCells = new Set<string>(), attemptIds = new Set<string>(), bindings: CheckpointBindings = {}; let finalized = false;
     for (let index = 0; index < records.length; index++) {
       const record = records[index]!;
+      if (record.type === 'binding') {
+        const parsed = bindingReferenceSchema.safeParse(record.binding);
+        if (!parsed.success || Object.keys(record).some(key => !['sequence', 'previousDigest', 'digest', 'type', 'binding'].includes(key))) throw new Error('checkpoint_invalid_binding');
+        if (finalized || intents.size) throw new Error('checkpoint_binding_closed');
+        const binding = parsed.data;
+        if (Object.hasOwn(bindings, binding.name)) throw new Error('checkpoint_duplicate_binding');
+        const bytes = await readSafe(join(this.path, binding.file), true);
+        if (sha256(bytes) !== binding.sha256) throw new Error('checkpoint_binding_tampered');
+        bindings[binding.name] = bytes;
+        continue;
+      }
+      if (Object.hasOwn(record, 'binding')) throw new Error('checkpoint_invalid_record');
       if (record.type === 'finalization') { if (finalized || !record.finalizedDigest || index !== records.length - 1 || record.finalizedDigest !== sha256(canonical(records.slice(0, -1) as unknown as Json))) throw new Error('checkpoint_invalid_finalization'); finalized = true; continue; }
       if (finalized || !record.cell || !record.paidAttempt || !cells.has(record.cell) || !validAttempt(record.paidAttempt)) throw new Error('checkpoint_invalid_record');
       const key = `${record.cell}\0${record.paidAttempt.id}`;
@@ -259,7 +282,7 @@ export class CheckpointJournal {
       }
     }
     const uncertain = [...intents.entries()].filter(([key]) => !terminalAttempts.has(key)).map(([key, paidAttempt]) => ({ cell: key.split('\0')[0]!, paidAttempt }));
-    return { records, outcomes, successes, uncertain, finalized };
+    return { state: { records, outcomes, successes, uncertain, finalized }, bindings };
   }
 
   private async write<T>(ownership: NativeTargetOwnership, operation: () => Promise<T>): Promise<T> {
@@ -276,6 +299,11 @@ export class CheckpointJournal {
     });
   }
   private async syncRecord(record: JournalRecord): Promise<void> {
+    if (record.binding) {
+      const path = join(this.path, record.binding.file), bytes = await readSafe(path, true);
+      if (sha256(bytes) !== record.binding.sha256) throw new Error('checkpoint_binding_tampered');
+      await syncExisting(path, bytes, true);
+    }
     if (record.result) {
       const path = join(this.path, 'results', record.result.resultFile), bytes = await readSafe(path);
       if (sha256(bytes) !== record.result.reviewSha256) throw new Error('checkpoint_result_tampered');
@@ -295,6 +323,34 @@ export class CheckpointJournal {
     await writeExclusive(join(this.path, 'events', eventFile(complete.sequence)), `${canonical(complete as unknown as Json)}\n`);
   }
   private cell(cell: string): void { if (!this.plan.cells.some(candidate => candidate.id === cell)) throw new Error('checkpoint_unknown_cell'); }
+
+  /** Bind opaque UTF-8 bytes before work begins. Identical replay re-establishes durability. */
+  async bind(name: CheckpointBindingName, bytes: string, ownership: NativeTargetOwnership): Promise<void> {
+    const parsed = bindingNameSchema.safeParse(name);
+    if (!parsed.success || typeof bytes !== 'string') throw new Error('checkpoint_invalid_binding');
+    boundedBytes(bytes);
+    if (Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('checkpoint_invalid_binding');
+    const binding = { name: parsed.data, file: bindingFile(parsed.data), sha256: sha256(bytes) };
+    return this.write(ownership, async () => {
+      const { state, bindings } = await this.readValidated();
+      const prior = state.records.find(record => record.type === 'binding' && record.binding?.name === binding.name);
+      if (prior) {
+        if (bindings[binding.name] !== bytes) throw new Error('checkpoint_binding_conflict');
+        await this.syncRecord(prior);
+        return;
+      }
+      if (state.finalized) throw new Error('checkpoint_finalized');
+      if (state.records.some(record => record.type === 'intent')) throw new Error('checkpoint_binding_closed');
+      const path = join(this.path, binding.file);
+      try { await writeExclusive(path, bytes); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (await readSafe(path, true) !== bytes) throw new Error('checkpoint_binding_conflict');
+        await syncExisting(path, bytes, true);
+      }
+      await this.append({ type: 'binding', binding });
+    });
+  }
 
   async recordIntent(cell: string, paidAttempt: PaidAttempt, ownership: NativeTargetOwnership): Promise<void> {
     const attempt = snapshotAttempt(paidAttempt);
@@ -362,6 +418,7 @@ export class CheckpointJournal {
   finalize(ownership: NativeTargetOwnership): Promise<void> {
     return this.write(ownership, async () => {
       const state = await this.read();
+      for (const record of state.records) if (record.type === 'binding') await this.syncRecord(record);
       if (state.finalized) { await this.syncRecord(state.records.at(-1)!); return; }
       await this.append({ type: 'finalization', finalizedDigest: sha256(canonical(state.records as unknown as Json)) });
     });

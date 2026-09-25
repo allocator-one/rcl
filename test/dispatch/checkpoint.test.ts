@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -254,4 +254,205 @@ describe('checkpoint interrupted files', () => {
     expect(await readdir(join(path, 'results'))).toEqual([]);
     expect(await readdir(join(path, 'events'))).toEqual(['00000001.json']);
   });
+});
+
+
+describe('immutable checkpoint metadata bindings', () => {
+  it('reads an existing journal without bindings as empty without writing anything', async () => {
+    await withStore(async (store, _ownership, commonDir) => {
+      const path = checkpointPath(commonDir, target, namespace), before = await readdir(path);
+      expect(await store.readBindings()).toEqual({});
+      expect(await readdir(path)).toEqual(before);
+      expect((await store.read()).records).toEqual([]);
+    });
+  });
+
+  it('serializes all closed names and identical concurrent replays into one immutable record each', async () => {
+    await withStore(async (store, ownership, commonDir) => {
+      let args = { name: 'captured-inputs' as const, bytes: 'captured exact bytes\n' };
+      const first = store.bind(args.name, args.bytes, ownership);
+      args = { name: 'captured-inputs', bytes: 'changed caller value' };
+      await Promise.all([first, store.bind('source', '', ownership), store.bind('operation', '\uFEFFoperation bytes', ownership), store.bind('source', '', ownership)]);
+      expect(await store.readBindings()).toEqual({ 'captured-inputs': 'captured exact bytes\n', source: '', operation: '\uFEFFoperation bytes' });
+      const state = await store.read();
+      expect(state.records.map(row => row.type)).toEqual(['binding', 'binding', 'binding']);
+      expect(state.records[0]!.previousDigest).toBe(store.getPlan().digest);
+      for (let index = 1; index < state.records.length; index++) expect(state.records[index]!.previousDigest).toBe(state.records[index - 1]!.digest);
+      const path = checkpointPath(commonDir, target, namespace);
+      for (const record of state.records) {
+        const binding = record.binding!;
+        const bytes = await readFile(join(path, binding.file), 'utf8');
+        expect(createHash('sha256').update(bytes).digest('hex')).toBe(binding.sha256);
+      }
+    });
+  });
+
+  it('rejects concurrent conflicting bytes while preserving the first binding and history', async () => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan());
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership });
+      const results = await Promise.allSettled([store.bind('source', 'original', ownership), store.bind('source', 'different', ownership)]);
+      expect(results.map(result => result.status)).toEqual(['fulfilled', 'rejected']);
+    })).rejects.toThrow('checkpoint_binding_conflict');
+    const store = await CheckpointJournal.openRead(checkpointPath(commonDir, target, namespace), frozen);
+    expect(await store.readBindings()).toEqual({ source: 'original' });
+    expect((await store.read()).records).toHaveLength(1);
+  });
+
+  it.each(['intent', 'finalization'] as const)('prevents a new binding after %s but permits identical durable replay', async phase => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan());
+    await withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership });
+      await store.bind('source', 'original', ownership);
+      if (phase === 'intent') await store.recordIntent('blocking/general:0', { id: 'one', kind: 'unknown' }, ownership);
+      else await store.finalize(ownership);
+      const before = JSON.stringify(await store.read());
+      durability.synced = [];
+      await store.bind('source', 'original', ownership);
+      expect(JSON.stringify(await store.read())).toBe(before);
+      expect(durability.synced).toContain(join(checkpointPath(commonDir, target, namespace), 'binding-source.data'));
+    });
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+      await store.bind('operation', 'new', ownership);
+    })).rejects.toThrow(phase === 'intent' ? 'checkpoint_binding_closed' : 'checkpoint_finalized');
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+      await store.bind('source', 'changed', ownership);
+    })).rejects.toThrow('checkpoint_binding_conflict');
+    const read = await CheckpointJournal.openRead(checkpointPath(commonDir, target, namespace), frozen);
+    expect(await read.readBindings()).toEqual({ source: 'original' });
+    expect((await read.read()).records).toHaveLength(2);
+  });
+
+  it.each(['../source', '__proto__', 'constructor', 'unknown', ''])(
+    'refuses unsupported binding name %s before publishing bytes', async name => {
+      const commonDir = await root();
+      await expect(withNativeTarget(commonDir, target, async ownership => {
+        const store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership });
+        const before = await readdir(checkpointPath(commonDir, target, namespace));
+        await expect(store.bind(name as never, 'bytes', ownership)).rejects.toThrow('checkpoint_invalid_binding');
+        expect(await readdir(checkpointPath(commonDir, target, namespace))).toEqual(before);
+      })).resolves.toBeUndefined();
+    },
+  );
+
+  it('requires primitive round-trippable UTF-8 strings and enforces the existing byte bound', async () => {
+    await withStore(async (store, ownership, commonDir) => {
+      await expect(store.bind('source', new String('object') as never, ownership)).rejects.toThrow('checkpoint_invalid_binding');
+      await expect(store.bind('source', '\uD800', ownership)).rejects.toThrow('checkpoint_invalid_binding');
+      await expect(store.bind('source', 'é'.repeat(4 * 1024 * 1024 + 1), ownership)).rejects.toThrow('checkpoint_file_too_large');
+      expect(await store.readBindings()).toEqual({});
+      expect(await readdir(checkpointPath(commonDir, target, namespace))).toEqual(['events', 'plan.json', 'results']);
+      const bytes = 'x'.repeat(8 * 1024 * 1024);
+      await store.bind('captured-inputs', bytes, ownership);
+      expect((await store.readBindings())['captured-inputs']).toBe(bytes);
+    });
+  });
+
+  it('preserves stale-owner and read-only-store refusal for metadata writes', async () => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan()); let expired!: NativeTargetOwnership; let store!: CheckpointJournal;
+    await withNativeTarget(commonDir, target, async ownership => { expired = ownership; store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership }); });
+    await expect(store.bind('source', 'bytes', expired)).rejects.toThrow('native_target_not_owned');
+    const read = await CheckpointJournal.openRead(checkpointPath(commonDir, target, namespace), frozen);
+    await expect(withNativeTarget(commonDir, target, ownership => read.bind('source', 'bytes', ownership))).rejects.toThrow('checkpoint_read_only');
+  });
+
+  it.each(['file', 'file-directory', 'event', 'event-directory'] as const)(
+    'resumes binding publication after %s fsync failure without adding a duplicate record', async point => {
+      const commonDir = await root(), frozen = freezeCheckpointPlan(plan()), path = checkpointPath(commonDir, target, namespace);
+      await withNativeTarget(commonDir, target, ownership => CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership }));
+      const faultPath = point === 'file' ? join(path, 'binding-source.data') : point === 'file-directory' ? path
+        : point === 'event' ? join(path, 'events', '00000001.json') : join(path, 'events');
+      await expect(withNativeTarget(commonDir, target, async ownership => {
+        const store = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+        durability.failPath = faultPath;
+        await store.bind('source', 'exact source bytes', ownership);
+      })).rejects.toMatchObject({ code: 'EIO' });
+      const before = await CheckpointJournal.openRead(path, frozen);
+      expect(await before.readBindings()).toEqual(point === 'file' || point === 'file-directory' ? {} : { source: 'exact source bytes' });
+      durability.synced = [];
+      await withNativeTarget(commonDir, target, async ownership => {
+        const resumed = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+        await resumed.bind('source', 'exact source bytes', ownership);
+        expect(await resumed.readBindings()).toEqual({ source: 'exact source bytes' });
+        expect((await resumed.read()).records).toHaveLength(1);
+        await resumed.finalize(ownership);
+        expect((await resumed.read()).finalized).toBe(true);
+      });
+      expect(durability.synced).toContain(faultPath);
+    },
+  );
+
+  it.each(['changed bytes', 'symlink', 'unsafe mode'] as const)('rejects %s in a referenced binding on read and finalization', async change => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan()), path = checkpointPath(commonDir, target, namespace);
+    let store!: CheckpointJournal;
+    await withNativeTarget(commonDir, target, async ownership => { store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership }); await store.bind('source', 'original', ownership); });
+    const file = join(path, 'binding-source.data');
+    if (change === 'changed bytes') await writeFile(file, 'modified');
+    else if (change === 'unsafe mode') await chmod(file, 0o644);
+    else { await writeFile(join(commonDir, 'other'), 'original', { mode: 0o600 }); await unlink(file); await symlink(join(commonDir, 'other'), file); }
+    await expect(store.readBindings()).rejects.toThrow(/checkpoint_(?:binding_tampered|symlink)/);
+    await expect(withNativeTarget(commonDir, target, ownership => store.finalize(ownership))).rejects.toThrow(/checkpoint_(?:binding_tampered|symlink)/);
+    expect(await readdir(join(path, 'events'))).toEqual(['00000001.json']);
+  });
+
+  it('refuses conflicting or partial unpublished binding bytes without overwriting them', async () => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan()), path = checkpointPath(commonDir, target, namespace);
+    await withNativeTarget(commonDir, target, ownership => CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership }));
+    await writeFile(join(path, 'binding-source.data'), '{', { mode: 0o600 });
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+      await store.bind('source', '{"complete":true}', ownership);
+    })).rejects.toThrow('checkpoint_binding_conflict');
+    expect(await readFile(join(path, 'binding-source.data'), 'utf8')).toBe('{');
+    expect(await readdir(join(path, 'events'))).toEqual([]);
+  });
+
+  it('reflushes referenced binding bytes on initial and repeated finalization', async () => {
+    await withStore(async (store, ownership, commonDir) => {
+      await store.bind('source', 'original', ownership);
+      const path = checkpointPath(commonDir, target, namespace);
+      for (let index = 0; index < 2; index++) {
+        durability.synced = [];
+        await store.finalize(ownership);
+        expect(durability.synced).toContain(join(path, 'binding-source.data'));
+        expect(durability.synced).toContain(join(path, 'events', '00000001.json'));
+        expect((await store.read()).records).toHaveLength(2);
+      }
+    });
+  });
+
+  it.each(['duplicate', 'after intent', 'wrong filename', 'unknown name', 'extra metadata', 'binding on intent'] as const)(
+    'rejects a recomputed hash chain containing %s rather than trusting the writer API', async mutation => {
+      const commonDir = await root(), frozen = freezeCheckpointPlan(plan()), path = checkpointPath(commonDir, target, namespace);
+      await withNativeTarget(commonDir, target, async ownership => {
+        const store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership });
+        await store.bind('source', 'original', ownership);
+        await store.recordIntent('blocking/general:0', { id: 'one', kind: 'unknown' }, ownership);
+      });
+      const binding = JSON.parse(await readFile(join(path, 'events', '00000001.json'), 'utf8'));
+      const intent = JSON.parse(await readFile(join(path, 'events', '00000002.json'), 'utf8'));
+      let records = [binding, intent];
+      if (mutation === 'duplicate') records = [binding, structuredClone(binding)];
+      else if (mutation === 'after intent') records = [intent, binding];
+      else if (mutation === 'wrong filename') binding.binding.file = '../plan.json';
+      else if (mutation === 'unknown name') binding.binding.name = '__proto__';
+      else if (mutation === 'extra metadata') binding.binding.ignored = true;
+      else intent.binding = binding.binding;
+      const canonical = (value: any): string => value === null || typeof value !== 'object' ? JSON.stringify(value)
+        : Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+          : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+      let previousDigest = frozen.digest;
+      for (const [index, record] of records.entries()) {
+        delete record.digest;
+        record.sequence = index + 1;
+        record.previousDigest = previousDigest;
+        record.digest = createHash('sha256').update(canonical(record)).digest('hex');
+        previousDigest = record.digest;
+        await writeFile(join(path, 'events', `${String(index + 1).padStart(8, '0')}.json`), canonical(record) + '\n');
+      }
+      await expect(CheckpointJournal.openRead(path, frozen)).rejects.toThrow(/checkpoint_(?:invalid_binding|binding_closed|duplicate_binding|invalid_record)/);
+    },
+  );
 });
