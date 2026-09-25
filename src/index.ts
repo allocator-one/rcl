@@ -1390,6 +1390,8 @@ interface CouncilCliOpts {
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
+  /** Retain guarded output creation semantics inside the post-claim execution. */
+  exclusiveOutputs?: boolean;
   launchIntent?: GuardedLaunchOptions['intent'];
   retryReason?: string;
   maxAttempts?: string;
@@ -1872,7 +1874,7 @@ async function executeCouncil(
       },
       run: async converge => {
         completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
-          { ...opts, guardedConverge: false }, extra, work);
+          { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
         return completion;
       },
     });
@@ -2191,7 +2193,7 @@ async function executeCouncil(
     printReviewSummary(result);
   }
 
-  const outputDiagnostics = await writeReportArtifacts(artifacts, { ...opts, exclusive: opts.guardedConverge }, {
+  const outputDiagnostics = await writeReportArtifacts(artifacts, { ...opts, exclusive: opts.guardedConverge || opts.exclusiveOutputs }, {
     onWritten: (label, path) => console.log(chalk.dim(`${label} written to: ${path}`)),
     onError: (message) => process.stderr.write(chalk.red(message) + '\n'),
   });
