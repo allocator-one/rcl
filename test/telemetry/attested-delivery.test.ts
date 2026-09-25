@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { applyHarnessModelKeys } from '../../src/config/harness.js';
 import { loadMergedWeights } from '../../src/models/server-stats.js';
 import type { HarnessCredential } from '../../src/telemetry/credentials.js';
+import { attestRun } from '../../src/telemetry/attest.js';
 import { createTelemetryRuntime, deliverRun } from '../../src/telemetry/deliver.js';
 import { openReadSink } from '../../src/telemetry/read-sink.js';
 import { fakeFetch, sampleResult, type RecordedRequest } from './fixtures.js';
@@ -139,6 +140,59 @@ describe('the run-bound credential of --attest', () => {
     expect(outcome.line).toMatch(/does not outlive its workflow run/);
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
   });
+
+  it.each(['2999-01-01T00:00:00Z', '2999-01-01T00:00:00.000Z'])(
+    'recovers lost delivery acknowledgements using the minted expiry %s', async expiresAt => {
+      const result = sampleResult();
+      const artifacts = { report_json: JSON.stringify(result), report_md: '# Original report\n' };
+      let posts = 0;
+      const { fetch, requests } = fakeFetch(request => {
+        if (request.url.startsWith('https://oidc.example.test/token')) return { status: 200, body: { value: 'synthetic-oidc' } };
+        if (request.url.endsWith('/api/v1/reviews/attest')) return { status: 201, body: { data: {
+          credential: 'rbc_minted', token_type: 'bearer', expires_at: expiresAt, run_id: result.run!.id,
+        } } };
+        if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) return { status: 404, body: { error: 'not_found' } };
+        if (request.url.endsWith('/api/v1/reviews/runs')) {
+          if (++posts === 1) return new TypeError('lost acknowledgement');
+          return { status: 201, body: { data: {
+            id: result.run!.id, url: `https://harness.example.test/api/v1/reviews/runs/${result.run!.id}`,
+            artifacts_expected: ['report_json', 'report_md'],
+          }, meta: { status: 'created' } } };
+        }
+        if (request.url.includes('/artifacts/')) {
+          const kind = request.url.slice(request.url.lastIndexOf('/') + 1);
+          return { status: 201, body: { data: { kind, sha256: createHash('sha256').update(request.body ?? '', 'utf8').digest('hex') } } };
+        }
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      });
+      const attestation = await attestRun({
+        runId: result.run!.id, rclVersion: '4.0.1', fetchImpl: fetch,
+        env: {
+          ACTIONS_ID_TOKEN_REQUEST_URL: 'https://oidc.example.test/token',
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'synthetic-runner', HARNESS_API_URL: RBC.url,
+        },
+      });
+      expect(attestation.expiresAt).toBe(expiresAt);
+      const runtime = await createTelemetryRuntime({
+        rclVersion: '4.0.1', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+        credential: attestation.credential, attestedExpiresAt: attestation.expiresAt,
+      });
+
+      const outcome = await deliverRun(runtime, { result, artifacts, evidenceRequired: true });
+
+      expect(outcome).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
+      expect(requests.map(request => [request.method, new URL(request.url).pathname])).toEqual([
+        ['GET', '/token'], ['POST', '/api/v1/reviews/attest'], ['POST', '/api/v1/reviews/runs'],
+        ['GET', `/api/v1/reviews/runs/${result.run!.id}`], ['POST', '/api/v1/reviews/runs'],
+        ['PUT', `/api/v1/reviews/runs/${result.run!.id}/artifacts/report_json`],
+        ['PUT', `/api/v1/reviews/runs/${result.run!.id}/artifacts/report_md`],
+      ]);
+      expect(requests[4]!.body).toBe(requests[2]!.body);
+      expect(requests[5]!.body).toBe(artifacts.report_json);
+      expect(requests[6]!.body).toBe(artifacts.report_md);
+      expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+    },
+  );
 
   it('does a receipt-first, bounded same-workflow replay after an uncertain envelope acknowledgement', async () => {
     let posts = 0;

@@ -11,11 +11,13 @@ export const ATTESTED_DELIVERY_MAX_ATTEMPTS = 3;
 export const ATTESTED_DELIVERY_DEADLINE_MS = 20_000;
 export const ATTESTED_DELIVERY_RETRY_PAUSE_MS = 250;
 
-/** Parse the canonical absolute timestamp minted with an attested credential. */
+/** Parse a UTC expiry in the backend's second precision or exact milliseconds. */
 export function parseAttestedExpiry(value: string): number | undefined {
-  const parsed = Date.parse(value);
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
-    Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : undefined;
+  const normalized = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)
+    ? value.replace(/Z$/, '.000Z') : value;
+  const parsed = Date.parse(normalized);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(normalized) &&
+    Number.isFinite(parsed) && new Date(parsed).toISOString() === normalized ? parsed : undefined;
 }
 
 export type DeliveryAttempt<TRecorded = undefined, TDisabled = never> =

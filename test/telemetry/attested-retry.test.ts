@@ -337,7 +337,7 @@ describe('recoverAttestedDelivery', () => {
     await expect(recoverAttestedDelivery({ runId: 'run-1', payload: 'immutable', expiresAt: '', post: async () => ({ kind: 'recorded' }), receipt: async () => ({ kind: 'absent' }) })).rejects.toThrow('expiresAt must be a valid ISO timestamp');
   });
 
-  it.each(['2026-02-30T12:00:00.000Z', '2026-09-23T12:00:00Z', '2026-09-23'])('rejects a noncanonical attested expiry %s before issuing a request', async (expiresAt) => {
+  it.each(['2026-02-30T12:00:00.000Z', '2026-02-30T12:00:00Z', '2026-09-23'])('rejects a noncanonical attested expiry %s before issuing a request', async (expiresAt) => {
     const post = vi.fn(async () => ({ kind: 'recorded' as const }));
     await expect(recoverAttestedDelivery({ runId: 'run-1', payload: 'immutable', expiresAt, post, receipt: async () => ({ kind: 'absent' }) })).rejects.toThrow('expiresAt must be a valid ISO timestamp');
     expect(post).not.toHaveBeenCalled();
