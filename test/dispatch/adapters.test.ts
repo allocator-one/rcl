@@ -98,6 +98,94 @@ describe('SDK client construction', () => {
 
 });
 
+describe('anthropic automatic tool choice', () => {
+  it('reviews with Fable 5.1 without sending unsupported forced tool choice', async () => {
+    const create = vi.fn(async (params: { tool_choice: { type: string } }) => {
+      if (params.tool_choice.type !== 'auto') {
+        throw new Anthropic.APIError(400, undefined, 'Forced tool choice is not supported', undefined);
+      }
+      return anthropicToolResponse();
+    });
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { create } });
+
+    const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 'system', 'diff', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(create).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        model: 'claude-fable-5-1',
+        tool_choice: { type: 'auto' },
+        tools: [expect.objectContaining({ name: 'report_findings' })],
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('preserves findings when the model returns text instead of calling the tool', async () => {
+    const finding = {
+      id: 'finding-1',
+      file: 'src/access.ts',
+      startLine: 2,
+      endLine: 2,
+      severity: 'critical',
+      category: 'security',
+      title: 'Missing authorization',
+      description: 'The route exposes protected data without checking access.',
+    };
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [
+            { type: 'thinking', thinking: 'Check access control.' },
+            { type: 'text', text: JSON.stringify({ findings: [finding] }) },
+          ],
+          stop_reason: 'end_turn',
+        }),
+      },
+    });
+
+    const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(review.findings).toEqual([expect.objectContaining(finding)]);
+  });
+
+  it('does not count thinking without findings output as a successful review', async () => {
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          content: [{ type: 'thinking', thinking: 'Check access control.' }],
+          stop_reason: 'end_turn',
+        }),
+      },
+    });
+
+    const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', OPTS);
+
+    expect(review.status).toBe('error');
+    expect(review.error).toContain('empty response');
+  });
+
+  it('does not retry a rejected request even when a retry budget remains', async () => {
+    const create = vi.fn().mockRejectedValue(
+      new Anthropic.APIError(400, undefined, 'Invalid request', undefined),
+    );
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { create } });
+
+    const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', {
+      ...OPTS,
+      maxRetries: 3,
+    });
+
+    expect(review.status).toBe('error');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('timeout classification', () => {
   it('anthropic: SDK abort error is classified as timeout', async () => {
     vi.useFakeTimers();

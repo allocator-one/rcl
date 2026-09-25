@@ -1,6 +1,6 @@
 {
   "name": "review-council",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "description": "Review Council — multi-model AI code review CLI",
   "main": "dist/index.js",
   "type": "module",
@@ -63,5 +63,10 @@
     "ora": "^9.3.0",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
-  }
+  },
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "types": "./dist/index.d.ts"
 }

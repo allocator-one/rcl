@@ -2,11 +2,18 @@
 
 ## Unreleased
 
-## 4.1.1 - 2026-09-25
+## 4.1.2 - 2026-09-25
 
 - Bind attested recovery receipts and preserve byte-identical evidence replay, including bounded recovery for unavailable attested delivery (RCL-83; requires compatible backend support).
 
 - Support complete evidence envelopes up to 4,000,000 bytes while retaining bounded diagnostics and compatibility with the backend evidence contract (RCL-88; requires compatible backend support).
+
+## 4.1.1 - 2026-09-25
+
+- Use automatic tool choice for Anthropic reviews. Claude Fable 5.1 rejects
+  forced tool choice with HTTP 400; automatic selection preserves the existing
+  structured-tool and JSON-text parsing paths without retrying invalid requests
+  or counting missing review output as approval (RCL-101).
 
 ## 4.1.0 - 2026-09-25
 
