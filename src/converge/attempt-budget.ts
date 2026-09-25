@@ -14,7 +14,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { withNativeTarget } from './target-ownership.js';
+import { withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
@@ -109,8 +109,8 @@ interface ClaimOptions {
   /** Target ownership has a different contention profile from attempt accounting. */
   targetLockTimeoutMs?: number;
   targetLockRetryMs?: number;
-  /** Runs after durable accounting and before target ownership is released. */
-  afterClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
+  beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void>;
+  afterClaim?: (claim: ConvergeAttemptClaim, ownership: NativeTargetOwnership) => Promise<void>;
 }
 
 interface AttemptLockOwner {
@@ -589,6 +589,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     lockRetryMs: options.lockRetryMs,
     targetLockTimeoutMs: options.targetLockTimeoutMs,
     targetLockRetryMs: options.targetLockRetryMs,
+    beforeClaim: options.beforeClaim,
     afterClaim: options.afterClaim,
   };
   // Use one canonical directory for both target ownership and state paths.
@@ -599,10 +600,11 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   if (claimOptions.maxAttempts !== undefined) validateCap(claimOptions.maxAttempts);
   let committed: ConvergeAttemptClaim | undefined;
   try {
-    return await withNativeTarget(gitCommonDir, target, async () => {
+    return await withNativeTarget(gitCommonDir, target, async ownership => {
+      await claimOptions.beforeClaim?.(ownership);
       committed = await claimConvergeAttemptOwned(claimOptions);
       try {
-        await claimOptions.afterClaim?.(committed);
+        await claimOptions.afterClaim?.(committed, ownership);
       } catch (error) {
         throw new ConvergeAttemptPostClaimError(committed, error);
       }
@@ -747,6 +749,15 @@ export async function loadConvergeAttemptState(
   target: string
 ): Promise<ConvergeAttemptState | undefined> {
   return readState(convergeAttemptStatePath(gitCommonDir, target), validateTarget(target));
+}
+
+export async function previewConvergeAttemptState(
+  gitCommonDir: string,
+  target: string
+): Promise<ConvergeAttemptState | undefined> {
+  const validatedTarget = validateTarget(target);
+  return await loadConvergeAttemptState(gitCommonDir, validatedTarget) ??
+    await stateFromExistingLedger(gitCommonDir, validatedTarget, new Date().toISOString());
 }
 
 export async function resolveGitCommonDir(cwd = process.cwd()): Promise<string> {

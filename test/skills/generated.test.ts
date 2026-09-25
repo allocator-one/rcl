@@ -43,68 +43,30 @@ describe('generated skill files', () => {
     }
   });
 
-  it('keeps each host on its own backgrounding mechanism', () => {
-    const bySkillDir = new Map(
-      (renderAll() as Rendered[]).map((r) => [r.path, r.content])
-    );
-    for (const [path, content] of bySkillDir) {
-      if (isClaudeTarget(path)) {
-        // Claude Code has a first-class background facility; the nohup/PID
-        // dance is Codex-only and would be unrunnable guidance here.
-        expect(content, path).toContain('run_in_background');
-        expect(content, path).not.toContain('nohup');
-      } else {
-        expect(content, path).toContain('nohup');
+  it('uses a supported host handle without an external convergence claim', () => {
+    for (const { path, content } of renderAll() as Rendered[]) {
+      const convergence = path.replaceAll('\\', '/').includes('/rcl-converge/');
+      if (!convergence) {
+        expect(content, path).toContain(isClaudeTarget(path) ? 'run_in_background' : 'nohup');
+        continue;
       }
-    }
-  });
-
-  it('machine-claims every convergence attempt before launching a review', () => {
-    const convergeSkills = (renderAll() as Rendered[]).filter(({ path }) =>
-      path.replaceAll('\\', '/').includes('/rcl-converge/')
-    );
-    expect(convergeSkills.length).toBeGreaterThan(0);
-
-    for (const { path, content } of convergeSkills) {
-      const claimCommand = "rcl converge-attempt --target '<TARGET>' <ATTEMPT_CAP_ARG>";
-      const claimCount = content.split(claimCommand).length - 1;
-      const claim = content.indexOf(claimCommand);
-      const launch = content.indexOf('rcl review <target>');
-      expect(claimCount, path).toBe(1);
-      expect(claim, path).toBeGreaterThan(-1);
-      expect(launch, path).toBeGreaterThan(-1);
-      expect(launch, path).toBeGreaterThan(claim);
-      expect(content, path).toContain('Bash(rcl converge-attempt:*)');
-      expect(content, path).toMatch(/cost cap defaults to 20/);
-      expect(content, path).toContain('`--max-rounds <N>`');
-      expect(content, path).toContain('`--max-attempts <N>`');
-      expect(content, path).toMatch(/Exit 2 is the configured consent boundary/i);
-      expect(content, path).toMatch(/Exit 3 is an accounting\/infrastructure failure/i);
-      expect(content, path).toMatch(/Never terminate a live council/i);
-      expect(content, path).toContain('failed to remove stale review artifacts');
-      if (isClaudeTarget(path)) {
-        expect(content, path).toContain('exactly once as a foreground Bash call');
-        expect(content.indexOf('run_in_background: true'), path).toBeGreaterThan(claim);
-      } else {
-        const pidFile = '<RCL_TMP>/rcl-converge-<TARGET>-r<R>.pid';
-        const cleanup = content.indexOf(
-          `rm -f <RCL_TMP>/rcl-report-<TARGET>-r<R>.md <RCL_TMP>/rcl-report-<TARGET>-r<R>.json ${pidFile}`
-        );
-        // The file records RCL's own PID: the wrapper installs its signal handler,
-        // then backgrounds RCL, records it, forwards signals, and waits — a killed
-        // wrapper cannot orphan a review, and a killed review never logs exit 0.
-        expect(content, path).toContain(`printf "%s\\n" "$rcl_pid" > ${pidFile} || { kill -TERM "$rcl_pid" 2>/dev/null; exit 125; }`);
-        expect(content, path).toContain('trap on_signal INT TERM HUP');
-        expect(content.indexOf('trap on_signal INT TERM HUP'), path).toBeLessThan(launch);
-        expect(content, path).toContain('echo "rcl exit=143"; exit 143; }');
-        expect(content, path).toContain('wait "$rcl_pid"; status=$?');
-        expect(content, path).toContain('evidence: pending run=<run id>');
-        expect(content, path).not.toMatch(/<HEAD_SHA_ARG> \\\n/);
-        expect(content, path).toContain('for no more than 30 seconds');
-        expect(cleanup, path).toBeGreaterThan(-1);
-        expect(cleanup, path).toBeLessThan(claim);
-        expect(content, path).toContain('exit "$ATTEMPT_STATUS"');
-      }
+      expect(content, path).toContain('rcl review <target> --guarded-converge');
+      expect(content, path).not.toContain("rcl converge-attempt --target");
+      expect(content, path).not.toContain('nohup');
+      expect(content, path).not.toContain('GITHUB_TOKEN=');
+      expect(content, path).not.toContain('--round <R> --attempt <ATTEMPT>');
+      expect(content, path).toContain(isClaudeTarget(path) ? 'run_in_background: true' : 'persistent exec session');
+      expect(content, path).toContain('native admitted state');
+      expect(content, path).toContain('stop-upstream');
+      expect(content, path).toContain('stop-review');
+      expect(content, path).toContain('--retry-reason');
+      expect(content, path).toContain('--max-attempts');
+      expect(content, path).toContain('--max-rounds');
+      expect(content, path).toContain('Exit 2 is the configured consent boundary');
+      expect(content, path).toContain('Exit 3 is an accounting/infrastructure failure');
+      expect(content, path).toContain('Never terminate a live council');
+      expect(content, path).toContain('evidence: pending run=<run id>');
+      expect(content, path).toContain('converged-dismissal-only');
     }
   });
 });

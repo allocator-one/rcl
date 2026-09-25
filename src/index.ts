@@ -80,6 +80,8 @@ import {
   ConvergeRunStateError,
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
+import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
+import { validateLaunchOutputs, validateLaunchProviders } from './converge/launch-preflight.js';
 import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
 import { readStable, sha256 } from './telemetry/recovery/files.js';
 import {
@@ -93,11 +95,14 @@ import {
 import { buildSeedRecords } from './models/seed.js';
 import {
   buildRoster,
+  configDigest,
+  diffDigest,
   describeRunTarget,
   detectRunner,
   parseSpecSource,
   resolveConvergeContext,
   sha256Hex,
+  stableStringify,
   validateSha,
   type ConvergeContext,
   type RunHeaderInput,
@@ -303,6 +308,11 @@ program
   .option('--for-pr <owner/repo#N>', 'The pull request a patch-file review is evidence for (or RCL_FOR_PR): Harness verifies its head against that pull request')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
+  .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
+  .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
+  .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
+  .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
+  .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
   .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
@@ -1379,6 +1389,13 @@ interface CouncilCliOpts {
   forPr?: string;
   round?: string;
   attempt?: string;
+  guardedConverge?: boolean;
+  /** Retain guarded output creation semantics inside the post-claim execution. */
+  exclusiveOutputs?: boolean;
+  launchIntent?: GuardedLaunchOptions['intent'];
+  retryReason?: string;
+  maxAttempts?: string;
+  maxRounds?: string;
   /** commander: `--no-telemetry` sets this false. */
   telemetry?: boolean;
   /** Exit 4 unless the evidence envelope was acknowledged. */
@@ -1439,7 +1456,7 @@ async function prepareCouncil(
     process.env
   );
   await fetchHarnessKeys(spinner, attestation?.credential);
-  const config = await loadConfig(opts.config);
+  const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
 
   // Validate mutually exclusive role options
   const roleOptionCount = [opts.role, opts.roles, opts.reviewer?.length].filter(Boolean).length;
@@ -1508,6 +1525,7 @@ async function prepareCouncil(
       specContent = await readFile(specPath, 'utf-8');
       spec = { source: specSource ?? 'flag', sha256: sha256Hex(specContent) };
     } catch {
+      if (opts.guardedConverge) throw new ReviewLaunchRefused('unreadable_spec', `Could not read required spec: ${specPath}`);
       spinner.warn(`Could not read spec file: ${specPath}`);
     }
   }
@@ -1557,7 +1575,11 @@ async function prepareCouncil(
     secondaryModels,
     explicitReviewers,
     roleMap,
+    deterministic: opts.guardedConverge,
   });
+  if (opts.guardedConverge && explicitReviewers && built.length !== explicitReviewers.length) {
+    throw new ReviewLaunchRefused('invalid_reviewers', 'Guarded review refuses unknown reviewer roles rather than removing them.');
+  }
 
   // Async lane (RCL-25): async models run the general role(s) only.
   // Membership in `models` wins over `asyncModels` — an explicit blocking
@@ -1575,7 +1597,7 @@ async function prepareCouncil(
   const asyncAssignments =
     explicitReviewers || asyncModels.length === 0 || generalRoles.length === 0
       ? []
-      : buildAssignments({ models: asyncModels, roles: generalRoles, roleMap });
+      : buildAssignments({ models: asyncModels, roles: generalRoles, roleMap, deterministic: opts.guardedConverge });
 
   const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
 
@@ -1611,6 +1633,17 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   const spinner = ora('Loading configuration...').start();
 
   try {
+    if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
+      opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
+      throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
+    }
+    if (opts.guardedConverge) {
+      const converge = resolveConvergeContext(opts, process.env);
+      if (!converge) throw new ReviewLaunchRefused('target_required', 'A guarded launch requires --converge-target.');
+      if (converge.attempt !== undefined || opts.attest) {
+        throw new ReviewLaunchRefused('incompatible_launch', 'Guarded review claims its own attempt; do not preclaim, pass --attempt, or combine it with --attest.');
+      }
+    }
     // Exactly one review source: a positional target, --staged, or --working-tree
     const sourceCount = [target, opts.staged, opts.workingTree].filter(Boolean).length;
     if (sourceCount === 0) {
@@ -1755,7 +1788,8 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     if (process.env['RCL_DEBUG']) {
       console.error(err);
     }
-    process.exit(1);
+    process.exitCode = opts.guardedConverge && (err instanceof ConvergeAttemptBudgetExceededError || err instanceof ConvergeRoundCapError)
+      ? 2 : opts.guardedConverge && (err instanceof ConvergeAttemptStateError || err instanceof ConvergeRunStateError) ? 3 : 1;
   }
 }
 
@@ -1763,6 +1797,30 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
  * Shared back half of every council command: chunking, prompt building,
  * dispatch, consensus, and every output surface.
  */
+async function prepareCouncilWork(
+  spinner: Spinner,
+  prepared: PreparedCouncil,
+  diff: Diff,
+  opts: CouncilCliOpts,
+  focus?: PlanFocus
+) {
+  const { assignments, contextFiles } = prepared;
+  const chunks = chunkDiff(diff.files);
+  assertReviewWorkWithinLimit(chunks.length, assignments.length);
+  spinner.text = `Building prompts (${chunks.length} chunk(s), ${assignments.length} reviewer(s))...`;
+  const chunkAssignments = chunks.flatMap(chunk => assignments.map(assignment => ({ assignment, chunk })));
+  const { docs: contextDocs, skipped } = await loadPromptContextDocs(contextFiles);
+  if (opts.guardedConverge && skipped.length > 0) {
+    throw new ReviewLaunchRefused('unreadable_context', `Required context could not be read: ${skipped.join(', ')}`);
+  }
+  for (const path of skipped) console.warn(`Context file not readable, not included in the review: ${path}`);
+  const prompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) => buildPrompt(chunk, assignment.role, {
+    contextDocs,
+    plan: focus === undefined ? undefined : { focus },
+  })));
+  return { chunks, chunkAssignments, contextDocs, prompts };
+}
+
 async function executeCouncil(
   spinner: Spinner,
   prepared: PreparedCouncil,
@@ -1775,42 +1833,54 @@ async function executeCouncil(
     asyncTargetLabel?: string;
     /** `--attest`: the run-bound credential and the run id it binds (RCL-40). */
     attestation?: Attestation;
-  }
-): Promise<void> {
-  const { config, roleMap, assignments, asyncAssignments, contextFiles } = prepared;
+  },
+  preparedWork?: Awaited<ReturnType<typeof prepareCouncilWork>>
+): Promise<GuardedLaunchCompletion> {
+  const { config, roleMap, assignments, asyncAssignments } = prepared;
   const planContext = extra.focus !== undefined ? { focus: extra.focus } : undefined;
-
-  // Chunk the diff
-  const chunks = chunkDiff(diff.files);
-  assertReviewWorkWithinLimit(chunks.length, assignments.length);
-
-  spinner.text = `Building prompts (${chunks.length} chunk(s), ${assignments.length} reviewer(s))...`;
-
-  // Fan out every assignment across every chunk so the whole diff is
-  // reviewed, not just the first ~2000 lines. The spec is NOT passed as a
-  // context doc: resolveRoles already embeds it in the spec-compliance
-  // role's system prompt, and duplicating it doubled that reviewer's cost.
-  const chunkAssignments = chunks.flatMap((chunk) =>
-    assignments.map((assignment) => ({ assignment, chunk }))
-  );
-  // Context files are read exactly once, here: every prompt (blocking and
-  // async) carries these bytes, and the run header digests the same bytes —
-  // a file edited mid-review can never make the header describe content the
-  // reviewers did not see.
-  const { docs: contextDocs, skipped: skippedContext } = await loadPromptContextDocs(contextFiles);
-  for (const path of skippedContext) {
-    // Say so before the council runs: a renamed rules file must not turn
-    // into a review that quietly lacked its context.
-    console.warn(`Context file not readable, not included in the review: ${path}`);
+  const work = preparedWork ?? await prepareCouncilWork(spinner, prepared, diff, opts, extra.focus);
+  const { chunks, chunkAssignments, contextDocs, prompts } = work;
+  if (opts.guardedConverge) {
+    const roster = buildRoster({ assignments, asyncAssignments, coreModels: prepared.coreModels,
+      explicit: prepared.explicit, gating: prepared.gatingConfig });
+    let completion: GuardedLaunchCompletion | undefined;
+    const claim = await guardReviewLaunch({
+      gitCommonDir: await resolveGitCommonDir(),
+      target: prepared.converge!.target,
+      headSha: extra.target.headSha ?? '',
+      inputSha256: sha256Hex(stableStringify({
+        head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
+        diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
+        asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
+      })),
+      round: prepared.converge!.round,
+      intent: opts.launchIntent,
+      retryReason: opts.retryReason,
+      maxAttempts: opts.maxAttempts === undefined ? undefined : Number(opts.maxAttempts),
+      maxRounds: opts.maxRounds === undefined ? undefined : Number(opts.maxRounds),
+      validate: async () => {
+        validateLaunchProviders(roster.map(entry => entry.provider));
+        if (assignments.length < 2) {
+          throw new ReviewLaunchRefused('insufficient_reviewers', 'Convergence needs at least two reviewer assignments for a conclusive round.');
+        }
+        await validateLaunchOutputs(opts);
+      },
+      onClaim: async claim => {
+        if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
+          kind: 'attempt_claimed', convergeTarget: claim.target, attempt: claim.attempt,
+          payload: { attempt: claim.attempt, cap: claim.cap },
+        })]);
+        process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
+      },
+      run: async converge => {
+        completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
+          { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
+        return completion;
+      },
+    });
+    if (claim.warning) process.stderr.write(`${claim.warning}\n`);
+    return completion!;
   }
-  const prompts = await Promise.all(
-    chunkAssignments.map(({ assignment, chunk }) =>
-      buildPrompt(chunk, assignment.role, {
-        contextDocs,
-        plan: planContext,
-      })
-    )
-  );
 
   // Async lane (RCL-25): fire the async reviewers with the round, never
   // await them; collect whatever arrived from earlier rounds after the
@@ -2123,7 +2193,7 @@ async function executeCouncil(
     printReviewSummary(result);
   }
 
-  const outputDiagnostics = await writeReportArtifacts(artifacts, opts, {
+  const outputDiagnostics = await writeReportArtifacts(artifacts, { ...opts, exclusive: opts.guardedConverge || opts.exclusiveOutputs }, {
     onWritten: (label, path) => console.log(chalk.dim(`${label} written to: ${path}`)),
     onError: (message) => process.stderr.write(chalk.red(message) + '\n'),
   });
@@ -2170,6 +2240,19 @@ async function executeCouncil(
         ? `Original report retention failed: ${delivery.retention.error ?? 'unknown error'}.`
         : undefined,
   ].filter((part): part is string => part !== undefined).join(' ');
+  if (opts.exclusiveOutputs && outputDiagnostics.some(diagnostic => diagnostic.path === 'output.report_json') &&
+    !delivery.spooled && delivery.status !== 'recorded' && delivery.retention?.status !== 'complete') {
+    throw new ReviewLaunchRefused('report_write_failed',
+      'The JSON report could not be retained. This attempt remains spent; correct the output path before an explicit bounded retry.');
+  }
+  const completion: GuardedLaunchCompletion = {
+    runId: run.id,
+    reportJsonSha256: sha256Hex(artifacts.report_json),
+    successfulReviews: result.stats.successfulReviews,
+    totalReviews: result.stats.totalReviews,
+    deliveryPending: delivery.spooled || delivery.exitCode !== 0,
+    hardFailure: chunkReviews.some(review => review.status === 'error' || review.status === 'parse_failed'),
+  };
 
   // CI mode: fail on a fully-failed run or on blocking findings. The gate
   // verdict keeps its exit code — pipelines branch on it — and an evidence
@@ -2179,14 +2262,17 @@ async function executeCouncil(
     if (verdict.exitCode !== 0) {
       console.error(chalk.red(`\n${verdict.message}`));
       if (delivery.exitCode !== 0) console.error(chalk.red(evidenceFailure));
-      process.exit(verdict.exitCode);
+      process.exitCode = verdict.exitCode;
+      return completion;
     }
   }
   if (delivery.exitCode !== 0) {
     console.error(chalk.red(evidenceFailure));
-    process.exit(delivery.exitCode);
+    process.exitCode = delivery.exitCode;
+    return completion;
   }
   if (outputDiagnostics.length > 0) process.exitCode = 1;
+  return completion;
 }
 
 async function runDiscuss(

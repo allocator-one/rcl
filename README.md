@@ -91,6 +91,10 @@ Review a PR, a local diff, or uncommitted work.
 | `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` |
 | `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
+| `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
+| `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
+| `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
+| `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
 
@@ -161,9 +165,38 @@ rcl roles show <name>      # Show system prompt and details for a role
 
 ---
 
+### Guarded convergence launches
+
+```bash
+rcl review change.patch --guarded-converge --converge-target repo-123 \
+  --head-sha <captured-head> --base-sha <captured-base> --json-file fresh-report.json
+```
+
+Keep this command foreground inside a persistent host task/session. It validates
+inputs, credentials and fresh output paths before claiming; native target
+ownership spans claim through completion. Do not call `converge-attempt` first
+or supply `--attempt`. RCL derives the next round from admitted state and rejects
+a conflicting `--round`. Existing caps and all spent attempts are retained.
+Guarded assignment order is stable and missing credentials never shrink the roster.
+
+Process and triage the original report before another launch. Unchanged reviewed
+inputs, including mere upstream base-tip movement, do not need another council.
+A real fix needs a fresh resulting head; unresolved native blockers refuse another
+launch. Unknown/failed dispatch requires an explicit `--retry-reason` after
+recovery, even if the head changed. This does not refund attempts or promise
+exactly-once provider billing. Credential presence cannot prove provider availability.
+
+`--launch-intent stop-upstream` never cancels review. `stop-review` and
+`retry-delivery` refuse new reviewer dispatch; cancel an existing review only
+through its retained host handle. Retry evidence with `rcl telemetry flush --run
+<run-id>`, not another council. Intent interpretation and finding adjudication
+remain human/agent decisions; native/enforced evidence and CI still gate merging.
+
 ### `rcl converge-attempt`
 
-Machine-enforced safety guard used by the generated `rcl-converge` skill.
+Low-level accounting command retained for legacy callers. The generated
+`rcl-converge` skill instead uses `review --guarded-converge`; do not preclaim
+an attempt for that path.
 Each call atomically and durably consumes one per-target attempt under the
 repository's common Git directory, so the budget survives sessions, linked
 worktrees, and abrupt system restarts.
