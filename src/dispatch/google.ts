@@ -50,7 +50,7 @@ export class GoogleAdapter implements ReviewAdapter {
 
   constructor(apiKey?: string) {
     this.client = new GoogleGenAI({
-      apiKey: apiKey ?? process.env['GOOGLE_API_KEY'] ?? process.env['GEMINI_API_KEY'],
+      apiKey: apiKey?.trim() || process.env['GOOGLE_API_KEY']?.trim() || process.env['GEMINI_API_KEY']?.trim() || undefined,
     });
   }
 
