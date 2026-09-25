@@ -58,14 +58,22 @@ describe('SDK client construction', () => {
     expect((adapter as unknown as { client: OpenAI }).client.maxRetries).toBe(0);
   });
 
-  it('anthropic retries without tools when a model rejects tool choice', async () => {
+  it('anthropic retries with auto tool use after the SDK reports an unsupported forced tool choice', async () => {
+    const payload = {
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: 'tool_choice: type "tool" and "any" are not supported for this model.',
+      },
+      request_id: 'req_011CfQWXHUsADG78BBDDYRN9',
+    };
     const create = vi.fn()
-      .mockRejectedValueOnce(new Anthropic.BadRequestError(400, { error: { message: 'tool_choice is not supported' } }, 'request'))
+      .mockRejectedValueOnce(new Anthropic.BadRequestError(400, payload, 'request'))
       .mockResolvedValueOnce({ content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' });
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, { messages: { create } });
 
-    const review = await adapter.review('claude-fable-5-1', 'general', 's', 'u', OPTS);
+    const review = await adapter.review('claude-fable-5', 'general', 's', 'u', OPTS);
 
     expect(review.status).toBe('success');
     expect(create.mock.calls[0]![0]).toMatchObject({
@@ -73,7 +81,28 @@ describe('SDK client construction', () => {
       tools: [expect.objectContaining({ name: 'report_findings' })],
     });
     expect(create.mock.calls[1]![0]).not.toHaveProperty('tool_choice');
-    expect(create.mock.calls[1]![0]).not.toHaveProperty('tools');
+    expect(create.mock.calls[1]![0]).toMatchObject({
+      tools: [expect.objectContaining({ name: 'report_findings' })],
+    });
+  });
+
+  it.each([
+    ['tool use', anthropicToolResponse()],
+    ['text JSON', { content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' }],
+  ])('anthropic Fable 5.1 omits forced tool choice and accepts %s', async (_kind, response) => {
+    const create = vi.fn().mockResolvedValueOnce(response);
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { create } });
+
+    const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 's', 'u', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0]).toMatchObject({
+      model: 'claude-fable-5-1',
+      tools: [expect.objectContaining({ name: 'report_findings' })],
+    });
+    expect(create.mock.calls[0]![0]).not.toHaveProperty('tool_choice');
   });
 });
 
