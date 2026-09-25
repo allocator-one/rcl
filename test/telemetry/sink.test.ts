@@ -312,6 +312,16 @@ describe('HarnessSink.getAttestedRunReceipt', () => {
   });
 
   it.each([
+    ['a server failure', () => ({ status: 503 })],
+    ['a transport failure', () => new TypeError('fetch failed')],
+  ])('treats receipt %s as unavailable rather than authorizing a replay', async (_label, respond) => {
+    const original = envelope();
+    const probe = await attestedSink(respond).sink.getAttestedRunReceipt(original, JSON.stringify(original));
+
+    expect(probe).toEqual({ kind: 'unavailable' });
+  });
+
+  it.each([
     ['an ordinary credential', 'ordinary'],
     ['a different run id', 'wrong-id'],
     ['a malformed receipt URL', 'malformed-url'],

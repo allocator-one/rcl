@@ -343,6 +343,26 @@ describe('recoverAttestedDelivery', () => {
     expect(post).not.toHaveBeenCalled();
   });
 
+  it('accepts the backend UTC-second expiry format', async () => {
+    const post = vi.fn(async () => ({ kind: 'recorded' as const }));
+
+    await expect(recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: '2026-09-23T12:10:00Z', now: () => NOW,
+      post, receipt: async () => ({ kind: 'absent' }), sleep: async () => {},
+    })).resolves.toEqual({ kind: 'recorded', attempts: 1, recovered: false });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns an existing receipt before posting when receiptFirst is enabled', async () => {
+    const post = vi.fn(async () => ({ kind: 'recorded' as const }));
+
+    await expect(recoverAttestedDelivery({
+      runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, receiptFirst: true,
+      post, receipt: async () => ({ kind: 'recorded' as const }), sleep: async () => {},
+    })).resolves.toEqual({ kind: 'recorded', attempts: 1, recovered: true });
+    expect(post).not.toHaveBeenCalled();
+  });
+
   it('counts the original unavailable post when receiptFirst is enabled without an override', async () => {
     const post = vi.fn(async () => ({ kind: 'recorded' as const }));
     const outcome = await recoverAttestedDelivery({ runId: 'run-1', payload: 'immutable', expiresAt: FUTURE, now: () => NOW, receiptFirst: true, post, receipt: async () => ({ kind: 'absent' }) });
