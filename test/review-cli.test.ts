@@ -208,6 +208,60 @@ describe('rcl review — guarded native launch', () => {
       const result = await run;
       expect(result.status).toBe(1);
       expect(readFileSync(join(fixture.repo, 'report.json'), 'utf8')).toBe('preserved');
+      expect((await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture'))?.lastLaunch?.status)
+        .toBe('failed');
+
+      const retryArgs = [...fixture.args, '--json-file', 'retry.json'];
+      const blindRetry = await runRclAsync(retryArgs, fixture.repo, fixture.env);
+      expect(blindRetry.status).toBe(1);
+      expect(blindRetry.stderr).toContain('dispatch_unknown');
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
+        .toMatchObject({ attemptsUsed: 1 });
+
+      const recovered = await runRclAsync([...retryArgs, '--retry-reason',
+        'Known JSON write collision; selected a fresh destination after checking the failed run'], fixture.repo, fixture.env);
+      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(fixture.calls()).toBe(4);
+      expect(JSON.parse(readFileSync(join(fixture.repo, 'retry.json'), 'utf8')).run.converge)
+        .toEqual({ target: 'guarded-fixture', round: 1, attempt: 2 });
+    });
+  }, 40_000);
+
+  it.each(['retained JSON', 'Markdown only'])('reuses the completed report after a %s write failure', async failedOutput => {
+    await withGuardedFixture(async fixture => {
+      const retainedJson = failedOutput === 'retained JSON';
+      const output = retainedJson ? 'report.json' : 'report.md';
+      const env = { ...fixture.env, ...(retainedJson ? {
+        RCL_TELEMETRY: 'findings', HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: '',
+      } : {}) };
+      if (retainedJson) {
+        mkdirSync(join(fixture.repo, '.harness-cli'));
+        writeFileSync(join(fixture.repo, '.harness-cli', 'config.json'), '{}');
+      }
+      const args = retainedJson
+        ? fixture.args.filter(argument => argument !== '--no-telemetry')
+        : [...fixture.args, '--markdown', output];
+      fixture.holdResponses();
+      const run = runRclAsync(args, fixture.repo, env);
+      await fixture.firstRequest;
+      writeFileSync(join(fixture.repo, output), 'preserved');
+      fixture.releaseResponses();
+      expect((await run).status).toBe(1);
+      const state = await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture');
+      expect(state?.lastLaunch?.status).toBe('completed');
+      const reportPath = retainedJson
+        ? join(fixture.repo, 'rcl-data', 'quarantine', state!.lastLaunch!.runId!, 'report.json')
+        : join(fixture.repo, 'report.json');
+      expect(JSON.parse(readFileSync(reportPath, 'utf8')).run.id).toBe(state?.lastLaunch?.runId);
+
+      const retry = await runRclAsync([...args, '--json-file', 'retry.json', '--retry-reason',
+        'A fresh output destination is available'], fixture.repo, env);
+      expect(retry.status).toBe(1);
+      expect(retry.stderr).toContain('report_not_admitted');
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
+        .toMatchObject({ attemptsUsed: 1 });
     });
   }, 40_000);
 

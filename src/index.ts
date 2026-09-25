@@ -2240,6 +2240,11 @@ async function executeCouncil(
         ? `Original report retention failed: ${delivery.retention.error ?? 'unknown error'}.`
         : undefined,
   ].filter((part): part is string => part !== undefined).join(' ');
+  if (opts.exclusiveOutputs && outputDiagnostics.some(diagnostic => diagnostic.path === 'output.report_json') &&
+    !delivery.spooled && delivery.status !== 'recorded' && delivery.retention?.status !== 'complete') {
+    throw new ReviewLaunchRefused('report_write_failed',
+      'The JSON report could not be retained. This attempt remains spent; correct the output path before an explicit bounded retry.');
+  }
   const completion: GuardedLaunchCompletion = {
     runId: run.id,
     reportJsonSha256: sha256Hex(artifacts.report_json),
