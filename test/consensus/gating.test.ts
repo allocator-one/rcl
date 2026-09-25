@@ -860,10 +860,11 @@ describe('resolveGatingConfig', () => {
   });
 
   it.each([
-    { verificationTimeout: undefined, expectedTimeout: 180_000 },
-    { verificationTimeout: 30_000, expectedTimeout: 30_000 },
-  ])('dispatches the resolved verifier budget: $expectedTimeout ms', async ({ verificationTimeout, expectedTimeout }) => {
-    const config = resolveGatingConfig({ verificationPassTimeout: 180_000, verificationTimeout });
+    { verificationPassTimeout: 180_000, verificationTimeout: undefined, expectedTimeout: 180_000 },
+    { verificationPassTimeout: 90_000, verificationTimeout: undefined, expectedTimeout: 90_000 },
+    { verificationPassTimeout: 180_000, verificationTimeout: 30_000, expectedTimeout: 30_000 },
+  ])('dispatches the resolved verifier budget: $expectedTimeout ms', async ({ verificationPassTimeout, verificationTimeout, expectedTimeout }) => {
+    const config = resolveGatingConfig({ verificationPassTimeout, verificationTimeout });
     const ask = vi.fn(async (): Promise<ModelAnswer> => ({
       model: config.verificationModel!,
       provider: 'google',
