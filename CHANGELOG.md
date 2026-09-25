@@ -6,9 +6,9 @@
   `openai/gpt-6-sol`; `google/gemini-3.8-flash` and the async `kimi-k3` seat
   are unchanged. Consensus weights are keyed by model id, so both new models
   start at the neutral weight until they accrue 20 triaged outcomes (RCL-99).
-- Send `max_completion_tokens` to every OpenAI `gpt-5`+ model. `gpt-6-*`
-  rejected the legacy `max_tokens` with HTTP 400, which would have killed the
-  OpenAI seat on every call (RCL-99).
+- Send `max_completion_tokens` to every OpenAI `gpt-5`+ and o-series model.
+  `gpt-6-*` rejected the legacy `max_tokens` with HTTP 400, which would have
+  killed the OpenAI seat on every call (RCL-99).
 
 ## 4.0.0 - 2026-09-24
 

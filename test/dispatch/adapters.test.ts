@@ -568,19 +568,23 @@ describe('openai request parameters', () => {
     };
   }
 
-  it.each(['gpt-5.6-sol', 'gpt-6-sol', 'openai/gpt-6-sol', 'gpt-10-sol', 'o3'])(
-    '%s reviews with max_completion_tokens',
-    async (model) => {
-      const captured: Array<Record<string, unknown>> = [];
-      const adapter = new OpenAIAdapter('test-key');
-      setClient(adapter, capturingClient(captured));
+  it.each([
+    'gpt-5.6-sol',
+    'gpt-6-sol',
+    'openai/gpt-6-sol',
+    'gpt-10-sol',
+    'o3',
+    'o5-mini',
+  ])('%s reviews with max_completion_tokens', async (model) => {
+    const captured: Array<Record<string, unknown>> = [];
+    const adapter = new OpenAIAdapter('test-key');
+    setClient(adapter, capturingClient(captured));
 
-      await adapter.review(model, 'general', 's', 'u', OPTS);
+    await adapter.review(model, 'general', 's', 'u', OPTS);
 
-      expect(captured[0]).toHaveProperty('max_completion_tokens', 16384);
-      expect(captured[0]).not.toHaveProperty('max_tokens');
-    }
-  );
+    expect(captured[0]).toHaveProperty('max_completion_tokens', 16384);
+    expect(captured[0]).not.toHaveProperty('max_tokens');
+  });
 
   it('gpt-6 asks with max_completion_tokens', async () => {
     const captured: Array<Record<string, unknown>> = [];

@@ -215,12 +215,12 @@ export class OpenAIAdapter implements ReviewAdapter {
 }
 
 /**
- * gpt-5+ and the o-series reject `max_tokens` with HTTP 400. Match by major
- * version so the next generation does not silently fall back to the legacy
- * parameter.
+ * gpt-5+ and every o-series model reject `max_tokens` with HTTP 400. Match by
+ * version family so the next generation does not silently fall back to the
+ * legacy parameter.
  */
 function usesMaxCompletionTokens(modelId: string): boolean {
   const gptMajor = /^gpt-(\d+)/.exec(modelId);
   if (gptMajor) return Number(gptMajor[1]) >= 5;
-  return /^o[134]/.test(modelId);
+  return /^o\d/.test(modelId);
 }
