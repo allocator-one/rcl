@@ -19,6 +19,10 @@ function anthropicToolResponse(stopReason = 'tool_use') {
   };
 }
 
+function anthropicStreamResponse(response: unknown) {
+  return { finalMessage: vi.fn().mockResolvedValue(response) };
+}
+
 function openaiResponse(finishReason = 'stop') {
   return {
     choices: [
@@ -60,20 +64,51 @@ describe('SDK client construction', () => {
 });
 
 describe('anthropic automatic tool choice', () => {
+  it('gives Fable 5.1 room to complete a large review with bounded effort', async () => {
+    const stream = vi.fn().mockReturnValue(anthropicStreamResponse(anthropicToolResponse()));
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { stream } });
+
+    const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 'system', 'large diff', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(stream).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        model: 'claude-fable-5-1',
+        max_tokens: 32768,
+        output_config: { effort: 'medium' },
+        tool_choice: { type: 'auto' },
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('keeps the existing output budget for other Claude models', async () => {
+    const create = vi.fn().mockResolvedValue(anthropicToolResponse());
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { create } });
+
+    const review = await adapter.review('anthropic/claude-opus-4-8', 'general', 'system', 'diff', OPTS);
+
+    expect(review.status).toBe('success');
+    expect(create.mock.calls[0]?.[0]).toMatchObject({ max_tokens: 16384 });
+    expect(create.mock.calls[0]?.[0]).not.toHaveProperty('output_config');
+  });
+
   it('reviews with Fable 5.1 without sending unsupported forced tool choice', async () => {
-    const create = vi.fn(async (params: { tool_choice: { type: string } }) => {
+    const stream = vi.fn((params: { tool_choice: { type: string } }) => {
       if (params.tool_choice.type !== 'auto') {
         throw new Anthropic.APIError(400, undefined, 'Forced tool choice is not supported', undefined);
       }
-      return anthropicToolResponse();
+      return anthropicStreamResponse(anthropicToolResponse());
     });
     const adapter = new AnthropicAdapter('test-key');
-    setClient(adapter, { messages: { create } });
+    setClient(adapter, { messages: { stream } });
 
     const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 'system', 'diff', OPTS);
 
     expect(review.status).toBe('success');
-    expect(create).toHaveBeenCalledExactlyOnceWith(
+    expect(stream).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         model: 'claude-fable-5-1',
         tool_choice: { type: 'auto' },
@@ -97,13 +132,13 @@ describe('anthropic automatic tool choice', () => {
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, {
       messages: {
-        create: vi.fn().mockResolvedValue({
+        stream: vi.fn().mockReturnValue(anthropicStreamResponse({
           content: [
             { type: 'thinking', thinking: 'Check access control.' },
             { type: 'text', text: JSON.stringify({ findings: [finding] }) },
           ],
           stop_reason: 'end_turn',
-        }),
+        })),
       },
     });
 
@@ -117,10 +152,10 @@ describe('anthropic automatic tool choice', () => {
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, {
       messages: {
-        create: vi.fn().mockResolvedValue({
+        stream: vi.fn().mockReturnValue(anthropicStreamResponse({
           content: [{ type: 'thinking', thinking: 'Check access control.' }],
           stop_reason: 'end_turn',
-        }),
+        })),
       },
     });
 
@@ -130,12 +165,29 @@ describe('anthropic automatic tool choice', () => {
     expect(review.error).toContain('empty response');
   });
 
-  it('does not retry a rejected request even when a retry budget remains', async () => {
-    const create = vi.fn().mockRejectedValue(
-      new Anthropic.APIError(400, undefined, 'Invalid request', undefined),
-    );
+  it('does not count a truncated Fable stream as a successful review', async () => {
     const adapter = new AnthropicAdapter('test-key');
-    setClient(adapter, { messages: { create } });
+    setClient(adapter, {
+      messages: {
+        stream: vi.fn().mockReturnValue(anthropicStreamResponse(anthropicToolResponse('max_tokens'))),
+      },
+    });
+
+    const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', OPTS);
+
+    expect(review.status).toBe('error');
+    expect(review.error).toContain('truncated');
+    expect(review.findings).toEqual([]);
+  });
+
+  it('does not retry a rejected request even when a retry budget remains', async () => {
+    const stream = vi.fn().mockReturnValue({
+      finalMessage: vi.fn().mockRejectedValue(
+        new Anthropic.APIError(400, undefined, 'Invalid request', undefined),
+      ),
+    });
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, { messages: { stream } });
 
     const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', {
       ...OPTS,
@@ -143,11 +195,34 @@ describe('anthropic automatic tool choice', () => {
     });
 
     expect(review.status).toBe('error');
-    expect(create).toHaveBeenCalledTimes(1);
+    expect(stream).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('timeout classification', () => {
+  it('anthropic Fable stream abort is classified as timeout', async () => {
+    vi.useFakeTimers();
+    const adapter = new AnthropicAdapter('test-key');
+    setClient(adapter, {
+      messages: {
+        stream: (_params: unknown, opts: { signal: AbortSignal }) => ({
+          finalMessage: () =>
+            new Promise((_resolve, reject) => {
+              opts.signal.addEventListener('abort', () => reject(new Anthropic.APIUserAbortError()));
+            }),
+        }),
+      },
+    });
+
+    const pending = adapter.review('claude-fable-5-1', 'general', 's', 'u', {
+      timeoutMs: 50,
+      maxRetries: 0,
+    });
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect((await pending).status).toBe('timeout');
+  });
+
   it('anthropic: SDK abort error is classified as timeout', async () => {
     vi.useFakeTimers();
     const adapter = new AnthropicAdapter('test-key');

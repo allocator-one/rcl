@@ -50,17 +50,20 @@ export class AnthropicAdapter implements ReviewAdapter {
 
     let lastErr: unknown = new Error('no attempts made');
     const modelId = stripKnownProviderPrefix(model);
+    // Fable 5.1 counts adaptive thinking against max_tokens. Large review
+    // chunks exhausted the old ceiling before any complete findings arrived.
+    const fable51 = modelId === 'claude-fable-5-1';
 
     try {
       for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
         try {
           // Use tool use for reliable JSON extraction
-          const response = await this.client.messages.create(
-            {
+          const request = {
               model: modelId,
-              max_tokens: 16384,
+              max_tokens: fable51 ? 32768 : 16384,
+              ...(fable51 ? { output_config: { effort: 'medium' as const } } : {}),
               system: systemPrompt,
-              messages: [{ role: 'user', content: userPrompt }],
+              messages: [{ role: 'user' as const, content: userPrompt }],
               tools: [
                 {
                   name: 'report_findings',
@@ -98,12 +101,17 @@ export class AnthropicAdapter implements ReviewAdapter {
                 },
               ],
               tool_choice: { type: 'auto' as const },
-            },
-            // Buffer above our own timeout so the SDK's request timeout
-            // (600s default) never wins the race and misclassifies a
-            // timeout as a generic error.
-            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
-          );
+            };
+          // Fable's larger output budget requires the SDK's streaming path.
+          // finalMessage() keeps the same complete-response parsing and
+          // truncation checks used by the nonstreaming path.
+          const requestOptions = {
+            signal: controller.signal,
+            timeout: options.timeoutMs + 30_000,
+          };
+          const response = fable51
+            ? await this.client.messages.stream(request, requestOptions).finalMessage()
+            : await this.client.messages.create(request, requestOptions);
           const usage = usageFromAnthropic(response.usage);
 
           if (response.stop_reason === 'max_tokens') {

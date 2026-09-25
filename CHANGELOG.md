@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.1.2 - 2026-09-25
+
+- Stream Claude Fable 5.1 reviewer responses with a 32,768-token output ceiling
+  and medium effort. This gives large review chunks room for thinking and
+  complete findings while preserving fail-closed truncation, timeout, and
+  schema checks. Other Claude model requests keep their previous settings
+  (RCL-103).
+
 ## 4.1.1 - 2026-09-25
 
 - Use automatic tool choice for Anthropic reviews. Claude Fable 5.1 rejects
