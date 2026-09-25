@@ -849,8 +849,7 @@ describe('resolveGatingConfig', () => {
     expect(cfg.mode).toBe('verified-consensus');
     expect(cfg.minModels).toBe(2);
     expect(cfg.verificationModel).not.toMatch(/^openrouter\//);
-    expect(cfg.verificationTimeoutMs).toBeLessThanOrEqual(60_000);
-    expect(cfg.verificationPassTimeoutMs).toBeGreaterThanOrEqual(cfg.verificationTimeoutMs);
+    expect(cfg.verificationTimeoutMs).toBe(cfg.verificationPassTimeoutMs);
     expect(cfg.verificationPassTimeoutMs).toBeLessThanOrEqual(180_000);
   });
 
@@ -858,6 +857,34 @@ describe('resolveGatingConfig', () => {
     expect(resolveGatingConfig({ verificationPassTimeout: 12_345 }).verificationPassTimeoutMs).toBe(
       12_345
     );
+  });
+
+  it.each([
+    { verificationTimeout: undefined, expectedTimeout: 180_000 },
+    { verificationTimeout: 30_000, expectedTimeout: 30_000 },
+  ])('dispatches the resolved verifier budget: $expectedTimeout ms', async ({ verificationTimeout, expectedTimeout }) => {
+    const config = resolveGatingConfig({ verificationPassTimeout: 180_000, verificationTimeout });
+    const ask = vi.fn(async (): Promise<ModelAnswer> => ({
+      model: config.verificationModel!,
+      provider: 'google',
+      text: '[{"id":"F1","verdict":"refuted","reason":"guard exists"}]',
+      durationMs: 1,
+      status: 'success',
+    }));
+
+    await applyGating([makeFinding()], {
+      minModels: config.minModels,
+      verificationModel: config.verificationModel,
+      verificationTimeoutMs: config.verificationTimeoutMs,
+      verificationPassTimeoutMs: config.verificationPassTimeoutMs,
+      diffFiles: [diffFile('src/a.ts')],
+      ask,
+    });
+
+    expect(config.verificationTimeoutMs).toBe(expectedTimeout);
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeGreaterThan(expectedTimeout - 5_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeLessThanOrEqual(expectedTimeout);
   });
 
   it.each([

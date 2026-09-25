@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 4.1.3 - 2026-09-25
+
+- Let verifier batches use the remaining whole-pass deadline when no separate
+  per-call timeout is configured, instead of imposing a 60-second default.
+  Explicit per-call limits, outer cancellation, unavailable results and review
+  accounting remain unchanged (RCL-104).
+
 ## 4.1.2 - 2026-09-25
 
 - Stream Claude Fable 5.1 reviewer responses with a 32,768-token output ceiling

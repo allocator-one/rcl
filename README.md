@@ -1000,7 +1000,6 @@ gating:
   mode: verified-consensus        # or all-findings (legacy: severity alone decides)
   minModels: 2                    # distinct models for consensus gating
   verificationModel: google/gemini-3.8-flash  # direct-API only
-  verificationTimeout: 60000      # ms per refutation call (8 candidates per batch, 3 in flight)
   verificationPassTimeout: 180000 # ms for the complete verification queue
 
 # Output defaults
@@ -1037,6 +1036,10 @@ spec: SPEC.md
 ```
 
 Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`. Executable JS config is never discovered: rcl often runs in untrusted checkouts with provider keys in the environment.
+
+Verifier calls default to the remaining whole-pass budget. Set the optional
+`gating.verificationTimeout` in milliseconds to impose a shorter per-call limit;
+every call is still capped by the remaining `verificationPassTimeout` deadline.
 
 For converging patch reviews, async collection uses `--converge-target` (or
 `RCL_CONVERGE_TARGET`), not the patch pathname. Each round can keep a distinct,

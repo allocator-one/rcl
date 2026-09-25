@@ -154,10 +154,6 @@ export const DEFAULT_GATING_CONFIG = {
   // Use the stable Flash council member for this latency-sensitive pass.
   // Individual batches and the complete queue both have explicit bounds.
   verificationModel: 'google/gemini-3.8-flash',
-  verificationTimeoutMs: 60_000,
-  // Bound the complete queue to three per-call windows. Large finding sets
-  // may span many batches; without a pass deadline those waves can keep a
-  // completed council run alive indefinitely.
   verificationPassTimeoutMs: 180_000,
 } as const;
 
@@ -200,18 +196,20 @@ export function resolveGatingConfig(
     }
   }
 
+  const verificationPassTimeoutMs = resolveTimerDelay(
+    'gating.verificationPassTimeout',
+    input?.verificationPassTimeout ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
+  );
+
   return {
     mode: input?.mode ?? DEFAULT_GATING_CONFIG.mode,
     minModels,
     verificationModel,
     verificationTimeoutMs: resolveTimerDelay(
       'gating.verificationTimeout',
-      input?.verificationTimeout ?? DEFAULT_GATING_CONFIG.verificationTimeoutMs
+      input?.verificationTimeout ?? verificationPassTimeoutMs
     ),
-    verificationPassTimeoutMs: resolveTimerDelay(
-      'gating.verificationPassTimeout',
-      input?.verificationPassTimeout ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
-    ),
+    verificationPassTimeoutMs,
   };
 }
 
