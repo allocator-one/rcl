@@ -283,9 +283,9 @@ export class HarnessSink {
   }
 
   private async getPreparedReceipt(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
-    if (this.credentialSource !== 'attest') return { kind: 'rejected' };
+    if (this.credential.source !== 'attest') return { kind: 'rejected' };
     if (!binding.artifactsDeclared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
-    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', options);
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', { ...options, maxResponseBytes: MAX_READ_RESPONSE_BYTES });
     if ('failure' in result) return { kind: 'unavailable' };
     if (result.status === 404) return { kind: 'absent' };
     if (result.status >= 500 || result.status === 429 || result.status === 408) return { kind: 'unavailable' };
