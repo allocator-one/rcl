@@ -22,8 +22,12 @@ import { loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport } from '../src/converge/run-state.js';
 import { sha256Hex } from '../src/report/run-header.js';
 
-const cliEntrypoint = process.env['RCL_TEST_REVIEW_ENTRYPOINT'] ?? fileURLToPath(new URL('../src/index.ts', import.meta.url));
-const tsxImport = import.meta.resolve('tsx');
+// Global setup builds dist unless an installed package entrypoint is selected.
+const cliEntrypoint = process.env['RCL_TEST_PACKAGED_CLI'] || process.env['RCL_TEST_REVIEW_ENTRYPOINT'] || fileURLToPath(new URL('../dist/index.js', import.meta.url));
+// Keep explicit TypeScript development overrides without loading tsx for built CLI runs.
+const cliNodeArgs = /\.(?:[cm]?ts|tsx)$/.test(cliEntrypoint)
+  ? ['--import', import.meta.resolve('tsx'), cliEntrypoint]
+  : [cliEntrypoint];
 const tempDirs: string[] = [];
 const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
@@ -42,7 +46,7 @@ function tempRepository(): string {
 }
 
 function runRcl(args: string[], cwd: string, extraEnv: Record<string, string> = {}) {
-  return spawnSync(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
+  return spawnSync(process.execPath, [...cliNodeArgs, ...args], {
     cwd,
     encoding: 'utf8',
     env: {
@@ -74,7 +78,7 @@ function runRclAsync(
   onSpawn?: (child: ChildProcess) => void
 ) {
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', tsxImport, cliEntrypoint, ...args], {
+    const child = spawn(process.execPath, [...cliNodeArgs, ...args], {
       cwd,
       env: {
         ...process.env,
