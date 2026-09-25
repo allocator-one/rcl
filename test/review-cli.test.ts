@@ -127,6 +127,7 @@ interface GuardedCliFixture {
   env: Record<string, string>;
   calls: () => number;
   holdResponses: () => void;
+  releaseResponses: () => void;
   firstRequest: Promise<void>;
 }
 
@@ -140,20 +141,24 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
   }));
   let calls = 0;
   let holdResponses = false;
+  const pendingResponses: Array<() => void> = [];
   let notifyRequest: () => void = () => {};
   const firstRequest = new Promise<void>(resolve => { notifyRequest = resolve; });
   const server = createServer((request, response) => {
     request.resume();
     calls++;
     notifyRequest();
-    if (holdResponses) return;
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({
-      id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
-      choices: [{ index: 0, finish_reason: 'stop', message: {
-        role: 'assistant', content: JSON.stringify({ findings: [] }),
-      } }],
-    }));
+    const respond = () => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
+        choices: [{ index: 0, finish_reason: 'stop', message: {
+          role: 'assistant', content: JSON.stringify({ findings: [] }),
+        } }],
+      }));
+    };
+    if (holdResponses) pendingResponses.push(respond);
+    else respond();
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
@@ -167,6 +172,10 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
         OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RCL_DATA_DIR: join(repo, 'rcl-data') },
       calls: () => calls,
       holdResponses: () => { holdResponses = true; },
+      releaseResponses: () => {
+        holdResponses = false;
+        for (const respond of pendingResponses.splice(0)) respond();
+      },
       firstRequest,
     });
   } finally {
@@ -186,6 +195,19 @@ describe('rcl review — guarded native launch', () => {
         .toEqual({ target: 'guarded-fixture', round: 1, attempt: 1 });
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
+
+  it('preserves a report file created after guarded preflight', async () => {
+    await withGuardedFixture(async fixture => {
+      fixture.holdResponses();
+      const run = runRclAsync(fixture.args, fixture.repo, fixture.env);
+      await fixture.firstRequest;
+      writeFileSync(join(fixture.repo, 'report.json'), 'preserved');
+      fixture.releaseResponses();
+      const result = await run;
+      expect(result.status).toBe(1);
+      expect(readFileSync(join(fixture.repo, 'report.json'), 'utf8')).toBe('preserved');
     });
   }, 40_000);
 
