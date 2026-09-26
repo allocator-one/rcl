@@ -17,7 +17,7 @@ export function platformPath(path: string): string {
 }
 
 /** Stable, bounded, regular-file read. In particular, opening a FIFO cannot block. */
-export async function readStable(path: string, limit = MAX_REPORT_BYTES): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
+export async function readStable(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean } = {}): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
   if (constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined) throw new Error('safe_file_flags_unavailable');
   const canonical = platformPath(path);
   if (await realpath(dirname(canonical)) !== dirname(canonical)) throw new Error('symlink_directory');
@@ -36,6 +36,9 @@ export async function readStable(path: string, limit = MAX_REPORT_BYTES): Promis
       if (bytesRead === 0) break;
       length += bytesRead;
     }
+    // Flush retained checkpoint bytes on the same descriptor before confirming
+    // their stability; readable bytes alone do not acknowledge durability.
+    if (options.sync) await handle.sync();
     const after = await handle.stat();
     const current = await lstat(canonical);
     if (length !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs ||
