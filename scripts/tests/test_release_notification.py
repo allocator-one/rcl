@@ -20,16 +20,17 @@ class ReleaseNotificationTest(unittest.TestCase):
     def run_data(self, **overrides):
         return {'id': 42, 'path': '.github/workflows/release.yml', 'event': 'push',
                 'status': 'completed', 'conclusion': 'success', 'head_branch': 'v4.1.6',
-                'head_sha': 'a' * 40, 'head_repository': {'full_name': 'allocator-one/rcl'},
+                'head_sha': 'a' * 40, 'run_attempt': 1, 'head_repository': {'full_name': 'allocator-one/rcl'},
                 **overrides}
 
     def test_only_successful_stable_release_runs_from_this_repository(self):
-        self.assertEqual(n.validate_run(self.run_data(), 'allocator-one/rcl'), ('4.1.6', 'a' * 40))
+        self.assertEqual(n.validate_run(self.run_data(path='.github/workflows/release.yml@main'), 'allocator-one/rcl'),
+                         ('4.1.6', 'a' * 40, 1))
         for change in [{'conclusion': 'failure'}, {'status': 'in_progress'},
                        {'event': 'pull_request'}, {'head_branch': 'main'},
                        {'head_branch': 'v4.1.6-beta.1'}, {'path': '.github/workflows/ci.yml'},
                        {'head_repository': {'full_name': 'attacker/rcl'}}, {'head_repository': None},
-                       {'head_branch': None}, {'head_sha': None}]:
+                       {'head_branch': None}, {'head_sha': None}, {'run_attempt': 0}]:
             with self.subTest(change=change), self.assertRaises(n.NotificationError):
                 n.validate_run(self.run_data(**change), 'allocator-one/rcl')
 
@@ -89,10 +90,10 @@ class ReleaseNotificationTest(unittest.TestCase):
             'payload': base64.b64encode(json.dumps(payload).encode()).decode()}}}]}
         document = {'dist': {'integrity': integrity, 'attestations': {'url': n.attestation_url('review-council', '4.1.6')},
                               }, 'attestations': attestation['attestations']}
-        n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42')
+        n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 1)
         document['attestations'][0]['bundle']['dsseEnvelope']['payload'] = base64.b64encode(json.dumps({**payload, 'subject': []}).encode()).decode()
         with self.assertRaises(n.NotificationError):
-            n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42')
+            n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 1)
 
     def test_signature_binds_exact_bytes_and_key_is_product_version_stable(self):
         body = n.encode_payload({'current_version': '4.1.6'})

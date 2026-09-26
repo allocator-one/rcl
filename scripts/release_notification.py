@@ -66,16 +66,19 @@ def validate_run(run, repository):
     tag = run.get('head_branch', '')
     sha = run.get('head_sha', '')
     head_repository = run.get('head_repository')
-    if (run.get('path') != '.github/workflows/release.yml'
+    run_attempt = run.get('run_attempt')
+    workflow_path = run.get('path', '').split('@', 1)[0] if isinstance(run.get('path'), str) else ''
+    if (workflow_path != '.github/workflows/release.yml'
             or run.get('event') != 'push'
             or run.get('status') != 'completed'
             or run.get('conclusion') != 'success'
             or not isinstance(head_repository, dict)
             or head_repository.get('full_name') != repository
             or not isinstance(tag, str) or not tag.startswith('v') or not STABLE.fullmatch(tag[1:])
-            or not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)):
+            or not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)
+            or not isinstance(run_attempt, int) or run_attempt < 1):
         raise NotificationError('Expected a successful stable Release tag run in this repository')
-    return tag[1:], sha
+    return tag[1:], sha, run_attempt
 
 
 def previous_version(metadata, version):
@@ -103,7 +106,7 @@ def attestation_url(name, version):
     return f'{NPM_REGISTRY}/-/npm/v1/attestations/{urllib.parse.quote(f"{name}@{version}", safe="@")}'
 
 
-def validate_attestation(document, name, version, repository, sha, run_id=None):
+def validate_attestation(document, name, version, repository, sha, run_id=None, run_attempt=None):
     try:
         integrity = document['dist']['integrity']
         expected_digest = base64.b64decode(integrity.removeprefix('sha512-'), validate=True).hex()
@@ -131,16 +134,16 @@ def validate_attestation(document, name, version, repository, sha, run_id=None):
         if (payload.get('predicateType') == SLSA_V1 and subject_matches and dependency_matches
                 and workflow == {'repository': f'https://github.com/{repository}',
                                  'path': '.github/workflows/release.yml', 'ref': f'refs/tags/v{version}'}
-                and (run_id is None or invocation == f'https://github.com/{repository}/actions/runs/{run_id}/attempts/1')):
+                and (run_id is None or invocation == f'https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt}')):
             return
     raise NotificationError('Published package provenance does not match the release')
 
 
-def validate_published_package(package, attestation, name, version, repository, sha, run_id=None):
+def validate_published_package(package, attestation, name, version, repository, sha, run_id=None, run_attempt=None):
     validate_package(package, name, version, sha)
     if package.get('gitHead') is None:
         validate_attestation({**package, 'attestations': attestation.get('attestations')}, name, version,
-                             repository, sha, run_id)
+                             repository, sha, run_id, run_attempt)
 
 
 def text(value, limit):
@@ -163,7 +166,11 @@ def build_payload(repository, version, previous, comparison):
             'author_name': text((commit.get('author') or {}).get('name'), 150) if author.get('type') != 'Bot' else None,
             'author_login': text(author.get('login'), 100) if author.get('type') == 'User' else None,
         })
-    files = sorted(comparison.get('files', []), key=lambda item: item.get('additions', 0) + item.get('deletions', 0), reverse=True)
+    comparison_files = comparison.get('files')
+    if not isinstance(comparison_files, list):
+        comparison_files = []
+    files = sorted((item for item in comparison_files if isinstance(item, dict)),
+                   key=lambda item: (item.get('additions') or 0) + (item.get('deletions') or 0), reverse=True)
     url = f'https://github.com/{repository}/compare/v{previous}...v{version}'
     return {
         'source': 'github_actions', 'environment': 'prod', 'repository': repository,
@@ -250,7 +257,7 @@ def main():
     def github(path):
         return json_response(f'https://api.github.com/repos/{repository}/{path}', headers=headers)
 
-    version, sha = validate_run(github(f'actions/runs/{run_id}'), repository)
+    version, sha, run_attempt = validate_run(github(f'actions/runs/{run_id}'), repository)
     if github(f'commits/v{version}').get('sha') != sha:
         raise NotificationError('Release tag no longer matches the successful workflow')
     package_name = PROJECTS[repository][0]
@@ -270,7 +277,7 @@ def main():
     if not isinstance(current_package, dict):
         raise NotificationError('Release version is not published on npm')
     current_attestation = json_response(attestation_url(package_name, version)) if current_package.get('gitHead') is None else {}
-    validate_published_package(current_package, current_attestation, package_name, version, repository, sha, run_id)
+    validate_published_package(current_package, current_attestation, package_name, version, repository, sha, run_id, run_attempt)
     previous_sha = github(f'commits/v{previous}').get('sha')
     if not isinstance(previous_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_sha):
         raise NotificationError('Previous release tag has no valid commit')
