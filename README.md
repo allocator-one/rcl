@@ -316,13 +316,16 @@ rcl converge-stale --resume --manifest stale.json --manifest-sha256 <reviewed-ma
 Preview writes only its exclusive manifest. Apply retains the original report and exact
 native snapshots, then atomically adds a digest-bound audit entry under native target ownership.
 Immutable shared objects and reconstructible snapshot templates avoid copying the full
-report and growing history for every correction.
+report and growing history for every correction. Incremental prefix hashing verifies
+the growing audit without repeatedly serializing all earlier entries.
 It does not admit findings, claim attempts, flush evidence, raise caps, or approve a PR.
 Resume is idempotent. Continue with the original `review --guarded-converge` invocation;
 it recomputes the real head/input digest and checks every retained receipt before claiming
 one normal attempt at the next native ordinal. The stale attempt stays spent.
 
-Unchanged inputs require normal admission. Upstream tip movement alone is insufficient.
+Before any stale disposition, unchanged inputs require normal admission; upstream tip movement alone is insufficient.
+After disposal, the original report stays historical even if its inputs return. Inspect and
+apply those inputs as another replacement to obtain a fresh review without reviving that report.
 Unknown outcomes, unhealthy reports, pending delivery, missing original evidence, changed
 state and unresolved earlier findings refuse safely. A disposition is bound to one exact
 replacement input. If inputs change again before continuation, inspect the new inputs and
@@ -330,7 +333,12 @@ create a new preview and apply operation; it appends another inspected replaceme
 same preserved report. Every earlier inspected replacement remains usable: returning to
 one needs only the guarded review command, not another disposition. Preview refuses a
 duplicate replacement plan. Missing or changed retained evidence, forged manifests and
-edited native history are refused before an attempt is claimed. Native convergence, enforced review and CI remain required.
+accidentally truncated audit history are refused before an attempt is claimed. Preview/apply
+bind the then-current native state; later legitimate native transitions remain authoritative.
+This local audit does not authenticate arbitrary edits to the entire native state file.
+Keep the audit directory with its original repository location: repository relocation and
+reconstruction of lost evidence are not supported by this command. Every receipt remains
+required, including earlier inspected alternatives. Native convergence, enforced review and CI remain required.
 
 ### `rcl converge-gap`
 

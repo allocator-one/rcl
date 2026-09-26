@@ -14,7 +14,7 @@ async function command(cwd:string,args:string[],denyNetwork:string) {
   const inherited = Object.fromEntries(['PATH','HOME','USERPROFILE','TMPDIR','TMP','TEMP','SystemRoot','WINDIR','ComSpec','PATHEXT']
     .flatMap(key => process.env[key] === undefined ? [] : [[key,process.env[key]!]]));
   const child = spawn(process.execPath,[...(packed?[]:['--import',import.meta.resolve('tsx')]),'--import',denyNetwork,cli,...args],{
-    cwd,env:{...inherited,NO_COLOR:'1',RCL_TELEMETRY:'off',RCL_DATA_DIR:join(cwd,'data'),XDG_CONFIG_HOME:join(cwd,'config'),
+    cwd,env:{...inherited,NODE_NO_WARNINGS:'1',NO_COLOR:'1',RCL_TELEMETRY:'off',RCL_DATA_DIR:join(cwd,'data'),XDG_CONFIG_HOME:join(cwd,'config'),
       GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull,TSX_DISABLE_CACHE:'1'},timeout:20000,
   });
   let stdout='',stderr=''; child.stdout.on('data',c=>stdout+=c); child.stderr.on('data',c=>stderr+=c);
@@ -35,7 +35,8 @@ it('previews, applies, resumes and rejects tampering through the supported CLI w
   expect(preview.code,preview.stderr).toBe(0); expect(await f.bytes()).toEqual(before);
   const digest = sha256(await readFile(f.manifestPath)); expect(JSON.parse(preview.stdout).manifestSha256).toBe(digest);
   const bad = await command(f.cwd,['converge-stale','--apply','--manifest',f.manifestPath,'--manifest-sha256','f'.repeat(64)],deny);
-  expect(bad.code).toBe(3); expect(await f.bytes()).toEqual(before);
+  expect(bad.code).toBe(3); expect(JSON.parse(bad.stderr).error.message).toBe('stale_report_digest_mismatch');
+  expect(await f.bytes()).toEqual(before);
   for (const mode of ['apply','resume']) {
     const result = await command(f.cwd,['converge-stale',`--${mode}`,'--manifest',f.manifestPath,'--manifest-sha256',digest],deny);
     expect(result.code,result.stderr).toBe(0); expect(JSON.parse(result.stdout).result).toBe(mode==='apply'?'applied':'resumed');

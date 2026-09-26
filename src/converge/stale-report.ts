@@ -14,14 +14,14 @@ import { launchSchema, hasHealthyGuardedLaunch } from './launch-guard.js';
 import { withRecoveryTarget } from './target-ownership.js';
 import { staleManifest, staleManifestSchema, staleSelectionSchema, validateStaleReportAudit, StaleReportAuditError,
   type StaleReportEntry, type StaleReportManifest, type StaleReportSelection } from './stale-report-schema.js';
-import { selectedStaleFile as selected, retainStaleFile as retain, retainStaleObject, readStaleObject,
-  retainStaleSnapshot, readStaleSnapshot } from './stale-report-storage.js';
+import { selectedStaleFile as selected, retainStaleFile as retain, retainStaleObject,
+  retainStaleSnapshot, StaleHistoryReader } from './stale-report-storage.js';
 import { scrubText } from '../telemetry/scrub.js';
 
 const parse = (s: Awaited<ReturnType<typeof readStable>>) => decodeOriginalReport(s.text).value;
-function eligible(state: ConvergeRunState, attemptsRaw: unknown, reportRaw: unknown, s: StaleReportSelection) {
+function eligible(state: ConvergeRunState, attemptsRaw: unknown, reportRaw: unknown, s: StaleReportSelection, auditValidated = false) {
   if (state.version !== 1 || state.target !== s.target || !Array.isArray(state.rounds) || !state.findings || Array.isArray(state.findings)) throw new Error('stale_report_unsupported_state');
-  validateRoundCap(state.roundCap); validateStaleReportAudit(state);
+  validateRoundCap(state.roundCap); if (!auditValidated) validateStaleReportAudit(state);
   const previous = launchSchema.parse(state.lastLaunch);
   const attempts = validateConvergeAttemptState(attemptsRaw,s.target,'stale-report');
   const report = originalRunReportSchema.parse(reportRaw);
@@ -32,7 +32,7 @@ function eligible(state: ConvergeRunState, attemptsRaw: unknown, reportRaw: unkn
   if (previous.status !== 'completed' || previous.deliveryPending || previous.hardFailure ||
     !hasHealthyGuardedLaunch(previous)) throw new Error('stale_report_outcome_ineligible');
   if (attempts.attemptsUsed !== previous.attempt || !attempts.attempts.some(a => a.attempt === previous.attempt && a.source === 'claim')) throw new Error('stale_report_attempt_mismatch');
-  if (s.inputSha256 === previous.inputSha256) throw new Error('inputs_unchanged');
+  if (s.inputSha256 === previous.inputSha256 && !state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt)) throw new Error('inputs_unchanged');
   if (previous.reportJsonSha256 !== s.reportSha256 || report.run.id !== previous.runId ||
     report.run.target.head_sha !== previous.headSha || report.run.converge?.target !== s.target ||
     report.run.converge?.round !== previous.round || report.run.converge?.attempt !== previous.attempt ||
@@ -67,27 +67,29 @@ export async function previewStaleReport(input: StaleReportSelection, gitCommonD
 
 function directory(common: string, m: StaleReportManifest) { return join(common,'rcl-stale-report-audits',m.operationId); }
 function nextState(before: ConvergeRunState, entry: StaleReportEntry, m: StaleReportManifest): ConvergeRunState {
-  return {...before,updatedAt:m.createdAt,staleReportAudit:[...(before.staleReportAudit ?? []),entry]};
+  const {staleReportAudit: audit = [], staleReportAuditCount: _count, updatedAt: _at, ...rest} = before;
+  return {staleReportAudit:[...audit,entry],...rest,staleReportAuditCount:audit.length+1,updatedAt:m.createdAt};
 }
-async function retained(common: string, entry: StaleReportEntry, prefix: StaleReportEntry[]) {
+async function retained(common: string, entry: StaleReportEntry, reader: StaleHistoryReader) {
   const m = staleManifest(entry), dir = directory(common,m);
   if (m.gitCommonDir !== common) throw new Error('stale_report_repository_mismatch');
   await inspectRecoveryDirectory(dir,true);
   await selected(join(dir,'manifest.json'),entry.manifestSha256);
-  const state = await readStaleSnapshot(common,join(dir,'native-before.json'),m.stateSha256,prefix);
+  const {state,body} = await reader.snapshot(join(dir,'native-before.json'),m.stateSha256);
+  const prefix = reader.prefix;
   if (!isDeepStrictEqual(state.staleReportAudit ?? [],prefix)) throw new Error('stale_report_audit_prefix_mismatch');
-  const attempts = await readStaleObject(common,m.attemptSha256);
-  const report = await readStaleObject(common,m.reportSha256);
-  const previous = eligible(state,parse(attempts),parse(report),m);
+  const attempts = await reader.object(m.attemptSha256);
+  const report = await reader.object(m.reportSha256);
+  const previous = eligible(state,parse(attempts),parse(report),m,true);
   if (previous.attempt !== m.attempt || previous.round !== m.round || previous.runId !== m.runId ||
     previous.headSha !== m.previousHeadSha || previous.inputSha256 !== m.previousInputSha256) throw new Error('stale_report_manifest_binding_mismatch');
-  const next = nextState(state,entry,m), afterSha256 = sha256(serializeRecoveryDocument(next));
-  return {m,dir,next,afterSha256};
+  const afterSha256 = reader.afterDigest(body,entry,m.createdAt);
+  return {m,dir,afterSha256};
 }
 
 /** Receipt inspection is read-only and cannot repair or fabricate a disposition. */
-async function verifyStaleReportReceipt(common: string, entry: StaleReportEntry, prefix: StaleReportEntry[]): Promise<void> {
-  const {m,dir,afterSha256} = await retained(common,entry,prefix);
+async function verifyStaleReportReceipt(common: string, entry: StaleReportEntry, reader: StaleHistoryReader): Promise<void> {
+  const {m,dir,afterSha256} = await retained(common,entry,reader);
   const expected = {kind:'rcl-stale-report-receipt',version:1,operationId:m.operationId,manifestSha256:entry.manifestSha256,
     beforeStateSha256:m.stateSha256,afterStateSha256:afterSha256};
   await selected(join(dir,'complete.json'),sha256(serializeRecoveryDocument(expected)));
@@ -100,10 +102,10 @@ export async function verifyStaleReportReceipts(common: string, entries: StaleRe
     const root = join(common,'rcl-stale-report-audits');
     await inspectRecoveryDirectory(root,true);
     await inspectRecoveryDirectory(join(root,'objects'),true);
-    const prefix: StaleReportEntry[] = [];
+    const reader = new StaleHistoryReader(common);
     for (const entry of entries) {
-      await verifyStaleReportReceipt(common,entry,prefix);
-      prefix.push(entry);
+      await verifyStaleReportReceipt(common,entry,reader);
+      reader.append(entry);
     }
   } catch (cause) { throw new StaleReportAuditError('stale_report_audit_invalid',{cause}); }
 }

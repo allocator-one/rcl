@@ -10,6 +10,8 @@
 - Retain every inspected replacement input, verify the complete audit history,
   and share immutable evidence between corrections. Returning to an earlier
   replacement no longer requires another disposition (RCL-106).
+- Allow inspected reversion to original inputs without reviving a disposed report;
+  detect truncated audit lists and incrementally hash their retained prefixes (RCL-106).
 - Report invalid audit evidence and missing resume operations explicitly; avoid
   syncing a read-only retained-evidence file handle on Windows (RCL-106).
 

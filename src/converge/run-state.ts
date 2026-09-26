@@ -131,6 +131,8 @@ export interface ConvergeRunState {
   updatedAt: string;
   lastLaunch?: GuardedLaunchState;
   staleReportAudit?: StaleReportEntry[];
+  /** Detect accidental truncation while preserving native state as the local authority. */
+  staleReportAuditCount?: number;
   /** Additive local audit only; entries never stand for an admitted round. */
   roundGapAudit?: { version: 1; entries: RoundGapEntry[] };
   /**

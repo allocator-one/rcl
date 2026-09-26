@@ -122,6 +122,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
   const healthy = hasHealthyGuardedLaunch(previous);
+  let disposed = false;
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
     const entry = candidates.find(e => {
@@ -131,6 +132,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (candidates.length > 0 && !entry) refuse('stale_report_input_mismatch', `Inspect these replacement inputs, then preview rcl converge-stale with --head ${options.headSha} --input-sha256 ${options.inputSha256}.`);
     if (!entry) refuse('report_not_admitted', `Process the existing report for run ${previous.runId}. If materially stale, preview rcl converge-stale with current --head ${options.headSha} --input-sha256 ${options.inputSha256}; never admit stale findings.`);
     const disposition = staleManifest(entry);
+    disposed = true;
     if (disposition.runId !== previous.runId || disposition.reportSha256 !== previous.reportJsonSha256 ||
       disposition.previousHeadSha !== previous.headSha || disposition.previousInputSha256 !== previous.inputSha256 ||
       disposition.round !== previous.round) refuse('stale_report_launch_mismatch', 'The audited original launch changed.');
@@ -139,7 +141,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     }
 
   }
-  if (healthy && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
+  if (healthy && !disposed && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
     refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');

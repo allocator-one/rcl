@@ -31,21 +31,28 @@ export class StaleReportAuditError extends Error {
   }
 }
 
+const manifests = new WeakMap<StaleReportEntry,{json:string;digest:string;manifest:StaleReportManifest}>();
+
 export function staleManifest(entry: StaleReportEntry): StaleReportManifest {
   try {
+    const cached = manifests.get(entry);
+    if (cached && cached.json === entry.manifestJson && cached.digest === entry.manifestSha256) return cached.manifest;
     if (!staleEntrySchema.safeParse(entry).success || sha256(entry.manifestJson) !== entry.manifestSha256) throw new StaleReportAuditError();
-    return staleManifestSchema.parse(decodeOriginalReport(entry.manifestJson).value);
+    const manifest = Object.freeze(staleManifestSchema.parse(decodeOriginalReport(entry.manifestJson).value));
+    manifests.set(entry,{json:entry.manifestJson,digest:entry.manifestSha256,manifest});
+    return manifest;
   } catch (cause) { throw new StaleReportAuditError(undefined,{cause}); }
 }
 
 export function validateStaleReportAudit(state: ConvergeRunState): void {
-  if (state.staleReportAudit === undefined) return;
-  if (!Array.isArray(state.staleReportAudit) || state.staleReportAudit.length === 0 || state.staleReportAudit.length > 10000) {
+  if (state.staleReportAudit === undefined) {
+    if (state.staleReportAuditCount !== undefined) throw new StaleReportAuditError();
+    return;
+  }
+  if (!Array.isArray(state.staleReportAudit) || state.staleReportAudit.length === 0 || state.staleReportAudit.length > 10000 || state.staleReportAuditCount !== state.staleReportAudit.length) {
     throw new StaleReportAuditError();
   }
-  const parsed = z.array(staleEntrySchema).min(1).max(10000).safeParse(state.staleReportAudit);
-  if (!parsed.success) throw new StaleReportAuditError();
-  const entries = parsed.data;
+  const entries = state.staleReportAudit;
   const operations = new Set<string>();
   const replacements = new Set<string>();
   const originals = new Map<number, StaleReportManifest>();
@@ -55,7 +62,7 @@ export function validateStaleReportAudit(state: ConvergeRunState): void {
     const m = staleManifest(entry);
     const original = originals.get(m.attempt);
     const replacement = `${m.attempt}:${m.headSha}:${m.inputSha256}`;
-    if (m.target !== state.target || m.inputSha256 === m.previousInputSha256 || operations.has(m.operationId) ||
+    if (m.target !== state.target || (m.inputSha256 === m.previousInputSha256 && original === undefined) || operations.has(m.operationId) ||
       replacements.has(replacement) || m.attempt < lastAttempt ||
       (runs.has(m.runId) && runs.get(m.runId) !== m.attempt) ||
       state.rounds.some(r => r.runId === m.runId) ||

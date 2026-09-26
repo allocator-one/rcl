@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { staleFixture } from './stale-report-fixtures.js';
 import { guardReviewLaunch, ReviewLaunchRefused } from '../../src/converge/launch-guard.js';
 import { loadConvergeRunState } from '../../src/converge/run-state.js';
@@ -84,6 +84,7 @@ it.each(['empty','digest','operation','replacement','target','unchanged','admitt
       entry.manifestJson = JSON.stringify(manifest); entry.manifestSha256 = sha256(entry.manifestJson);
     }
     if (state.staleReportAudit!.length === 1) state.staleReportAudit![0] = entry;
+    state.staleReportAuditCount = state.staleReportAudit!.length;
     await writeFile(f.statePath,JSON.stringify(state)); const before = await f.bytes();
     await expect(loadConvergeRunState(f.dir,f.target)).rejects.toThrow('invalid_stale_report_audit');
     await expect(guardReviewLaunch({...f.options,...f.selection})).rejects.toMatchObject({code:'stale_report_audit_invalid'});
@@ -94,6 +95,7 @@ it('bounds the number of retained audit entries before validating their contents
   const f = await staleFixture(); await f.prepare(); await f.apply();
   const state = (await loadConvergeRunState(f.dir,f.target))!;
   state.staleReportAudit = Array(10001).fill(state.staleReportAudit![0]);
+  state.staleReportAuditCount = 10001;
   expect(() => validateStaleReportAudit(state)).toThrow('invalid_stale_report_audit');
 });
 
@@ -102,6 +104,7 @@ it.each(['reordered','removed'] as const)('rejects %s history through its retain
   const second = await correction(f,'e'.repeat(64)); await second.apply();
   const state = (await loadConvergeRunState(f.dir,f.target))!;
   state.staleReportAudit = kind === 'reordered' ? state.staleReportAudit!.reverse() : state.staleReportAudit!.slice(1);
+  state.staleReportAuditCount = state.staleReportAudit.length;
   await writeFile(f.statePath,JSON.stringify(state)); const before = await f.bytes();
   await expect(guardReviewLaunch({...f.options,...second.selection})).rejects.toMatchObject({code:'stale_report_audit_invalid'});
   expect(await f.bytes()).toEqual(before); expect(f.options.run).toHaveBeenCalledTimes(1);
@@ -145,3 +148,38 @@ it('retains large original evidence once while replacement corrections grow by s
   expect(await bytesUnder(directory) - before).toBeLessThan(100*1024);
   expect(await readFile(f.reportPath)).toEqual(report);
 },30000);
+
+it('can inspect original inputs again without admitting their previously disposed report', async () => {
+  const f = await staleFixture(); await f.prepare(); await f.apply();
+  const manifest = await previewStaleReport({...f.selection,headSha:f.options.headSha,inputSha256:f.options.inputSha256},f.dir);
+  const path = join(f.cwd,'original-again.json'); await writeFile(path,JSON.stringify(manifest));
+  await applyStaleReport({manifest:path,manifestSha256:sha256(JSON.stringify(manifest)),mode:'apply'},f.dir);
+  await expect(guardReviewLaunch(f.options)).resolves.toMatchObject({attempt:2});
+  expect(f.options.run).toHaveBeenCalledTimes(2);
+});
+
+it('detects removal of the latest audit entry while retaining earlier evidence', async () => {
+  const f = await staleFixture(); await f.prepare(); await f.apply();
+  await (await correction(f,'e'.repeat(64))).apply();
+  const state = (await loadConvergeRunState(f.dir,f.target))!;
+  state.staleReportAudit!.pop(); await writeFile(f.statePath,JSON.stringify(state));
+  const before = await f.bytes();
+  await expect(guardReviewLaunch({...f.options,...f.selection})).rejects.toMatchObject({code:'stale_report_audit_invalid'});
+  expect(await f.bytes()).toEqual(before); expect(f.options.run).toHaveBeenCalledTimes(1);
+});
+
+it('does not repeatedly serialize the growing historical audit on a guarded launch', async () => {
+  const f = await staleFixture(); await f.prepare(); await f.apply();
+  for (let i=1;i<32;i++) await (await correction(f,i.toString(16).padStart(64,'0'))).apply();
+  const stringify = JSON.stringify;
+  let serializedEntries = 0;
+  const spy = vi.spyOn(JSON,'stringify').mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
+    const value = args[0];
+    if (value && typeof value === 'object' && Array.isArray(value.staleReportAudit)) serializedEntries += value.staleReportAudit.length;
+    return stringify(...args);
+  });
+  try {
+    await expect(guardReviewLaunch({...f.options,...f.selection})).resolves.toMatchObject({attempt:2});
+    expect(serializedEntries).toBeLessThanOrEqual(4*32);
+  } finally { spy.mockRestore(); }
+},60000);
