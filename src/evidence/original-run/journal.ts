@@ -112,14 +112,18 @@ export async function openJournal(path: string, manifestSha: string, operation: 
   await syncDirectory(dirname(path));
   const journal: ReadableJournal = { checkpoints: () => structuredClone(checkpoints), append: async (phase, data = null) => {
     if (typeof phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(phase)) throw new Error('invalid_recovery_checkpoint');
+    if (sequence >= MAX_RECOVERY_CHECKPOINTS) throw new Error('recovery_journal_checkpoint_limit');
     const retainedData: unknown = JSON.parse(JSON.stringify(data));
     await beforeWrite?.(phase);
     const current = await lstat(path, { bigint: true });
     if (!current.isDirectory() || current.dev !== directory.dev || current.ino !== directory.ino) throw new Error('recovery_journal_replaced');
     const record = { operation_id: operation, manifest_sha256: manifestSha, sequence: sequence + 1, previous_sha256: previous, phase, recorded_at: new Date().toISOString(), data: retainedData };
     const name = join(path, `${String(sequence + 1).padStart(8,'0')}.json`);
-    await writeExclusive(name, record, MAX_RECOVERY_CHECKPOINT_BYTES); sequence++;
-    previous = sha256(JSON.stringify(record, null, 2) + '\n');
+    const bytes = serializeRecoveryDocument(record, MAX_RECOVERY_CHECKPOINT_BYTES);
+    if (Buffer.byteLength(bytes, 'utf8') > MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes) throw new Error('recovery_journal_checkpoint_limit');
+    await writeExclusiveBytes(name, bytes); sequence++;
+    retainedBytes += Buffer.byteLength(bytes, 'utf8');
+    previous = sha256(bytes);
     checkpoints.push(record);
   } };
   if (torn.length) await journal.append('interrupted_checkpoints_retained', { files: torn });

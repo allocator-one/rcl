@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { MAX_RECOVERY_CHECKPOINTS, openJournal } from '../../src/evidence/original-run/journal.js';
+import { MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_CHECKPOINTS, openJournal } from '../../src/evidence/original-run/journal.js';
 
 const fault = vi.hoisted(() => ({ failures: 0, syncs: 0, entries: undefined as string[] | undefined }));
 vi.mock('node:fs/promises', async original => {
@@ -122,6 +122,30 @@ it('refuses a non-string phase before it can create an unreadable checkpoint', a
   expect(journal.checkpoints()).toEqual([]);
 });
 
+it.each([
+  ['an array record', () => []],
+  ['a phase with uppercase characters', (record: Record<string, unknown>) => ({ ...record, phase: 'Native_Verified' })],
+  ['a phase that starts with a digit', (record: Record<string, unknown>) => ({ ...record, phase: '1native_verified' })],
+  ['a missing timestamp', (record: Record<string, unknown>) => { delete record.recorded_at; return record; }],
+  ['an invalid timestamp', (record: Record<string, unknown>) => ({ ...record, recorded_at: 'not-a-date' })],
+  ['a missing data field', (record: Record<string, unknown>) => { delete record.data; return record; }],
+])('refuses a parseable checkpoint with %s', async (_description, mutate) => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  await journal.append('native_verified');
+  const checkpoint = join(file, '00000001.json');
+  const record = JSON.parse(await readFile(checkpoint, 'utf8')) as Record<string, unknown>;
+  await writeFile(checkpoint, JSON.stringify(mutate(record)));
+  await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('invalid_recovery_checkpoint');
+});
+
+it.each(['Native_Verified', '1native_verified', 'a'.repeat(129)])('refuses an invalid append phase %s before writing', async phase => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  await expect(journal.append(phase)).rejects.toThrow('invalid_recovery_checkpoint');
+  expect(await readdir(file)).toEqual([]);
+});
+
 it('resumes a read-only checkpoint where the platform permits read-descriptor synchronization', async () => {
   if (process.platform === 'win32') return;
   const file = await path();
@@ -136,4 +160,13 @@ it('refuses an oversized checkpoint count before reading or parsing entries', as
   await openJournal(file, manifest, operation, 'apply');
   fault.entries = Array.from({ length: MAX_RECOVERY_CHECKPOINTS + 1 }, (_, index) => `${String(index + 1).padStart(8, '0')}.json`);
   await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('recovery_journal_checkpoint_limit');
+});
+
+it('refuses an append that would make its own journal exceed the retained-byte limit', async () => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  const data = 'x'.repeat(MAX_RECOVERY_CHECKPOINT_BYTES - 8 * 1024);
+  for (let index = 0; index < 8; index++) await journal.append(`checkpoint_${index}`, data);
+  await expect(journal.append('checkpoint_over_limit', data)).rejects.toThrow('recovery_journal_checkpoint_limit');
+  await expect(openJournal(file, manifest, operation, 'resume')).resolves.toBeDefined();
 });
