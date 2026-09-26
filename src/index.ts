@@ -31,9 +31,9 @@ import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews, defaultAdapterFactory } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
-import { bindOriginalCouncil, executeCapturedOriginal } from './dispatch/original-execution.js';
+import { executeCapturedOriginal } from './dispatch/original-execution.js';
 import { executeCheckpointGating } from './dispatch/checkpoint-gating-execution.js';
-import { assertOriginalLaunchBudget, createOriginalLaunch, type OriginalLaunch } from './dispatch/original-launch.js';
+import { assertOriginalLaunchBudget, type OriginalLaunch } from './dispatch/original-launch.js';
 import { createCheckpointLateAudit, type CheckpointLateAudit } from './dispatch/late-audit.js';
 import type { CheckpointJournal } from './dispatch/checkpoint.js';
 import { withNativeTarget, type NativeTargetOwnership } from './converge/target-ownership.js';
@@ -44,6 +44,7 @@ import { projectCheckpointReport, type CheckpointReportProjection } from './repo
 import { captureSupplementalAsync } from './report/supplemental-async.js';
 import { describeReviewerEvidence } from './report/reviewer-evidence.js';
 import { serializeReviewerArtifact } from './report/reviewer-artifact.js';
+import { guardRetainedOriginal, type RetainedOriginalSession } from './evidence/reviewer-original.js';
 import { inspectReviewerStatus, formatReviewerStatus, inspectReviewerRecoveryPreview, formatReviewerRecoveryPreview } from './evidence/reviewer-status.js';
 import {
   partitionAsyncAssignments,
@@ -1910,6 +1911,8 @@ interface RetainedCouncilContext {
   launch: OriginalLaunch;
   journal: CheckpointJournal;
   lateAudit: CheckpointLateAudit;
+  signal: AbortSignal;
+  run: RetainedOriginalSession['run'];
 }
 
 async function loadCouncilWeights(opts: CouncilCliOpts, attestation?: Attestation): Promise<Map<string, number> | undefined> {
@@ -1959,7 +1962,7 @@ async function executeCouncil(
       }),
     }) : undefined;
     let completion: GuardedLaunchCompletion | undefined;
-    const claim = await guardReviewLaunch({
+    const guardOptions: GuardedLaunchOptions = {
       gitCommonDir: commonDir,
       target: prepared.converge!.target,
       headSha: extra.target.headSha ?? '',
@@ -1996,35 +1999,48 @@ async function executeCouncil(
         })]);
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
       },
-      run: async (converge, ownership) => {
-        let session: RetainedCouncilContext | undefined;
-        if (captured) {
-          const startedAtMs = Date.now();
-          const plan = buildCouncilRunPlan({ totalCalls: chunkAssignments.length, reviewers: assignments.length,
-            chunks: chunks.length, concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
-            timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS });
-          const maxAttemptsPerCell = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
-          const launch = createOriginalLaunch({ runId: uuidv7(), target: converge.target,
-            originalNativeClaim: { attempt: converge.attempt!, round: converge.round! },
-            capturedInputsSha256: captured.captured.digest, planDigest: captured.plan.digest,
-            startedAtMs, expiresAtMs: startedAtMs + plan.timeoutBoundMs,
-            maxPhysicalCalls: chunkAssignments.length * maxAttemptsPerCell, maxAttemptsPerCell });
-          const journal = await bindOriginalCouncil({ commonDir, ownership, captured: captured.captured, launch });
-          const lateAudit = createCheckpointLateAudit({ commonDir, ownership, journal, onError: (error) => {
+      run: async converge => {
+        completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
+          { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
+        return completion;
+      },
+    };
+    let claim;
+    if (captured) {
+      const startedAtMs = Date.now();
+      const plan = buildCouncilRunPlan({ totalCalls: chunkAssignments.length, reviewers: assignments.length,
+        chunks: chunks.length, concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+        timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS });
+      const maxAttemptsPerCell = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
+      claim = await guardRetainedOriginal({
+        guard: guardOptions, captured: captured.captured, diff, effectiveMergeBaseSha: captured.plan.mergeBaseSha,
+        run: { id: uuidv7(), rclVersion: RCL_VERSION, command: extra.command, target: extra.target, roster,
+          ...(prepared.spec ? { spec: prepared.spec } : {}),
+          contextFiles: contextDocs.map(doc => ({ path: doc.label, sha256: doc.sha256 })),
+          ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
+          runner: detectRunner(process.env, hostname()), startedAt: prepared.startedAt },
+        bounds: { startedAtMs, expiresAtMs: startedAtMs + plan.timeoutBoundMs,
+          maxPhysicalCalls: chunkAssignments.length * maxAttemptsPerCell, maxAttemptsPerCell },
+        // The public retained path is still explicitly local-only. Protected
+        // transport is integrated internally, not enabled by these CLI flags.
+        access: { kind: 'local' }, validate: guardOptions.validate, onClaim: guardOptions.onClaim,
+        execute: async original => {
+          const { ownership, journal, launch, signal, run } = original;
+          const lateAudit = createCheckpointLateAudit({ commonDir, ownership, journal, onError: error => {
             process.stderr.write(`Late reviewer response could not be retained: ${scrubText(String(error), 300)}\n`);
           } });
-          session = { commonDir, ownership, captured, launch, journal, lateAudit };
-        }
-        try {
-          completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
-            { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work, session);
-          return completion;
-        } finally {
-          // Drain only responses already observed; never wait for a hanging provider.
-          if (session && (await session.journal.read()).finalized) await session.lateAudit.drain();
-        }
-      },
-    });
+          const session = { commonDir, ownership, captured, launch, journal, lateAudit, signal, run };
+          try {
+            completion = await executeCouncil(spinner, { ...prepared, converge: run.converge }, diff,
+              { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work, session);
+            return completion;
+          } finally {
+            // Drain observed responses only; never wait for a hanging provider.
+            if ((await journal.read()).finalized) await lateAudit.drain();
+          }
+        },
+      });
+    } else claim = await guardReviewLaunch(guardOptions);
     if (claim.warning) process.stderr.write(`${claim.warning}\n`);
     return completion!;
   }
@@ -2136,7 +2152,7 @@ async function executeCouncil(
   try {
     if (retained) {
       const executed = await executeCapturedOriginal({ commonDir: retained.commonDir, ownership: retained.ownership,
-        journal: retained.journal, expectedPlan: retained.captured.plan, launch: retained.launch,
+        journal: retained.journal, expectedPlan: retained.captured.plan, launch: retained.launch, signal: retained.signal,
         onPhysicalReviewComplete: review => progress.complete(review),
         auditLateAttempt: retained.lateAudit.accept,
         onLateAuditError: error => process.stderr.write(`Late reviewer audit failed: ${scrubText(String(error), 300)}\n`),
@@ -2244,8 +2260,8 @@ async function executeCouncil(
     diff,
     gatingConfig: prepared.gatingConfig,
     modelWeights,
-    run: {
-      id: retained?.launch.runId ?? extra.attestation?.runId,
+    run: retained?.run ?? {
+      id: extra.attestation?.runId,
       rclVersion: RCL_VERSION,
       command: extra.command,
       target: extra.target,
@@ -2292,7 +2308,7 @@ async function executeCouncil(
   } : undefined;
   const checkpointGating = checkpointAssembly && retained ? await executeCheckpointGating({
     assembly: checkpointAssembly, commonDir: retained.commonDir, ownership: retained.ownership,
-    journal: retained.journal,
+    journal: retained.journal, signal: retained.signal,
     askFactory: model => {
       assemblyDependencies.onVerificationStart?.();
       const adapter = defaultAdapterFactory(detectProvider(model));

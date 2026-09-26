@@ -203,3 +203,28 @@ describe('fetchPRDiff', () => {
     ).rejects.toThrow(/moved .*basesha999/);
   });
 });
+
+
+describe('retained PR effective merge-base binding', () => {
+  const target = { owner: 'o', repo: 'r', number: 1 };
+  function strictFixture(count = 3) {
+    const pr = fakePr(count); pr.data.base.sha = 'a'.repeat(40); pr.data.head.sha = 'b'.repeat(40);
+    return octokitWith({ pr });
+  }
+  it('returns the actual merge base separately from the upstream tip', async () => {
+    const f = strictFixture(); f.compare.mockResolvedValue({ data: { files: files(3), merge_base_commit: { sha: 'c'.repeat(40) } } } as any);
+    const diff = await fetchPRDiff(target, undefined, f.octokit, { requireMergeBase: true });
+    expect(diff.metadata).toMatchObject({ baseSha: 'a'.repeat(40), mergeBaseSha: 'c'.repeat(40), headSha: 'b'.repeat(40) });
+    expect(f.compare).toHaveBeenCalledWith({ owner: 'o', repo: 'r', basehead: `${'a'.repeat(40)}...${'b'.repeat(40)}` });
+  });
+  it.each([undefined, 'bad', 'a'.repeat(40) + '\n'])('refuses absent/malformed merge-base %s without a tip substitution', async sha => {
+    const f = strictFixture(); f.compare.mockResolvedValue({ data: { files: files(3), merge_base_commit: { sha } } } as any);
+    await expect(fetchPRDiff(target, undefined, f.octokit, { requireMergeBase: true })).rejects.toThrow('merge base');
+    expect(f.paginate).not.toHaveBeenCalled();
+  });
+  it('still obtains a pinned merge base when full files require bracketed pagination', async () => {
+    const f = strictFixture(301); f.compare.mockResolvedValue({ data: { files: files(300), merge_base_commit: { sha: 'c'.repeat(40) } } } as any);
+    const diff = await fetchPRDiff(target, undefined, f.octokit, { requireMergeBase: true });
+    expect(diff.files).toHaveLength(301); expect(diff.metadata?.mergeBaseSha).toBe('c'.repeat(40)); expect(f.paginate).toHaveBeenCalledOnce();
+  });
+});
