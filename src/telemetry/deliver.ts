@@ -17,6 +17,7 @@ import { describeOutcome, HarnessSink, type RunReceipt, type SinkOutcome } from 
 import type { ReviewerArtifact } from '../report/reviewer-artifact.js';
 import { ReviewerDeliveryQueue, REVIEWER_OUTBOX_DIR } from './reviewer-delivery.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
+import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
 
 /**
  * Evidence delivery for a finished review and for the converge commands
@@ -285,6 +286,8 @@ export interface DeliverRunInput {
   reviewerArtifact?: ReviewerArtifact;
   /** Independently bound immediate parent for a supplemented artifact. */
   reviewerSource?: ReviewerRecoverySource;
+  /** Explicit current-workflow coordinator; never reconstructed from an ordinary credential or queue. */
+  attestedReviewer?: AttestedReviewerDelivery;
   evidenceRequired?: boolean;
   events?: WireEvent[];
   /** Requested report files that could not be written; the rendered originals still exist in memory. */
@@ -341,7 +344,9 @@ async function deliverReviewerRun(runtime: TelemetryRuntime, input: DeliverRunIn
   const finish = (status: DeliveryStatus, spooled: boolean, line: string): DeliveryOutcome => ({ status, spooled, line, runId, exitCode: exitFor(status, required) });
   if (runtime.level === 'off' || !runtime.repoManaged) return finish('off', false, required ? 'Private reviewer evidence retained locally; telemetry is off' : '');
   if (!runId || !input.reviewerArtifact || !input.result.run?.reviewer_evidence || runtime.level !== 'full' ||
-    runtime.attested || !runtime.sink || !runtime.credential || input.events?.length) {
+    !runtime.sink || !runtime.credential || input.events?.length ||
+    (runtime.attested ? !(input.attestedReviewer instanceof AttestedReviewerDelivery) ||
+      !input.attestedReviewer.matchesRuntime(runtime.credential, runtime.attestedExpiresAt) : input.attestedReviewer !== undefined)) {
     return finish('rejected', false, 'Private reviewer delivery requires complete retained evidence, full telemetry and a supported current owner credential');
   }
   const queue = new ReviewerDeliveryQueue(runtime.dataDir);
@@ -350,9 +355,15 @@ async function deliverReviewerRun(runtime: TelemetryRuntime, input: DeliverRunIn
       ...(input.reviewerSource === undefined ? {} : { source: input.reviewerSource }) });
     const envelope = buildRunEnvelope(input.result, input.artifacts, { level: 'full', delivery: { mode: 'direct' }, parseFailures: runtime.parseFailures, reviewerRecovery: declaration });
     await noticeBefore(runtime, 'private-reviewers');
+    if (runtime.attested) {
+      await input.attestedReviewer!.deliver({ envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
+      return finish('recorded', false, 'Private evidence and embedded JSON read back; ordinary artifact PUT receipts verified; no native admission implied');
+    }
     await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
     return finish('recorded', false, 'Reviewer evidence and ordinary reports recorded and read back; no native admission implied');
   } catch {
+    if (runtime.attested) return finish('rejected', false,
+      'Attested private delivery incomplete; nothing spooled and original checkpoint evidence is unchanged');
     const retained = await queue.isRetained(runId);
     return finish(retained ? 'spooled' : 'rejected', retained,
       retained ? 'Private reviewer delivery incomplete; exact bytes retained for an owner-checked telemetry flush' : 'Private reviewer delivery refused locally; original checkpoint evidence is unchanged');

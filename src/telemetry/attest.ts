@@ -1,4 +1,7 @@
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
+import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
+import type { ReviewerRecoverySource } from './envelope.js';
 import { scrubText } from './scrub.js';
 import { readBounded } from './sink.js';
 
@@ -63,6 +66,8 @@ export interface AttestOptions {
   /** The rcl run id this review will record — minted before the review, bound by the credential. */
   runId: string;
   rclVersion: string;
+  /** Exact immediate parent requested from the server; never an ancestor list or client authority. */
+  reviewerRecovery?: ReviewerAttestationRequest;
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   /** Injected by tests; the pause between exchange retries. */
@@ -77,6 +82,33 @@ export interface Attestation {
   expiresAt: string;
   /** The OIDC audience requested: the Harness origin. */
   audience: string;
+  /** The immutable request binding; the opaque credential carries the server's authorization. */
+  reviewerRecovery?: ReviewerAttestationRequest;
+}
+
+export interface ReviewerAttestationRequest { readonly version: 1; readonly source: Readonly<ReviewerRecoverySource> }
+const reviewerRequestSchema = z.object({ version: z.literal(1), source: z.object({
+  run_id: z.string().regex(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![\s\S])/i),
+  report_sha256: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
+  reviewer_artifact_sha256: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
+}).strict() }).strict();
+const freshAttestations = new WeakMap<Attestation, Attestation>();
+
+/** Validate and snapshot only the exact-parent request, without asserting a signed grant. */
+export function snapshotReviewerAttestation(runId: string, value: ReviewerAttestationRequest): ReviewerAttestationRequest {
+  const result = reviewerRequestSchema.safeParse(value);
+  if (!result.success || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![\s\S])/i.test(runId) ||
+    result.data.source.run_id.toLowerCase() === runId.toLowerCase()) {
+    throw new AttestError('invalid_attestation', 'Invalid reviewer recovery attestation request');
+  }
+  return Object.freeze({ version: 1, source: Object.freeze(result.data.source) });
+}
+
+/** One ephemeral first-delivery permission from an unchanged actual exchange, never restorable from disk. */
+export function consumeFreshAttestation(value: Attestation): boolean {
+  const original = freshAttestations.get(value);
+  freshAttestations.delete(value);
+  return original !== undefined && isDeepStrictEqual(value, original);
 }
 
 /** What Harness says when it refuses, worded for the workflow log. */
@@ -201,7 +233,8 @@ async function exchangeOnce(
   runId: string,
   rclVersion: string,
   fetchImpl: typeof fetch,
-  secrets: readonly string[]
+  secrets: readonly string[],
+  reviewerRecovery?: ReviewerAttestationRequest
 ): Promise<ExchangeResult> {
   let response: Response;
   try {
@@ -215,7 +248,7 @@ async function exchangeOnce(
         'x-harness-client-version': rclVersion,
         'user-agent': `rcl/${rclVersion} node/${process.versions.node}`,
       },
-      body: JSON.stringify({ run_id: runId }),
+      body: JSON.stringify({ run_id: runId, ...(reviewerRecovery === undefined ? {} : { reviewer_recovery: reviewerRecovery }) }),
       signal: AbortSignal.timeout(ATTEST_TIMEOUT_MS),
       redirect: 'manual',
     });
@@ -282,6 +315,8 @@ async function exchangeOnce(
  * behind it) is retried a bounded number of times first.
  */
 export async function attestRun(options: AttestOptions): Promise<Attestation> {
+  const runId = options.runId;
+  const reviewerRecovery = options.reviewerRecovery === undefined ? undefined : snapshotReviewerAttestation(runId, options.reviewerRecovery);
   const env = options.env ?? process.env;
   const fetchImpl = options.fetchImpl ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -296,17 +331,20 @@ export async function attestRun(options: AttestOptions): Promise<Attestation> {
   let lastRetry = '';
   for (let attempt = 0; attempt <= ATTEST_RETRIES; attempt++) {
     if (attempt > 0) await sleep(RETRY_PAUSE_MS);
-    const result = await exchangeOnce(base, oidcToken, options.runId, options.rclVersion, fetchImpl, secrets);
+    const result = await exchangeOnce(base, oidcToken, runId, options.rclVersion, fetchImpl, secrets, reviewerRecovery);
     if ('retry' in result) {
       lastRetry = result.retry;
       continue;
     }
-    return {
+    const attestation: Attestation = {
       credential: { url: base, token: result.credential, source: 'attest' },
-      runId: options.runId,
+      runId,
       expiresAt: result.expiresAt,
       audience,
+      ...(reviewerRecovery === undefined ? {} : { reviewerRecovery }),
     };
+    freshAttestations.set(attestation, structuredClone(attestation));
+    return attestation;
   }
   throw new AttestError(
     'harness_unavailable',
@@ -338,7 +376,7 @@ export async function renewAttestation(current: Attestation, options: RenewOptio
   const expires = Date.parse(current.expiresAt);
   if (Number.isFinite(expires) && expires - now > RENEW_BEFORE_MS) return { attestation: current, renewed: false };
   try {
-    const fresh = await attestRun({ ...options, runId: current.runId });
+    const fresh = await attestRun({ ...options, runId: current.runId, reviewerRecovery: current.reviewerRecovery });
     return { attestation: fresh, renewed: true };
   } catch (err) {
     return { attestation: current, renewed: false, failure: err instanceof Error ? err.message : String(err) };
