@@ -23,7 +23,10 @@ export async function readStable(path: string, limit = MAX_REPORT_BYTES, options
   if (await realpath(dirname(canonical)) !== dirname(canonical)) throw new Error('symlink_directory');
   const entry = await lstat(canonical);
   if (!entry.isFile()) throw new Error(entry.isSymbolicLink() ? 'symlink_file' : 'not_regular');
-  const handle = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  // A same-descriptor durability check needs a writable descriptor on Windows.
+  // Journal checkpoints are already qualified as private, user-owned files.
+  const access = options.sync ? constants.O_RDWR : constants.O_RDONLY;
+  const handle = await open(canonical, access | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat();
     if (!before.isFile()) throw new Error('not_regular');

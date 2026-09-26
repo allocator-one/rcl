@@ -110,7 +110,7 @@ export async function openJournal(path: string, manifestSha: string, operation: 
   await storage.sync(path);
   await storage.sync(dirname(path));
   const journal: ReadableJournal = { checkpoints: () => structuredClone(checkpoints), append: async (phase, data = null) => {
-    if (!/^[a-z][a-z0-9_]{0,127}$/.test(phase)) throw new Error('invalid_recovery_checkpoint');
+    if (typeof phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(phase)) throw new Error('invalid_recovery_checkpoint');
     const retainedData: unknown = JSON.parse(JSON.stringify(data));
     await beforeWrite?.(phase);
     const current = await lstat(path, { bigint: true });

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openJournal } from '../../src/evidence/original-run/journal.js';
@@ -104,4 +104,12 @@ it('refuses a parseable checkpoint with no valid phase instead of treating it as
   record.phase = { native_verified: true };
   await writeFile(checkpoint, JSON.stringify(record));
   await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('invalid_recovery_checkpoint');
+});
+
+it('refuses a non-string phase before it can create an unreadable checkpoint', async () => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  await expect(journal.append(null as unknown as string)).rejects.toThrow('invalid_recovery_checkpoint');
+  expect(await readdir(file)).toEqual([]);
+  expect(journal.checkpoints()).toEqual([]);
 });
