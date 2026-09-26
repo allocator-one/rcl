@@ -43,3 +43,10 @@ it('negotiates a first cycle before Harness has any cached head or review histor
     cycle_protocol: 1, active_cycle: null, head: null } } }));
   expect(await remote.current()).toBeNull();
 });
+
+it.each(['./repo', '../repo', 'owner/.', 'owner/..'])('rejects URL dot segments in repository %s before transport', repo => {
+  const { fetch, requests } = fakeFetch(() => ({ status: 500, body: {} }));
+  const sink = new HarnessSink({ credential: { url: 'https://harness.example', token: 'fixture', source: 'login' }, rclVersion: '4.1.11', fetchImpl: fetch });
+  expect(() => createReviewCycleRemote(sink, repo, 42, head)).toThrow('fresh_review_requires_pr');
+  expect(requests).toHaveLength(0);
+});

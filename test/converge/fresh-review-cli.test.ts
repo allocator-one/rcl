@@ -19,7 +19,7 @@ const digest = (value: Buffer | string) => createHash('sha256').update(value).di
 
 async function fixture(work: (f: {
   root: string; run: (args: string[]) => Promise<{ code: number | null; output: string }>;
-  calls: () => number; envelopes: any[]; cycles: ReviewCycleReceipt[]; requests: string[];
+  calls: () => number; events: any[]; envelopes: any[]; cycles: ReviewCycleReceipt[]; requests: string[];
 }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'rcl-fresh-cli-'));
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }, encoding: 'utf8' }).trim();
@@ -31,7 +31,7 @@ async function fixture(work: (f: {
   await writeFile(join(root, '.review-council.json'), JSON.stringify({ models: ['openai-compat/fixture'], secondaryModels: [], asyncModels: [],
     roles: ['general', 'security-auditor'], harness: { telemetry: 'full' }, gating: { mode: 'all-findings' } }));
   let calls = 0;
-  const cycles: ReviewCycleReceipt[] = [], envelopes: any[] = [], requests: string[] = [];
+  const cycles: ReviewCycleReceipt[] = [], envelopes: any[] = [], events: any[] = [], requests: string[] = [];
   const server = createServer(async (req, res) => {
     const parts: Buffer[] = []; for await (const part of req) parts.push(Buffer.from(part));
     const raw = Buffer.concat(parts), path = req.url!;
@@ -66,7 +66,10 @@ async function fixture(work: (f: {
     }
     const artifact = path.match(/^\/api\/v1\/reviews\/runs\/[^/]+\/artifacts\/(report_json|report_md)$/);
     if (artifact && req.method === 'PUT') return answer(201, { data: { kind: artifact[1], sha256: digest(raw) } });
-    if (path === '/api/v1/reviews/events') return answer(200, { data: { inserted: 1, duplicates: 0 } });
+    if (path === '/api/v1/reviews/converge/events') {
+      events.push(...JSON.parse(raw.toString()).events);
+      return answer(200, { data: { inserted: 1, duplicates: 0 } });
+    }
     return answer(404, { error: 'unexpected_fixture_request', path });
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -88,7 +91,7 @@ async function fixture(work: (f: {
     const timeout = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('fixture CLI timeout')); }, 30_000);
     child.on('error', reject); child.on('close', code => { clearTimeout(timeout); resolve({ code, output }); });
   });
-  try { await work({ root, run, calls: () => calls, envelopes, cycles, requests }); }
+  try { await work({ root, run, calls: () => calls, events, envelopes, cycles, requests }); }
   finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
 }
 
@@ -124,6 +127,9 @@ it('runs a bare explicit fresh PR review, retains outputs, binds admission, and 
     expect(next.code, next.output).toBe(0);
     expect(f.calls()).toBe(4);
     expect(f.cycles).toHaveLength(2);
+    expect(f.events.filter(e => e.kind === 'attempt_claimed').map(e => e.payload)).toEqual(
+      f.cycles.map(cycle => ({ attempt: 1, cap: 20, cycle_id: cycle.id }))
+    );
     const oldAdmission = await f.run(['converge-report', '--target', 'repo-42', '--round', '1', '--report', reportPath]);
     expect(oldAdmission.output).toContain('review_cycle_mismatch');
     expect(await loadConvergeAttemptState(join(f.root, '.git'), 'repo-42')).toMatchObject({ attemptsUsed: 1, cycle: { history: { attempts: 1, rounds: 1 } } });
@@ -131,6 +137,7 @@ it('runs a bare explicit fresh PR review, retains outputs, binds admission, and 
       const destination = process.env.RCL_TEST_EVIDENCE_DIR;
       await mkdir(destination, { recursive: true, mode: 0o700 });
       await writeFile(join(destination, 'cycles.json'), JSON.stringify(f.cycles));
+      await writeFile(join(destination, 'events.json'), JSON.stringify({ events: f.events }));
       for (const [i, envelope] of f.envelopes.entries()) {
         await writeFile(join(destination, `envelope-${i + 1}.json`), JSON.stringify(envelope));
       }

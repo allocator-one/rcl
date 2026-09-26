@@ -7,7 +7,7 @@ export class ReviewCycleRejected extends Error {}
 
 export function createReviewCycleRemote(sink: HarnessSink, repo: string, prNumber: number, headSha: string): ReviewCycleRemote {
   if (sink.credentialSource === 'attest') throw new Error('fresh_review_requires_actor_credential');
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || !Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('fresh_review_requires_pr');
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split('/').some(segment => segment === '.' || segment === '..') || !Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('fresh_review_requires_pr');
   repo = repo.toLowerCase();
   const path = `/api/v1/reviews/prs/${repo.split('/').map(encodeURIComponent).join('/')}/${prNumber}`;
   return {

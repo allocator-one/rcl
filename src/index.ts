@@ -1957,7 +1957,7 @@ async function executeCouncil(
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
           kind: 'attempt_claimed', convergeTarget: claim.target, attempt: claim.attempt,
-          payload: { attempt: claim.attempt, cap: claim.cap },
+          payload: { attempt: claim.attempt, cap: claim.cap, ...(claim.cycle ? { cycle_id: claim.cycle.id } : {}) },
         })]);
         if (claim.cycle) process.stderr.write(`Review cycle ${claim.cycle.id}. Prior local history: ${claim.cycle.history.attempts} attempts, ${claim.cycle.history.rounds} admitted rounds${claim.cycle.history.incomplete ? ' (known history only)' : ''}.\n`);
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);

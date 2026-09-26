@@ -27,10 +27,10 @@ it('starts unchanged inputs with a normal budget while retaining the original 17
   for (const [path, bytes] of [[attemptsPath, oldAttempts], [runPath, oldRun]] as const) {
     await mkdir(dirname(path), { recursive: true }); await writeFile(path, bytes);
   }
-  let active: null | { id: string; operation_id: string; previous_cycle_id: null; head_sha: string; inserted_at: string } = null;
+  let active: import('../../src/converge/review-cycle.js').ReviewCycleReceipt | null = null;
   const cycleRemote = { repo: 'allocator-one/rcl', prNumber: 42, url: 'https://harness.example',
     current: vi.fn(async () => active),
-    start: vi.fn(async (request: { operation_id: string; previous_cycle_id: null; head_sha: string }) => {
+    start: vi.fn(async (request: import('../../src/converge/review-cycle.js').ReviewCycleRequest) => {
       active = { ...request, id: randomUUID(), inserted_at: at }; return active;
     }) };
   const run = vi.fn(async () => ({ runId: randomUUID(), reportJsonSha256: 'd'.repeat(64),
