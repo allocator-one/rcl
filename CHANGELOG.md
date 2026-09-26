@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 4.1.7 - 2026-09-26
+
+- Add supported preview/apply/resume recovery for a healthy report that became
+  stale before admission. Preserve reports, findings and spending while allowing
+  the next guarded review (RCL-106).
+- Retain every inspected replacement input, verify the complete audit history,
+  and share immutable evidence between corrections. Returning to an earlier
+  replacement no longer requires another disposition (RCL-106).
+- Allow inspected reversion to original inputs without reviving a disposed report;
+  detect truncated audit lists and incrementally hash their retained prefixes (RCL-106).
+- Report invalid audit evidence and missing resume operations explicitly; avoid
+  syncing a read-only retained-evidence file handle on Windows (RCL-106).
+
+- Recheck retained disposition receipts before fresh report admission and validate
+  shared report evidence once per history traversal (RCL-106).
+
 ## 4.1.6 - 2026-09-26
 
 - Permit an explicit bounded same-head retry after an inconclusive guarded
