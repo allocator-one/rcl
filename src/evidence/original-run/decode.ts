@@ -25,7 +25,7 @@ function decimalIdentity(token: string): string {
   const [mantissa, exponent = '0'] = (negative ? token.slice(1) : token).toLowerCase().split('e');
   const [integer, fraction = ''] = mantissa!.split('.');
   const digits = (integer! + fraction).replace(/^0+/, '');
-  if (!digits) return '0';
+  if (!digits) return negative ? '-0' : '0';
   const significant = digits.replace(/0+$/, '');
   const power = Number(exponent) - fraction.length + digits.length - significant.length;
   if (!Number.isSafeInteger(power)) throw new Error('invalid_or_ambiguous_original_json');

@@ -31,6 +31,11 @@ it('does not conflate distinct raw UTF-16 units with the same replacement-encode
   decodeRecoveryOriginal(valid);
   expect(() => decodeRecoveryOriginal(high)).toThrow('unsupported_literal_surrogate');
 });
+it('rejects negative-zero spellings in strict recovery interpretation while retaining positive zero', () => {
+  for (const value of ['-0', '-0.0', '-0e1'])
+    expect(() => decodeRecoveryOriginal(`{"value":${value}}`, { exactNumbers: true })).toThrow('invalid_or_ambiguous_original_json');
+  expect(decodeRecoveryOriginal('{"value":0}', { exactNumbers: true }).value).toEqual({ value: 0 });
+});
 it('evicts bounded entries and never caches duplicate-key refusal', () => {
   const spy = vi.spyOn(decoder, 'decodeOriginalReport');
   const first = original('eviction first'); decodeRecoveryOriginal(first);

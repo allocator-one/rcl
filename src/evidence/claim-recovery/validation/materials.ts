@@ -91,7 +91,7 @@ export function packRecoveryMaterial(value: unknown): {
       return encoded.node;
     };
     if(v===null||typeof v==='boolean'||typeof v==='number'||typeof v==='string') {
-      requireMaterial(typeof v!=='number'||(Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER));
+      requireMaterial(typeof v!=='number'||(Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER&&!Object.is(v,-0)));
       node=[0,v];
       expand(Buffer.byteLength(JSON.stringify(v)));
     }

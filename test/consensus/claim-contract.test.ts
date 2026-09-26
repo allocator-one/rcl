@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { describeClaim, compareClaims } from '../../src/consensus/claim-identity.js';
 import { describeContract } from '../../src/consensus/claim-contract.js';
@@ -95,15 +96,17 @@ describe('bounded semantic contracts', () => {
   it('rejects a long malformed query suffix without excessive backtracking', () => {
     const finding = { ...original('c002'),
       suggestedFix: "const query = 'SELECT * FROM users WHERE id = $1'; return db.query(query, [userId])" };
-    const script = `import { describeContract } from './src/consensus/claim-contract.ts';
+    const moduleUrl = new URL('../../src/consensus/claim-contract.ts', import.meta.url).href;
+    const tsxLoader = new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href;
+    const script = `import { describeContract } from ${JSON.stringify(moduleUrl)};
       const finding = ${JSON.stringify(finding)};
       finding.suggestedFix += ' '.repeat(200000) + '!';
       if (describeContract(finding) !== undefined) process.exit(1);`;
-    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
-      encoding: 'utf8', timeout: 4000, env: { PATH: process.env.PATH, LANG: 'C' },
+    const result = spawnSync(process.execPath, ['--import', tsxLoader, '--input-type=module', '--eval', script], {
+      cwd: tmpdir(), encoding: 'utf8', timeout: 4000, env: { PATH: process.env.PATH, LANG: 'C' },
     });
-    expect(result.error).toBeUndefined();
-    expect(result.status).toBe(0);
+    expect(result.error, result.stderr).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
   });
 
   it('recognizes the supported plural ownership paraphrase without mixing resources', () => {

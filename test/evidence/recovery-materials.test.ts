@@ -181,3 +181,14 @@ it('refuses an unsafe numeric binding before it can publish unreadable material'
     expect(await readdir(join(dir, 'pool'))).toEqual([]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+it('refuses negative zero material before a scalar or nested proof can be published', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rcl-material-negative-zero-'));
+  try {
+    expect(() => packRecoveryMaterial(-0)).toThrow('recovery_material_conflict');
+    await expect(writeClaimProof(join(dir, 'proof.json'), join(dir, 'pool'), { nested: -0 }))
+      .rejects.toThrow('recovery_material_conflict');
+    expect(await readdir(dir)).toEqual(['pool']);
+    expect(await readdir(join(dir, 'pool'))).toEqual([]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
