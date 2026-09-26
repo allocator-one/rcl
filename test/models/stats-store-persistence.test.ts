@@ -75,13 +75,14 @@ const records = async (file: string) => (await readFile(join(dir, file), 'utf8')
 type ProtocolEvent = { type: 'rcl-stats-store-protocol'; event: string; path?: string };
 type ProtocolChild = { child: ChildProcess; events: ProtocolEvent[]; stderr: () => string };
 
-function protocolChild(path: string, recordId: string, pauseAt?: string): ProtocolChild {
+function protocolChild(path: string, recordId: string, pauseAt?: string, legacy = false): ProtocolChild {
   const events: ProtocolEvent[] = [];
   let stderr = '';
   const child = fork(resolve('test/fixtures/stats-store-protocol-child.ts'), [path, recordId], {
     execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     env: { PATH: process.env.PATH ?? '', NODE_ENV: 'test', NODE_NO_WARNINGS: '1',
-      RCL_TEST_STATS_STORE_TRACE: '1', ...(pauseAt ? { RCL_TEST_STATS_STORE_PAUSE_AT: pauseAt } : {}) },
+      RCL_TEST_STATS_STORE_TRACE: '1', ...(pauseAt ? { RCL_TEST_STATS_STORE_PAUSE_AT: pauseAt } : {}),
+      ...(legacy ? { RCL_TEST_STATS_STORE_LEGACY: '1' } : {}) },
   });
   children.push(child);
   child.stderr?.on('data', chunk => { stderr += String(chunk); });
@@ -276,13 +277,14 @@ it('rejects invalid retained ordering before creating a store', async () => {
   await expect(readFile(join(missing, 'outcomes.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-it('flushes previously created ancestor entries again after a failed directory flush', async () => {
+it('retries shared creation durability for an actual legacy write after a failed directory flush', async () => {
   const nested = join(dir, 'nested', 'store');
   fault.directory = dir; fault.syncFailures = 2;
-  await expect(appendCalls([call('operation:0')], nested)).rejects.toMatchObject({ code: 'EIO' });
-  await expect(appendCalls([call('operation:0')], nested)).rejects.toMatchObject({ code: 'EIO' });
+  const legacy = [{ ...call('legacy:0'), recordId: undefined }];
+  await expect(appendCalls(legacy, nested)).rejects.toMatchObject({ code: 'EIO' });
+  await expect(appendCalls(legacy, nested)).rejects.toMatchObject({ code: 'EIO' });
   await expect(readFile(join(nested, 'calls.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
-  await appendCalls([call('operation:0')], nested);
+  await appendCalls(legacy, nested);
   expect((await loadModelStats({ dir: nested, now }))[0]?.calls).toBe(1);
 });
 
@@ -352,6 +354,27 @@ it('rechecks a target that appears after discovery and blocks acknowledgement un
   expect(directorySync).toBeGreaterThan(fileSync);
   expect(acknowledgement).toBeGreaterThan(directorySync);
   expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual(['race:0']);
+}, 20_000);
+
+it('repairs a current-version legacy creator crash before retained acknowledgement', async () => {
+  const nested = join(dir, 'nested', 'middle', 'store');
+  const legacy = protocolChild(nested, 'legacy-race:0', 'target-visible', true);
+  await protocolEvent(legacy, 'target-visible');
+  expect(legacy.events.map(event => event.event)).not.toContain('acknowledged');
+
+  const retained = protocolChild(nested, 'retained-race:0');
+  legacy.child.kill('SIGKILL'); await once(legacy.child, 'exit');
+  expect(legacy.child.signalCode).toBe('SIGKILL');
+  await protocolEvent(retained, 'acknowledged');
+  await successfulProtocolChild(retained);
+
+  const anchorSync = eventIndex(retained, 'created-chain-synced', dir);
+  const fileSync = eventIndex(retained, 'history-file-synced', join(nested, 'calls.jsonl'));
+  const directorySync = eventIndex(retained, 'history-directory-synced', nested);
+  expect(fileSync).toBeGreaterThan(anchorSync);
+  expect(directorySync).toBeGreaterThan(fileSync);
+  expect(eventIndex(retained, 'acknowledged')).toBeGreaterThan(directorySync);
+  expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual(['retained-race:0']);
 }, 20_000);
 
 it('rediscovers the original intent when a partial ancestor appears after the missing-target check', async () => {

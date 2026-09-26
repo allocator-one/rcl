@@ -153,9 +153,9 @@ function readableRecords<T extends PrecisionRecord>(records: T[]): T[] {
   return accepted;
 }
 
-// Legacy writes retain their original fast directory preparation. Retained writes
-// use a durable intent so a cooperating process can repair a creator crash.
-const pendingDirectorySyncs = new Map<string, string[]>();
+// New directories use a durable intent so a cooperating current-version writer
+// can repair a creator crash before either legacy or retained history is acknowledged.
+// Genuinely pre-existing directories without an intent remain an established boundary.
 type DurableIntent = { version: 1; target: string; anchor: string; phase: 'creating' | 'published' };
 
 async function retainedProtocolTestEvent(event: string, path?: string): Promise<void> {
@@ -280,11 +280,11 @@ async function createRetainedChain(target: string, anchor: string): Promise<void
 }
 
 /**
- * Retained writes publish a durable intent before mkdir. Cooperating writers
- * discover it from the target's ancestors and repair its bounded chain before
- * any acknowledgement; legacy pre-existing directories have no such intent.
+ * Current-version writers publish a durable intent before mkdir. Cooperating
+ * writers discover it from the target's ancestors and repair its bounded chain
+ * before acknowledgement; genuinely pre-existing directories have no intent.
  */
-async function prepareRetainedDirectory(inputDir: string): Promise<string> {
+async function prepareDirectory(inputDir: string, strictPath: boolean): Promise<string> {
   const target = resolve(inputDir);
   let discovered = await discoverIntent(target);
   if (!discovered) {
@@ -293,7 +293,10 @@ async function prepareRetainedDirectory(inputDir: string): Promise<string> {
       const existing = await lstat(target);
       if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error('unsafe_precision_store');
       const dir = await realpath(target);
-      if (dir !== target) throw new Error('unsafe_precision_store');
+      // Legacy callers have always accepted a pre-existing data directory
+      // reached through a system ancestor alias. Retained callers keep the
+      // stricter path boundary for their identity-bearing history.
+      if (strictPath && dir !== target) throw new Error('unsafe_precision_store');
       // The target may have appeared after the first discovery pass. Its
       // creator publishes the intent before mkdir, so a second pass closes
       // that race without burdening genuinely pre-existing stores.
@@ -343,27 +346,6 @@ async function prepareRetainedDirectory(inputDir: string): Promise<string> {
   return await realpath(target);
 }
 
-async function syncDirectoryAncestors(inputDir: string): Promise<string> {
-  const target = resolve(inputDir);
-  const firstCreated = await mkdir(target, { recursive: true, mode: 0o700 });
-  const dir = await realpath(target);
-  let paths = pendingDirectorySyncs.get(dir) ?? [];
-  if (firstCreated) {
-    const boundary = await realpath(dirname(firstCreated));
-    const created: string[] = [];
-    for (let path = dir; dirname(path) !== path; path = dirname(path)) {
-      created.push(path);
-      if (path === boundary) break;
-    }
-    paths = [...new Set([...paths, ...created])];
-  }
-  if (paths.length === 0) return dir;
-  try { for (const path of paths) await syncNativeDirectory(path); }
-  catch (error) { pendingDirectorySyncs.set(dir, paths); throw error; }
-  pendingDirectorySyncs.delete(dir);
-  return dir;
-}
-
 async function trailingSeparator(handle: Awaited<ReturnType<typeof open>>): Promise<string> {
   const { size } = await handle.stat();
   if (size === 0) return '';
@@ -380,7 +362,7 @@ async function appendJsonl(inputDir: string, file: string, input: PrecisionRecor
   const retained = records.some(record => record.recordId !== undefined);
   if (retained && records.some(record => record.recordId === undefined)) throw new Error('mixed_precision_batch');
   identityIndex(records);
-  const dir = retained ? await prepareRetainedDirectory(inputDir) : await syncDirectoryAncestors(inputDir);
+  const dir = await prepareDirectory(inputDir, retained);
   await withNativeLock(join(dir, 'model-stats-locks'), file, async () => {
     const handle = await open(join(dir, file), constants.O_CREAT | constants.O_RDWR | constants.O_APPEND |
       (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600);
