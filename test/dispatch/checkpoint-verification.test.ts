@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
-import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, decodeVerificationProof,
+import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, decodeVerificationProof, snapshotVerificationEvent,
   validateVerificationRecordsForAppend } from '../../src/dispatch/checkpoint-verification.js';
 import { planGating } from '../../src/consensus/gating.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
@@ -36,6 +36,15 @@ function planInput() {
     startedAtMs: 200, expiresAtMs: 800, verificationTimeoutMs: plan.verificationTimeoutMs, verificationPassTimeoutMs: plan.verificationPassTimeoutMs, maxPhysicalCalls: 2 };
 }
 
+function widePlanInput(batchCount: number, promptBytes: number) {
+  const batches = Array.from({ length: batchCount }, (_, index) => ({ systemPrompt: `${index}:${'S'.repeat(promptBytes - `${index}:`.length)}`, userPrompt: `review ${index}` }));
+  const wire = { version: 1 as const, findings: [], initialGating: [], candidateIndices: [], model: 'openai/verifier',
+    verificationTimeoutMs: 100, verificationPassTimeoutMs: 600,
+    batches: batches.map((batch, index) => ({ findingIndices: [index], ...batch })) };
+  return { runId, gatingPlanBytes: stableStringify(wire), model: wire.model, provider: 'openai', batches,
+    startedAtMs: 200, expiresAtMs: 800, verificationTimeoutMs: 100, verificationPassTimeoutMs: 600, maxPhysicalCalls: 500 };
+}
+
 const intent = (batchIndex = 0) => ({ batchIndex, attemptId: `verifier-${batchIndex}`, startedAtMs: 210 + batchIndex });
 const answer = (extra = {}) => JSON.stringify({ model: 'openai/verifier', provider: 'openai', status: 'success', text: '[{"id":"F1","refuted":false}]', durationMs: 10, ...extra }, null, 2) + '\n';
 const outcome = (batchIndex = 0) => ({ batchIndex, attemptId: `verifier-${batchIndex}`, finishedAtMs: 300, answerBytes: answer() });
@@ -54,6 +63,20 @@ async function fixture(sealed = true) {
   return { commonDir, journal, plan, expired, path: checkpointPath(commonDir, target, namespace) };
 }
 const runOwned = <T>(f: Awaited<ReturnType<typeof fixture>>, action: (owner: NativeTargetOwnership) => Promise<T>) => withNativeTarget(f.commonDir, target, action);
+
+describe('verifier event input bounds', () => {
+  it('refuses an oversized multibatch plan before parsing or serializing the retained request', () => {
+    const plan = { ...planInput(), batches: Array.from({ length: 8 }, (_, index) => ({
+      systemPrompt: `${index}:${'S'.repeat(4 * 1024 * 1024 - `${index}:`.length)}`, userPrompt: `review ${index}`,
+    })) };
+    expect(() => snapshotVerificationEvent({ type: 'plan', plan })).toThrow('checkpoint_verification_too_large');
+  });
+
+  it('accepts a valid single-batch 4 MiB boundary control without changing retained bytes', () => {
+    const plan = widePlanInput(1, 4 * 1024 * 1024);
+    expect(snapshotVerificationEvent({ type: 'plan', plan })).toEqual({ type: 'plan', plan });
+  });
+});
 
 describe('durable verifier phase in the existing checkpoint', () => {
   it('retains exact request and result bytes, reopens without paid callbacks and leaves the reviewer proof unchanged', async () => {

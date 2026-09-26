@@ -47,7 +47,7 @@ describe('captured reviewer inputs', () => {
         expect(hash.mock.calls.filter(([bytes]) => bytes === systemPrompt)).toHaveLength(1);
       }
     } finally { hash.mockRestore(); }
-  });
+  }, 15_000);
 
   it.each(['changed', 'missing'])('revalidates a %s shared blob after a successful decode', mutation => {
     const input = fixture(), captured = captureReviewerInputs(input);

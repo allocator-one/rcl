@@ -111,6 +111,13 @@ function refuse(condition: unknown, reason: string): asserts condition {
 function opaque(bytes: string): void {
   refuse(Buffer.byteLength(bytes, 'utf8') <= 8 * 1024 * 1024 && Buffer.from(bytes, 'utf8').toString('utf8') === bytes, 'invalid_bytes');
 }
+function requestByteLowerBound(plan: VerificationPlanInput): number {
+  let bytes = Buffer.byteLength(plan.gatingPlanBytes, 'utf8');
+  for (const batch of plan.batches) {
+    bytes += Buffer.byteLength(batch.systemPrompt, 'utf8') + Buffer.byteLength(batch.userPrompt, 'utf8');
+  }
+  return bytes;
+}
 function binding(context: VerificationContext): z.infer<typeof bindingsSchema> {
   return bindingsSchema.parse({ planDigest: context.planDigest, finalizationDigest: context.finalizationDigest,
     capturedInputsSha256: context.capturedInputsSha256, operationSha256: context.operationSha256 });
@@ -126,6 +133,9 @@ export function snapshotVerificationEvent(input: VerificationEvent): Verificatio
   refuse(parsed.success, 'invalid_event');
   const event = parsed.data;
   if (event.type === 'plan') {
+    // This lower bound prevents aggregate request serialization or UTF-8 copies
+    // from exceeding the retained-event limit while keeping each field's limit.
+    refuse(requestByteLowerBound(event.plan) <= MAX_ARTIFACT_BYTES, 'too_large');
     opaque(event.plan.gatingPlanBytes);
     for (const batch of event.plan.batches) { opaque(batch.systemPrompt); opaque(batch.userPrompt); }
     let value: unknown;
