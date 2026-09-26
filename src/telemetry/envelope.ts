@@ -4,6 +4,7 @@ import type { ConsensusFinding, LocationProvenance, ModelReview, ReviewResult } 
 import { normalizeVerificationEvidence } from './verification.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
+import type { ReviewerEvidenceDescriptor } from '../report/reviewer-evidence-schema.js';
 import { scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
 
 /**
@@ -40,6 +41,57 @@ export interface ArtifactDeclaration {
 export interface DeliveryInfo {
   mode: 'direct' | 'retried';
   spooled_at?: string;
+}
+
+/** Source tuple held by a supplemented run; private bytes remain off this ordinary envelope. */
+export interface ReviewerRecoverySource {
+  run_id: string;
+  report_sha256: string;
+  reviewer_artifact_sha256: string;
+}
+
+/** Immutable declaration for the separate private reviewer-artifact route. */
+export interface ReviewerRecoveryDeclaration {
+  version: 1;
+  artifact_schema: 1;
+  sha256: string;
+  bytes: number;
+  descriptor: ReviewerEvidenceDescriptor;
+  source?: ReviewerRecoverySource;
+}
+
+export interface ReviewerRecoveryArtifactInput {
+  artifact: { bytes: string; digest: string };
+  descriptor: ReviewerEvidenceDescriptor;
+  source?: ReviewerRecoverySource;
+}
+
+const REVIEWER_ARTIFACT_MAX_BYTES = 25_000_000;
+const sha256Pattern = /^[0-9a-f]{64}$/;
+const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+/**
+ * Builds the declaration for an already sealed private artifact. This never
+ * embeds its bytes in the ordinary run envelope or generic artifact list.
+ */
+export function declareReviewerRecovery(input: ReviewerRecoveryArtifactInput): ReviewerRecoveryDeclaration {
+  if (typeof input.artifact?.bytes !== 'string') throw new Error('reviewer_recovery_invalid_bytes');
+  const bytes = Buffer.byteLength(input.artifact.bytes, 'utf8');
+  if (bytes > REVIEWER_ARTIFACT_MAX_BYTES || !sha256Pattern.test(input.artifact.digest) || sha256Hex(input.artifact.bytes) !== input.artifact.digest) {
+    throw new Error('reviewer_recovery_invalid_artifact');
+  }
+  const descriptor = input.descriptor;
+  if (descriptor.kind === 'original') {
+    if (input.source !== undefined) throw new Error('reviewer_recovery_original_source');
+    return { version: 1, artifact_schema: 1, sha256: input.artifact.digest, bytes, descriptor };
+  }
+  const source = input.source;
+  if (!source || !uuidPattern.test(source.run_id) || !sha256Pattern.test(source.report_sha256) ||
+    !sha256Pattern.test(source.reviewer_artifact_sha256) || source.run_id !== descriptor.source.run_id ||
+    source.report_sha256 !== descriptor.source.report_sha256) {
+    throw new Error('reviewer_recovery_source_mismatch');
+  }
+  return { version: 1, artifact_schema: 1, sha256: input.artifact.digest, bytes, descriptor, source: { ...source } };
 }
 
 export interface WireFinding {
@@ -92,6 +144,8 @@ export interface RunEnvelope {
   calls: WireCall[];
   stats: ReviewResult['stats'];
   artifacts_declared: ArtifactDeclaration[];
+  /** Separate private-artifact declaration; never a generic artifact kind. */
+  reviewer_recovery?: ReviewerRecoveryDeclaration;
   delivery: DeliveryInfo;
 }
 
@@ -104,6 +158,7 @@ export interface EnvelopeOptions {
    * the prompt, and the prompt contains the diff.
    */
   parseFailures?: boolean;
+  reviewerRecovery?: ReviewerRecoveryDeclaration;
 }
 
 /** Wire limits mirrored from the server (section 7 "Limits"). */
@@ -236,6 +291,7 @@ export function buildRunEnvelope(
     calls: includeRows ? result.reviews.map((review) => wireCall(review, run, parseFailures)) : [],
     stats: result.stats,
     artifacts_declared: declareArtifacts(artifacts),
+    ...(options.reviewerRecovery === undefined ? {} : { reviewer_recovery: structuredClone(options.reviewerRecovery) }),
     delivery: options.delivery,
   };
 }

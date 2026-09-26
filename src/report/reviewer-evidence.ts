@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import type { InspectedReviewerArtifact } from './reviewer-artifact.js';
 import { decodeSupplementalAsync, isSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { decodeCapturedInputs, type CapturedReviewerInputs } from '../dispatch/captured-inputs.js';
@@ -7,22 +6,10 @@ import { decodeCheckpointProof, isCheckpointProof, type CheckpointProof, type Fr
 import { decodeOriginalLaunch, type OriginalLaunch } from '../dispatch/original-launch.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { decodeRecoveryOperation, type RecoveryOperation } from '../dispatch/recovery-operation.js';
-import { originalRunReportSchema, UUID } from '../telemetry/recovery/source.js';
+import { originalRunReportSchema } from '../telemetry/recovery/source.js';
+import { reviewerEvidenceDescriptorSchema, reviewerEvidenceSourceSchema, type ReviewerEvidenceDescriptor, type ReviewerEvidenceSource } from './reviewer-evidence-schema.js';
+export { reviewerEvidenceDescriptorSchema, type ReviewerEvidenceDescriptor } from './reviewer-evidence-schema.js';
 import { sha256Hex, stableStringify, type RunHeader } from './run-header.js';
-
-const hash = z.string().regex(/^[a-f0-9]{64}$/), uuid = z.string().regex(UUID);
-const sourceSchema = z.object({ run_id: uuid, report_sha256: hash, checkpoint_sha256: hash }).strict();
-const common = {
-  version: z.literal(1), checkpoint_schema: z.literal(1), plan_sha256: hash,
-  checkpoint_sha256: hash, captured_inputs_sha256: hash,
-  aggregation_sha256: hash.optional(), supplemental_async_sha256: hash.optional(),
-  policy: z.object({ version: z.literal(1), fraction: z.number().min(2 / 3).max(1) }).strict(),
-};
-export const reviewerEvidenceDescriptorSchema = z.discriminatedUnion('kind', [
-  z.object({ ...common, kind: z.literal('original'), launch_sha256: hash.optional() }).strict(),
-  z.object({ ...common, kind: z.literal('supplemented'), source: sourceSchema, operation_id: uuid }).strict(),
-]);
-export type ReviewerEvidenceDescriptor = z.infer<typeof reviewerEvidenceDescriptorSchema>;
 
 /** Shared artifact limit; the complete serialized report must fit, not merely its proof. */
 export const MAX_REVIEWER_REPORT_BYTES = MAX_ARTIFACT_BYTES;
@@ -93,8 +80,8 @@ export function describeReviewerEvidence(proof: CheckpointProof, supplementalAsy
     ...(launch ? { launch_sha256: sha256Hex(proof.bindings.launch!) } : {}) });
   if (sourceBytes === undefined || operationBytes === undefined) throw new Error('reviewer_successor_missing_bindings');
   const operation = decodeRecoveryOperation(operationBytes);
-  let source: z.infer<typeof sourceSchema>;
-  try { source = sourceSchema.parse(JSON.parse(sourceBytes)); }
+  let source: ReviewerEvidenceSource;
+  try { source = reviewerEvidenceSourceSchema.parse(JSON.parse(sourceBytes)); }
   catch { throw new Error('reviewer_invalid_source_binding'); }
   if (stableStringify(source) !== sourceBytes || operation.target !== proof.plan.target ||
     operation.planDigest !== proof.plan.digest || operation.capturedInputsSha256 !== captured.digest ||
@@ -213,6 +200,11 @@ function validateChain<T extends InspectedReviewerReport>(reports: readonly T[])
   return Object.freeze([...reports]);
 }
 
+/** Runtime inline-inspection provenance only; never producer/server authority. */
+export function isInspectedReviewerReport(value: unknown): value is InspectedReviewerReport {
+  return typeof value === 'object' && value !== null && inspected.has(value);
+}
+
 /** Validate oldest-to-newest immutable report evidence. */
 export function validateReviewerReportChain(reports: readonly InspectedReviewerReport[]): readonly InspectedReviewerReport[] {
   for (const report of reports) if (!inspected.has(report)) throw new Error('reviewer_report_not_inspected');
@@ -220,6 +212,6 @@ export function validateReviewerReportChain(reports: readonly InspectedReviewerR
 }
 
 /** Validate separately retained private artifact pairs without fabricating inline evidence. */
-export function validateInspectedReviewerArtifactChain(reports: readonly InspectedReviewerArtifact[]): readonly InspectedReviewerArtifact[] {
+export function validateInspectedReviewerArtifactChain<T extends InspectedReviewerReport>(reports: readonly T[]): readonly T[] {
   return Object.freeze([...validateChain(reports)]);
 }

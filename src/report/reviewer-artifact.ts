@@ -17,7 +17,7 @@ import { type CheckpointAssemblyInput, type CheckpointAssemblyContribution,
 import { deriveCheckpointGating, type SealedVerificationProof } from './checkpoint-gating.js';
 import { projectCheckpointReport, type PhysicalCheckpointAttempt } from './checkpoint-projection.js';
 import { decodeSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
-import { describeReviewerEvidence, validateReviewerReportChain, MAX_REVIEWER_LINEAGE_DEPTH, type InspectedReviewerReport, type ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
+import { describeReviewerEvidence, isInspectedReviewerReport, validateInspectedReviewerArtifactChain, MAX_REVIEWER_LINEAGE_DEPTH, type InspectedReviewerReport, type ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
 import type { ReviewerHealth } from './reviewer-health.js';
 import { buildRunHeader, parseSpecSource, sha256Hex, stableStringify, type RunHeader } from './run-header.js';
 
@@ -26,7 +26,7 @@ export interface ReviewerArtifactContext {
   assembly: CheckpointAssemblyInput;
   representation: { version: 1; parseFailures: boolean };
   /** Optional complete inspected chain; external producer/server authority remains separate. */
-  lineage?: readonly InspectedReviewerReport[];
+  lineage?: readonly (InspectedReviewerReport | InspectedReviewerArtifact)[];
   /** Sealed verifier transcript, structurally replayed only; it confers no external authority. */
   verificationProof?: SealedVerificationProof;
 }
@@ -53,6 +53,21 @@ export type ReviewerArtifact = DeepReadonly<{
   newPhysicalAttempts: AttemptReference[];
 }>;
 const validated = new WeakSet<object>();
+const inspectedArtifacts = new WeakSet<object>();
+
+/** Runtime structural-inspection provenance only; never producer/server authority. */
+export function isInspectedReviewerArtifact(value: unknown): value is InspectedReviewerArtifact {
+  return typeof value === 'object' && value !== null && inspectedArtifacts.has(value);
+}
+
+function validateArtifactLineage(reports: readonly (InspectedReviewerReport | InspectedReviewerArtifact)[]) {
+  for (const report of reports) {
+    if (!isInspectedReviewerArtifact(report) && !isInspectedReviewerReport(report)) {
+      throw new Error('reviewer_report_not_inspected');
+    }
+  }
+  return validateInspectedReviewerArtifactChain(reports);
+}
 const representationSchema = z.object({ version: z.literal(1), parseFailures: z.boolean() }).strict();
 const integer = z.number().int().nonnegative().safe();
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -178,12 +193,15 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
   const expected = sanitizeForDelivery({ ...body, run: { ...header,
     ...(Object.hasOwn(report.run, 'reviewer_evidence') ? { reviewer_evidence: describeReviewerEvidence(successor.proof, supplementalAsync) } : {}) } }, representation);
   if (!equal(raw, expected)) throw new Error('reviewer_artifact_body_mismatch');
-  const lineage = input.lineage === undefined ? [] : validateReviewerReportChain(input.lineage).map((item, index) => {
+  const lineage = input.lineage === undefined ? [] : validateArtifactLineage(input.lineage).map((item, index) => {
     const proof = projection.proofs[index];
     if (!proof || proof.runId !== item.runId || proof.proof.digest !== item.proof.digest) throw new Error('reviewer_artifact_lineage_mismatch');
     return { runId: item.runId, reportSha256: item.reportSha256, checkpointSha256: item.proof.digest };
   });
   if (input.lineage !== undefined && lineage.length !== projection.proofs.length) throw new Error('reviewer_artifact_lineage_mismatch');
+  if (input.lineage !== undefined && lineage.at(-1)!.reportSha256 !== sha256Hex(input.reportBytes)) {
+    throw new Error('reviewer_artifact_lineage_report_mismatch');
+  }
   const annotations: ReviewerArtifactGate['annotations'] = [...gated.findings, ...gated.appendix].flatMap(finding =>
     finding.gating === undefined ? [] : [{ identity: finding.identity!, disposition: gated.appendix.includes(finding) ? 'below_threshold' as const : 'kept' as const, gating: finding.gating }]);
   const gate: ReviewerArtifactGate = { validation: 'deterministic', reportedCiExitCode, conservativeCiExitCode,
@@ -205,13 +223,18 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
  * verification truth, execution eligibility, or native/server approval.
  */
 export function serializeReviewerArtifact(input: ReviewerArtifactContext & { reportBytes: string }): ReviewerArtifact {
-  const { wire, projection, derived, validation, newPhysicalAttempts } = derive(input);
-  const bytes = stableStringify(wire);
+  const result = derive(input);
+  const bytes = stableStringify(result.wire);
   bound(bytes); // Includes escaping and every embedded report/proof, not just raw component lengths.
-  const result: ReviewerArtifact = freeze({ version: 1 as const, bytes, digest: sha256Hex(bytes), reportSha256: wire.report.sha256,
+  return finishArtifact(result, bytes);
+}
+
+function finishArtifact(result: ReturnType<typeof derive>, bytes: string): ReviewerArtifact {
+  const { wire, projection, derived, validation, newPhysicalAttempts } = result;
+  const artifact: ReviewerArtifact = freeze({ version: 1 as const, bytes, digest: sha256Hex(bytes), reportSha256: wire.report.sha256,
     validation, health: projection.health, contributions: derived.contributions, observations: derived.observations, newPhysicalAttempts });
-  validated.add(result);
-  return result;
+  validated.add(artifact);
+  return artifact;
 }
 
 /**
@@ -241,7 +264,9 @@ export interface InspectReviewerArtifactOptions {
   expectedPlan: FrozenCheckpointPlan;
   expectedPrTarget?: string;
   /** Required only when the artifact was serialized with a complete inspected report chain. */
-  lineage?: readonly InspectedReviewerReport[];
+  lineage?: readonly (InspectedReviewerReport | InspectedReviewerArtifact)[];
+  /** Cold reopen: genuine prior separate pairs only; CURRENT is derived from exact terminal bytes. */
+  ancestors?: readonly InspectedReviewerArtifact[];
 }
 
 /** Local structure/body validation only; callers still authenticate every source and launch. */
@@ -333,15 +358,43 @@ export function inspectReviewerArtifact(bytes: string, options: InspectReviewerA
   const verification = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse(wire.verification);
   if (verification !== undefined && sha256Hex(verification.bytes) !== verification.sha256) throw new Error('reviewer_artifact_verification_mismatch');
   const verificationProof = verification === undefined ? undefined : { bytes: verification.bytes, digest: verification.sha256 };
-  const artifact = validateReviewerArtifact(bytes, { assembly, representation,
-    ...(verificationProof === undefined ? {} : { verificationProof }),
-    ...(options.lineage === undefined ? {} : { lineage: options.lineage }) });
   const descriptor = describeReviewerEvidence(last.proof, supplementalAsync);
   const launch = last.proof.bindings.launch === undefined ? undefined : decodeOriginalLaunch(last.proof.bindings.launch);
   const operation = last.proof.bindings.operation === undefined ? undefined : decodeRecoveryOperation(last.proof.bindings.operation);
-  return freeze({ artifact, representation, assembly, reportBytes: report.bytes, reportSha256: report.sha256, runId: last.runId, prTarget,
+  const current = { representation, assembly, reportBytes: report.bytes, reportSha256: report.sha256, runId: last.runId, prTarget,
     proof: last.proof, captured, supplementalAsync, descriptor,
     ...(verificationProof === undefined ? {} : { verificationProof }),
     ...(launch ? { launch } : {}), ...(operation ? { operation } : {}),
-    ...(assembly.run.converge ? { nativeClaim: assembly.run.converge } : {}) });
+    ...(assembly.run.converge ? { nativeClaim: assembly.run.converge } : {}) };
+  const context = { assembly, representation, ...(verificationProof === undefined ? {} : { verificationProof }) };
+  if (options.ancestors !== undefined && options.lineage !== undefined) throw new Error('reviewer_artifact_conflicting_lineage');
+  const artifact = options.ancestors === undefined
+    ? validateReviewerArtifact(bytes, { ...context, ...(options.lineage === undefined ? {} : { lineage: options.lineage }) })
+    : reopenArtifact(bytes, context, current, options.ancestors);
+  const result = freeze({ ...current, artifact });
+  inspectedArtifacts.add(result);
+  return result;
+}
+
+/** Reconstruct the current body before checking complete independently established lineage refs. */
+function reopenArtifact(
+  bytes: string, context: ReviewerArtifactContext,
+  current: Omit<InspectedReviewerArtifact, 'artifact'>, ancestors: readonly InspectedReviewerArtifact[],
+): ReviewerArtifact {
+  if (!Array.isArray(ancestors) || ancestors.some(item => !isInspectedReviewerArtifact(item))) {
+    throw new Error('reviewer_report_not_inspected');
+  }
+  const derived = derive({ ...context, reportBytes: current.reportBytes });
+  const chain = validateInspectedReviewerArtifactChain<InspectedReviewerReport>([...ancestors, current]);
+  const proofs = derived.projection.proofs;
+  if (chain.length !== proofs.length || chain.some((item, index) => {
+    const expected = proofs[index];
+    return !expected || expected.runId !== item.runId || expected.proof.bytes !== item.proof.bytes;
+  })) throw new Error('reviewer_artifact_lineage_mismatch');
+  const lineage = chain.map(item => ({ runId: item.runId, reportSha256: item.reportSha256, checkpointSha256: item.proof.digest }));
+  // These are reconstructed comparison bytes. Never mutate or substitute the retained document.
+  const expected = stableStringify({ ...derived.wire, lineage });
+  bound(expected);
+  if (expected !== bytes) throw new Error('reviewer_artifact_mismatch');
+  return finishArtifact(derived, bytes);
 }

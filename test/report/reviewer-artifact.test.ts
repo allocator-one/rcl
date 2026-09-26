@@ -16,11 +16,12 @@ import { projectCheckpointReport } from '../../src/report/checkpoint-projection.
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 
-import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
-import { MAX_ARTIFACT_BYTES } from '../../src/telemetry/envelope-validation.js';
+import { buildRunEnvelope, declareReviewerRecovery, sanitizeForDelivery } from '../../src/telemetry/envelope.js';
+import { MAX_ARTIFACT_BYTES, validateRunEnvelope } from '../../src/telemetry/envelope-validation.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
-import { describeReviewerEvidence } from '../../src/report/reviewer-evidence.js';
+import { describeReviewerEvidence, reviewerEvidenceDescriptorSchema as compatibilityDescriptorSchema } from '../../src/report/reviewer-evidence.js';
+import { reviewerEvidenceDescriptorSchema as leafDescriptorSchema } from '../../src/report/reviewer-evidence-schema.js';
 import { serializeReviewerArtifact, validateReviewerArtifact, inspectReviewerArtifact, isReviewerArtifact } from '../../src/report/reviewer-artifact.js';
 
 const roots: string[] = [];
@@ -362,6 +363,67 @@ async function originalArtifact() {
   const expected = { expectedReportBytes: reportBytes, expectedRunId: runId(2), expectedTarget: f.plan.target, expectedPlan: f.plan };
   return { f, launch, originalProof, args, artifact, expected };
 }
+
+describe('reviewer recovery envelope declaration', () => {
+  it('derives an original declaration from real private artifact bytes and never promotes those bytes to generic artifacts', async () => {
+    const original = await originalArtifact();
+    const inspected = inspectReviewerArtifact(original.artifact.bytes, original.expected);
+    const declaration = declareReviewerRecovery({ artifact: original.artifact, descriptor: inspected.descriptor });
+    expect(compatibilityDescriptorSchema).toBe(leafDescriptorSchema);
+    expect(leafDescriptorSchema.parse(inspected.descriptor)).toEqual(inspected.descriptor);
+    const result = JSON.parse(original.expected.expectedReportBytes);
+    const artifacts = { report_json: original.expected.expectedReportBytes };
+    const envelope = buildRunEnvelope(result, artifacts, {
+      level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration,
+    });
+    expect(declaration).toMatchObject({ version: 1, artifact_schema: 1, sha256: original.artifact.digest,
+      bytes: Buffer.byteLength(original.artifact.bytes), descriptor: inspected.descriptor });
+    expect(envelope.reviewer_recovery).toEqual(declaration);
+    expect(envelope.artifacts_declared.map(item => item.kind)).toEqual(['report_json']);
+    expect(JSON.stringify(envelope)).not.toContain(original.artifact.bytes);
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
+  });
+
+  it('binds supplemented declaration source to actual source report and private artifact hashes', async () => {
+    const original = await originalArtifact(), { f } = original;
+    const operation = createRecoveryOperation({ operationId: runId(4), successorRunId: runId(3), sourceRunId: runId(2),
+      sourceReportSha256: sha256Hex(original.expected.expectedReportBytes), sourceCheckpointSha256: original.originalProof.digest,
+      capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, target: f.plan.target,
+      originalNativeClaim: { attempt: 2, round: 2 }, startedAtMs: 2000, expiresAtMs: 3000, maxAdditionalCalls: 1, maxAttemptsPerCell: 1 });
+    const successorProof = await proof(f, [], f.capture.bytes, [
+      ['source', stableStringify({ run_id: runId(2), report_sha256: operation.sourceReportSha256, checkpoint_sha256: operation.sourceCheckpointSha256 })],
+      ['operation', encodeRecoveryOperation(operation)],
+    ]);
+    const projection = projectCheckpointReport({ sources: [{ runId: runId(2), proof: original.originalProof }],
+      successor: { runId: runId(3), proof: successorProof }, policy });
+    const args = { ...baseInput(f, projection), run: { ...original.args.run, id: runId(3), converge: { target: f.plan.target, round: 3, attempt: 3 } } };
+    const completed = await assembleCheckpointReview(args);
+    const reportBytes = JSON.stringify(sanitizeForDelivery({ ...completed.report, run: { ...completed.report.run,
+      reviewer_evidence: describeReviewerEvidence(successorProof, args.supplementalAsync) } } as typeof completed.report));
+    const artifact = serializeReviewerArtifact({ assembly: args, representation, reportBytes });
+    const inspected = inspectReviewerArtifact(artifact.bytes, { ...original.expected, expectedRunId: runId(3), expectedReportBytes: reportBytes });
+    const declaration = declareReviewerRecovery({ artifact, descriptor: inspected.descriptor, source: {
+      run_id: original.expected.expectedRunId, report_sha256: original.expected.expectedReportBytes && sha256Hex(original.expected.expectedReportBytes),
+      reviewer_artifact_sha256: original.artifact.digest,
+    } });
+    expect(declaration.source).toEqual({ run_id: runId(2), report_sha256: operation.sourceReportSha256,
+      reviewer_artifact_sha256: original.artifact.digest });
+    const envelope = buildRunEnvelope(JSON.parse(reportBytes), { report_json: reportBytes }, {
+      level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration,
+    });
+    expect(validateRunEnvelope(envelope, { report_json: reportBytes })).toEqual([]);
+    expect(() => declareReviewerRecovery({ artifact: { ...artifact, digest: 'f'.repeat(64) }, descriptor: inspected.descriptor, source: declaration.source }))
+      .toThrow('reviewer_recovery_invalid_artifact');
+    for (const mutate of [
+      (v: any) => { v.reviewer_recovery.extra = true; },
+      (v: any) => { v.reviewer_recovery.source.run_id = runId(9); },
+      (v: any) => { v.reviewer_recovery.descriptor.operation_id = runId(9); },
+    ]) {
+      const altered = structuredClone(envelope); mutate(altered);
+      expect(validateRunEnvelope(altered, { report_json: reportBytes })).not.toEqual([]);
+    }
+  });
+});
 
 describe('separate terminal artifact inspection', () => {
   it('reconstructs original assembly and validates the exact terminal pair without inline proof or new report hash', async () => {
