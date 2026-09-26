@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.1.8 - 2026-09-26
+
+- Normalize freshly generated review prose before report serialization and
+  hashing, preventing unpaired Unicode surrogates from causing evidence-delivery
+  HTTP 400 errors. Valid Unicode and retained original evidence remain intact
+  (RCL-127).
+- Reject malformed Unicode in outgoing envelope keys and values locally while
+  preserving rejected artifacts and exact report digest bindings (RCL-127).
+
 ## 4.1.7 - 2026-09-26
 
 - Add supported preview/apply/resume recovery for a healthy report that became
