@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - run: python3 -m unittest discover -s scripts/tests -v
       - run: npm ci
       - run: npm run lint
       - run: npm run build

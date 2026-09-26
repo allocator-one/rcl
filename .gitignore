@@ -6,3 +6,6 @@ dist/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Python release-notification checks
+__pycache__/

@@ -86,6 +86,30 @@ A final job, after publish, creates the GitHub Release for the tag with notes
 extracted from the matching `CHANGELOG.md` section and the tarball attached.
 Every `CHANGELOG.md` release needs a `## X.Y.Z` heading or that job fails.
 
+## Release announcements
+
+`.github/workflows/notify-release.yml` follows successful `Release` runs and
+asks the production Ori agent to summarize the published version in
+`#infra-one-releases`. Publishing and notification have separate results.
+The notifier reads source evidence through GitHub's API and verifies npm;
+it never executes the released package or checks out release-controlled code.
+
+Configure `INFRA_ONE_RELEASE_WEBHOOK_URL` (variable) and
+`INFRA_ONE_RELEASE_WEBHOOK_SECRET` (secret) in the `release-announcements`
+GitHub environment, restricted to `main`. The endpoint belongs to the
+production **RCL release summaries** automation. Keep its configured agent
+and Slack channel enabled. No Slack or model-provider credential goes in CI.
+
+For a failed notification, rerun **Announce release** or dispatch it on `main`
+with the successful **Release** run's numeric ID. The repository/version key
+is stable across retries, so an accepted release cannot be posted twice.
+Acceptance means the production worker has queued the summary; inspect its
+Automation delivery/run for final success. If a run has `failed_after_claim`,
+inspect Slack before reconciling it; never bypass idempotency to force a resend.
+Disable this notification workflow or its production automation to stop new
+announcements without affecting npm publishing. `NOTIFICATION_DRY_RUN=1`
+validates release evidence locally without requiring or calling the webhook.
+
 ## Architecture Overview
 
 _Add a brief overview of your project architecture_

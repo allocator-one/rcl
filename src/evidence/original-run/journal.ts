@@ -11,6 +11,8 @@ import { inspectRecoveryDirectory } from './lock-path.js';
 // wrapper (UUID, hashes, sequence, phase and timestamp); do not truncate audit.
 export const MAX_RECOVERY_DOCUMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_RECOVERY_CHECKPOINT_BYTES = MAX_RECOVERY_DOCUMENT_BYTES + 1024;
+export const MAX_RECOVERY_CHECKPOINTS = 20_000;
+export const MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES = 64 * 1024 * 1024;
 
 async function parentSafe(path: string): Promise<void> {
   if (await realpath(dirname(path)) !== dirname(path)) throw new Error('symlink_directory');
@@ -26,11 +28,12 @@ export function serializeRecoveryDocument(value: unknown, limit = Infinity): str
 }
 /** Exclusive named publication; a failed write is retained and never overwritten. */
 export async function writeExclusive(path: string, value: unknown, limit = Infinity): Promise<void> {
-  await writeExclusiveBytes(path, Buffer.from(serializeRecoveryDocument(value, limit)));
+  const text = serializeRecoveryDocument(value, limit);
+  await writeExclusiveBytes(path, text);
 }
-/** Exact original bytes with the same exclusive, fsynced recovery publication contract. */
-export async function writeExclusiveBytes(path: string, bytes: Buffer): Promise<void> {
-  const pinned = Buffer.from(bytes);
+/** Preserve original bytes with the same exclusive, fsynced publication contract. */
+export async function writeExclusiveBytes(path: string, bytes: string | Uint8Array): Promise<void> {
+  const pinned = typeof bytes === 'string' ? bytes : Buffer.from(bytes);
   const file = platformPath(path); await parentSafe(file);
   const handle = await open(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   try { await handle.writeFile(pinned); await handle.sync(); } finally { await handle.close(); }
@@ -51,8 +54,18 @@ async function inspectJournalDirectory(path: string, privateRoot: boolean): Prom
 export interface Journal {
   append: (phase: string, data?: unknown) => Promise<void>;
 }
+export interface JournalCheckpoint {
+  operation_id: string; manifest_sha256: string; sequence: number;
+  previous_sha256: string; phase: string; recorded_at: string; data: unknown;
+}
+export interface ReadableJournal extends Journal {
+  /** Local audit facts only; a remote acknowledgment still needs exact readback. */
+  checkpoints: () => JournalCheckpoint[];
+}
+
+/** Storage qualification is explicit; recovery callers retain the strict default. */
 /** Checkpoints are audit facts, never a substitute for fresh server readback. */
-export async function openJournal(path: string, manifestSha: string, operation: string, mode: 'apply' | 'resume', beforeWrite?: (phase: string) => Promise<void>): Promise<Journal> {
+export async function openJournal(path: string, manifestSha: string, operation: string, mode: 'apply' | 'resume', beforeWrite?: (phase: string) => Promise<void>): Promise<ReadableJournal> {
   path = platformPath(path); await parentSafe(path);
   await inspectJournalDirectory(dirname(path), false);
   if (mode === 'apply') { await mkdir(path, { mode: 0o700 }); await syncDirectory(dirname(path)); }
@@ -61,11 +74,22 @@ export async function openJournal(path: string, manifestSha: string, operation: 
   const directory = await lstat(path, { bigint: true });
   const files = (await readdir(path)).sort();
   if (files.some(n => !/^\d{8}\.json$/.test(n))) throw new Error('unknown_recovery_journal_file');
+  if (files.length > MAX_RECOVERY_CHECKPOINTS) throw new Error('recovery_journal_checkpoint_limit');
   let sequence = 0; let previous = manifestSha;
   let torn: Array<{ file: string; sha256: string }> = [];
+  const checkpoints: JournalCheckpoint[] = [];
+  let retainedBytes = 0;
   for (const name of files) {
     if (name !== `${String(++sequence).padStart(8,'0')}.json`) throw new Error('recovery_journal_sequence_gap');
-    const snapshot = await readStable(join(path, name), MAX_RECOVERY_CHECKPOINT_BYTES);
+    // A prior write may have reached the filesystem before its flush failed.
+    // Require a current same-descriptor synchronization before exposing bytes;
+    // it does not recreate the prior descriptor's writeback-error history.
+    const checkpointPath = join(path, name);
+    const checkpoint = await lstat(checkpointPath, { bigint: true });
+    if (checkpoint.size > BigInt(MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes)) throw new Error('recovery_journal_checkpoint_limit');
+    const snapshot = await readStable(checkpointPath, MAX_RECOVERY_CHECKPOINT_BYTES, { sync: true });
+    if (snapshot.raw.byteLength > MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes) throw new Error('recovery_journal_checkpoint_limit');
+    retainedBytes += snapshot.raw.byteLength;
     let record: Record<string, unknown>;
     try { record = JSON.parse(snapshot.text) as Record<string, unknown>; }
     catch {
@@ -74,19 +98,33 @@ export async function openJournal(path: string, manifestSha: string, operation: 
       torn.push({ file: name, sha256: snapshot.sha256 });
       previous = snapshot.sha256; continue;
     }
+    if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('invalid_recovery_checkpoint');
     if (record.operation_id !== operation || record.manifest_sha256 !== manifestSha || record.sequence !== sequence || record.previous_sha256 !== previous) throw new Error('recovery_journal_binding_conflict');
+    if (typeof record.phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(record.phase) ||
+        typeof record.recorded_at !== 'string' || !Number.isFinite(Date.parse(record.recorded_at)) ||
+        !Object.hasOwn(record, 'data')) throw new Error('invalid_recovery_checkpoint');
     if (torn.length && (record.phase !== 'interrupted_checkpoints_retained' || !isDeepStrictEqual(record.data, { files: torn }))) throw new Error('corrupt_recovery_journal');
     torn = [];
     previous = snapshot.sha256;
+    checkpoints.push(record as unknown as JournalCheckpoint);
   }
-  const journal: Journal = { append: async (phase, data = null) => {
+  await syncDirectory(path);
+  await syncDirectory(dirname(path));
+  const journal: ReadableJournal = { checkpoints: () => structuredClone(checkpoints), append: async (phase, data = null) => {
+    if (typeof phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(phase)) throw new Error('invalid_recovery_checkpoint');
+    if (sequence >= MAX_RECOVERY_CHECKPOINTS) throw new Error('recovery_journal_checkpoint_limit');
+    const retainedData: unknown = JSON.parse(JSON.stringify(data));
     await beforeWrite?.(phase);
     const current = await lstat(path, { bigint: true });
     if (!current.isDirectory() || current.dev !== directory.dev || current.ino !== directory.ino) throw new Error('recovery_journal_replaced');
-    const record = { operation_id: operation, manifest_sha256: manifestSha, sequence: sequence + 1, previous_sha256: previous, phase, recorded_at: new Date().toISOString(), data };
+    const record = { operation_id: operation, manifest_sha256: manifestSha, sequence: sequence + 1, previous_sha256: previous, phase, recorded_at: new Date().toISOString(), data: retainedData };
     const name = join(path, `${String(sequence + 1).padStart(8,'0')}.json`);
-    await writeExclusive(name, record, MAX_RECOVERY_CHECKPOINT_BYTES); sequence++;
-    previous = sha256(JSON.stringify(record, null, 2) + '\n');
+    const bytes = serializeRecoveryDocument(record, MAX_RECOVERY_CHECKPOINT_BYTES);
+    if (Buffer.byteLength(bytes, 'utf8') > MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes) throw new Error('recovery_journal_checkpoint_limit');
+    await writeExclusiveBytes(name, bytes); sequence++;
+    retainedBytes += Buffer.byteLength(bytes, 'utf8');
+    previous = sha256(bytes);
+    checkpoints.push(record);
   } };
   if (torn.length) await journal.append('interrupted_checkpoints_retained', { files: torn });
   return journal;

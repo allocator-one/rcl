@@ -143,6 +143,8 @@ export interface ConsensusFinding extends Finding {
 export interface DeduplicatedGroup {
   representative: Finding;
   members: Array<{ finding: Finding; model: string; role: string }>;
+  /** Opt-in raw finding lineage for recovery; omitted from legacy report groups. */
+  contributions?: Array<{ reviewIndex: number; findingIndex: number }>;
 }
 
 export interface ReviewResult {

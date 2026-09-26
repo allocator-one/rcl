@@ -187,9 +187,29 @@ describe('native guarded review launch', () => {
       verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
 
     await expect(guardReviewLaunch(options)).rejects.toThrow(/fix|unchanged/i);
+    await expect(guardReviewLaunch({ ...options, inputSha256: 'f'.repeat(64) })).rejects.toThrow(/fix.*head|head.*fix/i);
     await guardReviewLaunch({ ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64) });
 
     expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 });
+  });
+
+  it('permits a bounded same-head retry when the review after a real fix is inconclusive', async () => {
+    const options = await fixture();
+    await guardReviewLaunch(options);
+    const report = await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [sampleFinding()], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    await recordVerdicts({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
+
+    const fixedHead = { ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64),
+      run: vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000002', successfulReviews: 1 }) };
+    await guardReviewLaunch(fixedHead);
+    await expect(guardReviewLaunch(fixedHead)).rejects.toThrow(/infrastructure.failure|retry.reason/i);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
+
+    await guardReviewLaunch({ ...fixedHead, retryReason: 'Inconclusive reviewer quorum; provider health checked.' });
+    expect(fixedHead.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 3 });
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 3 });
   });
 
   it('does not let an infrastructure retry defer admitted in-scope blockers', async () => {

@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 4.1.8 - 2026-09-26
+
+- Normalize freshly generated review prose before report serialization and
+  hashing, preventing unpaired Unicode surrogates from causing evidence-delivery
+  HTTP 400 errors. Valid Unicode and retained original evidence remain intact
+  (RCL-127).
+- Reject malformed Unicode in outgoing envelope keys and values locally while
+  preserving rejected artifacts and exact report digest bindings (RCL-127).
+
+## 4.1.7 - 2026-09-26
+
+- Add supported preview/apply/resume recovery for a healthy report that became
+  stale before admission. Preserve reports, findings and spending while allowing
+  the next guarded review (RCL-106).
+- Retain every inspected replacement input, verify the complete audit history,
+  and share immutable evidence between corrections. Returning to an earlier
+  replacement no longer requires another disposition (RCL-106).
+- Allow inspected reversion to original inputs without reviving a disposed report;
+  detect truncated audit lists and incrementally hash their retained prefixes (RCL-106).
+- Report invalid audit evidence and missing resume operations explicitly; avoid
+  syncing a read-only retained-evidence file handle on Windows (RCL-106).
+
+- Recheck retained disposition receipts before fresh report admission and validate
+  shared report evidence once per history traversal (RCL-106).
+
+## 4.1.6 - 2026-09-26
+
+- Permit an explicit bounded same-head retry after an inconclusive guarded
+  review of a fixed head. Healthy unchanged reviews still refuse duplicate
+  councils, and delivery-only retries retain their original evidence (RCL-107).
+
 ## 4.1.5 - 2026-09-26
 
 - Allow up to two minutes for evidence artifact uploads and exact-byte downloads
