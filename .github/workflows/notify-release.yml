@@ -1,0 +1,43 @@
+name: Announce release
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Successful Release workflow run ID to announce or retry
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-announcements
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    environment: release-announcements
+    timeout-minutes: 5
+    steps:
+      # Check out only the trusted notifier revision, never the release run's code.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify publication and request the release summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ github.event.workflow_run.id || inputs.release_run_id }}
+          INFRA_ONE_RELEASE_WEBHOOK_URL: ${{ vars.INFRA_ONE_RELEASE_WEBHOOK_URL }}
+          INFRA_ONE_RELEASE_WEBHOOK_SECRET: ${{ secrets.INFRA_ONE_RELEASE_WEBHOOK_SECRET }}
+        run: python3 scripts/release_notification.py
