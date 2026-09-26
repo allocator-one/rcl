@@ -176,6 +176,21 @@ describe('receipt-bound claim split preparation', () => {
     expect(() => prepareClaimSplit(selection)).toThrow(/claim_split/);
   });
 
+  it('refuses an unbound legacy classification shared by multiple original occurrences', () => {
+    const selection = input();
+    const report = JSON.parse(selection.reportJson);
+    report.belowThresholdFindings[0].identity = report.findings[0].identity;
+    selection.reportJson = JSON.stringify(report);
+    expect(() => prepareClaimSplit(selection)).toThrow(/claim_split/);
+
+    selection.correctionId = uuid(990);
+    selection.sourceReceipts.push({ ...selection.sourceReceipts[0]!, id: selection.correctionId,
+      kind: 'finding_identity_corrected', payload: { report_json_sha256: sha(selection.reportJson),
+        finding_ref: selection.findingRef, identity_key: report.findings[0].identity,
+        matched_identity: selection.previousIdentity } });
+    expect(prepareClaimSplit(selection).source.previousIdentity).toBe(selection.previousIdentity);
+  });
+
   it('honors a retained native report binding even when the source state is legacy v1', () => {
     const selection = input(); const native = JSON.parse(selection.nativeJson);
     native.rounds[0].reportBinding = { runId: selection.scope.run_id, target: selection.target, round: 2,

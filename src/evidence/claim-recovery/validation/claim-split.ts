@@ -193,6 +193,11 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
     const mapping = raw as Record<string, unknown>;
     return mapping.version === undefined || mapping.finding_ref === input.findingRef;
   });
+  // An unbound legacy key cannot identify one of several report occurrences.
+  // An exact positional correction below can establish that missing association.
+  requireEvidence(input.correctionId !== undefined ||
+    all.filter(member => object(member) && member.identity === finding.identity).length === 1 ||
+    mappings.every(mapping => object(mapping) && mapping.version === 1));
   const previous = new Set(mappings.map(m => (m as Record<string, unknown>).matched_identity));
   requireEvidence(previous.size === 1);
   if (input.correctionId) {

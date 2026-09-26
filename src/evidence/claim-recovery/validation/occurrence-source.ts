@@ -118,6 +118,11 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
       boundRefs.add(ref);
     }
   }
+  const occurrenceCounts = new Map<string, number>();
+  for (const raw of all) {
+    requireSource(object(raw) && typeof raw.identity === 'string');
+    occurrenceCounts.set(raw.identity, (occurrenceCounts.get(raw.identity) ?? 0) + 1);
+  }
   for (const [index, raw] of all.entries()) {
     const ref = `f${String(index + 1).padStart(3, '0')}`; const member = storedMembers.get(ref);
     requireSource(object(raw) && member && typeof raw.identity === 'string' && raw.identity.length > 0 && raw.identity.length <= 64 &&
@@ -133,8 +138,9 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
     if (raw.claimDescriptor !== undefined) requireSource(claimDescriptorSchema.safeParse(raw.claimDescriptor).success);
     const mappings = (rows as Record<string, unknown>[]).filter(row => row.identity_key === raw.identity &&
       (row.finding_ref === undefined || row.finding_ref === ref));
+    const unboundDuplicate = occurrenceCounts.get(raw.identity)! > 1 && mappings.some(row => row.finding_ref === undefined);
     const unresolvedReason = mappings.length === 0 ? 'classification-unavailable' :
-      new Set(mappings.map(m => m.matched_identity)).size !== 1 ? 'classification-ambiguous' : undefined;
+      unboundDuplicate || new Set(mappings.map(m => m.matched_identity)).size !== 1 ? 'classification-ambiguous' : undefined;
     // Released unmarked classifications may cover kept findings only. Preserve
     // every original appendix member without inventing its native association.
     // Declared snapshots, in contrast, promise complete positional membership.
@@ -159,6 +165,7 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
       requireSource(p[field] === expected);
     }
     member.identity = p.matched_identity; member.correction = receipt;
+    delete member.unresolvedReason;
     corrected.add(member.ref); ids.add(receipt.id);
   }
   return out;

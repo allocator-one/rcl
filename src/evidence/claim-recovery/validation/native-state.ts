@@ -78,6 +78,11 @@ function retainedFindingIdentity(current: FindingEntry, predecessor: FindingEntr
     (predecessor.verdict === undefined || current.verdict !== undefined && current.verdictRound! >= predecessor.verdictRound!);
 }
 
+function retainedRounds(current: ConvergeRunState, predecessor: ConvergeRunState): boolean {
+  const rounds = new Map(current.rounds.map(round => [round.round, round]));
+  return predecessor.rounds.every(round => isDeepStrictEqual(rounds.get(round.round), round));
+}
+
 /** Pure snapshot lineage and retained identity proof; later semantic updates and remote acceptance are validated separately. */
 export function verifyNativeRecoveryLineage(sourceJson: string, target: string, nativeSourceJsons: string[] = []): {
   state: ConvergeRunState; original: ConvergeRunState; legacy?: ConvergeRunState; reservedIdentities: string[];
@@ -85,6 +90,9 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
   try {
     const state = nativeSource(sourceJson, target);
     requireSource(Array.isArray(nativeSourceJsons));
+    const maximumSnapshots = (state.recovery?.operations.length ?? 0) + (state.migration ? 1 : 0);
+    requireSource(nativeSourceJsons.length <= maximumSnapshots && nativeSourceJsons.every(raw =>
+      typeof raw === 'string' && Buffer.byteLength(raw) <= MAX_BYTES));
     const snapshots = new Map(nativeSourceJsons.map(raw => [sha(raw), raw]));
     requireSource(snapshots.size === nativeSourceJsons.length);
     const used = new Set<string>();
@@ -105,7 +113,7 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
         isDeepStrictEqual(operations.slice(0, -1), predecessor.recovery?.operations ?? []) &&
         isDeepStrictEqual(current.migration, predecessor.migration) &&
         isDeepStrictEqual(current.cycle, predecessor.cycle) &&
-        predecessor.rounds.every(round => isDeepStrictEqual(current.rounds.find(row => row.round === round.round), round)) &&
+        retainedRounds(current, predecessor) &&
         Object.entries(predecessor.findings).every(([key, finding]) =>
           Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
       current = predecessor;
@@ -113,8 +121,9 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
     let legacy = current.version === 1 ? current : undefined;
     if (current.version === 2 && current.migration) {
       legacy = take(current.migration.sourceSha256);
-      requireSource(legacy.version === 1 && legacy.rounds.every(round => isDeepStrictEqual(current.rounds.find(row => row.round === round.round), round)) &&
-        Object.keys(legacy.findings).every(key => Object.hasOwn(current.findings, key)));
+      requireSource(legacy.version === 1 && retainedRounds(current, legacy) &&
+        Object.entries(legacy.findings).every(([key, finding]) =>
+          Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
     }
     requireSource(used.size === snapshots.size);
     return { state, original: current, ...(legacy ? { legacy } : {}), reservedIdentities: [...reserved].sort() };
