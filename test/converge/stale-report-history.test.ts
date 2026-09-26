@@ -1,3 +1,4 @@
+import { originalRunReportSchema } from '../../src/telemetry/recovery/source.js';
 import { randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -92,12 +93,27 @@ it.each(['empty','digest','operation','replacement','target','unchanged','admitt
     expect(await f.bytes()).toEqual(before); expect(f.options.run).toHaveBeenCalledTimes(1);
   });
 
-it('bounds the number of retained audit entries before validating their contents', async () => {
-  const f = await staleFixture(); await f.prepare(); await f.apply();
+it('accepts exactly the audit limit and rejects one more otherwise valid unique entry', async () => {
+  const f = await staleFixture(); const manifest = await f.prepare(); await f.apply();
   const state = (await loadConvergeRunState(f.dir,f.target))!;
-  state.staleReportAudit = Array(10001).fill(state.staleReportAudit![0]);
-  state.staleReportAuditCount = 10001;
+  const entries = Array.from({length:10001},(_,i) => {
+    const manifestJson = JSON.stringify({...manifest,operationId:randomUUID(),inputSha256:i.toString(16).padStart(64,'0')});
+    return {manifestJson,manifestSha256:sha256(manifestJson)};
+  });
+  state.staleReportAudit = entries.slice(0,10000); state.staleReportAuditCount = 10000;
+  expect(() => validateStaleReportAudit(state)).not.toThrow();
+  state.staleReportAudit = entries; state.staleReportAuditCount = 10001;
   expect(() => validateStaleReportAudit(state)).toThrow('invalid_stale_report_audit');
+});
+
+it('validates a shared original report once per receipt traversal', async () => {
+  const f = await staleFixture(); await f.prepare(); await f.apply();
+  await (await correction(f,'e'.repeat(64))).apply();
+  const parse = vi.spyOn(originalRunReportSchema,'parse');
+  try {
+    await guardReviewLaunch({...f.options,...f.selection});
+    expect(parse).toHaveBeenCalledTimes(1);
+  } finally { parse.mockRestore(); }
 });
 
 it.each(['reordered','removed'] as const)('rejects %s history through its retained prefix proof', async kind => {

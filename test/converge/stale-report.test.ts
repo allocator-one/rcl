@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { staleFixture as fixture } from './stale-report-fixtures.js';
 import { expect, it } from 'vitest';
 import { readFile, rm, writeFile } from 'node:fs/promises';
@@ -159,4 +160,30 @@ it('continues the incident shape at attempt 18 and round 14 while retaining 13 a
   const after = (await loadConvergeRunState(f.dir,f.target))!;
   expect(after.rounds).toEqual(state.rounds); expect(after.findings).toEqual(state.findings);
   expect(await loadConvergeAttemptState(f.dir,f.target)).toMatchObject({attemptsUsed:18,cap:20});
+});
+
+
+it('admits the replacement report and continues the next round without reviving the stale run', async () => {
+  const f = await fixture(); await f.prepare(); await f.apply();
+  const runId = randomUUID(), reportSha256 = 'e'.repeat(64);
+  f.options.run.mockResolvedValueOnce({runId,reportJsonSha256:reportSha256,successfulReviews:2,totalReviews:2,deliveryPending:false,hardFailure:false});
+  await guardReviewLaunch({...f.options,...f.selection});
+  await processRoundReport({gitCommonDir:f.dir,target:f.target,round:1,runId,reportSha256,findings:[]});
+  const state = (await loadConvergeRunState(f.dir,f.target))!;
+  expect(state.rounds).toHaveLength(1); expect(state.rounds[0]!.runId).toBe(runId);
+  expect(state.staleReportAudit).toHaveLength(1);
+  f.options.run.mockResolvedValueOnce({runId:randomUUID(),reportJsonSha256:'8'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false,hardFailure:false});
+  await expect(guardReviewLaunch({...f.options,headSha:'f'.repeat(40),inputSha256:'9'.repeat(64)})).resolves.toMatchObject({attempt:3});
+  expect(f.options.run.mock.calls.at(-1)?.[0]).toEqual({target:f.target,round:2,attempt:3});
+});
+
+it('refuses fresh report admission when retained disposition evidence disappears after launch', async () => {
+  const f = await fixture(), manifest = await f.prepare(); await f.apply();
+  const runId = randomUUID(), reportSha256 = 'e'.repeat(64);
+  f.options.run.mockResolvedValueOnce({runId,reportJsonSha256:reportSha256,successfulReviews:2,totalReviews:2,deliveryPending:false,hardFailure:false});
+  await guardReviewLaunch({...f.options,...f.selection});
+  await rm(join(f.dir,'rcl-stale-report-audits',manifest.operationId,'complete.json'));
+  const before = await f.bytes();
+  await expect(processRoundReport({gitCommonDir:f.dir,target:f.target,round:1,runId,reportSha256,findings:[]})).rejects.toThrow('stale_report_audit_invalid');
+  expect(await f.bytes()).toEqual(before);
 });

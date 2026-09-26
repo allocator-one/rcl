@@ -321,7 +321,8 @@ the growing audit without repeatedly serializing all earlier entries.
 It does not admit findings, claim attempts, flush evidence, raise caps, or approve a PR.
 Resume is idempotent. Continue with the original `review --guarded-converge` invocation;
 it recomputes the real head/input digest and checks every retained receipt before claiming
-one normal attempt at the next native ordinal. The stale attempt stays spent.
+one normal attempt at the next native ordinal. Admission of the fresh report rechecks
+that retained history. The stale attempt stays spent.
 
 Before any stale disposition, unchanged inputs require normal admission; upstream tip movement alone is insufficient.
 After disposal, the original report stays historical even if its inputs return. Inspect and

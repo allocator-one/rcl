@@ -394,6 +394,10 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
   if (state.staleReportAudit?.some(entry => staleManifest(entry).runId === runId || staleManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('stale_report_cannot_be_admitted');
+  if (state.staleReportAudit?.length) {
+    const { verifyStaleReportReceipts } = await import('./stale-report.js');
+    await verifyStaleReportReceipts(gitCommonDir, state.staleReportAudit);
+  }
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
   for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {

@@ -15,6 +15,9 @@
 - Report invalid audit evidence and missing resume operations explicitly; avoid
   syncing a read-only retained-evidence file handle on Windows (RCL-106).
 
+- Recheck retained disposition receipts before fresh report admission and validate
+  shared report evidence once per history traversal (RCL-106).
+
 ## 4.1.6 - 2026-09-26
 
 - Permit an explicit bounded same-head retry after an inconclusive guarded

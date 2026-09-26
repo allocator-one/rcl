@@ -43,3 +43,24 @@ it('previews, applies, resumes and rejects tampering through the supported CLI w
   }
   expect((await f.bytes()).slice(1)).toEqual(before.slice(1));
 },30000);
+
+
+it.each([
+  {args:[],message:'choose_exactly_one_stale_report_mode'},
+  {args:['--preview','--apply'],message:'choose_exactly_one_stale_report_mode'},
+  {args:['--preview','--manifest-sha256','a'.repeat(64)],message:'preview_does_not_accept_manifest_digest'},
+  {args:['--preview'],message:'stale_report_preview_arguments_required'},
+  {args:['--apply','--manifest-sha256','a'.repeat(64),'--target','other'],message:'apply_uses_only_pinned_manifest'},
+  {args:['--apply'],message:'manifestSha256'},
+  {args:['--resume'],message:'manifestSha256'},
+])('rejects invalid disposition arguments $args without touching evidence', async ({args,message}) => {
+  const f = await staleFixture(true), before = await f.bytes();
+  const deny = join(f.cwd,'deny-network.mjs');
+  await writeFile(deny,`import net from 'node:net';\nnet.Socket.prototype.connect = function(){throw Error('network forbidden');};\nglobalThis.fetch = async()=>{throw Error('network forbidden');};\n`);
+  const result = await command(f.cwd,['converge-stale','--manifest',f.manifestPath,...args],deny);
+  expect(result.code,result.stderr).toBe(3);
+  const error = JSON.parse(result.stderr).error;
+  expect(error.code).toBe('RCL_CONVERGE_STALE'); expect(error.message).toContain(message);
+  expect(await f.bytes()).toEqual(before);
+  await expect(readFile(f.manifestPath)).rejects.toMatchObject({code:'ENOENT'});
+},30000);
