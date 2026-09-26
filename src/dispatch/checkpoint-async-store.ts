@@ -4,8 +4,8 @@ import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/pro
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
-import { CAPTURED_INPUT_LIMITS, decodeCapturedInputs } from './captured-inputs.js';
-import { decodeOriginalLaunch } from './original-launch.js';
+import { CAPTURED_INPUT_LIMITS } from './captured-inputs.js';
+import { asyncContextForBindings, assertCapturedAsyncPlan } from './checkpoint-async-context.js';
 import { withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js';
 import { readStable } from '../telemetry/recovery/files.js';
@@ -13,14 +13,14 @@ import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
 import { appendAsyncRecord, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
-  validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncContext, type AsyncIntent,
+  validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncIntent,
   type AsyncPlan, type AsyncProof, type AsyncRecord, type AsyncResult, type AsyncState } from './checkpoint-async.js';
 
 interface LocationInput { commonDir: string; namespace: string; plan: FrozenCheckpointPlan }
 interface Location { commonDir: string; namespace: string; checkpointPath: string; phasePath: string; plan: FrozenCheckpointPlan }
 export interface InitializeAsyncInput extends LocationInput { ownership: NativeTargetOwnership; calls: readonly AsyncCall[]; maxPhysicalCalls: number; maxAttemptsPerCall: number; expiresAtMs: number }
 export interface AsyncDelegate { version: 1; commonDir: string; namespace: string; target: string; checkpointPath: string; planDigest: string; callIndex: number; token: string }
-export interface AsyncWriter { claim(prompts: { systemPrompt: string; userPrompt: string }): Promise<AsyncIntent | undefined>; recordResult(attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> }
+export interface AsyncWriter { claim(prompts: { systemPrompt: string; userPrompt: string }, afterIntent?: (intent: AsyncIntent) => void): Promise<AsyncIntent | undefined>; recordResult(attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> }
 interface Metadata { version: 1; plan: AsyncPlan; grants: string[] }
 interface Phase { plan: AsyncPlan; state: AsyncState }
 export interface AsyncLateRecord { sequence: number; previousDigest: string; digest: string; sealedProofSha256: string; result: AsyncResult }
@@ -66,21 +66,19 @@ function snapshotLocation(input: LocationInput): Location {
   const commonDir = resolve(input.commonDir), path = checkpointPath(commonDir, plan.target, input.namespace);
   return { commonDir, namespace: input.namespace, checkpointPath: path, phasePath: join(path, 'async'), plan };
 }
-async function contextAt(location: Location): Promise<{ context: AsyncContext; journal: CheckpointJournal }> {
+async function contextAt(location: Location) {
   asyncRefuse(await realpath(location.commonDir) === location.commonDir, 'alias');
   const journal = await CheckpointJournal.openRead(location.checkpointPath, location.plan), bindings = await journal.readBindings();
-  asyncRefuse(bindings.launch && bindings['captured-inputs'] && !bindings.source && !bindings.operation, 'original_required');
-  const captured = decodeCapturedInputs(bindings['captured-inputs'], location.plan), launch = decodeOriginalLaunch(bindings.launch);
-  asyncRefuse(launch.runId === location.namespace && launch.target === location.plan.target && launch.planDigest === location.plan.digest && launch.capturedInputsSha256 === captured.digest, 'parent_binding');
-  return { journal, context: { runId: launch.runId, target: launch.target, planDigest: launch.planDigest,
-    capturedInputsSha256: captured.digest, launchSha256: sha256Hex(bindings.launch), startedAtMs: launch.startedAtMs,
-    expiresAtMs: launch.expiresAtMs, reviewerReservedCalls: launch.maxPhysicalCalls } };
+  const bound = asyncContextForBindings(location.plan, bindings);
+  asyncRefuse(bound.context.runId === location.namespace, 'parent_binding');
+  return { journal, ...bound };
 }
 async function metadataAt(location: Location): Promise<Metadata> {
   const bytes = await safeRead(join(location.phasePath, 'phase.json')); let raw: unknown;
   try { raw = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_metadata'); }
   const parsed = metadataSchema.safeParse(raw); asyncRefuse(parsed.success && stableStringify(parsed.data) + '\n' === bytes, 'invalid_metadata');
-  const plan = validateAsyncPlan(parsed.data.plan), { context } = await contextAt(location);
+  const plan = validateAsyncPlan(parsed.data.plan), { context, captured } = await contextAt(location);
+  assertCapturedAsyncPlan(plan, captured);
   asyncRefuse(stableStringify(plan.context) === stableStringify(context) && parsed.data.grants.length === plan.calls.length && new Set(parsed.data.grants).size === plan.calls.length, 'parent_binding');
   for (const call of plan.calls) asyncRefuse(location.plan.chunks[call.chunk]?.digest === call.chunkSha256, 'call');
   return { version: 1, plan, grants: parsed.data.grants };
@@ -109,10 +107,11 @@ async function append(location: Location, state: AsyncState, plan: AsyncPlan, ev
 export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ delegates: readonly AsyncDelegate[]; plan: AsyncPlan }> {
   const location = snapshotLocation(input), calls = structuredClone(input.calls), { ownership, maxPhysicalCalls, maxAttemptsPerCall, expiresAtMs } = input;
   return withOwnedNativeOperation(ownership, location.commonDir, location.plan.target, async () => {
-    const { journal, context } = await contextAt(location), state = await journal.read();
+    const { journal, context, captured } = await contextAt(location), state = await journal.read();
     asyncRefuse(!state.finalized && !state.records.some(row => row.type === 'intent'), 'initialization_closed');
     try { await lstat(join(location.checkpointPath, 'terminal-report')); throw new Error('checkpoint_async_initialization_closed'); } catch (error) { if (!isMissing(error)) throw error; }
     const plan = validateAsyncPlan({ version: 1, context, calls, maxPhysicalCalls, maxAttemptsPerCall, expiresAtMs });
+    assertCapturedAsyncPlan(plan, captured);
     asyncRefuse(Date.now() >= context.startedAtMs && Date.now() < plan.expiresAtMs, 'deadline');
     for (const call of plan.calls) asyncRefuse(location.plan.chunks[call.chunk]?.digest === call.chunkSha256, 'call');
     try { await lstat(location.phasePath); throw new Error('checkpoint_async_already_initialized'); } catch (error) { if (!isMissing(error)) throw error; }
@@ -141,7 +140,7 @@ export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWrit
   const snapshot = structuredClone(input), { location, delegate } = await delegatedLocation(snapshot);
   await locked(location, async metadata => authorize(metadata, delegate));
   return Object.freeze({
-    claim: async (prompts: { systemPrompt: string; userPrompt: string }): Promise<AsyncIntent | undefined> => {
+    claim: async (prompts: { systemPrompt: string; userPrompt: string }, afterIntent?: (intent: AsyncIntent) => void): Promise<AsyncIntent | undefined> => {
       const system = prompts.systemPrompt, user = prompts.userPrompt;
       return locked(location, async (metadata, state) => {
         authorize(metadata, delegate); const call = metadata.plan.calls[delegate.callIndex]!;
@@ -152,7 +151,10 @@ export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWrit
         if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || state.intents.length >= metadata.plan.maxPhysicalCalls || prior.length >= metadata.plan.maxAttemptsPerCall ||
           last && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
         const intent = { callIndex: delegate.callIndex, attemptId: `async-${randomUUID()}`, startedAtMs: now };
-        await append(location, state, metadata.plan, { type: 'intent', intent }); return freezeAsync(intent);
+        await append(location, state, metadata.plan, { type: 'intent', intent });
+        // A retained executor may synchronously start dispatch after fsync while
+        // this same cutoff lock is held. Never await provider work under the lock.
+        const frozen = freezeAsync(intent); afterIntent?.(frozen); return frozen;
       });
     },
     recordResult: async (attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> => {
@@ -213,4 +215,15 @@ async function appendLate(location: Location, proof: AsyncProof, result: AsyncRe
 }
 export function readAsyncLateAudit(input: LocationInput): Promise<readonly AsyncLateRecord[]> {
   const location = snapshotLocation(input); return locked(location, (metadata, state) => lateAt(location, encodeAsyncProof(metadata.plan, state.records)));
+}
+
+/** Authenticated restricted executor input, read only from the same journal and captured matrix. */
+export async function openCapturedAsyncDelegate(input: AsyncDelegate) {
+  const { location, delegate } = await delegatedLocation(structuredClone(input));
+  const execution = await locked(location, async metadata => {
+    authorize(metadata, delegate);
+    const { captured } = await contextAt(location);
+    return freezeAsync({ plan: metadata.plan, call: captured.async!.calls[delegate.callIndex]!, timeoutMs: captured.async!.timeoutMs });
+  });
+  return { ...execution, writer: await openAsyncDelegate(delegate) };
 }

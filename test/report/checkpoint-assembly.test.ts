@@ -134,7 +134,7 @@ describe('proof-bound checkpoint assembly', () => {
       { cell: 's1:0', id: 'old-failed', status: 'error', findings: [finding('failed', 'failed.ts')] },
     ]);
     const args = input(f, source, await proof(f, [{ cell: 's1:0', id: 'new-success', findings: [finding('same-id')] }]));
-    args.supplementalAsync = captureSupplementalAsync([asyncReview('bonus', finding('bonus', 'bonus.ts'))], 1);
+    args.supplementalAsync = captureSupplementalAsync([asyncReview('bonus', finding('bonus', 'bonus.ts'))], 0);
     const assembled = await assembleCheckpointReview(args);
     const before = stableStringify(args), clock = vi.spyOn(Date, 'now').mockImplementation(() => { throw new Error('clock forbidden'); });
     try {
@@ -183,7 +183,7 @@ describe('proof-bound checkpoint assembly', () => {
       asyncReview('same', finding('shadowed', 'shadowed.ts')),
       asyncReview('independent-async', finding('opportunistic', 'async.ts')),
       asyncReview('failed-async', finding('failed-observation', 'failure.ts'), 'error'),
-    ], 4);
+    ], 0);
     const result = await assembleCheckpointReview(args);
     expect(result.projection.health.successfulSeats).toEqual(['s0', 's3']);
     expect(result.projection.health.conclusive).toBe(false);

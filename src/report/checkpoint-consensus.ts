@@ -1,3 +1,4 @@
+import type { SealedAsyncProof } from '../dispatch/checkpoint-async-context.js';
 import type { Finding, ModelReview } from '../consensus/types.js';
 import { decodeCapturedInputs } from '../dispatch/captured-inputs.js';
 import { mergeChunkReviewsWithContributions } from '../dispatch/merge.js';
@@ -13,6 +14,8 @@ import { isSupplementalAsync, type SupplementalAsync } from './supplemental-asyn
 export interface CheckpointAssemblyInput extends Pick<CompletedReviewInput, 'diff' | 'startTime' | 'run'> {
   projection: CheckpointReportProjection;
   supplementalAsync: SupplementalAsync;
+  /** Original-owned physical accounting, distinct from opportunistic voting arrivals. */
+  asyncExecution?: SealedAsyncProof;
 }
 
 export type CheckpointFindingOrigin = { kind: 'checkpoint' } & Omit<CheckpointContribution, 'finding' | 'eligibility'>;

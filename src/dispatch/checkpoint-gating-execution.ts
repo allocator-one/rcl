@@ -1,3 +1,5 @@
+import { readAsyncPhase } from './checkpoint-async-store.js';
+import { encodeAsyncProof } from './checkpoint-async.js';
 import type { AskFn } from '../consensus/gating.js';
 import { withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import type { CheckpointAssemblyInput } from '../report/checkpoint-consensus.js';
@@ -38,6 +40,13 @@ export function executeCheckpointGating(input: CheckpointGatingExecutionOptions)
     const actual = await options.journal.exportProof();
     if (actual.bytes !== expected.bytes || actual.digest !== expected.digest) {
       throw new Error('checkpoint_gating_execution_journal_mismatch');
+    }
+    if (options.assembly.asyncExecution && options.assembly.projection.proofs.length === 1) {
+      const phase = await readAsyncPhase({ commonDir: options.commonDir, namespace: options.assembly.projection.proofs.at(-1)!.runId, plan: options.journal.getPlan() });
+      const sealed = encodeAsyncProof(phase.plan, phase.state.records);
+      if (sealed.bytes !== options.assembly.asyncExecution.bytes || sealed.digest !== options.assembly.asyncExecution.digest) {
+        throw new Error('checkpoint_gating_execution_async_mismatch');
+      }
     }
     const existing = await options.journal.readVerification();
     if (plan === undefined || plan.batches.length === 0) {

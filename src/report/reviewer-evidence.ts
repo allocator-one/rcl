@@ -1,3 +1,4 @@
+import type { SealedAsyncProof } from '../dispatch/checkpoint-async-context.js';
 import { z } from 'zod';
 import { decodeSupplementalAsync, isSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
@@ -25,6 +26,7 @@ export interface InspectedReviewerReport {
   readonly proof: CheckpointProof;
   readonly captured: CapturedReviewerInputs;
   readonly supplementalAsync?: SupplementalAsync;
+  readonly asyncExecution?: SealedAsyncProof;
   readonly operation?: RecoveryOperation;
   /** Absent for legacy structural proofs; inspection alone never grants launch eligibility. */
   readonly launch?: OriginalLaunch;
@@ -158,6 +160,13 @@ export function assertReviewerRunBindings(
   if (stableStringify(roster) !== stableStringify(proof.plan.roster.map(({ model, role, route }) => ({ model, role, route })))) {
     throw new Error('reviewer_report_roster_mismatch');
   }
+  if (captured.async) {
+    const asyncRoster = run.roster.filter(row => row.lane === 'async');
+    const expected = proof.plan.chunks.flatMap(chunk => asyncRoster.map(row =>
+      ({ chunk: chunk.index, model: row.model, role: row.role, provider: row.provider }))).slice(0, 8);
+    const actual = captured.async.calls.map(({ ref }) => ({ chunk: ref.chunk, model: ref.model, role: ref.role, provider: ref.provider }));
+    if (stableStringify(actual) !== stableStringify(expected)) throw new Error('reviewer_report_async_roster_mismatch');
+  }
   if ((run.spec?.sha256 ?? sha256Hex('')) !== proof.plan.specSha256) throw new Error('reviewer_report_spec_mismatch');
   const context = JSON.parse(captured.contextBytes) as Array<{ label: string; sha256: string }>;
   if (stableStringify(run.context_files) !== stableStringify(context.map(doc => ({ path: doc.label, sha256: doc.sha256 })))) {
@@ -179,6 +188,7 @@ function validateChain<T extends InspectedReviewerReport>(reports: readonly T[])
       if (report.descriptor.kind !== 'original') throw new Error('reviewer_lineage_missing_origin');
     } else {
       if (report.descriptor.kind !== 'supplemented' || !report.operation) throw new Error('reviewer_lineage_missing_source');
+      if (report.asyncExecution?.bytes !== previous.asyncExecution?.bytes || report.asyncExecution?.digest !== previous.asyncExecution?.digest) throw new Error('reviewer_lineage_async_execution_mismatch');
       if (report.supplementalAsync?.digest !== previous.supplementalAsync?.digest) throw new Error('reviewer_lineage_async_mismatch');
       if (report.prTarget !== previous.prTarget) throw new Error('reviewer_lineage_target_mismatch');
       const source = report.descriptor.source, operation = report.operation;

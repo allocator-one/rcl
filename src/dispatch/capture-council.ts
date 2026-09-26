@@ -34,6 +34,9 @@ export interface CapturePreparedCouncilInput {
   contextDocs: readonly ContextDoc[];
   compatibility: CouncilCompatibility;
   aggregationInputs?: CapturedAggregationInputs;
+  /** Actual prepared chunk-major first-eight async calls, separate from blocking seats. */
+  async?: { assignments: readonly ReviewAssignment[]; prompts: readonly BuiltPrompt[];
+    timeoutMs: number; maxAttemptsPerCall: number; maxPhysicalCalls: number };
 }
 export interface CapturedPreparedCouncil {
   plan: FrozenCheckpointPlan;
@@ -115,6 +118,11 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
   const assignments = input.chunks.flatMap(() => input.assignments.map(assignment => ({
     model: assignment.model, provider: assignment.provider, role: assignment.role,
   })));
+  const asyncCalls = input.async === undefined ? undefined : input.chunks.flatMap((_, chunk) =>
+    input.async!.assignments.map((assignment, index) => ({ assignmentId: `async-assignment:${index}`, chunk, assignment }))).slice(0, 8);
+  if (input.async && (asyncCalls!.length === 0 || input.async.prompts.length !== asyncCalls!.length)) {
+    throw new Error('capture_council_incomplete_async_matrix');
+  }
   const captured = captureReviewerInputs({
     plan,
     policy: { version: 1, fraction: input.config.quorumFraction ?? 2 / 3 },
@@ -126,6 +134,9 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
     chunkBytes,
     assignments,
     prompts: [...input.prompts],
+    ...(input.async === undefined ? {} : { async: { timeoutMs: input.async.timeoutMs,
+      maxAttemptsPerCall: input.async.maxAttemptsPerCall, maxPhysicalCalls: input.async.maxPhysicalCalls,
+      calls: asyncCalls!.map((call, index) => ({ ...call, prompt: input.async!.prompts[index]! })) } }),
     ...(input.aggregationInputs !== undefined ? { aggregation: input.aggregationInputs } : {}),
   });
   const decoded = decodeCapturedInputs(captured.bytes, plan);

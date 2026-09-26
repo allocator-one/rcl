@@ -22,6 +22,26 @@ function fixture() {
 }
 
 describe('captured reviewer inputs', () => {
+  it('captures exact async routes, roles, prompts and retry allocation in the same blob store', () => {
+    const base = fixture();
+    const async = { timeoutMs: 1000, maxAttemptsPerCall: 2, maxPhysicalCalls: 2,
+      calls: [{ assignmentId: 'async:0', chunk: 0, assignment: base.assignments[0]!,
+        prompt: { systemPrompt: 'Async private system', userPrompt: 'Async private user' } }] };
+    const captured = captureReviewerInputs({ ...base, async } as any);
+    const decoded = decodeCapturedInputs(captured.bytes, base.plan) as any;
+    expect(decoded.async?.calls[0].prompt).toEqual(async.calls[0].prompt);
+    expect(decoded.async?.calls[0].ref).toMatchObject({ id: 'async:0:0', assignment: 'async:0',
+      model: base.assignments[0]!.model, systemPromptSha256: sha256Hex(async.calls[0].prompt.systemPrompt) });
+    expect(decoded.async?.maxPhysicalCalls).toBe(2);
+    expect(captured.digest).not.toBe(captureReviewerInputs(base).digest);
+  });
+  it('refuses duplicate async cells and an async chunk absent from the captured matrix', () => {
+    const base = fixture();
+    const call = { assignmentId: 'async:0', chunk: 0, assignment: base.assignments[0]!, prompt: base.prompts[0]! };
+    const async = { timeoutMs: 1000, maxAttemptsPerCall: 2, maxPhysicalCalls: 2, calls: [call, call] };
+    expect(() => captureReviewerInputs({ ...base, async } as any)).toThrow();
+    expect(() => captureReviewerInputs({ ...base, async: { ...async, calls: [{ ...call, chunk: 1 }] } } as any)).toThrow();
+  });
   it('round-trips exact prompts and source bytes with content-addressed sharing', () => {
     const input = fixture();
     const captured = captureReviewerInputs(input);

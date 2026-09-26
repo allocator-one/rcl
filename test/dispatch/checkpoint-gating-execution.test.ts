@@ -91,11 +91,10 @@ describe('retained checkpoint verifier integration', () => {
     await expect(execute(plain,{journal:other.journal,askFactory:factory})).rejects.toThrow('checkpoint_gating_execution_journal_mismatch');
     expect(factory).not.toHaveBeenCalled();
   });
-  it('seals zero-cap fallback before a provider when current reviewer and async calls fill the run budget',async()=>{
+  it('refuses unbound logical async counts before verifier intent or provider construction',async()=>{
     const f=await fixture({asyncLaunched:498}),factory=vi.fn();
-    const result=await execute(f,{askFactory:factory});
-    expect(result.projection.disposition).toBe('strict_fallback');
-    expect((await f.journal.readVerification())!.plan.maxPhysicalCalls).toBe(0);
+    await expect(execute(f,{askFactory:factory})).rejects.toThrow('checkpoint_gating_unbound_async_launches');
+    expect(await f.journal.readVerification()).toBeUndefined();
     expect(factory).not.toHaveBeenCalled();
   });
   it('retains cancellation as a failed phase without inventing an answer',async()=>{

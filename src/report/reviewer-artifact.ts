@@ -1,3 +1,5 @@
+import type { SealedAsyncProof } from '../dispatch/checkpoint-async-context.js';
+import type { AsyncProof } from '../dispatch/checkpoint-async.js';
 import { z } from 'zod';
 import { evaluateCiGate } from '../ci.js';
 import type { GatingInfo } from '../consensus/gating.js';
@@ -51,6 +53,7 @@ export type ReviewerArtifact = DeepReadonly<{
   contributions: CheckpointAssemblyContribution[];
   observations: CheckpointAssemblyObservation[];
   newPhysicalAttempts: AttemptReference[];
+  newAsyncPhysicalAttempts?: Array<Omit<AsyncProof['physicalAttempts'][number], 'reviewBytes'>>;
 }>;
 const validated = new WeakSet<object>();
 const inspectedArtifacts = new WeakSet<object>();
@@ -208,14 +211,18 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
     unresolvedFindingIdentities: [], annotations };
   const newPhysicalAttempts = projection.newPhysicalAttempts.map(({ review: _review, reviewBytes: _bytes, ...attempt }) => attempt);
   const validation = { body: 'deterministic' as const, health: 'derived' as const, gate };
+  const asyncExecution = gated.asyncExecution === undefined ? undefined : { bytes: gated.asyncExecution.bytes, sha256: gated.asyncExecution.digest };
+  const newAsyncPhysicalAttempts = gated.asyncExecution === undefined ? undefined :
+    (projection.proofs.length === 1 ? gated.asyncExecution.physicalAttempts : []).map(({ reviewBytes: _bytes, ...attempt }) => attempt);
   const verification = gated.phase === undefined ? undefined : { bytes: gated.phase.proof.bytes, sha256: gated.phase.proof.digest };
   const wire = { version: 1 as const, kind: 'private-reviewer-evidence' as const,
     report: { bytes: input.reportBytes, sha256: sha256Hex(input.reportBytes) }, representation, assembly: assemblyMetadata(input.assembly),
     checkpoints: projection.proofs.map(item => ({ runId: item.runId, sha256: item.proof.digest, bytes: item.proof.bytes })),
     supplementalAsync: { bytes: supplementalAsync.bytes, sha256: supplementalAsync.digest },
-    ...(verification ? { verification } : {}), lineage,
+    ...(verification ? { verification } : {}),
+    ...(asyncExecution === undefined ? {} : { asyncExecution, newAsyncPhysicalAttempts }), lineage,
     contributions: derived.contributions, observations: derived.observations, health: projection.health, newPhysicalAttempts, validation };
-  return { wire, projection, derived, validation, newPhysicalAttempts };
+  return { wire, projection, derived, validation, newPhysicalAttempts, newAsyncPhysicalAttempts };
 }
 /**
  * Serialize PRIVATE evidence after ordinary sanitization/rendering. Pure and
@@ -230,9 +237,10 @@ export function serializeReviewerArtifact(input: ReviewerArtifactContext & { rep
 }
 
 function finishArtifact(result: ReturnType<typeof derive>, bytes: string): ReviewerArtifact {
-  const { wire, projection, derived, validation, newPhysicalAttempts } = result;
+  const { wire, projection, derived, validation, newPhysicalAttempts, newAsyncPhysicalAttempts } = result;
   const artifact: ReviewerArtifact = freeze({ version: 1 as const, bytes, digest: sha256Hex(bytes), reportSha256: wire.report.sha256,
-    validation, health: projection.health, contributions: derived.contributions, observations: derived.observations, newPhysicalAttempts });
+    validation, health: projection.health, contributions: derived.contributions, observations: derived.observations, newPhysicalAttempts,
+    ...(newAsyncPhysicalAttempts === undefined ? {} : { newAsyncPhysicalAttempts }) });
   validated.add(artifact);
   return artifact;
 }
@@ -251,7 +259,12 @@ export function validateReviewerArtifact(bytes: string, context: ReviewerArtifac
   if (context.verificationProof !== undefined && (verification === undefined || !equal(context.verificationProof, { bytes: verification.bytes, digest: verification.sha256 }))) {
     throw new Error('reviewer_artifact_verification_mismatch');
   }
-  const expected = serializeReviewerArtifact({ ...context, reportBytes: report.bytes,
+  const asyncExecution = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse((raw as Record<string, unknown>).asyncExecution);
+  if (asyncExecution !== undefined && sha256Hex(asyncExecution.bytes) !== asyncExecution.sha256 ||
+    context.assembly.asyncExecution !== undefined && (asyncExecution === undefined ||
+      !equal(context.assembly.asyncExecution, { bytes: asyncExecution.bytes, digest: asyncExecution.sha256 }))) throw new Error('reviewer_artifact_async_execution_mismatch');
+  const expected = serializeReviewerArtifact({ ...context, assembly: { ...context.assembly,
+    ...(asyncExecution === undefined ? {} : { asyncExecution: { bytes: asyncExecution.bytes, digest: asyncExecution.sha256 } }) }, reportBytes: report.bytes,
     ...(verification === undefined ? {} : { verificationProof: { bytes: verification.bytes, digest: verification.sha256 } }) });
   if (expected.bytes !== bytes) throw new Error('reviewer_artifact_mismatch');
   return expected;
@@ -283,6 +296,7 @@ export interface InspectedReviewerArtifact {
   readonly supplementalAsync: SupplementalAsync;
   readonly descriptor: ReviewerEvidenceDescriptor;
   readonly verificationProof?: SealedVerificationProof;
+  readonly asyncExecution?: SealedAsyncProof;
   readonly launch?: OriginalLaunch;
   readonly operation?: RecoveryOperation;
   readonly nativeClaim?: NonNullable<RunHeader['converge']>;
@@ -347,7 +361,10 @@ export function inspectReviewerArtifact(bytes: string, options: InspectReviewerA
       ...(previousFilename === null ? {} : { previousFilename }), ...(blobSha === null ? {} : { blobSha }) };
   }) };
   const { spec, startedAt, ...run } = metadata.run;
-  const assembly: CheckpointAssemblyInput = { projection, supplementalAsync, diff, startTime: metadata.startTime,
+  const asyncPhysicalWire = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse(wire.asyncExecution);
+  if (asyncPhysicalWire !== undefined && sha256Hex(asyncPhysicalWire.bytes) !== asyncPhysicalWire.sha256) throw new Error('reviewer_artifact_async_execution_mismatch');
+  const asyncExecution = asyncPhysicalWire === undefined ? undefined : { bytes: asyncPhysicalWire.bytes, digest: asyncPhysicalWire.sha256 };
+  const assembly: CheckpointAssemblyInput = { projection, supplementalAsync, ...(asyncExecution === undefined ? {} : { asyncExecution }), diff, startTime: metadata.startTime,
     run: { ...run, startedAt: new Date(startedAt), ...(spec ? { spec: { ...spec, source: parseSpecSource(spec.source) } } : {}) } };
   const target = assembly.run.target;
   const prTarget = target.repo && target.prNumber ? `${target.repo.toLowerCase()}#${target.prNumber}` : undefined;
@@ -363,6 +380,7 @@ export function inspectReviewerArtifact(bytes: string, options: InspectReviewerA
   const operation = last.proof.bindings.operation === undefined ? undefined : decodeRecoveryOperation(last.proof.bindings.operation);
   const current = { representation, assembly, reportBytes: report.bytes, reportSha256: report.sha256, runId: last.runId, prTarget,
     proof: last.proof, captured, supplementalAsync, descriptor,
+    ...(asyncExecution === undefined ? {} : { asyncExecution }),
     ...(verificationProof === undefined ? {} : { verificationProof }),
     ...(launch ? { launch } : {}), ...(operation ? { operation } : {}),
     ...(assembly.run.converge ? { nativeClaim: assembly.run.converge } : {}) };

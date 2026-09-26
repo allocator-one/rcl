@@ -11,6 +11,8 @@ import { CheckpointJournal, exportCheckpointProof, freezeCheckpointPlan,
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { assembleCheckpointReview, deriveCheckpointConsensus } from '../../src/report/checkpoint-assembly.js';
+import { appendAsyncRecord, encodeAsyncProof, validateAsyncPlan, type AsyncRecord } from '../../src/dispatch/checkpoint-async.js';
+import { prepareCheckpointGating } from '../../src/report/checkpoint-gating.js';
 import { planGating } from '../../src/consensus/gating.js';
 import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
@@ -36,7 +38,7 @@ function finding(id: string, file = 'tenant.ts'): Finding {
     title: 'Missing tenant isolation', description: 'An unrelated tenant can read this record.' };
 }
 function fixture(options: { models?: string[]; chunks?: number; appendix?: boolean; minConfidence?: number;
-  aggregation?: boolean; verified?: boolean; missingThresholds?: boolean } = {}) {
+  aggregation?: boolean; async?: boolean; verified?: boolean; missingThresholds?: boolean } = {}) {
   const models = options.models ?? ['model-a', 'model-b', 'model-c'];
   const chunks = options.chunks ?? 2;
   const diff: Diff = { source: 'local', files: [{ filename: 'tenant.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, language: 'typescript' }] };
@@ -66,6 +68,9 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
   const capture = captureReviewerInputs({ plan, policy, patchBytes, configBytes, specBytes, contextBytes, toolsBytes,
     chunkBytes, assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
     prompts: plan.cells.map(cell => ({ systemPrompt: 'system', userPrompt: `prompt ${cell.chunk}` })),
+    ...(options.async ? { async: { timeoutMs: 100, maxAttemptsPerCall: 2, maxPhysicalCalls: 3,
+      calls: [0, 1].map(index => ({ assignmentId: `async:${index}`, chunk: 0,
+        assignment: { model: 'async-model', provider: 'fake', role }, prompt: { systemPrompt: 'async-system', userPrompt: 'async-user' } })) } } : {}),
     ...(options.aggregation === false ? {} : { aggregation }) });
   expect(sha256Hex(patchBytes)).toBe(plan.patchSha256);
   return { plan, capture, diff, config };
@@ -244,21 +249,21 @@ describe('private reviewer artifact', () => {
       asyncReview('same', finding('shadowed', 'shadowed.ts')),
       asyncReview('bonus', finding('bonus', 'bonus.ts')),
       asyncReview('failed', finding('failed', 'failed.ts'), 'error'),
-    ], 3);
+    ], 0);
     const assembled = await assembleCheckpointReview(args);
     const compact = describeReviewerEvidence(args.projection.proofs.at(-1)!.proof, args.supplementalAsync);
     const delivered = sanitizeForDelivery({ ...assembled.report, run: { ...assembled.report.run, reviewer_evidence: compact } } as typeof assembled.report);
     const reportBytes = JSON.stringify(delivered);
     const artifact = serializeReviewerArtifact({ assembly: args, reportBytes, representation });
     expect(delivered.belowThresholdFindings).toHaveLength(1);
-    expect(delivered.stats).toMatchObject({ asyncLaunched: 3, asyncMerged: 3, totalReviews: 4, successfulReviews: 3 });
+    expect(delivered.stats).toMatchObject({ asyncMerged: 3, totalReviews: 4, successfulReviews: 3 });
     expect(artifact.observations.map(item => item.reason)).toEqual(['async_shadowed_by_blocking', 'unsuccessful_async']);
     expect(artifact.health.successfulSeats).toHaveLength(3);
     expect(artifact.contributions.flatMap(item => item.origins).map(origin => origin.kind).sort()).toEqual(['async', 'checkpoint']);
     for (const mutate of [
       (r: any) => { delete r.belowThresholdFindings; },
       (r: any) => { r.belowThresholdFindings[0].description = 'Altered appendix'; },
-      (r: any) => { r.stats.asyncLaunched--; },
+      (r: any) => { r.stats.asyncLaunched = 1; },
       (r: any) => { r.stats.asyncMerged++; },
       (r: any) => { r.run.reviewer_evidence.checkpoint_sha256 = 'f'.repeat(64); },
     ]) expect(() => serializeReviewerArtifact({ assembly: args, representation, reportBytes: rewrite(reportBytes, mutate) })).toThrow();
@@ -347,14 +352,34 @@ describe('private reviewer artifact', () => {
   });
 });
 
-async function originalArtifact() {
-  const f = fixture({ chunks: 1 });
+async function originalArtifact(withAsync = false) {
+  const f = fixture({ chunks: 1, async: withAsync });
   const launch = createOriginalLaunch({ runId: runId(2), target: f.plan.target, originalNativeClaim: { attempt: 2, round: 2 },
     capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, startedAtMs: 1000, expiresAtMs: 2000,
     maxPhysicalCalls: 3, maxAttemptsPerCell: 1 });
   const rows = rowsFor(f, ['s0', 's1'], 'original'); rows[0]!.findings = [finding('retained')];
   const originalProof = await proof(f, rows, f.capture.bytes, [['launch', encodeOriginalLaunch(launch)]]);
-  const args = baseInput(f, projectCheckpointReport({ sources: [], successor: { runId: runId(2), proof: originalProof }, policy }));
+  let asyncExecution: { bytes: string; digest: string } | undefined;
+  if (withAsync) {
+    const asyncPlan = validateAsyncPlan({ version: 1, context: { runId: launch.runId, target: launch.target,
+      planDigest: f.plan.digest, capturedInputsSha256: f.capture.digest, launchSha256: sha256Hex(encodeOriginalLaunch(launch)),
+      startedAtMs: launch.startedAtMs, expiresAtMs: launch.expiresAtMs, reviewerReservedCalls: launch.maxPhysicalCalls },
+      calls: f.capture.async!.calls.map(call => call.ref), maxPhysicalCalls: 3, maxAttemptsPerCall: 2, expiresAtMs: 2000 });
+    const records: AsyncRecord[] = [];
+    const push = (event: Parameters<typeof appendAsyncRecord>[1]) => records.push(appendAsyncRecord(records, event, asyncPlan));
+    push({ type: 'intent', intent: { callIndex: 0, attemptId: `async-${runId(50)}`, startedAtMs: 1001 } });
+    const reviewBytes = asyncReview('async-model', finding('async-physical'));
+    push({ type: 'result', result: { callIndex: 0, attemptId: `async-${runId(50)}`, finishedAtMs: 1002, reviewBytes, reviewSha256: sha256Hex(reviewBytes), possiblyBilled: true } });
+    push({ type: 'intent', intent: { callIndex: 1, attemptId: `async-${runId(51)}`, startedAtMs: 1003 } });
+    push({ type: 'seal', cutoffMs: 1004 });
+    const proof = encodeAsyncProof(asyncPlan, records); asyncExecution = { bytes: proof.bytes, digest: proof.digest };
+  }
+  const args = { ...baseInput(f, projectCheckpointReport({ sources: [], successor: { runId: runId(2), proof: originalProof }, policy })),
+    ...(asyncExecution === undefined ? {} : { asyncExecution }) };
+  if (withAsync) {
+    args.supplementalAsync = captureSupplementalAsync([], 2);
+    args.run.roster.push(...f.capture.async!.calls.map(call => ({ model: call.ref.model, role: call.ref.role, provider: call.ref.provider, lane: 'async' as any })));
+  }
   const assembled = await assembleCheckpointReview(args);
   const delivered = sanitizeForDelivery({ ...assembled.report, run: { ...assembled.report.run,
     reviewer_evidence: describeReviewerEvidence(originalProof, args.supplementalAsync) } } as typeof assembled.report);
@@ -363,6 +388,60 @@ async function originalArtifact() {
   const expected = { expectedReportBytes: reportBytes, expectedRunId: runId(2), expectedTarget: f.plan.target, expectedPlan: f.plan };
   return { f, launch, originalProof, args, artifact, expected };
 }
+
+describe('captured async physical artifact inheritance', () => {
+  it('refuses a current async header roster unrelated to the captured call matrix', async () => {
+    const original = await originalArtifact(true);
+    await expect(assembleCheckpointReview({ ...original.args, run: { ...original.args.run,
+      roster: original.args.run.roster.filter(row => row.lane !== ('async' as any)) } })).rejects.toThrow('async_roster');
+  });
+  it('requires captured async proof and retains observed/unknown physical calls separately from opportunistic opinions', async () => {
+    const original = await originalArtifact(true), wire = JSON.parse(original.artifact.bytes);
+    expect(wire.asyncExecution).toEqual({ bytes: original.args.asyncExecution!.bytes, sha256: original.args.asyncExecution!.digest });
+    expect(wire.newAsyncPhysicalAttempts).toHaveLength(2);
+    expect(wire.newAsyncPhysicalAttempts[1]).toMatchObject({ outcomeCertainty: 'uncertain', possiblyBilled: true, durationMs: null, usage: null });
+    expect(JSON.parse(original.expected.expectedReportBytes).stats.asyncLaunched).toBe(2);
+    const inspected = inspectReviewerArtifact(original.artifact.bytes, original.expected) as any;
+    expect(inspected.asyncExecution).toEqual(original.args.asyncExecution);
+    expect(prepareCheckpointGating(original.args).originalAsync).toBe(2);
+    expect(() => serializeReviewerArtifact({ assembly: { ...original.args, asyncExecution: undefined } as any,
+      representation, reportBytes: original.expected.expectedReportBytes })).toThrow('missing_proof');
+    expect(() => inspectReviewerArtifact(rewrite(original.artifact.bytes, w => { delete w.asyncExecution; }), original.expected)).toThrow();
+  });
+  it('inherits the exact original async proof but charges zero source calls to a successor', async () => {
+    const original = await originalArtifact(true), { f } = original;
+    const operation = createRecoveryOperation({ operationId: runId(4), successorRunId: runId(3), sourceRunId: runId(2),
+      sourceReportSha256: sha256Hex(original.expected.expectedReportBytes), sourceCheckpointSha256: original.originalProof.digest,
+      capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, target: f.plan.target,
+      originalNativeClaim: { attempt: 2, round: 2 }, successorNativeClaim: { attempt: 3, round: 2 },
+      startedAtMs: 2000, expiresAtMs: 3000, maxAdditionalCalls: 1, maxAttemptsPerCell: 1 });
+    const successor = await proof(f, [], f.capture.bytes, [
+      ['source', stableStringify({ run_id: runId(2), report_sha256: operation.sourceReportSha256, checkpoint_sha256: operation.sourceCheckpointSha256 })],
+      ['operation', encodeRecoveryOperation(operation)],
+    ]);
+    const projection = projectCheckpointReport({ sources: [{ runId: runId(2), proof: original.originalProof }], successor: { runId: runId(3), proof: successor }, policy });
+    const args = { ...baseInput(f, projection), supplementalAsync: original.args.supplementalAsync, asyncExecution: original.args.asyncExecution,
+      run: { ...original.args.run, id: runId(3), converge: { target: f.plan.target, round: 2, attempt: 3 } } };
+    const assembled = await assembleCheckpointReview(args), reportBytes = JSON.stringify(sanitizeForDelivery(assembled.report));
+    const artifact = serializeReviewerArtifact({ assembly: args, representation, reportBytes });
+    const wire = JSON.parse(artifact.bytes);
+    expect(wire.asyncExecution).toEqual(JSON.parse(original.artifact.bytes).asyncExecution);
+    expect(wire.newAsyncPhysicalAttempts).toEqual([]);expect(wire.newPhysicalAttempts).toEqual([]);
+    expect(prepareCheckpointGating(args).originalAsync).toBe(0);
+    const ancestor = inspectReviewerArtifact(original.artifact.bytes, original.expected);
+    const child = inspectReviewerArtifact(artifact.bytes, { ...original.expected, expectedRunId: runId(3), expectedReportBytes: reportBytes });
+    const linked = serializeReviewerArtifact({ assembly: args, representation, reportBytes, lineage: [ancestor, child] });
+    expect(inspectReviewerArtifact(linked.bytes, { ...original.expected, expectedRunId: runId(3), expectedReportBytes: reportBytes, ancestors: [ancestor] }).asyncExecution).toEqual(original.args.asyncExecution);
+    const changedWire = JSON.parse(original.args.asyncExecution!.bytes);
+    const seal = changedWire.records.at(-1);seal.event.cutoffMs++;
+    const { digest: _digest, ...unsigned } = seal;seal.digest=sha256Hex(stableStringify(unsigned));
+    const changedBytes=stableStringify(changedWire), changedArgs={...args,asyncExecution:{bytes:changedBytes,digest:sha256Hex(changedBytes)}};
+    const changedArtifact=serializeReviewerArtifact({assembly:changedArgs,representation,reportBytes});
+    const changedChild=inspectReviewerArtifact(changedArtifact.bytes,{...original.expected,expectedRunId:runId(3),expectedReportBytes:reportBytes});
+    expect(()=>serializeReviewerArtifact({assembly:changedArgs,representation,reportBytes,lineage:[ancestor,changedChild]})).toThrow('async_execution_mismatch');
+    expect(inspectReviewerArtifact(artifact.bytes, { ...original.expected, expectedRunId: runId(3), expectedReportBytes: reportBytes }).reportBytes).toBe(reportBytes);
+  });
+});
 
 describe('reviewer recovery envelope declaration', () => {
   it('derives an original declaration from real private artifact bytes and never promotes those bytes to generic artifacts', async () => {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { capturedAsyncSchema, captureAsyncInputs, decodeCapturedAsync, type CaptureAsyncInputs, type CapturedAsyncInputs } from './captured-async.js';
 import { decodeAggregationInputs, isCapturedAggregationInputs, type CapturedAggregationInputs } from '../report/aggregation-inputs.js';
 import { ConfigSchema, type Config } from '../config/schema.js';
 import type { BuiltPrompt } from '../prepare/prompt-builder.js';
@@ -23,6 +24,7 @@ const captureSchema = z.object({
   policy: z.object({ version: z.literal(1), fraction: z.number().finite() }).strict(),
   blobs: z.record(digest, z.string()),
   aggregationSha256: digest.optional(),
+  async: capturedAsyncSchema.optional(),
   roles: z.array(z.object({ cell: text, sha256: digest }).strict()).max(CAPTURED_INPUT_LIMITS.cells),
 }).strict();
 
@@ -40,14 +42,16 @@ export interface CaptureReviewerInputs {
   prompts: BuiltPrompt[];
   /** Actual static aggregation values captured before the first provider intent. */
   aggregation?: CapturedAggregationInputs;
+  async?: CaptureAsyncInputs;
 }
 
-export interface CapturedReviewerInputs extends Omit<CaptureReviewerInputs, 'policy'> {
+export interface CapturedReviewerInputs extends Omit<CaptureReviewerInputs, 'policy' | 'async'> {
   version: 1;
   bytes: string;
   digest: string;
   policy: QuorumPolicy;
   config: Config;
+  async?: CapturedAsyncInputs;
 }
 
 function freeze<T>(value: T): T {
@@ -119,7 +123,9 @@ export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedRev
     const aggregation = decodeAggregationInputs(input.aggregation.bytes, plan.patchSha256);
     aggregationSha256 = add(aggregation.bytes, aggregation.digest);
   }
+  const async = input.async === undefined ? undefined : captureAsyncInputs(input.async, plan, add);
   const bytes = stableStringify({ version: 1, plan, policy: input.policy, blobs, roles,
+    ...(async === undefined ? {} : { async }),
     ...(aggregationSha256 !== undefined ? { aggregationSha256 } : {}) });
   return decodeCapturedInputs(bytes, plan);
 }
@@ -169,8 +175,10 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
   if (aggregation && stableStringify(aggregation.algorithm) !== stableStringify(tools.data.aggregation)) {
     throw new Error('capture_incompatible_aggregation');
   }
+  const async = captured.async === undefined ? undefined : decodeCapturedAsync(captured.async, plan, get, bytes => roleSchema.parse(decodeCanonical(bytes)));
   if (Object.keys(captured.blobs).length !== referenced.size) throw new Error('capture_unreferenced_blob');
   return freeze({ version: 1, bytes, digest: sha256Hex(bytes), plan, policy, config: config.data,
     patchBytes, configBytes, specBytes, contextBytes, toolsBytes, chunkBytes, assignments, prompts,
+    ...(async === undefined ? {} : { async }),
     ...(aggregation !== undefined ? { aggregation } : {}) });
 }

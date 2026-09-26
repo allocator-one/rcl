@@ -586,7 +586,8 @@ describe('retained reviewer recovery coordinator', () => {
     const bonus = { model: 'bonus', role: 'general', provider: 'fake', status: 'success', durationMs: 1, async: true,
       findings: [{ id: 'async-f', file: 'bonus.ts', startLine: 2, endLine: 2, severity: 'critical',
         category: 'correctness', title: 'Retained async observation', description: 'original async result' }] };
-    const supplementalAsync = captureSupplementalAsync([JSON.stringify(bonus)], 1);
+    // This is an imported prior-round opinion, not an unjournaled current launch.
+    const supplementalAsync = captureSupplementalAsync([JSON.stringify(bonus)], 0);
     const fixture = await sealed(1, 'timeout', 3, { supplementalAsync }), options = coordinator(fixture);
     const result = await applyReviewerRecovery(options.input);
     if (result.kind !== 'completed') throw new Error('Expected completed recovery');

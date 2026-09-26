@@ -11,25 +11,26 @@ import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit } from '../../src/dispatch/checkpoint-async-store.js';
+import { executeCheckpointAsync } from '../../src/dispatch/checkpoint-async-execution.js';
 import { decodeAsyncProof } from '../../src/dispatch/checkpoint-async.js';
-const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[]}));
-vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}return sync();};return h;}};});
+const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], afterSync: undefined as undefined | ((path:string)=>void)}));
+vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
 const roots: string[] = [];
-afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.afterSync=undefined; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
-async function fixture() {
+async function fixture(cap = 3, systemPrompt = prompts.systemPrompt) {
  const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'async-phase-'))); roots.push(commonDir);
  const configBytes = '{}', toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: sha256Hex('[]'), configSha256: sha256Hex(configBytes), specSha256: sha256Hex(''), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 }, roster: ['a','b'].map(seat => ({seat, model: seat, role: 'general', route: 'fake'})), chunks: [{index:0,total:1,digest:sha256Hex('chunk')}], prompts: ['a','b'].map(seat=>({seat,chunk:0,systemSha256:sha256Hex('s'),userSha256:sha256Hex('u')})) });
  const role = { name:'general',systemPrompt:'s',focus:[],description:'d',isSpecialized:false };
- const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})) });
+ const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})), async: { timeoutMs: 1000, maxPhysicalCalls: cap, maxAttemptsPerCall: 2, calls: ['assignment-a','assignment-b'].map(assignmentId=>({assignmentId,chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{...prompts,systemPrompt}})) } });
  const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim:{attempt:3,round:2},startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:2,maxAttemptsPerCell:1});
  let journal!: CheckpointJournal;
  await withNativeTarget(commonDir,target,async ownership=>{journal=await CheckpointJournal.create({commonDir,namespace:runId,plan,ownership});await journal.bind('captured-inputs',captured.bytes,ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);});
- const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks[0]!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(prompts.systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
- const input = {commonDir,namespace:runId,plan,calls,maxPhysicalCalls:3,maxAttemptsPerCall:2,expiresAtMs:launch.expiresAtMs};
+ const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks[0]!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
+ const input = {commonDir,namespace:runId,plan,calls,maxPhysicalCalls:cap,maxAttemptsPerCall:2,expiresAtMs:launch.expiresAtMs};
  return {commonDir,plan,journal,launch,captured,input,path:checkpointPath(commonDir,target,runId)};
 }
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
@@ -50,7 +51,7 @@ describe('restricted original async checkpoint phase',()=>{
   const proof=await seal(f);expect(proof.state.uncertain).toEqual([first]);expect(proof.physicalAttempts[0]).toMatchObject({outcomeCertainty:'uncertain',possiblyBilled:true,reviewBytes:null,durationMs:null,usage:null});
  });
  it('admits only durable failed-outcome retries and honors one atomic global cap',async()=>{
-  const f=await fixture(),opened=await initialize(f,{maxPhysicalCalls:2}),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);await w.recordResult(first.attemptId,review('timeout'),true);
+  const f=await fixture(2),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);await w.recordResult(first.attemptId,review('timeout'),true);
   const other=await openAsyncDelegate(opened.delegates[1]);const next=await Promise.all([w.claim(prompts),other.claim(prompts)]);expect(next.filter(Boolean)).toHaveLength(1);expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(2);
  });
  it('fences concurrent new intents and retries at immutable seal and preserves late audit only',async()=>{
@@ -89,7 +90,7 @@ describe('restricted original async checkpoint phase',()=>{
  });
  it('respects original launch reservations, chunk references and sealing state',async()=>{
   const f=await fixture();await expect(initialize(f,{maxPhysicalCalls:499})).rejects.toThrow('budget');await expect(initialize(f,{expiresAtMs:f.launch.expiresAtMs+1})).rejects.toThrow('deadline');
-  await expect(initialize(f,{calls:[{...f.input.calls[0],chunkSha256:'0'.repeat(64)}]})).rejects.toThrow('call');
+  await expect(initialize(f,{calls:[{...f.input.calls[0],chunkSha256:'0'.repeat(64)}]})).rejects.toThrow('capture');
   await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));await expect(initialize(f)).rejects.toThrow('closed');expect(await readdir(f.path)).not.toContain('async');
  });
  it('atomically fences delegates when the owning main checkpoint finalizes',async()=>{
@@ -117,9 +118,59 @@ describe('restricted original async checkpoint phase',()=>{
  });
 
  it('refuses a non-UTF8 prompt scalar that aliases the digest of replacement text',async()=>{
-  const f=await fixture();const calls=f.input.calls.map(call=>({...call,systemPromptSha256:sha256Hex('�')}));
-  const opened=await initialize(f,{calls}),writer=await openAsyncDelegate(opened.delegates[0]);
+  const f=await fixture(3, '�');
+  const opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]);
   await expect(writer.claim({...prompts,systemPrompt:'\uD800'})).rejects.toThrow('prompt');expect((await readAsyncPhase(f.input)).state.intents).toEqual([]);
+ });
+
+ it('executes only captured prompts and routes with separate durable attempts and SDK retries disabled', async()=>{
+  const f=await fixture(),opened=await initialize(f);let calls=0;
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async(model,role,system,user,options)=>{
+   expect([model,role,system,user]).toEqual(['async-model','general',prompts.systemPrompt,prompts.userPrompt]);
+   expect(options.maxRetries).toBe(0);expect(options.timeoutMs).toBeGreaterThan(0);expect(options.timeoutMs).toBeLessThanOrEqual(1000);
+   expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(++calls);
+   return JSON.parse(review(calls===1?'timeout':'success'));
+  })};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:()=>{throw new Error('unexpected late failure');}});
+  expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  const proof=await seal(f);expect(proof.state.outcomes).toHaveLength(2);expect(proof.state.uncertain).toEqual([]);
+  expect(new Set(proof.state.intents.map(row=>row.attemptId)).size).toBe(2);
+ });
+ it('does not dispatch when cancellation arrives after durable intent acknowledgement', async()=>{
+  const f=await fixture(),opened=await initialize(f),controller=new AbortController(),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
+  durability.afterSync=path=>{if(path===join(f.path,'async','events','00000001.json'))controller.abort();};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:vi.fn()});
+  expect(adapter.review).not.toHaveBeenCalled();expect(result.newPhysicalCalls).toBe(0);
+  const proof=await seal(f);expect(proof.state.uncertain).toHaveLength(1);expect(proof.physicalAttempts[0].possiblyBilled).toBe(true);
+ });
+ it('returns on cancellation without waiting for a noncooperative adapter and audits its late result', async()=>{
+  const f=await fixture(),opened=await initialize(f),controller=new AbortController();let resolve!: (value:any)=>void,started!:()=>void;
+  const began=new Promise<void>(r=>started=r),raw=new Promise<any>(r=>resolve=r),errors:unknown[]=[];
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{started();return raw;})};
+  const running=executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:error=>errors.push(error)});
+  await began;controller.abort();expect((await running).newPhysicalCalls).toBe(1);const proof=await seal(f);
+  resolve(JSON.parse(review()));await vi.waitFor(async()=>expect(await readAsyncLateAudit(f.input)).toHaveLength(1));
+  expect((await seal(f)).bytes).toBe(proof.bytes);expect(errors).toEqual([]);
+ });
+
+ it('rejects caller-substituted async prompt hashes and caps before creating a phase', async()=>{
+  const f=await fixture();
+  await expect(initialize(f,{calls:f.input.calls.map(call=>({...call,userPromptSha256:sha256Hex('replacement')}))})).rejects.toThrow('capture_mismatch');
+  await expect(initialize(f,{maxAttemptsPerCall:3})).rejects.toThrow('capture_mismatch');
+  await expect(initialize(f,{maxPhysicalCalls:4})).rejects.toThrow('capture_mismatch');
+  expect(await readdir(f.path)).not.toContain('async');
+ });
+ it('checks absolute expiry again after fsync and preserves that unstarted intent as uncertain', async()=>{
+  const f=await fixture(),opened=await initialize(f),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
+  durability.afterSync=path=>{if(path===join(f.path,'async','events','00000001.json')){vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.expiresAtMs);}};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()});
+  expect(result.newPhysicalCalls).toBe(0);expect(adapter.review).not.toHaveBeenCalled();expect((await seal(f)).state.uncertain).toHaveLength(1);
+ });
+ it('never starts a new adapter request after main finalization cuts off pending claims', async()=>{
+  const f=await fixture(),opened=await initialize(f),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
+  await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
+  expect(await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()})).toEqual({newPhysicalCalls:0});
+  expect(adapter.review).not.toHaveBeenCalled();
  });
 
 });

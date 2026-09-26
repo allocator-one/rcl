@@ -97,3 +97,15 @@ it('refuses an aggregation snapshot for a different captured patch', async () =>
     modelWeights: undefined, diffSha256: 'f'.repeat(64) });
   expect(() => capturePreparedCouncil({ ...input, aggregationInputs: changed })).toThrow('aggregation_diff_mismatch');
 });
+
+it('captures the actual first-eight chunk-major async prompt matrix without adding blocking seats', async () => {
+  const input = await fixture(), asyncAssignments = Array.from({ length: 5 }, (_, index) => ({ ...assignments[0]!, model: `async-model-${index}` }));
+  const schedule = input.chunks.flatMap((_, chunk) => asyncAssignments.map((assignment, index) => ({ chunk, assignment, index }))).slice(0, 8);
+  const prompts = schedule.map((call, index) => ({ systemPrompt: `actual-system-${index}`, userPrompt: `actual-user-${call.chunk}-${index}` }));
+  const async = { assignments: asyncAssignments, prompts, timeoutMs: 1000, maxAttemptsPerCall: 2, maxPhysicalCalls: 16 };
+  const captured = capturePreparedCouncil({ ...input, async });
+  expect(captured.plan).toEqual(capturePreparedCouncil(input).plan);
+  expect(captured.captured.async!.calls.map(call => call.ref.id)).toEqual(schedule.map(call => `async-assignment:${call.index}:${call.chunk}`));
+  expect(captured.captured.async!.calls.map(call => call.prompt)).toEqual(prompts);
+  expect(() => capturePreparedCouncil({ ...input, async: { ...async, prompts: prompts.slice(1) } })).toThrow('incomplete_async_matrix');
+});
