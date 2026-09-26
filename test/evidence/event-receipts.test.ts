@@ -166,6 +166,13 @@ describe('selected recovery event receipts', () => {
     expect(requests).toHaveLength(0);
   });
 
+  it.each([null, {}])('rejects malformed IDs %j before HTTP', async malformed => {
+    const { sink, requests } = client(body());
+    await expect(readEventReceipts(sink, scope, malformed as readonly string[]))
+      .rejects.toThrow('invalid_event_receipt_selection');
+    expect(requests).toHaveLength(0);
+  });
+
   it('pins selected scope and IDs while the receipt read is pending', async () => {
     const selectedScope = structuredClone(scope);
     const ids = [EVENT];

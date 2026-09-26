@@ -27,6 +27,7 @@ export { isEventReceipt } from './claim-recovery/validation/receipts.js';
 export async function readEventReceipts(
   sink: HarnessSink, scope: EventReceiptScope, ids: readonly string[]
 ): Promise<SinkOutcome<SelectedEventReceipts>> {
+  if (!Array.isArray(ids)) throw new Error('invalid_event_receipt_selection');
   const selectedScope = structuredClone(scope);
   const selectedIds = [...ids];
   if (!isEventReceiptScope(selectedScope) || selectedIds.length < 1 || selectedIds.length > MAX_SELECTED_EVENT_RECEIPTS ||
