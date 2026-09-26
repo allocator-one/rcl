@@ -580,7 +580,9 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // Re-processing a round without a report id (a legacy or mismatched
   // report) must not erase the binding an earlier pass persisted.
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
-  const roundHeadSha = options.headSha ?? (state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined);
+  const existingRound = state.rounds.find((entry) => entry.round === options.round);
+  const roundHeadSha = options.headSha ?? existingRound?.headSha ??
+    (state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined);
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
     { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}),
@@ -708,7 +710,7 @@ export function resolveRoundResolution(state: ConvergeRunState, round: number): 
     ).length;
     const fixedHeadShas = [...new Set(Object.values(state.findings)
       .filter((e) => e.verdict === 'fixed' && e.verdictRound === round)
-      .map((e) => state.rounds.find((entry) => entry.round === e.verdictRound)?.headSha)
+      .map((e) => e.verdictHeadSha)
       .filter((headSha): headSha is string => headSha !== undefined))];
     return {
       round,
