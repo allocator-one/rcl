@@ -121,13 +121,13 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   if (previous.deliveryPending && ((previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) ||
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
-    if (options.confirmDelivery && !options.retryReason) {
-      refuse('infrastructure_failure', 'A received run needs an explicit bounded retry reason before another review.');
-    }
     const delivered = previous.runId && previous.reportJsonSha256 && options.confirmDelivery
       ? await options.confirmDelivery(previous).catch(() => false) : false;
     if (!delivered) {
       refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
+    }
+    if (!options.retryReason) {
+      refuse('infrastructure_failure', 'A received run needs an explicit bounded retry reason before another review.');
     }
   }
   const healthy = hasHealthyGuardedLaunch(previous);

@@ -117,7 +117,22 @@ describe('native guarded review launch', () => {
       findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
     const confirmDelivery = vi.fn().mockResolvedValue(true);
     await expect(guardReviewLaunch({ ...options, confirmDelivery })).rejects.toThrow(/retry.*reason/i);
-    expect(confirmDelivery).not.toHaveBeenCalled();
+    expect(confirmDelivery).toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('reports unresolved delivery before requiring a retry reason', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
+      deliveryPending: true, hardFailure: true });
+    await guardReviewLaunch(options);
+    await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    const confirmDelivery = vi.fn().mockResolvedValue(false);
+
+    await expect(guardReviewLaunch({ ...options, confirmDelivery })).rejects.toThrow('delivery_pending');
+
+    expect(confirmDelivery).toHaveBeenCalled();
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 
