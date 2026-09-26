@@ -860,7 +860,15 @@ export async function applyGating(
     if (failedWorker !== undefined) throw failedWorker.reason;
   }
 
-  return replayGating(plan, outcomes, now() - started);
+  const result = replayGating(plan, outcomes, now() - started);
+  const finished = now();
+  // Parsing and projecting retained responses are part of the same live pass.
+  // A completed request does not permit accepting an interpretation past its deadline.
+  if (batches.length > 0 && finished >= verificationDeadline) {
+    throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+  }
+  if (result.verification) result.verification.durationMs = finished - started;
+  return result;
 }
 
 

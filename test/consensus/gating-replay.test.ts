@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { applyGating, planGating, replayGating, type GatingBatchOutcome } from '../../src/consensus/gating.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 import type { ModelAnswer } from '../../src/dispatch/adapter.js';
@@ -25,6 +25,24 @@ function answer(text: string): ModelAnswer {
 }
 
 describe('deterministic verifier planning and replay', () => {
+  it('keeps final outcome interpretation inside the live whole-pass deadline', async () => {
+    let elapsed = 0;
+    const parse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((...args: Parameters<typeof JSON.parse>) => {
+      const value = parse(...args);
+      if (args[0].includes('"F1"')) elapsed = 100;
+      return value;
+    });
+    try {
+      await expect(applyGating([finding(0)], { ...options(), verificationPassTimeoutMs: 100,
+        monotonicNow: () => elapsed,
+        ask: async () => answer('[{"id":"F1","verdict":"confirmed"}]'),
+      })).rejects.toThrow(/whole-pass deadline/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('freezes queued prompts and findings before the first provider call', async () => {
     const findings = Array.from({ length: 32 }, (_, index) => finding(index));
     const original = structuredClone(findings);
