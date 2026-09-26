@@ -60,7 +60,7 @@ const launchSchema = z.object({
   deliveryPending: z.boolean().optional(),
   hardFailure: z.boolean().optional(),
   reviewerHealth: reviewerHealthSchema.optional(),
-  recovery: z.object({ sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict() }).strict().optional(),
+  recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),
 }).strict().refine(value => (value.status !== 'completed' && value.reviewerHealth === undefined) || completionSchema.safeParse(value).success);
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;

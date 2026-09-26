@@ -17,9 +17,12 @@ import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
+import { guardReviewerRecoveryLaunch } from '../../src/converge/recovery-launch.js';
+import { loadReviewerLineage } from '../../src/evidence/reviewer-lineage.js';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState, resolveRoundResolution } from '../../src/converge/run-state.js';
-import { processRetainedRoundReport, retainedLaunchInputSha256 } from '../../src/converge/retained-report.js';
+import * as retainedReports from '../../src/converge/retained-report.js';
+import { processRetainedRoundReport, processSupplementedRoundReport, retainedLaunchInputSha256 } from '../../src/converge/retained-report.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -249,5 +252,178 @@ describe('native admission of an original retained report', () => {
     for (const changed of [{ ...run, target: { ...run.target, prNumber: 106 } }, { ...run, roster: [...run.roster].reverse() },
       { ...run, spec: { ...run.spec, sha256: 'c'.repeat(64) } }]) expect(retainedLaunchInputSha256(f.capture.digest, changed)).not.toBe(digest);
     expect(retainedLaunchInputSha256('c'.repeat(64), run)).not.toBe(digest);
+  });
+});
+
+async function supplemented(options: { complete?: boolean; verified?: boolean } = {}) {
+  const f = await retained({ seats: 1, verified: options.verified });
+  const originalReport = f.reportBytes;
+  const sourceJournal = await CheckpointJournal.inspectRead(f.checkpoint);
+  const sourceProof = await exportCheckpointProof(sourceJournal);
+  const successor = runId(20), startedAtMs = Date.now();
+  let reportBytes = '';
+  await guardReviewerRecoveryLaunch({ gitCommonDir: f.gitCommonDir, target: f.target,
+    sourceRunId: f.id, successorRunId: successor, operationId: runId(30), headSha: f.currentHeadSha,
+    inputSha256: retainedLaunchInputSha256(f.f.capture.digest, f.run), startedAtMs,
+    expiresAtMs: startedAtMs + 60_000, maxAdditionalCalls: 2, maxAttemptsPerCell: 1,
+    run: async ({ journal, operation, ownership }) => {
+      for (const cell of f.f.plan.cells.filter(cell => cell.seat === 's1')) {
+        if (options.complete === false && cell.chunk === 1) continue;
+        const attempt = { id: `successor-${cell.id}`, kind: 'paid' as const };
+        const review: ModelReview = { model: cell.model, role: cell.role, provider: cell.route,
+          status: 'success', durationMs: 1, findings: [] };
+        await journal.recordIntent(cell.id, attempt, ownership);
+        await journal.recordResult(cell.id, attempt, { kind: 'success', chunk: cell.chunk,
+          reviewBytes: JSON.stringify(review) }, ownership);
+      }
+      await journal.finalize(ownership);
+      const proof = await exportCheckpointProof(journal);
+      const projection = projectCheckpointReport({ sources: [{ runId: f.id, proof: sourceProof }],
+        successor: { runId: successor, proof }, policy });
+      const run = { ...f.run, id: successor, startedAt: new Date(startedAtMs),
+        converge: { target: f.target, ...operation.successorNativeClaim! } };
+      const assembly = { projection, supplementalAsync: emptyAsync(), diff: f.f.diff, startTime: startedAtMs, run };
+      const { report } = await assembleCheckpointReview(assembly, { ask: async () => ({
+        model: 'google/gemini-3.8-flash', provider: 'google', status: 'success', durationMs: 1, text: '[]' }) });
+      reportBytes = JSON.stringify(sanitizeForDelivery(report));
+      const artifact = serializeReviewerArtifact({ assembly, reportBytes,
+        representation: { version: 1, parseFailures: false } });
+      await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
+    } });
+  return { ...f, reportBytes, originalReport, sourceJournal, successor };
+}
+
+describe('native admission of a supplemented retained report', () => {
+  it('admits a second successor without losing the first successor chunk or the original finding', async () => {
+    const f = await supplemented({ complete: false });
+    const source = await loadReviewerLineage({ commonDir: f.gitCommonDir, target: f.target, runId: f.successor });
+    const sourceReports = source.runs.map(entry => entry.terminal.reportBytes);
+    const startedAtMs = Date.now(), id = runId(40);
+    let reportBytes = '';
+    await guardReviewerRecoveryLaunch({ gitCommonDir: f.gitCommonDir, target: f.target,
+      sourceRunId: f.successor, successorRunId: id, operationId: runId(50), headSha: f.currentHeadSha,
+      inputSha256: retainedLaunchInputSha256(f.f.capture.digest, f.run), startedAtMs,
+      expiresAtMs: startedAtMs + 60_000, maxAdditionalCalls: 1, maxAttemptsPerCell: 1,
+      run: async ({ journal, operation, ownership }) => {
+        const cell = f.f.plan.cells.find(cell => cell.seat === 's1' && cell.chunk === 1)!;
+        const attempt = { id: 'second-successor-only-missing-chunk', kind: 'paid' as const };
+        const review: ModelReview = { model: cell.model, role: cell.role, provider: cell.route,
+          status: 'success', durationMs: 1, findings: [] };
+        await journal.recordIntent(cell.id, attempt, ownership);
+        await journal.recordResult(cell.id, attempt, { kind: 'success', chunk: cell.chunk,
+          reviewBytes: JSON.stringify(review) }, ownership);
+        await journal.finalize(ownership);
+        const projection = projectCheckpointReport({ sources: source.runs.map(entry => ({ runId: entry.runId, proof: entry.proof })),
+          successor: { runId: id, proof: await exportCheckpointProof(journal) }, policy });
+        const assembly = { projection, supplementalAsync: source.latest.inspected.supplementalAsync,
+          diff: f.f.diff, startTime: startedAtMs, run: { ...f.run, id, startedAt: new Date(startedAtMs),
+            converge: { target: f.target, ...operation.successorNativeClaim! } } };
+        reportBytes = JSON.stringify(sanitizeForDelivery((await assembleCheckpointReview(assembly)).report));
+        const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation: { version: 1, parseFailures: false } });
+        await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
+      } });
+    const attempts = (await nativeBytes(f))[1];
+    const admitted = await processSupplementedRoundReport({ ...f, reportBytes });
+    expect(admitted.findings).toHaveLength(1);
+    expect(admitted.findings[0]!.finding.description).toBe('An unrelated tenant can read this record.');
+    const combined = await loadReviewerLineage({ commonDir: f.gitCommonDir, target: f.target, runId: id });
+    expect(combined.runs).toHaveLength(3);
+    expect(combined.runs.slice(0, 2).map(entry => entry.terminal.reportBytes)).toEqual(sourceReports);
+    expect(combined.latest.state.successes).toHaveLength(1);
+    expect(combined.latest.inspected.artifact.health.successfulSeats).toHaveLength(2);
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.rounds).toMatchObject([{ round: 1, runId: id }]);
+    expect((await nativeBytes(f))[1]).toEqual(attempts);
+    expect(await loadConvergeAttemptState(f.gitCommonDir, f.target)).toMatchObject({ attemptsUsed: 3, cap: 3 });
+  });
+
+  it('admits the same unadmitted round once, preserves original findings and spends no further attempt', async () => {
+    const f = await supplemented(), beforeAttempts = (await nativeBytes(f))[1];
+    const sourceBefore = await f.sourceJournal.readTerminalReport();
+    const first = await processSupplementedRoundReport(f);
+    expect(first.findings).toHaveLength(1);
+    expect(first.findings[0]!.finding.description).toBe('An unrelated tenant can read this record.');
+    const state = (await loadConvergeRunState(f.gitCommonDir, f.target))!;
+    expect(state.rounds.map(({ round, runId }) => ({ round, runId }))).toEqual([{ round: 1, runId: f.successor }]);
+    expect(resolveRoundResolution(state, 1)!.status).toBe('unresolved');
+    expect(await processSupplementedRoundReport(f)).toEqual(first);
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.rounds).toHaveLength(1);
+    expect((await nativeBytes(f))[1]).toEqual(beforeAttempts);
+    expect(await f.sourceJournal.readTerminalReport()).toEqual(sourceBefore);
+    expect(sourceBefore!.reportBytes).toBe(f.originalReport);
+    expect(await loadConvergeAttemptState(f.gitCommonDir, f.target)).toMatchObject({ attemptsUsed: 2, cap: 3 });
+  });
+
+  it('refuses a still-incomplete chunked seat without admitting or changing accounting', async () => {
+    const f = await supplemented({ complete: false }), before = await nativeBytes(f);
+    await expect(processSupplementedRoundReport(f)).rejects.toThrow('supplemented_report_inconclusive_health');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('refuses a round already bound to another run', async () => {
+    const f = await supplemented();
+    await alterState(f, state => { state.rounds.push({ round: 1, runId: f.id,
+      counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } }); });
+    const before = await nativeBytes(f);
+    await expect(processSupplementedRoundReport(f)).rejects.toThrow('supplemented_report_round_already_bound');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it.each(['operation', 'source', 'root', 'health', 'report', 'claim'])('refuses a mismatched native %s binding', async kind => {
+    const f = await supplemented();
+    await alterState(f, state => {
+      if (kind === 'operation') state.lastLaunch.recovery.operationId = runId(90);
+      if (kind === 'source') state.lastLaunch.recovery.sourceRunId = runId(90);
+      if (kind === 'root') state.lastLaunch.recovery.originalNativeClaim.attempt = 2;
+      if (kind === 'health') state.lastLaunch.reviewerHealth.successfulSeats = 3;
+      if (kind === 'report') state.lastLaunch.reportJsonSha256 = 'c'.repeat(64);
+      if (kind === 'claim') state.lastLaunch.recovery.sourceNativeClaim.attempt = 2;
+    });
+    const before = await nativeBytes(f);
+    await expect(processSupplementedRoundReport(f)).rejects.toThrow('supplemented_report_native_launch_mismatch');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('requires the exact ordinary bytes and current head and rejects stale ownership', async () => {
+    const f = await supplemented(); let ownership!: NativeTargetOwnership;
+    await withNativeTarget(f.gitCommonDir, f.target, async value => { ownership = value; });
+    const before = await nativeBytes(f);
+    await expect(processSupplementedRoundReport({ ...f, reportBytes: f.reportBytes + '\n' })).rejects.toThrow('supplemented_report_terminal_mismatch');
+    await expect(processSupplementedRoundReport({ ...f, currentHeadSha: 'c'.repeat(40) })).rejects.toThrow('supplemented_report_head_mismatch');
+    await expect(processSupplementedRoundReport({ ...f, ownership })).rejects.toThrow('native_target_not_owned');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+
+  it('does not treat a provider-dependent verifier annotation as admission authority', async () => {
+    const f = await supplemented({ verified: true }), before = await nativeBytes(f);
+    await expect(processSupplementedRoundReport(f)).rejects.toThrow('supplemented_report_verifier_evidence_required');
+    expect(await nativeBytes(f)).toEqual(before);
+  });
+});
+
+
+describe('proof-bound native intake routing', () => {
+  it('admits an original through the same entry point used by converge-report', async () => {
+    const f = await retained();
+    const result = await retainedReports.processReviewerRoundReport(f);
+    expect(result.findings[0]!.finding.severity).toBe('critical');
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.rounds[0]!.runId).toBe(f.id);
+  });
+
+  it('admits a supplemented report through that entry point and replays without another claim', async () => {
+    const f = await supplemented(), before = await loadConvergeAttemptState(f.gitCommonDir, f.target);
+    await retainedReports.processReviewerRoundReport(f);
+    await retainedReports.processReviewerRoundReport(f);
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.rounds).toHaveLength(1);
+    expect((await loadConvergeRunState(f.gitCommonDir, f.target))!.rounds[0]!.runId).toBe(f.successor);
+    expect(await loadConvergeAttemptState(f.gitCommonDir, f.target)).toEqual(before);
+    expect((await f.sourceJournal.readTerminalReport())!.reportBytes).toBe(f.originalReport);
+  });
+
+  it('cannot route a successor around its proof by claiming an original ordinary kind', async () => {
+    const f = await supplemented(), report = JSON.parse(f.reportBytes), before = await nativeBytes(f);
+    report.run.reviewer_evidence = { version: 1, kind: 'original' };
+    await expect(retainedReports.processReviewerRoundReport({ ...f, reportBytes: JSON.stringify(report) }))
+      .rejects.toThrow('supplemented_report_terminal_mismatch');
+    expect(await nativeBytes(f)).toEqual(before);
   });
 });

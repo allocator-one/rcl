@@ -1,12 +1,13 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { guardReviewerRecoveryLaunch } from "../../src/converge/recovery-launch.js";
+import { guardReviewerRecoveryLaunch, guardReviewerRecoveryResume } from "../../src/converge/recovery-launch.js";
 import { loadConvergeAttemptState } from "../../src/converge/attempt-budget.js";
 import { guardReviewLaunch } from "../../src/converge/launch-guard.js";
-import { loadConvergeRunState } from "../../src/converge/run-state.js";
+import { loadConvergeRunState, convergeRunStatePath } from "../../src/converge/run-state.js";
+import { recoverCapturedAssignments, recoveryAttemptsFromCheckpoint } from "../../src/dispatch/recovery.js";
 import {
   CheckpointJournal,
   exportCheckpointProof,
@@ -86,7 +87,7 @@ function review(
   };
 }
 
-async function sealed(successes: number, failure: SourceFailure = "timeout") {
+async function sealed(successes: number, failure: SourceFailure = "timeout", seats = 17) {
   const dir = await mkdtemp(join(tmpdir(), "rcl-recovery-"));
   roots.push(dir);
   const diff: any = {
@@ -127,7 +128,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout") {
     parser: { name: "findings-json", version: 1 },
     aggregation: { name: "consensus", version: 1 },
   });
-  const roster = Array.from({ length: 17 }, (_, index) => ({
+  const roster = Array.from({ length: seats }, (_, index) => ({
     seat: `s${index}`,
     model: `m${index}`,
     role: "general",
@@ -234,13 +235,13 @@ async function sealed(successes: number, failure: SourceFailure = "timeout") {
             planDigest: plan.digest,
             startedAtMs: clock,
             expiresAtMs: clock + 60_000,
-            maxPhysicalCalls: 17,
+            maxPhysicalCalls: seats,
             maxAttemptsPerCell: 1,
           }),
         ),
         ownership,
       );
-      for (let index = 0; index < 17; index++) {
+      for (let index = 0; index < seats; index++) {
         const attempt = { id: `a${index}`, kind: "paid" as const };
         await journal.recordIntent(`s${index}:0`, attempt, ownership);
         if (index < successes) {
@@ -306,7 +307,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout") {
         runId: id,
         reportJsonSha256: sha256Hex(reportBytes),
         successfulReviews: successes,
-        totalReviews: 17,
+        totalReviews: seats,
         deliveryPending: false,
         hardFailure: true,
         reviewerHealth: {
@@ -401,7 +402,7 @@ async function sealSuccessor(
   const assembly: any = {
     ...source.assembly,
     projection: projectCheckpointReport({
-      sources: [{ runId: fixture.id, proof: fixture.sourceProof }],
+      sources: source.assembly.projection.proofs.map((item: any) => ({ runId: item.runId, proof: item.proof })),
       successor: { runId: value.operation.successorRunId, proof },
       policy: fixture.captured.policy,
     }),
@@ -584,24 +585,7 @@ describe("proof-bearing reviewer recovery launch", () => {
     });
   });
 
-  it("refuses a successor-of-successor source before claiming", async () => {
-    const fixture = await sealed(11);
-    const first: any = opts(fixture);
-    first.run = async (context: any) => {
-      await sealSuccessor(fixture, context, [{ cell: "s11:0" }]);
-    };
-    await guardReviewerRecoveryLaunch(first);
-    const second: any = opts(fixture, {
-      sourceRunId: first.successorRunId,
-      successorRunId: "44444444-4444-4444-8444-444444444444",
-      operationId: "55555555-5555-4555-8555-555555555555",
-    });
-    await expect(guardReviewerRecoveryLaunch(second)).rejects.toThrow(
-      "recovery_launch_successor_source_unsupported",
-    );
-    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
-    expect(second.run).not.toHaveBeenCalled();
-  });
+
 
   it("already-quorate source spends nothing", async () => {
     const fixture = await sealed(12);
@@ -610,5 +594,158 @@ describe("proof-bearing reviewer recovery launch", () => {
       kind: "already_quorate",
     });
     expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+  });
+});
+
+
+function resumeOptions(value: ReturnType<typeof opts>) {
+  return { gitCommonDir: value.gitCommonDir, target: value.target, successorRunId: value.successorRunId,
+    headSha: value.headSha, inputSha256: value.inputSha256, nowMs: value.nowMs, run: value.run };
+}
+
+describe('same-operation guarded reviewer recovery resume', () => {
+  it('revalidates a completed terminal and returns without a new claim or callback', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => { await sealSuccessor(fixture, context, [{ cell: 's1:0' }]); };
+    await guardReviewerRecoveryLaunch(value);
+    const attempts = await state(fixture), native = await runState(fixture);
+    const resume = { ...resumeOptions(value), run: vi.fn() };
+    const result = await guardReviewerRecoveryResume(resume);
+    expect(result).toMatchObject({ kind: 'resumed', reusedTerminal: true, claim: { attempt: 2, cap: 3 } });
+    expect(resume.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('resumes failure before dispatch with the same claim and immutable original PID', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted before dispatch'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted before dispatch');
+    const attempts = await state(fixture), before = await runState(fixture);
+    const resume = { ...resumeOptions(value), run: vi.fn(async (context: any) => {
+      expect(context.claim).toMatchObject({ attempt: 2, cap: 3 });
+      expect(context.claim.stateFile).not.toBe('');
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+    }) };
+    await expect(guardReviewerRecoveryResume(resume)).resolves.toMatchObject({ kind: 'resumed', reusedTerminal: false });
+    expect(resume.run).toHaveBeenCalledTimes(1);
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed',
+      pid: before!.lastLaunch!.pid, successfulReviews: 2, totalReviews: 3,
+      recovery: { resume: { pid: process.pid, phase: 'finished' } } } });
+  });
+
+  it('repairs completion after terminal retention without calling the callback again', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+      throw new Error('interrupted after terminal');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted after terminal');
+    const attempts = await state(fixture);
+    const resume = { ...resumeOptions(value), nowMs: () => clock + 600_000, run: vi.fn() };
+    await expect(guardReviewerRecoveryResume(resume)).resolves.toMatchObject({ kind: 'resumed', reusedTerminal: true });
+    expect(resume.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed', successfulReviews: 2 } });
+  });
+
+  it('serializes two resumes and completes one callback without double spending', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const resume = { ...resumeOptions(value), run: vi.fn(async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+    }) };
+    const results = await Promise.allSettled([guardReviewerRecoveryResume(resume), guardReviewerRecoveryResume(resume)]);
+    expect(results.map(result => result.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(resume.run).toHaveBeenCalledTimes(1);
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2, cap: 3 });
+  });
+
+  it('refuses head or full input drift before reopening a spent operation', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const attempts = await state(fixture), native = await runState(fixture), run = vi.fn();
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), headSha: 'c'.repeat(40), run })).rejects.toThrow('recovery_launch_resume_input_mismatch');
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), inputSha256: 'c'.repeat(64), run })).rejects.toThrow('recovery_launch_resume_input_mismatch');
+    expect(run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('retains a durable success across interruption and finishes after expiry without another provider call', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => {
+      const attempt = { id: 'durable-before-crash', kind: 'paid' as const };
+      await context.journal.recordIntent('s1:0', attempt, context.ownership);
+      await context.journal.recordResult('s1:0', attempt, { kind: 'success', chunk: 0,
+        reviewBytes: JSON.stringify(review(1, 'success')) }, context.ownership);
+      throw new Error('interrupted after durable result');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted after durable result');
+    const attempts = await state(fixture), provider = vi.fn();
+    const resume = { ...resumeOptions(value), nowMs: () => clock + 600_000, run: async (context: any) => {
+      const result = await recoverCapturedAssignments({ commonDir: fixture.dir, ownership: context.ownership,
+        journal: context.journal, operation: context.operation, expectedPlan: fixture.plan,
+        sourceAttempts: recoveryAttemptsFromCheckpoint(fixture.sourceProof.state), nowMs: () => clock + 600_000,
+        adapterFactory: provider });
+      expect(result.preview.successfulSeats).toBe(2);
+      expect(result.newAttempts).toBe(1);
+      await sealSuccessor(fixture, context, []);
+    } };
+    await expect(guardReviewerRecoveryResume(resume)).resolves.toMatchObject({ kind: 'resumed' });
+    expect(provider).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed', successfulReviews: 2 } });
+  });
+
+  it('keeps an interrupted provider intent uncertain and spent instead of issuing it again', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => {
+      await context.journal.recordIntent('s1:0', { id: 'unknown-before-crash', kind: 'paid' }, context.ownership);
+      throw new Error('interrupted with unknown outcome');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted with unknown outcome');
+    const attempts = await state(fixture), provider = vi.fn();
+    await guardReviewerRecoveryResume({ ...resumeOptions(value), run: async (context: any) => {
+      const result = await recoverCapturedAssignments({ commonDir: fixture.dir, ownership: context.ownership,
+        journal: context.journal, operation: context.operation, expectedPlan: fixture.plan,
+        sourceAttempts: recoveryAttemptsFromCheckpoint(fixture.sourceProof.state), nowMs: value.nowMs, adapterFactory: provider });
+      expect(result.newAttempts).toBe(1);
+      expect(result.preview.successfulSeats).toBe(1);
+      expect((await context.journal.read()).uncertain).toHaveLength(1);
+      await sealSuccessor(fixture, context, []);
+    } });
+    expect(provider).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed', successfulReviews: 1 } });
+  });
+
+  it.each(['alive', 'unverifiable', 'dead'] as const)('handles a pending %s owner conservatively', async kind => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const path = convergeRunStatePath(fixture.dir, target), native = JSON.parse(await readFile(path, 'utf8'));
+    native.lastLaunch.status = 'pending';
+    await writeFile(path, JSON.stringify(native));
+    const before = await state(fixture), run = vi.fn(async (context: any) => { await sealSuccessor(fixture, context, [{ cell: 's1:0' }]); });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      if (kind === 'alive') return true;
+      throw Object.assign(new Error('pid probe'), { code: kind === 'dead' ? 'ESRCH' : 'EPERM' });
+    });
+    try {
+      if (kind === 'dead') {
+        await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run })).resolves.toMatchObject({ kind: 'resumed' });
+        expect(run).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run })).rejects.toThrow(
+          kind === 'alive' ? 'recovery_launch_resume_owner_alive' : 'recovery_launch_resume_owner_unverifiable');
+        expect(run).not.toHaveBeenCalled();
+        expect(await runState(fixture)).toEqual(native);
+      }
+      expect(await state(fixture)).toEqual(before);
+    } finally { kill.mockRestore(); }
   });
 });

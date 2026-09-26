@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { InspectedReviewerArtifact } from './reviewer-artifact.js';
 import { decodeSupplementalAsync, isSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { decodeCapturedInputs, type CapturedReviewerInputs } from '../dispatch/captured-inputs.js';
@@ -178,13 +179,12 @@ export function assertReviewerRunBindings(
   return target;
 }
 
-/** Validate oldest-to-newest immutable ancestry; does not grant producer authority or approval. */
-export function validateReviewerReportChain(reports: readonly InspectedReviewerReport[]): readonly InspectedReviewerReport[] {
+/** Validates a report-shaped chain. The caller separately establishes how each pair was inspected. */
+function validateChain<T extends InspectedReviewerReport>(reports: readonly T[]): readonly T[] {
   if (reports.length === 0 || reports.length > MAX_REVIEWER_LINEAGE_DEPTH) throw new Error('reviewer_lineage_depth');
   const runIds = new Set<string>(), operationIds = new Set<string>();
   let previous: InspectedReviewerReport | undefined;
   for (const report of reports) {
-    if (!inspected.has(report)) throw new Error('reviewer_report_not_inspected');
     const id = report.runId.toLowerCase();
     if (runIds.has(id)) throw new Error('reviewer_lineage_duplicate_run');
     runIds.add(id);
@@ -199,12 +199,27 @@ export function validateReviewerReportChain(reports: readonly InspectedReviewerR
         report.proof.plan.digest !== previous.proof.plan.digest || report.captured.digest !== previous.captured.digest) {
         throw new Error('reviewer_lineage_source_mismatch');
       }
-      if (operation.originalNativeClaim.attempt !== previous.nativeClaim?.attempt ||
-        operation.originalNativeClaim.round !== previous.nativeClaim?.round) throw new Error('reviewer_lineage_native_claim_mismatch');
+      const root = reports[0]!;
+      if (operation.originalNativeClaim.attempt !== root.nativeClaim?.attempt ||
+        operation.originalNativeClaim.round !== root.nativeClaim?.round ||
+        !operation.successorNativeClaim ||
+        operation.successorNativeClaim.attempt !== report.nativeClaim?.attempt ||
+        operation.successorNativeClaim.round !== report.nativeClaim?.round) throw new Error('reviewer_lineage_native_claim_mismatch');
       if (operationIds.has(operation.operationId.toLowerCase())) throw new Error('reviewer_lineage_duplicate_operation');
       operationIds.add(operation.operationId.toLowerCase());
     }
     previous = report;
   }
   return Object.freeze([...reports]);
+}
+
+/** Validate oldest-to-newest immutable report evidence. */
+export function validateReviewerReportChain(reports: readonly InspectedReviewerReport[]): readonly InspectedReviewerReport[] {
+  for (const report of reports) if (!inspected.has(report)) throw new Error('reviewer_report_not_inspected');
+  return validateChain(reports);
+}
+
+/** Validate separately retained private artifact pairs without fabricating inline evidence. */
+export function validateInspectedReviewerArtifactChain(reports: readonly InspectedReviewerArtifact[]): readonly InspectedReviewerArtifact[] {
+  return Object.freeze([...validateChain(reports)]);
 }

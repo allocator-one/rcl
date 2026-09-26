@@ -10,6 +10,7 @@ import { stableStringify } from '../report/run-header.js';
 import { deriveReviewerHealth } from '../report/reviewer-health.js';
 import { inspectReviewerArtifact } from '../report/reviewer-artifact.js';
 import { UUID } from '../telemetry/recovery/source.js';
+import { loadReviewerLineage } from './reviewer-lineage.js';
 
 const MAX_LINEAGE_DEPTH = 32;
 
@@ -202,7 +203,7 @@ async function sourceLineage(
   throw new Error('reviewer_status_lineage_depth');
 }
 
-function chainedState(runs: readonly DecodedRun[]): CheckpointState {
+function chainedState(runs: readonly Pick<DecodedRun, 'state'>[]): CheckpointState {
   const successes: CheckpointState['successes'] = [], outcomes: CheckpointState['outcomes'] = [], records: CheckpointState['records'] = [], uncertain: CheckpointState['uncertain'] = [];
   const successfulCells = new Set<string>(), pendingCells = new Set<string>(), attempts = new Set<string>();
   for (const run of runs) {
@@ -281,20 +282,12 @@ export async function inspectReviewerRecoveryPreview(input: InspectReviewerRecov
     !Number.isSafeInteger(proposedBudget.timeBudgetMs) || proposedBudget.timeBudgetMs < 1 || proposedBudget.timeBudgetMs > MAX_TIMER_DELAY_MS) {
     throw new Error('reviewer_preview_invalid_budget');
   }
-  const run = await decodeRun(request.commonDir, request.target, request.runId, request.nowMs);
-  if (!run.state.finalized) throw new Error('reviewer_preview_source_unsealed');
-  const terminal = await run.journal.readTerminalReport();
-  if (!terminal) throw new Error('reviewer_preview_terminal_missing');
-  const inspected = inspectReviewerArtifact(terminal.reviewerArtifactBytes, {
-    expectedReportBytes: terminal.reportBytes, expectedRunId: request.runId, expectedTarget: request.target, expectedPlan: run.plan,
-  });
-  const proof = await exportCheckpointProof(run.journal);
-  if (inspected.proof.digest !== proof.digest || inspected.reportSha256 !== terminal.reportSha256 || inspected.captured.digest !== run.captureDigest) {
-    throw new Error('reviewer_preview_source_mismatch');
-  }
-  const chain = await sourceLineage(request.commonDir, request.target, run, request.runId, request.nowMs);
+  const chain = await loadReviewerLineage({ commonDir: request.commonDir, target: request.target, runId: request.runId });
+  const run = chain.latest;
+  const inspected = run.inspected;
+  const proof = run.proof;
   const merged = chainedState(chain.runs);
-  const attempts = chain.runs.flatMap(item => recoveryAttemptsFromCheckpoint(item.state));
+  const attempts = chain.attempts;
   const policy = resolveQuorumPolicy(run.plan.roster.length, inspected.captured.policy.fraction);
   const recovery = previewReviewerRecovery(run.plan.cells, attempts, policy, {
     ...proposedBudget, additionalCallsUsed: 0, remainingMs: proposedBudget.timeBudgetMs,
@@ -304,7 +297,7 @@ export async function inspectReviewerRecoveryPreview(input: InspectReviewerRecov
     health.conclusive !== inspected.artifact.health.conclusive) throw new Error('reviewer_preview_health_mismatch');
   return freeze({ version: 1, scope: 'local_structural_preview_only', authorization: 'not_recovery_authorization_or_server_approval',
     target: request.target, runId: request.runId,
-    source: { reportSha256: terminal.reportSha256, checkpointSha256: proof.digest, capturedInputsSha256: run.captureDigest, planDigest: run.plan.digest },
+    source: { reportSha256: run.terminal.reportSha256, checkpointSha256: proof.digest, capturedInputsSha256: run.captured.digest, planDigest: run.plan.digest },
     proposedBudget, recovery,
     eligibleAssignments: recovery.eligibleCallIndices.map(index => {
       const cell = run.plan.cells[index]!;

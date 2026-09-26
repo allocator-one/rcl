@@ -36,7 +36,7 @@ import { assertOriginalLaunchBudget, createOriginalLaunch, type OriginalLaunch }
 import { createCheckpointLateAudit, type CheckpointLateAudit } from './dispatch/late-audit.js';
 import type { CheckpointJournal } from './dispatch/checkpoint.js';
 import { withNativeTarget, type NativeTargetOwnership } from './converge/target-ownership.js';
-import { retainedLaunchInputSha256, processRetainedRoundReport } from './converge/retained-report.js';
+import { retainedLaunchInputSha256, processReviewerRoundReport } from './converge/retained-report.js';
 import { AGGREGATION_ALGORITHM, captureAggregationInputs } from './report/aggregation-inputs.js';
 import { assembleCheckpointReview, type CheckpointAssemblyInput } from './report/checkpoint-assembly.js';
 import { projectCheckpointReport, type CheckpointReportProjection } from './report/checkpoint-projection.js';
@@ -658,7 +658,7 @@ program
           // cannot make an already retained launch fall through legacy intake.
           const state = await loadConvergeRunState(gitCommonDir, convergeTarget);
           if (report.run?.reviewer_evidence !== undefined || state?.lastLaunch?.reviewerHealth !== undefined) {
-            return processRetainedRoundReport({ gitCommonDir, target: convergeTarget, round, reportBytes,
+            return processReviewerRoundReport({ gitCommonDir, target: convergeTarget, round, reportBytes,
               currentHeadSha: (await resolveGitHeads()).headSha ?? '', ownership,
               ...(maxRounds !== undefined ? { maxRounds } : {}) });
           }

@@ -108,7 +108,7 @@ describe('immutable reviewer report lineage', () => {
       const operation = createRecoveryOperation({ operationId: ids[2]!, successorRunId: ids[1]!, sourceRunId: source.runId,
         sourceReportSha256: source.reportSha256, sourceCheckpointSha256: source.proof.digest,
         capturedInputsSha256: input.captured.digest, planDigest: input.plan.digest, target: input.plan.target,
-        originalNativeClaim: { attempt: 1, round: 1 }, startedAtMs: 1000, expiresAtMs: 2000, maxAdditionalCalls: 2, maxAttemptsPerCell: 2 });
+        originalNativeClaim: { attempt: 1, round: 1 }, successorNativeClaim: { attempt: 2, round: 2 }, startedAtMs: 1000, expiresAtMs: 2000, maxAdditionalCalls: 2, maxAttemptsPerCell: 2 });
       const journal = await CheckpointJournal.create({ commonDir: input.commonDir, namespace: 'successor', plan: input.plan, ownership });
       await journal.bind('captured-inputs', input.captured.bytes, ownership);
       await journal.bind('source', reviewerSourceBinding(source), ownership);
@@ -213,7 +213,7 @@ describe('original launch report binding', () => {
     const operation = createRecoveryOperation({ operationId: ids[2]!, successorRunId: ids[1]!, sourceRunId: ids[0]!,
       sourceReportSha256: 'a'.repeat(64), sourceCheckpointSha256: 'b'.repeat(64),
       capturedInputsSha256: input.captured.digest, planDigest: input.plan.digest, target: input.plan.target,
-      originalNativeClaim: { attempt: 1, round: 1 }, startedAtMs: 1000, expiresAtMs: 2000, maxAdditionalCalls: 2, maxAttemptsPerCell: 2 });
+      originalNativeClaim: { attempt: 1, round: 1 }, successorNativeClaim: { attempt: 2, round: 2 }, startedAtMs: 1000, expiresAtMs: 2000, maxAdditionalCalls: 2, maxAttemptsPerCell: 2 });
     const bytes = { source: stableStringify({ run_id: ids[0], report_sha256: 'a'.repeat(64), checkpoint_sha256: 'b'.repeat(64) }),
       operation: encodeRecoveryOperation(operation) };
     const proof = await proofWithBindings(input, [['launch', encodeOriginalLaunch(launch)], ...names.map(name => [name, bytes[name]] as ['source' | 'operation', string])]);

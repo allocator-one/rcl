@@ -186,9 +186,9 @@ describe('local missing-reviewer preview', () => {
     const value = await fixture();
     const request = { commonDir: value.commonDir, target, runId, nowMs: 4_000,
       maxAdditionalCalls: 2, maxAttemptsPerCell: 2, timeBudgetMs: 30_000 };
-    await expect(inspectReviewerRecoveryPreview(request)).rejects.toThrow('reviewer_preview_source_unsealed');
+    await expect(inspectReviewerRecoveryPreview(request)).rejects.toThrow('reviewer_lineage_unsealed');
     await withNativeTarget(value.commonDir, target, async ownership => { await value.journal.finalize(ownership); });
-    await expect(inspectReviewerRecoveryPreview(request)).rejects.toThrow('reviewer_preview_terminal_missing');
+    await expect(inspectReviewerRecoveryPreview(request)).rejects.toThrow('reviewer_lineage_terminal_missing');
     await withNativeTarget(value.commonDir, target, async ownership => {
       await value.journal.retainTerminalReport(await terminalPair(runId, value.plan, await exportCheckpointProof(value.journal), value.files), ownership);
     });
