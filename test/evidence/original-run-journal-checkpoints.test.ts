@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { MAX_RECOVERY_CHECKPOINT_BYTES, MAX_RECOVERY_CHECKPOINTS, openJournal } from '../../src/evidence/original-run/journal.js';
+import { sha256 } from '../../src/telemetry/recovery/files.js';
 
 const fault = vi.hoisted(() => ({ failures: 0, syncs: 0, entries: undefined as string[] | undefined }));
 vi.mock('node:fs/promises', async original => {
@@ -169,4 +170,18 @@ it('refuses an append that would make its own journal exceed the retained-byte l
   for (let index = 0; index < 8; index++) await journal.append(`checkpoint_${index}`, data);
   await expect(journal.append('checkpoint_over_limit', data)).rejects.toThrow('recovery_journal_checkpoint_limit');
   await expect(openJournal(file, manifest, operation, 'resume')).resolves.toBeDefined();
+});
+
+it('refuses oversized retained checkpoint bytes before resume parses excess entries', async () => {
+  const file = await path();
+  await openJournal(file, manifest, operation, 'apply');
+  let previous = manifest;
+  const data = 'x'.repeat(MAX_RECOVERY_CHECKPOINT_BYTES - 8 * 1024);
+  for (let sequence = 1; sequence <= 9; sequence++) {
+    const record = { operation_id: operation, manifest_sha256: manifest, sequence, previous_sha256: previous, phase: `checkpoint_${sequence}`, recorded_at: new Date().toISOString(), data };
+    const bytes = JSON.stringify(record, null, 2) + '\n';
+    await writeFile(join(file, `${String(sequence).padStart(8, '0')}.json`), bytes);
+    previous = sha256(bytes);
+  }
+  await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('recovery_journal_checkpoint_limit');
 });
