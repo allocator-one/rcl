@@ -125,7 +125,7 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');
   }
-  if ((resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
+  if (healthy && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
   if ((previous.hardFailure || !healthy) && !options.retryReason) {

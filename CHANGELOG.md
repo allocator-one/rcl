@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.1.6 - 2026-09-26
+
+- Permit an explicit bounded same-head retry after an inconclusive guarded
+  review of a fixed head. Healthy unchanged reviews still refuse duplicate
+  councils, and delivery-only retries retain their original evidence (RCL-107).
+
 ## 4.1.5 - 2026-09-26
 
 - Allow up to two minutes for evidence artifact uploads and exact-byte downloads
