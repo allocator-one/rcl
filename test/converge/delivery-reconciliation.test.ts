@@ -52,6 +52,7 @@ describe('reconcileDeliveredRun', () => {
     ['a mismatched round', (detail: ReturnType<typeof matchingDetail>) => { detail.converge.round = 2; }],
     ['a mismatched attempt', (detail: ReturnType<typeof matchingDetail>) => { detail.converge.attempt = 5; }],
     ['a mismatched report digest', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].declared_sha256 = 'd'.repeat(64); }],
+    ['a missing report digest', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].declared_sha256 = undefined as never; }],
     ['an unstored report artifact', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].stored = false; }],
     ['a mismatched run id', (detail: ReturnType<typeof matchingDetail>) => { detail.id = '019921a0-0000-7000-8000-000000000002'; }],
   ])('does not mutate %s', async (_name, mutator) => {
@@ -72,6 +73,8 @@ describe('reconcileDeliveredRun', () => {
     ['a non-completed launch', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.status = 'failed'; }],
     ['a launch without pending delivery', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.deliveryPending = false; }],
     ['a launch for another run', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.runId = '019921a0-0000-7000-8000-000000000002'; }],
+    ['a launch without a report digest', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.reportJsonSha256 = undefined as never; }],
+    ['a launch without a head or round', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.headSha = undefined as never; state!.lastLaunch!.round = undefined as never; }],
   ])('does not mutate %s', async (_name, mutate) => {
     const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
     try {

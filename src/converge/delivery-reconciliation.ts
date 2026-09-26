@@ -25,11 +25,15 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
   }
   return withNativeTarget(common, target, async ownership => {
     const state = await loadConvergeRunState(common, target), launch = state?.lastLaunch;
+    const round = detail.converge?.round, attempt = detail.converge?.attempt, headSha = detail.target.head_sha;
     if (!state || !launch || launch.status !== 'completed' || !launch.deliveryPending ||
-      launch.runId?.toLowerCase() !== runId.toLowerCase() ||
-      detail.converge?.round !== launch.round || detail.converge?.attempt !== launch.attempt ||
-      detail.target.head_sha !== launch.headSha ||
-      !detail.artifacts?.some(artifact => artifact.kind === 'report_json' && artifact.stored && artifact.declared_sha256 === launch.reportJsonSha256)) return 'unchanged';
+      typeof launch.runId !== 'string' || typeof launch.reportJsonSha256 !== 'string' ||
+      !Number.isSafeInteger(launch.round) || !Number.isSafeInteger(launch.attempt) || typeof launch.headSha !== 'string' ||
+      !Number.isSafeInteger(round) || !Number.isSafeInteger(attempt) || typeof headSha !== 'string' ||
+      launch.runId.toLowerCase() !== runId.toLowerCase() ||
+      round !== launch.round || attempt !== launch.attempt || headSha !== launch.headSha ||
+      !detail.artifacts?.some(artifact => artifact.kind === 'report_json' && artifact.stored &&
+        typeof artifact.declared_sha256 === 'string' && artifact.declared_sha256 === launch.reportJsonSha256)) return 'unchanged';
     state.lastLaunch = { ...launch, deliveryPending: false };
     state.updatedAt = new Date().toISOString();
     await writeState(common, state, ownership);
