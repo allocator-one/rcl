@@ -87,9 +87,7 @@ def previous_version(metadata, version):
         raise NotificationError('Release version is not published on npm')
     current = tuple(map(int, version.split('.')))
     earlier = [v for v in versions if STABLE.fullmatch(v) and tuple(map(int, v.split('.'))) < current]
-    if not earlier:
-        raise NotificationError('No previous stable npm version to compare')
-    return max(earlier, key=lambda value: tuple(map(int, value.split('.'))))
+    return max(earlier, key=lambda value: tuple(map(int, value.split('.')))) if earlier else None
 
 
 def validate_package(package, name, version, sha):
@@ -177,15 +175,15 @@ def build_payload(repository, version, previous, comparison):
         comparison_files = []
     files = sorted((item for item in comparison_files if isinstance(item, dict)),
                    key=lambda item: (item.get('additions') or 0) + (item.get('deletions') or 0), reverse=True)
-    url = f'https://github.com/{repository}/compare/v{previous}...v{version}'
+    url = f'https://github.com/{repository}/compare/v{previous}...v{version}' if previous else None
     return {
         'source': 'github_actions', 'environment': 'prod', 'repository': repository,
         'product': product, 'package': package, 'current_version': version,
-        'previous_version': previous, 'current_tag': f'v{version}', 'previous_tag': f'v{previous}',
+        'previous_version': previous, 'current_tag': f'v{version}', 'previous_tag': f'v{previous}' if previous else None,
         'compare_url': url,
         'npm_url': f'https://www.npmjs.com/package/{package}/v/{version}',
         'release_header': f'**{product} {version}**\n\n',
-        'full_diff_footer': f'\n\n[Full diff: v{previous} → v{version}]({url})',
+        'full_diff_footer': f'\n\n[Full diff: v{previous} → v{version}]({url})' if previous else '',
         'total_commits': comparison.get('total_commits', len(commits)),
         'included_commits': len(commits),
         'commits_truncated': comparison.get('total_commits', len(commits)) > len(commits),
@@ -284,17 +282,19 @@ def main():
         raise NotificationError('Release version is not published on npm')
     current_attestation = json_response(attestation_url(package_name, version)) if current_package.get('gitHead') is None else {}
     validate_published_package(current_package, current_attestation, package_name, version, repository, sha, run_id, run_attempt)
-    previous_sha = github(f'commits/v{previous}').get('sha')
-    if not isinstance(previous_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_sha):
-        raise NotificationError('Previous release tag has no valid commit')
-    previous_package = versions.get(previous)
-    if not isinstance(previous_package, dict):
-        raise NotificationError('Previous release version is not published on npm')
-    previous_attestation = json_response(attestation_url(package_name, previous)) if previous_package.get('gitHead') is None else {}
-    validate_published_package(previous_package, previous_attestation, package_name, previous, repository, previous_sha)
-    comparison = latest_comparison(github, previous_sha, sha)
-    if comparison.get('status') != 'ahead':
-        raise NotificationError('Release comparison must advance from the previous published tag')
+    comparison = {'total_commits': 0, 'commits': [], 'files': []}
+    if previous:
+        previous_sha = github(f'commits/v{previous}').get('sha')
+        if not isinstance(previous_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_sha):
+            raise NotificationError('Previous release tag has no valid commit')
+        previous_package = versions.get(previous)
+        if not isinstance(previous_package, dict):
+            raise NotificationError('Previous release version is not published on npm')
+        previous_attestation = json_response(attestation_url(package_name, previous)) if previous_package.get('gitHead') is None else {}
+        validate_published_package(previous_package, previous_attestation, package_name, previous, repository, previous_sha)
+        comparison = latest_comparison(github, previous_sha, sha)
+        if comparison.get('status') != 'ahead':
+            raise NotificationError('Release comparison must advance from the previous published tag')
     payload = build_payload(repository, version, previous, comparison)
     body = encode_payload(payload)
     if dry_run:

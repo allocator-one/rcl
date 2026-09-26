@@ -37,8 +37,7 @@ class ReleaseNotificationTest(unittest.TestCase):
     def test_previous_published_stable_version_ignores_newer_and_prerelease(self):
         self.assertEqual(n.previous_version({'versions': {'4.1.5': {}, '4.1.6': {}, '4.1.7': {},
                                                             '4.1.6-beta.1': {}, '3.10.0': {}}}, '4.1.6'), '4.1.5')
-        with self.assertRaises(n.NotificationError):
-            n.previous_version({'versions': {'4.1.5': {}}}, '4.1.6')
+        self.assertIsNone(n.previous_version({'versions': {'4.1.6': {}}}, '4.1.6'))
 
     def test_payload_bounds_evidence_and_labels_product(self):
         comparison = {'total_commits': 301, 'commits': [
@@ -62,6 +61,12 @@ class ReleaseNotificationTest(unittest.TestCase):
         self.assertEqual(payload['included_commits'], 80)
         self.assertEqual(payload['commits'][0]['message'], '1')
         self.assertEqual(payload['commits'][-1]['message'], '80')
+
+    def test_first_stable_release_has_no_compare_fields(self):
+        payload = n.build_payload('allocator-one/rcl', '1.0.0', None, {'commits': [], 'files': []})
+        self.assertIsNone(payload['previous_version'])
+        self.assertIsNone(payload['compare_url'])
+        self.assertEqual(payload['full_diff_footer'], '')
 
     def test_comparison_fetches_last_page_when_initial_page_is_not_complete(self):
         calls = []
