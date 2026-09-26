@@ -25,6 +25,8 @@ PROJECTS = {
 STABLE = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
 MAX_PAYLOAD = 256 * 1024
 MAX_RESPONSE = 16 * 1024 * 1024
+NPM_REGISTRY = 'https://registry.npmjs.org'
+SLSA_V1 = 'https://slsa.dev/provenance/v1'
 
 
 class NotificationError(Exception):
@@ -97,6 +99,50 @@ def validate_package(package, name, version, sha):
         raise NotificationError('Published package identity does not match the release')
 
 
+def attestation_url(name, version):
+    return f'{NPM_REGISTRY}/-/npm/v1/attestations/{urllib.parse.quote(f"{name}@{version}", safe="@")}'
+
+
+def validate_attestation(document, name, version, repository, sha, run_id=None):
+    try:
+        integrity = document['dist']['integrity']
+        expected_digest = base64.b64decode(integrity.removeprefix('sha512-'), validate=True).hex()
+        expected_url = attestation_url(name, version)
+        if document['dist'].get('attestations', {}).get('url') != expected_url:
+            raise ValueError()
+        attestations = document['attestations']
+    except (KeyError, AttributeError, ValueError, UnicodeError):
+        raise NotificationError('Published package has no valid provenance') from None
+
+    for attestation in attestations if isinstance(attestations, list) else []:
+        try:
+            payload = json.loads(base64.b64decode(attestation['bundle']['dsseEnvelope']['payload'], validate=True))
+            workflow = payload['predicate']['buildDefinition']['externalParameters']['workflow']
+            dependencies = payload['predicate']['buildDefinition']['resolvedDependencies']
+            invocation = payload['predicate']['runDetails']['metadata']['invocationId']
+            subject_matches = any(
+                subject.get('name') == f'pkg:npm/{name}@{version}'
+                and subject.get('digest', {}).get('sha512') == expected_digest
+                for subject in payload['subject'])
+            dependency_matches = any(
+                dependency.get('digest', {}).get('gitCommit') == sha for dependency in dependencies)
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            continue
+        if (payload.get('predicateType') == SLSA_V1 and subject_matches and dependency_matches
+                and workflow == {'repository': f'https://github.com/{repository}',
+                                 'path': '.github/workflows/release.yml', 'ref': f'refs/tags/v{version}'}
+                and (run_id is None or invocation == f'https://github.com/{repository}/actions/runs/{run_id}/attempts/1')):
+            return
+    raise NotificationError('Published package provenance does not match the release')
+
+
+def validate_published_package(package, attestation, name, version, repository, sha, run_id=None):
+    validate_package(package, name, version, sha)
+    if package.get('gitHead') is None:
+        validate_attestation({**package, 'attestations': attestation.get('attestations')}, name, version,
+                             repository, sha, run_id)
+
+
 def text(value, limit):
     return value.encode('utf-8', errors='replace')[:limit].decode('utf-8', errors='ignore') if isinstance(value, str) else ''
 
@@ -139,8 +185,8 @@ def build_payload(repository, version, previous, comparison):
     }
 
 
-def latest_comparison(github, previous, version):
-    comparison_path = f'compare/v{previous}...v{version}?per_page=100'
+def latest_comparison(github, base, head):
+    comparison_path = f'compare/{base}...{head}?per_page=100'
     comparison = github(comparison_path)
     commits = comparison.get('commits')
     total = comparison.get('total_commits')
@@ -148,12 +194,20 @@ def latest_comparison(github, previous, version):
         raise NotificationError('Release comparison has invalid commit evidence')
     if total <= 100:
         return comparison
+    first_needed = total - 79
+    first_page = (first_needed - 1) // 100 + 1
     last_page = (total - 1) // 100 + 1
-    latest_page = github(f'{comparison_path}&page={last_page}')
-    latest_commits = latest_page.get('commits')
-    if not isinstance(latest_commits, list):
+    selected_page = comparison if first_page == 1 else github(f'{comparison_path}&page={first_page}')
+    selected_commits = selected_page.get('commits')
+    final_page = selected_page if last_page == first_page else github(f'{comparison_path}&page={last_page}')
+    final_commits = final_page.get('commits')
+    if not isinstance(selected_commits, list) or not isinstance(final_commits, list):
         raise NotificationError('Release comparison has invalid commit evidence')
-    return {**comparison, 'commits': latest_commits}
+    offset = (first_needed - 1) % 100
+    commits = selected_commits[offset:]
+    if final_page is not selected_page:
+        commits += final_commits
+    return {**comparison, 'commits': commits[-80:]}
 
 
 def encode_payload(payload):
@@ -206,14 +260,26 @@ def main():
     except (KeyError, ValueError, UnicodeError):
         raise NotificationError('Could not decode the release package manifest') from None
     validate_package(source_package, package_name, version, sha)
-    registry = f'https://registry.npmjs.org/{urllib.parse.quote(package_name, safe="")}'
+    registry = f'{NPM_REGISTRY}/{urllib.parse.quote(package_name, safe="")}'
     metadata = json_response(registry)
     previous = previous_version(metadata, version)
     versions = metadata.get('versions', {})
     if not isinstance(versions, dict):
         raise NotificationError('Release version is not published on npm')
-    validate_package(versions.get(version), package_name, version, sha)
-    comparison = latest_comparison(github, previous, version)
+    current_package = versions.get(version)
+    if not isinstance(current_package, dict):
+        raise NotificationError('Release version is not published on npm')
+    current_attestation = json_response(attestation_url(package_name, version)) if current_package.get('gitHead') is None else {}
+    validate_published_package(current_package, current_attestation, package_name, version, repository, sha, run_id)
+    previous_sha = github(f'commits/v{previous}').get('sha')
+    if not isinstance(previous_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_sha):
+        raise NotificationError('Previous release tag has no valid commit')
+    previous_package = versions.get(previous)
+    if not isinstance(previous_package, dict):
+        raise NotificationError('Previous release version is not published on npm')
+    previous_attestation = json_response(attestation_url(package_name, previous)) if previous_package.get('gitHead') is None else {}
+    validate_published_package(previous_package, previous_attestation, package_name, previous, repository, previous_sha)
+    comparison = latest_comparison(github, previous_sha, sha)
     if comparison.get('status') != 'ahead':
         raise NotificationError('Release comparison must advance from the previous published tag')
     payload = build_payload(repository, version, previous, comparison)

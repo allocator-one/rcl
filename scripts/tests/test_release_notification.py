@@ -67,13 +67,32 @@ class ReleaseNotificationTest(unittest.TestCase):
 
         def github(path):
             calls.append(path)
-            return ({'total_commits': 101, 'commits': [{}] * 100}
-                    if len(calls) == 1 else {'commits': [{'sha': 'latest'}]})
+            return ({'total_commits': 101, 'commits': [{'sha': str(index)} for index in range(1, 101)]}
+                    if len(calls) == 1 else {'commits': [{'sha': '101'}]})
 
-        comparison = n.latest_comparison(github, '4.1.5', '4.1.6')
-        self.assertEqual(comparison['commits'], [{'sha': 'latest'}])
-        self.assertEqual(calls, ['compare/v4.1.5...v4.1.6?per_page=100',
-                                 'compare/v4.1.5...v4.1.6?per_page=100&page=2'])
+        comparison = n.latest_comparison(github, 'b' * 40, 'a' * 40)
+        self.assertEqual([commit['sha'] for commit in comparison['commits']], [str(index) for index in range(22, 102)])
+        self.assertEqual(calls, [f'compare/{"b" * 40}...{"a" * 40}?per_page=100',
+                                 f'compare/{"b" * 40}...{"a" * 40}?per_page=100&page=2'])
+
+    def test_attestation_requires_expected_subject_workflow_commit_and_run(self):
+        digest = b'x' * 64
+        integrity = 'sha512-' + base64.b64encode(digest).decode()
+        payload = {'predicateType': n.SLSA_V1,
+                   'subject': [{'name': 'pkg:npm/review-council@4.1.6', 'digest': {'sha512': digest.hex()}}],
+                   'predicate': {'buildDefinition': {'externalParameters': {'workflow': {
+                       'repository': 'https://github.com/allocator-one/rcl', 'path': '.github/workflows/release.yml',
+                       'ref': 'refs/tags/v4.1.6'}}, 'resolvedDependencies': [{'digest': {'gitCommit': 'a' * 40}}]},
+                                 'runDetails': {'metadata': {'invocationId':
+                                     'https://github.com/allocator-one/rcl/actions/runs/42/attempts/1'}}}}
+        attestation = {'attestations': [{'bundle': {'dsseEnvelope': {
+            'payload': base64.b64encode(json.dumps(payload).encode()).decode()}}}]}
+        document = {'dist': {'integrity': integrity, 'attestations': {'url': n.attestation_url('review-council', '4.1.6')},
+                              }, 'attestations': attestation['attestations']}
+        n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42')
+        document['attestations'][0]['bundle']['dsseEnvelope']['payload'] = base64.b64encode(json.dumps({**payload, 'subject': []}).encode()).decode()
+        with self.assertRaises(n.NotificationError):
+            n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42')
 
     def test_signature_binds_exact_bytes_and_key_is_product_version_stable(self):
         body = n.encode_payload({'current_version': '4.1.6'})
@@ -93,9 +112,12 @@ class ReleaseNotificationTest(unittest.TestCase):
 
     def test_end_to_end_verification_posts_only_after_all_evidence_matches(self):
         manifest = {'name': 'review-council', 'version': '4.1.6'}
+        published_manifest = {**manifest, 'gitHead': 'a' * 40}
+        previous_manifest = {'name': 'review-council', 'version': '4.1.5', 'gitHead': 'b' * 40}
         responses = [self.run_data(), {'sha': 'a' * 40},
                      {'content': base64.b64encode(json.dumps(manifest).encode()).decode()},
-                     {'versions': {'4.1.5': {}, '4.1.6': manifest}},
+                     {'versions': {'4.1.5': previous_manifest, '4.1.6': published_manifest}},
+                     {'sha': 'b' * 40},
                      {'status': 'ahead', 'total_commits': 1, 'commits': [], 'files': []}]
         env = {'GITHUB_REPOSITORY': 'allocator-one/rcl', 'RELEASE_RUN_ID': '42', 'GH_TOKEN': 'private-github-token',
                'INFRA_ONE_RELEASE_WEBHOOK_URL': 'https://venture.infra.one/api/webhooks/automations/56840af9-aa90-4afe-98cf-45fcd42bd0fe',
