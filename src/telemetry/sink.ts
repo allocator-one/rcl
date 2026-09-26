@@ -1,3 +1,4 @@
+import { reviewCycleReceiptSchema, type ReviewCycleReceipt, type ReviewCycleRequest } from '../converge/review-cycle.js';
 import { createHash } from 'node:crypto';
 import { abortSignalWithTimeout } from './abort-signal.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
@@ -129,6 +130,18 @@ export class HarnessSink {
 
   /** Recovery never substitutes an ordinary credential for an attested one. */
   get credentialSource(): HarnessCredential['source'] { return this.credential.token.startsWith('rbc_') ? 'attest' : this.credential.source; }
+
+  /** Actor-authorized cycle creation; never fall back from a run-bound credential. */
+  async startReviewCycle(repo: string, prNumber: number, request: ReviewCycleRequest): Promise<SinkOutcome<ReviewCycleReceipt>> {
+    if (this.credentialSource === 'attest') throw new Error('fresh_review_requires_actor_credential');
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || !Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('fresh_review_requires_pr');
+    const path = `/api/v1/reviews/prs/${repo.split('/').map(encodeURIComponent).join('/')}/${prNumber}/cycles`;
+    const result = await this.request('POST', path, JSON.stringify(request), 'application/json');
+    return this.classify(result, body => {
+      const receipt = reviewCycleReceiptSchema.safeParse((body as { data?: unknown } | null)?.data);
+      return receipt.success ? receipt.data : null;
+    });
+  }
 
   /** Exact bounded raw artifact read; never decode/re-encode original evidence. */
   async getArtifact(runId: string, kind: ArtifactKind, limit: number, options: RequestOptions = {}): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>> {

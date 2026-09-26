@@ -91,6 +91,7 @@ Review a PR, a local diff, or uncommitted work.
 | `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` |
 | `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
+| `--start-over` | Explicitly start a fresh PR review with a new normal budget; preserve all prior spending and evidence |
 | `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
 | `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
@@ -164,6 +165,20 @@ rcl roles show <name>      # Show system prompt and details for a role
 ```
 
 ---
+
+### Start a fresh review
+
+```bash
+rcl review owner/repo#123 --start-over
+```
+
+This reviews the full current inputs again, even on an unchanged head or after an exhausted previous cycle. RCL archives the original native state and spending, creates a Harness review cycle, and starts at attempt 1 / round 1 with the normal 20-attempt / 15-round budget. Previous approvals, dismissals and reviewer responses stay historical. Explicit `--max-attempts` / `--max-rounds` select different limits for the new cycle; old overrides are not inherited.
+
+The command enables guarded launch and chooses private JSON/Markdown paths under the Git common directory when omitted. It prints the cycle and cumulative prior spending. Keep the files in place. A captured patch can use the same flag with `--for-pr owner/repo#123 --head-sha <captured-head>`. Full Harness evidence and a user/API actor credential are required; unbound local and attested starts are refused.
+
+An interrupted start resumes with the same command and operation, keeping spent claims. If its report is already complete, no reviewers restart. A later deliberate start-over creates another cycle. Ordinary `rcl review owner/repo#123` discovers the local cycle and continues its existing budget; it does not replenish it. A concurrent fresh request cannot silently create another cycle after waiting for the first.
+
+Stop an active review through its recorded host task before replacing it. Late reports and verdicts remain bound to their original cycle. After checking reviewer health and exact-head freshness, admit the report with `converge-report`; use `converge-verdict --run-id <report-run-id>` for triage in a fresh cycle. All native, enforced and CI merge gates still apply. To complete missing reviewers while preserving successful work, use the supported recovery workflow instead of starting over.
 
 ### Guarded convergence launches
 

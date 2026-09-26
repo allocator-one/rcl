@@ -1,7 +1,7 @@
 ---
 name: rcl
 description: Run Review Council (multi-model AI code review) on the current PR or branch diff
-argument-hint: "[--post] [--inline] [--spec <path>] [--roles <roles>] [PR#N]"
+argument-hint: "[--start-over] [--post] [--inline] [--spec <path>] [--roles <roles>] [PR#N]"
 allowed-tools:
   - Bash(gh pr view:*)
   - Bash(gh auth token:*)
@@ -42,6 +42,14 @@ Invoke as `{{PREFIX}}rcl` in a Codex session.
 {{/codex}}
 
 Run a multi-model AI code review on the current branch's PR. By default, keep the review in-session and do not post to GitHub unless the caller explicitly asks for `--post` or `--inline`.
+
+## Fresh review requests
+
+When the user says “start a completely fresh review,” run `rcl review <REPO>#<PR_NUMBER> --start-over` with the resolved current spec/context/roster. Natural-language authorization is enough; do not ask for a second confirmation. The flag enables guarded launch, assigns its own target/ordinals and retains reports in private paths when no outputs were supplied. For a captured PR patch, include its existing `--for-pr` and exact-head binding. Unbound local diffs cannot create a PR cycle.
+
+This creates a normal 20-attempt/15-round cycle and retains every prior cycle's spending and evidence. It inherits no findings, dismissals, reviewer responses or approval. Ordinary continuation preserves the current budget; completing missing reviewers uses the supported RCL-105 recovery path when available. Never add `--start-over` merely because continuation is refused or a budget is exhausted, and never substitute standalone claims or delete state. Resume an interrupted explicit start with the same flag; the CLI reuses its durable operation and budget. Once it returns a completed run, reuse that report. A later deliberate fresh request is a new cycle.
+
+If the old review is active, stop only its recorded host task when replacement was requested and wait for it to end. Do not steal target ownership. Fresh cycles require full Harness evidence. After review, use the ordinary exact-head health/admission and merge gates; `converge-verdict` must include `--run-id` from the current report. The RCL convergence skill describes that workflow.
 
 ## Steps
 
