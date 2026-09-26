@@ -60,9 +60,9 @@ function uuid(value: unknown, error: string): asserts value is string { if (type
 
 function validate(input: RecoveryOperationInput | RecoveryOperation, requireVersion: boolean): RecoveryOperation {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('recovery_operation_invalid_descriptor');
-  if (!requireVersion && Object.hasOwn(input, 'successorNativeClaim') && input.successorNativeClaim === undefined) {
+  if (Object.hasOwn(input, 'successorNativeClaim') && input.successorNativeClaim === undefined) {
     const { successorNativeClaim: _ignored, ...normalized } = input;
-    return validate(normalized, false);
+    return validate(normalized, requireVersion);
   }
   const fields = ['operationId', 'successorRunId', 'sourceRunId', 'sourceReportSha256', 'sourceCheckpointSha256', 'capturedInputsSha256', 'planDigest', 'target', 'originalNativeClaim', 'startedAtMs', 'expiresAtMs', 'maxAdditionalCalls', 'maxAttemptsPerCell'];
   if (input.successorNativeClaim !== undefined) fields.push('successorNativeClaim');

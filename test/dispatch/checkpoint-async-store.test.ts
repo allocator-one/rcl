@@ -1,4 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+const observation = vi.hoisted(() => ({ hashes: 0, serializations: 0, locks: 0 }));
+vi.mock('../../src/report/run-header.js', async original => {
+  const actual = await original<typeof import('../../src/report/run-header.js')>();
+  return { ...actual,
+    sha256Hex: (...args: Parameters<typeof actual.sha256Hex>) => { observation.hashes += 1; return actual.sha256Hex(...args); },
+    stableStringify: (...args: Parameters<typeof actual.stableStringify>) => { observation.serializations += 1; return actual.stableStringify(...args); },
+  };
+});
+vi.mock('../../src/converge/native-lock.js', async original => {
+  const actual = await original<typeof import('../../src/converge/native-lock.js')>();
+  return { ...actual, withNativeLock: async (...args: Parameters<typeof actual.withNativeLock>) => {
+    observation.locks += 1; return actual.withNativeLock(...args);
+  } };
+});
 import { constants } from 'node:fs';
 import { mkdtemp, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,11 +23,11 @@ import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit } from '../../src/dispatch/checkpoint-async-store.js';
-import { decodeAsyncProof } from '../../src/dispatch/checkpoint-async.js';
+import { decodeAsyncProof, validateAsyncRecords, validateAsyncResult } from '../../src/dispatch/checkpoint-async.js';
 const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], requireWritableSyncPath:'', afterSync: undefined as undefined | ((path:string)=>void)}));
 vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.requireWritableSyncPath&&!(Number(args[1])&constants.O_RDWR))throw Object.assign(new Error('sync requires write access'),{code:'EACCES'});if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
 const roots: string[] = [];
-afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.requireWritableSyncPath=''; durability.afterSync=undefined; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.requireWritableSyncPath=''; durability.afterSync=undefined; observation.hashes=0; observation.serializations=0; observation.locks=0; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
@@ -65,6 +79,39 @@ describe('restricted original async checkpoint persistence',()=>{
   const f=await fixture();await expect(initializeAsyncPhase({...f.input,ownership:{target}} as any)).rejects.toThrow('native_target');const opened=await initialize(f);
   await expect(openAsyncDelegate({...opened.delegates[0],token:'0'.repeat(64)})).rejects.toThrow('delegate');await expect(openAsyncDelegate({...opened.delegates[0],callIndex:1})).rejects.toThrow('delegate');
   const w=await openAsyncDelegate(opened.delegates[0]);await expect(w.claim({...prompts,userPrompt:'changed'})).rejects.toThrow('prompt');expect((await readAsyncPhase(f.input)).state.intents).toEqual([]);
+ });
+ it('refuses oversized result bytes before lock, hash, or serialization work while valid bytes reach each control',async()=>{
+  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]),intent=await w.claim(prompts);
+  observation.hashes=0; observation.serializations=0; observation.locks=0;
+  await expect(w.recordResult(intent.attemptId,'x'.repeat(8 * 1024 * 1024 + 1),true)).rejects.toThrow('invalid_bytes');
+  expect(observation).toEqual({ hashes: 0, serializations: 0, locks: 0 });
+  await w.recordResult(intent.attemptId,review(),true);
+  expect(observation.hashes).toBeGreaterThan(0); expect(observation.serializations).toBeGreaterThan(0); expect(observation.locks).toBeGreaterThan(0);
+  expect((await seal(f)).state.outcomes).toHaveLength(1);
+ });
+ it('bounds pure result validation before hashing supplied review bytes',async()=>{
+  const f=await fixture(),opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]),intent=await writer.claim(prompts);
+  const phase=await readAsyncPhase(f.input), bytes=review();
+  const result={callIndex:0,attemptId:intent.attemptId,finishedAtMs:Date.now(),reviewBytes:bytes,reviewSha256:sha256Hex(bytes),possiblyBilled:true};
+  observation.hashes=0;
+  expect(()=>validateAsyncResult({...result,reviewBytes:'x'.repeat(8*1024*1024+1)},phase.plan,phase.state.intents)).toThrow('invalid_bytes');
+  expect(observation.hashes).toBe(0);
+  expect(validateAsyncResult(result,phase.plan,phase.state.intents)).toEqual(result);
+  expect(observation.hashes).toBeGreaterThan(0);
+ });
+ it('bounds individual and aggregate raw review history before hashing or serialization',async()=>{
+  const f=await fixture(),opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]),intent=await writer.claim(prompts);
+  const phase=await readAsyncPhase(f.input);
+  const record=(bytes:string)=>({sequence:2,previousDigest:phase.state.records[0].digest,digest:'0'.repeat(64),event:{type:'result',result:{
+    callIndex:0,attemptId:intent.attemptId,finishedAtMs:Date.now(),reviewBytes:bytes,reviewSha256:'0'.repeat(64),possiblyBilled:true}}});
+  const oversized=[record('x'.repeat(8*1024*1024+1))], aggregate=Array.from({length:4},()=>record('x'.repeat(7*1024*1024)));
+  for(const records of [oversized,aggregate]){
+    observation.hashes=0; observation.serializations=0;
+    expect(()=>validateAsyncRecords(records,phase.plan)).toThrow('invalid_bytes');
+    expect(observation.hashes).toBe(0); expect(observation.serializations).toBe(0);
+  }
+  expect(validateAsyncRecords(phase.state.records,phase.plan).intents).toEqual([intent]);
+  expect(observation.hashes).toBeGreaterThan(0); expect(observation.serializations).toBeGreaterThan(0);
  });
  it('refuses wrong route and duplicate conflicting results but exact replay is idempotent',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const intent=await w.claim(prompts);

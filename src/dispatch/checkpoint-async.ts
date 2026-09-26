@@ -68,10 +68,12 @@ export function validateAsyncPlan(input: unknown): AsyncPlan {
 }
 /** Exact schema-valid observed bytes; no provider truth or billing authority is inferred. */
 export function parseAsyncReview(bytes: string, call: AsyncCall) {
-  bound(bytes, 8 * 1024 * 1024); let value: unknown; try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_review'); }
+  assertAsyncReviewBytes(bytes); let value: unknown; try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_review'); }
   const parsed = asyncReviewSchema.safeParse(value); asyncRefuse(parsed.success && parsed.data.model === call.model && parsed.data.role === call.role && parsed.data.provider === call.provider, 'invalid_review');
   return freezeAsync(parsed.data);
 }
+/** Bound caller bytes before hashing, parsing or acquiring a persistence lock. */
+export function assertAsyncReviewBytes(bytes: string): void { bound(bytes, 8 * 1024 * 1024); }
 export function validateAsyncResult(input: unknown, plan: AsyncPlan, intents: readonly AsyncIntent[]): AsyncResult {
   const parsed = resultSchema.safeParse(input); asyncRefuse(parsed.success, 'invalid_result'); const result = parsed.data;
   const intent = intents.find(row => row.attemptId === result.attemptId);
@@ -79,13 +81,23 @@ export function validateAsyncResult(input: unknown, plan: AsyncPlan, intents: re
 }
 function validateAsyncResultForIntent(result: AsyncResult, plan: AsyncPlan, intent: AsyncIntent | undefined): { result: AsyncResult; status: string } {
   asyncRefuse(intent && intent.callIndex === result.callIndex && result.finishedAtMs >= intent.startedAtMs, 'result_intent');
+  assertAsyncReviewBytes(result.reviewBytes);
   asyncRefuse(sha256Hex(result.reviewBytes) === result.reviewSha256, 'result_digest');
   const review = parseAsyncReview(result.reviewBytes, plan.calls[result.callIndex]!);
   asyncRefuse(review.status !== 'success' || result.possiblyBilled, 'success_billing'); return { result: freezeAsync(result), status: review.status };
 }
 /** Replays exact ordered records. Unknown outcomes consume budget and cannot be retried. */
 export function validateAsyncRecords(input: readonly unknown[], planInput: AsyncPlan): AsyncState {
-  const plan = validateAsyncPlan(planInput); asyncRefuse(input.length <= 1001, 'too_many_records');
+  asyncRefuse(Array.isArray(input) && input.length <= 1001, 'too_many_records');
+  let reviewBytes = 0;
+  for (const raw of input) {
+    const event = (raw as Partial<AsyncRecord> | null)?.event;
+    if (event?.type !== 'result' || typeof event.result?.reviewBytes !== 'string') continue;
+    reviewBytes += Buffer.byteLength(event.result.reviewBytes, 'utf8');
+    asyncRefuse(reviewBytes <= MAX_ARTIFACT_BYTES, 'invalid_bytes');
+    assertAsyncReviewBytes(event.result.reviewBytes);
+  }
+  const plan = validateAsyncPlan(planInput);
   const records: AsyncRecord[] = [], intents: AsyncIntent[] = [], outcomes: AsyncResult[] = [];
   const intentsByAttempt = new Map<string, AsyncIntent>(), outcomesByAttempt = new Map<string, AsyncResult>(), outcomeStatusByAttempt = new Map<string, string>();
   const lastIntentByCall = new Map<number, AsyncIntent>(), attemptsByCall = new Map<number, number>();

@@ -52,6 +52,12 @@ describe('recovery operation descriptor', () => {
     expect(decodeRecoveryOperation(encodeRecoveryOperation(operation))).toEqual(operation);
   });
 
+  it('normalizes an own undefined optional successor claim for versioned encode and budget inputs', () => {
+    const operation = { ...createRecoveryOperation(input()), successorNativeClaim: undefined };
+    expect(encodeRecoveryOperation(operation)).toBe(encodeRecoveryOperation(createRecoveryOperation(input())));
+    expect(remainingRecoveryBudget(operation, 4_000)).toEqual(remainingRecoveryBudget(createRecoveryOperation(input()), 4_000));
+  });
+
   it('accepts v7 run IDs but rejects source/successor reuse and malformed persisted bounds', () => {
     expect(createRecoveryOperation(input()).sourceRunId).toBe('01a0daa6-b575-759b-942c-e879460be5bf');
     expect(() => createRecoveryOperation(input({ successorRunId: '01A0DAA6-B575-759B-942C-E879460BE5BF' }))).toThrow('recovery_operation_source_successor_reused');

@@ -12,7 +12,7 @@ import { readStable } from '../telemetry/recovery/files.js';
 import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
-import { appendAsyncRecordToValidatedState, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
+import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
   validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
   type AsyncPlan, type AsyncProof, type AsyncRecord, type AsyncResult, type AsyncState } from './checkpoint-async.js';
 
@@ -179,6 +179,7 @@ export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWrit
       });
     },
     recordResult: async (attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> => {
+      assertAsyncReviewBytes(reviewBytes);
       const finishedAtMs = Date.now();
       return locked(location, async (metadata, state) => {
         authorize(metadata, delegate); const existing = state.outcomes.find(row => row.attemptId === attemptId);

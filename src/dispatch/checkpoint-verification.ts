@@ -111,12 +111,36 @@ function refuse(condition: unknown, reason: string): asserts condition {
 function opaque(bytes: string): void {
   refuse(Buffer.byteLength(bytes, 'utf8') <= 8 * 1024 * 1024 && Buffer.from(bytes, 'utf8').toString('utf8') === bytes, 'invalid_bytes');
 }
-function requestByteLowerBound(plan: VerificationPlanInput): number {
-  let bytes = Buffer.byteLength(plan.gatingPlanBytes, 'utf8');
-  for (const batch of plan.batches) {
-    bytes += Buffer.byteLength(batch.systemPrompt, 'utf8') + Buffer.byteLength(batch.userPrompt, 'utf8');
+function rawObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+function boundRawStrings(value: unknown, fields: readonly string[], budget: { bytes: number }, limit = MAX_ARTIFACT_BYTES): void {
+  const object = rawObject(value);
+  for (const field of fields) {
+    const text = object[field];
+    if (typeof text !== 'string') continue; // The schema rejects wrong types without traversing them.
+    const bytes = Buffer.byteLength(text, 'utf8'); budget.bytes += bytes;
+    refuse(budget.bytes <= MAX_ARTIFACT_BYTES, 'too_large');
+    refuse(bytes <= limit, 'invalid_bytes');
   }
-  return bytes;
+}
+/** Inspect only the finite wire shape; shared objects count at each serialized occurrence. */
+function preflightRawVerificationEvent(value: unknown, budget = { bytes: 0 }): void {
+  const event = rawObject(value);
+  boundRawStrings(event, ['type'], budget);
+  if (event.type === 'plan') {
+    const plan = rawObject(event.plan);
+    boundRawStrings(plan, ['runId', 'model', 'provider'], budget);
+    boundRawStrings(plan, ['gatingPlanBytes'], budget, 8 * 1024 * 1024);
+    if (Array.isArray(plan.batches)) {
+      refuse(plan.batches.length <= 500, 'invalid_event');
+      for (const batch of plan.batches) boundRawStrings(batch, ['systemPrompt', 'userPrompt'], budget, 8 * 1024 * 1024);
+    }
+  } else if (event.type === 'result') {
+    boundRawStrings(event.result, ['attemptId'], budget);
+    boundRawStrings(event.result, ['answerBytes'], budget, 8 * 1024 * 1024);
+  } else if (event.type === 'intent') boundRawStrings(event.intent, ['attemptId'], budget);
+  else if (event.type === 'terminal') boundRawStrings(event.terminal, ['status', 'reason'], budget);
 }
 function binding(context: VerificationContext): z.infer<typeof bindingsSchema> {
   return bindingsSchema.parse({ planDigest: context.planDigest, finalizationDigest: context.finalizationDigest,
@@ -129,13 +153,11 @@ function contextFingerprint(context: VerificationContext): string {
 
 /** Snapshot before any await. Validation is structural; this never authorizes a provider request. */
 export function snapshotVerificationEvent(input: VerificationEvent): VerificationEvent {
+  preflightRawVerificationEvent(input);
   const parsed = eventSchema.safeParse(input);
   refuse(parsed.success, 'invalid_event');
   const event = parsed.data;
   if (event.type === 'plan') {
-    // This lower bound prevents aggregate request serialization or UTF-8 copies
-    // from exceeding the retained-event limit while keeping each field's limit.
-    refuse(requestByteLowerBound(event.plan) <= MAX_ARTIFACT_BYTES, 'too_large');
     opaque(event.plan.gatingPlanBytes);
     for (const batch of event.plan.batches) { opaque(batch.systemPrompt); opaque(batch.userPrompt); }
     let value: unknown;
@@ -189,7 +211,14 @@ function retainVerificationEvent(event: VerificationEvent, metadata: Verificatio
   } else metadata.terminal = event.terminal;
 }
 function validateVerificationRecordSet(input: readonly unknown[], context: VerificationContext): { state?: VerificationState; metadata: VerificationValidationMetadata } {
-  refuse(input.length <= 1002, 'too_many_records');
+  refuse(Array.isArray(input) && input.length <= 1002, 'too_many_records');
+  const budget = { bytes: 0 };
+  for (const value of input) {
+    const record = rawObject(value);
+    boundRawStrings(record, ['previousDigest', 'digest'], budget);
+    boundRawStrings(record.bindings, ['planDigest', 'finalizationDigest', 'capturedInputsSha256', 'operationSha256'], budget);
+    preflightRawVerificationEvent(record.event, budget);
+  }
   const expected = stableStringify(binding(context));
   const metadata: VerificationValidationMetadata = { contextFingerprint: contextFingerprint(context), expectedBinding: expected,
     retainedBytes: Buffer.byteLength('{"records":[],"version":1}', 'utf8'), previousDigest: context.finalizationDigest,

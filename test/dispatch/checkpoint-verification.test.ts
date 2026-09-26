@@ -3,10 +3,17 @@ import { chmod, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+const preflightObservation = vi.hoisted(() => ({ serializations: 0 }));
+vi.mock('../../src/report/run-header.js', async original => {
+  const actual = await original<typeof import('../../src/report/run-header.js')>();
+  return { ...actual,
+    stableStringify: (...args: Parameters<typeof actual.stableStringify>) => { preflightObservation.serializations += 1; return actual.stableStringify(...args); },
+  };
+});
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
 import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, decodeVerificationProof, snapshotVerificationEvent,
-  validateVerificationRecordsForAppend } from '../../src/dispatch/checkpoint-verification.js';
+  validateVerificationRecordsForAppend, validateVerificationRecords } from '../../src/dispatch/checkpoint-verification.js';
 import { planGating } from '../../src/consensus/gating.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 import { stableStringify } from '../../src/report/run-header.js';
@@ -23,7 +30,7 @@ vi.mock('node:fs/promises', async original => {
   } };
 });
 const roots: string[] = [];
-afterEach(async () => { durability.failPath = ''; durability.synced = []; await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => { durability.failPath = ''; durability.synced = []; preflightObservation.serializations = 0; await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 const target = 'allocator-one/rcl#105', namespace = 'verification';
 const runId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -187,6 +194,21 @@ describe('durable verifier phase in the existing checkpoint', () => {
       const result = outcome(), pendingResult = f.journal.recordVerificationResult(result, owner); result.answerBytes = 'changed'; await pendingResult;
     });
     const phase = (await f.journal.readVerification())!; expect(phase.plan.batches[0]!.userPrompt).toBe(planInput().batches[0]!.userPrompt); expect(phase.outcomes[0]!.answerBytes).toBe(answer());
+  });
+
+  it('rejects oversized raw arrays and events before schema parsing or canonical serialization while accepting the valid boundary', () => {
+    const context = { planDigest: hash('plan'), finalizationDigest: hash('final'), capturedInputsSha256: hash('captured'), operationSha256: hash('operation'), runId,
+      startedAtMs: 100, expiresAtMs: 1_000, reviewerAttemptIds: [] };
+    const oversized = { sequence: 1, previousDigest: context.finalizationDigest, digest: hash('irrelevant'), bindings: { planDigest: context.planDigest, finalizationDigest: context.finalizationDigest,
+        capturedInputsSha256: context.capturedInputsSha256, operationSha256: context.operationSha256 },
+      event: { type: 'result', result: { batchIndex: 0, attemptId: 'reviewer-0', finishedAtMs: 201, answerBytes: 'x'.repeat(25_000_001) } } };
+    preflightObservation.serializations = 0;
+    expect(() => validateVerificationRecords([oversized], context)).toThrow('too_large');
+    expect(preflightObservation).toEqual({ serializations: 0 });
+    expect(() => snapshotVerificationEvent({ type: 'result', result: { batchIndex: 0, attemptId: 'reviewer-0', finishedAtMs: 201, answerBytes: 'x'.repeat(8 * 1024 * 1024 + 1) } } as any)).toThrow('invalid_bytes');
+    expect(preflightObservation).toEqual({ serializations: 0 });
+    expect(snapshotVerificationEvent({ type: 'result', result: { batchIndex: 0, attemptId: 'reviewer-0', finishedAtMs: 201, answerBytes: 'x'.repeat(8 * 1024 * 1024) } } as any).type).toBe('result');
+    expect(preflightObservation.serializations).toBeGreaterThan(0);
   });
 
   it('reuses the same-operation validated prefix when appending a verifier event', async () => {
