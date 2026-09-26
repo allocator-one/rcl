@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { openJournal } from '../../src/evidence/original-run/journal.js';
+import { MAX_RECOVERY_CHECKPOINTS, openJournal } from '../../src/evidence/original-run/journal.js';
 
-const fault = vi.hoisted(() => ({ failures: 0, syncs: 0 }));
+const fault = vi.hoisted(() => ({ failures: 0, syncs: 0, entries: undefined as string[] | undefined }));
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
@@ -21,14 +21,14 @@ vi.mock('node:fs/promises', async original => {
       };
     }
     return handle;
-  } };
+  }, readdir: async (...args: Parameters<typeof fs.readdir>) => fault.entries ?? fs.readdir(...args) };
 });
 
 const roots: string[] = [];
 const manifest = 'a'.repeat(64);
 const operation = '00000000-0000-4000-8000-000000000001';
 afterEach(async () => {
-  fault.failures = 0; fault.syncs = 0;
+  fault.failures = 0; fault.syncs = 0; fault.entries = undefined;
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 async function path() {
@@ -120,4 +120,20 @@ it('refuses a non-string phase before it can create an unreadable checkpoint', a
   await expect(journal.append(null as unknown as string)).rejects.toThrow('invalid_recovery_checkpoint');
   expect(await readdir(file)).toEqual([]);
   expect(journal.checkpoints()).toEqual([]);
+});
+
+it('resumes a read-only checkpoint where the platform permits read-descriptor synchronization', async () => {
+  if (process.platform === 'win32') return;
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  await journal.append('native_verified');
+  await chmod(join(file, '00000001.json'), 0o400);
+  await expect(openJournal(file, manifest, operation, 'resume')).resolves.toBeDefined();
+});
+
+it('refuses an oversized checkpoint count before reading or parsing entries', async () => {
+  const file = await path();
+  await openJournal(file, manifest, operation, 'apply');
+  fault.entries = Array.from({ length: MAX_RECOVERY_CHECKPOINTS + 1 }, (_, index) => `${String(index + 1).padStart(8, '0')}.json`);
+  await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('recovery_journal_checkpoint_limit');
 });

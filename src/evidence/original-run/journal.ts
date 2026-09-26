@@ -11,6 +11,8 @@ import { inspectRecoveryDirectory } from './lock-path.js';
 // wrapper (UUID, hashes, sequence, phase and timestamp); do not truncate audit.
 export const MAX_RECOVERY_DOCUMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_RECOVERY_CHECKPOINT_BYTES = MAX_RECOVERY_DOCUMENT_BYTES + 1024;
+export const MAX_RECOVERY_CHECKPOINTS = 20_000;
+export const MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES = 64 * 1024 * 1024;
 
 async function parentSafe(path: string): Promise<void> {
   if (await realpath(dirname(path)) !== dirname(path)) throw new Error('symlink_directory');
@@ -62,34 +64,32 @@ export interface ReadableJournal extends Journal {
 }
 
 /** Storage qualification is explicit; recovery callers retain the strict default. */
-export interface JournalStorage {
-  inspect: (path: string, privateRoot: boolean) => Promise<void>;
-  read: typeof readStable;
-  write: typeof writeExclusive;
-  sync: typeof syncDirectory;
-}
-const recoveryStorage: JournalStorage = { inspect: inspectJournalDirectory, read: readStable,
-  write: writeExclusive, sync: syncDirectory };
-
 /** Checkpoints are audit facts, never a substitute for fresh server readback. */
-export async function openJournal(path: string, manifestSha: string, operation: string, mode: 'apply' | 'resume', beforeWrite?: (phase: string) => Promise<void>, storage: JournalStorage = recoveryStorage): Promise<ReadableJournal> {
-  storage = { ...storage };
+export async function openJournal(path: string, manifestSha: string, operation: string, mode: 'apply' | 'resume', beforeWrite?: (phase: string) => Promise<void>): Promise<ReadableJournal> {
   path = platformPath(path); await parentSafe(path);
-  await storage.inspect(dirname(path), false);
-  if (mode === 'apply') { await mkdir(path, { mode: 0o700 }); await storage.sync(dirname(path)); }
+  await inspectJournalDirectory(dirname(path), false);
+  if (mode === 'apply') { await mkdir(path, { mode: 0o700 }); await syncDirectory(dirname(path)); }
   else if (await realpath(path) !== path || !(await lstat(path)).isDirectory()) throw new Error('recovery_journal_unavailable');
-  await storage.inspect(path, true);
+  await inspectJournalDirectory(path, true);
   const directory = await lstat(path, { bigint: true });
   const files = (await readdir(path)).sort();
   if (files.some(n => !/^\d{8}\.json$/.test(n))) throw new Error('unknown_recovery_journal_file');
+  if (files.length > MAX_RECOVERY_CHECKPOINTS) throw new Error('recovery_journal_checkpoint_limit');
   let sequence = 0; let previous = manifestSha;
   let torn: Array<{ file: string; sha256: string }> = [];
   const checkpoints: JournalCheckpoint[] = [];
+  let retainedBytes = 0;
   for (const name of files) {
     if (name !== `${String(++sequence).padStart(8,'0')}.json`) throw new Error('recovery_journal_sequence_gap');
     // A prior write may have reached the filesystem before its flush failed.
-    // Readable bytes alone are not a new durability acknowledgment.
-    const snapshot = await storage.read(join(path, name), MAX_RECOVERY_CHECKPOINT_BYTES, { sync: true });
+    // Require a current same-descriptor synchronization before exposing bytes;
+    // it does not recreate the prior descriptor's writeback-error history.
+    const checkpointPath = join(path, name);
+    const checkpoint = await lstat(checkpointPath, { bigint: true });
+    if (checkpoint.size > BigInt(MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes)) throw new Error('recovery_journal_checkpoint_limit');
+    const snapshot = await readStable(checkpointPath, MAX_RECOVERY_CHECKPOINT_BYTES, { sync: true });
+    if (snapshot.raw.byteLength > MAX_RECOVERY_CHECKPOINT_TOTAL_BYTES - retainedBytes) throw new Error('recovery_journal_checkpoint_limit');
+    retainedBytes += snapshot.raw.byteLength;
     let record: Record<string, unknown>;
     try { record = JSON.parse(snapshot.text) as Record<string, unknown>; }
     catch {
@@ -108,8 +108,8 @@ export async function openJournal(path: string, manifestSha: string, operation: 
     previous = snapshot.sha256;
     checkpoints.push(record as unknown as JournalCheckpoint);
   }
-  await storage.sync(path);
-  await storage.sync(dirname(path));
+  await syncDirectory(path);
+  await syncDirectory(dirname(path));
   const journal: ReadableJournal = { checkpoints: () => structuredClone(checkpoints), append: async (phase, data = null) => {
     if (typeof phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(phase)) throw new Error('invalid_recovery_checkpoint');
     const retainedData: unknown = JSON.parse(JSON.stringify(data));
@@ -118,7 +118,7 @@ export async function openJournal(path: string, manifestSha: string, operation: 
     if (!current.isDirectory() || current.dev !== directory.dev || current.ino !== directory.ino) throw new Error('recovery_journal_replaced');
     const record = { operation_id: operation, manifest_sha256: manifestSha, sequence: sequence + 1, previous_sha256: previous, phase, recorded_at: new Date().toISOString(), data: retainedData };
     const name = join(path, `${String(sequence + 1).padStart(8,'0')}.json`);
-    await storage.write(name, record, MAX_RECOVERY_CHECKPOINT_BYTES); sequence++;
+    await writeExclusive(name, record, MAX_RECOVERY_CHECKPOINT_BYTES); sequence++;
     previous = sha256(JSON.stringify(record, null, 2) + '\n');
     checkpoints.push(record);
   } };
