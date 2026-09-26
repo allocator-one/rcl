@@ -151,9 +151,9 @@ function unboundedCollection(f: ClaimText): Contract | undefined {
   const route = /^The GET \/([A-Za-z_][\w]*) endpoint fetches all ([A-Za-z_][\w]*) without pagination$/i.exec(parts[0] ?? '');
   const sql = /^SELECT \* FROM ([A-Za-z_][\w]*) without a LIMIT clause will return all records$/i.exec(parts[0] ?? '');
   if (!route && !sql) return;
-  if (route && route[1] !== route[2]) return;
-  const resource = route?.[1] ?? sql![1]!;
-  if ((title[1] ?? title[2])!.replace(/s$/, '') !== resource.replace(/s$/, '')) return;
+  if (route && route[1]!.toLowerCase() !== route[2]!.toLowerCase()) return;
+  const resource = (route?.[1] ?? sql![1]!).toLowerCase();
+  if ((title[1] ?? title[2])!.toLowerCase().replace(/s$/, '') !== resource.replace(/s$/, '')) return;
   if (!parts.slice(1).every(part => /^(?:This will cause performance issues and excessive memory usage at scale|Add pagination to prevent memory exhaustion)$/i.test(part))) return;
   return { kind: 'unbounded-collection-materialization', subject: [resource, 'read all records', 'no pagination or row limit'],
     condition: 'Reading the named collection materializes all records without a row bound.', observations: [] };

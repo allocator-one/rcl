@@ -74,6 +74,7 @@ export async function writeClaimProof(path: string,pool: string,value: unknown):
 /** All references are re-read and hashed; missing or mutated bytes refuse even
  * when the small root and its manifest digest still match. */
 export async function readClaimProof(path: string,pool: string): Promise<unknown> {
+  await inspectRecoveryDirectory(dirname(path),true);
   await inspectRecoveryDirectory(pool,true);
   const root=decodeRecoveryDocument((await readStable(path,MAX_RECOVERY_DOCUMENT_BYTES)).text) as Record<string,unknown>;
   if(!root||root.kind!=='rcl-claim-proof'||root.version!==1||typeof root.rootSha256!=='string'||!Array.isArray(root.sha256s)||

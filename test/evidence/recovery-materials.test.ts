@@ -1,5 +1,5 @@
 import { describe,expect,it } from 'vitest';
-import { mkdtemp,readdir,rm } from 'node:fs/promises';
+import { chmod,mkdtemp,readdir,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readClaimProof,writeClaimProof } from '../../src/evidence/claim-recovery/proof-storage.js';
@@ -68,6 +68,21 @@ it('allows concurrent identical proof writers to share content-addressed materia
     expect((await readdir(pool)).every(name => !name.endsWith('.tmp'))).toBe(true);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+it('refuses to read a proof document from a non-private recovery root', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rcl-material-permissions-'));
+  const path = join(dir, 'proof.json');
+  const pool = join(dir, 'pool');
+  try {
+    await writeClaimProof(path, pool, { original: 'retained' });
+    await chmod(dir, 0o755);
+    await expect(readClaimProof(path, pool)).rejects.toThrow('unsafe_recovery_lock_root');
+  } finally {
+    await chmod(dir, 0o700);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('bounds unique retained bytes without recursively copying a prior proof pool into later proofs',() => {
   const original='x'.repeat(1024*1024);
   const first=packRecoveryMaterial({ original,rows: Array.from({ length: 10 },() => ({ original })) });

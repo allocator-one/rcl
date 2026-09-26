@@ -44,7 +44,8 @@ function invariantWords(s: string): string[] {
   const canonical = s.toLowerCase().trim().replace(/[.!]$/, '')
     .replace(/^(.+) lacks (.+)$/, '$1 missing $2')
     .replace(/^(.+) has (.+) gaps$/, '$1 missing $2');
-  return (canonical.match(/[\p{L}\p{N}_]+|[<>!=]=?/gu) ?? []).filter(t => !grammar.has(t)).map(t => inflections[t] ?? t);
+  return (canonical.match(/[\p{L}\p{N}_]+|[<>!=]=?/gu) ?? []).filter(t => !grammar.has(t))
+    .map(t => Object.hasOwn(inflections,t) ? inflections[t]! : t);
 }
 function similarity(a: string, b: string): number {
   return substantive(a).length >= 3 && substantive(b).length >= 3 ? jaccardSimilarity(a, b) : 0;

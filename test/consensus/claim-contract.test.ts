@@ -58,6 +58,13 @@ describe('bounded semantic contracts', () => {
     expect(describeContract(finding)).toBeDefined();
   });
 
+  it('normalizes resource casing in unbounded collection contracts', () => {
+    const finding = { file: 'src/users.ts', title: 'Missing pagination on Users listing endpoint',
+      description: 'The GET /users endpoint fetches all USERS without pagination.' };
+
+    expect(describeContract(finding)).toBeDefined();
+  });
+
   it('recognizes uppercase privilege literals while retaining their exact value', () => {
     const role = (literal: string) => ({ file: 'src/auth.ts', title: 'Admin check uses username instead of role',
       description: `The requireAdmin middleware checks user.username === '${literal}' instead of checking a proper role field.` });

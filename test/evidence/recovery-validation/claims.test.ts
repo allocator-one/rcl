@@ -41,3 +41,10 @@ it('does not invent equivalence for sparse or redacted historical evidence', () 
     expect(compareClaims(d, d)).toBeUndefined();
   }
 });
+
+it('keeps Object prototype names as ordinary invariant words', () => {
+  const a = { ...descriptor, invariant: 'The cache constructor returns entries after checking expiry' };
+  const b = { ...descriptor, invariant: 'The cache prototype returns entries after checking expiry' };
+
+  expect(compareClaims(a, b)).toBeUndefined();
+});
