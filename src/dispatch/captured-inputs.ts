@@ -144,8 +144,13 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
   const referenced = new Set<string>();
   function get(hash: string): string {
     const value = captured.blobs[hash];
-    if (typeof value !== 'string' || sha256Hex(value) !== hash) throw new Error('capture_missing_or_changed_blob');
-    bound(value); referenced.add(hash); return value;
+    // This decode owns the parsed strings: shared references need one full check,
+    // while every new decode must validate the bytes again.
+    if (!referenced.has(hash)) {
+      if (typeof value !== 'string' || sha256Hex(value) !== hash) throw new Error('capture_missing_or_changed_blob');
+      bound(value); referenced.add(hash);
+    }
+    return value;
   }
   const patchBytes = get(plan.patchSha256), configBytes = get(plan.configSha256), specBytes = get(plan.specSha256);
   const contextBytes = get(plan.contextSha256), toolsBytes = get(plan.toolsSha256);

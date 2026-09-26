@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as runHeader from '../../src/report/run-header.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
 import { captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
@@ -22,6 +23,52 @@ function fixture() {
 }
 
 describe('captured reviewer inputs', () => {
+  it('validates a large shared blob once per decode without carrying trust into another decode', () => {
+    const base = fixture(), systemPrompt = 'S'.repeat(4 * 1024 * 1024);
+    const roster = Array.from({ length: 100 }, (_, index) => ({ ...base.plan.roster[0]!, seat: `s${index}`, model: `fake/m${index}` }));
+    const chunkBytes = Array.from({ length: 5 }, (_, index) => `chunk ${index}`);
+    const cells = chunkBytes.flatMap((_, chunk) => roster.map(seat => ({ seat, chunk })));
+    const prompts = cells.map(() => ({ systemPrompt, userPrompt: 'Review patch' }));
+    const plan = freezeCheckpointPlan({ ...base.plan, roster,
+      chunks: chunkBytes.map((bytes, index) => ({ index, total: chunkBytes.length, digest: sha256Hex(bytes) })),
+      prompts: cells.map(({ seat, chunk }) => ({ seat: seat.seat, chunk,
+        systemSha256: sha256Hex(systemPrompt), userSha256: sha256Hex('Review patch') })),
+    });
+    const captured = captureReviewerInputs({ ...base, plan, chunkBytes, prompts,
+      assignments: cells.map(({ seat }) => ({ ...base.assignments[0]!, model: seat.model })) });
+    expect(Buffer.byteLength(captured.bytes)).toBeLessThan(8 * 1024 * 1024);
+    const hash = vi.spyOn(runHeader, 'sha256Hex');
+    try {
+      for (let pass = 0; pass < 2; pass += 1) {
+        hash.mockClear();
+        const decoded = decodeCapturedInputs(captured.bytes, plan);
+        expect(decoded.prompts).toEqual(prompts);
+        expect(decoded.bytes).toBe(captured.bytes);
+        expect(hash.mock.calls.filter(([bytes]) => bytes === systemPrompt)).toHaveLength(1);
+      }
+    } finally { hash.mockRestore(); }
+  });
+
+  it.each(['changed', 'missing'])('revalidates a %s shared blob after a successful decode', mutation => {
+    const input = fixture(), captured = captureReviewerInputs(input);
+    expect(decodeCapturedInputs(captured.bytes, input.plan).prompts).toEqual(input.prompts);
+    const tampered = JSON.parse(captured.bytes), shared = sha256Hex(input.prompts[0]!.systemPrompt);
+    if (mutation === 'changed') tampered.blobs[shared] = 'different shared prompt';
+    else delete tampered.blobs[shared];
+    expect(() => decodeCapturedInputs(stableStringify(tampered), input.plan)).toThrow('capture_missing_or_changed_blob');
+  });
+
+  it('rejects invalid UTF-8 in a shared blob even when its hash and plan agree', () => {
+    const input = fixture(), captured = captureReviewerInputs(input), wire = JSON.parse(captured.bytes);
+    const invalid = String.fromCharCode(0xd800), digest = sha256Hex(invalid);
+    delete wire.blobs[sha256Hex(input.prompts[0]!.systemPrompt)];
+    wire.blobs[digest] = invalid;
+    const plan = freezeCheckpointPlan({ ...input.plan,
+      prompts: input.plan.prompts.map(prompt => ({ ...prompt, systemSha256: digest })) });
+    wire.plan = plan;
+    expect(() => decodeCapturedInputs(stableStringify(wire), plan)).toThrow('capture_invalid_bytes');
+  });
+
   it('captures exact async routes, roles, prompts and retry allocation in the same blob store', () => {
     const base = fixture();
     const async = { timeoutMs: 1000, maxAttemptsPerCall: 2, maxPhysicalCalls: 2,

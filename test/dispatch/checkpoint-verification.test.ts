@@ -116,18 +116,29 @@ describe('durable verifier phase in the existing checkpoint', () => {
     for (const field of ['planDigest', 'finalizationDigest', 'capturedInputsSha256', 'operationSha256'] as const) {
       expect(() => decodeVerificationProof(proof.bytes, { ...context, [field]: '9'.repeat(64) })).toThrow();
     }
-    for (const mutation of ['complete', 'duplicate batch', 'out of bounds', 'extra key']) {
-      const wire = JSON.parse(proof.bytes);
-      if (mutation === 'complete') wire.records[2].event.terminal = { status: 'complete', finishedAtMs: 300 };
-      else if (mutation === 'duplicate batch') wire.records.splice(2, 0, structuredClone(wire.records[1]));
-      else if (mutation === 'out of bounds') wire.records[1].event.intent.batchIndex = 2;
-      else wire.records[1].authority = true;
+    function rechain(wire: { records: Array<Record<string, any>> }): string {
       let previous = context.finalizationDigest;
       for (const [i, record] of wire.records.entries()) {
         record.sequence = i + 1; record.previousDigest = previous; delete record.digest;
         record.digest = hash(stableStringify(record)); previous = record.digest;
       }
-      expect(() => decodeVerificationProof(stableStringify(wire), context)).toThrow();
+      return stableStringify(wire);
+    }
+    const unchanged = rechain(JSON.parse(proof.bytes));
+    expect(unchanged).toBe(proof.bytes);
+    expect(decodeVerificationProof(unchanged, context)).toEqual(decodeVerificationProof(proof.bytes, context));
+    for (const [mutation, error] of [
+      ['complete', 'checkpoint_verification_incomplete'],
+      ['duplicate batch', 'checkpoint_verification_duplicate_or_unknown_intent'],
+      ['out of bounds', 'checkpoint_verification_duplicate_or_unknown_intent'],
+      ['extra key', 'checkpoint_verification_invalid_record'],
+    ]) {
+      const wire = JSON.parse(proof.bytes);
+      if (mutation === 'complete') wire.records[2].event.terminal = { status: 'complete', finishedAtMs: 300 };
+      else if (mutation === 'duplicate batch') wire.records.splice(2, 0, structuredClone(wire.records[1]));
+      else if (mutation === 'out of bounds') wire.records[1].event.intent.batchIndex = 2;
+      else wire.records[1].authority = true;
+      expect(() => decodeVerificationProof(rechain(wire), context)).toThrow(error);
     }
   });
 
