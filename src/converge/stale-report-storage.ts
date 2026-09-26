@@ -23,9 +23,18 @@ export async function retainStaleFile(path: string, bytes: Buffer): Promise<void
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     const staging = `${path}.${randomUUID()}.pending`;
-    await writeExclusiveBytes(staging,bytes);
-    await link(staging,path); await syncDirectory(dirname(path));
-    await unlink(staging);
+    try {
+      await writeExclusiveBytes(staging,bytes);
+      try { await link(staging,path); }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause;
+        if (!(await readStable(path)).raw.equals(bytes)) throw new Error('stale_report_retained_conflict');
+      }
+      await syncDirectory(dirname(path));
+    } finally {
+      try { await unlink(staging); }
+      catch (cleanup) { if ((cleanup as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanup; }
+    }
   }
   const current = await selectedStaleFile(path,sha256(bytes));
   const handle = await open(path,'r');
