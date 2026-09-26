@@ -293,44 +293,52 @@ export async function runReviews(
         canceled = true;
         const review = canceledReview(call, Date.now() - startedAt, 'while in flight');
         controller.abort();
-        // Let an abort-aware intent settle first so an unrelated persistence
-        // failure cannot lose the race to the synthetic cancellation result.
-        queueMicrotask(() => resolveCancel(review));
+        resolveCancel(review);
         auditCanceledRaw();
       };
       cancelOutstanding.add(cancel);
     });
-    const invoke = async (): Promise<ModelReview> => {
+    try {
+      // Intent persistence is an owned, caller-bounded durability operation.
+      // Cancellation signals it, but the run still observes how it settles.
       if (options.beforeReview) {
         try {
           if (await options.beforeReview(index, controller.signal) === false) {
-            return canceledReview(call, 0, 'intent declined before provider dispatch');
+            await accept(index, canceledReview(call, 0, 'intent declined before provider dispatch'));
+            return;
           }
         } catch (error) {
           if ((canceled || controller.signal.aborted || closed) && isAbortError(error)) {
-            return canceledReview(call, Date.now() - startedAt, 'while awaiting intent');
+            await accept(index, canceledReview(call, Date.now() - startedAt, 'while awaiting intent'));
+            return;
           }
           fail(error);
           throw error;
         }
       }
-      if (stopped()) return canceledReview(call, Date.now() - startedAt, 'before provider dispatch');
+      if (stopped()) {
+        await accept(index, canceledReview(call, Date.now() - startedAt, 'before provider dispatch'));
+        return;
+      }
       let adapter: ReviewAdapter;
       try {
         const existing = adapters.get(call.provider);
         adapter = existing ?? factory(call.provider);
         if (!existing) adapters.set(call.provider, adapter);
-      } catch (error) { return failedReview(index, error, startedAt); }
+      } catch (error) {
+        await accept(index, failedReview(index, error, startedAt));
+        return;
+      }
       dispatched.add(index);
-      try {
-        raw = await adapter.review(call.model, call.role, call.systemPrompt, call.userPrompt,
-          { ...adapterOpts, signal: controller.signal });
-      } catch (error) { raw = failedReview(index, error, startedAt); }
-      auditCanceledRaw();
-      return raw;
-    };
-    try {
-      const review = await Promise.race([invoke(), cancellation]);
+      const provider = (async (): Promise<ModelReview> => {
+        try {
+          raw = await adapter.review(call.model, call.role, call.systemPrompt, call.userPrompt,
+            { ...adapterOpts, signal: controller.signal });
+        } catch (error) { raw = failedReview(index, error, startedAt); }
+        auditCanceledRaw();
+        return raw;
+      })();
+      const review = await Promise.race([provider, cancellation]);
       // A returned response is no longer an in-flight provider call. Remove
       // it before acceptance can close quorum, so accepted work is not audited
       // as a canceled straggler by its own completion.

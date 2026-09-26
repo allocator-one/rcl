@@ -613,6 +613,25 @@ describe('retained original matrix and recovery dispatch boundaries', () => {
     expect(c.started).toEqual([0, 1]);
   });
 
+  it('waits for a delayed intent persistence failure after quorum cancellation', async () => {
+    const assignments = ['a', 'b', 'waiting-intent'].map(makeAssignment); const c = controlled(assignments);
+    const beforeReview = vi.fn((index: number, signal: AbortSignal): Promise<void> => {
+      if (index !== 2) return Promise.resolve();
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          setTimeout(() => reject(new Error('delayed intent store failure')), 10);
+        }, { once: true });
+      });
+    });
+    const running = runReviews(assignments, c.prompts, {
+      ...poolOptions, adapterFactory: () => c.adapter, beforeReview,
+    });
+    const rejected = expect(running).rejects.toThrow('delayed intent store failure');
+    c.pending[0]!.resolve(c.result(0)); c.pending[1]!.resolve(c.result(1));
+    await rejected;
+    expect(c.started).toEqual([0, 1]);
+  });
+
   it('external cancellation aborts noncooperative calls even without quorum', async () => {
     const assignments = ['a', 'b', 'queued'].map(makeAssignment); const c = controlled(assignments);
     const controller = new AbortController(); const acceptReview = vi.fn(async () => {});
