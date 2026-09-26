@@ -28,11 +28,6 @@ export const DEFAULT_CONVERGE_ROUND_CAP = 15;
 export const HARD_CONVERGE_ROUND_CAP = 99;
 export const MIN_CONVERGE_ROUNDS = 2;
 
-/** Guarded convergence requires both a two-thirds quorum and at least two reviewers. */
-export function requiredSuccessfulReviews(totalReviews: number): number {
-  return Math.max(2, Math.ceil(2 * totalReviews / 3));
-}
-
 const STATE_VERSION = 1;
 const STATE_DIR = 'rcl-converge-runs';
 const DEFAULT_LINE_WINDOW = 5;
@@ -104,8 +99,6 @@ export interface FindingEntry {
   verdict?: FindingVerdict;
   verdictReason?: string;
   verdictRound?: number;
-  /** Head reviewed by the round that recorded a fixed verdict. Absent in legacy state. */
-  verdictHeadSha?: string;
   /**
    * Severity at the moment the verdict was recorded (RCL-30). A dismissal is
    * terminal on that evidence; only escalation past it re-gates. Absent on
@@ -130,10 +123,6 @@ export interface ConvergeRunState {
     round: number;
     counts: RoundCounts;
     runId?: string;
-    /** This run was bound to a completed guarded launch; its identity cannot be replaced by replay. */
-    launchBound?: true;
-    /** Exact reviewed head, retained once the report is admitted. */
-    headSha?: string;
     /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
     severities?: Record<string, ConsensusFinding['severity']>;
   }>;
@@ -330,7 +319,6 @@ export interface ProcessRoundOptions {
   /** The report's own run id, kept so verdicts can be bound to the round's run. */
   runId?: string;
   reportSha256?: string;
-  headSha?: string;
   ownership?: NativeTargetOwnership;
 }
 
@@ -400,20 +388,6 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
-  const currentLaunch = state.lastLaunch;
-  const recordedRound = state.rounds.find((entry) => entry.round === options.round);
-  if (recordedRound?.launchBound && runId !== recordedRound.runId) {
-    throw new ConvergeRunStateError(`Round ${options.round} report run differs from its recorded round launch.`);
-  }
-  if (currentLaunch?.status === 'completed' && currentLaunch.round === options.round && currentLaunch.runId !== undefined) {
-    if (runId !== currentLaunch.runId) {
-      throw new ConvergeRunStateError(`Round ${options.round} report run does not match its admitted launch.`);
-    }
-    if (currentLaunch.successfulReviews !== undefined && currentLaunch.totalReviews !== undefined &&
-        currentLaunch.successfulReviews < requiredSuccessfulReviews(currentLaunch.totalReviews)) {
-      throw new ConvergeRunStateError(`Round ${options.round} report is inconclusive; reviewer quorum was not met.`);
-    }
-  }
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
   for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {
@@ -600,23 +574,10 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
   // Re-processing a round without a report id (a legacy or mismatched
   // report) must not erase the binding an earlier pass persisted.
-  const existingRound = recordedRound;
-  const boundRunId = runId ?? existingRound?.runId;
-  if (options.headSha !== undefined && state.lastLaunch?.round === options.round &&
-      state.lastLaunch.headSha !== undefined && options.headSha !== state.lastLaunch.headSha) {
-    throw new ConvergeRunStateError(`Round ${options.round} report head conflicts with its admitted launch.`);
-  }
-  if (options.headSha !== undefined && existingRound?.headSha !== undefined && options.headSha !== existingRound.headSha) {
-    throw new ConvergeRunStateError(`Round ${options.round} head conflicts with its admitted launch.`);
-  }
-  const roundHeadSha = options.headSha ?? existingRound?.headSha ??
-    (state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined);
+  const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}),
-      ...(existingRound?.launchBound || (currentLaunch?.status === 'completed' &&
-        currentLaunch.round === options.round && currentLaunch.runId === runId) ? { launchBound: true as const } : {}),
-      ...(roundHeadSha !== undefined ? { headSha: roundHeadSha } : {}) },
+    { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,
@@ -646,8 +607,6 @@ export interface RoundResolution {
   unresolved: string[];
   /** Identities recorded fixed this round (any status — every fix changes the patch). */
   fixedThisRound: number;
-  /** Fixed-round heads retained for a guarded retry; absent for legacy verdicts. */
-  fixedHeadShas?: string[];
   status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
 }
 
@@ -695,7 +654,6 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   }
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
-  const verdictHeadSha = reviewedRound.headSha;
   for (const { key, verdict, reason } of options.verdicts) {
     const entry = state.findings[key];
     if (!entry) {
@@ -711,8 +669,6 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     recorded.verdict = verdict;
     recorded.verdictRound = options.round;
     recorded.verdictSeverity = severities?.[key] ?? entry.severity;
-    if (verdict === 'fixed' && verdictHeadSha !== undefined) recorded.verdictHeadSha = verdictHeadSha;
-    else delete recorded.verdictHeadSha;
     if (reason !== undefined) recorded.verdictReason = reason;
     else if (verdict === 'fixed') delete recorded.verdictReason;
     updated.push(recorded);
@@ -738,16 +694,11 @@ export function resolveRoundResolution(state: ConvergeRunState, round: number): 
     const fixedThisRound = Object.values(state.findings).filter(
       (e) => e.verdict === 'fixed' && e.verdictRound === round
     ).length;
-    const fixedHeadShas = [...new Set(Object.values(state.findings)
-      .filter((e) => e.verdict === 'fixed' && e.verdictRound === round)
-      .map((e) => e.verdictHeadSha)
-      .filter((headSha): headSha is string => headSha !== undefined))];
     return {
       round,
       actionable: actionable.length,
       unresolved,
       fixedThisRound,
-      fixedHeadShas,
       status:
         unresolved.length > 0
           ? 'unresolved'

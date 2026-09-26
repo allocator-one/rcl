@@ -7,7 +7,6 @@ import {
 } from './attempt-budget.js';
 import {
   initialConvergeRunState, loadConvergeRunState, resolveRoundResolution, validateRoundCap,
-  requiredSuccessfulReviews,
   writeState, ConvergeRoundCapError, type ConvergeRunState,
 } from './run-state.js';
 import type { ConvergeContext } from '../report/run-header.js';
@@ -117,7 +116,7 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
-  const healthy = previous.successfulReviews! >= requiredSuccessfulReviews(previous.totalReviews!);
+  const healthy = previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
     refuse('report_not_admitted', `Process the existing report for run ${previous.runId}; do not rerun its reviewers.`);
   }
@@ -128,18 +127,6 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
   }
   if (healthy && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
-  }
-  if (!healthy && (resolution?.fixedThisRound ?? 0) > 0) {
-    const fixedHeads = resolution?.fixedHeadShas ?? [];
-    if (fixedHeads.includes(options.headSha)) {
-      refuse('fix_head_retry_changed', 'An inconclusive review after a real fix cannot reuse the fixed-round head.');
-    }
-    if (fixedHeads.length === 0 && previous.round === resolution?.round && previous.headSha === options.headSha) {
-      refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
-    }
-    if (fixedHeads.length === 0 && previous.headSha !== options.headSha) {
-      refuse('legacy_fix_head_unverified', 'Legacy fixed-round state permits only an explicit retry of the immediately preceding inconclusive head.');
-    }
   }
   if ((previous.hardFailure || !healthy) && !options.retryReason) {
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
