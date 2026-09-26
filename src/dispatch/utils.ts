@@ -308,7 +308,13 @@ export function isRetryableConnectionError(error: unknown, knownConnectionError 
       transient = true;
     }
     const children: unknown[] = [];
-    if (current instanceof AggregateError) children.push(...current.errors);
+    if (current instanceof AggregateError) {
+      const members = current.errors;
+      if (!Array.isArray(members)) return false;
+      const count = members.length;
+      if (count > 32 - inspected - pending.length - Number(cause.cause !== undefined)) return false;
+      for (let index = 0; index < count; index += 1) children.push(members[index]);
+    }
     if (cause.cause !== undefined) children.push(cause.cause);
     if (children.length === 0) {
       if (!transient && !(knownConnectionError && seen.size === 1)) return false;

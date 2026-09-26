@@ -37,6 +37,37 @@ describe('bounded transport cause classification', () => {
     expect(isRetryableConnectionError(new Error('SDK wrapper', { cause: aggregate }), true)).toBe(false);
   });
 
+  it('recognizes a transient code below another transient wrapper', () => {
+    const error = Object.assign(new Error('SDK wrapper', { cause: coded('ETIMEDOUT') }), { code: 'ECONNRESET' });
+    expect(isRetryableConnectionError(error)).toBe(true);
+  });
+
+  it('bounds aggregate members before reading their iterator', () => {
+    const members = Array.from({ length: 33 }, () => coded('ECONNRESET'));
+    const error = new AggregateError(members, 'connection failures');
+    error.errors[Symbol.iterator] = () => { throw new Error('must not iterate oversized errors'); };
+    expect(isRetryableConnectionError(error)).toBe(false);
+  });
+
+  it('reads bounded aggregate arrays without invoking a replaced iterator', () => {
+    const error = new AggregateError([coded('ECONNRESET')], 'connection failures');
+    error.errors[Symbol.iterator] = () => { throw new Error('must not invoke arbitrary iterator'); };
+    expect(isRetryableConnectionError(error)).toBe(true);
+  });
+
+  it('refuses a replaced aggregate errors collection', () => {
+    const error = new AggregateError([], 'connection failures');
+    error.errors = { [Symbol.iterator]: () => { throw new Error('must not invoke arbitrary iterator'); } } as never;
+    expect(isRetryableConnectionError(error)).toBe(false);
+  });
+
+  it('lets Node invalid-URL codes veto a transient wrapper', () => {
+    let invalidUrl: unknown;
+    try { new URL('not a URL'); } catch (error) { invalidUrl = error; }
+    const wrapped = Object.assign(new Error('SDK wrapper', { cause: invalidUrl }), { code: 'ECONNRESET' });
+    expect(isRetryableConnectionError(wrapped)).toBe(false);
+  });
+
   it.each([
     [new Error('invalid configuration'), coded('ECONNRESET')],
     [coded('ECONNRESET'), new Error('invalid configuration')],

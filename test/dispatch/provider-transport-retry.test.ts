@@ -47,6 +47,12 @@ function transport(provider: Provider, code = 'UND_ERR_CONNECT_TIMEOUT'): Error 
 
 for (const provider of providers) describe(`${provider} bounded transport retries`, () => {
   for (const method of methods) {
+    it(`${method} reports one observed invocation on first-try success`, async () => {
+      const { request, invoke } = fixture(provider);
+      expect(await invoke()).toMatchObject({ status: 'success', adapterAttempts: 1 });
+      expect(request).toHaveBeenCalledTimes(1);
+    });
+
     it(`${method} retries a transient failure and reports observed SDK invocations`, async () => {
       const { request, invoke } = fixture(provider);
       // Exercise the exact statusless OpenAI timeout from RCL126 as well as
@@ -121,6 +127,19 @@ for (const provider of providers) describe(`${provider} bounded transport retrie
       expect(request).toHaveBeenCalledTimes(1);
     });
   }
+
+  it('keeps an in-band review failure terminal after one invocation', async () => {
+    const { request, invoke } = fixture(provider);
+    const response = provider === 'google'
+      ? { text: '', candidates: [{ finishReason: 'MAX_TOKENS' }] }
+      : provider === 'anthropic'
+        ? { content: [{ type: 'text', text: '' }], stop_reason: 'max_tokens' }
+        : { choices: [{ message: { content: '' }, finish_reason: 'length' }] };
+    request.mockResolvedValue(response);
+
+    expect(await invoke('review')).toMatchObject({ status: 'error', adapterAttempts: 1 });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 
   it('still retries a real HTTP 503 error', async () => {
     const { request, invoke } = fixture(provider);
