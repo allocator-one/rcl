@@ -1,0 +1,51 @@
+import type { HarnessSink, SinkOutcome } from '../telemetry/sink.js';
+import {
+  isEventReceiptScope,
+  isStoredEventReceipt,
+  type StoredEventReceipt,
+  type EventReceiptScope,
+} from './claim-recovery/validation/receipts.js';
+import { object, uuidSchema } from './claim-recovery/validation/primitives.js';
+
+export { matchesPreparedEventReceipt } from './claim-recovery/validation/receipts.js';
+export { isStoredEventReceipt } from './claim-recovery/validation/receipts.js';
+export type { StoredEventReceipt, EventReceipt, EventReceiptScope } from './claim-recovery/validation/receipts.js';
+
+export interface SelectedEventReceipts {
+  receipts: StoredEventReceipt[];
+  missing: string[];
+}
+
+export const MAX_SELECTED_EVENT_RECEIPTS = 50;
+
+export { isEventReceipt } from './claim-recovery/validation/receipts.js';
+
+/**
+ * Read only explicitly selected receipts. A successful empty result proves
+ * none of these IDs were returned; a failed read makes no absence claim.
+ */
+export async function readEventReceipts(
+  sink: HarnessSink, scope: EventReceiptScope, ids: readonly string[]
+): Promise<SinkOutcome<SelectedEventReceipts>> {
+  if (!Array.isArray(ids)) throw new Error('invalid_event_receipt_selection');
+  const selectedScope = structuredClone(scope);
+  const selectedIds = [...ids];
+  if (!isEventReceiptScope(selectedScope) || selectedIds.length < 1 || selectedIds.length > MAX_SELECTED_EVENT_RECEIPTS ||
+      !selectedIds.every(id => uuidSchema.safeParse(id).success) || new Set(selectedIds).size !== selectedIds.length) throw new Error('invalid_event_receipt_selection');
+  if (sink.credentialSource === 'attest') throw new Error('unsupported_attested_recovery');
+  if (sink.baseUrl !== selectedScope.base_url) throw new Error('event_receipt_destination_conflict');
+  const selected = new Set(selectedIds);
+  const query = new URLSearchParams({ ids: selectedIds.join(',') });
+  return sink.getJson(`/api/v1/reviews/runs/${selectedScope.run_id}/events?${query}`, (data, meta) => {
+    if (!object(meta) || meta.org_id !== selectedScope.org_id || meta.run_id !== selectedScope.run_id ||
+        Object.keys(meta).some(key => !['org_id', 'run_id', 'claim_recovery_version'].includes(key)) ||
+        meta.claim_recovery_version !== 1 || !Array.isArray(data) || data.length > selectedIds.length) return null;
+    const receipts: StoredEventReceipt[] = [];
+    const seen = new Set<string>();
+    for (const raw of data) {
+      if (!isStoredEventReceipt(raw, selectedScope) || !selected.has(raw.id) || seen.has(raw.id)) return null;
+      seen.add(raw.id); receipts.push(raw);
+    }
+    return { receipts, missing: selectedIds.filter(id => !seen.has(id)) };
+  }, { requireCompleteRead: true });
+}

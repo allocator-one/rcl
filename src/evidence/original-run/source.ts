@@ -1,3 +1,4 @@
+import { recoverySourceSchema } from '../../report/recovery-source.js';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ReviewResult } from '../../consensus/types.js';
@@ -57,8 +58,13 @@ function knownKeys(value: object, allowed: string[], label: string): void {
   if (Object.keys(value).some(k => !allowed.includes(k))) throw new Error(`unsupported_${label}_fields`);
 }
 const consensusFindingKeys = ['id','file','startLine','endLine','locationProvenance','severity','category','title','description','suggestedFix','identity','consensus','gating','claimDescriptor'];
-function cleanMarkdown(text: string): void {
-  if (scrubSecrets(text) !== text || text.includes('[redacted]') || text.includes('\0')) throw new Error('original_artifact_requires_redaction');
+function hasSelectedJsonNulProvenance(selection: Selection, transformations: OriginalProseTransformation[]): boolean {
+  return selection.originalProse === 'control-code-units-v1' &&
+    transformations.some(transformation => 'kind' in transformation && transformation.kind === 'control_code_unit' && transformation.original_unit === '0000');
+}
+function cleanMarkdown(text: string, selection: Selection, transformations: OriginalProseTransformation[]): void {
+  if (scrubSecrets(text) !== text || text.includes('[redacted]') ||
+      (text.includes('\0') && !hasSelectedJsonNulProvenance(selection, transformations))) throw new Error('original_artifact_requires_redaction');
   if (text.includes('SYNTHETIC_TEST_ONLY')) throw new Error('source_marked_synthetic');
 }
 function retainedRedactions(value: unknown, path = ''): Array<{ path: string; count: number }> {
@@ -109,7 +115,14 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   knownKeys(report.run, ['id','rcl_version','command','target','roster','config_sha256','thresholds','gating','spec','context_files','plan','runner','started_at','finished_at','duration_ms','ci_exit_code','converge','provenance'], 'header');
   knownKeys(report.run.runner, ['kind','agent','host','ci_run_id'], 'runner');
   knownKeys(report.run.target, ['kind','repo','pr_number','url','head_sha','base_sha','head_ref','base_ref','diff_sha256','files','additions','deletions'], 'target');
-  if (report.run.converge) knownKeys(report.run.converge, ['target','round','attempt'], 'converge');
+  if (report.run.converge) {
+    knownKeys(report.run.converge, ['target','round','attempt','recovery_source'], 'converge');
+    if (Object.hasOwn(report.run.converge, 'recovery_source') &&
+        (!recoverySourceSchema.safeParse(report.run.converge.recovery_source).success ||
+          report.run.gating.bound_classification_protocol !== 1 || !Number.isSafeInteger(report.run.converge.round))) {
+      throw new Error('unsupported_recovery_source');
+    }
+  }
   if (report.run.spec) knownKeys(report.run.spec, ['source','sha256'], 'spec');
   if (report.run.plan) knownKeys(report.run.plan, ['focus'], 'plan');
   for (const row of report.run.roster) knownKeys(row, ['model','role','provider','lane'], 'roster');
@@ -122,7 +135,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   if (selection.reportMd) {
     const md = await readStable(selection.reportMd, MAX_ARTIFACT_BYTES);
     if (md.sha256 !== selection.markdownSha256 || !Buffer.from(md.text, 'utf8').equals(md.raw)) throw new Error('original_markdown_digest_mismatch');
-    cleanMarkdown(md.text); artifacts.report_md = md.text;
+    cleanMarkdown(md.text, selection, decoded.transformations); artifacts.report_md = md.text;
     sources.report_md = { path: platformPath(selection.reportMd), sha256: md.sha256, bytes: md.raw.length };
   }
   const originalFindings = [...report.findings, ...(report.belowThresholdFindings ?? [])];
@@ -155,6 +168,8 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
       if (Object.hasOwn(described, 'claimDescriptor')) {
         const parsed = descriptor.safeParse(described.claimDescriptor);
         if (!parsed.success) throw new Error('unsupported_original_descriptor');
+        // Preserve published Mode A's descriptor property order in pinned envelopes.
+        delete wire.claim_descriptor;
         (wire as unknown as Record<string, unknown>).claim_descriptor = parsed.data;
       }
       for (const [source, dest] of [['title','title'],['description','description'],['suggestedFix','suggested_fix']] as const) derive(`${group.root}/${index}/${dest}`, f[source], wire[dest], 'existing_buildRunEnvelope_scrub_and_codepoint_limit');

@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 import { abortSignalWithTimeout } from './abort-signal.js';
+import { claimDescriptorSchema } from '../consensus/claim-identity.js';
+import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactDeclaration, ArtifactKind, RunEnvelope } from './envelope.js';
-import { parseAttestedExpiry, type ReceiptProbe } from './attested-retry.js';
 import type { WireEvent } from './events.js';
+import type { RecoveryRequestBudget, RecoveryWritePermit, RecoveryRateLimit } from './recovery-request-budget.js';
+import { parseAttestedExpiry, type ReceiptProbe } from './attested-retry.js';
 
 /**
  * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
@@ -28,10 +31,14 @@ export const MAX_RESPONSE_BYTES = 64 * 1024;
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export interface RequestOptions {
-  /** A shorter timeout for this one request, e.g. what remains of a flush deadline. */
+  /** Recovery reserves transport capacity before its final source proof. */
+  recoveryWritePermit?: RecoveryWritePermit;
+  /** A shorter delivery budget, including any capability preflight, e.g. a flush's remaining time. */
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
+  /** Recovery reads require HTTP 200 and a complete data/meta envelope, never a partial/error answer. */
+  requireCompleteRead?: boolean;
   /** Cancellation/deadline for an attested same-workflow retry operation. */
   signal?: AbortSignal;
 }
@@ -67,15 +74,22 @@ export type SinkOutcome<T> =
   /** The server understood the request and refused it for good; retrying cannot help. */
   | { kind: 'rejected'; httpStatus: number; error: string; message: string }
   /** Network, timeout or server failure — the delivery is worth retrying. */
-  | { kind: 'unavailable'; reason: string };
+  | { kind: 'unavailable'; reason: string; httpStatus?: number; retryAfterMs?: number; rateLimitReason?: RecoveryRateLimit['reason'] };
 
 export type PreparedPostRun =
   | Extract<SinkOutcome<RunReceipt>, { kind: 'rejected' }>
   | { kind: 'ready'; serializedEnvelope: string; post: (options?: RequestOptions) => Promise<SinkOutcome<RunReceipt>>; receipt: (options?: RequestOptions) => Promise<ReceiptProbe<RunReceipt>> };
 
-interface PreparedRunBinding { runId: string; hasLocationProvenance: boolean; artifactsDeclared: ArtifactDeclaration[]; }
+interface PreparedRunBinding {
+  runId: string;
+  hasEvidenceProvenance: boolean;
+  boundClassification: 'absent' | 'valid' | 'invalid';
+  artifactsDeclared: ArtifactDeclaration[];
+}
 
 export interface SinkOptions {
+  /** Only explicitly selected recovery operations opt into quota scheduling. */
+  requestBudget?: RecoveryRequestBudget;
   credential: HarnessCredential;
   rclVersion: string;
   fetchImpl?: typeof fetch;
@@ -90,6 +104,28 @@ interface ErrorBody {
   message?: string;
 }
 
+const SIGHTING_BINDING_FIELDS = ['version', 'finding_ref', 'report_json_sha256', 'claim_descriptor', 'match_rationale', 'pending_round'];
+
+/** Inspect retained bindings without normalizing or replacing their original values. */
+export function validSightingBinding(entry: Record<string, unknown>): boolean {
+  const key = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 64;
+  return entry.version === 1 && key(entry.identity_key) && key(entry.matched_identity) &&
+    ['new', 'repeat', 'suppressed', 'regating'].includes(entry.status as string) &&
+    typeof entry.finding_ref === 'string' && Buffer.byteLength(entry.finding_ref, 'utf8') > 0 &&
+    Buffer.byteLength(entry.finding_ref, 'utf8') <= 32 &&
+    typeof entry.report_json_sha256 === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(entry.report_json_sha256) &&
+    claimDescriptorSchema.safeParse(entry.claim_descriptor).success &&
+    ['new_claim', 'exact_descriptor', 'supported_paraphrase', 'ambiguous', 'explicit_split'].includes(entry.match_rationale as string) &&
+    (!Object.hasOwn(entry, 'pending_round') || entry.pending_round === null ||
+      (typeof entry.pending_round === 'number' && Number.isSafeInteger(entry.pending_round) && entry.pending_round >= 1));
+}
+
+function remainingRequestOptions(options: RequestOptions, deadline: number | undefined): RequestOptions | null {
+  if (deadline === undefined) return options;
+  const timeoutMs = Math.floor(deadline - performance.now());
+  return timeoutMs < 1 ? null : { ...options, timeoutMs };
+}
+
 export class HarnessSink {
   private readonly credential: HarnessCredential;
   private readonly rclVersion: string;
@@ -97,6 +133,7 @@ export class HarnessSink {
   private readonly timeoutMs: number;
   private readonly artifactTimeoutMs: number;
   private readonly artifactExpiry?: { epoch: number; remainingMs: number; startedAt: number };
+  private readonly requestBudget?: RecoveryRequestBudget;
 
   constructor(options: SinkOptions) {
     // The token travels to the host that minted it, over TLS (loopback
@@ -121,6 +158,7 @@ export class HarnessSink {
         this.artifactExpiry = { epoch, remainingMs: epoch - Date.now(), startedAt: performance.now() };
       }
     }
+    this.requestBudget = options.requestBudget;
   }
 
   get baseUrl(): string {
@@ -134,19 +172,19 @@ export class HarnessSink {
   async getArtifact(runId: string, kind: ArtifactKind, limit: number, options: RequestOptions = {}): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>> {
     if (!Number.isSafeInteger(limit) || limit < 0 || limit > 25_000_000) throw new Error('invalid_artifact_read_limit');
     if (kind !== 'report_json' && kind !== 'report_md') return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: 'Unsupported artifact selection' };
-    const timeoutMs = this.artifactBudget(options);
-    if (timeoutMs <= 0) return { kind: 'unavailable', reason: 'artifact_transfer_expired' };
-    const signal = abortSignalWithTimeout(options.signal, timeoutMs);
+    if (this.artifactBudget(options) <= 0) return { kind: 'unavailable', reason: 'artifact_transfer_expired' };
+    let dispose: (() => void) | undefined;
     try {
-      signal.signal.throwIfAborted();
-      const response = await this.fetchImpl(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
-        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual', signal: signal.signal,
-      });
+      const fetched = await this.fetchRequest(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
+        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual',
+      }, () => this.artifactBudget(options), undefined, options.signal, this.artifactLifetime(options));
+      const { response, rateLimit } = fetched;
+      dispose = fetched.dispose;
       if (response.status !== 200) {
         const text = await readBounded(response, MAX_RESPONSE_BYTES);
         let body: unknown = null;
         try { body = JSON.parse(text ?? 'null'); } catch { /* Untrusted failure text is not a receipt. */ }
-        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body }, () => null);
+        return this.classify<{ bytes: Buffer; sha256: string }>({ status: response.type === 'opaqueredirect' ? 302 : response.status, body, ...(rateLimit ? { rateLimit } : {}) }, () => null);
       }
       const bytes = await readBoundedBytes(response, limit);
       const digest = response.headers.get('x-artifact-sha256');
@@ -155,13 +193,76 @@ export class HarnessSink {
       }
       return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: digest } };
     } catch { return { kind: 'unavailable', reason: 'artifact_read_failed' }; }
-    finally { signal.dispose(); }
+    finally { dispose?.(); }
+  }
+
+  /** The reservation is scheduling only; callers must still prove source and packet freshness. */
+  async reserveRecoveryWrite(): Promise<RecoveryWritePermit | undefined> {
+    return this.requestBudget?.reserveWrite();
+  }
+
+  releaseRecoveryWrite(permit: RecoveryWritePermit | undefined): void {
+    if (permit) this.requestBudget?.releaseWrite(permit);
+  }
+
+  private artifactLifetime(options: RequestOptions): number | undefined {
+    const expiry = this.artifactExpiry;
+    if (!expiry) return options.timeoutMs;
+    return Math.min(options.timeoutMs ?? Infinity,
+      expiry.epoch - Date.now(), expiry.remainingMs - (performance.now() - expiry.startedAt));
   }
 
   private artifactBudget(options: RequestOptions): number {
-    const expiry = this.artifactExpiry;
-    return Math.min(this.artifactTimeoutMs, options.timeoutMs ?? this.artifactTimeoutMs,
-      ...(expiry ? [expiry.epoch - Date.now(), expiry.remainingMs - (performance.now() - expiry.startedAt)] : []));
+    return Math.min(this.artifactTimeoutMs, this.artifactLifetime(options) ?? this.artifactTimeoutMs);
+  }
+
+  private async fetchRequest(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number | (() => number),
+    permit?: RecoveryWritePermit,
+    parentSignal?: AbortSignal,
+    operationTimeoutMs?: number
+  ): Promise<{ response: Response; rateLimit?: RecoveryRateLimit; dispose: () => void }> {
+    const deadline = operationTimeoutMs === undefined ? undefined : performance.now() + operationTimeoutMs;
+    const operation = operationTimeoutMs === undefined ? undefined : abortSignalWithTimeout(parentSignal, operationTimeoutMs);
+    const signal = operation?.signal ?? parentSignal;
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        if (!permit && this.requestBudget) await this.requestBudget.acquire(signal);
+        signal?.throwIfAborted();
+        // Admission and 429 pacing cannot renew an explicit caller deadline or
+        // credential lifetime. The ordinary network timer starts after admission.
+        const remaining = Math.min(typeof timeoutMs === 'function' ? timeoutMs() : timeoutMs,
+          deadline === undefined ? Infinity : deadline - performance.now());
+        if (remaining <= 0) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+        const lease = abortSignalWithTimeout(signal, remaining);
+        try {
+          lease.signal.throwIfAborted();
+          if (permit) {
+            if (init.method !== 'POST' || !this.requestBudget) throw new Error('recovery_write_permit_invalid');
+            this.requestBudget.consumeWrite(permit);
+          }
+          const response = await this.fetchImpl(url, { ...init, signal: lease.signal });
+          // Keep both leases until the caller has consumed the response body too.
+          const dispose = (): void => { lease.dispose(); operation?.dispose(); };
+          if (response.status !== 429 || !this.requestBudget) return { response, dispose };
+          const rateLimit = this.requestBudget.rateLimited(response.headers.get('retry-after'), response.headers.get('date'));
+          // Reads may restart after an explicit rejection. Writes remain receipt-driven;
+          // neither a 429 nor a lost acknowledgment authorizes a blind POST retry.
+          if (init.method !== 'GET' || !rateLimit.retryable) return { response, rateLimit, dispose };
+          await response.body?.cancel().catch(() => undefined);
+          lease.dispose();
+        } catch (error) {
+          lease.dispose();
+          throw error;
+        }
+      }
+    } catch (error) {
+      operation?.dispose();
+      throw error;
+    }
   }
 
   private headers(contentType: string): Record<string, string> {
@@ -181,44 +282,49 @@ export class HarnessSink {
     body: string | undefined,
     contentType: string,
     options: RequestOptions = {},
-    timeoutCeilingMs = this.timeoutMs
-  ): Promise<{ status: number; body: unknown } | { failure: string }> {
-    const timeoutMs = Math.max(1, Math.min(timeoutCeilingMs, options.timeoutMs ?? timeoutCeilingMs));
-    const signal = abortSignalWithTimeout(options.signal, timeoutMs);
+    timeoutCeilingMs: number | (() => number) = this.timeoutMs
+  ): Promise<{ status: number; body: unknown; rateLimit?: RecoveryRateLimit } | { failure: string }> {
+    let dispose: (() => void) | undefined;
     try {
-      signal.signal.throwIfAborted();
-      const response = await this.fetchImpl(`${this.credential.url}${path}`, {
+      const fetched = await this.fetchRequest(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
         ...(body !== undefined ? { body } : {}),
-        signal: signal.signal,
         redirect: 'manual',
-      });
+      }, timeoutCeilingMs, options.recoveryWritePermit, options.signal, options.timeoutMs);
+      const { response, rateLimit } = fetched;
+      dispose = fetched.dispose;
       // Node returns a manual redirect as the 3xx itself; a WHATWG client
       // returns an opaque redirect with status 0. Both read as "redirected".
       if (response.type === 'opaqueredirect') return { status: 302, body: null };
       const text = await readBounded(response, options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
       if (text === null) {
-        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' } };
+        return { status: response.status, body: { error: 'malformed_response', message: 'response larger than the receipt limit' }, ...(rateLimit ? { rateLimit } : {}) };
       }
       let parsed: unknown = null;
       if (text !== '') {
         try {
-          parsed = JSON.parse(text);
+          if (options.requireCompleteRead) {
+            const decoded = decodeOriginalReport(text, { exactNumbers: true });
+            if (decoded.transformations.length) throw new Error('transformed_receipt');
+            parsed = decoded.value;
+          } else parsed = JSON.parse(text);
         } catch {
-          parsed = { message: text.slice(0, 200) };
+          parsed = options.requireCompleteRead
+            ? { error: 'malformed_response', message: 'invalid or ambiguous complete read response' }
+            : { message: text.slice(0, 200) };
         }
       }
-      return { status: response.status, body: parsed };
+      return { status: response.status, body: parsed, ...(rateLimit ? { rateLimit } : {}) };
     } catch (err) {
       return { failure: transportFailure(err) };
     } finally {
-      signal.dispose();
+      dispose?.();
     }
   }
 
   private classify<T>(
-    result: { status: number; body: unknown } | { failure: string },
+    result: { status: number; body: unknown; rateLimit?: RecoveryRateLimit } | { failure: string },
     onOk: (body: unknown, status: number) => T | null
   ): SinkOutcome<T> {
     if ('failure' in result) return { kind: 'unavailable', reason: result.failure };
@@ -235,6 +341,10 @@ export class HarnessSink {
       return { kind: 'disabled', reason: error, message };
     }
     if (status === 409) return { kind: 'conflict', message };
+    if (status === 429 && result.rateLimit) return {
+      kind: 'unavailable', reason: 'HTTP 429', httpStatus: 429, rateLimitReason: result.rateLimit.reason,
+      ...(result.rateLimit.retryAfterMs !== undefined ? { retryAfterMs: result.rateLimit.retryAfterMs } : {}),
+    };
     if (status >= 500 || status === 429 || status === 408) {
       return { kind: 'unavailable', reason: `HTTP ${status}${message ? ` ${message}` : ''}` };
     }
@@ -249,12 +359,53 @@ export class HarnessSink {
     return { kind: 'rejected', httpStatus: status, error: error || `http_${status}`, message };
   }
 
+  /** Capability is read at the credential's own host; no speculative write. */
+  private async requireEvidenceProtocol(options: RequestOptions, boundClassification = false): Promise<SinkOutcome<{ supported: boolean }>> {
+    // Old servers silently discard unknown provenance. The attested credential
+    // may read model-stats, but may not list runs or use an ordinary login.
+    const attested = this.credential.source === 'attest';
+    // Capability reads use normal read admission; the reserved slot belongs
+    // exclusively to the subsequent POST and must survive a failed preflight.
+    const { recoveryWritePermit: _permit, ...readOptions } = options;
+    const capability = await this.getJson(
+      attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
+      (data, meta) => {
+        if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
+        const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
+        const boundVersion = (meta as { bound_classification_protocol?: unknown } | null)?.bound_classification_protocol;
+        return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 &&
+          (!boundClassification || boundVersion === 1) };
+      }, readOptions
+    );
+    if (capability.kind !== 'ok') return capability;
+    if (!capability.value.supported) return {
+      kind: 'rejected', httpStatus: 0,
+      error: boundClassification ? 'unsupported_bound_classification_protocol' : 'unsupported_evidence_protocol',
+      message: boundClassification
+        ? 'The server has not confirmed evidence protocol 2 and bound classification protocol 1; events were not sent'
+        : 'The server has not confirmed evidence protocol version 2; versioned evidence was not sent',
+    };
+    return capability;
+  }
+
   /** Retain immutable delivery primitives and exact bytes for one POST and any replay. */
   preparePostRun(envelope: RunEnvelope, serializedEnvelope?: string): PreparedPostRun {
     const canonicalEnvelope = JSON.stringify(envelope);
-    if (serializedEnvelope !== undefined && serializedEnvelope !== canonicalEnvelope) return { kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch', message: 'The supplied serialized envelope does not match the validated envelope' };
-    const binding: PreparedRunBinding = { runId: envelope.run.id, hasLocationProvenance: envelope.findings.some((finding) => finding.location_provenance !== undefined), artifactsDeclared: structuredClone(envelope.artifacts_declared) };
-    return { kind: 'ready', serializedEnvelope: canonicalEnvelope, post: (options = {}) => this.postPreparedRun(binding, canonicalEnvelope, options), receipt: (options = {}) => this.getPreparedReceipt(binding, canonicalEnvelope, options) };
+    if (serializedEnvelope !== undefined && serializedEnvelope !== canonicalEnvelope) return {
+      kind: 'rejected', httpStatus: 0, error: 'serialized_envelope_mismatch',
+      message: 'The supplied serialized envelope does not match the validated envelope',
+    };
+    const gating = envelope.run.gating;
+    const hasBoundClassification = gating !== null && typeof gating === 'object' && 'bound_classification_protocol' in gating;
+    const binding: PreparedRunBinding = {
+      runId: envelope.run.id,
+      hasEvidenceProvenance: envelope.findings.some(finding => finding.location_provenance !== undefined || finding.claim_descriptor !== undefined),
+      boundClassification: hasBoundClassification ? (gating.bound_classification_protocol === 1 ? 'valid' : 'invalid') : 'absent',
+      artifactsDeclared: structuredClone(envelope.artifacts_declared),
+    };
+    return { kind: 'ready', serializedEnvelope: canonicalEnvelope,
+      post: (options = {}) => this.postPreparedRun(binding, canonicalEnvelope, options),
+      receipt: (options = {}) => this.getPreparedReceipt(binding, canonicalEnvelope, options) };
   }
 
   /** `POST /api/v1/reviews/runs` — idempotent on the run id. */
@@ -264,25 +415,21 @@ export class HarnessSink {
   }
 
   private async postPreparedRun(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions): Promise<SinkOutcome<RunReceipt>> {
-    if (binding.hasLocationProvenance) {
-      // Old servers silently discard unknown provenance. The attested credential
-      // may read model-stats, but may not list runs or use an ordinary login.
-      const attested = this.credential.source === 'attest';
-      const capability = await this.getJson(
-        attested ? '/api/v1/reviews/model-stats' : '/api/v1/reviews/runs?page_size=1',
-        (data, meta) => {
-          if (attested ? !data || typeof data !== 'object' || !Array.isArray((data as { models?: unknown }).models) : !Array.isArray(data)) return null;
-          const version = (meta as { evidence_protocol_version?: unknown } | null)?.evidence_protocol_version;
-          return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 };
-        }, options
-      );
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
+    const boundClassification = binding.boundClassification === 'valid';
+    if (binding.boundClassification === 'invalid') return {
+      kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+      message: 'The run must declare bound classification protocol 1; the envelope was not sent',
+    };
+    if (boundClassification || binding.hasEvidenceProvenance) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
       if (capability.kind !== 'ok') return capability;
-      if (!capability.value.supported) return {
-        kind: 'rejected', httpStatus: 0, error: 'unsupported_evidence_protocol',
-        message: 'The server has not confirmed evidence protocol version 2; normalization provenance was not sent',
-      };
     }
-    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', options);
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', remaining);
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the
@@ -314,13 +461,13 @@ export class HarnessSink {
   }
 
   private async getPreparedReceipt(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
-    if (this.credential.source !== 'attest') return { kind: 'rejected' };
+    if (this.credentialSource !== 'attest') return { kind: 'rejected' };
     if (!binding.artifactsDeclared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
-    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', { ...options, maxResponseBytes: MAX_READ_RESPONSE_BYTES });
+    const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', { ...options, maxResponseBytes: MAX_READ_RESPONSE_BYTES, requireCompleteRead: true });
     if ('failure' in result) return { kind: 'unavailable' };
     if (result.status === 404) return { kind: 'absent' };
     if (result.status >= 500 || result.status === 429 || result.status === 408) return { kind: 'unavailable' };
-    if (result.status !== 200) return { kind: 'rejected' };
+    if (result.status !== 200 || !completeReadBody(result.body)) return { kind: 'rejected' };
     const response = result.body as { data?: Record<string, unknown>; meta?: Record<string, unknown> } | null;
     const data = response?.data;
     const envelopeSha256 = createHash('sha256').update(serializedEnvelope, 'utf8').digest('hex');
@@ -364,8 +511,8 @@ export class HarnessSink {
       `/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}`,
       bytes,
       'application/octet-stream',
-      options,
-      timeoutMs
+      { ...options, timeoutMs: this.artifactLifetime(options) },
+      () => this.artifactBudget(options)
     );
     // The receipt must name the artifact that was sent and carry the digest
     // of exactly those bytes; anything else is not a receipt for this upload.
@@ -385,12 +532,76 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
+    // Retained JSON can violate the producer's type. Refuse the batch before
+    // inspecting provenance so the outbox preserves it and continues other entries.
+    if (events.some(event => event.kind === 'round_processed' &&
+      (event.payload === null || typeof event.payload !== 'object' || Array.isArray(event.payload)))) {
+      return { kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
+        message: 'round_processed payload must be an object; events were not sent' };
+    }
+    let boundClassification = false;
+    let versionedClassification = false;
+    for (const event of events) {
+      if (event.kind !== 'round_processed') continue;
+      const payload = event.payload;
+      const markedClassification = 'classification_version' in payload || 'legacy_pending_identities' in payload;
+      if (markedClassification) {
+        const pending = payload.legacy_pending_identities;
+        if (payload.classification_version !== 1 || typeof payload.report_json_sha256 !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(payload.report_json_sha256) ||
+          !Number.isSafeInteger(event.round) || event.round! < 1 ||
+          !Array.isArray(payload.identities) || !payload.identities.every((identity: unknown) => {
+            if (identity === null || typeof identity !== 'object' || Array.isArray(identity) ||
+              !Object.hasOwn(identity, 'pending_round')) return false;
+            const value = (identity as { pending_round: unknown }).pending_round;
+            return value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= event.round!);
+          }) ||
+          ('legacy_pending_identities' in payload && (!Array.isArray(pending) || pending.length === 0 || pending.length > 2000 ||
+            !pending.every((identity: unknown, index: number) => typeof identity === 'string' && /^[a-f0-9]{16}$/.test(identity) &&
+              (index === 0 || pending[index - 1] < identity))))) {
+          return { kind: 'rejected', httpStatus: 0, error: 'invalid_bound_classification',
+            message: 'Bound classification requires version 1, a lowercase report digest, pending snapshots and valid optional legacy pending identities; events were not sent' };
+        }
+        boundClassification = true;
+      }
+      const markedSightingRefs = new Set<string>();
+      if (Array.isArray(payload.identities)) {
+        for (const entry of payload.identities) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
+            !SIGHTING_BINDING_FIELDS.some(field => Object.hasOwn(entry, field))) continue;
+          if (!validSightingBinding(entry)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Per-sighting bindings require a complete supported version 1 identity; events were not sent',
+          };
+          if (markedClassification && entry.report_json_sha256 !== payload.report_json_sha256) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use the classification report digest; events were not sent',
+          };
+          if (markedClassification && markedSightingRefs.has(entry.finding_ref as string)) return {
+            kind: 'rejected', httpStatus: 0, error: 'invalid_sighting_binding',
+            message: 'Marked per-sighting bindings must use unique finding references; events were not sent',
+          };
+          if (markedClassification) markedSightingRefs.add(entry.finding_ref as string);
+          versionedClassification = true;
+        }
+      }
+    }
+    if (boundClassification || versionedClassification) {
+      const remaining = remainingRequestOptions(options, deadline);
+      if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
+      const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
+      if (capability.kind !== 'ok') return capability;
+    }
+    const body = JSON.stringify({ events });
+    const remaining = remainingRequestOptions(options, deadline);
+    if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
     const result = await this.request(
       'POST',
       '/api/v1/reviews/converge/events',
-      JSON.stringify({ events }),
+      body,
       'application/json',
-      options
+      remaining
     );
     return this.classify(result, (body) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
@@ -412,11 +623,18 @@ export class HarnessSink {
    */
   async getJson<T>(path: string, validate: (data: unknown, meta?: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
     const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
-    return this.classify(result, (body) => {
+    return this.classify(result, (body, status) => {
+      if (options.requireCompleteRead && (status !== 200 || !completeReadBody(body))) return null;
       const response = body as { data?: unknown; meta?: unknown } | null;
       return validate(response?.data, response?.meta);
     });
   }
+}
+
+function completeReadBody(body: unknown): boolean {
+  return body !== null && typeof body === 'object' && !Array.isArray(body) &&
+    Object.hasOwn(body, 'data') && Object.hasOwn(body, 'meta') &&
+    Object.keys(body).every(key => key === 'data' || key === 'meta');
 }
 
 /**

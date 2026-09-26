@@ -222,6 +222,47 @@ describe('the run-bound credential of --attest', () => {
     expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
   });
 
+  it('rechecks versioned evidence capability before a prepared attested replay', async () => {
+    const result = sampleResult();
+    result.findings[0]!.locationProvenance = {
+      version: 1, source: 'parser', reason: 'reversed_range', originalStartLine: 12, originalEndLine: 10,
+    };
+    const artifacts = { report_json: JSON.stringify(result), report_md: '# Original report\n' };
+    let capabilities = 0;
+    const { fetch, requests } = fakeFetch(request => {
+      if (request.url.endsWith('/api/v1/reviews/model-stats')) {
+        capabilities++;
+        return { status: 200, body: { data: { models: [] }, meta: { evidence_protocol_version: capabilities === 1 ? 2 : 1 } } };
+      }
+      if (request.url.endsWith(`/api/v1/reviews/runs/${result.run!.id}`)) return { status: 404, body: { error: 'not_found' } };
+      if (request.url.endsWith('/api/v1/reviews/runs')) return new TypeError('lost acknowledgement');
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const runtime = await createTelemetryRuntime({
+      rclVersion: '4.0.2', env: {}, cwd: plainRepo, dataDir, credentialsPath: stale, fetchImpl: fetch, stderr: () => {},
+      credential: RBC, attestedExpiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const outcome = await deliverRun(runtime, { result, artifacts, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4, retention: { status: 'complete' } });
+    expect(requests.map(request => [request.method, new URL(request.url).pathname])).toEqual([
+      ['GET', '/api/v1/reviews/model-stats'],
+      ['POST', '/api/v1/reviews/runs'],
+      ['GET', `/api/v1/reviews/runs/${result.run!.id}`],
+      ['GET', '/api/v1/reviews/model-stats'],
+    ]);
+    expect(JSON.parse(requests[1]!.body!).findings[0].location_provenance).toEqual({
+      version: 1, source: 'parser', reason: 'reversed_range', original_start_line: 12, original_end_line: 10,
+    });
+    expect(await readdir(join(dataDir, 'outbox'))).toEqual([]);
+    const retained = await runtime.quarantine!.inspect(result.run!.id);
+    expect(retained).toMatchObject({ status: 'complete', manifest: { acknowledged: false, requested_mode: 'attested' } });
+    for (const [kind, bytes] of Object.entries(artifacts)) {
+      expect(await readFile(join(retained!.path, retained!.manifest!.artifacts[kind]!.file), 'utf8')).toBe(bytes);
+    }
+  });
+
   it('retains an unavailable attested POST without recovery requests when its expiry is invalid', async () => {
     const result = sampleResult();
     const { fetch, requests } = fakeFetch(() => new TypeError('lost acknowledgement'));

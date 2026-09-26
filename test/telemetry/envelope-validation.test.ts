@@ -146,4 +146,67 @@ describe('validateRunEnvelope', () => {
     expect(validateRunEnvelope(envelope, artifacts)).toContainEqual({ path: 'envelope', message: `Envelope exceeds ${PROTOCOL_MAX_ENVELOPE_BYTES} bytes or is not JSON` });
   });
 
+
+  it.each([
+    ['missing protocol marker', undefined, 1],
+    ['wrong protocol marker', 2, 1],
+    ['missing recovery round', 1, undefined],
+    ['non-positive recovery round', 1, 0],
+  ] as const)('refuses a recovery source with %s without rewriting the envelope', (_label, protocol, round) => {
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result) };
+    const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+    envelope.run.converge = {
+      target: 'recovered',
+      ...(round === undefined ? {} : { round }),
+      recovery_source: { version: 1, native_sha256: 'a'.repeat(64) },
+    };
+    if (protocol === undefined) delete envelope.run.gating.bound_classification_protocol;
+    else envelope.run.gating.bound_classification_protocol = protocol;
+
+    const before = JSON.stringify(envelope);
+    expect(validateRunEnvelope(envelope, artifacts)).toContainEqual(expect.objectContaining({ path: expect.stringMatching(/^run\.converge/) }));
+    expect(JSON.stringify(envelope)).toBe(before);
+  });
+
+  it('preserves ordinary marker-absent envelopes and described/undescribed identity semantics', () => {
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result) };
+    const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
+
+    const repeatedUndescribed = structuredClone(envelope);
+    repeatedUndescribed.findings.push({ ...structuredClone(repeatedUndescribed.findings[0]!), ref: 'duplicate-identity-ref' });
+    expect(validateRunEnvelope(repeatedUndescribed, artifacts)).toEqual([]);
+
+    const describedCollision = structuredClone(envelope);
+    describedCollision.findings[0]!.claim_descriptor = {
+      version: 1, operation: 'Preserve identity', invariant: 'Keep the contract', evidence: ['source'],
+    };
+    describedCollision.findings.push({ ...structuredClone(describedCollision.findings[0]!), ref: 'duplicate-described-identity-ref' });
+    expect(validateRunEnvelope(describedCollision, artifacts)).toContainEqual(expect.objectContaining({
+      path: 'findings', message: 'Described sightings require unique report keys',
+    }));
+
+    const mixedCollision = structuredClone(envelope);
+    mixedCollision.findings[0]!.claim_descriptor = {
+      version: 1, operation: 'Preserve identity', invariant: 'Keep the contract', evidence: ['source'],
+    };
+    const undescribedDuplicate = { ...structuredClone(mixedCollision.findings[0]!), ref: 'duplicate-undescribed-identity-ref' };
+    delete undescribedDuplicate.claim_descriptor;
+    mixedCollision.findings.push(undescribedDuplicate);
+    expect(validateRunEnvelope(mixedCollision, artifacts)).toContainEqual(expect.objectContaining({
+      path: 'findings', message: 'Described sightings require unique report keys',
+    }));
+
+    const distinctDescriptors = structuredClone(envelope);
+    distinctDescriptors.findings[0]!.claim_descriptor = {
+      version: 1, operation: 'Preserve first identity', invariant: 'Keep first contract', evidence: ['source-a'],
+    };
+    distinctDescriptors.findings[1]!.claim_descriptor = {
+      version: 1, operation: 'Preserve second identity', invariant: 'Keep second contract', evidence: ['source-b'],
+    };
+    expect(validateRunEnvelope(distinctDescriptors, artifacts)).toEqual([]);
+  });
+
 });
