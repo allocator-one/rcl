@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { createGuardedDeliveryConfirmer, matchesGuardedDelivery, verifyGuardedDelivery } from '../../src/converge/delivery-reconcile.js';
 import type { RunDetail } from '../../src/evidence/types.js';
@@ -96,4 +96,29 @@ describe('guarded delivery receipt', () => {
       startedAt: '2026-09-26T12:31:20.636Z', pid: 1, successfulReviews: 1, totalReviews: 2,
       deliveryPending: true, hardFailure: true })).toBe(false);
   });
+
+  it('fails closed before reading evidence when the guarded receipt is incomplete', async () => {
+    const openReadSink = vi.fn();
+    const confirm = createGuardedDeliveryConfirmer({ target: expected.target, rclVersion: 'test', cwd: '/',
+      dependencies: { openReadSink, getRun: vi.fn() } });
+
+    expect(await confirm({ ...expected, runId: '', status: 'completed', inputSha256: 'c'.repeat(64),
+      startedAt: '2026-09-26T12:31:20.636Z', pid: 1, successfulReviews: 1, totalReviews: 2,
+      deliveryPending: true, hardFailure: true })).toBe(false);
+    expect(openReadSink).not.toHaveBeenCalled();
+  });
+
+  it.each(['unavailable sink', 'unavailable run'] as const)(
+    'fails closed for an %s read', async failure => {
+      const openReadSink = vi.fn().mockResolvedValue(failure === 'unavailable sink' ? { sink: null } : { sink: {} });
+      const getRun = vi.fn().mockResolvedValue({ kind: 'unavailable', reason: 'fixture' });
+      const confirm = createGuardedDeliveryConfirmer({ target: expected.target, rclVersion: 'test', cwd: '/',
+        dependencies: { openReadSink, getRun } });
+
+      expect(await confirm({ ...expected, status: 'completed', inputSha256: 'c'.repeat(64),
+        startedAt: '2026-09-26T12:31:20.636Z', pid: 1, successfulReviews: 1, totalReviews: 2,
+        deliveryPending: true, hardFailure: true })).toBe(false);
+      expect(getRun).toHaveBeenCalledTimes(failure === 'unavailable sink' ? 0 : 1);
+    }
+  );
 });
