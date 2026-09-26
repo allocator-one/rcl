@@ -394,11 +394,14 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
   const currentLaunch = state.lastLaunch;
-  if (runId !== undefined && currentLaunch?.status === 'completed' &&
-      currentLaunch.round === options.round && currentLaunch.runId === runId &&
-      currentLaunch.successfulReviews !== undefined && currentLaunch.totalReviews !== undefined &&
-      currentLaunch.successfulReviews < Math.max(2, Math.ceil(2 * currentLaunch.totalReviews / 3))) {
-    throw new ConvergeRunStateError(`Round ${options.round} report is inconclusive; reviewer quorum was not met.`);
+  if (currentLaunch?.status === 'completed' && currentLaunch.round === options.round && currentLaunch.runId !== undefined) {
+    if (runId !== currentLaunch.runId) {
+      throw new ConvergeRunStateError(`Round ${options.round} report run does not match its admitted launch.`);
+    }
+    if (currentLaunch.successfulReviews !== undefined && currentLaunch.totalReviews !== undefined &&
+        currentLaunch.successfulReviews < Math.max(2, Math.ceil(2 * currentLaunch.totalReviews / 3))) {
+      throw new ConvergeRunStateError(`Round ${options.round} report is inconclusive; reviewer quorum was not met.`);
+    }
   }
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
@@ -588,7 +591,8 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // report) must not erase the binding an earlier pass persisted.
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   const existingRound = state.rounds.find((entry) => entry.round === options.round);
-  if (options.headSha !== undefined && state.lastLaunch?.round === options.round && options.headSha !== state.lastLaunch.headSha) {
+  if (options.headSha !== undefined && state.lastLaunch?.round === options.round &&
+      state.lastLaunch.headSha !== undefined && options.headSha !== state.lastLaunch.headSha) {
     throw new ConvergeRunStateError(`Round ${options.round} report head conflicts with its admitted launch.`);
   }
   if (options.headSha !== undefined && existingRound?.headSha !== undefined && options.headSha !== existingRound.headSha) {

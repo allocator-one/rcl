@@ -133,6 +133,9 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     if (fixedHeads.includes(options.headSha)) {
       refuse('fix_head_retry_changed', 'An inconclusive review after a real fix cannot reuse the fixed-round head.');
     }
+    if (fixedHeads.length === 0 && previous.round === resolution?.round && previous.headSha === options.headSha) {
+      refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
+    }
     if (fixedHeads.length === 0 && previous.headSha !== options.headSha) {
       refuse('legacy_fix_head_unverified', 'Legacy fixed-round state permits only an explicit retry of the immediately preceding inconclusive head.');
     }

@@ -10,7 +10,9 @@
 - Older convergence state without a fixed-round head remains conservative: it
   permits only the immediately preceding inconclusive head for an explicit retry.
 - Reports tied to an inconclusive guarded launch cannot be admitted as a
-  reviewed round, leaving that round available for a bounded retry.
+  reviewed round, leaving that round available for a bounded retry. Reports for
+  a known guarded launch must match its run ID, so older or unbound reports
+  cannot replace the retry's evidence.
 
 ## 4.1.5 - 2026-09-26
 

@@ -240,6 +240,34 @@ describe('native guarded review launch', () => {
     expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 });
   });
 
+  it('refuses an unbound report while a guarded round has an inconclusive launch', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1 });
+    await guardReviewLaunch(options);
+
+    for (const runId of [undefined, '019921a0-0000-7000-8000-000000000099']) {
+      await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+        findings: [], reportSha256: completion.reportJsonSha256, headSha: options.headSha,
+        ...(runId ? { runId } : {}) })).rejects.toThrow(/run.*does not match/i);
+    }
+
+    expect((await loadConvergeRunState(options.gitCommonDir, target))?.rounds).toEqual([]);
+  });
+
+  it('refuses a superseded inconclusive run after its bounded retry', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValueOnce({ ...completion, successfulReviews: 1 })
+      .mockResolvedValueOnce({ ...completion, runId: '019921a0-0000-7000-8000-000000000002' });
+    await guardReviewLaunch(options);
+    await guardReviewLaunch({ ...options, retryReason: 'Provider recovered after inconclusive review.' });
+
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256,
+      headSha: options.headSha })).rejects.toThrow(/run.*does not match/i);
+
+    expect((await loadConvergeRunState(options.gitCommonDir, target))?.rounds).toEqual([]);
+  });
+
   it('keeps legacy fixed-round retries on the immediately preceding inconclusive head', async () => {
     const options = await fixture();
     await guardReviewLaunch(options);
@@ -262,6 +290,26 @@ describe('native guarded review launch', () => {
     await guardReviewLaunch({ ...fixedHead, retryReason: 'Provider recovered after inconclusive review.' });
 
     expect(fixedHead.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 3 });
+  });
+
+  it('does not retry an unhealthy legacy fixed round before its fix is pushed', async () => {
+    const options = await fixture();
+    await guardReviewLaunch(options);
+    const report = await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [sampleFinding()], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    await recordVerdicts({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
+
+    const path = convergeRunStatePath(options.gitCommonDir, target);
+    const legacy = JSON.parse(await readFile(path, 'utf8'));
+    delete legacy.rounds[0].headSha;
+    delete legacy.findings[report.findings[0]!.identity].verdictHeadSha;
+    legacy.lastLaunch.successfulReviews = 1;
+    await writeFile(path, JSON.stringify(legacy));
+
+    await expect(guardReviewLaunch({ ...options, retryReason: 'Provider recovered.' }))
+      .rejects.toThrow(/fix_head_unchanged|fix.*head/i);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 
   it('refuses an old-head retry after the review of a real fix is inconclusive', async () => {
