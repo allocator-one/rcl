@@ -6,7 +6,7 @@ import { captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/
 function fixture() {
   const configBytes = stableStringify({ quorumFraction: 2 / 3, timeout: 1000 });
   const contextBytes = stableStringify([{ label: 'rules.md', content: 'Rules €', sha256: sha256Hex('Rules €') }]);
-  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } });
+  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
   const assignments = [0, 1, 2].map(index => ({ model: `fake/m${index}`, provider: 'fake',
     role: { name: 'general', systemPrompt: 'role', focus: [], description: 'Test', isSpecialized: false } }));
   const prompts = assignments.map(() => ({ systemPrompt: 'System €', userPrompt: 'Review patch' }));
@@ -76,7 +76,7 @@ describe('captured reviewer inputs', () => {
   it('refuses an independently changed quorum policy and incompatible parser', () => {
     const input = fixture(); input.policy.fraction = 1;
     expect(() => captureReviewerInputs(input)).toThrow();
-    const parser = fixture(); parser.toolsBytes = stableStringify({ parser: { name: 'other', version: 1 }, aggregation: { name: 'consensus', version: 1 } });
+    const parser = fixture(); parser.toolsBytes = stableStringify({ parser: { name: 'other', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
     parser.plan = freezeCheckpointPlan({ ...parser.plan, toolsSha256: sha256Hex(parser.toolsBytes) });
     expect(() => captureReviewerInputs(parser)).toThrow();
   });

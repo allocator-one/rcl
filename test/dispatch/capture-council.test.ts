@@ -25,7 +25,7 @@ async function fixture() {
   const contextDocs: ContextDoc[] = [{ label: 'rules.md', content: 'Exact rules', sha256: sha256Hex('Exact rules') }];
   const prompts = await Promise.all(chunks.flatMap(chunk => assignments.map(assignment => buildPrompt(chunk, assignment.role, { contextDocs }))));
   const config: Config = { models: ['openai/gpt-5.6-sol'], quorumFraction: 2 / 3, githubToken: 'never-captured', harness: { telemetry: 'full' } };
-  return { target: 'allocator-one/allocator-one#9165', headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), diff, chunks, assignments, prompts, config, specBytes: 'exact spec bytes', contextDocs, compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } } };
+  return { target: 'allocator-one/allocator-one#9165', headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), diff, chunks, assignments, prompts, config, specBytes: 'exact spec bytes', contextDocs, compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } } };
 }
 
 describe('capture prepared council', () => {
@@ -64,7 +64,7 @@ describe('capture prepared council', () => {
 });
 
 function aggregationFor(input: Awaited<ReturnType<typeof fixture>>, weight = 1) {
-  return captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: diffDigest(input.diff.files),
+  return captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 }, diffSha256: diffDigest(input.diff.files),
     roleMap: new Map([[role.name, role]]), modelWeights: new Map([[assignments[0]!.model, weight]]),
     thresholds: { minConsensusScore: 0.4, minConfidence: 0.2, dedupeLineWindow: 5, jaccardThreshold: 0.3 },
     gating: { mode: 'all-findings', minModels: 2, verificationModel: undefined, verificationTimeoutMs: 1000, verificationPassTimeoutMs: 1000 },

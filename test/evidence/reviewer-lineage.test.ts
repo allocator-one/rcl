@@ -50,7 +50,7 @@ async function fixture(options: {
   roots.push(commonDir);
   const files = [{ filename: 'a.ts', status: 'modified' as const, previousFilename: null, patch: '@@\n+x', additions: 1, deletions: 0, blobSha: null, language: 'typescript' }];
   const config = { quorumFraction: 2 / 3, thresholds: { minConsensusScore: 0, minConfidence: 0, dedupeLineWindow: 3, jaccardThreshold: 0.3 }, output: { belowThresholdAppendix: true } };
-  const tools = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } });
+  const tools = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
   const seats = options.concurrentSuccessor ? ['a', 'b', 'c'] : ['a', 'b'];
   const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: diffDigest(files),
     configSha256: configDigest(config), specSha256: sha256Hex('spec'), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(tools),
@@ -62,7 +62,7 @@ async function fixture(options: {
     patchBytes: stableStringify(files.map(({ language: _language, ...file }) => file)), configBytes: stableStringify(config), specBytes: 'spec', contextBytes: '[]', toolsBytes: tools, chunkBytes: ['chunk'],
     assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
     prompts: plan.cells.map(cell => ({ systemPrompt: 'Review.', userPrompt: `prompt-${cell.seat}` })),
-    aggregation: captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: plan.patchSha256,
+    aggregation: captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 }, diffSha256: plan.patchSha256,
       roleMap: new Map([[role.name, role]]), thresholds: config.thresholds,
       gating: { mode: 'all-findings', minModels: 2, verificationTimeoutMs: 100, verificationPassTimeoutMs: 100 }, belowThresholdAppendix: true }),
   });

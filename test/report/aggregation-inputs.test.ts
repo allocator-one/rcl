@@ -14,15 +14,23 @@ function role(name: string): Role {
   return { name, systemPrompt: `Exact ${name} prompt\n`, description: `${name} description`, focus: ['correctness', 'tests'], isSpecialized: name !== 'general', severityBias: { important: 1.25, minor: -1 } };
 }
 function input(): CaptureAggregationInput {
-  return { algorithm: { name: 'consensus', version: 1 }, diffSha256, roleMap: new Map([['security', role('security')], ['general', role('general')]]),
+  return { algorithm: { name: 'consensus', version: 2 }, diffSha256, roleMap: new Map([['security', role('security')], ['general', role('general')]]),
     thresholds: { ...DEFAULT_THRESHOLDS }, gating: resolveGatingConfig({ verificationTimeout: 17, verificationPassTimeout: 31 }, ['openai/gpt-6-sol']),
     modelWeights: new Map([['openai/gpt-6-sol', 0.5], ['google/gemini-3.8-flash', 1.5]]), belowThresholdAppendix: true };
 }
 
 describe('captured aggregation inputs', () => {
+  it('refuses earlier ambient-locale captures instead of silently upgrading their bytes', () => {
+    const old = JSON.parse(captureAggregationInputs(input()).bytes);
+    old.algorithm.version = 1;
+    const bytes = stableStringify(old), digest = sha256Hex(bytes);
+    expect(() => decodeAggregationInputs(bytes, diffSha256)).toThrow('aggregation_invalid_document');
+    expect(sha256Hex(bytes)).toBe(digest);
+  });
+
   it('captures full actual roles and resolved settings without keeping mutable Maps', () => {
     const original = input(), captured = captureAggregationInputs(original);
-    expect(captured.version).toBe(1); expect(captured.algorithm).toEqual({ name: 'consensus', version: 1 });
+    expect(captured.version).toBe(1); expect(captured.algorithm).toEqual({ name: 'consensus', version: 2 });
     expect(captured.roles).toEqual([{ name: 'general', role: role('general') }, { name: 'security', role: role('security') }]);
     expect(captured.thresholds).toEqual(DEFAULT_THRESHOLDS); expect(captured.gating).toEqual(original.gating);
     expect(captured.modelWeights).toEqual([{ model: 'google/gemini-3.8-flash', weight: 1.5 }, { model: 'openai/gpt-6-sol', weight: 0.5 }]);
@@ -91,7 +99,7 @@ describe('captured aggregation inputs', () => {
       else if (mutation === 'fake map') original.roleMap = { entries: () => [] };
       else if (mutation === 'credential') original.githubToken = 'synthetic';
       else if (mutation === 'unknown undefined key') original.ignored = undefined;
-      else original.algorithm.version = 2;
+      else original.algorithm.version = 3;
       expect(() => captureAggregationInputs(original)).toThrow('aggregation_invalid_input');
     },
   );
@@ -109,7 +117,7 @@ describe('captured aggregation inputs', () => {
       else if (mutation === 'role order') wire.roles.reverse();
       else if (mutation === 'weight order') wire.modelWeights.reverse();
       else if (mutation === 'unknown algorithm name') wire.algorithm.name = 'future';
-      else if (mutation === 'unknown algorithm version') wire.algorithm.version = 2;
+      else if (mutation === 'unknown algorithm version') wire.algorithm.version = 3;
       else if (mutation === 'unknown document version') wire.version = 2;
       else if (mutation === 'bad verifier') wire.gating.verificationModel = 'openrouter/model';
       else wire.modelWeights[0].weight = 0;

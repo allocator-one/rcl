@@ -31,8 +31,8 @@ async function fixture(nativeTarget = target, withAggregation = false) {
   const prompts = await Promise.all(chunks.flatMap(chunk => assignments.map(a => buildPrompt(chunk, a.role))));
   const { plan, captured } = capturePreparedCouncil({ target: nativeTarget, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     diff, assignments, chunks, prompts, config, specBytes: '', contextDocs: [],
-    compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } },
-    ...(withAggregation ? { aggregationInputs: captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 },
+    compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } },
+    ...(withAggregation ? { aggregationInputs: captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 },
       diffSha256: diffDigest(diff.files), roleMap: new Map(assignments.map(a => [a.role.name, a.role])),
       thresholds: { minConsensusScore: 0.5, minConfidence: 0.5, dedupeLineWindow: 3, jaccardThreshold: 0.5 },
       gating: { mode: 'all-findings', minModels: 2, verificationModel: undefined, verificationTimeoutMs: 1000, verificationPassTimeoutMs: 1000 },

@@ -1,6 +1,6 @@
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import type { Config } from '../config/schema.js';
-import { deduplicateFindings } from '../consensus/deduper.js';
+import { deduplicateFindings, type DedupeOrdering } from '../consensus/deduper.js';
 import type { ConsensusFinding, ModelReview } from '../consensus/types.js';
 import { applyReportThresholds, computeConsensus } from '../consensus/voter.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
@@ -14,6 +14,7 @@ export interface ConsensusAssemblyInput {
   thresholds?: Config['thresholds'];
   modelWeights?: ReadonlyMap<string, number>;
   collectContributions?: boolean;
+  dedupeOrdering?: DedupeOrdering;
 }
 
 export interface ConsensusAssemblyContribution {
@@ -47,6 +48,7 @@ export function deriveConsensusAssembly(input: ConsensusAssemblyInput): Consensu
     thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
     thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
     collectContributions,
+    input.dedupeOrdering,
   );
   const consensusFindings = computeConsensus(input.runId, groups, reviews, new Map(input.roleMap), {
     lineWindow: thresholds?.dedupeLineWindow,

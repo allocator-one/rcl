@@ -581,16 +581,17 @@ function clustersShareFile(a: TaggedFinding[][], b: TaggedFinding[][]): boolean 
 
 function splitCompatibleChains(
   component: TaggedFinding[][],
-  lineWindow: number
+  lineWindow: number,
+  compareText: (left: string, right: string) => number
 ): TaggedFinding[][][] {
   const clusters: TaggedFinding[][][] = [];
   const ordered = [...component].sort((a, b) => {
     const left = chooseRepresentative(a).finding;
     const right = chooseRepresentative(b).finding;
-    return left.file.localeCompare(right.file) ||
+    return compareText(left.file, right.file) ||
       left.startLine - right.startLine ||
       left.endLine - right.endLine ||
-      left.title.localeCompare(right.title);
+      compareText(left.title, right.title);
   });
   for (const group of ordered) {
     const compatible = clusters.find((cluster) =>
@@ -794,7 +795,8 @@ function mergeAnchoredCommunities(
 
 function agreementClusters(
   groups: TaggedFinding[][],
-  lineWindow: number
+  lineWindow: number,
+  compareText: (left: string, right: string) => number
 ): AgreementCluster[] {
   groups = [...groups].sort((a, b) => {
     const left = agreementClusterKey({ groups: [a], corroborated: false });
@@ -863,7 +865,7 @@ function agreementClusters(
   }
 
   const coreClusters = connectedComponents(true)
-    .flatMap((component) => splitCompatibleChains(component, lineWindow))
+    .flatMap((component) => splitCompatibleChains(component, lineWindow, compareText))
     .map((component): AgreementCluster => ({
       groups: component,
       corroborated:
@@ -926,9 +928,10 @@ function attachmentEvidence(
 
 function mergeCorroboratedLocationClusters(
   groups: TaggedFinding[][],
-  lineWindow: number
+  lineWindow: number,
+  compareText: (left: string, right: string) => number
 ): TaggedFinding[][] {
-  const clusters = agreementClusters(groups, lineWindow);
+  const clusters = agreementClusters(groups, lineWindow, compareText);
 
   // A lone wording variant can sit just below the calibrated title floor.
   // Attach it only to one unambiguous corroborated cluster, with support from
@@ -976,7 +979,7 @@ function mergeCorroboratedLocationClusters(
             b.support - a.support ||
             b.strength - a.strength ||
             b.size - a.size ||
-            a.key.localeCompare(b.key)
+            compareText(a.key, b.key)
         );
       if (ranked.length === 0) continue;
       if (
@@ -1225,13 +1228,21 @@ function dedupeWithinReview(
   );
 }
 
+/** Ordinary reviews retain locale ordering; checkpoint consensus v2 uses UTF-16 code units. */
+export type DedupeOrdering = 'legacy' | 'utf16';
+
 export function deduplicateFindings(
   reviews: ModelReview[],
   jaccardThreshold: number = DEFAULT_THRESHOLDS.jaccardThreshold,
   lineWindow: number = DEFAULT_THRESHOLDS.dedupeLineWindow,
   minConsensusScore: number = DEFAULT_THRESHOLDS.minConsensusScore,
-  collectContributions = false
+  collectContributions = false,
+  ordering: DedupeOrdering = 'legacy'
 ): DeduplicatedGroup[] {
+  if (ordering !== 'legacy' && ordering !== 'utf16') throw new Error('deduper_invalid_ordering');
+  const compareText = ordering === 'utf16'
+    ? (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0
+    : (left: string, right: string) => left.localeCompare(right);
   // Flatten all findings with attribution, deduplicating within each review first
   const all: TaggedFinding[] = [];
   for (const [reviewIndex, review] of reviews.entries()) {
@@ -1248,7 +1259,7 @@ export function deduplicateFindings(
     }
   }
 
-  const corroborated = mergeCorroboratedLocationClusters(strictGroups, lineWindow);
+  const corroborated = mergeCorroboratedLocationClusters(strictGroups, lineWindow, compareText);
   const successfulReviews = reviews.filter((review) => review.status === 'success').length;
   const minimumReviewers = Math.max(
     CORROBORATED_MIN_REVIEWERS,
@@ -1274,7 +1285,7 @@ export function deduplicateFindings(
       severityOrder[a.representative.severity] -
       severityOrder[b.representative.severity];
     if (sevDiff !== 0) return sevDiff;
-    return a.representative.file.localeCompare(b.representative.file);
+    return compareText(a.representative.file, b.representative.file);
   });
 
   return result;

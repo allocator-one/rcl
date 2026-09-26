@@ -35,17 +35,17 @@ async function fixture(namespace = runId, chunkCount = 2) {
   const chunks = ['first chunk', 'second chunk'].slice(0, chunkCount);
   const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: diffDigest(files),
     configSha256: configDigest(config), specSha256: sha('spec'), contextSha256: sha('[]'),
-    toolsSha256: sha(stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } })),
+    toolsSha256: sha(stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } })),
     parser: { name: 'findings-json', version: 1 }, roster: ['a', 'b', 'c'].map(seat => ({ seat, model: `model-${seat}`, role: 'general', route: 'fake' })),
     chunks: chunks.map((bytes, index) => ({ index, total: chunks.length, digest: sha(bytes) })),
     prompts: chunks.flatMap((_, chunk) => ['a', 'b', 'c'].map(seat => ({ seat, chunk, systemSha256: sha('Review.'), userSha256: sha(`prompt ${seat}:${chunk}`) }))),
   });
-  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: plan.patchSha256,
+  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 }, diffSha256: plan.patchSha256,
     roleMap: new Map([[role.name, role]]), thresholds, gating: { mode: 'all-findings', minModels: 2, verificationModel: undefined,
       verificationTimeoutMs: 60_000, verificationPassTimeoutMs: 180_000 }, belowThresholdAppendix: true });
   const patchBytes = stableStringify(files.map(({ language: _language, ...file }) => file));
   const capture = captureReviewerInputs({ plan, policy: { version: 1, fraction: 2 / 3 }, patchBytes, configBytes: stableStringify(config),
-    specBytes: 'spec', contextBytes: '[]', toolsBytes: stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } }),
+    specBytes: 'spec', contextBytes: '[]', toolsBytes: stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } }),
     chunkBytes: chunks, assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
     prompts: plan.cells.map(cell => ({ systemPrompt: 'Review.', userPrompt: `prompt ${cell.seat}:${cell.chunk}` })), aggregation,
   });

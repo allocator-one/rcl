@@ -38,7 +38,7 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
     output: { belowThresholdAppendix: options.appendix ?? true } };
   if (options.missingThresholds) delete config.thresholds;
   const configBytes = stableStringify(config), specBytes = 'Exact spec', contextBytes = '[]';
-  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } });
+  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
   const chunkBytes = Array.from({ length: chunks }, (_, chunk) => `chunk ${chunk}`);
   const plan = freezeCheckpointPlan({ target: 'rcl-105', headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: diffDigest(diff.files), configSha256: configDigest(config), specSha256: sha256Hex(specBytes),
@@ -48,7 +48,7 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
     prompts: chunkBytes.flatMap((_, chunk) => models.map((_, seat) => ({ seat: `s${seat}`, chunk,
       systemSha256: sha256Hex('system'), userSha256: sha256Hex(`prompt ${chunk}`) }))),
   });
-  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: plan.patchSha256,
+  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 }, diffSha256: plan.patchSha256,
     roleMap: new Map([[role.name, role]]), thresholds: resolvedThresholds,
     gating: { mode: options.verified ? 'verified-consensus' : 'all-findings', minModels: 2,
       verificationModel: options.verified ? 'google/gemini-3.8-flash' : undefined,
@@ -104,6 +104,19 @@ function asyncReview(model: string, item: Finding, status: ModelReview['status']
 }
 
 describe('proof-bound checkpoint assembly', () => {
+  it('uses the captured deterministic ordering for both offline and completed reports', async () => {
+    const f = fixture({ chunks: 1 }), rows = rowsFor(f, ['s0', 's1'], 'ordered');
+    rows[0]!.findings = ['a.ts', 'ä.ts', 'z.ts'].map((file, index) => finding(`f${index}`, file));
+    const args = input(f, await proof(f, rows), await proof(f, []));
+    const locale = vi.spyOn(String.prototype, 'localeCompare').mockImplementation(() => { throw new Error('ambient collation forbidden'); });
+    try {
+      const derived = deriveCheckpointConsensus(args), assembled = await assembleCheckpointReview(args);
+      expect(derived.consensus.reportFindings.map(item => item.file)).toEqual(['a.ts', 'z.ts', 'ä.ts']);
+      expect(assembled.report.findings).toEqual(derived.consensus.reportFindings);
+      expect(assembled.contributions).toEqual(derived.contributions);
+    } finally { locale.mockRestore(); }
+  });
+
   it('rebuilds the same findings and raw contribution map without clocks or verification', async () => {
     const f = fixture({ chunks: 1 });
     const source = await proof(f, [

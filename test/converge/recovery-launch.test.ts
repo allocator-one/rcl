@@ -130,7 +130,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
   );
   const tools = stableStringify({
     parser: { name: "findings-json", version: 1 },
-    aggregation: { name: "consensus", version: 1 },
+    aggregation: { name: "consensus", version: 2 },
   });
   const roster = Array.from({ length: seats }, (_, index) => ({
     seat: `s${index}`,
@@ -158,7 +158,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     })),
   });
   const aggregation = captureAggregationInputs({
-    algorithm: { name: "consensus", version: 1 },
+    algorithm: { name: "consensus", version: 2 },
     diffSha256: plan.patchSha256,
     roleMap: new Map([["general", role]]),
     thresholds: config.thresholds,

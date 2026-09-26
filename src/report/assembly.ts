@@ -1,5 +1,6 @@
 import { evaluateCiGate } from '../ci.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
 import type { ModelReview, ReviewResult } from '../consensus/types.js';
@@ -21,6 +22,7 @@ export interface CompletedReviewInput {
   diff: Diff;
   gatingConfig: ResolvedGatingConfig;
   modelWeights?: Map<string, number>;
+  dedupeOrdering?: DedupeOrdering;
   /** Validated original-seat health for proof-bearing reports; never deserialized counts. */
   reviewerHealth?: ReviewerHealth;
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
@@ -46,6 +48,7 @@ export async function assembleCompletedReview(
   const { reviews, consensusFindings, reportFindings, droppedFindings, contributions } = deriveConsensusAssembly({
     runId, chunkReviews, arrivedAsync, roleMap, thresholds: config.thresholds, modelWeights,
     collectContributions: dependencies.onFindingContributions !== undefined,
+    dedupeOrdering: input.dedupeOrdering,
   });
 
   // Convergence gating (RCL-23): annotate every kept finding with why it

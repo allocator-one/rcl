@@ -48,7 +48,7 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
     output: { belowThresholdAppendix: options.appendix ?? true } };
   if (options.missingThresholds) delete config.thresholds;
   const configBytes = stableStringify(config), specBytes = 'Exact spec', contextBytes = '[]';
-  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 1 } });
+  const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
   const chunkBytes = Array.from({ length: chunks }, (_, chunk) => `chunk ${chunk}`);
   const plan = freezeCheckpointPlan({ target: 'rcl-105', headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: diffDigest(diff.files), configSha256: configDigest(config), specSha256: sha256Hex(specBytes),
@@ -58,7 +58,7 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
     prompts: chunkBytes.flatMap((_, chunk) => models.map((_, seat) => ({ seat: `s${seat}`, chunk,
       systemSha256: sha256Hex('system'), userSha256: sha256Hex(`prompt ${chunk}`) }))),
   });
-  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 1 }, diffSha256: plan.patchSha256,
+  const aggregation = captureAggregationInputs({ algorithm: { name: 'consensus', version: 2 }, diffSha256: plan.patchSha256,
     roleMap: new Map([[role.name, role]]), thresholds: resolvedThresholds,
     gating: { mode: options.verified ? 'verified-consensus' : 'all-findings', minModels: 2,
       verificationModel: options.verified ? 'google/gemini-3.8-flash' : undefined,

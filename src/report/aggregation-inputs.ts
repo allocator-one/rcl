@@ -5,7 +5,9 @@ import type { Role } from '../roles/types.js';
 import { sha256Hex, stableStringify, type ResolvedThresholds } from './run-header.js';
 
 export const MAX_AGGREGATION_INPUT_BYTES = 8 * 1024 * 1024;
-export const AGGREGATION_ALGORITHM = Object.freeze({ name: 'consensus', version: 1 } as const);
+// Version 2 fixes every deduper sort to UTF-16 code-unit ordering. Version 1
+// depended on ambient ICU collation and cannot be independently reconstructed.
+export const AGGREGATION_ALGORITHM = Object.freeze({ name: 'consensus', version: 2 } as const);
 const algorithmSchema = z.object({ name: z.literal(AGGREGATION_ALGORITHM.name), version: z.literal(AGGREGATION_ALGORITHM.version) }).strict();
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const thresholdsSchema = ThresholdsSchema.required().strict();

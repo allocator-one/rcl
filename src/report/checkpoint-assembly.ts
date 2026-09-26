@@ -177,7 +177,7 @@ function prepareCheckpointAssembly(input: CheckpointAssemblyInput) {
   const completedInput: CompletedReviewInput = { chunkReviews: blocking.map(item => item.review),
     arrivedAsync: asyncInputs.map(item => item.review), asyncLaunched: supplementalAsync.asyncLaunched,
     startTime: input.startTime, roleMap: new Map(aggregation.roles.map(item => [item.name, structuredClone(item.role) as Role])),
-    config, diff, gatingConfig, reviewerHealth: projection.health, run,
+    config, diff, gatingConfig, reviewerHealth: projection.health, run, dedupeOrdering: 'utf16',
     ...(aggregation.modelWeights === undefined ? {} : { modelWeights: new Map(aggregation.modelWeights.map(item => [item.model, item.weight])) }),
   };
   function mapContributions(groups: ConsensusAssemblyContribution[]): CheckpointAssemblyContribution[] {
@@ -199,7 +199,7 @@ export function deriveCheckpointConsensus(input: CheckpointAssemblyInput): Check
   const prepared = prepareCheckpointAssembly(input), completed = prepared.completedInput;
   const consensus = deriveConsensusAssembly({ runId: completed.run.id!, chunkReviews: completed.chunkReviews,
     arrivedAsync: completed.arrivedAsync, roleMap: completed.roleMap, thresholds: completed.config.thresholds,
-    modelWeights: completed.modelWeights, collectContributions: true });
+    modelWeights: completed.modelWeights, collectContributions: true, dedupeOrdering: completed.dedupeOrdering });
   return { consensus, contributions: prepared.mapContributions(consensus.contributions!),
     observations: prepared.observations, projection: prepared.projection };
 }
