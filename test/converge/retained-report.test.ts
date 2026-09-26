@@ -15,10 +15,12 @@ import { projectCheckpointReport } from '../../src/report/checkpoint-projection.
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
+import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { guardReviewerRecoveryLaunch } from '../../src/converge/recovery-launch.js';
+import { inspectReviewerStatus } from '../../src/evidence/reviewer-status.js';
 import { loadReviewerLineage } from '../../src/evidence/reviewer-lineage.js';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState, resolveRoundResolution } from '../../src/converge/run-state.js';
@@ -182,6 +184,8 @@ describe('native admission of an original retained report', () => {
     expect(phase!.terminal!.status).toBe('complete');
     expect(JSON.parse(f.reportBytes).findings[0].gating.verification.verdict).toBe('unavailable');
     expect((await processRetainedRoundReport(f)).findings).toHaveLength(1);
+    const status = await inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: f.id });
+    expect(status.attempts.verifier.current).toMatchObject({ intents: 1, status: 'complete' });
   });
 
   it.each(['missing', 'replaced'])('refuses a %s verifier journal before admission or lineage reuse', async kind => {
@@ -191,6 +195,7 @@ describe('native admission of an original retained report', () => {
       : vi.spyOn(CheckpointJournal.prototype, 'exportVerificationProof').mockResolvedValue({ bytes: '{}', digest: 'f'.repeat(64) });
     try {
       await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_verification_mismatch');
+      await expect(inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: f.id })).rejects.toThrow('reviewer_status_verification_mismatch');
       await expect(loadReviewerLineage({ commonDir: f.gitCommonDir, target: f.target, runId: f.id }))
         .rejects.toThrow('reviewer_lineage_verification_mismatch');
       expect(await nativeBytes(f)).toEqual(before);
@@ -314,6 +319,50 @@ async function supplemented(options: { complete?: boolean; verified?: boolean } 
 }
 
 describe('native admission of a supplemented retained report', () => {
+  it('counts structural inherited verifier history without treating it as a new call or recovery authority', async () => {
+    // Recovery launch correctly refuses conclusive sources. This synthetic local
+    // lineage tests only forensic status accounting and confers no launch authority.
+    const f = await retained({ verified: true }), successorId = runId(20);
+    const source = await CheckpointJournal.inspectRead(f.checkpoint), sourceProof = await source.exportProof();
+    const before = await nativeBytes(f);
+    await withNativeTarget(f.gitCommonDir, f.target, async ownership => {
+      const operation = createRecoveryOperation({ operationId: runId(30), successorRunId: successorId, sourceRunId: f.id,
+        sourceReportSha256: sha256Hex(f.reportBytes), sourceCheckpointSha256: sourceProof.digest,
+        capturedInputsSha256: f.f.capture.digest, planDigest: f.f.plan.digest, target: f.target,
+        originalNativeClaim: { attempt: 1, round: 1 }, successorNativeClaim: { attempt: 2, round: 2 },
+        startedAtMs: 2000, expiresAtMs: 62000, maxAdditionalCalls: 1, maxAttemptsPerCell: 1 });
+      const journal = await CheckpointJournal.create({ commonDir: f.gitCommonDir, namespace: successorId, plan: f.f.plan, ownership });
+      await journal.bind('captured-inputs', f.f.capture.bytes, ownership);
+      await journal.bind('source', stableStringify({ run_id: f.id, report_sha256: sha256Hex(f.reportBytes), checkpoint_sha256: sourceProof.digest }), ownership);
+      await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
+      await journal.finalize(ownership);
+      const assembly = { projection: projectCheckpointReport({ sources: [{ runId: f.id, proof: sourceProof }],
+        successor: { runId: successorId, proof: await journal.exportProof() }, policy }), supplementalAsync: emptyAsync(),
+        diff: f.f.diff, startTime: 2000, run: { ...f.run, id: successorId, startedAt: new Date(2000),
+          converge: { target: f.target, attempt: 2, round: 2 } } };
+      const gate = await executeCheckpointGating({ assembly, commonDir: f.gitCommonDir, ownership, journal,
+        askFactory: () => async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success' as const, durationMs: 1, text: '[]' }),
+        beforeLaunch: async () => {}, onLateAuditError: () => {}, nowMs: () => 2001, monotonicNow: () => 0 });
+      const reportBytes = JSON.stringify(sanitizeForDelivery((await assembleCheckpointReview(assembly, { verificationProof: gate.verificationProof })).report));
+      const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation: { version: 1, parseFailures: false }, verificationProof: gate.verificationProof });
+      await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
+    });
+    const status = await inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: successorId });
+    expect(status.attempts).toMatchObject({ physical: 4, newOnly: 0, verifier: {
+      current: { intents: 1, uncertain: 0, status: 'complete' }, inherited: { intents: 1, uncertain: 0 } },
+      reviewerAndVerifier: { physical: 6, newOnly: 1, uncertain: 0 } });
+    expect(await nativeBytes(f)).toEqual(before);
+    const original = CheckpointJournal.prototype.exportVerificationProof;
+    const change = vi.spyOn(CheckpointJournal.prototype, 'exportVerificationProof').mockImplementation(async function() {
+      const actual = await original.call(this);
+      return (await this.exportProof()).digest === sourceProof.digest ? { ...actual, digest: 'f'.repeat(64) } : actual;
+    });
+    try {
+      await expect(inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: successorId }))
+        .rejects.toThrow('reviewer_status_verification_mismatch');
+      expect(await nativeBytes(f)).toEqual(before);
+    } finally { change.mockRestore(); }
+  });
   it('admits a second successor without losing the first successor chunk or the original finding', async () => {
     const f = await supplemented({ complete: false });
     const source = await loadReviewerLineage({ commonDir: f.gitCommonDir, target: f.target, runId: f.successor });
@@ -416,6 +465,8 @@ describe('native admission of a supplemented retained report', () => {
   it('admits a successor with structurally replayed sealed verifier evidence', async () => {
     const f = await supplemented({ verified: true });
     expect((await processSupplementedRoundReport(f)).findings).toHaveLength(1);
+    const status = await inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: f.successor });
+    expect(status.attempts).toMatchObject({ physical: 4, newOnly: 2, verifier: { current: { intents: 1, status: 'complete' }, inherited: { intents: 0, uncertain: 0 } }, reviewerAndVerifier: { physical: 5, newOnly: 3, uncertain: 0 } });
   });
 });
 

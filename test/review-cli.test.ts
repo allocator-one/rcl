@@ -227,6 +227,9 @@ describe('rcl review — guarded native launch', () => {
       expect(JSON.parse(terminal.reviewerArtifactBytes).verification.bytes).toBe((await journal.exportVerificationProof()).bytes);
       const status = await runRclAsync(['reviewers', 'status', 'guarded-fixture', '--run', report.run.id, '--json'], fixture.repo, fixture.env);
       expect(status.status, status.stderr).toBe(0);expect(fixture.calls()).toBe(3);
+      expect(JSON.parse(status.stdout).attempts).toMatchObject({ physical: 2, newOnly: 2,
+        verifier: { current: { intents: 1, uncertain: 0, status: 'complete' }, inherited: { intents: 0, uncertain: 0 } },
+        reviewerAndVerifier: { physical: 3, newOnly: 3, uncertain: 0 } });
     });
   }, 40000);
 

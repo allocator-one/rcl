@@ -15,6 +15,8 @@ import { captureSupplementalAsync } from '../../src/report/supplemental-async.js
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { planGating } from '../../src/consensus/gating.js';
 import { deriveCheckpointGating } from '../../src/report/checkpoint-gating.js';
+import { inspectReviewerStatus, formatReviewerStatus } from '../../src/evidence/reviewer-status.js';
+import { prepareCheckpointGating } from '../../src/report/checkpoint-gating.js';
 import { executeCheckpointGating } from '../../src/dispatch/checkpoint-gating-execution.js';
 
 const roots: string[] = []; afterEach(async () => { await Promise.all(roots.splice(0).map(x => rm(x,{recursive:true,force:true}))); });
@@ -32,7 +34,7 @@ async function fixture(opts:{mode?:'verified-consensus'|'all-findings'; both?:bo
  const aggregation=captureAggregationInputs({algorithm:AGGREGATION_ALGORITHM,diffSha256:plan.patchSha256,roleMap:new Map([['general',role]]),thresholds:localThresholds,gating:{mode:opts.mode??'verified-consensus',minModels:2,verificationModel:'openai/verifier',verificationTimeoutMs:100,verificationPassTimeoutMs:500},modelWeights:new Map(Array.from({length:seats},(_,i)=>[`m${i}`,1])),belowThresholdAppendix:true});
  const captured=captureReviewerInputs({plan,policy:{version:1,fraction:1},patchBytes:stableStringify(diff.files.map((f:any)=>({filename:f.filename,status:f.status,previousFilename:null,patch:f.patch,additions:f.additions,deletions:f.deletions,blobSha:null}))),configBytes:stableStringify(config),specBytes:'spec',contextBytes:'[]',toolsBytes:tools,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})),aggregation});
  let journal!:CheckpointJournal; let proof!:CheckpointProof;
- await withNativeTarget(dir,target,async owner=>{journal=await CheckpointJournal.create({commonDir:dir,namespace:'run',plan,ownership:owner}); await journal.bind('captured-inputs',captured.bytes,owner); await journal.bind('launch',encodeOriginalLaunch(createOriginalLaunch({runId:fixtureRunId,target,originalNativeClaim:{attempt:1,round:1},capturedInputsSha256:hash(captured.bytes),planDigest:plan.digest,startedAtMs:1,expiresAtMs:1000,maxPhysicalCalls:4,maxAttemptsPerCell:1})),owner); for(const i of Array.from({length:seats},(_,i)=>i)) {if(opts.second===false&&i===1) continue;const review={model:`m${i}`,role:'general',provider:'openai',status:'success' as const,durationMs:1,findings:i===0?[finding(opts.file),...(opts.both?[{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[])]:opts.both?[finding(opts.file),{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[]};const paidAttempt={id:`r${i}`,kind:(opts.unknownSecond&&i===1?'unknown':'paid')} as const;await journal.recordIntent(`s${i}:0`,paidAttempt,owner);if(!(opts.unknownSecond&&i===1))await journal.recordResult(`s${i}:0`,paidAttempt,{kind:'success',chunk:0,reviewBytes:JSON.stringify(review)},owner);} await journal.finalize(owner);proof=await exportCheckpointProof(journal);});
+ await withNativeTarget(dir,target,async owner=>{journal=await CheckpointJournal.create({commonDir:dir,namespace:fixtureRunId,plan,ownership:owner}); await journal.bind('captured-inputs',captured.bytes,owner); await journal.bind('launch',encodeOriginalLaunch(createOriginalLaunch({runId:fixtureRunId,target,originalNativeClaim:{attempt:1,round:1},capturedInputsSha256:hash(captured.bytes),planDigest:plan.digest,startedAtMs:1,expiresAtMs:1000,maxPhysicalCalls:4,maxAttemptsPerCell:1})),owner); for(const i of Array.from({length:seats},(_,i)=>i)) {if(opts.second===false&&i===1) continue;const review={model:`m${i}`,role:'general',provider:'openai',status:'success' as const,durationMs:1,findings:i===0?[finding(opts.file),...(opts.both?[{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[])]:opts.both?[finding(opts.file),{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[]};const paidAttempt={id:`r${i}`,kind:(opts.unknownSecond&&i===1?'unknown':'paid')} as const;await journal.recordIntent(`s${i}:0`,paidAttempt,owner);if(!(opts.unknownSecond&&i===1))await journal.recordResult(`s${i}:0`,paidAttempt,{kind:'success',chunk:0,reviewBytes:JSON.stringify(review)},owner);} await journal.finalize(owner);proof=await exportCheckpointProof(journal);});
  const assembly:CheckpointAssemblyInput={projection:projectCheckpointReport({sources:[],successor:{runId:fixtureRunId,proof},policy:{version:1,fraction:1}}),supplementalAsync:captureSupplementalAsync([],opts.asyncLaunched??0),diff,startTime:1,run:{id:fixtureRunId,rclVersion:'x',command:'review',target:{kind:'pr',repo:'allocator-one/rcl',prNumber:105,headSha:plan.headSha},roster:plan.roster.map(s=>({model:s.model,role:s.role,provider:s.route,lane:'blocking' as const})),spec:{source:'flag',sha256:plan.specSha256},contextFiles:[],runner:{kind:'agent'},startedAt:new Date(1),converge:{target,attempt:1,round:1}}};
  return {dir,journal,assembly,plan,captured,proof};
 }
@@ -62,6 +64,12 @@ describe('retained checkpoint verifier integration', () => {
     expect(resumed.verificationProof).toEqual(first.verificationProof);
     expect(resumed.newPhysicalCalls).toBe(0);
     expect(factory).not.toHaveBeenCalled();
+    const status = await inspectReviewerStatus({ commonDir: f.dir, target, runId, nowMs: 99999 });
+    expect(status.attempts.verifier).toEqual({ current: { intents: 1, uncertain: 0, status: 'complete', maxPhysicalCalls: 1, expiresAtMs: 510, remainingMs: 0 }, inherited: { intents: 0, uncertain: 0 } });
+    expect(status.attempts.reviewerAndVerifier).toEqual({ physical: 3, newOnly: 3, uncertain: 0 });
+    expect(status.attempts.physical).toBe(2);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(formatReviewerStatus(status)).toContain('async calls excluded');
   });
   it('seals strict fallback when the original lifetime has expired without constructing a provider', async () => {
     const f=await fixture(), factory=vi.fn();
@@ -71,6 +79,8 @@ describe('retained checkpoint verifier integration', () => {
     expect(result.newPhysicalCalls).toBe(0);expect(factory).not.toHaveBeenCalled();
     const phase=(await f.journal.readVerification())!;
     expect(phase.plan.expiresAtMs).toBe(1000);expect(phase.terminal!.status).toBe('failed');
+    const status = await inspectReviewerStatus({ commonDir: f.dir, target, runId, nowMs: 99999 });
+    expect(status.attempts.verifier.current).toMatchObject({ intents: 0, uncertain: 0, status: 'failed', expiresAtMs: 1000, remainingMs: 0 });
   });
   it('keeps deterministic and plain paths provider-free and refuses the wrong journal', async () => {
     const plain=await fixture({mode:'all-findings'}), factory=vi.fn();
@@ -94,4 +104,23 @@ describe('retained checkpoint verifier integration', () => {
     expect(result.projection.disposition).toBe('strict_fallback');
     expect((await f.journal.readVerification())!.outcomes).toEqual([]);expect(factory).not.toHaveBeenCalled();
   });
+});
+
+
+it('reports an unknown verifier intent as possibly spent before and after failure without renewing its phase', async () => {
+  const f = await fixture();
+  const plan = prepareCheckpointGating(f.assembly).plan!;
+  await withNativeTarget(f.dir, target, async ownership => {
+    await f.journal.beginVerification({ runId, gatingPlanBytes: stableStringify(plan), model: plan.model, provider: 'openai',
+      batches: plan.batches.map(({systemPrompt,userPrompt}) => ({systemPrompt,userPrompt})), startedAtMs: 10, expiresAtMs: 510,
+      verificationTimeoutMs: plan.verificationTimeoutMs, verificationPassTimeoutMs: plan.verificationPassTimeoutMs, maxPhysicalCalls: 1 }, ownership);
+    await f.journal.recordVerificationIntent({ batchIndex: 0, attemptId: 'unknown-verifier', startedAtMs: 11 }, ownership);
+  });
+  const open = await inspectReviewerStatus({ commonDir: f.dir, target, runId, nowMs: 20 });
+  expect(open.attempts.verifier.current).toEqual({ intents: 1, uncertain: 1, status: 'open', maxPhysicalCalls: 1, expiresAtMs: 510, remainingMs: 490 });
+  expect(open.attempts.reviewerAndVerifier).toEqual({ physical: 3, newOnly: 3, uncertain: 1 });
+  await withNativeTarget(f.dir, target, ownership => f.journal.finalizeVerification({ status: 'failed', finishedAtMs: 25, reason: 'unknown outcome' }, ownership));
+  const closed = await inspectReviewerStatus({ commonDir: f.dir, target, runId, nowMs: 30 });
+  expect(closed.attempts.verifier.current).toEqual({ intents: 1, uncertain: 1, status: 'failed', maxPhysicalCalls: 1, expiresAtMs: 510, remainingMs: 0 });
+  expect((await f.journal.readVerification())!.outcomes).toEqual([]);
 });
