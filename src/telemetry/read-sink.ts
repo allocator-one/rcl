@@ -16,6 +16,8 @@ export interface ReadSinkOptions {
   fetchImpl?: typeof fetch;
   /** A credential already in hand — the run-bound one of `--attest` — used instead of resolving one. */
   credential?: HarnessCredential;
+  /** Lifetime of an explicitly supplied run-bound credential, when known. */
+  attestedExpiresAt?: string;
 }
 
 export type ReadSink = { sink: HarnessSink; host: string; note?: undefined } | { sink: null; host?: undefined; note: string };
@@ -34,6 +36,7 @@ export async function openReadSink(options: ReadSinkOptions): Promise<ReadSink> 
     sink: new HarnessSink({
       credential: resolved.credential,
       rclVersion: options.rclVersion,
+      ...(options.attestedExpiresAt !== undefined ? { attestedExpiresAt: options.attestedExpiresAt } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     }),
     host: credentialHost(resolved.credential),
