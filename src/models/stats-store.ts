@@ -305,15 +305,22 @@ async function prepareRetainedDirectory(inputDir: string): Promise<string> {
     }
   }
   if (!discovered) {
+    await retainedProtocolTestEvent('target-missing', target);
     const anchor = await nearestExistingAncestor(target);
     if (dirname(anchor) === anchor) throw new Error('durable_precision_anchor_required');
-    const root = intentDirectory(anchor, target);
-    try { await mkdir(root, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    await retainedProtocolTestEvent('intent-root-created', root);
-    await syncNativeDirectory(anchor);
-    await retainedProtocolTestEvent('intent-root-anchored', anchor);
-    discovered = { root, intent: { version: 1, target, anchor, phase: 'creating' } };
+    // A competing creator may have supplied this ancestor after lstat missed
+    // the target. Join its original intent and lock instead of treating an
+    // unflushed directory link as our durable boundary.
+    discovered = await discoverIntent(target);
+    if (!discovered) {
+      const root = intentDirectory(anchor, target);
+      try { await mkdir(root, { mode: 0o700 }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      await retainedProtocolTestEvent('intent-root-created', root);
+      await syncNativeDirectory(anchor);
+      await retainedProtocolTestEvent('intent-root-anchored', anchor);
+      discovered = { root, intent: { version: 1, target, anchor, phase: 'creating' } };
+    }
   }
 
   const durableCreation = discovered;

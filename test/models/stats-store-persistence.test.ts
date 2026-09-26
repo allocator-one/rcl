@@ -120,7 +120,9 @@ async function successfulProtocolChild(run: ProtocolChild): Promise<void> {
 }
 
 function eventIndex(run: ProtocolChild, event: string, path?: string): number {
-  return run.events.findIndex(value => value.event === event && (path === undefined || value.path === path));
+  const index = run.events.findIndex(value => value.event === event && (path === undefined || value.path === path));
+  expect(index, `missing protocol event ${event}${path ? ` at ${path}` : ''}`).toBeGreaterThanOrEqual(0);
+  return index;
 }
 
 it('retries the same retained call without duplicating physical history', async () => {
@@ -350,6 +352,27 @@ it('rechecks a target that appears after discovery and blocks acknowledgement un
   expect(directorySync).toBeGreaterThan(fileSync);
   expect(acknowledgement).toBeGreaterThan(directorySync);
   expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual(['race:0']);
+}, 20_000);
+
+it('rediscovers the original intent when a partial ancestor appears after the missing-target check', async () => {
+  const nested = join(dir, 'nested', 'middle', 'store');
+  const lateWriter = protocolChild(nested, 'ancestor-race:0', 'target-missing');
+  await protocolEvent(lateWriter, 'target-missing');
+  const creator = protocolChild(nested, 'ancestor-race:0', 'mkdir-component-visible');
+  await protocolEvent(creator, 'mkdir-component-visible');
+  creator.child.kill('SIGKILL'); await once(creator.child, 'exit');
+  lateWriter.child.send({ type: 'rcl-stats-store-protocol-continue', event: 'target-missing' });
+  await protocolEvent(lateWriter, 'acknowledged');
+  await successfulProtocolChild(lateWriter);
+
+  const ancestorSync = eventIndex(lateWriter, 'created-chain-synced', dir);
+  const fileSync = eventIndex(lateWriter, 'history-file-synced', join(nested, 'calls.jsonl'));
+  const directorySync = eventIndex(lateWriter, 'history-directory-synced', nested);
+  expect(fileSync).toBeGreaterThan(ancestorSync);
+  expect(directorySync).toBeGreaterThan(fileSync);
+  expect(eventIndex(lateWriter, 'acknowledged')).toBeGreaterThan(directorySync);
+  expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual(['ancestor-race:0']);
+  expect((await readdir(join(dir, 'nested'))).filter(name => name.startsWith('.rcl-model-stats-intent-'))).toEqual([]);
 }, 20_000);
 
 it('keeps a published retained-creation intent for a later cooperating process', async () => {
