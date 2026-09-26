@@ -13,10 +13,23 @@ export interface ControlProseTransformation extends ProseTransformation {
 }
 export type OriginalProseTransformation = ProseTransformation | ControlProseTransformation;
 export type OriginalProseMode = 'control-code-units-v1';
-export interface DecodeOriginalReportOptions { originalProse?: OriginalProseMode }
+export interface DecodeOriginalReportOptions { originalProse?: OriginalProseMode; exactNumbers?: boolean }
 export const findingProsePath = /^(?:\/(?:findings|belowThresholdFindings)\/\d+|\/reviews\/\d+\/findings\/\d+)\/(?:title|description|suggestedFix)$/;
 const pointer = (parts: string[]) => '/' + parts.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
 const scalarToken = /(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/y;
+
+/** Compare decimal meanings without converting the original token to a float. */
+function decimalIdentity(token: string): string {
+  const negative = token.startsWith('-');
+  const [mantissa, exponent = '0'] = (negative ? token.slice(1) : token).toLowerCase().split('e');
+  const [integer, fraction = ''] = mantissa!.split('.');
+  const digits = (integer! + fraction).replace(/^0+/, '');
+  if (!digits) return '0';
+  const significant = digits.replace(/0+$/, '');
+  const power = Number(exponent) - fraction.length + digits.length - significant.length;
+  if (!Number.isSafeInteger(power)) throw new Error('invalid_or_ambiguous_original_json');
+  return `${negative ? '-' : ''}${significant}e${power}`;
+}
 
 /** UTF-8 prefix lengths for the immutable source, computed once only when needed. */
 function utf8Offsets(text: string): Uint32Array {
@@ -41,6 +54,17 @@ function utf8Offsets(text: string): Uint32Array {
 
 /** Strict JSON with duplicate-key detection and explicit prose-only lone-surrogate notation. */
 export function decodeOriginalReport(text: string, options: DecodeOriginalReportOptions = {}): { value: unknown; transformations: OriginalProseTransformation[] } {
+  return decodeJSON(text,options,false);
+}
+
+/** Strict internal JSON, preserving retained strings verbatim. This is not an
+ * original report validator: every embedded original is separately interpreted
+ * under its own source policy before it can establish a recovery binding. */
+export function decodeRecoveryDocument(text:string):unknown {
+  return decodeJSON(text,{exactNumbers:true},true).value;
+}
+function decodeJSON(text:string,options:DecodeOriginalReportOptions,preserveStrings:boolean):{value:unknown;transformations:OriginalProseTransformation[]} {
+
   if (options.originalProse !== undefined && options.originalProse !== 'control-code-units-v1') throw new Error('unsupported_original_prose_mode');
   let at = 0;
   const transformations: OriginalProseTransformation[] = [];
@@ -63,6 +87,7 @@ export function decodeOriginalReport(text: string, options: DecodeOriginalReport
     if (text[at++] !== '"') return fail();
     let value: string;
     try { value = JSON.parse(text.slice(start, at)) as string; } catch { return fail(); }
+    if(preserveStrings)return value;
     const pathText = pointer(path);
     let result = '';
     for (let i = 0; i < value.length; i++) {
@@ -130,6 +155,8 @@ export function decodeOriginalReport(text: string, options: DecodeOriginalReport
     if (!token) return fail(); at += token[0].length;
     const parsed: unknown = JSON.parse(token[0]);
     if (typeof parsed === 'number' && (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER)) return fail();
+    if (typeof parsed === 'number' && options.exactNumbers &&
+        decimalIdentity(token[0]) !== decimalIdentity(JSON.stringify(parsed))) return fail();
     return parsed;
   }
   const result = value([], 0); whitespace(); if (at !== text.length) return fail();
