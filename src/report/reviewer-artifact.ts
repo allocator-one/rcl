@@ -295,6 +295,7 @@ export interface InspectReviewerArtifactOptions {
 /** Local structure/body validation only; callers still authenticate every source and launch. */
 export interface InspectedReviewerArtifact {
   readonly artifact: ReviewerArtifact;
+  readonly representation: { readonly version: 1; readonly parseFailures: boolean };
   readonly assembly: CheckpointAssemblyInput;
   readonly reportBytes: string;
   readonly reportSha256: string;
@@ -375,12 +376,13 @@ export function inspectReviewerArtifact(bytes: string, options: InspectReviewerA
   if (!prTarget || options.expectedPrTarget !== undefined && prTarget !== options.expectedPrTarget.toLowerCase()) {
     throw new Error('reviewer_artifact_target_mismatch');
   }
-  const artifact = validateReviewerArtifact(bytes, { assembly, representation: representationSchema.parse(wire.representation),
+  const representation = representationSchema.parse(wire.representation);
+  const artifact = validateReviewerArtifact(bytes, { assembly, representation,
     ...(options.lineage === undefined ? {} : { lineage: options.lineage }) });
   const descriptor = describeReviewerEvidence(last.proof, supplementalAsync);
   const launch = last.proof.bindings.launch === undefined ? undefined : decodeOriginalLaunch(last.proof.bindings.launch);
   const operation = last.proof.bindings.operation === undefined ? undefined : decodeRecoveryOperation(last.proof.bindings.operation);
-  return freeze({ artifact, assembly, reportBytes: report.bytes, reportSha256: report.sha256, runId: last.runId, prTarget,
+  return freeze({ artifact, representation, assembly, reportBytes: report.bytes, reportSha256: report.sha256, runId: last.runId, prTarget,
     proof: last.proof, captured, supplementalAsync, descriptor,
     ...(launch ? { launch } : {}), ...(operation ? { operation } : {}),
     ...(assembly.run.converge ? { nativeClaim: assembly.run.converge } : {}) });
