@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readCarrierInventory, carrierInventoryContent } from '../../src/evidence/claim-recovery/carrier-inventory.js';
 import { HarnessSink } from '../../src/telemetry/sink.js';
 import { projectionFixture } from './recovery-validation/carrier-fixtures.js';
@@ -198,6 +198,44 @@ describe('authenticated carrier inventory', () => {
         if (body.meta.recovery) { if (kind === 'truncated') body.meta.recovery.truncated = true; else delete body.meta.claim_recovery_version; }
         return body;
       }); expect((await read(f)).kind).not.toBe('ok');
+    }
+  });
+
+  it('validates the full supported correction inventory without quadratic selector scans', async () => {
+    const f = fixture(false); const source = f.sources[0]!; const classification = source.classifications![0]!;
+    source.corrections = Array.from({ length: 2000 }, (_, index) => ({
+      ...classification, id: uuid(10_000 + index), sequence: index + 2, kind: 'finding_identity_corrected', payload: {},
+    }));
+    source.correctionIds = source.corrections.map(receipt => receipt.id);
+    f.change(body => {
+      if (body.meta.recovery) body.meta.recovery.event_sequence = 2001;
+      return body;
+    });
+    let selectorMembershipVisits = 0;
+    const originalSome = Array.prototype.some;
+    const scan = vi.spyOn(Array.prototype, 'some').mockImplementation(function (
+      this: any[], predicate: (value: any, index: number, array: any[]) => unknown, thisArg?: any,
+    ) {
+      const selectors = this[0]?.id === classification.id && this[0]?.kind === 'round_processed' &&
+        Object.keys(this[0]).length === 3;
+      return originalSome.call(this, (value, index, array) => {
+        if (selectors) selectorMembershipVisits++;
+        return predicate.call(thisArg, value, index, array);
+      });
+    });
+    try {
+      // Prove the counter observes real callback visits before exercising the reader.
+      [{ id: classification.id, sequence: classification.sequence, kind: 'round_processed' }]
+        .some(selector => selector.sequence === 2001);
+      expect(selectorMembershipVisits).toBe(1);
+      selectorMembershipVisits = 0;
+      const result = await read(f);
+      expect(result.kind).toBe('ok');
+      if (result.kind !== 'ok') throw new Error(JSON.stringify(result));
+      expect(carrierInventoryContent(result.value).inventory.sources[0]!.corrections).toEqual(source.corrections);
+      expect(selectorMembershipVisits).toBeLessThan(20_000);
+    } finally {
+      scan.mockRestore();
     }
   });
 

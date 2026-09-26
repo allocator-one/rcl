@@ -9,6 +9,8 @@ import { object, uuidSchema } from './primitives.js';
 import type { ConvergeRunState, FindingEntry } from './types.js';
 
 const MAX_BYTES = 64 * 1024 * 1024;
+/** Total predecessor bytes admitted by one proof; outer readers must enforce this while reading too. */
+export const MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const sha = (raw: string) => createHash('sha256').update(raw).digest('hex');
 const uuid = (value: unknown): value is string => uuidSchema.safeParse(value).success;
 const identity = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value);
@@ -91,8 +93,15 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
     const state = nativeSource(sourceJson, target);
     requireSource(Array.isArray(nativeSourceJsons));
     const maximumSnapshots = (state.recovery?.operations.length ?? 0) + (state.migration ? 1 : 0);
-    requireSource(nativeSourceJsons.length <= maximumSnapshots && nativeSourceJsons.every(raw =>
-      typeof raw === 'string' && Buffer.byteLength(raw) <= MAX_BYTES));
+    requireSource(nativeSourceJsons.length <= maximumSnapshots);
+    // Bound the whole ancestry before hashing any predecessor. Oversized
+    // histories remain retained but cannot be admitted to an in-memory proof.
+    let snapshotBytes = 0;
+    for (const raw of nativeSourceJsons) {
+      requireSource(typeof raw === 'string' && raw.length <= MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES - snapshotBytes);
+      snapshotBytes += Buffer.byteLength(raw);
+      requireSource(snapshotBytes <= MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES);
+    }
     const snapshots = new Map(nativeSourceJsons.map(raw => [sha(raw), raw]));
     requireSource(snapshots.size === nativeSourceJsons.length);
     const used = new Set<string>();

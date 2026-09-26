@@ -104,11 +104,15 @@ async function runView(sink: HarnessSink, carrier: OccurrenceCarrierSelector, li
     const corrections: string[] = [];
     const eventSelectors = classification === null ? [] : [{ id: classification.id as string,
       sequence: classification.sequence as number, kind: 'round_processed' }];
+    const correctionIds = new Set<string>();
+    const eventSequences = new Set(eventSelectors.map(event => event.sequence));
     for (const correction of recovery.native_corrections) {
       if (!object(correction) || !uuid(correction.id) || !count(correction.sequence) || correction.sequence < 1 ||
-          correction.sequence > sequence || corrections.includes(correction.id) ||
+          correction.sequence > sequence || correctionIds.has(correction.id) ||
           classification !== null && correction.id === classification.id) return null;
-      if (eventSelectors.some(event => event.sequence === correction.sequence)) return null;
+      if (eventSequences.has(correction.sequence)) return null;
+      correctionIds.add(correction.id);
+      eventSequences.add(correction.sequence);
       corrections.push(correction.id);
       eventSelectors.push({ id: correction.id, sequence: correction.sequence, kind: 'finding_identity_corrected' });
     }

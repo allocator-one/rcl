@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { verifyNativeRecoveryLineage } from '../../../src/evidence/claim-recovery/validation/native-state.js';
-import { legacyFixture, recoveredFixture, sha, target } from './fixtures.js';
+import { correctionAnchor } from '../../../src/evidence/claim-recovery/validation/anchors.js';
+import { prepareClaimSplit } from '../../../src/evidence/claim-recovery/validation/claim-split.js';
+import { legacyFixture, recoveredFixture, sha, target, uuid } from './fixtures.js';
 
 vi.mock('node:crypto', async importOriginal => {
   const actual = await importOriginal<typeof import('node:crypto')>();
@@ -16,6 +18,42 @@ function migrated() {
     migration: { sourceSha256: sha(original), snapshotPath: `/synthetic/native.v1-${sha(original)}.snapshot`,
       migratedAt: '2026-09-22T01:00:00Z' } };
   return { ...fixture, original, current };
+}
+
+// Two receipt-backed occurrences with exact predecessor snapshots. This builds
+// the recovery writer's additive shape without executing a native writer.
+function twoStepLineage() {
+  const fixture = recoveredFixture();
+  const report = JSON.parse(fixture.selection.reportJson);
+  const second = { ...structuredClone(report.findings[0]), identity: 'second-retained-claim',
+    title: 'Expired cache writes', claimDescriptor: { version: 1 as const, operation: 'cache.ts :: cache.write',
+      invariant: 'The cache stores expired entries without validating their expiry timestamp.',
+      evidence: ['Validate expiry before storing the cache entry.'] } };
+  second.description = second.claimDescriptor.invariant;
+  report.findings.push(second);
+  const source = JSON.parse(fixture.sourceJson);
+  source.rounds[0].counts.new = 2;
+  const original = JSON.stringify(source);
+  const firstSelection = { ...fixture.selection, nativeJson: original, reportJson: JSON.stringify(report),
+    sourceReceipts: structuredClone(fixture.selection.sourceReceipts) };
+  (firstSelection.sourceReceipts[0]!.payload.identities as Array<Record<string, unknown>>).push({
+    identity_key: second.identity, matched_identity: firstSelection.previousIdentity, status: 'new',
+  });
+  const append = (selection: typeof fixture.selection, operationId: string) => {
+    const predecessor = JSON.parse(selection.nativeJson);
+    const event = prepareClaimSplit(selection).event;
+    const receipt = { ...selection.scope, ...event, actor_user_id: uuid(7), converge_target: target, round: 1, attempt: null };
+    const anchor = correctionAnchor(selection, receipt, uuid(7), operationId);
+    return JSON.stringify({ ...predecessor, version: 3, sightings: predecessor.sightings ?? [],
+      recovery: { version: 1, operations: [...(predecessor.recovery?.operations ?? []), {
+        operationId, sourceVersion: predecessor.version, sourceSha256: sha(selection.nativeJson),
+        anchors: [anchor], sourceReceipts: selection.sourceReceipts,
+      }] } });
+  };
+  const intermediate = append(firstSelection, uuid(8));
+  const next = { ...firstSelection, nativeJson: intermediate, nativeSourceJsons: [original],
+    eventId: uuid(10), identity: '3333333333333333', findingRef: 'f002', descriptor: second.claimDescriptor };
+  return { original, intermediate, current: append(next, uuid(9)), snapshots: [original, intermediate] };
 }
 
 describe('retained snapshot lineage', () => {
@@ -53,6 +91,33 @@ describe('retained snapshot lineage', () => {
     vi.mocked(createHash).mockClear();
     expect(() => verifyNativeRecoveryLineage(JSON.stringify(f.state), target,
       [f.sourceJson, f.sourceJson + ' '])).toThrow(/native_recovery/);
+    expect(createHash).toHaveBeenCalledTimes(sourceHashes);
+  });
+
+  it('preserves a valid two-step lineage below the aggregate predecessor budget', () => {
+    const f = twoStepLineage();
+    const result = verifyNativeRecoveryLineage(f.current, target, f.snapshots);
+    expect(result.original).toEqual(JSON.parse(f.original));
+    expect(result.state.recovery!.operations).toHaveLength(2);
+    expect(result.reservedIdentities).toEqual(['2222222222222222', '3333333333333333']);
+    expect(result.state.recovery!.operations.map(operation => operation.sourceSha256))
+      .toEqual([sha(f.original), sha(f.intermediate)]);
+  });
+
+  it('refuses individually allowed snapshots over the aggregate budget before hashing any predecessor', () => {
+    const f = twoStepLineage();
+    // These are size-preflight inputs, not claimed as parseable source evidence.
+    // Distinct strings avoid the duplicate-snapshot check masking the budget.
+    const snapshots = ['x'.repeat(33 * 1024 * 1024), 'y'.repeat(33 * 1024 * 1024)];
+    expect(snapshots.map(raw => Buffer.byteLength(raw))).toEqual([33 * 1024 * 1024, 33 * 1024 * 1024]);
+    expect(snapshots.every(raw => Buffer.byteLength(raw) <= 64 * 1024 * 1024)).toBe(true);
+    expect(JSON.parse(f.current).recovery.operations).toHaveLength(snapshots.length);
+    vi.mocked(createHash).mockClear();
+    expect(() => verifyNativeRecoveryLineage(f.current, target, [])).toThrow('native_recovery_lineage_conflict');
+    const sourceHashes = vi.mocked(createHash).mock.calls.length;
+    expect(sourceHashes).toBeGreaterThan(0);
+    vi.mocked(createHash).mockClear();
+    expect(() => verifyNativeRecoveryLineage(f.current, target, snapshots)).toThrow('native_recovery_lineage_conflict');
     expect(createHash).toHaveBeenCalledTimes(sourceHashes);
   });
 

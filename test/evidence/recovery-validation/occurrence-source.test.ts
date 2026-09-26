@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { validateOccurrenceSource } from '../../../src/evidence/claim-recovery/validation/occurrence-source.js';
 import { fixture, rebind } from './occurrence-fixtures.js';
 import { sha, uuid } from './fixtures.js';
@@ -65,4 +65,89 @@ describe('original occurrence classification', () => {
     expect(member.correction).toEqual(correction);
     expect(member.unresolvedReason).toBeUndefined();
   });
+
+  it.each([false, true])('preserves receipt order when bound and unbound mappings agree (bound first: %s)', boundFirst => {
+    const { transfer } = fixture(true);
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const bound = rows[0]!;
+    const unbound = { identity_key: bound.identity_key, matched_identity: bound.matched_identity,
+      status: 'repeat', claim_descriptor: bound.claim_descriptor };
+    delete source.classification.payload.classification_version;
+    source.classification.payload.identities = boundFirst ? [...rows, unbound] : [unbound, ...rows];
+    const member = validateOccurrenceSource(source).members[0]!;
+    expect(member.mapping).toBe(boundFirst ? bound : unbound);
+    expect(member.identity).toBe(transfer.split.selection.previousIdentity);
+  });
+
+  it('retains ambiguity when an unbound mapping disagrees with an exact positional mapping', () => {
+    const { transfer } = fixture(true);
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const bound = rows[0]!;
+    delete source.classification.payload.classification_version;
+    rows.push({ identity_key: bound.identity_key, matched_identity: '4444444444444444',
+      status: 'repeat', claim_descriptor: bound.claim_descriptor });
+    const member = validateOccurrenceSource(source).members[0]!;
+    expect(member.unresolvedReason).toBe('classification-ambiguous');
+    expect(member.identity).toBeUndefined();
+  });
+
+  it.each([false, true])('refuses mixed descriptor presence in duplicate legacy mappings (descriptor first: %s)', descriptorFirst => {
+    const { transfer } = fixture();
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const missing = { ...rows[0]! };
+    delete missing.claim_descriptor;
+    source.classification.payload.identities = descriptorFirst ? [...rows, missing] : [missing, ...rows];
+    expect(() => validateOccurrenceSource(source)).toThrow('occurrence_source_conflict');
+  });
+
+  it('refuses legacy classification rows beyond the supported finding count', () => {
+    const { transfer } = fixture();
+    const source = transfer.split.source;
+    const row = (source.classification.payload.identities as Array<Record<string, unknown>>)[0]!;
+    source.classification.payload.identities = Array(2001).fill(row);
+    expect(() => validateOccurrenceSource(source)).toThrow('occurrence_source_conflict');
+  });
+
+  it.each(['legacy-distinct', 'legacy-shared', 'marked-shared'])(
+    'keeps %s membership lookup linear at the full supported finding count', kind => {
+    const { transfer, report } = fixture(kind === 'marked-shared');
+    const prototype = report.findings[0];
+    report.findings = Array.from({ length: 2000 }, (_, index) => ({ ...structuredClone(prototype), identity: kind === 'marked-shared' ? 'shared-raw' : `raw-${index}` }));
+    report.belowThresholdFindings = [];
+    rebind(transfer, report);
+    if (kind === 'legacy-shared') {
+      // The split helper correctly refuses ambiguous legacy membership; this
+      // reader must retain that unresolved source without preparing a split.
+      for (const finding of report.findings) finding.identity = 'shared-raw';
+      const source = transfer.split.source;
+      source.reportJson = JSON.stringify(report);
+      const artifact = (source.storedRun.artifacts as Array<Record<string, unknown>>)[0]!;
+      artifact.declared_sha256 = sha(source.reportJson);
+      artifact.declared_bytes = Buffer.byteLength(source.reportJson);
+      for (const member of source.storedRun.findings as Array<Record<string, unknown>>) member.identity_key = 'shared-raw';
+      for (const row of source.classification.payload.identities as Array<Record<string, unknown>>) row.identity_key = 'shared-raw';
+    }
+    const originalSome = Array.prototype.some;
+    const originalFilter = Array.prototype.filter;
+    let visits = 0;
+    const some = vi.spyOn(Array.prototype, 'some').mockImplementation(function (this: unknown[], callback, thisArg) {
+      return originalSome.call(this, (value, index, values) => { visits++; return callback.call(thisArg, value, index, values); });
+    });
+    const filter = vi.spyOn(Array.prototype, 'filter').mockImplementation(function (this: unknown[], callback, thisArg) {
+      return originalFilter.call(this, (value, index, values) => { visits++; return callback.call(thisArg, value, index, values); });
+    });
+    try {
+      const result = validateOccurrenceSource(transfer.split.source);
+      expect(result.members).toHaveLength(2000);
+      expect(result.members.every(member => kind === 'legacy-shared'
+        ? member.identity === undefined && member.unresolvedReason === 'classification-ambiguous'
+        : member.identity === transfer.split.selection.previousIdentity && member.unresolvedReason === undefined)).toBe(true);
+    } finally { some.mockRestore(); filter.mockRestore(); }
+    expect(visits).toBeGreaterThan(0);
+    expect(visits).toBeLessThan(100 * report.findings.length);
+  });
+
 });

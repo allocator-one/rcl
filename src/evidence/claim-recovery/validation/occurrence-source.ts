@@ -37,6 +37,16 @@ export interface ValidatedOccurrenceSource {
   members: OccurrenceMember[];
 }
 
+interface PositionedMapping {
+  row: Record<string, unknown>;
+  order: number;
+}
+interface UnboundMappings extends PositionedMapping {
+  identity: string | undefined;
+  hasDescriptor: boolean;
+  descriptorsAgree: boolean;
+}
+
 /** Selected receipt content, not authentication or proof of inventory completeness. */
 export function receiptFor(receipt: StoredEventReceipt, source: ValidatedOccurrenceSource): void {
   requireSource(isStoredEventReceipt(receipt, source.input.scope) && receipt.converge_target === source.target &&
@@ -94,6 +104,7 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
   requireSource(input.classification.kind === 'round_processed' && Array.isArray(input.classification.payload.identities));
   const payload = input.classification.payload;
   const rows = payload.identities as unknown[];
+  requireSource(rows.length <= 2000);
   const declared = Object.hasOwn(payload, 'classification_version') || Object.hasOwn(payload, 'legacy_pending_identities');
   if (Object.hasOwn(payload, 'report_json_sha256')) requireSource(payload.report_json_sha256 === digest);
   if (declared) requireSource(payload.classification_version === 1 && payload.report_json_sha256 === digest && rows.length === all.length);
@@ -102,26 +113,37 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
     requireSource(Array.isArray(ids) && ids.length > 0 && ids.length <= 2000 && ids.every(key) &&
       isDeepStrictEqual(ids, [...new Set(ids)].sort()));
   }
-  const boundRefs = new Set<string>();
-  for (const row of rows) {
+  const occurrenceCounts = new Map<string, number>();
+  for (const raw of all) {
+    requireSource(object(raw) && typeof raw.identity === 'string');
+    occurrenceCounts.set(raw.identity, (occurrenceCounts.get(raw.identity) ?? 0) + 1);
+  }
+  const boundMappings = new Map<string, PositionedMapping>();
+  const unboundMappings = new Map<string, UnboundMappings>();
+  for (const [order, row] of rows.entries()) {
     requireSource(object(row) && typeof row.identity_key === 'string' && key(row.matched_identity) &&
       ['new', 'repeat', 'suppressed', 'regating'].includes(row.status as string) &&
-      all.some(member => object(member) && member.identity === row.identity_key));
+      occurrenceCounts.has(row.identity_key));
     const bound = declared || ['version', 'finding_ref', 'report_json_sha256'].some(field => Object.hasOwn(row, field));
     if (bound) {
       requireSource(validSightingBinding(row) && Object.hasOwn(row, 'pending_round') &&
         (row.pending_round === null || positive(row.pending_round) && row.pending_round <= out.round));
       const ref = row.finding_ref as string; const index = Number(ref.slice(1)) - 1;
-      requireSource(Number.isSafeInteger(index) && ref === `f${String(index + 1).padStart(3, '0')}` && !boundRefs.has(ref) &&
+      requireSource(Number.isSafeInteger(index) && ref === `f${String(index + 1).padStart(3, '0')}` && !boundMappings.has(ref) &&
         object(all[index]) && row.identity_key === all[index].identity && row.report_json_sha256 === digest &&
         isDeepStrictEqual(row.claim_descriptor, all[index].claimDescriptor));
-      boundRefs.add(ref);
+      boundMappings.set(ref, { row, order });
+    } else {
+      const group = unboundMappings.get(row.identity_key);
+      if (group) {
+        if (group.identity !== row.matched_identity) group.identity = undefined;
+        group.hasDescriptor ||= row.claim_descriptor !== undefined;
+        group.descriptorsAgree &&= isDeepStrictEqual(group.row.claim_descriptor, row.claim_descriptor);
+      } else {
+        unboundMappings.set(row.identity_key, { row, order, identity: row.matched_identity,
+          hasDescriptor: row.claim_descriptor !== undefined, descriptorsAgree: true });
+      }
     }
-  }
-  const occurrenceCounts = new Map<string, number>();
-  for (const raw of all) {
-    requireSource(object(raw) && typeof raw.identity === 'string');
-    occurrenceCounts.set(raw.identity, (occurrenceCounts.get(raw.identity) ?? 0) + 1);
   }
   for (const [index, raw] of all.entries()) {
     const ref = `f${String(index + 1).padStart(3, '0')}`; const member = storedMembers.get(ref);
@@ -136,19 +158,23 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
       member.verification_verdict === (object(gating.verification) ? gating.verification.verdict ?? null : null) &&
       Object.hasOwn(member, 'claim_descriptor') && isDeepStrictEqual(member.claim_descriptor, raw.claimDescriptor ?? null));
     if (raw.claimDescriptor !== undefined) requireSource(claimDescriptorSchema.safeParse(raw.claimDescriptor).success);
-    const mappings = (rows as Record<string, unknown>[]).filter(row => row.identity_key === raw.identity &&
-      (row.finding_ref === undefined || row.finding_ref === ref));
-    const unboundDuplicate = occurrenceCounts.get(raw.identity)! > 1 && mappings.some(row => row.finding_ref === undefined);
-    const unresolvedReason = mappings.length === 0 ? 'classification-unavailable' :
-      unboundDuplicate || new Set(mappings.map(m => m.matched_identity)).size !== 1 ? 'classification-ambiguous' : undefined;
+    const bound = boundMappings.get(ref); const unbound = unboundMappings.get(raw.identity);
+    // Preserve the first receipt row while summarizing duplicate unbound rows
+    // once, so shared report identities do not require repeated receipt scans.
+    const mapping = !bound ? unbound?.row : !unbound || bound.order < unbound.order ? bound.row : unbound.row;
+    const ambiguous = unbound && (occurrenceCounts.get(raw.identity)! > 1 || unbound.identity === undefined ||
+      bound && bound.row.matched_identity !== unbound.identity);
+    const unresolvedReason = mapping === undefined ? 'classification-unavailable' :
+      ambiguous ? 'classification-ambiguous' : undefined;
     // Released unmarked classifications may cover kept findings only. Preserve
     // every original appendix member without inventing its native association.
     // Declared snapshots, in contrast, promise complete positional membership.
     requireSource(!declared || unresolvedReason === undefined);
-    if (mappings.some(row => row.claim_descriptor !== undefined)) requireSource(mappings.every(row =>
-      isDeepStrictEqual(row.claim_descriptor, raw.claimDescriptor)));
+    if (unbound?.hasDescriptor || bound?.row.claim_descriptor !== undefined) requireSource(
+      (!unbound || unbound.descriptorsAgree && isDeepStrictEqual(unbound.row.claim_descriptor, raw.claimDescriptor)) &&
+      (!bound || isDeepStrictEqual(bound.row.claim_descriptor, raw.claimDescriptor)));
     out.members.push({ ref, raw, stored: member,
-      ...(unresolvedReason ? { unresolvedReason } : { mapping: mappings[0], identity: mappings[0].matched_identity as string }),
+      ...(unresolvedReason ? { unresolvedReason } : { mapping: mapping!, identity: mapping!.matched_identity as string }),
       severity: raw.severity as ClaimSeverity, gating: index >= kept.length ? 'none' : (gating.reason as string | undefined ??
         (['critical', 'important'].includes(raw.severity as string) ? 'legacy-blocking' : 'none')) });
   }
