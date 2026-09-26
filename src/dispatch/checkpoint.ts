@@ -6,6 +6,13 @@ import { z } from 'zod';
 import { originalRawFindingSchema } from '../telemetry/recovery/source.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
+import { decodeOriginalLaunch } from './original-launch.js';
+import { decodeRecoveryOperation } from './recovery-operation.js';
+import {
+  appendVerificationRecord, encodeVerificationProof, snapshotVerificationEvent, validateVerificationRecords,
+  type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationPlanInput,
+  type VerificationResult, type VerificationState, type VerificationTerminal,
+} from './checkpoint-verification.js';
 import {
   assertNativeTargetOwnership,
   ownedNativeTargetCommonDir,
@@ -178,8 +185,8 @@ async function writeExclusive(path: string, bytes: string, maxBytes = MAX_FILE_B
 }
 
 /** Event records are staged outside the observed journal namespace before an exclusive link publishes them. */
-async function publishEventExclusive(journalPath: string, name: string, bytes: string): Promise<void> {
-  boundedBytes(bytes);
+async function publishEventExclusive(journalPath: string, name: string, bytes: string, maxBytes = MAX_FILE_BYTES): Promise<void> {
+  boundedBytes(bytes, maxBytes);
   const eventDirectory = join(journalPath, 'events');
   const targetDirectory = resolve(journalPath, '..');
   await inspectDirectory(eventDirectory);
@@ -188,7 +195,7 @@ async function publishEventExclusive(journalPath: string, name: string, bytes: s
   const published = join(eventDirectory, name);
   let stagedCreated = false, linked = false;
   try {
-    await writeExclusive(staged, bytes);
+    await writeExclusive(staged, bytes, maxBytes);
     stagedCreated = true;
     await link(staged, published);
     linked = true;
@@ -202,7 +209,7 @@ async function publishEventExclusive(journalPath: string, name: string, bytes: s
     }
   }
   // Preserve the acknowledged file and directory durability boundary used by replay.
-  if (linked) await syncExisting(published, bytes);
+  if (linked) await syncExisting(published, bytes, false, { maxBytes });
 }
 function boundedBytes(bytes: string, maxBytes = MAX_FILE_BYTES): void {
   if (Buffer.byteLength(bytes, 'utf8') > maxBytes) throw new Error('checkpoint_file_too_large');
@@ -438,6 +445,121 @@ export class CheckpointJournal {
   async readBindings(): Promise<CheckpointBindings> { return (await this.readValidated()).bindings; }
 
   /**
+   * Freeze a distinct, explicitly capped verifier phase after reviewer sealing.
+   * This storage contract never expands reviewer-cell caps or establishes spend,
+   * capture, provider or server authority. The executor must regenerate the plan
+   * from validated captures, authorize its separate cap and disable SDK retries.
+   */
+  async beginVerification(input: VerificationPlanInput, ownership: NativeTargetOwnership): Promise<void> {
+    await this.appendVerification({ type: 'plan', plan: input }, ownership);
+  }
+
+  /**
+   * True only for a newly durable intent. False means a prior intent exists and
+   * must NEVER be launched again, even when its first fsync acknowledgment failed.
+   * A true result is a storage claim, not independent provider launch authority.
+   */
+  async recordVerificationIntent(input: VerificationIntent, ownership: NativeTargetOwnership): Promise<boolean> {
+    return this.appendVerification({ type: 'intent', intent: input }, ownership);
+  }
+
+  /** Exact observed adapter bytes; failed/late answers remain physical history. */
+  async recordVerificationResult(input: VerificationResult, ownership: NativeTargetOwnership): Promise<void> {
+    await this.appendVerification({ type: 'result', result: input }, ownership);
+  }
+
+  /** A terminal storage outcome, never a finding verdict or approval. */
+  async finalizeVerification(input: VerificationTerminal, ownership: NativeTargetOwnership): Promise<void> {
+    await this.appendVerification({ type: 'terminal', terminal: input }, ownership);
+  }
+
+  async readVerification(): Promise<VerificationState | undefined> {
+    const directory = join(this.path, 'verification');
+    // Validate main history even when no phase has been created.
+    const main = await this.readValidated();
+    try { await lstat(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    return this.readVerificationValidated(this.verificationContext(main));
+  }
+
+  async exportVerificationProof(): Promise<{ bytes: string; digest: string }> {
+    const context = this.verificationContext(await this.readValidated());
+    const state = await this.readVerificationValidated(context);
+    if (!state?.terminal) throw new Error('checkpoint_verification_unsealed');
+    return encodeVerificationProof(state, context);
+  }
+
+  private verificationContext(main: { state: CheckpointState; bindings: CheckpointBindings }): VerificationContext {
+    if (!main.state.finalized) throw new Error('checkpoint_verification_requires_finalization');
+    const capture = main.bindings['captured-inputs'];
+    const hasLaunch = main.bindings.launch !== undefined, hasOperation = main.bindings.operation !== undefined;
+    if (capture === undefined || hasLaunch === hasOperation) throw new Error('checkpoint_verification_missing_binding');
+    const operationBytes = (main.bindings.launch ?? main.bindings.operation)!;
+    const parent = hasLaunch ? decodeOriginalLaunch(operationBytes) : decodeRecoveryOperation(operationBytes);
+    if (parent.planDigest !== this.plan.digest || parent.target !== this.plan.target || parent.capturedInputsSha256 !== sha256(capture) ||
+      ('successorRunId' in parent && !parent.successorNativeClaim)) throw new Error('checkpoint_verification_binding_mismatch');
+    return { planDigest: this.plan.digest, finalizationDigest: main.state.records.at(-1)!.digest,
+      capturedInputsSha256: sha256(capture), operationSha256: sha256(operationBytes),
+      runId: 'runId' in parent ? parent.runId : parent.successorRunId,
+      startedAtMs: parent.startedAtMs, expiresAtMs: parent.expiresAtMs,
+      reviewerAttemptIds: main.state.records.filter(row => row.type === 'intent').map(row => row.paidAttempt!.id) };
+  }
+
+  private async readVerificationValidated(context: VerificationContext): Promise<VerificationState | undefined> {
+    const directory = join(this.path, 'verification');
+    try { await lstat(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    await inspectDirectory(directory);
+    const entries = await readdir(directory);
+    if (entries.some(name => name !== 'events')) throw new Error('checkpoint_verification_unknown_entry');
+    // A crash while publishing the empty directories consumed no intent.
+    if (!entries.length) return undefined;
+    const events = join(directory, 'events'); await inspectDirectory(events);
+    const names = (await readdir(events)).sort(), values: unknown[] = [];
+    if (names.length > 1002) throw new Error('checkpoint_verification_too_many_records');
+    let totalBytes = 0;
+    for (const [index, name] of names.entries()) {
+      if (name !== eventFile(index + 1)) throw new Error('checkpoint_verification_sequence_gap');
+      const bytes = await readSafe(join(events, name), true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+      totalBytes += Buffer.byteLength(bytes, 'utf8');
+      if (totalBytes > MAX_ARTIFACT_BYTES) throw new Error('checkpoint_verification_too_large');
+      let value: unknown;
+      try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_invalid_record'); }
+      if (bytes !== `${canonical(value as Json)}\n`) throw new Error('checkpoint_verification_noncanonical');
+      values.push(value);
+    }
+    return validateVerificationRecords(values, context);
+  }
+
+  private async appendVerification(input: VerificationEvent, ownership: NativeTargetOwnership): Promise<boolean> {
+    const event = snapshotVerificationEvent(input);
+    return this.write(ownership, async () => {
+      const context = this.verificationContext(await this.readValidated());
+      const state = await this.readVerificationValidated(context), records = state?.records ?? [];
+      const prior = records.find(row => row.event.type === event.type &&
+        (event.type === 'intent' ? row.event.type === 'intent' && row.event.intent.attemptId === event.intent.attemptId
+          : event.type === 'result' ? row.event.type === 'result' && row.event.result.attemptId === event.result.attemptId : true));
+      if (prior && canonical(prior.event as unknown as Json) !== canonical(event as unknown as Json)) throw new Error('checkpoint_verification_conflict');
+      // An immutable report, including a surviving partial publication, closes
+      // this run to new paid work. Only identical records of a sealed phase can
+      // be re-acknowledged afterward; they never return a new launch claim.
+      if (await this.terminalReportEntries() !== undefined && (!state?.terminal || !prior)) {
+        throw new Error('checkpoint_verification_report_finalized');
+      }
+      const record = prior ? undefined : appendVerificationRecord(records, event, context);
+      if (!state && event.type !== 'plan') throw new Error('checkpoint_verification_missing_plan');
+      const directory = await ensurePrivateChild(this.path, 'verification'); await ensurePrivateChild(directory, 'events');
+      for (const existing of records) {
+        await syncExisting(join(directory, 'events', eventFile(existing.sequence)), `${canonical(existing as unknown as Json)}\n`, true,
+          { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+      }
+      if (!record) return false;
+      await publishEventExclusive(directory, eventFile(record.sequence), `${canonical(record as unknown as Json)}\n`, MAX_ARTIFACT_BYTES);
+      return true;
+    });
+  }
+
+  /**
    * Retain opaque terminal bytes after sealing, under the caller's ownership.
    * Exact orphan payloads can resume; no existing bytes are replaced. The final
    * manifest publishes the pair and does not confer producer authority.
@@ -453,6 +575,8 @@ export class CheckpointJournal {
     return this.write(ownership, async () => {
       const state = await this.read();
       if (!state.finalized) throw new Error('checkpoint_terminal_report_requires_finalization');
+      const verification = await this.readVerification();
+      if (verification && !verification.terminal) throw new Error('checkpoint_terminal_report_verification_pending');
       const directory = join(this.path, 'terminal-report'), names = await this.terminalReportEntries();
       const payloads = [['report.json', captured.reportBytes], ['reviewer-artifact.json', captured.reviewerArtifactBytes]] as const;
       if (names?.includes('manifest.json')) {
