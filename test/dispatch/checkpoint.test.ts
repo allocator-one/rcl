@@ -371,11 +371,12 @@ describe('immutable checkpoint metadata bindings', () => {
 
   it('requires primitive round-trippable UTF-8 strings and enforces the existing byte bound', async () => {
     await withStore(async (store, ownership, commonDir) => {
+      const before = await readdir(checkpointPath(commonDir, target, namespace));
       await expect(store.bind('source', new String('object') as never, ownership)).rejects.toThrow('checkpoint_invalid_binding');
       await expect(store.bind('source', '\uD800', ownership)).rejects.toThrow('checkpoint_invalid_binding');
       await expect(store.bind('source', 'é'.repeat(4 * 1024 * 1024 + 1), ownership)).rejects.toThrow('checkpoint_file_too_large');
       expect(await store.readBindings()).toEqual({});
-      expect(await readdir(checkpointPath(commonDir, target, namespace))).toEqual(['events', 'plan.json', 'results']);
+      expect(await readdir(checkpointPath(commonDir, target, namespace))).toEqual(before);
       const bytes = 'x'.repeat(8 * 1024 * 1024);
       await store.bind('captured-inputs', bytes, ownership);
       expect((await store.readBindings())['captured-inputs']).toBe(bytes);

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
@@ -115,9 +115,30 @@ export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ del
     asyncRefuse(Date.now() >= context.startedAtMs && Date.now() < plan.expiresAtMs, 'deadline');
     for (const call of plan.calls) asyncRefuse(location.plan.chunks[call.chunk]?.digest === call.chunkSha256, 'call');
     try { await lstat(location.phasePath); throw new Error('checkpoint_async_already_initialized'); } catch (error) { if (!isMissing(error)) throw error; }
-    await child(location.checkpointPath, 'async'); await child(location.phasePath, 'events'); await child(location.phasePath, 'late');
     const tokens = calls.map(() => randomBytes(32).toString('hex')); const metadata: Metadata = { version: 1, plan, grants: tokens.map(sha256Hex) };
-    await publish(location.phasePath, join(location.phasePath, 'phase.json'), stableStringify(metadata) + '\n');
+    // The visible async directory is the initialization commit point. Preparing
+    // elsewhere cannot make main finalization depend on missing metadata.
+    const staging = await child(location.checkpointPath, '.staging');
+    const prepared = await child(staging, `async-${randomUUID()}.pending`), identity = await lstat(prepared);
+    let published = false;
+    try {
+      await child(prepared, 'events'); await child(prepared, 'late');
+      await publish(prepared, join(prepared, 'phase.json'), stableStringify(metadata) + '\n');
+      await syncNativeDirectory(prepared);
+      // Native ownership serializes initializers. Never replace an existing
+      // phase, including an empty, malformed or symlinked path.
+      try { await lstat(location.phasePath); throw new Error('checkpoint_async_already_initialized'); }
+      catch (error) { if (!isMissing(error)) throw error; }
+      await rename(prepared, location.phasePath);
+      published = true;
+      await syncNativeDirectory(location.checkpointPath); await syncNativeDirectory(staging);
+    } finally {
+      if (!published) {
+        const current = await lstat(prepared);
+        asyncRefuse(current.ino === identity.ino && current.dev === identity.dev && !current.isSymbolicLink(), 'changing_file');
+        await rm(prepared, { recursive: true }); await syncNativeDirectory(staging);
+      }
+    }
     const delegates = tokens.map((token, callIndex): AsyncDelegate => ({ version: 1, commonDir: location.commonDir, namespace: location.namespace,
       target: location.plan.target, checkpointPath: location.checkpointPath, planDigest: sha256Hex(stableStringify(plan)), callIndex, token }));
     return freezeAsync({ delegates, plan });

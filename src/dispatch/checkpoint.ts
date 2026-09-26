@@ -163,7 +163,9 @@ export function freezeCheckpointPlan(input: CheckpointPlanInput): FrozenCheckpoi
   const cells: CheckpointCell[] = [];
   for (const chunk of chunks) { requireDigest(chunk.digest, 'chunk_digest'); for (const seat of input.roster) { const id = `${seat.seat}:${chunk.index}`, prompt = prompts.get(id); if (!prompt) throw new Error('checkpoint_missing_prompt'); cells.push({ id, seat: seat.seat, chunk: chunk.index, route: seat.route, model: seat.model, role: seat.role, chunkDigest: chunk.digest, systemPromptSha256: prompt.systemSha256, userPromptSha256: prompt.userSha256 }); } }
   if (prompts.size !== cells.length) throw new Error('checkpoint_extra_prompt');
-  const payload = planPayload(input, cells); return deepFreeze({ ...payload, digest: sha256(canonical(payload as unknown as Json)) });
+  const payload = planPayload(input, cells), plan = { ...payload, digest: sha256(canonical(payload as unknown as Json)) };
+  if (!frozenPlanSchema.safeParse(plan).success) throw new Error('checkpoint_invalid_plan');
+  return deepFreeze(plan);
 }
 
 async function inspectDirectory(path: string): Promise<void> {
@@ -183,39 +185,77 @@ async function readSafe(path: string, preserveBom = false, options: { maxBytes?:
   try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs || options.singleLink && before.nlink !== 1) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink() || options.singleLink && (after.nlink !== 1 || current.nlink !== 1)) throw new Error('checkpoint_changing_source'); return new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(bytes); } finally { await handle.close(); }
 }
 
-async function writeExclusive(path: string, bytes: string, maxBytes = MAX_FILE_BYTES): Promise<void> {
-  boundedBytes(bytes, maxBytes);
-  const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
-  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-  await syncNativeDirectory(resolve(path, '..'));
-}
-
 /** Event records are staged outside the observed journal namespace before an exclusive link publishes them. */
 async function publishEventExclusive(journalPath: string, name: string, bytes: string, maxBytes = MAX_FILE_BYTES): Promise<void> {
+  await publishExclusive(resolve(journalPath, '..'), join(journalPath, 'events', name), bytes, maxBytes);
+}
+
+function publicationPrefix(root: string, path: string, bytes: string): string {
+  return `${sha256(relative(root, path))}-${sha256(bytes)}-`;
+}
+
+/** Complete bytes become visible without replacing any existing destination. */
+async function publishExclusive(root: string, published: string, bytes: string, maxBytes = MAX_FILE_BYTES): Promise<void> {
   boundedBytes(bytes, maxBytes);
-  const eventDirectory = join(journalPath, 'events');
-  const targetDirectory = resolve(journalPath, '..');
-  await inspectDirectory(eventDirectory);
-  const stagingDirectory = await ensurePrivateChild(targetDirectory, '.staging');
-  const staged = join(stagingDirectory, `${randomUUID()}.pending`);
-  const published = join(eventDirectory, name);
-  let stagedCreated = false, linked = false;
+  const directory = resolve(published, '..');
+  await inspectDirectory(directory);
+  const stagingDirectory = await ensurePrivateChild(root, '.staging');
+  const staged = join(stagingDirectory, `${publicationPrefix(root, published, bytes)}${randomUUID()}.pending`);
+  const handle = await open(staged, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+  const identity = await handle.stat();
+  let linked = false;
   try {
-    await writeExclusive(staged, bytes, maxBytes);
-    stagedCreated = true;
+    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+    await syncNativeDirectory(stagingDirectory);
     await link(staged, published);
     linked = true;
-    // The event name is durable before removing the otherwise invisible staging link.
-    await syncNativeDirectory(eventDirectory);
+    await syncNativeDirectory(directory);
   } finally {
-    if (stagedCreated) {
-      try { await unlink(staged); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      await syncNativeDirectory(stagingDirectory);
-    }
+    // Only this invocation's exclusively created inode may be removed here.
+    const current = await lstat(staged);
+    if (current.isSymbolicLink() || current.ino !== identity.ino || current.dev !== identity.dev || current.nlink !== (linked ? 2 : 1)) throw new Error('checkpoint_changing_source');
+    await unlink(staged);
+    await syncNativeDirectory(stagingDirectory);
   }
-  // Preserve the acknowledged file and directory durability boundary used by replay.
-  if (linked) await syncExisting(published, bytes, false, { maxBytes });
+  if (linked) await syncExisting(published, bytes, true, { maxBytes, singleLink: true });
+}
+
+interface PendingPublication { path: string; staged: string; bytes: string; maxBytes: number; ino: number; dev: number }
+
+/** An owned caller may inspect a qualified staging pair, but must validate its full history before cleanup. */
+async function readPublished(path: string, root: string, options: { maxBytes?: number; singleLink: true }, pending?: PendingPublication[]): Promise<string> {
+  if (!pending || (await lstat(path)).nlink === 1) return readSafe(path, true, options);
+  const entry = await lstat(path);
+  if (entry.nlink !== 2) throw new Error('checkpoint_symlink');
+  const bytes = await readSafe(path, true, { maxBytes: options.maxBytes });
+  const staging = join(root, '.staging');
+  try { await inspectDirectory(staging); } catch { throw new Error('checkpoint_symlink'); }
+  const prefix = publicationPrefix(root, path, bytes);
+  const names = (await readdir(staging)).filter(name => name.startsWith(prefix) && /^[a-f0-9-]{36}\.pending$/.test(name.slice(prefix.length)));
+  if (names.length !== 1) throw new Error('checkpoint_symlink');
+  const staged = join(staging, names[0]!), counterpart = await lstat(staged);
+  if (counterpart.nlink !== 2 || counterpart.ino !== entry.ino || counterpart.dev !== entry.dev ||
+    await readSafe(staged, true, { maxBytes: options.maxBytes }) !== bytes) throw new Error('checkpoint_symlink');
+  pending.push({ path, staged, bytes, maxBytes: options.maxBytes ?? MAX_FILE_BYTES, ino: entry.ino, dev: entry.dev });
+  return bytes;
+}
+
+/** Called only inside owned writes; read-only readers never repair filesystem state. */
+async function recoverPublications<T>(read: (pending?: PendingPublication[]) => Promise<T>): Promise<T> {
+  const pending: PendingPublication[] = [], value = await read(pending);
+  // The caller's full semantic validation has succeeded before any link is removed.
+  for (const item of pending) {
+    const current = await lstat(item.path), staged = await lstat(item.staged);
+    if (current.nlink !== 2 || staged.nlink !== 2 || current.ino !== item.ino || staged.ino !== item.ino ||
+      current.dev !== item.dev || staged.dev !== item.dev || current.isSymbolicLink() || staged.isSymbolicLink()) throw new Error('checkpoint_changing_source');
+    await syncExisting(item.path, item.bytes, true, { maxBytes: item.maxBytes });
+    if (await readSafe(item.staged, true, { maxBytes: item.maxBytes }) !== item.bytes) throw new Error('checkpoint_changing_source');
+    await unlink(item.staged);
+    await syncNativeDirectory(resolve(item.staged, '..'));
+    await syncExisting(item.path, item.bytes, true, { maxBytes: item.maxBytes, singleLink: true });
+  }
+  // Re-read strictly after cleanup; no validated disk state is cached across calls.
+  return pending.length ? read() : value;
 }
 function boundedBytes(bytes: string, maxBytes = MAX_FILE_BYTES): void {
   if (Buffer.byteLength(bytes, 'utf8') > maxBytes) throw new Error('checkpoint_file_too_large');
@@ -401,7 +441,7 @@ export class CheckpointJournal {
       if (relative(targetRoot, path).startsWith('..')) throw new Error('checkpoint_root_outside_common_dir');
       await ensurePrivateChild(targetRoot, namespace);
       await ensurePrivateChild(path, 'events'); await ensurePrivateChild(path, 'results');
-      await writeExclusive(join(path, 'plan.json'), planBytes);
+      await publishExclusive(path, join(path, 'plan.json'), planBytes);
       return new CheckpointJournal(path, plan, commonDir);
     });
   }
@@ -438,6 +478,10 @@ export class CheckpointJournal {
       await assertNativeTargetOwnership(active, commonDir, plan.target);
       const journal = await CheckpointJournal.openRead(checkpointPath(commonDir, plan.target, namespace), plan);
       const writable = new CheckpointJournal(journal.path, plan, commonDir);
+      await recoverPublications(async pending => {
+        const bytes = await readPublished(join(writable.path, 'plan.json'), writable.path, { singleLink: true }, pending);
+        if (!matchingPlan(decodePlan(bytes.trim()), plan)) throw new Error('checkpoint_plan_mismatch');
+      });
       await writable.syncHistory(await writable.read());
       return writable;
     });
@@ -483,12 +527,12 @@ export class CheckpointJournal {
     const result = snapshot.result;
     return this.write(ownership, async () => {
       const main = await this.readValidated(), context = this.verificationContext(main);
-      const verification = await this.readVerificationValidated(context);
+      const verification = await recoverPublications(pending => this.readVerificationValidated(context, pending));
       if (!verification?.terminal) throw new Error('checkpoint_verification_late_requires_terminal');
       parseVerificationAnswer(result.answerBytes, verification.plan);
       const intent = verification.intents.find(item => item.batchIndex === result.batchIndex && item.attemptId === result.attemptId);
       if (!intent || result.finishedAtMs < intent.startedAtMs) throw new Error('checkpoint_verification_late_invalid_result');
-      const prior = await this.readLateVerificationAuditValidated(verification);
+      const prior = await recoverPublications(pending => this.readLateVerificationAuditValidated(verification, pending));
       const existing = prior.find(item => item.result.attemptId === result.attemptId);
       if (existing) {
         if (existing.result.batchIndex !== result.batchIndex || existing.result.finishedAtMs !== result.finishedAtMs || existing.result.answerBytes !== result.answerBytes) throw new Error('checkpoint_verification_late_conflict');
@@ -511,7 +555,7 @@ export class CheckpointJournal {
     });
   }
 
-  private async readLateVerificationAuditValidated(verification: VerificationState): Promise<readonly CheckpointLateVerificationRecord[]> {
+  private async readLateVerificationAuditValidated(verification: VerificationState, pending?: PendingPublication[]): Promise<readonly CheckpointLateVerificationRecord[]> {
     const directory = join(this.path, 'verification-late-audit');
     try { await lstat(directory); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Object.freeze([]); throw error; }
@@ -528,7 +572,7 @@ export class CheckpointJournal {
     const records: CheckpointLateVerificationRecord[] = []; const attempts = new Set<string>(); let previous = terminalDigest; let total = 0;
     for (const [index, name] of names.entries()) {
       if (name !== eventFile(index + 1)) throw new Error('checkpoint_verification_late_unknown_entry');
-      const bytes = await readSafe(join(events, name), true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true }); total += Buffer.byteLength(bytes, 'utf8');
+      const bytes = await readPublished(join(events, name), this.path, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true }, pending); total += Buffer.byteLength(bytes, 'utf8');
       if (total > MAX_ARTIFACT_BYTES) throw new Error('checkpoint_verification_late_too_large');
       let value: unknown; try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_late_invalid_record'); }
       const parsed = verificationLateRecordSchema.safeParse(value); if (!parsed.success) throw new Error('checkpoint_verification_late_invalid_record');
@@ -573,11 +617,11 @@ export class CheckpointJournal {
     return verificationContextFromValidatedCheckpoint(this.plan, main);
   }
 
-  private async readVerificationValidated(context: VerificationContext): Promise<VerificationState | undefined> {
-    return (await this.readVerificationValidatedForAppend(context)).state;
+  private async readVerificationValidated(context: VerificationContext, pending?: PendingPublication[]): Promise<VerificationState | undefined> {
+    return (await this.readVerificationValidatedForAppend(context, pending)).state;
   }
 
-  private async readVerificationValidatedForAppend(context: VerificationContext): Promise<ValidatedVerificationRecords> {
+  private async readVerificationValidatedForAppend(context: VerificationContext, pending?: PendingPublication[]): Promise<ValidatedVerificationRecords> {
     const directory = join(this.path, 'verification');
     try { await lstat(directory); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return validateVerificationRecordsForAppend([], context); throw error; }
@@ -592,7 +636,7 @@ export class CheckpointJournal {
     let totalBytes = 0;
     for (const [index, name] of names.entries()) {
       if (name !== eventFile(index + 1)) throw new Error('checkpoint_verification_sequence_gap');
-      const bytes = await readSafe(join(events, name), true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+      const bytes = await readPublished(join(events, name), this.path, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true }, pending);
       totalBytes += Buffer.byteLength(bytes, 'utf8');
       if (totalBytes > MAX_ARTIFACT_BYTES) throw new Error('checkpoint_verification_too_large');
       let value: unknown;
@@ -607,7 +651,7 @@ export class CheckpointJournal {
     const event = snapshotVerificationEvent(input);
     return this.write(ownership, async () => {
       const context = this.verificationContext(await this.readValidated());
-      const snapshot = await this.readVerificationValidatedForAppend(context), state = snapshot.state, records = state?.records ?? [];
+      const snapshot = await recoverPublications(pending => this.readVerificationValidatedForAppend(context, pending)), state = snapshot.state, records = state?.records ?? [];
       const prior = records.find(row => row.event.type === event.type &&
         (event.type === 'intent' ? row.event.type === 'intent' && row.event.intent.attemptId === event.intent.attemptId
           : event.type === 'result' ? row.event.type === 'result' && row.event.result.attemptId === event.result.attemptId : true));
@@ -647,36 +691,40 @@ export class CheckpointJournal {
     return this.write(ownership, async () => {
       const state = await this.read();
       if (!state.finalized) throw new Error('checkpoint_terminal_report_requires_finalization');
-      const verification = await this.readVerification();
+      let verification: VerificationState | undefined;
+      let hasVerification = false;
+      try { await lstat(join(this.path, 'verification')); hasVerification = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (hasVerification) {
+        const context = this.verificationContext(await this.readValidated());
+        verification = await recoverPublications(pending => this.readVerificationValidated(context, pending));
+      }
       if (verification && !verification.terminal) throw new Error('checkpoint_terminal_report_verification_pending');
-      const directory = join(this.path, 'terminal-report'), names = await this.terminalReportEntries();
+      const directory = join(this.path, 'terminal-report');
       const payloads = [['report.json', captured.reportBytes], ['reviewer-artifact.json', captured.reviewerArtifactBytes]] as const;
-      if (names?.includes('manifest.json')) {
-        const published = await this.readTerminalReportValidated(state);
-        if (published!.reportBytes !== captured.reportBytes || published!.reviewerArtifactBytes !== captured.reviewerArtifactBytes) {
-          throw new Error('checkpoint_terminal_report_conflict');
-        }
-      } else {
-        // Validate every surviving orphan before writing any missing file. A
-        // truncated/conflicting payload is evidence of failure, never a prefix
-        // that can be repaired or attributed to this caller's report.
-        for (const [name, bytes] of payloads) {
-          if (names?.includes(name) && await readSafe(join(directory, name), true, terminalPayloadOptions) !== bytes) {
-            throw new Error('checkpoint_terminal_report_conflict');
+      await recoverPublications(async pending => {
+        const entries = await this.terminalReportEntries();
+        if (entries?.includes('manifest.json')) {
+          const report = await this.readTerminalReportValidated(state, pending);
+          if (report!.reportBytes !== captured.reportBytes || report!.reviewerArtifactBytes !== captured.reviewerArtifactBytes) throw new Error('checkpoint_terminal_report_conflict');
+        } else {
+          for (const [name, bytes] of payloads) {
+            if (entries?.includes(name) && await readPublished(join(directory, name), this.path, terminalPayloadOptions, pending) !== bytes) throw new Error('checkpoint_terminal_report_conflict');
           }
         }
-      }
+      });
+      const names = await this.terminalReportEntries();
       await ensurePrivateChild(this.path, 'terminal-report');
       for (const [name, bytes] of payloads) {
         const path = join(directory, name);
-        if (!names?.includes(name)) await writeExclusive(path, bytes, MAX_ARTIFACT_BYTES);
+        if (!names?.includes(name)) await publishExclusive(this.path, path, bytes, MAX_ARTIFACT_BYTES);
         await syncExisting(path, bytes, true, terminalPayloadOptions);
       }
       const manifest = { version: 1, planDigest: this.plan.digest, finalizationDigest: state.records.at(-1)!.digest,
         reportSha256: sha256(captured.reportBytes), reviewerArtifactSha256: sha256(captured.reviewerArtifactBytes),
         reportByteLength: Buffer.byteLength(captured.reportBytes, 'utf8'), reviewerArtifactByteLength: Buffer.byteLength(captured.reviewerArtifactBytes, 'utf8') };
       const bytes = `${canonical(manifest as unknown as Json)}\n`, path = join(directory, 'manifest.json');
-      if (!names?.includes('manifest.json')) await writeExclusive(path, bytes);
+      if (!names?.includes('manifest.json')) await publishExclusive(this.path, path, bytes);
       await syncExisting(path, bytes, true, terminalManifestOptions);
     });
   }
@@ -696,12 +744,12 @@ export class CheckpointJournal {
     return names;
   }
 
-  private async readTerminalReportValidated(state: CheckpointState): Promise<TerminalCheckpointReport | undefined> {
+  private async readTerminalReportValidated(state: CheckpointState, pending?: PendingPublication[]): Promise<TerminalCheckpointReport | undefined> {
     const names = await this.terminalReportEntries();
     if (names === undefined) return undefined;
     if (!state.finalized) throw new Error('checkpoint_terminal_report_requires_finalization');
     if (names.length !== terminalFileNames.length) throw new Error('checkpoint_terminal_report_incomplete');
-    const path = join(this.path, 'terminal-report'), bytes = await readSafe(join(path, 'manifest.json'), true, terminalManifestOptions);
+    const path = join(this.path, 'terminal-report'), bytes = await readPublished(join(path, 'manifest.json'), this.path, terminalManifestOptions, pending);
     let value: unknown;
     try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_terminal_manifest'); }
     const parsed = terminalManifestSchema.safeParse(value);
@@ -709,8 +757,8 @@ export class CheckpointJournal {
     const manifest = parsed.data;
     if (bytes !== `${canonical(manifest as unknown as Json)}\n` || manifest.planDigest !== this.plan.digest ||
       manifest.finalizationDigest !== state.records.at(-1)!.digest) throw new Error('checkpoint_invalid_terminal_manifest');
-    const reportBytes = await readSafe(join(path, 'report.json'), true, terminalPayloadOptions);
-    const reviewerArtifactBytes = await readSafe(join(path, 'reviewer-artifact.json'), true, terminalPayloadOptions);
+    const reportBytes = await readPublished(join(path, 'report.json'), this.path, terminalPayloadOptions, pending);
+    const reviewerArtifactBytes = await readPublished(join(path, 'reviewer-artifact.json'), this.path, terminalPayloadOptions, pending);
     if (Buffer.byteLength(reportBytes, 'utf8') !== manifest.reportByteLength || Buffer.byteLength(reviewerArtifactBytes, 'utf8') !== manifest.reviewerArtifactByteLength ||
       sha256(reportBytes) !== manifest.reportSha256 || sha256(reviewerArtifactBytes) !== manifest.reviewerArtifactSha256) throw new Error('checkpoint_terminal_report_tampered');
     return Object.freeze({ reportBytes, reviewerArtifactBytes, reportSha256: manifest.reportSha256, reviewerArtifactSha256: manifest.reviewerArtifactSha256 });
@@ -721,7 +769,7 @@ export class CheckpointJournal {
     return this.readLateAuditValidated(await this.read());
   }
 
-  private async readLateAuditValidated(state: CheckpointState): Promise<readonly CheckpointLateAuditRecord[]> {
+  private async readLateAuditValidated(state: CheckpointState, pending?: PendingPublication[]): Promise<readonly CheckpointLateAuditRecord[]> {
     const path = join(this.path, 'late-audit');
     try { await lstat(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Object.freeze([]); throw error; }
@@ -732,7 +780,7 @@ export class CheckpointJournal {
     let previous = finalization.digest;
     for (const [index, name] of names.entries()) {
       if (name !== eventFile(index + 1)) throw new Error('checkpoint_late_unknown_entry');
-      const bytes = await readSafe(join(path, name), true, lateFileOptions);
+      const bytes = await readPublished(join(path, name), this.path, lateFileOptions, pending);
       let value: unknown;
       try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_late_record'); }
       const parsed = lateRecordSchema.safeParse(value);
@@ -763,7 +811,7 @@ export class CheckpointJournal {
       if (!state.finalized) throw new Error('checkpoint_late_requires_finalization');
       const intent = state.records.find(row => row.type === 'intent' && row.cell === cell && row.paidAttempt?.id === attempt.id && row.paidAttempt.kind === attempt.kind);
       if (!intent) throw new Error('checkpoint_late_missing_intent');
-      const records = await this.readLateAuditValidated(state);
+      const records = await recoverPublications(pending => this.readLateAuditValidated(state, pending));
       const prior = records.find(record => record.paidAttempt.id === attempt.id);
       if (prior && prior.reviewBytes !== rawReviewBytes) throw new Error('checkpoint_late_conflict');
       const finalizationDigest = state.records.at(-1)!.digest;
@@ -777,7 +825,7 @@ export class CheckpointJournal {
       // Reflush acknowledged history too: a prior process may have lost an fsync acknowledgment.
       for (const existing of records) await this.syncLateRecord(existing);
       if (prior) return;
-      await writeExclusive(join(path, eventFile(record.sequence)), bytes, lateFileOptions.maxBytes);
+      await publishExclusive(this.path, join(path, eventFile(record.sequence)), bytes, lateFileOptions.maxBytes);
       await this.syncLateRecord(record);
     });
   }
@@ -888,11 +936,13 @@ export class CheckpointJournal {
       if (state.finalized) throw new Error('checkpoint_finalized');
       if (state.records.some(record => record.type === 'intent')) throw new Error('checkpoint_binding_closed');
       const path = join(this.path, binding.file);
-      try { await writeExclusive(path, bytes); }
+      try { await publishExclusive(this.path, path, bytes); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (await readSafe(path, true) !== bytes) throw new Error('checkpoint_binding_conflict');
-        await syncExisting(path, bytes, true);
+        await recoverPublications(async pending => {
+          if (await readPublished(path, this.path, { singleLink: true }, pending) !== bytes) throw new Error('checkpoint_binding_conflict');
+        });
+        await syncExisting(path, bytes, true, { singleLink: true });
       }
       await this.append({ type: 'binding', binding });
     });
@@ -935,14 +985,6 @@ export class CheckpointJournal {
       const state = await this.read();
       if (state.finalized) throw new Error('checkpoint_finalized');
       const existing = state.records.find(record => record.type === 'result' && record.cell === cell && record.paidAttempt?.id === attempt.id);
-      const priorSuccess = state.successes.find(success => success.cell === cell);
-      if (priorSuccess) {
-        if (captured.kind === 'success' && priorSuccess.paidAttempt.id === attempt.id && priorSuccess.paidAttempt.kind === attempt.kind && priorSuccess.reviewBytes === captured.reviewBytes) {
-          await this.syncRecord(existing!);
-          return;
-        }
-        throw new Error('checkpoint_success_immutable');
-      }
       if (existing) {
         if (existing.result?.reviewSha256 === sha256(captured.reviewBytes) && existing.result.kind === captured.kind && existing.result.chunk === captured.chunk && existing.paidAttempt?.kind === attempt.kind && (captured.kind !== 'failure' || existing.result.possiblyBilled === captured.possiblyBilled)) {
           await this.syncRecord(existing);
@@ -950,12 +992,16 @@ export class CheckpointJournal {
         }
         throw new Error('checkpoint_terminal_result_exists');
       }
+      if (state.successes.some(success => success.cell === cell)) throw new Error('checkpoint_success_immutable');
       if (!state.records.some(record => record.type === 'intent' && record.cell === cell && record.paidAttempt?.id === attempt.id && record.paidAttempt.kind === attempt.kind)) throw new Error('checkpoint_missing_intent');
       const resultFile = resultFileFor(cell, attempt), resultPath = join(this.path, 'results', resultFile);
-      try { await writeExclusive(resultPath, captured.reviewBytes); }
+      try { await publishExclusive(this.path, resultPath, captured.reviewBytes); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        await syncExisting(resultPath, captured.reviewBytes, true);
+        await recoverPublications(async pending => {
+          if (await readPublished(resultPath, this.path, { singleLink: true }, pending) !== captured.reviewBytes) throw new Error('checkpoint_changing_source');
+        });
+        await syncExisting(resultPath, captured.reviewBytes, true, { singleLink: true });
       }
       await this.append({ type: 'result', cell, paidAttempt: attempt, result: { kind: captured.kind, chunk: captured.chunk, reviewSha256: sha256(captured.reviewBytes), resultFile, ...(captured.kind === 'failure' ? { possiblyBilled: captured.possiblyBilled } : {}) } });
     });
