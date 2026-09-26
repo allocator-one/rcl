@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -78,6 +78,13 @@ it('retains separate original calls with identical visible model and timing fiel
   await appendCalls([call('operation:0'), call('operation:1')], dir);
   expect((await records('calls.jsonl')).map(row => row.recordId)).toEqual(['operation:0', 'operation:1']);
   expect((await loadModelStats({ dir, now }))[0]?.calls).toBe(2);
+});
+
+it('rejects mixed retained and legacy batches before creating history', async () => {
+  const missing = join(dir, 'mixed');
+  await expect(appendCalls([call('operation:0'), { ...call('legacy:0'), recordId: undefined }], missing))
+    .rejects.toThrow('mixed_precision_batch');
+  await expect(readFile(join(missing, 'calls.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
 it('refuses an existing record identity reused for different evidence without changing history', async () => {
@@ -217,6 +224,17 @@ it('flushes previously created ancestor entries again after a failed directory f
   await expect(readFile(join(nested, 'calls.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
   await appendCalls([call('operation:0')], nested);
   expect((await loadModelStats({ dir: nested, now }))[0]?.calls).toBe(1);
+});
+
+it('keeps a published retained-creation intent for a later cooperating process', async () => {
+  const nested = join(dir, 'nested', 'store');
+  await appendCalls([call('operation:0')], nested);
+  const intentRoot = (await readdir(dir)).find(name => name.startsWith('.rcl-model-stats-intent-'))!;
+  expect(JSON.parse(await readFile(join(dir, intentRoot, 'intent.json'), 'utf8'))).toMatchObject({
+    version: 1, target: nested, anchor: dir, phase: 'published',
+  });
+  await appendCalls([call('operation:1')], nested);
+  expect((await loadModelStats({ dir: nested, now }))[0]?.calls).toBe(2);
 });
 
 it.each(['calls', 'outcomes'] as const)('surfaces a read-only %s store and permits the exact batch in a writable override', async kind => {

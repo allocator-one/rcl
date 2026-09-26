@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
-import { mkdir, open, readFile, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js';
 
@@ -152,34 +153,136 @@ function readableRecords<T extends PrecisionRecord>(records: T[]): T[] {
   return accepted;
 }
 
-// A failed parent fsync leaves a created directory entry pending in this process.
-// Retry that bounded chain, but never sync unrelated, pre-existing ancestors.
+// Legacy writes retain their original fast directory preparation. Retained writes
+// use a durable intent so a cooperating process can repair a creator crash.
 const pendingDirectorySyncs = new Map<string, string[]>();
+type DurableIntent = { version: 1; target: string; anchor: string; phase: 'creating' | 'published' };
+
+function intentDirectory(anchor: string, target: string): string {
+  const id = createHash('sha256').update(target).digest('hex');
+  return join(anchor, `.rcl-model-stats-intent-${id}`);
+}
+
+function validIntent(value: unknown, target: string): value is DurableIntent {
+  if (!value || typeof value !== 'object') return false;
+  const intent = value as Partial<DurableIntent>;
+  return intent.version === 1 && intent.target === target && typeof intent.anchor === 'string' &&
+    (intent.phase === 'creating' || intent.phase === 'published');
+}
+
+async function readIntent(path: string, target: string): Promise<DurableIntent | undefined> {
+  let raw: string;
+  try { raw = await readFile(join(path, 'intent.json'), 'utf8'); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new Error('unsafe_precision_intent'); }
+  if (!validIntent(value, target)) throw new Error('unsafe_precision_intent');
+  return value;
+}
+
+async function writeIntent(path: string, value: DurableIntent): Promise<void> {
+  const destination = join(path, 'intent.json');
+  const temporary = join(path, `.intent-${randomUUID()}.tmp`);
+  const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try { await handle.writeFile(JSON.stringify(value) + '\n'); await handle.sync(); }
+  finally { await handle.close(); }
+  try { await rename(temporary, destination); }
+  finally { await unlink(temporary).catch(() => undefined); }
+  await syncNativeDirectory(path);
+}
+
+async function nearestExistingAncestor(target: string): Promise<string> {
+  for (let path = target; ; path = dirname(path)) {
+    try {
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('unsafe_precision_store');
+      return await realpath(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (dirname(path) === path) throw new Error('durable_precision_anchor_required');
+    }
+  }
+}
+
+async function discoverIntent(target: string): Promise<{ root: string; intent: DurableIntent } | undefined> {
+  for (let path = target; ; path = dirname(path)) {
+    const root = intentDirectory(path, target);
+    const intent = await readIntent(root, target);
+    if (intent) return { root, intent };
+    if (dirname(path) === path) return undefined;
+  }
+}
+
+async function syncCreatedChain(target: string, anchor: string): Promise<void> {
+  for (let path = target; ; path = dirname(path)) {
+    if (dirname(path) === path) throw new Error('durable_precision_anchor_required');
+    await syncNativeDirectory(path);
+    if (path === anchor) return;
+  }
+}
+
+/**
+ * Retained writes publish a durable intent before mkdir. Cooperating writers
+ * discover it from the target's ancestors and repair its bounded chain before
+ * any acknowledgement; legacy pre-existing directories have no such intent.
+ */
+async function prepareRetainedDirectory(inputDir: string): Promise<string> {
+  const target = resolve(inputDir);
+  let discovered = await discoverIntent(target);
+  if (!discovered) {
+    try {
+      const existing = await lstat(target);
+      if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error('unsafe_precision_store');
+      return await realpath(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const anchor = await nearestExistingAncestor(target);
+    if (dirname(anchor) === anchor) throw new Error('durable_precision_anchor_required');
+    const root = intentDirectory(anchor, target);
+    try { await mkdir(root, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    await syncNativeDirectory(anchor);
+    discovered = { root, intent: { version: 1, target, anchor, phase: 'creating' } };
+  }
+
+  await withNativeLock(discovered.root, 'model-stats-intent', async () => {
+    let intent = await readIntent(discovered!.root, target);
+    if (!intent) {
+      intent = discovered!.intent;
+      await writeIntent(discovered!.root, intent);
+    }
+    if (intent.phase === 'creating') {
+      await mkdir(target, { recursive: true, mode: 0o700 });
+      const dir = await realpath(target);
+      if (dir !== target) throw new Error('unsafe_precision_store');
+      await syncCreatedChain(dir, intent.anchor);
+      await writeIntent(discovered!.root, { ...intent, phase: 'published' });
+    }
+  });
+  return await realpath(target);
+}
 
 async function syncDirectoryAncestors(inputDir: string): Promise<string> {
   const target = resolve(inputDir);
   const firstCreated = await mkdir(target, { recursive: true, mode: 0o700 });
   const dir = await realpath(target);
   let paths = pendingDirectorySyncs.get(dir) ?? [];
-
   if (firstCreated) {
     const boundary = await realpath(dirname(firstCreated));
     const created: string[] = [];
-    for (let path = dir; ; path = dirname(path)) {
+    for (let path = dir; dirname(path) !== path; path = dirname(path)) {
       created.push(path);
       if (path === boundary) break;
-      if (dirname(path) === path) throw new Error('invalid_precision_store');
     }
     paths = [...new Set([...paths, ...created])];
   }
-
   if (paths.length === 0) return dir;
-  try {
-    for (const path of paths) await syncNativeDirectory(path);
-  } catch (error) {
-    pendingDirectorySyncs.set(dir, paths);
-    throw error;
-  }
+  try { for (const path of paths) await syncNativeDirectory(path); }
+  catch (error) { pendingDirectorySyncs.set(dir, paths); throw error; }
   pendingDirectorySyncs.delete(dir);
   return dir;
 }
@@ -197,16 +300,15 @@ async function appendJsonl(inputDir: string, file: string, input: PrecisionRecor
   // Freeze and validate the entire batch before making any filesystem changes.
   const records = JSON.parse(JSON.stringify(input)) as PrecisionRecord[];
   records.forEach(validateMetadata);
+  const retained = records.some(record => record.recordId !== undefined);
+  if (retained && records.some(record => record.recordId === undefined)) throw new Error('mixed_precision_batch');
   identityIndex(records);
-  // An earlier mkdir may have succeeded before its parent flush failed. Sync
-  // its ancestry on every retry, but never attempt the filesystem root.
-  const dir = await syncDirectoryAncestors(inputDir);
+  const dir = retained ? await prepareRetainedDirectory(inputDir) : await syncDirectoryAncestors(inputDir);
   await withNativeLock(join(dir, 'model-stats-locks'), file, async () => {
     const handle = await open(join(dir, file), constants.O_CREAT | constants.O_RDWR | constants.O_APPEND |
       (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600);
     try {
       if (!(await handle.stat()).isFile()) throw new Error('invalid_precision_store');
-      const retained = records.some(record => record.recordId !== undefined);
       const raw = retained ? await handle.readFile('utf8') : '';
       const existingRecords = retained ? readableRecords(parseJsonl<PrecisionRecord>(raw)) : [];
       const existing = identityIndex(existingRecords);
