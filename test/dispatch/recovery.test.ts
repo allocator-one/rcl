@@ -243,16 +243,27 @@ describe('owned missing-review executor', () => {
   }));
 
   it('ends on deadline despite a noncooperative provider and preserves its uncertain cost', async () => runFixture(async (input, commonDir) => {
-    const called = vi.fn(() => new Promise<ModelReview>(() => {}));
+    let providerStarted!: () => void;
+    const started = new Promise<void>(resolve => { providerStarted = resolve; });
+    const called = vi.fn(() => { providerStarted(); return new Promise<ModelReview>(() => {}); });
     await withNativeTarget(commonDir, target, async ownership => {
       const journal = await CheckpointJournal.create({ commonDir, namespace: 'deadline', plan: input.plan, ownership });
-      const result = await recoverReviewerAssignments({ ...input, commonDir, ownership, journal, fraction: 2 / 3,
-        maxAdditionalCalls: 2, maxAttemptsPerCell: 3, remainingMs: 50, timeoutMs: 1_000, concurrency: 1,
-        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
-      expect(called).toHaveBeenCalledTimes(1);
-      expect(result.preview.successfulSeats).toBe(1);
-      expect(result.preview.nextAction).toBe('time_limit');
-      expect((await journal.read()).uncertain).toHaveLength(1);
+      // Advance the unchanged 50 ms budget only after the durable intent reaches
+      // the provider. Real filesystem scheduling must not turn this hanging-call
+      // regression into the separate pre-dispatch-expiry case.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+      try {
+        const running = recoverReviewerAssignments({ ...input, commonDir, ownership, journal, fraction: 2 / 3,
+          maxAdditionalCalls: 2, maxAttemptsPerCell: 3, remainingMs: 50, timeoutMs: 1_000, concurrency: 1,
+          adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
+        await started;
+        await vi.advanceTimersByTimeAsync(50);
+        const result = await running;
+        expect(called).toHaveBeenCalledTimes(1);
+        expect(result.preview.successfulSeats).toBe(1);
+        expect(result.preview.nextAction).toBe('time_limit');
+        expect((await journal.read()).uncertain).toHaveLength(1);
+      } finally { vi.useRealTimers(); }
     });
   }));
 });

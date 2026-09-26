@@ -1,7 +1,9 @@
 import { decodeCapturedInputs } from '../dispatch/captured-inputs.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointState, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
 import { decodeOriginalLaunch, remainingOriginalBudget, type OriginalBudget } from '../dispatch/original-launch.js';
-import { classifyMissingReview } from '../dispatch/recovery-policy.js';
+import { classifyMissingReview, previewReviewerRecovery, type RecoveryPreview } from '../dispatch/recovery-policy.js';
+import { resolveQuorumPolicy } from '../dispatch/quorum.js';
+import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
 import { recoveryAttemptsFromCheckpoint } from '../dispatch/recovery.js';
 import { decodeRecoveryOperation, remainingRecoveryBudget, type RecoveryBudget } from '../dispatch/recovery-operation.js';
 import { stableStringify } from '../report/run-header.js';
@@ -246,4 +248,74 @@ export function formatReviewerStatus(status: ReviewerStatus): string {
   return `${status.target} run ${status.runId}: ${status.health.successfulSeats}/${status.health.minimumSuccessful} complete seats; ` +
     `${status.attempts.physical} physical attempts (${status.attempts.uncertain} uncertain); ` +
     `${status.finalized ? 'finalized' : 'open'}; terminal artifact ${status.terminalArtifact.available ? 'available' : 'unavailable'}.`;
+}
+
+
+export interface InspectReviewerRecoveryPreviewInput extends InspectReviewerStatusInput {
+  maxAdditionalCalls: number;
+  maxAttemptsPerCell: number;
+  timeBudgetMs: number;
+}
+
+export interface ReviewerRecoveryPreview {
+  version: 1;
+  scope: 'local_structural_preview_only';
+  authorization: 'not_recovery_authorization_or_server_approval';
+  target: string;
+  runId: string;
+  source: { reportSha256: string; checkpointSha256: string; capturedInputsSha256: string; planDigest: string };
+  proposedBudget: { maxAdditionalCalls: number; maxAttemptsPerCell: number; timeBudgetMs: number };
+  recovery: RecoveryPreview;
+  eligibleAssignments: Array<{ cell: string; seat: string; chunk: number; model: string; role: string; route: string }>;
+}
+
+/**
+ * Read-only proposal for a new successor. The proposed time budget is not a
+ * renewed operation deadline. Native ownership, current input identity, spent
+ * attempts and producer authority must be checked by the guarded launch.
+ */
+export async function inspectReviewerRecoveryPreview(input: InspectReviewerRecoveryPreviewInput): Promise<ReviewerRecoveryPreview> {
+  const request = requireInput(input);
+  const proposedBudget = { maxAdditionalCalls: input.maxAdditionalCalls, maxAttemptsPerCell: input.maxAttemptsPerCell, timeBudgetMs: input.timeBudgetMs };
+  if (![proposedBudget.maxAdditionalCalls, proposedBudget.maxAttemptsPerCell].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 1_000_000) ||
+    !Number.isSafeInteger(proposedBudget.timeBudgetMs) || proposedBudget.timeBudgetMs < 1 || proposedBudget.timeBudgetMs > MAX_TIMER_DELAY_MS) {
+    throw new Error('reviewer_preview_invalid_budget');
+  }
+  const run = await decodeRun(request.commonDir, request.target, request.runId, request.nowMs);
+  if (!run.state.finalized) throw new Error('reviewer_preview_source_unsealed');
+  const terminal = await run.journal.readTerminalReport();
+  if (!terminal) throw new Error('reviewer_preview_terminal_missing');
+  const inspected = inspectReviewerArtifact(terminal.reviewerArtifactBytes, {
+    expectedReportBytes: terminal.reportBytes, expectedRunId: request.runId, expectedTarget: request.target, expectedPlan: run.plan,
+  });
+  const proof = await exportCheckpointProof(run.journal);
+  if (inspected.proof.digest !== proof.digest || inspected.reportSha256 !== terminal.reportSha256 || inspected.captured.digest !== run.captureDigest) {
+    throw new Error('reviewer_preview_source_mismatch');
+  }
+  const chain = await sourceLineage(request.commonDir, request.target, run, request.runId, request.nowMs);
+  const merged = chainedState(chain.runs);
+  const attempts = chain.runs.flatMap(item => recoveryAttemptsFromCheckpoint(item.state));
+  const policy = resolveQuorumPolicy(run.plan.roster.length, inspected.captured.policy.fraction);
+  const recovery = previewReviewerRecovery(run.plan.cells, attempts, policy, {
+    ...proposedBudget, additionalCallsUsed: 0, remainingMs: proposedBudget.timeBudgetMs,
+  });
+  const health = seatStatus(run.plan, merged, inspected.captured.policy.fraction);
+  if (health.successfulSeats !== inspected.artifact.health.successfulSeats.length || health.minimumSuccessful !== inspected.artifact.health.policy.minimumSuccessful ||
+    health.conclusive !== inspected.artifact.health.conclusive) throw new Error('reviewer_preview_health_mismatch');
+  return freeze({ version: 1, scope: 'local_structural_preview_only', authorization: 'not_recovery_authorization_or_server_approval',
+    target: request.target, runId: request.runId,
+    source: { reportSha256: terminal.reportSha256, checkpointSha256: proof.digest, capturedInputsSha256: run.captureDigest, planDigest: run.plan.digest },
+    proposedBudget, recovery,
+    eligibleAssignments: recovery.eligibleCallIndices.map(index => {
+      const cell = run.plan.cells[index]!;
+      return { cell: cell.id, seat: cell.seat, chunk: cell.chunk, model: cell.model, role: cell.role, route: cell.route };
+    }),
+  });
+}
+
+export function formatReviewerRecoveryPreview(preview: ReviewerRecoveryPreview): string {
+  return `${preview.target} run ${preview.runId}: ${preview.recovery.successfulSeats}/${preview.recovery.policy.minimumSuccessful} complete seats; ` +
+    `${preview.recovery.successesNeeded} still needed; ${preview.eligibleAssignments.length} eligible missing chunks; ` +
+    `${preview.recovery.blockedCells.length} blocked chunks; next: ${preview.recovery.nextAction}. ` +
+    'Read-only proposal; a guarded launch must revalidate source, accounting and authority.';
 }

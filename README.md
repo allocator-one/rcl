@@ -192,6 +192,31 @@ through its retained host handle. Retry evidence with `rcl telemetry flush --run
 <run-id>`, not another council. Intent interpretation and finding adjudication
 remain human/agent decisions; native/enforced evidence and CI still gate merging.
 
+### Private reviewer capture and read-only preview
+
+The --retain-reviewers option stores exact prepared prompts, configuration,
+patch, roster and per-chunk results in the private Git common-directory
+checkpoint store. It currently requires a guarded patch review with explicit
+head/base and --for-pr bindings, and telemetry disabled. Private reviewer
+artifacts contain raw prompts and results; ordinary reports do not contain them.
+Legacy reports without this capture cannot be reconstructed into resumable runs.
+
+    rcl reviewers status repo-123 --run <original-run-uuid> --json
+    rcl reviewers preview repo-123 --run <original-run-uuid> --max-additional-calls 3 --max-attempts-per-cell 2 --time-budget-ms 120000 --json
+
+Status reports complete blocking seats, missing chunks, saved attempts and
+uncertain outcomes. Preview requires a sealed source and its exact retained
+report/artifact pair. It proposes missing assignments using the frozen quorum
+policy, retains successful assignments, and excludes uncertain and known
+permanent failures. The per-cell limit includes the assignment's prior attempts.
+Already-quorate sources have no eligible reviewer calls.
+
+Both commands are read-only and make no provider or evidence-delivery calls.
+Preview bounds describe a proposed new successor; they do not renew an existing
+operation or change native caps. A preview does not authorize a retry, admit a
+report or establish server approval. Supported successor execution and compatible
+backend authority are separate requirements.
+
 ### `rcl converge-attempt`
 
 Low-level accounting command retained for legacy callers. The generated

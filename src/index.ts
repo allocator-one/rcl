@@ -43,7 +43,7 @@ import { projectCheckpointReport, type CheckpointReportProjection } from './repo
 import { captureSupplementalAsync } from './report/supplemental-async.js';
 import { describeReviewerEvidence } from './report/reviewer-evidence.js';
 import { serializeReviewerArtifact } from './report/reviewer-artifact.js';
-import { inspectReviewerStatus, formatReviewerStatus } from './evidence/reviewer-status.js';
+import { inspectReviewerStatus, formatReviewerStatus, inspectReviewerRecoveryPreview, formatReviewerRecoveryPreview } from './evidence/reviewer-status.js';
 import {
   partitionAsyncAssignments,
   asyncTargetKey,
@@ -350,6 +350,25 @@ reviewersCommand.command('status <target>')
     try {
       const status = await inspectReviewerStatus({ commonDir: await resolveGitCommonDir(), target, runId: opts.run });
       console.log(opts.json ? JSON.stringify(status, null, 2) : formatReviewerStatus(status));
+    } catch (error) {
+      console.error(scrubText(error instanceof Error ? error.message : String(error), 500));
+      process.exitCode = 1;
+    }
+  });
+
+reviewersCommand.command('preview <target>')
+  .description('Plan missing assignments from a sealed local source without spending attempts or calling providers')
+  .requiredOption('--run <uuid>', 'Exact retained source run UUID')
+  .requiredOption('--max-additional-calls <n>', 'Proposed finite call budget for a new successor')
+  .requiredOption('--max-attempts-per-cell <n>', 'Proposed total attempt limit per original assignment, including its history')
+  .requiredOption('--time-budget-ms <n>', 'Proposed duration for a new successor; does not renew an existing deadline')
+  .option('--json', 'Print machine-readable preview')
+  .action(async (target: string, opts: { run: string; maxAdditionalCalls: string; maxAttemptsPerCell: string; timeBudgetMs: string; json?: boolean }) => {
+    try {
+      const integer = (value: string): number => /^[1-9][0-9]*$/.test(value) ? Number(value) : Number.NaN;
+      const preview = await inspectReviewerRecoveryPreview({ commonDir: await resolveGitCommonDir(), target, runId: opts.run,
+        maxAdditionalCalls: integer(opts.maxAdditionalCalls), maxAttemptsPerCell: integer(opts.maxAttemptsPerCell), timeBudgetMs: integer(opts.timeBudgetMs) });
+      console.log(opts.json ? JSON.stringify(preview, null, 2) : formatReviewerRecoveryPreview(preview));
     } catch (error) {
       console.error(scrubText(error instanceof Error ? error.message : String(error), 500));
       process.exitCode = 1;

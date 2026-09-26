@@ -15,7 +15,7 @@ import { serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
-import { formatReviewerStatus, inspectReviewerStatus } from '../../src/evidence/reviewer-status.js';
+import { formatReviewerStatus, inspectReviewerStatus, inspectReviewerRecoveryPreview } from '../../src/evidence/reviewer-status.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -152,5 +152,67 @@ describe('local reviewer status', () => {
     expect(JSON.stringify(status)).not.toContain('reviewerArtifactBytes');
     await writeFile(join(checkpointPath(commonDir, target, runId), 'terminal-report', 'reviewer-artifact.json'), '{"tampered":true}\n');
     await expect(inspectReviewerStatus({ commonDir, target, runId: successorRunId, nowMs: 2_000 })).rejects.toThrow();
+  });
+});
+
+
+describe('local missing-reviewer preview', () => {
+  async function seal(value: Awaited<ReturnType<typeof fixture>>) {
+    await withNativeTarget(value.commonDir, target, async ownership => {
+      await value.journal.finalize(ownership);
+      await value.journal.retainTerminalReport(await terminalPair(runId, value.plan, await exportCheckpointProof(value.journal), value.files), ownership);
+    });
+  }
+
+  it('plans only missing chunks from a sealed source and preserves uncertain calls without authorizing a launch', async () => {
+    const value = await fixture();
+    await seal(value);
+    const before = (await exportCheckpointProof(value.journal)).digest;
+    const result = await inspectReviewerRecoveryPreview({ commonDir: value.commonDir, target, runId, nowMs: 20_000,
+      maxAdditionalCalls: 2, maxAttemptsPerCell: 2, timeBudgetMs: 30_000 });
+    expect(result).toMatchObject({ scope: 'local_structural_preview_only', authorization: 'not_recovery_authorization_or_server_approval',
+      proposedBudget: { maxAdditionalCalls: 2, maxAttemptsPerCell: 2, timeBudgetMs: 30_000 },
+      recovery: { successfulSeats: 1, successesNeeded: 1, remainingCalls: 2, nextAction: 'retry_missing_assignments' } });
+    expect(result.eligibleAssignments.map(item => item.cell)).toEqual(['b:0', 'b:1']);
+    expect(result.recovery.blockedCells).toContainEqual({ cell: 'c:0', reason: 'uncertain_outcome' });
+    expect(result.source.reportSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.source.checkpointSha256).toBe(before);
+    expect((await exportCheckpointProof(value.journal)).digest).toBe(before);
+    expect(JSON.stringify(result)).not.toContain('prompt b:0');
+    expect(JSON.stringify(result)).not.toContain('reviewBytes');
+  });
+
+  it('refuses open or unretained sources and invalid proposed budgets without changing saved bounds', async () => {
+    const value = await fixture();
+    const request = { commonDir: value.commonDir, target, runId, nowMs: 4_000,
+      maxAdditionalCalls: 2, maxAttemptsPerCell: 2, timeBudgetMs: 30_000 };
+    await expect(inspectReviewerRecoveryPreview(request)).rejects.toThrow('reviewer_preview_source_unsealed');
+    await withNativeTarget(value.commonDir, target, async ownership => { await value.journal.finalize(ownership); });
+    await expect(inspectReviewerRecoveryPreview(request)).rejects.toThrow('reviewer_preview_terminal_missing');
+    await withNativeTarget(value.commonDir, target, async ownership => {
+      await value.journal.retainTerminalReport(await terminalPair(runId, value.plan, await exportCheckpointProof(value.journal), value.files), ownership);
+    });
+    const before = (await exportCheckpointProof(value.journal)).digest;
+    const proposed = await inspectReviewerRecoveryPreview({ ...request, maxAttemptsPerCell: 3 });
+    expect(proposed.proposedBudget.maxAttemptsPerCell).toBe(3);
+    expect((await inspectReviewerStatus(request)).budget.maxAttemptsPerCell).toBe(2);
+    await expect(inspectReviewerRecoveryPreview({ ...request, maxAdditionalCalls: 0 })).rejects.toThrow('reviewer_preview_invalid_budget');
+    expect((await exportCheckpointProof(value.journal)).digest).toBe(before);
+  });
+
+  it('reports the existing report path with no eligible calls once retained seats already reach quorum', async () => {
+    const value = await fixture();
+    await withNativeTarget(value.commonDir, target, async ownership => {
+      for (const chunk of [0, 1]) {
+        const attempt = { id: `retry-b-${chunk}`, kind: 'paid' as const };
+        await value.journal.recordIntent(`b:${chunk}`, attempt, ownership);
+        await value.journal.recordResult(`b:${chunk}`, attempt, { kind: 'success', chunk, reviewBytes: review('model-b') }, ownership);
+      }
+    });
+    await seal(value);
+    const result = await inspectReviewerRecoveryPreview({ commonDir: value.commonDir, target, runId, nowMs: 4_000,
+      maxAdditionalCalls: 1, maxAttemptsPerCell: 2, timeBudgetMs: 30_000 });
+    expect(result.recovery).toMatchObject({ successfulSeats: 2, successesNeeded: 0, nextAction: 'build_report' });
+    expect(result.eligibleAssignments).toEqual([]);
   });
 });

@@ -40,6 +40,12 @@ describe('recovery operation descriptor', () => {
     expect(Object.isFrozen(operation)).toBe(true);
   });
 
+  it('retains a distinct successor native claim when one is supplied', () => {
+    const operation = createRecoveryOperation(input({ successorNativeClaim: { attempt: 26, round: 14 } }));
+    expect(decodeRecoveryOperation(encodeRecoveryOperation(operation)).successorNativeClaim).toEqual({ attempt: 26, round: 14 });
+    expect(() => createRecoveryOperation(input({ successorNativeClaim: { attempt: 25, round: 14 } }))).toThrow('recovery_operation_successor_native_claim_reused');
+  });
+
   it('accepts v7 run IDs but rejects source/successor reuse and malformed persisted bounds', () => {
     expect(createRecoveryOperation(input()).sourceRunId).toBe('01a0daa6-b575-759b-942c-e879460be5bf');
     expect(() => createRecoveryOperation(input({ successorRunId: '01A0DAA6-B575-759B-942C-E879460BE5BF' }))).toThrow('recovery_operation_source_successor_reused');

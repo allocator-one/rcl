@@ -17,6 +17,8 @@ export interface RecoveryOperationInput {
   planDigest: string;
   target: string;
   originalNativeClaim: { attempt: number; round: number };
+  /** The separately claimed native attempt that owns this successor. */
+  successorNativeClaim?: { attempt: number; round: number };
   startedAtMs: number;
   expiresAtMs: number;
   maxAdditionalCalls: number;
@@ -58,9 +60,9 @@ function uuid(value: unknown, error: string): asserts value is string { if (type
 
 function validate(input: RecoveryOperationInput | RecoveryOperation, requireVersion: boolean): RecoveryOperation {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('recovery_operation_invalid_descriptor');
-  exactKeys(input as unknown as Record<string, unknown>, requireVersion
-    ? ['version', 'operationId', 'successorRunId', 'sourceRunId', 'sourceReportSha256', 'sourceCheckpointSha256', 'capturedInputsSha256', 'planDigest', 'target', 'originalNativeClaim', 'startedAtMs', 'expiresAtMs', 'maxAdditionalCalls', 'maxAttemptsPerCell']
-    : ['operationId', 'successorRunId', 'sourceRunId', 'sourceReportSha256', 'sourceCheckpointSha256', 'capturedInputsSha256', 'planDigest', 'target', 'originalNativeClaim', 'startedAtMs', 'expiresAtMs', 'maxAdditionalCalls', 'maxAttemptsPerCell'], 'recovery_operation_unknown_field');
+  const fields = ['operationId', 'successorRunId', 'sourceRunId', 'sourceReportSha256', 'sourceCheckpointSha256', 'capturedInputsSha256', 'planDigest', 'target', 'originalNativeClaim', 'startedAtMs', 'expiresAtMs', 'maxAdditionalCalls', 'maxAttemptsPerCell'];
+  if (input.successorNativeClaim !== undefined) fields.push('successorNativeClaim');
+  exactKeys(input as unknown as Record<string, unknown>, requireVersion ? ['version', ...fields] : fields, 'recovery_operation_unknown_field');
   if (requireVersion && (input as RecoveryOperation).version !== VERSION) throw new Error('recovery_operation_invalid_version');
   uuid(input.operationId, 'recovery_operation_invalid_operation_id');
   uuid(input.successorRunId, 'recovery_operation_invalid_successor_run_id');
@@ -76,6 +78,14 @@ function validate(input: RecoveryOperationInput | RecoveryOperation, requireVers
   exactKeys(claim as Record<string, unknown>, ['attempt', 'round'], 'recovery_operation_unknown_field');
   safeInteger(claim.attempt, 'recovery_operation_invalid_native_attempt', 1, MAX_LIMIT);
   safeInteger(claim.round, 'recovery_operation_invalid_native_round', 1, MAX_LIMIT);
+  const successor = input.successorNativeClaim;
+  if (successor !== undefined) {
+    if (!successor || typeof successor !== 'object' || Array.isArray(successor)) throw new Error('recovery_operation_invalid_successor_native_claim');
+    exactKeys(successor as Record<string, unknown>, ['attempt', 'round'], 'recovery_operation_invalid_successor_native_claim');
+    safeInteger(successor.attempt, 'recovery_operation_invalid_successor_native_attempt', 1, MAX_LIMIT);
+    safeInteger(successor.round, 'recovery_operation_invalid_successor_native_round', 1, MAX_LIMIT);
+    if (successor.attempt === claim.attempt && successor.round === claim.round) throw new Error('recovery_operation_successor_native_claim_reused');
+  }
   safeInteger(input.startedAtMs, 'recovery_operation_invalid_started_at', 0);
   safeInteger(input.expiresAtMs, 'recovery_operation_invalid_deadline', 0);
   if (input.expiresAtMs < input.startedAtMs || input.expiresAtMs - input.startedAtMs > MAX_TIMER_DELAY_MS) throw new Error('recovery_operation_invalid_deadline');
@@ -92,6 +102,7 @@ function validate(input: RecoveryOperationInput | RecoveryOperation, requireVers
     planDigest: input.planDigest,
     target: input.target,
     originalNativeClaim: { attempt: claim.attempt, round: claim.round },
+    ...(successor === undefined ? {} : { successorNativeClaim: { attempt: successor.attempt, round: successor.round } }),
     startedAtMs: input.startedAtMs,
     expiresAtMs: input.expiresAtMs,
     maxAdditionalCalls: input.maxAdditionalCalls,

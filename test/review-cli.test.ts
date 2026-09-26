@@ -230,6 +230,13 @@ describe('rcl review — guarded native launch', () => {
         fixture.repo, fixture.env);
       expect(status.status, status.stderr).toBe(0);
       expect(status.stdout).not.toContain('PRIVATE');
+      const preview = await runRclAsync(['reviewers', 'preview', 'guarded-fixture', '--run', report.run.id,
+        '--max-additional-calls', '1', '--max-attempts-per-cell', '2', '--time-budget-ms', '30000', '--json'], fixture.repo, fixture.env);
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(JSON.parse(preview.stdout)).toMatchObject({ scope: 'local_structural_preview_only',
+        recovery: { nextAction: 'build_report', successesNeeded: 0 }, eligibleAssignments: [] });
+      expect(preview.stdout).not.toContain('PRIVATE');
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
       expect(fixture.calls()).toBe(2);
       const admitted = await runRclAsync(['converge-report', '--target', 'guarded-fixture', '--round', '1',
         '--report', 'report.json', '--json'], fixture.repo, { ...fixture.env, RCL_TELEMETRY: 'off' });
