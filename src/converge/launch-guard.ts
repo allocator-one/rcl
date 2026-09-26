@@ -146,7 +146,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');
   }
-  if ((resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
+  // A disposed unadmitted report may already follow the fixed round's commit.
+  if (!disposed && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
   if ((previous.hardFailure || !healthy) && !options.retryReason) {

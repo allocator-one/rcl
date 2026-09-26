@@ -10,7 +10,7 @@ import { previewStaleReport, applyStaleReport } from '../../src/converge/stale-r
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import { sampleResult, sampleReview, sampleFinding } from '../telemetry/fixtures.js';
 
-export async function staleFixture(git = false, withHistory = false) {
+export async function staleFixture(git = false, withHistory: boolean | 'fixed' = false) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-stale-')));
   onTestFinished(() => rm(dir, { recursive: true, force: true }));
   if (git) execFileSync('git',['init','-q',dir]);
@@ -19,7 +19,7 @@ export async function staleFixture(git = false, withHistory = false) {
   const target = 'synthetic-stale';
   if (withHistory) {
     const round = await processRoundReport({gitCommonDir:common,target,round:1,findings:[sampleFinding()]});
-    await recordVerdicts({gitCommonDir:common,target,round:1,verdicts:[{key:round.findings[0]!.identity,verdict:'dismissed',reason:'Existing guard independently verified.'}]});
+    await recordVerdicts({gitCommonDir:common,target,round:1,verdicts:[{key:round.findings[0]!.identity,verdict:withHistory === 'fixed' ? 'fixed' : 'dismissed',reason:'Existing guard independently verified.'}]});
   }
   const report = sampleResult({ reviews: [sampleReview(), sampleReview({model:'openai/gpt', role:'security-auditor', provider:'openai'})] });
   report.run!.converge = { target, round: withHistory ? 2 : 1, attempt: 1 };

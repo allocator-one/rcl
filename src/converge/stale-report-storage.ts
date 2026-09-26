@@ -55,12 +55,17 @@ const snapshotSchema = z.discriminatedUnion('kind',[
     auditCount:z.number().int().positive().max(10000)}).strict(),
 ]);
 
+function hasTemplateLayout(state: ConvergeRunState): boolean {
+  const keys = Object.keys(state);
+  return keys[0] === 'staleReportAudit' && keys.at(-2) === 'staleReportAuditCount' && keys.at(-1) === 'updatedAt';
+}
+
 /** Preserve arbitrary initial bytes; canonical later snapshots share a template and audit prefix. */
 export async function retainStaleSnapshot(common: string, path: string, before: Awaited<ReturnType<typeof readStable>>): Promise<void> {
   const state = decodeOriginalReport(before.text).value as ConvergeRunState;
   let snapshot: z.infer<typeof snapshotSchema> = {kind:'raw',sha256:before.sha256};
   let bytes = before.raw;
-  if (state.staleReportAudit?.length && Object.keys(state)[0] === 'staleReportAudit' && before.text === serializeRecoveryDocument(state)) {
+  if (state.staleReportAudit?.length && hasTemplateLayout(state) && before.text === serializeRecoveryDocument(state)) {
     bytes = Buffer.from(serializeRecoveryDocument({...state,updatedAt:'',staleReportAudit:[],staleReportAuditCount:0}));
     snapshot = {kind:'template',sha256:sha256(bytes),updatedAt:state.updatedAt,auditCount:state.staleReportAudit.length};
   }
@@ -68,19 +73,34 @@ export async function retainStaleSnapshot(common: string, path: string, before: 
   await retainStaleFile(path,Buffer.from(serializeRecoveryDocument(snapshotSchema.parse(snapshot))));
 }
 
-/** A traversal reads each immutable object once and hashes each audit entry once. */
+/** A traversal caches bounded recent objects and hashes each audit entry once. */
 export class StaleHistoryReader {
   readonly prefix: StaleReportEntry[] = [];
   private hash = createHash('sha256').update('{\n  "staleReportAudit": [\n');
   private objects = new Map<string, Awaited<ReturnType<typeof readStable>>>();
-  private decoded = new Map<string, ConvergeRunState>();
+  private objectBytes = 0;
+  private decoded?: {digest: string; body: ConvergeRunState};
   private tails = new WeakMap<ConvergeRunState,string>();
 
   constructor(private common: string) {}
 
   async object(digest: string) {
-    let object = this.objects.get(digest);
-    if (!object) { object = await readStaleObject(this.common,digest); this.objects.set(digest,object); }
+    const cached = this.objects.get(digest);
+    if (cached) {
+      this.objects.delete(digest); this.objects.set(digest,cached);
+      return cached;
+    }
+    const object = await readStaleObject(this.common,digest);
+    const bytes = object.raw.byteLength + object.text.length*2;
+    const maxBytes = 8*1024*1024;
+    if (bytes <= maxBytes) {
+      while (this.objects.size >= 3 || this.objectBytes + bytes > maxBytes) {
+        const oldest = this.objects.entries().next().value!;
+        this.objects.delete(oldest[0]);
+        this.objectBytes -= oldest[1].raw.byteLength + oldest[1].text.length*2;
+      }
+      this.objects.set(digest,object); this.objectBytes += bytes;
+    }
     return object;
   }
 
@@ -112,8 +132,9 @@ export class StaleHistoryReader {
   async snapshot(path: string, expectedDigest: string) {
     const descriptor = snapshotSchema.parse(decodeOriginalReport((await readStable(path)).text).value);
     const object = await this.object(descriptor.sha256);
-    let body = this.decoded.get(descriptor.sha256);
-    if (!body) { body = decodeOriginalReport(object.text).value as ConvergeRunState; this.decoded.set(descriptor.sha256,body); }
+    const body = this.decoded?.digest === descriptor.sha256 ? this.decoded.body
+      : decodeOriginalReport(object.text).value as ConvergeRunState;
+    this.decoded = {digest:descriptor.sha256,body};
     if (descriptor.kind === 'raw') {
       if (object.sha256 !== expectedDigest) throw new Error('stale_report_digest_mismatch');
       return {state:body,body};
@@ -121,7 +142,7 @@ export class StaleHistoryReader {
     if (descriptor.auditCount !== this.prefix.length) throw new Error('stale_report_audit_prefix_mismatch');
     if (body.updatedAt !== '' || body.staleReportAuditCount !== 0 ||
       !Array.isArray(body.staleReportAudit) || body.staleReportAudit.length !== 0 ||
-      Object.keys(body)[0] !== 'staleReportAudit') throw new Error('stale_report_invalid_snapshot');
+      !hasTemplateLayout(body)) throw new Error('stale_report_invalid_snapshot');
     if (this.digest(body,descriptor.updatedAt) !== expectedDigest) throw new Error('stale_report_digest_mismatch');
     return {state:{...body,updatedAt:descriptor.updatedAt,staleReportAudit:this.prefix,staleReportAuditCount:this.prefix.length},body};
   }

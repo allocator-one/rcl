@@ -74,6 +74,7 @@ it.each(['empty','digest','operation','replacement','target','unchanged','admitt
       if (kind === 'unchanged') manifest.inputSha256 = manifest.previousInputSha256;
       if (['replacement','original','report','attempt','run'].includes(kind)) {
         manifest.operationId = randomUUID();
+        expect(manifest.operationId).not.toBe(JSON.parse(state.staleReportAudit![0]!.manifestJson).operationId);
         if (kind !== 'replacement') manifest.inputSha256 = 'e'.repeat(64);
         if (kind === 'original') manifest.previousHeadSha = 'f'.repeat(40);
         if (kind === 'report') manifest.reportSha256 = 'f'.repeat(64);
@@ -158,10 +159,11 @@ it('can inspect original inputs again without admitting their previously dispose
   expect(f.options.run).toHaveBeenCalledTimes(2);
 });
 
-it('detects removal of the latest audit entry while retaining earlier evidence', async () => {
+it('detects accidental latest-entry truncation through the retained audit count', async () => {
   const f = await staleFixture(); await f.prepare(); await f.apply();
   await (await correction(f,'e'.repeat(64))).apply();
   const state = (await loadConvergeRunState(f.dir,f.target))!;
+  // Deliberately retain the count: this models accidental truncation, not coordinated state rewriting.
   state.staleReportAudit!.pop(); await writeFile(f.statePath,JSON.stringify(state));
   const before = await f.bytes();
   await expect(guardReviewLaunch({...f.options,...f.selection})).rejects.toMatchObject({code:'stale_report_audit_invalid'});
@@ -170,7 +172,8 @@ it('detects removal of the latest audit entry while retaining earlier evidence',
 
 it('does not repeatedly serialize the growing historical audit on a guarded launch', async () => {
   const f = await staleFixture(); await f.prepare(); await f.apply();
-  for (let i=1;i<32;i++) await (await correction(f,i.toString(16).padStart(64,'0'))).apply();
+  // Sixteen entries distinguish linear work from the former quadratic traversal.
+  for (let i=1;i<16;i++) await (await correction(f,i.toString(16).padStart(64,'0'))).apply();
   const stringify = JSON.stringify;
   let serializedEntries = 0;
   const spy = vi.spyOn(JSON,'stringify').mockImplementation((...args: Parameters<typeof JSON.stringify>) => {
@@ -180,6 +183,18 @@ it('does not repeatedly serialize the growing historical audit on a guarded laun
   });
   try {
     await expect(guardReviewLaunch({...f.options,...f.selection})).resolves.toMatchObject({attempt:2});
-    expect(serializedEntries).toBeLessThanOrEqual(4*32);
+    expect(serializedEntries).toBeLessThanOrEqual(4*16);
   } finally { spy.mockRestore(); }
 },60000);
+
+it.each(['original','changed-spec'] as const)('allows inspected %s inputs after a prior fixed round', async kind => {
+  const f = await staleFixture(false,'fixed'); await f.prepare(); await f.apply();
+  const inputSha256 = kind === 'original' ? f.options.inputSha256 : 'e'.repeat(64);
+  const manifest = await previewStaleReport({...f.selection,headSha:f.options.headSha,inputSha256},f.dir);
+  const path = join(f.cwd,'fixed-round.json'); await writeFile(path,JSON.stringify(manifest));
+  await applyStaleReport({manifest:path,manifestSha256:sha256(JSON.stringify(manifest)),mode:'apply'},f.dir);
+  f.options.run.mockResolvedValueOnce({runId:randomUUID(),reportJsonSha256:'f'.repeat(64),successfulReviews:2,
+    totalReviews:2,deliveryPending:false,hardFailure:false});
+  await expect(guardReviewLaunch({...f.options,inputSha256})).resolves.toMatchObject({attempt:2});
+  expect(f.options.run).toHaveBeenCalledTimes(2);
+});
