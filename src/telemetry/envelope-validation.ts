@@ -54,6 +54,10 @@ const run = z.object({
 }).passthrough().superRefine((v, ctx) => {
   if (Date.parse(v.finished_at) < Date.parse(v.started_at)) ctx.addIssue({ code: 'custom', path: ['finished_at'], message: 'Finish precedes start' });
   if (v.historical_source && v.provenance !== 'backfill') ctx.addIssue({ code: 'custom', path: ['historical_source'], message: 'Historical source requires backfill provenance' });
+  if (v.converge?.recovery_source !== undefined &&
+      (v.gating?.bound_classification_protocol !== 1 || v.converge.round == null || v.converge.round < 1)) {
+    ctx.addIssue({ code: 'custom', path: ['converge', 'recovery_source'], message: 'Recovery source requires bound classification protocol 1 and a positive converge round' });
+  }
 });
 
 const provenance = z.object({
@@ -92,9 +96,14 @@ const envelopeSchema = z.object({
   delivery: z.object({ mode: z.enum(['direct', 'retried']), spooled_at: optional(text(500)) }),
 }).passthrough().superRefine((v, ctx) => {
   if (new Set(v.findings.map((f) => f.ref)).size !== v.findings.length) ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Duplicate finding reference' });
-  const describedKeys = new Set(v.findings.filter(f => f.claim_descriptor !== undefined).map(f => f.identity_key));
+  const identityCounts = new Map<string, number>();
+  const describedKeys = new Set<string>();
+  for (const finding of v.findings) {
+    identityCounts.set(finding.identity_key, (identityCounts.get(finding.identity_key) ?? 0) + 1);
+    if (finding.claim_descriptor !== undefined) describedKeys.add(finding.identity_key);
+  }
   for (const key of describedKeys) {
-    if (v.findings.filter(f => f.identity_key === key).length > 1) ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Described sightings require unique report keys' });
+    if ((identityCounts.get(key) ?? 0) > 1) ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Described sightings require unique report keys' });
   }
   const kinds = v.artifacts_declared.map((a) => a.kind);
   if (new Set(kinds).size !== kinds.length || !kinds.includes('report_json')) ctx.addIssue({ code: 'custom', path: ['artifacts_declared'], message: 'Require one report_json declaration and no duplicate kinds' });
