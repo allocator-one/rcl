@@ -551,151 +551,177 @@ function parseVerdicts(text: string): Map<string, { refuted: boolean; note?: str
   return verdicts;
 }
 
+export interface GatingBatch {
+  findingIndices: number[];
+  systemPrompt: string;
+  userPrompt: string;
+}
+
+/** Private deterministic work plan, not authenticated evidence or launch authority. */
+export interface GatingPlan {
+  version: 1;
+  findings: ConsensusFinding[];
+  initialGating: Array<GatingInfo | null>;
+  candidateIndices: number[];
+  model: string;
+  verificationTimeoutMs: number;
+  verificationPassTimeoutMs: number;
+  batches: GatingBatch[];
+}
+
+export type GatingBatchOutcome =
+  | { batchIndex: number; kind: 'answer'; answer: ModelAnswer }
+  | { batchIndex: number; kind: 'failure'; reason: string };
+
+type GatingPlanOptions = Pick<GatingOptions, 'minModels' | 'verificationModel' | 'verificationTimeoutMs' |
+  'verificationPassTimeoutMs' | 'diffFiles' | 'modelWeights'>;
+
+function unavailableGating(model: string, note: string): GatingInfo {
+  return { reason: 'none', verification: { model, verdict: 'unavailable', note } };
+}
+
+/** Derive every private verifier request before dispatch, without clocks, adapters or caller aliases. */
+export function planGating(input: ConsensusFinding[], options: GatingPlanOptions): GatingPlan {
+  const verificationTimeoutMs = resolveTimerDelay('verificationTimeoutMs', options.verificationTimeoutMs);
+  const verificationPassTimeoutMs = resolveTimerDelay('verificationPassTimeoutMs',
+    options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs);
+  const findings = structuredClone(input);
+  const model = options.verificationModel ?? '(none)';
+  const initialGating: Array<GatingInfo | null> = findings.map(() => null);
+  const candidateIndices: number[] = [];
+  const weights = options.modelWeights;
+  findings.forEach((finding, index) => {
+    const models = finding.consensus.models;
+    const support = weights === undefined ? models.length : models.reduce((sum, name) => sum + (weights.get(name) ?? 1), 0);
+    if (finding.severity !== 'critical' && finding.severity !== 'important') {
+      initialGating[index] = { reason: 'none' };
+    } else if (models.length >= options.minModels && support >= options.minModels) {
+      // Weights can demote consensus, never substitute for distinct models.
+      initialGating[index] = { reason: 'consensus' };
+    } else if (finding.severity === 'critical') {
+      initialGating[index] = { reason: 'critical' };
+    } else {
+      candidateIndices.push(index);
+    }
+  });
+
+  const fullPatches = new Map<string, string>();
+  for (const file of options.diffFiles ?? []) {
+    const patch = file.patch ?? '';
+    if (patch.trim().length > 0) fullPatches.set(file.filename, patch);
+  }
+  // The excerpt covers all candidates for a file, as in the normal live pass.
+  const rangesByFile = new Map<string, Array<{ start: number; end: number }>>();
+  for (const index of candidateIndices) {
+    const finding = findings[index]!;
+    if (!fullPatches.has(finding.file)) continue;
+    const ranges = rangesByFile.get(finding.file) ?? [];
+    ranges.push({ start: finding.startLine, end: finding.endLine });
+    rangesByFile.set(finding.file, ranges);
+  }
+  const patches = new Map<string, string>();
+  for (const [file, ranges] of rangesByFile) {
+    const excerpt = relevantPatchExcerpt(fullPatches.get(file)!, ranges);
+    if (excerpt.trim().length > 0) patches.set(file, excerpt);
+  }
+  const verifiable: number[] = [];
+  for (const index of candidateIndices) {
+    const finding = findings[index]!;
+    if (!patches.has(finding.file)) {
+      initialGating[index] = unavailableGating(model, fullPatches.has(finding.file)
+        ? 'no hunk context fits the safe verifier bound — not sent to the verifier'
+        : 'no diff context for this file — not sent to the verifier');
+    } else if (options.verificationModel === undefined) {
+      initialGating[index] = unavailableGating(model, 'no direct-API verifier available in the configured roster');
+    } else {
+      verifiable.push(index);
+    }
+  }
+  const batches: GatingBatch[] = [];
+  for (let index = 0; index < verifiable.length; index += VERIFIER_BATCH_SIZE) {
+    const findingIndices = verifiable.slice(index, index + VERIFIER_BATCH_SIZE);
+    const candidates = findingIndices.map(i => findings[i]!);
+    const relevantPatches = new Map([...new Set(candidates.map(f => f.file))].map(file => [file, patches.get(file)!]));
+    batches.push({ findingIndices, systemPrompt: VERIFIER_SYSTEM_PROMPT,
+      userPrompt: buildVerifierPrompt(candidates, relevantPatches) });
+  }
+  return { version: 1, findings, initialGating, candidateIndices, model,
+    verificationTimeoutMs, verificationPassTimeoutMs, batches };
+}
+
 /**
- * Annotate every finding with its gating reason; single-model blocking
- * findings get one batched refutation call to the verification model.
- * Returns new finding objects (input is not mutated).
+ * Interpret a complete set of batch outcomes with no provider calls. Callers must
+ * derive the plan from trusted captured inputs and validate retained outcome
+ * provenance separately; this function does not authenticate a transcript.
+ * Missing or duplicate batches refuse, rather than inventing unavailable results.
  */
+export function replayGating(
+  plan: GatingPlan,
+  outcomes: readonly GatingBatchOutcome[],
+  durationMs: number
+): { findings: ConsensusFinding[]; verification?: VerificationStats } {
+  if (!Number.isFinite(durationMs) || durationMs < 0) throw new Error('gating_replay_duration');
+  const byBatch = new Map<number, GatingBatchOutcome>();
+  for (const outcome of outcomes) {
+    if (!Number.isSafeInteger(outcome.batchIndex) || outcome.batchIndex < 0 ||
+      outcome.batchIndex >= plan.batches.length || byBatch.has(outcome.batchIndex)) {
+      throw new Error('gating_replay_batch_identity');
+    }
+    byBatch.set(outcome.batchIndex, outcome);
+  }
+  if (byBatch.size !== plan.batches.length) throw new Error('gating_replay_missing_batch');
+  const annotations = structuredClone(plan.initialGating);
+  plan.batches.forEach((batch, batchIndex) => {
+    const outcome = byBatch.get(batchIndex)!;
+    const failure = outcome.kind === 'failure' ? outcome.reason : outcome.answer.status !== 'success'
+      ? (outcome.answer.error ?? outcome.answer.status) : undefined;
+    const verdicts = outcome.kind === 'answer' && outcome.answer.status === 'success'
+      ? parseVerdicts(outcome.answer.text) : new Map<string, { refuted: boolean; note?: string }>();
+    batch.findingIndices.forEach((findingIndex, offset) => {
+      const verdict = verdicts.get(`F${offset + 1}`);
+      annotations[findingIndex] = verdict === undefined
+        ? unavailableGating(plan.model, failure ?? 'verifier response did not cover this finding')
+        : { reason: verdict.refuted ? 'none' : 'verified', verification: {
+          model: plan.model, verdict: verdict.refuted ? 'refuted' : 'unrefuted',
+          ...(verdict.note ? { note: verdict.note } : {}),
+        } };
+    });
+  });
+  const findings = structuredClone(plan.findings).map((finding, index) => {
+    const gating = annotations[index];
+    if (!gating) throw new Error('gating_replay_missing_annotation');
+    return { ...finding, gating };
+  });
+  if (plan.candidateIndices.length === 0) return { findings };
+  const verdicts = annotations.flatMap(gating => gating?.verification ? [gating.verification.verdict] : []);
+  return { findings, verification: { model: plan.model, candidates: plan.candidateIndices.length,
+    refuted: verdicts.filter(v => v === 'refuted').length,
+    unrefuted: verdicts.filter(v => v === 'unrefuted').length,
+    unavailable: verdicts.filter(v => v === 'unavailable').length, durationMs } };
+}
+
+/** Annotate findings through the same deterministic plan and interpreter used by retained replay. */
 export async function applyGating(
   findings: ConsensusFinding[],
   options: GatingOptions
 ): Promise<{ findings: ConsensusFinding[]; verification?: VerificationStats }> {
-  const verificationTimeoutMs = resolveTimerDelay(
-    'verificationTimeoutMs', options.verificationTimeoutMs
-  );
-  const verificationPassTimeoutMs = resolveTimerDelay(
-    'verificationPassTimeoutMs',
-    options.verificationPassTimeoutMs ?? DEFAULT_GATING_CONFIG.verificationPassTimeoutMs
-  );
-  const annotated: ConsensusFinding[] = new Array(findings.length);
-  const candidateIndices: number[] = [];
-
-  const weights = options.modelWeights;
-  const weightedSupport = (models: readonly string[]): number =>
-    weights === undefined
-      ? models.length
-      : models.reduce((sum, m) => sum + (weights.get(m) ?? 1), 0);
-
-  findings.forEach((finding, i) => {
-    const blocking = finding.severity === 'critical' || finding.severity === 'important';
-    // Consensus gating: the configured distinct-model count is always
-    // required, and with weights active the weighted vote mass must ALSO
-    // reach it — weights can only DEMOTE (noisy models lose gating power);
-    // they never let fewer distinct models than configured auto-gate.
-    const models = finding.consensus.models;
-    const consensusGated =
-      models.length >= options.minModels && weightedSupport(models) >= options.minModels;
-    if (!blocking) {
-      annotated[i] = { ...finding, gating: { reason: 'none' } };
-    } else if (consensusGated) {
-      annotated[i] = { ...finding, gating: { reason: 'consensus' } };
-    } else if (finding.severity === 'critical') {
-      annotated[i] = { ...finding, gating: { reason: 'critical' } };
-    } else {
-      candidateIndices.push(i);
-    }
-  });
-
-  if (candidateIndices.length === 0) {
-    return { findings: annotated };
-  }
-
   const now = options.monotonicNow ?? performance.now.bind(performance);
   const started = now();
+  const plan = planGating(findings, options);
+  const { verificationTimeoutMs, verificationPassTimeoutMs, batches } = plan;
   const verificationDeadline = started + verificationPassTimeoutMs;
-  const verifierModel = options.verificationModel ?? '(none)';
-  const stats: VerificationStats = {
-    model: verifierModel,
-    candidates: candidateIndices.length,
-    refuted: 0,
-    unrefuted: 0,
-    unavailable: 0,
-    durationMs: 0,
-  };
-
-  // Verification promotes nothing it did not check (RCL-62): an unchecked
-  // candidate keeps the tier it earned on its own — not gating — with the
-  // cause recorded, instead of being promoted to 'verified' by default.
-  function markUnavailable(findingIndex: number, note: string): void {
-    stats.unavailable++;
-    annotated[findingIndex] = {
-      ...findings[findingIndex]!,
-      gating: {
-        reason: 'none',
-        verification: { model: verifierModel, verdict: 'unavailable', note },
-      },
-    };
-  }
-
-  // A refutation must be grounded in the change itself. Candidates whose
-  // file has no patch content (renames the resolver didn't map, plan
-  // pseudo-files, missing diff) are never sent — the verifier judging a
-  // claim from the claim's own wording could un-gate real findings.
-  const fullPatches = new Map<string, string>();
-  for (const df of options.diffFiles ?? []) {
-    const patch = df.patch ?? '';
-    if (patch.trim().length > 0) fullPatches.set(df.filename, patch);
-  }
-  // Per-file excerpt covering that file's candidates, so the verifier sees
-  // exactly the hunks the claims are about — never a tail-truncated patch
-  // whose relevant hunk fell off.
-  const candidateRangesByFile = new Map<string, Array<{ start: number; end: number }>>();
-  for (const findingIndex of candidateIndices) {
-    const f = findings[findingIndex]!;
-    if (!fullPatches.has(f.file)) continue;
-    const ranges = candidateRangesByFile.get(f.file) ?? [];
-    ranges.push({ start: f.startLine, end: f.endLine });
-    candidateRangesByFile.set(f.file, ranges);
-  }
-  const patches = new Map<string, string>();
-  for (const [file, ranges] of candidateRangesByFile) {
-    const excerpt = relevantPatchExcerpt(fullPatches.get(file)!, ranges);
-    if (excerpt.trim().length > 0) patches.set(file, excerpt);
-  }
-
-  const verifiable: number[] = [];
-  for (const findingIndex of candidateIndices) {
-    const f = findings[findingIndex]!;
-    if (patches.has(f.file)) {
-      verifiable.push(findingIndex);
-    } else {
-      markUnavailable(
-        findingIndex,
-        fullPatches.has(f.file)
-          ? 'no hunk context fits the safe verifier bound — not sent to the verifier'
-          : 'no diff context for this file — not sent to the verifier'
-      );
-    }
-  }
-
-  if (options.verificationModel === undefined) {
-    for (const findingIndex of verifiable) {
-      markUnavailable(findingIndex, 'no direct-API verifier available in the configured roster');
-    }
-    stats.durationMs = now() - started;
-    return { findings: annotated, verification: stats };
-  }
-
-  // One verdict per candidate has to fit in one answer, so a single call over
-  // every candidate silently stops covering them as a review grows — and an
-  // uncovered candidate goes unverified. Batches keep each answer small, and
-  // keep one bad batch from costing the whole lane (RCL-60).
-  const verdictsByIndex = new Map<number, { refuted: boolean; note?: string }>();
-  const failureByIndex = new Map<number, string>();
-  if (verifiable.length > 0) {
-    const batches: number[][] = [];
-    for (let i = 0; i < verifiable.length; i += VERIFIER_BATCH_SIZE) {
-      batches.push(verifiable.slice(i, i + VERIFIER_BATCH_SIZE));
-    }
-
+  const providedAsk = options.ask;
+  const onVerificationProgress = options.onVerificationProgress;
+  const outcomes: GatingBatchOutcome[] = [];
+  if (batches.length > 0) {
     let completedBatches = 0;
     let completedCandidates = 0;
     const reportProgress = (): void =>
-      options.onVerificationProgress?.({
+      onVerificationProgress?.({
         completedBatches,
         totalBatches: batches.length,
         completedCandidates,
-        totalCandidates: verifiable.length,
+        totalCandidates: plan.batches.reduce((sum, batch) => sum + batch.findingIndices.length, 0),
       });
     reportProgress();
 
@@ -706,9 +732,9 @@ export async function applyGating(
     let constructionFailure: string | undefined;
     try {
       ask =
-        options.ask ??
+        providedAsk ??
         ((): AskFn => {
-          const adapter = defaultAdapterFactory(detectProvider(options.verificationModel!));
+          const adapter = defaultAdapterFactory(detectProvider(plan.model));
           return (m, systemPrompt, userPrompt, opts) => adapter.ask(m, systemPrompt, userPrompt, opts);
         })();
     } catch (err) {
@@ -723,7 +749,7 @@ export async function applyGating(
     const passTimeoutHandle = setTimeout(() => passController.abort(), remainingPassMs);
 
     function askWithinPassDeadline(
-      prompt: string,
+      batch: GatingBatch,
       callTimeoutMs: number
     ): Promise<ModelAnswer> {
       return new Promise((resolve, reject) => {
@@ -747,9 +773,9 @@ export async function applyGating(
         let answerPromise: Promise<ModelAnswer>;
         try {
           answerPromise = ask!(
-            options.verificationModel!,
-            VERIFIER_SYSTEM_PROMPT,
-            prompt,
+            plan.model,
+            batch.systemPrompt,
+            batch.userPrompt,
             { timeoutMs: callTimeoutMs, maxRetries: 1, signal: passController.signal }
           );
         } catch (err) {
@@ -763,17 +789,12 @@ export async function applyGating(
       });
     }
 
-    async function runBatch(batch: number[]): Promise<void> {
+    async function runBatch(batch: GatingBatch, batchIndex: number): Promise<void> {
       if (ask === undefined) {
-        for (const index of batch) failureByIndex.set(index, constructionFailure!);
+        outcomes.push({ batchIndex, kind: 'failure', reason: constructionFailure! });
         return;
       }
-      const candidates = batch.map((i) => findings[i]!);
-      const relevantPatches = new Map(
-        [...new Set(candidates.map((f) => f.file))].map((file) => [file, patches.get(file)!])
-      );
       try {
-        const verifierPrompt = buildVerifierPrompt(candidates, relevantPatches);
         const remainingMs = verificationDeadline - now();
         if (remainingMs <= 0) {
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
@@ -782,28 +803,19 @@ export async function applyGating(
         // provider SDKs such as OpenAI require integer millisecond timeouts.
         // Round down so the adapter's own bound never exceeds the pass.
         const callTimeoutMs = Math.max(1, Math.floor(Math.min(verificationTimeoutMs, remainingMs)));
-        const answer = await askWithinPassDeadline(verifierPrompt, callTimeoutMs);
+        const answer = await askWithinPassDeadline(batch, callTimeoutMs);
         if (now() >= verificationDeadline) {
           passController.abort();
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
-        if (answer.status !== 'success') {
-          const reason = answer.error ?? answer.status;
-          for (const index of batch) failureByIndex.set(index, reason);
-          return;
-        }
-        const parsed = parseVerdicts(answer.text);
-        batch.forEach((findingIndex, c) => {
-          const verdict = parsed.get(`F${c + 1}`);
-          if (verdict !== undefined) verdictsByIndex.set(findingIndex, verdict);
-        });
+        outcomes.push({ batchIndex, kind: 'answer', answer: structuredClone(answer) });
       } catch (err) {
         if (err instanceof VerificationPassTimeoutError) {
           passController.abort();
           throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
         }
         const reason = err instanceof Error ? err.message : String(err);
-        for (const index of batch) failureByIndex.set(index, reason);
+        outcomes.push({ batchIndex, kind: 'failure', reason });
       }
     }
 
@@ -824,9 +836,9 @@ export async function applyGating(
                 throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
               }
               const batch = batches[batchIndex]!;
-              await runBatch(batch);
+              await runBatch(batch, batchIndex);
               completedBatches++;
-              completedCandidates += batch.length;
+              completedCandidates += batch.findingIndices.length;
               reportProgress();
             }
           } catch (err) {
@@ -848,43 +860,15 @@ export async function applyGating(
     if (failedWorker !== undefined) throw failedWorker.reason;
   }
 
-  verifiable.forEach((findingIndex) => {
-    const finding = findings[findingIndex]!;
-    const verdict = verdictsByIndex.get(findingIndex);
-    if (verdict === undefined) {
-      markUnavailable(
-        findingIndex,
-        failureByIndex.get(findingIndex) ?? 'verifier response did not cover this finding'
-      );
-      return;
-    }
-    let gating: GatingInfo;
-    if (verdict.refuted) {
-      stats.refuted++;
-      gating = {
-        reason: 'none',
-        verification: {
-          model: verifierModel,
-          verdict: 'refuted',
-          ...(verdict.note ? { note: verdict.note } : {}),
-        },
-      };
-    } else {
-      stats.unrefuted++;
-      gating = {
-        reason: 'verified',
-        verification: {
-          model: verifierModel,
-          verdict: 'unrefuted',
-          ...(verdict.note ? { note: verdict.note } : {}),
-        },
-      };
-    }
-    annotated[findingIndex] = { ...finding, gating };
-  });
-
-  stats.durationMs = now() - started;
-  return { findings: annotated, verification: stats };
+  const result = replayGating(plan, outcomes, now() - started);
+  const finished = now();
+  // Parsing and projecting retained responses are part of the same live pass.
+  // A completed request does not permit accepting an interpretation past its deadline.
+  if (batches.length > 0 && finished >= verificationDeadline) {
+    throw new VerificationPassTimeoutError(verificationPassTimeoutMs);
+  }
+  if (result.verification) result.verification.durationMs = finished - started;
+  return result;
 }
 
 

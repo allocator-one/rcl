@@ -38,28 +38,40 @@ function sumUsage(parts: readonly ModelReview[]): TokenUsage | undefined {
  * async ones: those calls still consumed time and tokens even when they do
  * not affect the blocking reviewer's status or findings.
  */
-export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
-  const byReviewer = new Map<string, ModelReview[]>();
+export interface RawFindingOrigin { reviewIndex: number; findingIndex: number }
+export interface MergedChunkReviewsWithContributions {
+  reviews: ModelReview[];
+  /** [merged review][merged finding][raw source finding], positional only. */
+  contributions: RawFindingOrigin[][][];
+}
+
+interface IndexedReview { review: ModelReview; reviewIndex: number }
+interface MergedReviewEntry { review: ModelReview; contributions: RawFindingOrigin[][] }
+
+function origins(parts: readonly IndexedReview[]): RawFindingOrigin[][] {
+  return parts.flatMap(({ review, reviewIndex }) => review.findings.map((_, findingIndex) => [{ reviewIndex, findingIndex }]));
+}
+
+/** Existing merge semantics with positional source lineage retained alongside each returned finding. */
+function mergeChunkReviewEntries(reviews: ModelReview[], collectContributions: boolean): MergedReviewEntry[] {
+  const byReviewer = new Map<string, IndexedReview[]>();
   const order: string[] = [];
-  for (const review of reviews) {
+  for (const [reviewIndex, review] of reviews.entries()) {
     const key = `${review.model}::${review.role}`;
     const existing = byReviewer.get(key);
-    if (existing) {
-      existing.push(review);
-    } else {
-      byReviewer.set(key, [review]);
-      order.push(key);
-    }
+    if (existing) existing.push({ review, reviewIndex });
+    else { byReviewer.set(key, [{ review, reviewIndex }]); order.push(key); }
   }
 
   return order.map((key) => {
-    const parts = byReviewer.get(key)!;
-    if (parts.length === 1) return parts[0]!;
+    const indexedParts = byReviewer.get(key)!;
+    const parts = indexedParts.map(({ review }) => review);
+    if (parts.length === 1) return { review: parts[0]!, contributions: collectContributions ? origins(indexedParts) : [] };
 
     const first = parts[0]!;
-    const blockingParts = parts.filter((part) => part.async !== true);
-    const outcomeParts = blockingParts.length > 0 ? blockingParts : parts;
-    const successes = outcomeParts.filter((part) => part.status === 'success');
+    const blockingParts = indexedParts.filter(({ review }) => review.async !== true);
+    const outcomeParts = blockingParts.length > 0 ? blockingParts : indexedParts;
+    const successes = outcomeParts.filter(({ review }) => review.status === 'success');
     const requireComplete = blockingParts.length > 0;
     const successful = requireComplete
       ? successes.length === outcomeParts.length
@@ -77,33 +89,48 @@ export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
 
     if (successful) {
       return {
-        model: first.model,
-        role: first.role,
-        provider: first.provider,
-        findings: successes.flatMap((p) => p.findings),
-        durationMs,
-        status: 'success',
-        ...degraded,
+        review: {
+          model: first.model,
+          role: first.role,
+          provider: first.provider,
+          findings: successes.flatMap(({ review }) => review.findings),
+          durationMs,
+          status: 'success',
+          ...degraded,
+        },
+        contributions: collectContributions ? origins(successes) : [],
       };
     }
 
-    const failed = outcomeParts.find((part) => part.status !== 'success' && part.error) ??
-      outcomeParts.find((part) => part.status !== 'success') ??
-      first;
+    const failed = outcomeParts.find(({ review }) => review.status !== 'success' && review.error)?.review ??
+      outcomeParts.find(({ review }) => review.status !== 'success')?.review ?? first;
     const incompleteError =
       requireComplete && successes.length > 0
         ? `Incomplete chunk coverage: ${successes.length}/${outcomeParts.length} parts succeeded; ` +
           `${failed.status}${failed.error ? `: ${failed.error}` : ''}`
         : failed.error;
     return {
-      model: first.model,
-      role: first.role,
-      provider: first.provider,
-      findings: [],
-      durationMs,
-      status: failed.status,
-      ...(incompleteError ? { error: incompleteError } : {}),
-      ...degraded,
+      review: {
+        model: first.model,
+        role: first.role,
+        provider: first.provider,
+        findings: [],
+        durationMs,
+        status: failed.status,
+        ...(incompleteError ? { error: incompleteError } : {}),
+        ...degraded,
+      },
+      contributions: [],
     };
   });
+}
+
+/** Original merge API; this is intentionally the same internal merge path as the provenance API. */
+export function mergeChunkReviews(reviews: ModelReview[]): ModelReview[] {
+  return mergeChunkReviewEntries(reviews, false).map((entry) => entry.review);
+}
+
+export function mergeChunkReviewsWithContributions(reviews: ModelReview[]): MergedChunkReviewsWithContributions {
+  const merged = mergeChunkReviewEntries(reviews, true);
+  return { reviews: merged.map((entry) => entry.review), contributions: merged.map((entry) => entry.contributions) };
 }
