@@ -60,6 +60,29 @@ function rechain(wire: any) {
 }
 
 describe('portable finalized checkpoint proof', () => {
+  it.each(['failure', 'success', 'other pending attempt'] as const)('refuses uncertainty appended after %s even with a valid digest chain', async kind => {
+    const { journal } = await fixture();
+    const original = await exportCheckpointProof(journal), wire = JSON.parse(original.bytes);
+    rechain(wire);
+    expect(canonical(wire)).toBe(original.bytes);
+    expect(decodeCheckpointProof(canonical(wire))).toEqual(original);
+    const attempt = { id: kind === 'failure' ? 'failed-paid' : kind === 'success' ? 'successful-paid' : 'pending-paid', kind: 'paid' };
+    if (kind === 'other pending attempt') wire.records.splice(3, 0, { type: 'intent', cell: 'general:0', paidAttempt: attempt });
+    wire.records.splice(-1, 0, { type: 'uncertain', cell: 'general:0', paidAttempt: attempt, reason: 'Response lost' });
+    rechain(wire);
+    expect(() => decodeCheckpointProof(canonical(wire))).toThrow(kind === 'other pending attempt' ? 'checkpoint_success_immutable' : 'checkpoint_terminal_result_exists');
+  });
+
+  it('retains uncertainty before a terminal result when decoding a valid chronological proof', async () => {
+    const { journal } = await fixture(), wire = JSON.parse((await exportCheckpointProof(journal)).bytes);
+    wire.records.splice(4, 0, { type: 'uncertain', cell: 'general:0', paidAttempt: { id: 'failed-paid', kind: 'paid' }, reason: 'Response lost' });
+    rechain(wire);
+    const decoded = decodeCheckpointProof(canonical(wire));
+    expect(decoded.state.outcomes.map(row => row.result.reviewBytes)).toEqual([failedBytes, successfulBytes, successfulBytes]);
+    expect(decoded.state.uncertain).toEqual([{ cell: 'security:0', paidAttempt: { id: 'lost-paid', kind: 'unknown' } }]);
+    expect(decoded.state.records[4]).toMatchObject({ type: 'uncertain', paidAttempt: { id: 'failed-paid', kind: 'paid' } });
+  });
+
   it('independently decodes complete frozen evidence after the source journal is gone', async () => {
     const { journal, frozen, path } = await fixture();
     const state = await journal.read(), bindings = await journal.readBindings();

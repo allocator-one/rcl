@@ -60,6 +60,65 @@ describe('checkpoint plan', () => {
 });
 
 describe('checkpoint journal', () => {
+  it.each(['failure', 'success'] as const)('refuses new uncertainty after a %s result without changing retained bytes', async kind => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan());
+    const cell = 'blocking/general:0', attempt = { id: 'completed', kind: 'paid' as const };
+    const result = kind === 'failure' ? failure() : { kind, chunk: 0, reviewBytes: completeReview() };
+    let store!: CheckpointJournal;
+    await withNativeTarget(commonDir, target, async ownership => {
+      store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership });
+      await store.recordIntent(cell, attempt, ownership);
+      await store.recordResult(cell, attempt, result, ownership);
+    });
+    const before = await store.read(), events = join(checkpointPath(commonDir, target, namespace), 'events');
+    const files = await readdir(events), bytes = await Promise.all(files.map(file => readFile(join(events, file), 'utf8')));
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const reopened = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+      await reopened.recordUncertain(cell, attempt, 'Response lost', ownership);
+    })).rejects.toThrow('checkpoint_terminal_result_exists');
+    expect(await store.read()).toEqual(before);
+    expect(await readdir(events)).toEqual(files);
+    expect(await Promise.all(files.map(file => readFile(join(events, file), 'utf8')))).toEqual(bytes);
+  });
+
+  it('refuses new uncertainty for a pending attempt after another attempt fills its cell', async () => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan()), cell = 'blocking/general:0';
+    const pending = { id: 'pending', kind: 'unknown' as const }, completed = { id: 'completed', kind: 'paid' as const };
+    let store!: CheckpointJournal;
+    await withNativeTarget(commonDir, target, async ownership => {
+      store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership });
+      await store.recordIntent(cell, pending, ownership);
+      await store.recordIntent(cell, completed, ownership);
+      await store.recordResult(cell, completed, { kind: 'success', chunk: 0, reviewBytes: completeReview() }, ownership);
+    });
+    const before = await store.read();
+    await expect(withNativeTarget(commonDir, target, ownership => store.recordUncertain(cell, pending, 'Response lost', ownership))).rejects.toThrow('checkpoint_success_immutable');
+    expect(await store.read()).toEqual(before);
+    expect(before.uncertain).toEqual([{ cell, paidAttempt: pending }]);
+  });
+
+  it('replays an existing uncertain event after its result and a later cell success without appending', async () => {
+    const commonDir = await root(), frozen = freezeCheckpointPlan(plan()), cell = 'blocking/general:0';
+    const first = { id: 'first', kind: 'paid' as const }, second = { id: 'second', kind: 'paid' as const };
+    let store!: CheckpointJournal;
+    await withNativeTarget(commonDir, target, async ownership => {
+      store = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership });
+      await store.recordIntent(cell, first, ownership);
+      await store.recordUncertain(cell, first, 'Response lost', ownership);
+      await store.recordResult(cell, first, failure(), ownership);
+      await store.recordIntent(cell, second, ownership);
+      await store.recordResult(cell, second, { kind: 'success', chunk: 0, reviewBytes: completeReview() }, ownership);
+    });
+    const before = await store.read();
+    await withNativeTarget(commonDir, target, async ownership => {
+      const reopened = await CheckpointJournal.openWrite({ commonDir, namespace, plan: frozen, ownership });
+      await reopened.recordUncertain(cell, first, 'Response lost', ownership);
+    });
+    expect(await store.read()).toEqual(before);
+    expect(before.records.filter(row => row.type === 'uncertain')).toHaveLength(1);
+    expect(before.uncertain).toEqual([]);
+  });
+
   it('retains a failed attempt then accepts a new successful paid attempt without overwriting history', async () => { const commonDir = await root(); let store!: CheckpointJournal; const bytes = JSON.stringify({ model: 'openai/gpt-6-sol', role: 'general', provider: 'openai', status: 'success', durationMs: 1, findings: [{ id: 'f1', file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', title: 'Original title', description: 'Original finding' }] }); await withNativeTarget(commonDir, target, async ownership => { store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership); await store.recordResult('blocking/general:0', { id: 'one', kind: 'paid' }, failure(), ownership); await store.recordIntent('blocking/general:0', { id: 'two', kind: 'paid' }, ownership); await store.recordResult('blocking/general:0', { id: 'two', kind: 'paid' }, { kind: 'success', chunk: 0, reviewBytes: bytes }, ownership); const state = await store.read(); expect(state.successes[0]?.reviewBytes).toBe(bytes); expect(state.records.filter(record => record.type === 'result')).toHaveLength(2); }); await expect(withNativeTarget(commonDir, target, ownership => store.recordResult('blocking/general:0', { id: 'three', kind: 'paid' }, failure(), ownership))).rejects.toThrow('checkpoint_success_immutable'); });
   it('keeps interrupted intent uncertain and changed duplicate identities refuse', async () => { const commonDir = await root(); let store!: CheckpointJournal; await withNativeTarget(commonDir, target, async ownership => { store = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await store.recordIntent('blocking/general:0', { id: 'possibly-billed', kind: 'unknown' }, ownership); expect((await store.read()).uncertain).toEqual([{ cell: 'blocking/general:0', paidAttempt: { id: 'possibly-billed', kind: 'unknown' } }]); }); await expect(withNativeTarget(commonDir, target, ownership => store.recordIntent('blocking/general:0', { id: 'possibly-billed', kind: 'paid' }, ownership))).rejects.toThrow('checkpoint_duplicate_attempt'); });
   it('serializes appends and rejects released/cross-target ownership', async () => { const commonDir = await root(); let released!: NativeTargetOwnership, writable!: CheckpointJournal; await withNativeTarget(commonDir, target, async ownership => { released = ownership; writable = await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }); await Promise.all([writable.recordIntent('blocking/general:0', { id: 'one', kind: 'paid' }, ownership), writable.recordUncertain('blocking/general:0', { id: 'one', kind: 'paid' }, 'interrupted', ownership)]); expect((await writable.read()).records.map(record => record.sequence)).toEqual([1, 2]); }); await expect(writable.recordIntent('blocking/general:0', { id: 'late', kind: 'paid' }, released)).rejects.toThrow('native_target_not_owned'); await expect(withNativeTarget(commonDir, 'another-target', other => writable.recordIntent('blocking/general:0', { id: 'bad', kind: 'paid' }, other))).rejects.toThrow('native_target_not_owned'); });

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { stableStringify } from '../../src/report/run-header.js';
-import { snapshotVerificationEvent, validateVerificationRecords,
+import { decodeVerificationProof, snapshotVerificationEvent, validateVerificationRecords,
   type VerificationEvent } from '../../src/dispatch/checkpoint-verification.js';
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -36,6 +36,18 @@ function history(batchCount: number, sharedBindings = false) {
 }
 
 describe('verification input bound compatibility', () => {
+  it('rejects a deeply nested untrusted record before canonical serialization', () => {
+    const nested = '{"extra":'.repeat(10_000) + 'null' + '}'.repeat(10_000);
+    const bytes = `{"records":[${nested}],"version":1}`;
+    expect(() => decodeVerificationProof(bytes, context)).toThrow('checkpoint_verification_invalid_record');
+  });
+
+  it('keeps canonical proof validation after structural validation', () => {
+    const records = history(2), bytes = stableStringify({ version: 1, records });
+    expect(decodeVerificationProof(bytes, context)).toEqual(validateVerificationRecords(records, context));
+    expect(() => decodeVerificationProof(bytes + '\n', context)).toThrow('checkpoint_verification_invalid_proof');
+  });
+
   it('accepts all 500 completed calls within the existing 1002-record limit', () => {
     const records = history(500);
     expect(records).toHaveLength(1002);

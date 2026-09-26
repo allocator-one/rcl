@@ -24,6 +24,9 @@ import {
 const VERSION = 1;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_CHECKPOINT_PROOF_BYTES = 25 * 1024 * 1024;
+// Ordinary reads may retain more than a portable proof, but never unbounded
+// results. Count original file bytes, including whitespace, before allocation.
+const MAX_CHECKPOINT_READ_BYTES = 64 * 1024 * 1024;
 const integer = z.number().int().nonnegative().safe();
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation', 'launch']);
@@ -179,10 +182,12 @@ async function ensurePrivateChild(parent: string, child: string): Promise<string
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   await inspectDirectory(path); await syncNativeDirectory(parent); return path;
 }
-async function readSafe(path: string, preserveBom = false, options: { maxBytes?: number; singleLink?: boolean } = {}): Promise<string> {
+interface ReadBudget { remaining: number; error: string }
+async function readSafe(path: string, preserveBom = false, options: { maxBytes?: number; singleLink?: boolean; budget?: ReadBudget } = {}): Promise<string> {
   const entry = await lstat(path); if (!entry.isFile() || entry.isSymbolicLink() || entry.size > (options.maxBytes ?? MAX_FILE_BYTES) || options.singleLink && entry.nlink !== 1 || (entry.mode & 0o7777) !== 0o600 || (process.geteuid && entry.uid !== process.geteuid())) throw new Error('checkpoint_symlink');
+  if (options.budget && entry.size > options.budget.remaining) throw new Error(options.budget.error);
   const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs || options.singleLink && before.nlink !== 1) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink() || options.singleLink && (after.nlink !== 1 || current.nlink !== 1)) throw new Error('checkpoint_changing_source'); return new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(bytes); } finally { await handle.close(); }
+  try { const before = await handle.stat(); if (!before.isFile() || before.size !== entry.size || before.ino !== entry.ino || before.dev !== entry.dev || before.mtimeMs !== entry.mtimeMs || before.ctimeMs !== entry.ctimeMs || options.singleLink && before.nlink !== 1) throw new Error('checkpoint_changing_source'); const bytes = Buffer.alloc(before.size); let offset = 0; while (offset < bytes.length) { const next = await handle.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; } const after = await handle.stat(), current = await lstat(path); if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.ino !== before.ino || current.dev !== before.dev || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs || current.isSymbolicLink() || options.singleLink && (after.nlink !== 1 || current.nlink !== 1)) throw new Error('checkpoint_changing_source'); const decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: preserveBom }).decode(bytes); if (options.budget) options.budget.remaining -= before.size; return decoded; } finally { await handle.close(); }
 }
 
 /** Event records are staged outside the observed journal namespace before an exclusive link publishes them. */
@@ -366,7 +371,11 @@ function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], r
     const key = `${record.cell}\0${record.paidAttempt.id}`;
     if (record.type === 'intent') { if (successfulCells.has(record.cell)) throw new Error('checkpoint_success_immutable'); if (intents.has(key) || attemptIds.has(record.paidAttempt.id)) throw new Error('checkpoint_duplicate_attempt'); intents.set(key, record.paidAttempt); attemptIds.add(record.paidAttempt.id); continue; }
     if (!intents.has(key) || intents.get(key)!.kind !== record.paidAttempt.kind) throw new Error('checkpoint_missing_intent');
-    if (record.type === 'uncertain') continue;
+    if (record.type === 'uncertain') {
+      if (terminalAttempts.has(key)) throw new Error('checkpoint_terminal_result_exists');
+      if (successfulCells.has(record.cell)) throw new Error('checkpoint_success_immutable');
+      continue;
+    }
     if (record.type === 'result') {
       if (!record.result || terminalAttempts.has(key) || successfulCells.has(record.cell) || !validResultReference(record.result, record.cell, record.paidAttempt)) throw new Error('checkpoint_invalid_record');
       terminalAttempts.set(key, record);
@@ -841,42 +850,36 @@ export class CheckpointJournal {
     return decodeCheckpointProof(bytes, this.plan);
   }
 
-  private async readValidated(maxRetainedBytes?: number): Promise<{ state: CheckpointState; bindings: CheckpointBindings }> {
+  private async readValidated(maxReadBytes = MAX_CHECKPOINT_READ_BYTES): Promise<{ state: CheckpointState; bindings: CheckpointBindings; bytesRead: number }> {
     await inspectDirectory(this.path); await inspectDirectory(join(this.path, 'events')); await inspectDirectory(join(this.path, 'results'));
-    const actual = decodePlan((await readSafe(join(this.path, 'plan.json'))).trim());
+    const budget: ReadBudget = { remaining: maxReadBytes, error: maxReadBytes === MAX_CHECKPOINT_PROOF_BYTES ? 'checkpoint_proof_too_large' : 'checkpoint_journal_too_large' };
+    const actual = decodePlan((await readSafe(join(this.path, 'plan.json'), false, { budget })).trim());
     if (!matchingPlan(actual, this.plan)) throw new Error('checkpoint_plan_mismatch');
-    let retainedBytes = 0;
-    const retain = (bytes: string): string => {
-      retainedBytes += Buffer.byteLength(bytes, 'utf8');
-      if (maxRetainedBytes !== undefined && retainedBytes > maxRetainedBytes) throw new Error('checkpoint_proof_too_large');
-      return bytes;
-    };
-    retain(canonical(actual as unknown as Json));
     const names = (await readdir(join(this.path, 'events'))).sort();
     const rawRecords: unknown[] = [];
     for (let i = 0; i < names.length; i++) {
       if (names[i] !== eventFile(i + 1)) throw new Error('checkpoint_sequence_gap');
       let bytes = '';
       for (let attempt = 0; attempt < 3; attempt++) {
-        try { bytes = await readSafe(join(this.path, 'events', names[i]!)); break; }
+        try { bytes = await readSafe(join(this.path, 'events', names[i]!), false, { budget }); break; }
         catch (error) {
           if (error instanceof Error && error.message === 'checkpoint_changing_source' && attempt < 2) continue;
-          if (error instanceof Error && error.message === 'checkpoint_symlink') throw error;
+          if (error instanceof Error && (error.message === 'checkpoint_symlink' || error.message === budget.error)) throw error;
           throw new Error('checkpoint_invalid_record');
         }
       }
       let record: unknown;
       try { record = JSON.parse(bytes); }
       catch { throw new Error('checkpoint_invalid_record'); }
-      retain(canonical(record as Json)); rawRecords.push(record);
+      rawRecords.push(record);
     }
     const records = validateRecordChain(rawRecords, this.plan);
     const resultBytes = new Map<string, string>(), suppliedBindings: CheckpointBindings = {};
     for (const record of records) {
-      if (record.binding) suppliedBindings[record.binding.name] = retain(await readSafe(join(this.path, record.binding.file), true));
-      if (record.result) resultBytes.set(record.result.resultFile, retain(await readSafe(join(this.path, 'results', record.result.resultFile), true)));
+      if (record.binding) suppliedBindings[record.binding.name] = await readSafe(join(this.path, record.binding.file), true, { budget });
+      if (record.result) resultBytes.set(record.result.resultFile, await readSafe(join(this.path, 'results', record.result.resultFile), true, { budget }));
     }
-    return validateHistory(this.plan, records, resultBytes, suppliedBindings);
+    return { ...validateHistory(this.plan, records, resultBytes, suppliedBindings), bytesRead: maxReadBytes - budget.remaining };
   }
 
   private async write<T>(ownership: NativeTargetOwnership, operation: (active: NativeTargetOwnership) => Promise<T>): Promise<T> {
@@ -910,11 +913,15 @@ export class CheckpointJournal {
     for (const record of state.records) await this.syncRecord(record);
   }
   private async append(record: Omit<JournalRecord, 'sequence' | 'previousDigest' | 'digest'>): Promise<void> {
-    const state = await this.read();
+    const { state, bytesRead } = await this.readValidated();
     const previousDigest = state.records.at(-1)?.digest ?? this.plan.digest;
     const unsigned = { ...record, sequence: state.records.length + 1, previousDigest } as Omit<JournalRecord, 'digest'>;
     const complete = { ...unsigned, digest: recordDigest(unsigned) };
-    await publishEventExclusive(this.path, eventFile(complete.sequence), `${canonical(complete as unknown as Json)}\n`);
+    const bytes = `${canonical(complete as unknown as Json)}\n`;
+    const addedFile = record.binding ? join(this.path, record.binding.file) : record.result ? join(this.path, 'results', record.result.resultFile) : undefined;
+    const addedBytes = addedFile ? (await lstat(addedFile)).size : 0;
+    if (bytesRead + addedBytes + Buffer.byteLength(bytes, 'utf8') > MAX_CHECKPOINT_READ_BYTES) throw new Error('checkpoint_journal_too_large');
+    await publishEventExclusive(this.path, eventFile(complete.sequence), bytes);
   }
   private cell(cell: string): void { if (!this.plan.cells.some(candidate => candidate.id === cell)) throw new Error('checkpoint_unknown_cell'); }
 
@@ -974,6 +981,8 @@ export class CheckpointJournal {
       if (!state.records.some(record => record.type === 'intent' && record.cell === cell && record.paidAttempt?.id === attempt.id && record.paidAttempt.kind === attempt.kind)) throw new Error('checkpoint_missing_intent');
       const prior = state.records.find(record => record.type === 'uncertain' && record.cell === cell && record.paidAttempt?.id === attempt.id && record.reason === reason);
       if (prior) { await this.syncRecord(prior); return; }
+      if (state.records.some(record => record.type === 'result' && record.cell === cell && record.paidAttempt?.id === attempt.id)) throw new Error('checkpoint_terminal_result_exists');
+      if (state.successes.some(success => success.cell === cell)) throw new Error('checkpoint_success_immutable');
       await this.append({ type: 'uncertain', cell, paidAttempt: attempt, reason });
     });
   }

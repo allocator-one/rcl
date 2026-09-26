@@ -285,8 +285,9 @@ export function decodeVerificationProof(bytes: string, context: VerificationCont
   let value: unknown;
   try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_invalid_proof'); }
   const parsed = z.object({ version: z.literal(1), records: z.array(z.unknown()).max(1002) }).strict().safeParse(value);
-  refuse(parsed.success && stableStringify(value) === bytes, 'invalid_proof');
+  refuse(parsed.success, 'invalid_proof');
   const state = validateVerificationRecords(parsed.data.records, context);
+  refuse(stableStringify(value) === bytes, 'invalid_proof');
   refuse(state?.terminal, 'unsealed');
   return state;
 }
