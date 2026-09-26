@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.1.6 - 2026-09-26
+
+- Preserve every stale-report disposition while allowing an inspected, newly
+  bound supersession when replacement inputs change before the guarded launch.
+  This repairs a mistyped or subsequently changed input without admitting the
+  original report, spending another attempt, or resetting native accounting
+  (RCL-106).
+- Avoid syncing a read-only retained-evidence file handle on Windows (RCL-106).
+
 ## 4.1.5 - 2026-09-26
 
 - Allow up to two minutes for evidence artifact uploads and exact-byte downloads

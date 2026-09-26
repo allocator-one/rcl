@@ -32,11 +32,18 @@ export function staleManifest(entry: StaleReportEntry): StaleReportManifest {
 export function validateStaleReportAudit(state: ConvergeRunState): void {
   if (state.staleReportAudit === undefined) return;
   const entries = z.array(staleEntrySchema).min(1).max(10000).parse(state.staleReportAudit);
-  const operations = new Set<string>(), attempts = new Set<number>(), runs = new Set<string>();
+  const operations = new Set<string>();
+  const originals = new Map<number, Pick<StaleReportManifest, 'runId' | 'round' | 'previousHeadSha' | 'previousInputSha256'>>();
   for (const entry of entries) {
     const m = staleManifest(entry);
+    const original = originals.get(m.attempt);
     if (m.target !== state.target || m.inputSha256 === m.previousInputSha256 || operations.has(m.operationId) ||
-      attempts.has(m.attempt) || runs.has(m.runId) || state.rounds.some(r => r.runId === m.runId)) throw new Error('invalid_stale_report_audit');
-    operations.add(m.operationId); attempts.add(m.attempt); runs.add(m.runId);
+      state.rounds.some(r => r.runId === m.runId) ||
+      (original !== undefined && (original.runId !== m.runId || original.round !== m.round ||
+        original.previousHeadSha !== m.previousHeadSha || original.previousInputSha256 !== m.previousInputSha256))) {
+      throw new Error('invalid_stale_report_audit');
+    }
+    operations.add(m.operationId);
+    originals.set(m.attempt, {runId:m.runId,round:m.round,previousHeadSha:m.previousHeadSha,previousInputSha256:m.previousInputSha256});
   }
 }

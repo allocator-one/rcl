@@ -43,6 +43,20 @@ it('cannot use the disposition for a different current input or admit the preser
   expect(await f.bytes()).toEqual(before);
 });
 
+it('audits a corrected replacement input without spending another attempt', async () => {
+  const f = await fixture(); await f.prepare(); await f.apply();
+  const corrected = {...f.selection,headSha:'e'.repeat(40),inputSha256:'f'.repeat(64),reason:'The inspected replacement inputs changed before continuation.'};
+  await expect(guardReviewLaunch({...f.options,...corrected})).rejects.toThrow('stale_report_input_mismatch');
+  const manifest = await previewStaleReport(corrected,f.dir);
+  const manifestPath = join(f.dir,'corrected-manifest.json');
+  await writeFile(manifestPath,JSON.stringify(manifest));
+  await expect(applyStaleReport({manifest:manifestPath,manifestSha256:sha256(await readFile(manifestPath)),mode:'apply'},f.dir)).resolves.toBe('applied');
+  expect((await loadConvergeRunState(f.dir,f.target))?.staleReportAudit).toHaveLength(2);
+  await guardReviewLaunch({...f.options,...corrected});
+  expect(f.options.run.mock.calls.at(-1)?.[0]).toEqual({target:f.target,round:1,attempt:2});
+  expect(await loadConvergeAttemptState(f.dir,f.target)).toMatchObject({attemptsUsed:2});
+});
+
 it.each(['beforeNativeWrite','afterNativeWrite'] as const)('resumes an interruption at %s without spending or fabricating a round', async boundary => {
   const f = await fixture(); await f.prepare(); const original = await f.bytes();
   await expect(f.apply('apply',{[boundary]:async () => {throw new Error('interrupted');}})).rejects.toThrow('interrupted');

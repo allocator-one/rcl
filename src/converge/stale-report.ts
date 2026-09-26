@@ -54,7 +54,10 @@ export async function previewStaleReport(input: StaleReportSelection, gitCommonD
   const state = await loadConvergeRunState(common,s.target);
   if (!state || !isDeepStrictEqual(state,parse(native))) throw new Error('stale_report_state_changed');
   const previous = eligible(state,parse(attempts),parse(report),s);
-  if (state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt)) throw new Error('stale_report_already_disposed');
+  if (state.staleReportAudit?.some(e => {
+    const prior = staleManifest(e);
+    return prior.attempt === previous.attempt && prior.headSha === s.headSha && prior.inputSha256 === s.inputSha256;
+  })) throw new Error('stale_report_already_disposed');
   const manifest = staleManifestSchema.parse({...s,reportPath:platformPath(s.reportPath),reason:scrubText(s.reason,500),
     kind:'rcl-stale-report',version:1,operationId:randomUUID(),createdAt:new Date().toISOString(),gitCommonDir:common,
     stateSha256:native.sha256,attemptSha256:attempts.sha256,runId:previous.runId,attempt:previous.attempt,round:previous.round,
@@ -138,7 +141,6 @@ export async function applyStaleReport(input: {manifest:string;manifestSha256:st
     const previous = eligible(state,parse(attempts),parse(report),m);
     if (previous.attempt !== m.attempt || previous.round !== m.round || previous.runId !== m.runId ||
       previous.headSha !== m.previousHeadSha || previous.inputSha256 !== m.previousInputSha256) throw new Error('stale_report_manifest_binding_mismatch');
-    if (state.staleReportAudit?.some(e => staleManifest(e).attempt === m.attempt)) throw new Error('stale_report_conflict');
     if (pinned.mode === 'resume') { const stat = await lstat(dir); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('stale_report_operation_missing'); }
     await prepareLockRoot(dirname(dir)); await syncDirectory(common);
     await prepareLockRoot(dir); await syncDirectory(dirname(dir));

@@ -123,7 +123,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   const healthy = hasHealthyGuardedLaunch(previous);
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
-    const entry = state.staleReportAudit?.find(e => staleManifest(e).attempt === previous.attempt);
+    const entry = [...(state.staleReportAudit ?? [])].reverse().find(e => staleManifest(e).attempt === previous.attempt);
     if (!entry) refuse('report_not_admitted', `Process the existing report for run ${previous.runId}. If materially stale, preview rcl converge-stale with current --head ${options.headSha} --input-sha256 ${options.inputSha256}; never admit stale findings.`);
     const disposition = staleManifest(entry);
     if (disposition.runId !== previous.runId || disposition.reportSha256 !== previous.reportJsonSha256 ||

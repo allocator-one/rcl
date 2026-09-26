@@ -323,8 +323,10 @@ one normal attempt at the next native ordinal. The stale attempt stays spent.
 Unchanged inputs require normal admission. Upstream tip movement alone is insufficient.
 Unknown outcomes, unhealthy reports, pending delivery, missing original evidence, changed
 state and unresolved earlier findings refuse safely. A disposition is bound to one exact
-replacement input: further changes require an inspected recovery decision, not a forged
-manifest or edited native state. Native convergence, enforced review and CI remain required.
+replacement input. If inputs change again before continuation, inspect the new inputs and
+create a new preview and apply operation; it appends an audited supersession for the same
+preserved report. Reusing the same replacement input, forging a manifest or editing native
+state remains refused. Native convergence, enforced review and CI remain required.
 
 ### `rcl converge-gap`
 
