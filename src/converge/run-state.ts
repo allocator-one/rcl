@@ -581,6 +581,9 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // report) must not erase the binding an earlier pass persisted.
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   const existingRound = state.rounds.find((entry) => entry.round === options.round);
+  if (options.headSha !== undefined && existingRound?.headSha !== undefined && options.headSha !== existingRound.headSha) {
+    throw new ConvergeRunStateError(`Round ${options.round} head conflicts with its admitted launch.`);
+  }
   const roundHeadSha = options.headSha ?? existingRound?.headSha ??
     (state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined);
   state.rounds = [
