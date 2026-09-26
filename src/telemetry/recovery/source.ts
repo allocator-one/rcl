@@ -45,6 +45,7 @@ const target = z.object({
 const header = z.object({
   id: string.regex(UUID), rcl_version: nonblank.max(64), command: z.enum(['review', 'review-plan']), target,
   roster: z.array(z.object({ model: nonblank, role: nonblank, provider: nonblank, lane: z.enum(['blocking', 'secondary', 'async', 'verification']) })).max(200),
+  cycle_id: string.regex(UUID).optional(),
   config_sha256: hash,
   thresholds: z.object({ min_consensus_score: number, min_confidence: number, dedupe_line_window: integer, jaccard_threshold: number }),
   gating: z.object({

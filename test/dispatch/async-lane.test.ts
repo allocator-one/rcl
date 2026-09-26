@@ -205,6 +205,15 @@ describe('spool → worker → collect round trip', () => {
     expect(await collectAsyncResults(dir, next)).toEqual([]);
   });
 
+  it('keeps a late async response in its original cycle on unchanged inputs', async () => {
+    const old = asyncTargetKey('owner/repo#42', undefined, '00000000-0000-4000-8000-000000000001');
+    const fresh = asyncTargetKey('owner/repo#42', undefined, '00000000-0000-4000-8000-000000000002');
+    const [spool] = await spoolAsyncCalls([spec], { storeDir: dir, targetKey: old, timeoutMs: 1000, maxRetries: 0 });
+    await runAsyncWorker(spool!, () => fakeAdapter(1));
+    expect(await collectAsyncResults(dir, fresh)).toEqual([]);
+    expect(await collectAsyncResults(dir, old)).toHaveLength(1);
+  });
+
   it('shares results across linked worktrees, not independent repositories', async () => {
     const repo = join(dir, 'repo');
     const linked = join(dir, 'linked');

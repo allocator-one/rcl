@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createReviewCycleRemote } from './converge/cycle-remote.js';
+import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
@@ -6,7 +8,7 @@ import chalk from 'chalk';
 import { readdir, readFile, writeFile } from 'fs/promises';
 import { hostname } from 'os';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { loadConfig } from './config/loader.js';
 import { applyHarnessModelKeys } from './config/harness.js';
 import {
@@ -141,7 +143,7 @@ import { runBackfill } from './telemetry/backfill.js';
 import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemetry/recovery/command.js';
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
-import { loadConvergeRunState, roundRunId } from './converge/run-state.js';
+import { loadConvergeRunState } from './converge/run-state.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -160,6 +162,7 @@ program
 // worker is not a user command.
 program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
+  if (name === 'review') return; // Review flushes after detecting explicit/pending cycles.
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
   if (name === 'converge-stale' || name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
@@ -310,6 +313,7 @@ program
   .option('--for-pr <owner/repo#N>', 'The pull request a patch-file review is evidence for (or RCL_FOR_PR): Harness verifies its head against that pull request')
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
+  .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
@@ -435,7 +439,7 @@ program
             convergeTarget: claim.target,
             attempt: claim.attempt,
             // The claim's local state path and process id stay on this machine.
-            payload: { attempt: claim.attempt, cap: claim.cap },
+            payload: { attempt: claim.attempt, cap: claim.cap, ...(claim.cycle ? { cycle_id: claim.cycle.id } : {}) },
           }),
           // An explicit --max-attempts is consent evidence, whatever it was before.
           ...(maxAttempts !== undefined
@@ -643,6 +647,7 @@ program
           round,
           findings: report.findings,
           reportSha256,
+          cycleId: report.run?.cycle_id,
           ...(maxRounds !== undefined ? { maxRounds } : {}),
           ...(runId !== undefined ? { runId } : {}),
         });
@@ -737,6 +742,7 @@ program
 program
   .command('converge-verdict')
   .description('Record fixed/dismissed triage verdicts for finding identities in the converge run state')
+  .option('--run-id <uuid>', 'Report run UUID (required for fresh review cycles)')
   .option('--target [key]', 'Stable convergence target key')
   .option('--round [n]', 'Evidence round the triage belongs to')
   .option(
@@ -771,6 +777,7 @@ program
     async (opts: {
       target?: string | boolean;
       round?: string | boolean;
+      runId?: string;
       fixed: string[];
       fixedReason: string[];
       dismissed: string[];
@@ -816,11 +823,12 @@ program
         if (new Set(verdicts.map(({ key }) => key)).size !== verdicts.length) {
           throw new ConvergeRunStateError('Pass each finding identity only once, as either fixed or dismissed.');
         }
-        const { entries: updated, resolution } = await recordVerdicts({
+        const { entries: updated, resolution, runId: roundRun } = await recordVerdicts({
           gitCommonDir: await resolveGitCommonDir(),
           target: opts.target,
           round,
           verdicts,
+          runId: opts.runId,
         });
         // Feed the cross-run precision history (RCL-27) — fail-soft, the
         // verdicts above are already durably recorded.
@@ -845,14 +853,6 @@ program
           console.warn(
             `Model-stats store unavailable (outcomes not recorded): ${String(err)}`
           );
-        }
-        // The run id binding is advisory: an unreadable state file must not
-        // fail a command whose verdicts are already recorded.
-        let roundRun: string | undefined;
-        try {
-          roundRun = roundRunId(await loadConvergeRunState(await resolveGitCommonDir(), opts.target), round);
-        } catch {
-          roundRun = undefined;
         }
         await reportConvergeEvents([
           buildEvent({
@@ -1434,6 +1434,8 @@ interface CouncilCliOpts {
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
+  startOver?: boolean;
+  cycleReview?: boolean;
   /** Retain guarded output creation semantics inside the post-claim execution. */
   exclusiveOutputs?: boolean;
   launchIntent?: GuardedLaunchOptions['intent'];
@@ -1497,7 +1499,7 @@ async function prepareCouncil(
   // model time is spent, not after the council has run.
   const converge = resolveConvergeContext(
     { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
-    process.env
+    reviewConvergeEnvironment(opts)
   );
   await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
@@ -1669,6 +1671,31 @@ async function prepareCouncil(
   };
 }
 
+function reviewConvergeEnvironment(opts: CouncilCliOpts): NodeJS.ProcessEnv {
+  return opts.startOver || opts.cycleReview
+    ? { ...process.env, RCL_CONVERGE_ROUND: undefined, RCL_CONVERGE_ATTEMPT: undefined }
+    : process.env;
+}
+
+async function discoverCycleReview(target: string | undefined, opts: CouncilCliOpts & { staged?: boolean; workingTree?: boolean }): Promise<CouncilCliOpts> {
+  const prRef = target && isGitHubTarget(target) ? target : opts.forPr ?? process.env['RCL_FOR_PR'];
+  if (opts.startOver && (!prRef || opts.staged || opts.workingTree)) throw new Error('--start-over needs a PR or a captured patch with --for-pr and --head-sha');
+  if (!prRef) return opts;
+  const pr = parseGitHubTarget(prRef);
+  const targetKey = opts.convergeTarget?.trim() || process.env['RCL_CONVERGE_TARGET']?.trim() || `${pr.repo.toLowerCase()}-${pr.number}`;
+  let common: string;
+  try { common = await resolveGitCommonDir(); }
+  catch (error) { if (opts.startOver) throw error; return opts; }
+  if (!opts.startOver) await assertNoPendingFreshReview(common, targetKey);
+  const active = opts.startOver ? undefined : await loadConvergeRunState(common, targetKey);
+  if (!opts.startOver && !active?.cycle) return opts;
+  if (opts.attempt !== undefined || (opts.startOver && opts.round !== undefined) || opts.attest) throw new Error('A fresh review assigns its own ordinals and needs an ordinary actor credential');
+  if (opts.telemetry === false) throw new Error('Fresh review cycles require Harness evidence');
+  const paths = opts.jsonFile ? {} : await freshReviewOutputPaths(common);
+  return { ...opts, ...paths, ...(opts.markdown ? { markdown: opts.markdown } : {}),
+    convergeTarget: targetKey, guardedConverge: true, cycleReview: true, evidenceRequired: true };
+}
+
 async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   staged?: boolean;
   workingTree?: boolean;
@@ -1677,12 +1704,20 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   const spinner = ora('Loading configuration...').start();
 
   try {
+    opts = { ...opts, ...await discoverCycleReview(target, opts) };
+    if (!opts.cycleReview && opts.telemetry !== false && (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
+      try {
+        if ((await readdir(join(resolveDataDir(), 'outbox')).catch(() => [])).length > 0) {
+          await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
+        }
+      } catch { /* Startup delivery remains best-effort for legacy reviews. */ }
+    }
     if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
       throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
     }
     if (opts.guardedConverge) {
-      const converge = resolveConvergeContext(opts, process.env);
+      const converge = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
       if (!converge) throw new ReviewLaunchRefused('target_required', 'A guarded launch requires --converge-target.');
       if (converge.attempt !== undefined || opts.attest) {
         throw new ReviewLaunchRefused('incompatible_launch', 'Guarded review claims its own attempt; do not preclaim, pass --attempt, or combine it with --attest.');
@@ -1888,9 +1923,19 @@ async function executeCouncil(
     const roster = buildRoster({ assignments, asyncAssignments, coreModels: prepared.coreModels,
       explicit: prepared.explicit, gating: prepared.gatingConfig });
     let completion: GuardedLaunchCompletion | undefined;
+    const common = await resolveGitCommonDir();
+    const native = opts.startOver ? undefined : await loadConvergeRunState(common, prepared.converge!.target);
+    let cycleRemote: GuardedLaunchOptions['cycleRemote'];
+    if (opts.startOver || native?.cycle) {
+      if (!extra.target.repo || !extra.target.prNumber) throw new Error('fresh_review_requires_pr');
+      const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
+      if (!runtime.sink || runtime.level !== 'full') throw new Error('Fresh review cycles require full Harness evidence and an actor credential');
+      cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber, extra.target.headSha ?? '');
+    }
     const claim = await guardReviewLaunch({
       gitCommonDir: await resolveGitCommonDir(),
       target: prepared.converge!.target,
+      startOver: opts.startOver, cycleRemote,
       headSha: extra.target.headSha ?? '',
       inputSha256: sha256Hex(stableStringify({
         head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
@@ -1912,8 +1957,9 @@ async function executeCouncil(
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
           kind: 'attempt_claimed', convergeTarget: claim.target, attempt: claim.attempt,
-          payload: { attempt: claim.attempt, cap: claim.cap },
+          payload: { attempt: claim.attempt, cap: claim.cap, ...(claim.cycle ? { cycle_id: claim.cycle.id } : {}) },
         })]);
+        if (claim.cycle) process.stderr.write(`Review cycle ${claim.cycle.id}. Prior local history: ${claim.cycle.history.attempts} attempts, ${claim.cycle.history.rounds} admitted rounds${claim.cycle.history.incomplete ? ' (known history only)' : ''}.\n`);
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
       },
       run: async converge => {
@@ -1923,7 +1969,12 @@ async function executeCouncil(
       },
     });
     if (claim.warning) process.stderr.write(`${claim.warning}\n`);
-    return completion!;
+    if (claim.resumedCompletion) {
+      process.stderr.write(`Fresh review already completed as run ${claim.resumedCompletion.runId}; no reviewers restarted.\n`);
+      if (claim.resumedCompletion.reportPath) process.stderr.write(`Retained report: ${claim.resumedCompletion.reportPath}\n`);
+      process.exitCode = claim.resumedCompletion.exitCode ?? (claim.resumedCompletion.deliveryPending ? 4 : 0);
+    }
+    return claim.resumedCompletion ?? completion!;
   }
 
   // Async lane (RCL-25): fire the async reviewers with the round, never
@@ -1942,7 +1993,8 @@ async function executeCouncil(
       asyncStoreDir = await resolveAsyncStoreDir();
       asyncKey = asyncTargetKey(
         asyncTargetLabel,
-        extra.target.kind === 'patch' ? prepared.converge?.target : undefined
+        extra.target.kind === 'patch' ? prepared.converge?.target : undefined,
+        prepared.converge?.cycleId
       );
       let asyncChunkAssignments = chunks.flatMap((chunk) =>
         asyncAssignments.map((assignment) => ({ assignment, chunk }))
@@ -2155,7 +2207,7 @@ async function executeCouncil(
       ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
       runner: detectRunner(process.env, hostname()),
       startedAt: prepared.startedAt,
-      ...(prepared.converge ? { converge: prepared.converge } : {}),
+      ...(prepared.converge ? { converge: { target: prepared.converge.target, round: prepared.converge.round, attempt: prepared.converge.attempt }, cycleId: prepared.converge.cycleId } : {}),
     },
   }, {
     onStage: postReviewStage,
@@ -2297,6 +2349,10 @@ async function executeCouncil(
     successfulReviews: result.stats.successfulReviews,
     totalReviews: result.stats.totalReviews,
     deliveryPending: delivery.spooled || delivery.exitCode !== 0,
+    ...(prepared.converge?.cycleId ? {
+      exitCode: opts.ci && run.ci_exit_code !== 0 ? run.ci_exit_code : delivery.exitCode || (outputDiagnostics.length > 0 ? 1 : 0),
+      ...(opts.jsonFile ? { reportPath: resolve(opts.jsonFile) } : {}),
+    } : {}),
     hardFailure: chunkReviews.some(review => review.status === 'error' || review.status === 'parse_failed'),
   };
 

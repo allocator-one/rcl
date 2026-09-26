@@ -37,6 +37,7 @@ const target = z.object({
 
 const run = z.object({
   id: uuid, rcl_version: text(64, true), command: z.enum(['review', 'review-plan']), target,
+  cycle_id: optional(uuid),
   config_sha256: digest,
   roster: z.array(z.object({ model: short, role: short, provider: short, lane })).max(200),
   thresholds: optional(map), gating: optional(map),

@@ -578,3 +578,13 @@ describe('round-11 hardening', () => {
     expect(diffDigest([local])).toBe(diffDigest([{ ...local, blobSha: undefined }]));
   });
 });
+
+
+it('retains cycle membership when missing-reviewer reconstruction replaces only its converge ordinals', () => {
+  const cycleId = '01924f6e-6a2b-7c4d-8e9f-0123456789ab';
+  const original = { ...baseInput(), cycleId, converge: { target: 'rcl-42', round: 1, attempt: 1, cycleId } };
+  const rebuilt = buildRunHeader({ ...original, converge: { target: 'rcl-42', round: 1, attempt: 2 } });
+  expect(rebuilt.cycle_id).toBe(cycleId);
+  expect(rebuilt.converge).toEqual({ target: 'rcl-42', round: 1, attempt: 2 });
+  expect(() => buildRunHeader({ ...original, converge: { ...original.converge, cycleId: 'other' } })).toThrow('review_cycle_header_mismatch');
+});

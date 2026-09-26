@@ -1,3 +1,5 @@
+import { validCycleVersion } from './review-cycle.js';
+import { assertReviewCyclePair, assertNoPendingFreshReview } from './fresh-review.js';
 import { randomUUID } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -39,10 +41,11 @@ class ValidatedStaleHistoryReader extends StaleHistoryReader {
 }
 
 function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validatedEvidence>, s: StaleReportSelection, auditValidated = false) {
-  if (state.version !== 1 || state.target !== s.target || !Array.isArray(state.rounds) || !state.findings || Array.isArray(state.findings)) throw new Error('stale_report_unsupported_state');
+  if (!validCycleVersion(state, 1) || state.target !== s.target || !Array.isArray(state.rounds) || !state.findings || Array.isArray(state.findings)) throw new Error('stale_report_unsupported_state');
   validateRoundCap(state.roundCap); if (!auditValidated) validateStaleReportAudit(state);
   const previous = launchSchema.parse(state.lastLaunch);
   const {attempts,report,successfulReviews} = evidence;
+  if (!isDeepStrictEqual(state.cycle, attempts.cycle) || report.run.cycle_id !== state.cycle?.id) throw new Error('stale_report_cycle_mismatch');
   const round = Math.max(0,...state.rounds.map(r => r.round)) + 1;
   if (!Number.isSafeInteger(round) || round > state.roundCap || previous.round !== round ||
     state.rounds.some(r => r.runId === previous.runId)) throw new Error('stale_report_not_unadmitted');
@@ -63,11 +66,13 @@ function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validated
 /** Read-only evidence selection; it never admits findings or claims an attempt. */
 export async function previewStaleReport(input: StaleReportSelection, gitCommonDir: string): Promise<StaleReportManifest> {
   const s = staleSelectionSchema.parse(input), common = await realpath(resolve(gitCommonDir));
+  await assertNoPendingFreshReview(common,s.target);
   const native = await readStable(convergeRunStatePath(common,s.target));
   const attempts = await readStable(convergeAttemptStatePath(common,s.target));
   const report = await selected(s.reportPath,s.reportSha256);
   const state = await loadConvergeRunState(common,s.target);
   if (!state || !isDeepStrictEqual(state,parse(native))) throw new Error('stale_report_state_changed');
+  await assertReviewCyclePair(common,s.target,state.cycle);
   const previous = eligible(state,validatedEvidence(parse(attempts),parse(report),s.target),s);
   await verifyStaleReportReceipts(common,state.staleReportAudit ?? []);
   if (state.staleReportAudit?.some(e => {
@@ -135,6 +140,7 @@ export async function applyStaleReport(input: {manifest:string;manifestSha256:st
   if (m.gitCommonDir !== common) throw new Error('stale_report_repository_mismatch');
   const entry: StaleReportEntry = {manifestJson:original.text,manifestSha256:original.sha256};
   return withRecoveryTarget(common,m.target,async ownership => {
+    await assertNoPendingFreshReview(common,m.target);
     const current = await readStable(convergeRunStatePath(common,m.target));
     const state = await loadConvergeRunState(common,m.target);
     if (!state || !isDeepStrictEqual(state,parse(current))) throw new Error('stale_report_state_changed');

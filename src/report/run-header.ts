@@ -59,6 +59,7 @@ export interface ConvergeContext {
   target: string;
   round?: number;
   attempt?: number;
+  cycleId?: string;
 }
 
 export interface RunHeader {
@@ -93,7 +94,8 @@ export interface RunHeader {
   duration_ms: number;
   /** Computed even without --ci so the gate verdict is recorded uniformly. */
   ci_exit_code: number;
-  converge?: ConvergeContext;
+  converge?: Omit<ConvergeContext, 'cycleId'>;
+  cycle_id?: string;
   /** `backfill` for recovered history (`rcl telemetry backfill`); absent means live. */
   provenance?: 'live' | 'backfill';
   /** Original immutable modern report, only on a non-gating historical import. */
@@ -108,6 +110,7 @@ export interface ResolvedThresholds {
 }
 
 export interface RunHeaderInput {
+  cycleId?: string;
   id?: string;
   rclVersion: string;
   command: RunHeader['command'];
@@ -416,6 +419,9 @@ export function describeRunTarget(target: RunTarget): string {
 
 export function buildRunHeader(input: RunHeaderInput): RunHeader {
   const { target, diff } = input;
+  if (input.cycleId !== undefined && input.converge?.cycleId !== undefined && input.cycleId !== input.converge.cycleId) {
+    throw new Error('review_cycle_header_mismatch');
+  }
   return {
     id: input.id ?? uuidv7(),
     rcl_version: input.rclVersion,
@@ -459,6 +465,11 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
     finished_at: input.finishedAt.toISOString(),
     duration_ms: Math.max(0, input.finishedAt.getTime() - input.startedAt.getTime()),
     ci_exit_code: input.ciExitCode,
-    ...(input.converge ? { converge: { ...input.converge } } : {}),
+    ...((input.cycleId ?? input.converge?.cycleId) ? { cycle_id: input.cycleId ?? input.converge?.cycleId } : {}),
+    ...(input.converge ? { converge: {
+      target: input.converge.target,
+      ...(input.converge.round !== undefined ? { round: input.converge.round } : {}),
+      ...(input.converge.attempt !== undefined ? { attempt: input.converge.attempt } : {}),
+    } } : {}),
   };
 }

@@ -10,6 +10,7 @@ import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
 import * as lockScope from '../evidence/original-run/lock-scope.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import type { GuardedLaunchState } from './launch-guard.js';
+import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import {
   availableFindingKey,
@@ -116,7 +117,8 @@ export interface RoundCounts {
 }
 
 export interface ConvergeRunState {
-  version: typeof STATE_VERSION;
+  version: 1 | 2;
+  cycle?: NativeReviewCycle;
   target: string;
   roundCap: number;
   /** `runId` is the report's `run.id` (rcl ≥ 3.0), which converge-verdict sends with every verdict. */
@@ -210,7 +212,7 @@ export async function loadConvergeRunStateEvidence(
   }
   const state = parsed as Partial<ConvergeRunState>;
   if (
-    state.version !== STATE_VERSION ||
+    !validCycleVersion(state, STATE_VERSION) ||
     state.target !== target ||
     !Number.isSafeInteger(state.roundCap) ||
     !Array.isArray(state.rounds) ||
@@ -235,6 +237,8 @@ async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): P
   // Callers pass the immutable directory bound to target ownership; resolving
   // it here normalizes platform aliases without consulting a mutable caller path.
   gitCommonDir = await realpath(resolve(gitCommonDir));
+  const { assertReviewCyclePair } = await import('./fresh-review.js');
+  await assertReviewCyclePair(gitCommonDir, state.target, state.cycle);
   const path = convergeRunStatePath(gitCommonDir, state.target);
   const stateDir = join(gitCommonDir, STATE_DIR);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
@@ -324,6 +328,7 @@ export interface ProcessRoundOptions {
   /** The report's own run id, kept so verdicts can be bound to the round's run. */
   runId?: string;
   reportSha256?: string;
+  cycleId?: string;
   ownership?: NativeTargetOwnership;
 }
 
@@ -393,6 +398,18 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
+  const { assertReviewCyclePair, assertNoPendingFreshReview } = await import('./fresh-review.js');
+  await assertNoPendingFreshReview(gitCommonDir, target);
+  await assertReviewCyclePair(gitCommonDir, target, state.cycle);
+  if (options.cycleId !== state.cycle?.id) throw new ConvergeRunStateError('review_cycle_mismatch');
+  if (state.cycle) {
+    const launch = state.lastLaunch;
+    const { hasHealthyGuardedLaunch } = await import('./launch-guard.js');
+    if (!launch || launch.status !== 'completed' || !hasHealthyGuardedLaunch(launch) ||
+      launch.runId !== runId || launch.reportJsonSha256 !== options.reportSha256 || launch.round !== options.round) {
+      throw new ConvergeRunStateError('review_cycle_launch_mismatch');
+    }
+  }
   if (state.staleReportAudit?.some(entry => staleManifest(entry).runId === runId || staleManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('stale_report_cannot_be_admitted');
   if (state.staleReportAudit?.length) {
     const { verifyStaleReportReceipts } = await import('./stale-report.js');
@@ -621,6 +638,7 @@ export interface RoundResolution {
 }
 
 export interface RecordVerdictsResult {
+  runId?: string;
   entries: FindingEntry[];
   /**
    * Present only when the verdicts belong to the most recently processed
@@ -636,6 +654,7 @@ export interface RecordVerdictsResult {
  * resolution when it can be decided.
  */
 export interface RecordVerdictsOptions {
+  runId?: string;
   gitCommonDir: string;
   target: string;
   round: number;
@@ -662,6 +681,13 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   if (!reviewedRound) {
     throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
   }
+  const { assertReviewCyclePair, assertNoPendingFreshReview } = await import('./fresh-review.js');
+  await assertNoPendingFreshReview(gitCommonDir, target);
+  await assertReviewCyclePair(gitCommonDir, target, state.cycle);
+  if ((state.cycle && options.runId === undefined) ||
+    (options.runId !== undefined && options.runId !== reviewedRound.runId)) {
+    throw new ConvergeRunStateError('review_cycle_verdict_run_mismatch: use --run-id from the current report');
+  }
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
   for (const { key, verdict, reason } of options.verdicts) {
@@ -687,7 +713,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   await writeState(gitCommonDir, state, ownership);
 
   const resolution = resolveRoundResolution(state, options.round);
-  return { entries: updated, ...(resolution ? { resolution } : {}) };
+  return { entries: updated, ...(reviewedRound.runId ? { runId: reviewedRound.runId } : {}), ...(resolution ? { resolution } : {}) };
 }
 
 export function resolveRoundResolution(state: ConvergeRunState, round: number): RoundResolution | undefined {

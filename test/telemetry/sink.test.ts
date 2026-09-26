@@ -458,3 +458,11 @@ describe('HarnessSink.postEvents', () => {
     expect(await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })])).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
   });
 });
+
+it.each(['./repo', '../repo', 'owner/.', 'owner/..'])('refuses direct cycle POST dot segments in %s before transport', async repo => {
+  const { sink: s, requests } = sink(() => ({ status: 500, body: {} }));
+  await expect(s.startReviewCycle(repo, 42, {
+    operation_id: '550e8400-e29b-41d4-a716-446655440000', previous_cycle_id: null, head_sha: 'a'.repeat(40),
+  })).rejects.toThrow('fresh_review_requires_pr');
+  expect(requests).toHaveLength(0);
+});
