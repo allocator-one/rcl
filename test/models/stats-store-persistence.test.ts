@@ -102,11 +102,15 @@ it('serializes concurrent retries of one retained batch', async () => {
 });
 
 it('preserves one physical batch across concurrent processes and a later restart', async () => {
-  const program = `import {appendCalls} from ${JSON.stringify(new URL('../../dist/models/stats-store.js', import.meta.url).href)};
+  const program = `import {appendCalls} from ${JSON.stringify(new URL('../../src/models/stats-store.ts', import.meta.url).href)};
     await appendCalls(JSON.parse(process.argv[1]), process.argv[2]);`;
   const batch = JSON.stringify([call('operation:0'), call('operation:1')]);
-  const run = () => promisify(execFile)(process.execPath, ['--input-type=module', '-e', program, batch, dir], { timeout: 10_000 });
-  await Promise.all([run(), run(), run()]);
+  const run = () => promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program, batch, dir], {
+    timeout: 10_000, env: { PATH: process.env.PATH ?? '', NODE_NO_WARNINGS: '1' },
+  });
+  const concurrent = await Promise.all([run(), run(), run()]);
+  expect(concurrent).toHaveLength(3);
+  concurrent.forEach(result => expect(result).toMatchObject({ stdout: '', stderr: '' }));
   const before = await readFile(join(dir, 'calls.jsonl'));
   const restarted = await run();
   expect(restarted.stderr).toBe('');
@@ -173,6 +177,12 @@ it('keeps the last physical legacy outcome when its timestamp is older', async (
   await appendOutcomes([{ ...outcome('legacy:1', 1, 'dismissed'), recordId: undefined, order: undefined,
     ts: '2026-09-22T11:00:00Z' }], dir);
   expect((await loadModelStats({ dir, now }))[0]).toMatchObject({ outcomes: 1, fixed: 0 });
+});
+
+it('does not let a later legacy outcome replace retained original ordering', async () => {
+  await appendOutcomes([outcome('ordered:0', 2, 'fixed')], dir);
+  await appendOutcomes([{ ...outcome('legacy:0', 1, 'dismissed'), recordId: undefined, order: undefined }], dir);
+  expect((await loadModelStats({ dir, now }))[0]).toMatchObject({ outcomes: 1, fixed: 1 });
 });
 
 it('rejects invalid retained ordering before creating a store', async () => {

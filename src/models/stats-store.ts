@@ -152,9 +152,8 @@ async function syncDirectoryAncestors(inputDir: string): Promise<string> {
   const target = resolve(inputDir);
   await mkdir(target, { recursive: true, mode: 0o700 });
   const dir = await realpath(target);
-  for (let path = dir; ; path = dirname(path)) {
+  for (let path = dir; dirname(path) !== path; path = dirname(path)) {
     await syncNativeDirectory(path);
-    if (dirname(path) === path || dirname(path) === '/') break;
   }
   return dir;
 }
@@ -253,6 +252,8 @@ function laterOutcome(candidate: OutcomeRecord, current: OutcomeRecord): boolean
     }
     return candidate.order.sequence > current.order.sequence;
   }
+  if (!candidate.order && current.order) return false;
+  if (candidate.order && !current.order) return true;
   return true;
 }
 
