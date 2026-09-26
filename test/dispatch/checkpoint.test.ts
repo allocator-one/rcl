@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type CheckpointPlanInput } from '../../src/dispatch/checkpoint.js';
@@ -22,7 +22,7 @@ vi.mock('node:fs/promises', async original => {
     return new Proxy(handle, {
       get(file, property) {
         if (property === 'writeFile') return async (...writeArgs: Parameters<typeof file.writeFile>) => {
-          if (durability.pauseStagedWrite && !durability.stagedWriteUsed && (path.includes('/.staging/') || path.includes('/events/'))) {
+          if (durability.pauseStagedWrite && !durability.stagedWriteUsed && (path.includes(`${sep}.staging${sep}`) || path.includes(`${sep}events${sep}`))) {
             durability.stagedWriteUsed = true;
             durability.stagedWriteStarted?.();
             await durability.stagedWriteRelease;

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
-import { decodeVerificationProof } from '../../src/dispatch/checkpoint-verification.js';
+import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, decodeVerificationProof,
+  validateVerificationRecordsForAppend } from '../../src/dispatch/checkpoint-verification.js';
 import { planGating } from '../../src/consensus/gating.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 import { stableStringify } from '../../src/report/run-header.js';
@@ -152,6 +153,41 @@ describe('durable verifier phase in the existing checkpoint', () => {
       const result = outcome(), pendingResult = f.journal.recordVerificationResult(result, owner); result.answerBytes = 'changed'; await pendingResult;
     });
     const phase = (await f.journal.readVerification())!; expect(phase.plan.batches[0]!.userPrompt).toBe(planInput().batches[0]!.userPrompt); expect(phase.outcomes[0]!.answerBytes).toBe(answer());
+  });
+
+  it('reuses the same-operation validated prefix when appending a verifier event', async () => {
+    const f = await fixture(), saved = planInput();
+    await runOwned(f, owner => f.journal.beginVerification(saved, owner));
+    const parse = JSON.parse; let planParses = 0;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((...args: Parameters<typeof JSON.parse>) => {
+      if (args[0] === saved.gatingPlanBytes) planParses += 1;
+      return parse(...args);
+    });
+    try {
+      await runOwned(f, owner => f.journal.recordVerificationIntent(intent(), owner));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(planParses).toBe(1);
+    expect((await f.journal.readVerification())!.intents).toEqual([intent()]);
+  });
+
+  it('brands one verifier append snapshot, rejects forgery or stale reuse and preserves exact record bytes', async () => {
+    const f = await fixture(); await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));
+    const main = await f.journal.exportProof(), phase = (await f.journal.readVerification())!;
+    const context = { planDigest: main.plan.digest, finalizationDigest: main.state.records.at(-1)!.digest,
+      capturedInputsSha256: hash(main.bindings['captured-inputs']!), operationSha256: hash(main.bindings.launch!),
+      runId, startedAtMs: 100, expiresAtMs: 1000, reviewerAttemptIds: ['reviewer-0'] };
+    const event = { type: 'intent' as const, intent: intent() };
+    const expected = appendVerificationRecord(phase.records, event, context);
+    const rawRecords = structuredClone(phase.records), mutableContext = structuredClone(context);
+    const snapshot = validateVerificationRecordsForAppend(rawRecords, mutableContext);
+    rawRecords[0]!.digest = '0'.repeat(64); mutableContext.operationSha256 = '9'.repeat(64);
+    expect(appendVerificationRecordToValidatedRecords(snapshot, event, context)).toEqual(expected);
+    expect(() => appendVerificationRecordToValidatedRecords(snapshot, event, context)).toThrow('unvalidated_state');
+    expect(() => appendVerificationRecordToValidatedRecords(structuredClone(snapshot), event, context)).toThrow('unvalidated_state');
+    const wrongContext = validateVerificationRecordsForAppend(phase.records, context);
+    expect(() => appendVerificationRecordToValidatedRecords(wrongContext, event, { ...context, operationSha256: '9'.repeat(64) })).toThrow('unvalidated_state');
   });
 
   it('requires sealed bound reviewer evidence and live same-target writable ownership', async () => {

@@ -8,7 +8,9 @@ import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
 import { verificationContextFromValidatedCheckpoint } from './checkpoint-verification-context.js';
 import {
-  appendVerificationRecord, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent, validateVerificationRecords, verificationDigest,
+  appendVerificationRecordToValidatedRecords, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent,
+  validateVerificationRecords, validateVerificationRecordsForAppend, verificationDigest,
+  type ValidatedVerificationRecords,
   type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationPlanInput,
   type VerificationResult, type VerificationState, type VerificationTerminal,
 } from './checkpoint-verification.js';
@@ -572,14 +574,18 @@ export class CheckpointJournal {
   }
 
   private async readVerificationValidated(context: VerificationContext): Promise<VerificationState | undefined> {
+    return (await this.readVerificationValidatedForAppend(context)).state;
+  }
+
+  private async readVerificationValidatedForAppend(context: VerificationContext): Promise<ValidatedVerificationRecords> {
     const directory = join(this.path, 'verification');
     try { await lstat(directory); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return validateVerificationRecordsForAppend([], context); throw error; }
     await inspectDirectory(directory);
     const entries = await readdir(directory);
     if (entries.some(name => name !== 'events')) throw new Error('checkpoint_verification_unknown_entry');
     // A crash while publishing the empty directories consumed no intent.
-    if (!entries.length) return undefined;
+    if (!entries.length) return validateVerificationRecordsForAppend([], context);
     const events = join(directory, 'events'); await inspectDirectory(events);
     const names = (await readdir(events)).sort(), values: unknown[] = [];
     if (names.length > 1002) throw new Error('checkpoint_verification_too_many_records');
@@ -594,14 +600,14 @@ export class CheckpointJournal {
       if (bytes !== `${canonical(value as Json)}\n`) throw new Error('checkpoint_verification_noncanonical');
       values.push(value);
     }
-    return validateVerificationRecords(values, context);
+    return validateVerificationRecordsForAppend(values, context);
   }
 
   private async appendVerification(input: VerificationEvent, ownership: NativeTargetOwnership): Promise<boolean> {
     const event = snapshotVerificationEvent(input);
     return this.write(ownership, async () => {
       const context = this.verificationContext(await this.readValidated());
-      const state = await this.readVerificationValidated(context), records = state?.records ?? [];
+      const snapshot = await this.readVerificationValidatedForAppend(context), state = snapshot.state, records = state?.records ?? [];
       const prior = records.find(row => row.event.type === event.type &&
         (event.type === 'intent' ? row.event.type === 'intent' && row.event.intent.attemptId === event.intent.attemptId
           : event.type === 'result' ? row.event.type === 'result' && row.event.result.attemptId === event.result.attemptId : true));
@@ -612,7 +618,7 @@ export class CheckpointJournal {
       if (await this.terminalReportEntries() !== undefined && (!state?.terminal || !prior)) {
         throw new Error('checkpoint_verification_report_finalized');
       }
-      const record = prior ? undefined : appendVerificationRecord(records, event, context);
+      const record = prior ? undefined : appendVerificationRecordToValidatedRecords(snapshot, event, context);
       if (!state && event.type !== 'plan') throw new Error('checkpoint_verification_missing_plan');
       const directory = await ensurePrivateChild(this.path, 'verification'); await ensurePrivateChild(directory, 'events');
       for (const existing of records) {

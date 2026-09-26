@@ -65,6 +65,10 @@ describe('portable finalized checkpoint proof', () => {
     const state = await journal.read(), bindings = await journal.readBindings();
     const proof = await exportCheckpointProof(journal);
     expect(proof.bytes).toBe(canonical(JSON.parse(proof.bytes)));
+    const rehashed = JSON.parse(proof.bytes);
+    rechain(rehashed);
+    expect(canonical(rehashed)).toBe(proof.bytes);
+    expect(decodeCheckpointProof(canonical(rehashed), frozen)).toEqual(proof);
     expect(proof.digest).toBe(hash(proof.bytes));
     expect(proof.state).toEqual(state); expect(proof.bindings).toEqual(bindings);
     await rm(path, { recursive: true });

@@ -131,8 +131,8 @@ describe('checkpoint late-result audit segment', () => {
     await expect(journal.readLateAudit()).rejects.toThrow('checkpoint_symlink');
   });
 
-  it.each(['plan', 'finalization', 'intent', 'cell', 'attempt kind', 'extra key', 'duplicate attempt'])(
-    'refuses a rehashed audit record with wrong %s binding', async mutation => {
+  it.each(['unchanged', 'plan', 'finalization', 'intent', 'cell', 'attempt kind', 'extra key', 'duplicate attempt'])(
+    'validates a rehashed audit record with %s binding', async mutation => {
       const { commonDir, journal, path } = await fixture();
       await withNativeTarget(commonDir, target, owner => journal.recordLateResult('general:0', { id: 'original', kind: 'unknown' }, review(), owner));
       const file = join(path, 'late-audit', '00000001.json'), record = JSON.parse(await readFile(file, 'utf8'));
@@ -142,12 +142,16 @@ describe('checkpoint late-result audit segment', () => {
       else if (mutation === 'cell') record.cell = 'general:1';
       else if (mutation === 'attempt kind') record.paidAttempt.kind = 'paid';
       else if (mutation === 'extra key') record.authoritative = true;
-      else { record.sequence = 2; record.previousDigest = record.digest; }
+      else if (mutation === 'duplicate attempt') { record.sequence = 2; record.previousDigest = record.digest; }
       const canonical = (value: any): string => value === null || typeof value !== 'object' ? JSON.stringify(value) : Array.isArray(value)
         ? `[${value.map(canonical).join(',')}]` : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
       delete record.digest; record.digest = hash(canonical(record));
       await writeFile(mutation === 'duplicate attempt' ? join(path, 'late-audit', '00000002.json') : file, canonical(record) + '\n', { mode: 0o600 });
-      await expect(journal.readLateAudit()).rejects.toThrow();
+      if (mutation === 'unchanged') {
+        const rows = await journal.readLateAudit();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toEqual(record);
+      } else await expect(journal.readLateAudit()).rejects.toThrow();
     },
   );
 

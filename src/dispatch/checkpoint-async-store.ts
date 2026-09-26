@@ -12,8 +12,8 @@ import { readStable } from '../telemetry/recovery/files.js';
 import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
-import { appendAsyncRecord, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
-  validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncIntent,
+import { appendAsyncRecordToValidatedState, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
+  validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
   type AsyncPlan, type AsyncProof, type AsyncRecord, type AsyncResult, type AsyncState } from './checkpoint-async.js';
 
 interface LocationInput { commonDir: string; namespace: string; plan: FrozenCheckpointPlan }
@@ -46,7 +46,7 @@ async function safeRead(path: string): Promise<string> {
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw);
 }
 async function resync(path: string, bytes: string): Promise<void> {
-  asyncRefuse(await safeRead(path) === bytes, 'conflict'); const before = await lstat(path), handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  asyncRefuse(await safeRead(path) === bytes, 'conflict'); const before = await lstat(path), handle = await open(path, constants.O_RDWR | constants.O_NOFOLLOW);
   try { const stat = await handle.stat(); asyncRefuse(stat.ino === before.ino && stat.dev === before.dev && stat.size === before.size && stat.ctimeMs === before.ctimeMs, 'changing_file'); await handle.sync(); }
   finally { await handle.close(); }
   asyncRefuse(await safeRead(path) === bytes, 'changing_file'); await syncNativeDirectory(dirname(path));
@@ -100,8 +100,8 @@ async function locked<T>(location: Location, work: (metadata: Metadata, state: A
     return work(metadata, state);
   });
 }
-async function append(location: Location, state: AsyncState, plan: AsyncPlan, event: Parameters<typeof appendAsyncRecord>[1]): Promise<AsyncRecord> {
-  const record = appendAsyncRecord(state.records, event, plan); await publish(location.phasePath, join(location.phasePath, 'events', filename(record.sequence)), stableStringify(record) + '\n'); return record;
+async function append(location: Location, state: AsyncState, plan: AsyncPlan, event: AsyncEvent): Promise<AsyncRecord> {
+  const record = appendAsyncRecordToValidatedState(state, event, plan); await publish(location.phasePath, join(location.phasePath, 'events', filename(record.sequence)), stableStringify(record) + '\n'); return record;
 }
 /** Only initialization under live native ownership may create restricted per-call delegations. */
 export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ delegates: readonly AsyncDelegate[]; plan: AsyncPlan }> {

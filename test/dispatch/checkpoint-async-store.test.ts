@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { constants } from 'node:fs';
 import { mkdtemp, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,10 +10,10 @@ import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/o
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit } from '../../src/dispatch/checkpoint-async-store.js';
 import { decodeAsyncProof } from '../../src/dispatch/checkpoint-async.js';
-const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], afterSync: undefined as undefined | ((path:string)=>void)}));
-vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
+const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], requireWritableSyncPath:'', afterSync: undefined as undefined | ((path:string)=>void)}));
+vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.requireWritableSyncPath&&!(Number(args[1])&constants.O_RDWR))throw Object.assign(new Error('sync requires write access'),{code:'EACCES'});if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
 const roots: string[] = [];
-afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.afterSync=undefined; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.requireWritableSyncPath=''; durability.afterSync=undefined; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
@@ -70,6 +71,11 @@ describe('restricted original async checkpoint persistence',()=>{
   await expect(w.recordResult(intent.attemptId,review('success',{provider:'other'}),true)).rejects.toThrow('review');await w.recordResult(intent.attemptId,review(),true);await w.recordResult(intent.attemptId,review(),true);
   await expect(w.recordResult(intent.attemptId,review('error'),true)).rejects.toThrow('conflict');expect((await seal(f)).state.outcomes).toHaveLength(1);
  });
+ it('resyncs an existing immutable event with a writable non-truncating handle',async()=>{
+  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]),intent=await w.claim(prompts);await w.recordResult(intent.attemptId,review(),true);
+  const path=join(f.path,'async','events','00000002.json'),before=await readFile(path,'utf8');durability.requireWritableSyncPath=path;
+  await w.recordResult(intent.attemptId,review(),true);expect(await readFile(path,'utf8')).toBe(before);
+ });
  it('rejects changed context and noncanonical or tampered event bytes on reopen',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);await w.claim(prompts);const proof=await seal(f);
   expect(()=>decodeAsyncProof(proof.bytes,{...proof.context,capturedInputsSha256:'0'.repeat(64)})).toThrow();
@@ -113,4 +119,31 @@ describe('restricted original async checkpoint persistence',()=>{
   expect(await readdir(f.path)).not.toContain('async');
  });
 
+});
+
+describe('async replay append cost',()=>{
+ it('reuses the same-operation validated prefix when appending an async retry intent',async()=>{
+  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);const bytes=review('error');await w.recordResult(first.attemptId,bytes,true);
+  const parse=JSON.parse;let reviewParses=0;const spy=vi.spyOn(JSON,'parse').mockImplementation((...args:Parameters<typeof JSON.parse>)=>{if(args[0]===bytes)reviewParses+=1;return parse(...args);});
+  let retry;
+  try{retry=await w.claim(prompts);}finally{spy.mockRestore();}
+  expect(retry).toBeDefined();expect(reviewParses).toBe(2);expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(2);
+ });
+ it('brands one async append state, rejects forgery or stale reuse and preserves exact record bytes',async()=>{
+  const {appendAsyncRecord,appendAsyncRecordToValidatedState,validateAsyncRecords}=await import('../../src/dispatch/checkpoint-async.js');
+  const f=await fixture(),opened=await initialize(f),phase=await readAsyncPhase(f.input);
+  const intentEvent={type:'intent' as const,intent:{callIndex:0,attemptId:'async-00000000-0000-4000-8000-000000000001',startedAtMs:f.launch.startedAtMs+1}};
+  const first=appendAsyncRecord(phase.state.records,intentEvent,phase.plan),rawRecords=structuredClone([first]);
+  const state=validateAsyncRecords(rawRecords,phase.plan),reviewBytes=review();
+  rawRecords[0]!.digest='0'.repeat(64);
+  const event={type:'result' as const,result:{callIndex:0,attemptId:intentEvent.intent.attemptId,finishedAtMs:f.launch.startedAtMs+2,
+    reviewBytes,reviewSha256:sha256Hex(reviewBytes),possiblyBilled:true}};
+  const expected=appendAsyncRecord([first],event,phase.plan);
+  expect(appendAsyncRecordToValidatedState(state,event,phase.plan)).toEqual(expected);
+  expect(()=>appendAsyncRecordToValidatedState(state,event,phase.plan)).toThrow('unvalidated_state');
+  expect(()=>appendAsyncRecordToValidatedState(structuredClone(state),event,phase.plan)).toThrow('unvalidated_state');
+  const wrongPlanState=validateAsyncRecords([first],phase.plan);
+  expect(()=>appendAsyncRecordToValidatedState(wrongPlanState,event,{...phase.plan,expiresAtMs:phase.plan.expiresAtMs-1})).toThrow('unvalidated_state');
+  expect(opened.delegates).toHaveLength(2);
+ });
 });

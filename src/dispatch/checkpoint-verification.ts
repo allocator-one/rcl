@@ -70,6 +70,22 @@ export interface VerificationState {
   uncertain: VerificationIntent[];
   terminal?: VerificationTerminal;
 }
+export interface ValidatedVerificationRecords { readonly state?: VerificationState }
+interface VerificationValidationMetadata {
+  contextFingerprint: string;
+  expectedBinding: string;
+  retainedBytes: number;
+  previousDigest: string;
+  records: VerificationRecord[];
+  intents: VerificationIntent[];
+  outcomes: VerificationResult[];
+  byBatch: Map<number, VerificationIntent>;
+  ids: Set<string>;
+  results: Set<number>;
+  plan?: VerificationPlanInput;
+  terminal?: VerificationTerminal;
+}
+const validatedVerificationRecords = new WeakMap<ValidatedVerificationRecords, VerificationValidationMetadata>();
 
 export function verificationDigest(bytes: string): string { return createHash('sha256').update(bytes).digest('hex'); }
 
@@ -99,6 +115,10 @@ function binding(context: VerificationContext): z.infer<typeof bindingsSchema> {
   return bindingsSchema.parse({ planDigest: context.planDigest, finalizationDigest: context.finalizationDigest,
     capturedInputsSha256: context.capturedInputsSha256, operationSha256: context.operationSha256 });
 }
+function contextFingerprint(context: VerificationContext): string {
+  return stableStringify({ ...binding(context), runId: context.runId, startedAtMs: context.startedAtMs,
+    expiresAtMs: context.expiresAtMs, reviewerAttemptIds: [...context.reviewerAttemptIds] });
+}
 
 /** Snapshot before any await. Validation is structural; this never authorizes a provider request. */
 export function snapshotVerificationEvent(input: VerificationEvent): VerificationEvent {
@@ -121,69 +141,93 @@ export function snapshotVerificationEvent(input: VerificationEvent): Verificatio
   return freeze(event);
 }
 
-/** A proof of private local recording, not of remote ownership, model truth or launch authority. */
-export function validateVerificationRecords(input: readonly unknown[], context: VerificationContext): VerificationState | undefined {
+function checkVerificationEvent(event: VerificationEvent, index: number, metadata: VerificationValidationMetadata, context: VerificationContext): void {
+  refuse(!metadata.terminal, 'finalized');
+  if (event.type === 'plan') {
+    const plan = event.plan;
+    refuse(index === 0 && !metadata.plan, 'duplicate_plan');
+    refuse(plan.runId === context.runId && plan.startedAtMs >= context.startedAtMs && plan.expiresAtMs >= plan.startedAtMs &&
+      plan.expiresAtMs <= context.expiresAtMs && plan.expiresAtMs - plan.startedAtMs <= plan.verificationPassTimeoutMs &&
+      plan.maxPhysicalCalls <= plan.batches.length && plan.maxPhysicalCalls + context.reviewerAttemptIds.length <= 500, 'invalid_plan');
+  } else {
+    const plan = metadata.plan; refuse(plan, 'missing_plan');
+    if (event.type === 'intent') {
+      const row = event.intent;
+      refuse(row.batchIndex < plan.batches.length && !metadata.byBatch.has(row.batchIndex) && !metadata.ids.has(row.attemptId), 'duplicate_or_unknown_intent');
+      refuse(row.startedAtMs >= plan.startedAtMs && row.startedAtMs < plan.expiresAtMs &&
+        row.startedAtMs >= (metadata.intents.at(-1)?.startedAtMs ?? plan.startedAtMs), 'invalid_intent_time');
+      refuse(metadata.intents.length < plan.maxPhysicalCalls, 'call_cap');
+    } else if (event.type === 'result') {
+      const row = event.result, launch = metadata.byBatch.get(row.batchIndex);
+      refuse(launch && launch.attemptId === row.attemptId && !metadata.results.has(row.batchIndex), 'missing_or_duplicate_intent');
+      refuse(row.finishedAtMs >= launch.startedAtMs, 'invalid_result_time');
+      parseVerificationAnswer(row.answerBytes, plan);
+    } else {
+      const row = event.terminal;
+      refuse(row.finishedAtMs >= plan.startedAtMs && metadata.intents.every(x => x.startedAtMs <= row.finishedAtMs) &&
+        metadata.outcomes.every(x => x.finishedAtMs <= row.finishedAtMs), 'invalid_terminal_time');
+      if (row.status === 'complete') refuse(metadata.results.size === plan.batches.length && row.finishedAtMs < plan.expiresAtMs, 'incomplete');
+    }
+  }
+}
+function retainVerificationEvent(event: VerificationEvent, metadata: VerificationValidationMetadata): void {
+  if (event.type === 'plan') metadata.plan = event.plan;
+  else if (event.type === 'intent') {
+    metadata.byBatch.set(event.intent.batchIndex, event.intent); metadata.ids.add(event.intent.attemptId); metadata.intents.push(event.intent);
+  } else if (event.type === 'result') {
+    metadata.results.add(event.result.batchIndex); metadata.outcomes.push(event.result);
+  } else metadata.terminal = event.terminal;
+}
+function validateVerificationRecordSet(input: readonly unknown[], context: VerificationContext): { state?: VerificationState; metadata: VerificationValidationMetadata } {
   refuse(input.length <= 1002, 'too_many_records');
-  if (!input.length) return undefined;
   const expected = stableStringify(binding(context));
-  const records: VerificationRecord[] = [], intents: VerificationIntent[] = [], outcomes: VerificationResult[] = [];
-  const byBatch = new Map<number, VerificationIntent>(), ids = new Set(context.reviewerAttemptIds), results = new Set<number>();
-  let plan: VerificationPlanInput | undefined, terminal: VerificationTerminal | undefined, previous = context.finalizationDigest;
-  // Reserve the portable wrapper and one separator per record, also covering
-  // local trailing newlines. A writer must never publish evidence its reader
-  // would refuse because JSON/container overhead crossed the same byte cap.
-  let retainedBytes = Buffer.byteLength('{"records":[],"version":1}', 'utf8');
+  const metadata: VerificationValidationMetadata = { contextFingerprint: contextFingerprint(context), expectedBinding: expected,
+    retainedBytes: Buffer.byteLength('{"records":[],"version":1}', 'utf8'), previousDigest: context.finalizationDigest,
+    records: [], intents: [], outcomes: [], byBatch: new Map(), ids: new Set(context.reviewerAttemptIds), results: new Set() };
+  if (!input.length) return { metadata };
   for (const [index, value] of input.entries()) {
     const parsed = recordSchema.safeParse(value);
     refuse(parsed.success, 'invalid_record');
     const record = parsed.data, { digest: hash, ...unsigned } = record;
-    retainedBytes += Buffer.byteLength(stableStringify(record), 'utf8') + 1;
-    refuse(retainedBytes <= MAX_ARTIFACT_BYTES, 'too_large');
-    refuse(record.sequence === index + 1 && record.previousDigest === previous &&
+    metadata.retainedBytes += Buffer.byteLength(stableStringify(record), 'utf8') + 1;
+    refuse(metadata.retainedBytes <= MAX_ARTIFACT_BYTES, 'too_large');
+    refuse(record.sequence === index + 1 && record.previousDigest === metadata.previousDigest &&
       hash === verificationDigest(stableStringify(unsigned)) && stableStringify(record.bindings) === expected, 'invalid_record');
     const event = snapshotVerificationEvent(record.event);
-    refuse(!terminal, 'finalized');
-    if (event.type === 'plan') {
-      refuse(index === 0 && !plan, 'duplicate_plan');
-      plan = event.plan;
-      refuse(plan.runId === context.runId && plan.startedAtMs >= context.startedAtMs && plan.expiresAtMs >= plan.startedAtMs &&
-        plan.expiresAtMs <= context.expiresAtMs && plan.expiresAtMs - plan.startedAtMs <= plan.verificationPassTimeoutMs &&
-        plan.maxPhysicalCalls <= plan.batches.length && plan.maxPhysicalCalls + context.reviewerAttemptIds.length <= 500, 'invalid_plan');
-    } else {
-      refuse(plan, 'missing_plan');
-      if (event.type === 'intent') {
-        const row = event.intent;
-        refuse(row.batchIndex < plan.batches.length && !byBatch.has(row.batchIndex) && !ids.has(row.attemptId), 'duplicate_or_unknown_intent');
-        refuse(row.startedAtMs >= plan.startedAtMs && row.startedAtMs < plan.expiresAtMs &&
-          row.startedAtMs >= (intents.at(-1)?.startedAtMs ?? plan.startedAtMs), 'invalid_intent_time');
-        refuse(intents.length < plan.maxPhysicalCalls, 'call_cap');
-        byBatch.set(row.batchIndex, row); ids.add(row.attemptId); intents.push(row);
-      } else if (event.type === 'result') {
-        const row = event.result, launch = byBatch.get(row.batchIndex);
-        refuse(launch && launch.attemptId === row.attemptId && !results.has(row.batchIndex), 'missing_or_duplicate_intent');
-        refuse(row.finishedAtMs >= launch.startedAtMs, 'invalid_result_time');
-        parseVerificationAnswer(row.answerBytes, plan);
-        results.add(row.batchIndex); outcomes.push(row);
-      } else {
-        const row = event.terminal;
-        refuse(row.finishedAtMs >= plan.startedAtMs && intents.every(x => x.startedAtMs <= row.finishedAtMs) &&
-          outcomes.every(x => x.finishedAtMs <= row.finishedAtMs), 'invalid_terminal_time');
-        if (row.status === 'complete') refuse(results.size === plan.batches.length && row.finishedAtMs < plan.expiresAtMs, 'incomplete');
-        terminal = row;
-      }
-    }
-    records.push(record); previous = hash;
+    checkVerificationEvent(event, index, metadata, context); retainVerificationEvent(event, metadata);
+    metadata.records.push(record); metadata.previousDigest = hash;
   }
-  refuse(plan, 'missing_plan');
-  return freeze({ plan, records, intents, outcomes, uncertain: intents.filter(row => !results.has(row.batchIndex)), ...(terminal ? { terminal } : {}) });
+  refuse(metadata.plan, 'missing_plan');
+  const state = freeze({ plan: metadata.plan, records: metadata.records, intents: metadata.intents, outcomes: metadata.outcomes,
+    uncertain: metadata.intents.filter(row => !metadata.results.has(row.batchIndex)), ...(metadata.terminal ? { terminal: metadata.terminal } : {}) });
+  return { state, metadata };
 }
 
-export function appendVerificationRecord(records: readonly VerificationRecord[], event: VerificationEvent, context: VerificationContext): VerificationRecord {
-  const unsigned = { sequence: records.length + 1, previousDigest: records.at(-1)?.digest ?? context.finalizationDigest,
-    bindings: binding(context), event: snapshotVerificationEvent(event) };
+/** A proof of private local recording, not of remote ownership, model truth or launch authority. */
+export function validateVerificationRecords(input: readonly unknown[], context: VerificationContext): VerificationState | undefined {
+  return validateVerificationRecordSet(input, context).state;
+}
+/** Non-forgeable same-operation snapshot; arbitrary arrays are fully validated before branding. */
+export function validateVerificationRecordsForAppend(input: readonly unknown[], context: VerificationContext): ValidatedVerificationRecords {
+  const checked = validateVerificationRecordSet(input, context), snapshot = freeze(checked.state ? { state: checked.state } : {});
+  validatedVerificationRecords.set(snapshot, checked.metadata); return snapshot;
+}
+
+/** Append only to a snapshot returned by this module's full validator in the same operation. */
+export function appendVerificationRecordToValidatedRecords(snapshot: ValidatedVerificationRecords, event: VerificationEvent, context: VerificationContext): VerificationRecord {
+  const metadata = validatedVerificationRecords.get(snapshot);
+  refuse(metadata && metadata.contextFingerprint === contextFingerprint(context), 'unvalidated_state');
+  validatedVerificationRecords.delete(snapshot);
+  refuse(metadata.records.length < 1002, 'too_many_records');
+  const captured = snapshotVerificationEvent(event); checkVerificationEvent(captured, metadata.records.length, metadata, context);
+  const unsigned = { sequence: metadata.records.length + 1, previousDigest: metadata.previousDigest,
+    bindings: binding(context), event: captured };
   const record = { ...unsigned, digest: verificationDigest(stableStringify(unsigned)) };
-  validateVerificationRecords([...records, record], context);
+  refuse(metadata.retainedBytes + Buffer.byteLength(stableStringify(record), 'utf8') + 1 <= MAX_ARTIFACT_BYTES, 'too_large');
   return freeze(record);
+}
+export function appendVerificationRecord(records: readonly VerificationRecord[], event: VerificationEvent, context: VerificationContext): VerificationRecord {
+  return appendVerificationRecordToValidatedRecords(validateVerificationRecordsForAppend(records, context), event, context);
 }
 
 /** Canonical sealed portable bytes. Consumers must regenerate the plan from validated captures before replay. */
