@@ -179,13 +179,23 @@ describe('validateRunEnvelope', () => {
     repeatedUndescribed.findings.push({ ...structuredClone(repeatedUndescribed.findings[0]!), ref: 'duplicate-identity-ref' });
     expect(validateRunEnvelope(repeatedUndescribed, artifacts)).toEqual([]);
 
-    const collision = structuredClone(envelope);
-    collision.findings[0]!.claim_descriptor = {
+    const describedCollision = structuredClone(envelope);
+    describedCollision.findings[0]!.claim_descriptor = {
       version: 1, operation: 'Preserve identity', invariant: 'Keep the contract', evidence: ['source'],
     };
-    collision.findings.push({ ...structuredClone(collision.findings[0]!), ref: 'duplicate-identity-ref' });
-    delete collision.findings[1]!.claim_descriptor;
-    expect(validateRunEnvelope(collision, artifacts)).toContainEqual(expect.objectContaining({
+    describedCollision.findings.push({ ...structuredClone(describedCollision.findings[0]!), ref: 'duplicate-described-identity-ref' });
+    expect(validateRunEnvelope(describedCollision, artifacts)).toContainEqual(expect.objectContaining({
+      path: 'findings', message: 'Described sightings require unique report keys',
+    }));
+
+    const mixedCollision = structuredClone(envelope);
+    mixedCollision.findings[0]!.claim_descriptor = {
+      version: 1, operation: 'Preserve identity', invariant: 'Keep the contract', evidence: ['source'],
+    };
+    const undescribedDuplicate = { ...structuredClone(mixedCollision.findings[0]!), ref: 'duplicate-undescribed-identity-ref' };
+    delete undescribedDuplicate.claim_descriptor;
+    mixedCollision.findings.push(undescribedDuplicate);
+    expect(validateRunEnvelope(mixedCollision, artifacts)).toContainEqual(expect.objectContaining({
       path: 'findings', message: 'Described sightings require unique report keys',
     }));
 
