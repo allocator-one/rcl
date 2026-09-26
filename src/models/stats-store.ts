@@ -158,6 +158,32 @@ function readableRecords<T extends PrecisionRecord>(records: T[]): T[] {
 const pendingDirectorySyncs = new Map<string, string[]>();
 type DurableIntent = { version: 1; target: string; anchor: string; phase: 'creating' | 'published' };
 
+async function retainedProtocolTestEvent(event: string, path?: string): Promise<void> {
+  const pauseAt = process.env['RCL_TEST_STATS_STORE_PAUSE_AT'];
+  const trace = process.env['RCL_TEST_STATS_STORE_TRACE'] === '1';
+  if (!trace && pauseAt !== event) return;
+  if (process.env.NODE_ENV !== 'test') throw new Error('test_only_stats_store_protocol_hook');
+  if (!process.send) throw new Error('stats_store_protocol_ipc_required');
+  process.send({ type: 'rcl-stats-store-protocol', event, ...(path ? { path } : {}) });
+  if (pauseAt !== event) return;
+  await new Promise<void>((resolvePause, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup(); reject(new Error(`stats_store_protocol_barrier_timeout:${event}`));
+    }, 10_000);
+    const onMessage = (message: unknown) => {
+      if (!message || typeof message !== 'object') return;
+      const value = message as { type?: unknown; event?: unknown };
+      if (value.type !== 'rcl-stats-store-protocol-continue' || value.event !== event) return;
+      cleanup(); resolvePause();
+    };
+    const onDisconnect = () => { cleanup(); reject(new Error(`stats_store_protocol_ipc_closed:${event}`)); };
+    const cleanup = () => {
+      clearTimeout(timeout); process.off('message', onMessage); process.off('disconnect', onDisconnect);
+    };
+    process.on('message', onMessage); process.once('disconnect', onDisconnect);
+  });
+}
+
 function intentDirectory(anchor: string, target: string): string {
   const id = createHash('sha256').update(target).digest('hex');
   return join(anchor, `.rcl-model-stats-intent-${id}`);
@@ -211,7 +237,10 @@ async function discoverIntent(target: string): Promise<{ root: string; intent: D
   for (let path = target; ; path = dirname(path)) {
     const root = intentDirectory(path, target);
     const intent = await readIntent(root, target);
-    if (intent) return { root, intent };
+    if (intent) {
+      if (intent.anchor !== path) throw new Error('unsafe_precision_intent');
+      return { root, intent };
+    }
     if (dirname(path) === path) return undefined;
   }
 }
@@ -220,7 +249,33 @@ async function syncCreatedChain(target: string, anchor: string): Promise<void> {
   for (let path = target; ; path = dirname(path)) {
     if (dirname(path) === path) throw new Error('durable_precision_anchor_required');
     await syncNativeDirectory(path);
+    await retainedProtocolTestEvent('created-chain-synced', path);
     if (path === anchor) return;
+  }
+}
+
+async function createRetainedChain(target: string, anchor: string): Promise<void> {
+  const missing: string[] = [];
+  for (let path = target; path !== anchor; path = dirname(path)) {
+    if (dirname(path) === path) throw new Error('durable_precision_anchor_required');
+    try {
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.isSymbolicLink() || await realpath(path) !== path) {
+        throw new Error('unsafe_precision_store');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      missing.push(path);
+    }
+  }
+  for (const path of missing.reverse()) {
+    try { await mkdir(path, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(path) !== path) {
+      throw new Error('unsafe_precision_store');
+    }
+    await retainedProtocolTestEvent(path === target ? 'target-visible' : 'mkdir-component-visible', path);
   }
 }
 
@@ -233,34 +288,49 @@ async function prepareRetainedDirectory(inputDir: string): Promise<string> {
   const target = resolve(inputDir);
   let discovered = await discoverIntent(target);
   if (!discovered) {
+    await retainedProtocolTestEvent('intent-discovery-miss', target);
     try {
       const existing = await lstat(target);
       if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error('unsafe_precision_store');
-      return await realpath(target);
+      const dir = await realpath(target);
+      if (dir !== target) throw new Error('unsafe_precision_store');
+      // The target may have appeared after the first discovery pass. Its
+      // creator publishes the intent before mkdir, so a second pass closes
+      // that race without burdening genuinely pre-existing stores.
+      discovered = await discoverIntent(target);
+      if (!discovered) return dir;
+      await retainedProtocolTestEvent('existing-target-intent-discovered', discovered.root);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+  }
+  if (!discovered) {
     const anchor = await nearestExistingAncestor(target);
     if (dirname(anchor) === anchor) throw new Error('durable_precision_anchor_required');
     const root = intentDirectory(anchor, target);
     try { await mkdir(root, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    await retainedProtocolTestEvent('intent-root-created', root);
     await syncNativeDirectory(anchor);
+    await retainedProtocolTestEvent('intent-root-anchored', anchor);
     discovered = { root, intent: { version: 1, target, anchor, phase: 'creating' } };
   }
 
-  await withNativeLock(discovered.root, 'model-stats-intent', async () => {
-    let intent = await readIntent(discovered!.root, target);
+  const durableCreation = discovered;
+  await withNativeLock(durableCreation.root, 'model-stats-intent', async () => {
+    let intent = await readIntent(durableCreation.root, target);
     if (!intent) {
-      intent = discovered!.intent;
-      await writeIntent(discovered!.root, intent);
+      intent = durableCreation.intent;
+      await writeIntent(durableCreation.root, intent);
+      await retainedProtocolTestEvent('creating-intent-durable', join(durableCreation.root, 'intent.json'));
     }
     if (intent.phase === 'creating') {
-      await mkdir(target, { recursive: true, mode: 0o700 });
+      await createRetainedChain(target, intent.anchor);
       const dir = await realpath(target);
       if (dir !== target) throw new Error('unsafe_precision_store');
       await syncCreatedChain(dir, intent.anchor);
-      await writeIntent(discovered!.root, { ...intent, phase: 'published' });
+      await writeIntent(durableCreation.root, { ...intent, phase: 'published' });
+      await retainedProtocolTestEvent('published-intent-durable', join(durableCreation.root, 'intent.json'));
     }
   });
   return await realpath(target);
@@ -343,8 +413,10 @@ async function appendJsonl(inputDir: string, file: string, input: PrecisionRecor
       // Readback after a failed fsync is not durability. Even an identical
       // already-present batch must successfully flush before acknowledging it.
       await handle.sync();
+      if (retained) await retainedProtocolTestEvent('history-file-synced', join(dir, file));
     } finally { await handle.close(); }
     await syncNativeDirectory(dir);
+    if (retained) await retainedProtocolTestEvent('history-directory-synced', dir);
   });
 }
 

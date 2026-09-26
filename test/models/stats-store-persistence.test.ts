@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { execFile, fork, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
 import { appendCalls, appendOutcomes, loadModelStats } from '../../src/models/stats-store.js';
 
 const fault = vi.hoisted(() => ({ syncFailures: 0, syncAttempts: 0, readAttempts: 0, partialWrite: false,
@@ -48,6 +48,7 @@ vi.mock('node:fs/promises', async original => {
 });
 
 let dir: string;
+const children: ChildProcess[] = [];
 const now = new Date('2026-09-22T12:00:00Z');
 const call = (recordId: string) => ({ recordId, ts: now.toISOString(), model: 'fixture', role: 'general',
   durationMs: 25, status: 'success', source: 'live' as const });
@@ -58,6 +59,11 @@ const outcome = (recordId: string, sequence: number, verdict: 'fixed' | 'dismiss
 
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-history-persistence-'))); });
 afterEach(async () => {
+  for (const child of children.splice(0)) {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL'); await once(child, 'exit');
+    }
+  }
   fault.syncFailures = 0; fault.syncAttempts = 0; fault.readAttempts = 0; fault.partialWrite = false;
   fault.directory = ''; fault.openDenied = ''; fault.openedPaths = [];
   await rm(dir, { recursive: true, force: true });
@@ -65,6 +71,57 @@ afterEach(async () => {
 const records = async (file: string) => (await readFile(join(dir, file), 'utf8')).trim().split('\n').flatMap(line => {
   try { return [JSON.parse(line)]; } catch { return []; }
 });
+
+type ProtocolEvent = { type: 'rcl-stats-store-protocol'; event: string; path?: string };
+type ProtocolChild = { child: ChildProcess; events: ProtocolEvent[]; stderr: () => string };
+
+function protocolChild(path: string, recordId: string, pauseAt?: string): ProtocolChild {
+  const events: ProtocolEvent[] = [];
+  let stderr = '';
+  const child = fork(resolve('test/fixtures/stats-store-protocol-child.ts'), [path, recordId], {
+    execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    env: { PATH: process.env.PATH ?? '', NODE_ENV: 'test', NODE_NO_WARNINGS: '1',
+      RCL_TEST_STATS_STORE_TRACE: '1', ...(pauseAt ? { RCL_TEST_STATS_STORE_PAUSE_AT: pauseAt } : {}) },
+  });
+  children.push(child);
+  child.stderr?.on('data', chunk => { stderr += String(chunk); });
+  child.on('message', message => {
+    if (message && typeof message === 'object' &&
+        (message as { type?: unknown }).type === 'rcl-stats-store-protocol') events.push(message as ProtocolEvent);
+  });
+  return { child, events, stderr: () => stderr };
+}
+
+async function protocolEvent(run: ProtocolChild, event: string): Promise<ProtocolEvent> {
+  const seen = run.events.find(value => value.event === event);
+  if (seen) return seen;
+  return await new Promise<ProtocolEvent>((resolveEvent, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup(); reject(new Error(`protocol event ${event} timed out; events=${JSON.stringify(run.events)} stderr=${run.stderr()}`));
+    }, 10_000);
+    const onMessage = (message: unknown) => {
+      if (!message || typeof message !== 'object') return;
+      const value = message as Partial<ProtocolEvent>;
+      if (value.type !== 'rcl-stats-store-protocol' || value.event !== event) return;
+      cleanup(); resolveEvent(value as ProtocolEvent);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup(); reject(new Error(`child exited before ${event}: code=${code} signal=${signal} stderr=${run.stderr()}`));
+    };
+    const cleanup = () => { clearTimeout(timeout); run.child.off('message', onMessage); run.child.off('exit', onExit); };
+    run.child.on('message', onMessage); run.child.once('exit', onExit);
+  });
+}
+
+async function successfulProtocolChild(run: ProtocolChild): Promise<void> {
+  if (run.child.exitCode === null && run.child.signalCode === null) await once(run.child, 'exit');
+  expect({ code: run.child.exitCode, signal: run.child.signalCode, stderr: run.stderr() })
+    .toEqual({ code: 0, signal: null, stderr: '' });
+}
+
+function eventIndex(run: ProtocolChild, event: string, path?: string): number {
+  return run.events.findIndex(value => value.event === event && (path === undefined || value.path === path));
+}
 
 it('retries the same retained call without duplicating physical history', async () => {
   await appendCalls([call('operation:0')], dir);
@@ -228,22 +285,72 @@ it('flushes previously created ancestor entries again after a failed directory f
 });
 
 
-it.each(['durable intent before target creation', 'partial mkdir chain', 'target visible before published marker', 'published marker', 'bootstrap root before intent document'])(
-  'repairs %s from an independent process before retained acknowledgement', async phase => {
-    const nested = join(dir, 'nested', 'store');
-    const root = join(dir, `.rcl-model-stats-intent-${createHash('sha256').update(nested).digest('hex')}`);
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    if (phase !== 'bootstrap root before intent document') {
-      if (phase !== 'durable intent before target creation') await mkdir(nested, { recursive: true, mode: 0o700 });
-      const marker = { version: 1, target: nested, anchor: dir, phase: phase === 'published marker' ? 'published' : 'creating' };
-      await writeFile(join(root, 'intent.json'), JSON.stringify(marker) + '\n');
-    }
-    const program = `import {appendCalls} from ${JSON.stringify(new URL('../../src/models/stats-store.ts', import.meta.url).href)}; await appendCalls(JSON.parse(process.argv[1]), process.argv[2]);`;
-    await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program, JSON.stringify([call('phase:0')]), nested], { timeout: 10_000, env: { PATH: process.env.PATH ?? '', NODE_NO_WARNINGS: '1' } });
-    expect((await readFile(join(nested, 'calls.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line).recordId)).toEqual(['phase:0']);
-    expect(JSON.parse(await readFile(join(root, 'intent.json'), 'utf8'))).toMatchObject({ phase: 'published', target: nested });
-  }, 20_000
-);
+it.each([
+  ['bootstrap root before intent document', 'intent-root-created'],
+  ['durable intent before target creation', 'creating-intent-durable'],
+  ['partial mkdir chain', 'mkdir-component-visible'],
+  ['target visible before published marker', 'target-visible'],
+  ['published marker', 'published-intent-durable'],
+] as const)('repairs an actual creator crash at %s before retained acknowledgement', async (_phase, crashAt) => {
+  const nested = join(dir, 'nested', 'middle', 'store');
+  const recordId = `crash:${crashAt}`;
+  const creator = protocolChild(nested, recordId, crashAt);
+  await protocolEvent(creator, crashAt);
+  expect(creator.events.map(event => event.event)).not.toContain('acknowledged');
+  creator.child.kill('SIGKILL'); await once(creator.child, 'exit');
+  expect(creator.child.signalCode).toBe('SIGKILL');
+
+  const repair = protocolChild(nested, recordId);
+  await protocolEvent(repair, 'acknowledged');
+  await successfulProtocolChild(repair);
+  const fileSync = eventIndex(repair, 'history-file-synced', join(nested, 'calls.jsonl'));
+  const directorySync = eventIndex(repair, 'history-directory-synced', nested);
+  const acknowledgement = eventIndex(repair, 'acknowledged');
+  expect(fileSync).toBeGreaterThanOrEqual(0);
+  expect(directorySync).toBeGreaterThan(fileSync);
+  expect(acknowledgement).toBeGreaterThan(directorySync);
+
+  if (crashAt === 'intent-root-created') {
+    expect(eventIndex(repair, 'intent-root-anchored', dir)).toBeLessThan(fileSync);
+  } else if (crashAt !== 'published-intent-durable') {
+    expect(eventIndex(repair, 'created-chain-synced', nested)).toBeLessThan(fileSync);
+    expect(eventIndex(repair, 'created-chain-synced', dir)).toBeLessThan(fileSync);
+  } else {
+    expect(eventIndex(creator, 'created-chain-synced', nested)).toBeLessThan(eventIndex(creator, crashAt));
+    expect(eventIndex(creator, 'created-chain-synced', dir)).toBeLessThan(eventIndex(creator, crashAt));
+  }
+
+  expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual([recordId]);
+  const intentRoot = (await readdir(dir)).find(name => name.startsWith('.rcl-model-stats-intent-'))!;
+  expect(JSON.parse(await readFile(join(dir, intentRoot, 'intent.json'), 'utf8'))).toMatchObject({
+    phase: 'published', target: nested, anchor: dir,
+  });
+}, 20_000);
+
+it('rechecks a target that appears after discovery and blocks acknowledgement until crash repair is durable', async () => {
+  const nested = join(dir, 'nested', 'middle', 'store');
+  const lateWriter = protocolChild(nested, 'race:0', 'intent-discovery-miss');
+  await protocolEvent(lateWriter, 'intent-discovery-miss');
+
+  const creator = protocolChild(nested, 'race:0', 'target-visible');
+  await protocolEvent(creator, 'target-visible');
+  lateWriter.child.send({ type: 'rcl-stats-store-protocol-continue', event: 'intent-discovery-miss' });
+  await protocolEvent(lateWriter, 'existing-target-intent-discovered');
+  expect(lateWriter.events.map(event => event.event)).not.toContain('acknowledged');
+
+  creator.child.kill('SIGKILL'); await once(creator.child, 'exit');
+  await protocolEvent(lateWriter, 'acknowledged');
+  await successfulProtocolChild(lateWriter);
+  const chainSync = eventIndex(lateWriter, 'created-chain-synced', nested);
+  const fileSync = eventIndex(lateWriter, 'history-file-synced', join(nested, 'calls.jsonl'));
+  const directorySync = eventIndex(lateWriter, 'history-directory-synced', nested);
+  const acknowledgement = eventIndex(lateWriter, 'acknowledged');
+  expect(chainSync).toBeGreaterThan(eventIndex(lateWriter, 'existing-target-intent-discovered'));
+  expect(fileSync).toBeGreaterThan(chainSync);
+  expect(directorySync).toBeGreaterThan(fileSync);
+  expect(acknowledgement).toBeGreaterThan(directorySync);
+  expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual(['race:0']);
+}, 20_000);
 
 it('keeps a published retained-creation intent for a later cooperating process', async () => {
   const nested = join(dir, 'nested', 'store');
