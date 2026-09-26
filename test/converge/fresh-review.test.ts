@@ -65,6 +65,37 @@ async function freshFixture() {
     validate: vi.fn(async () => {}), run: vi.fn(async () => completion), startOver: true, cycleRemote, completion };
 }
 
+it('retains known legacy launch spending as incomplete history when the attempt file is missing', async () => {
+  const options = await freshFixture();
+  const at = new Date().toISOString();
+  const path = convergeRunStatePath(options.gitCommonDir, options.target);
+  const original = Buffer.from(JSON.stringify({ version: 1, target: options.target, roundCap: 15,
+    findings: {}, rounds: [], updatedAt: at,
+    lastLaunch: { status: 'failed', attempt: 7, round: 1, headSha: options.headSha,
+      inputSha256: options.inputSha256, startedAt: at, pid: 99999999 } }));
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, original);
+
+  await guardReviewLaunch(options);
+
+  const state = await loadConvergeRunState(options.gitCommonDir, options.target);
+  expect(state!.cycle!.history).toEqual({ attempts: 7, rounds: 0, incomplete: true });
+  const archive = JSON.parse(await readFile(state!.cycle!.archivePath, 'utf8'));
+  expect(Buffer.from(archive.files.run.bytes, 'base64')).toEqual(original);
+  expect(archive.files.attempts).toBeNull();
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ cap: 20, attemptsUsed: 1 });
+});
+
+it('rejects an ownerless fresh claim before invoking lifecycle callbacks', async () => {
+  const { claimConvergeAttempt } = await import('../../src/converge/attempt-budget.js');
+  const options = await freshFixture();
+  const beforeClaim = vi.fn(async () => {});
+  await expect(claimConvergeAttempt({ gitCommonDir: options.gitCommonDir, target: options.target,
+    freshReviewOperation: randomUUID(), beforeClaim })).rejects.toThrow('fresh_review_owner_required');
+  expect(beforeClaim).not.toHaveBeenCalled();
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toBeUndefined();
+});
+
 it('replays one durable operation after a lost acknowledgement and never restores old cap overrides', async () => {
   const options = await freshFixture();
   const start = options.cycleRemote.start.getMockImplementation()!;

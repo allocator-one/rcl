@@ -165,9 +165,9 @@ export async function prepareFreshReview(options: FreshReviewOptions): Promise<F
     if (!isDeepStrictEqual(run?.cycle, attempts?.cycle)) throw new Error('fresh_review_state_pair_mismatch');
     if (run?.cycle) await verifyReviewCycle(common, options.target, run.cycle);
     const history = cycleHistorySchema.parse({
-      attempts: (run?.cycle?.history.attempts ?? 0) + (attempts?.attemptsUsed ?? 0),
+      attempts: (run?.cycle?.history.attempts ?? 0) + (attempts?.attemptsUsed ?? run?.lastLaunch?.attempt ?? 0),
       rounds: (run?.cycle?.history.rounds ?? 0) + (run?.rounds.length ?? 0),
-      ...(run?.cycle?.history.incomplete || (attempts?.migratedAttempts ?? 0) > 0 || (run && run.rounds.length > 0 && !attempts) ? { incomplete: true } : {}),
+      ...(run?.cycle?.history.incomplete || (attempts?.migratedAttempts ?? 0) > 0 || (run && (run.rounds.length > 0 || run.lastLaunch) && !attempts) ? { incomplete: true } : {}),
     });
     const operationId = randomUUID();
     const ledger = /^[A-Za-z0-9._-]+$/.test(options.target)

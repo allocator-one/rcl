@@ -599,6 +599,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     ownership: options.ownership,
     freshReviewOperation: options.freshReviewOperation,
   };
+  if (claimOptions.freshReviewOperation && !claimOptions.ownership) throw new Error('fresh_review_owner_required');
   // Use one canonical directory for both target ownership and state paths.
   // The caller's textual symlink must not be resolved once for a lock and
   // later again for a state write after it has been retargeted.
@@ -610,7 +611,6 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     const work = async (ownership: NativeTargetOwnership) => {
       await claimOptions.beforeClaim?.(ownership);
       const { assertFreshReviewClaim } = await import('./fresh-review.js');
-      if (claimOptions.freshReviewOperation && !claimOptions.ownership) throw new Error('fresh_review_owner_required');
       await assertFreshReviewClaim(gitCommonDir, target, claimOptions.freshReviewOperation);
       committed = await claimConvergeAttemptOwned(claimOptions);
       try {
