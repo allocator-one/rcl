@@ -135,7 +135,7 @@ interface GuardedCliFixture {
   firstRequest: Promise<void>;
 }
 
-async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<void>): Promise<void> {
+async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<void>, findings: unknown[] = []): Promise<void> {
   const repo = tempRepository();
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, env: GIT_ENV, encoding: 'utf8' }).trim();
   writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n');
@@ -157,7 +157,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
       response.end(JSON.stringify({
         id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
         choices: [{ index: 0, finish_reason: 'stop', message: {
-          role: 'assistant', content: JSON.stringify({ findings: [] }),
+          role: 'assistant', content: JSON.stringify({ findings }),
         } }],
       }));
     };
@@ -189,6 +189,26 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
 }
 
 describe('rcl review — guarded native launch', () => {
+  it('normalizes fresh reviewer prose before writing report bytes with telemetry off', async () => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync([...fixture.args, '--markdown', 'report.md'], fixture.repo, fixture.env);
+      expect(result.status, result.stderr).toBe(0);
+      expect(fixture.calls()).toBe(2);
+      const bytes = readFileSync(join(fixture.repo, 'report.json'), 'utf8');
+      const report = JSON.parse(bytes);
+      expect(report.reviews).toHaveLength(2);
+      for (const review of report.reviews) {
+        expect(review.status).toBe('success');
+        expect(review.findings).toHaveLength(1);
+        expect(review.findings[0]).toMatchObject({ title: 'A title�', description: 'Preserve 😀 and replace � �', suggestedFix: 'Fix the issue' });
+      }
+      expect(bytes).not.toMatch(/\\ud[89ab][0-9a-f]{2}|\\ud[cdef][0-9a-f]{2}/i);
+      const markdown = readFileSync(join(fixture.repo, 'report.md'), 'utf8');
+      expect(markdown).toContain('A title�');
+    }, [{ file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', confidence: 0.9,
+      title: 'A title\uD800', description: 'Preserve 😀 and replace \uD800 \uDFFF', suggestedFix: 'Fix\0 the issue' }]);
+  }, 40_000);
+
   it('claims and binds one launch only after successful preflight', async () => {
     await withGuardedFixture(async fixture => {
       const result = await runRclAsync(fixture.args, fixture.repo, fixture.env);

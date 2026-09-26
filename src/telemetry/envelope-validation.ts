@@ -98,11 +98,32 @@ const envelopeSchema = z.object({
   }
 });
 
+/** Check actual serialized keys and values, including passthrough metadata. */
+function hasUnpairedSurrogate(encoded: string): boolean {
+  // The caller has already enforced the byte budget. Parsing avoids confusing
+  // literal backslash-u text with JSON escapes and removes cycles/accessors.
+  const pending: unknown[] = [JSON.parse(encoded)];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (typeof value === 'string') {
+      // Unicode mode consumes valid pairs together, outside this code-unit range.
+      if (/[\uD800-\uDFFF]/u.test(value)) return true;
+    } else if (value !== null && typeof value === 'object') {
+      for (const [key, child] of Object.entries(value)) {
+        if (/[\uD800-\uDFFF]/u.test(key)) return true;
+        pending.push(child);
+      }
+    }
+  }
+  return false;
+}
+
 /** Check the complete outgoing object and exact artifact declarations without coercion or row removal. */
 export function validateRunEnvelope(envelope: unknown, artifacts?: ArtifactBytes): EvidenceDiagnostic[] {
   try {
     const encoded = JSON.stringify(envelope);
     if (encoded === undefined || Buffer.byteLength(encoded) > MAX_ENVELOPE_BYTES) return [{ path: 'envelope', message: 'Envelope exceeds 4000000 bytes or is not JSON' }];
+    if (hasUnpairedSurrogate(encoded)) return [{ path: 'envelope', message: 'Envelope contains an unpaired UTF-16 surrogate' }];
     const result = envelopeSchema.safeParse(envelope);
     if (!result.success) return result.error.issues.slice(0, 20).map((issue) => ({
       path: issue.path.join('.').slice(0, 200), message: issue.message.slice(0, 300),

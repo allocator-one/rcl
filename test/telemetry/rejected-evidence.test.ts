@@ -45,6 +45,25 @@ describe('retention of refused completed evidence', () => {
     expect(await rt.outbox.list()).toEqual([]);
   });
 
+  it.each([false, true])('refuses malformed transport Unicode locally and retains exact originals (attested=%s)', async attested => {
+    const { rt, requests } = await runtime(() => ({ status: 400, body: { error: 'bad_request' } }), attested);
+    const result = sampleResult();
+    result.findings[0]!.file = 'src/invalid\uD800.ts';
+    const artifacts = { report_json: JSON.stringify(result, null, 2) + '\n', report_md: '# Original report\n' };
+    const outcome = await deliverRun(rt, { result, artifacts, evidenceRequired: true });
+    expect(outcome).toMatchObject({ status: 'rejected', exitCode: 4, spooled: false, retention: { status: 'complete' } });
+    expect(requests).toEqual([]);
+    const dir = join(dataDir, 'quarantine', result.run!.id);
+    expect(await readFile(join(dir, 'report.json'), 'utf8')).toBe(artifacts.report_json);
+    expect(await readFile(join(dir, 'report.md'), 'utf8')).toBe(artifacts.report_md);
+    const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'));
+    expect(manifest).toMatchObject({ requested_mode: attested ? 'attested' : 'asserted', acknowledged: false,
+      artifacts: { report_json: { sha256: sha256Hex(artifacts.report_json) } },
+      diagnostics: [{ path: 'envelope', message: 'Envelope contains an unpaired UTF-16 surrogate' }],
+    });
+    expect(await rt.outbox.list()).toEqual([]);
+  });
+
   it.each([false, true])('retains a direct 422 without making it auto-retryable (attested=%s)', async (attested) => {
     const { rt, requests } = await runtime(() => ({ status: 422, body: { error: 'validation_error', message: 'findings[1].end_line is invalid' } }), attested);
     rt.level = 'findings';

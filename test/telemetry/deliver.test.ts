@@ -15,7 +15,8 @@ import {
   flushOutboxAtStart,
   resolveTelemetryLevel,
 } from '../../src/telemetry/deliver.js';
-import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
+import { normalizeGeneratedReport, sanitizeForDelivery } from '../../src/telemetry/envelope.js';
+import { renderReportArtifacts } from '../../src/output/artifacts.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { NOTICE_FILE } from '../../src/telemetry/notice.js';
 import { fakeFetch, sampleResult, type RecordedRequest } from './fixtures.js';
@@ -82,6 +83,24 @@ describe('telemetry delivery', () => {
   afterEach(async () => {
     await rm(repo, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it.each([false, true])('delivers fresh normalized prose and exact artifact bytes (attested=%s)', async attested => {
+    const { rt, requests } = await runtime(acceptEverything, {
+      credential: { url: 'https://harness.example.test', token: 'synthetic_credential', source: attested ? 'attest' : 'login' },
+    });
+    const input = sampleResult();
+    input.findings[0]!.description = 'Keep 😀; replace \uD800 and \uDFFF';
+    const report = sanitizeForDelivery(normalizeGeneratedReport(input));
+    const artifacts = renderReportArtifacts(report);
+    expect(await deliverRun(rt, { result: report, artifacts, evidenceRequired: true })).toMatchObject({ status: 'recorded', exitCode: 0 });
+    const envelope = JSON.parse(requests.find(r => r.url.endsWith('/api/v1/reviews/runs'))!.body!);
+    expect(envelope.findings[0].description).toBe('Keep 😀; replace � and �');
+    expect(envelope.artifacts_declared).toContainEqual({ kind: 'report_json',
+      sha256: createHash('sha256').update(artifacts.report_json).digest('hex'), bytes: Buffer.byteLength(artifacts.report_json) });
+    expect(requests.find(r => r.url.endsWith('/artifacts/report_json'))!.body).toBe(artifacts.report_json);
+    expect(requests.find(r => r.url.endsWith('/artifacts/report_md'))!.body).toBe(artifacts.report_md);
+    expect(input.findings[0]!.description).toBe('Keep 😀; replace \uD800 and \uDFFF');
   });
 
   it.each(['findings', 'full'] as const)('delivers verifier evidence at %s level for direct and convergence runs', async (level) => {
