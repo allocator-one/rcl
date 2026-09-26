@@ -82,7 +82,7 @@ async function retain(path: string, bytes: Buffer): Promise<void> {
   }
   const current = await selected(path,sha256(bytes));
   const handle = await open(path,'r');
-  try { if (!(await handle.readFile()).equals(current.raw)) throw new Error('stale_report_retained_conflict'); await handle.sync(); }
+  try { if (!(await handle.readFile()).equals(current.raw)) throw new Error('stale_report_retained_conflict'); }
   finally { await handle.close(); }
   await syncDirectory(dirname(path));
 }
