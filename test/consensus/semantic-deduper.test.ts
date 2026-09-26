@@ -29,6 +29,25 @@ const signature = (reviews: ModelReview[]) => deduplicateSemanticFindings(review
 }));
 
 describe('semantic deduplication before report serialization', () => {
+  it.each([
+    ['GET /accounts lacks authentication', 'POST /accounts lacks authentication'],
+    ['GET /accounts lacks authentication', 'GET /organizations lacks authentication'],
+    ['Export lacks authentication', 'Import lacks authentication'],
+  ])('preserves operation-specific claims despite identical generic evidence: %s', (left, right) => {
+    const a = finding({ id: 'a', title: left,
+      description: 'The request handler accepts unauthenticated requests without checking the current session.',
+      suggestedFix: 'Validate the current session before processing the request.' });
+    const b = { ...a, id: 'b', title: right };
+    const reviews = [review('first', [a]), review('second', [b])];
+    const before = JSON.stringify(reviews);
+
+    expect(compareClaims(describeClaim(a), describeClaim(b))).toBeUndefined();
+    const groups = deduplicateSemanticFindings(reviews);
+    expect(groups).toHaveLength(2);
+    expect(groups.every(group => group.members.length === 1)).toBe(true);
+    expect(JSON.stringify(reviews)).toBe(before);
+  });
+
   it('preserves distinct configured reviewer tuples containing delimiters while counting each tuple once', () => {
     const pairs = [{ model: 'local::variant', role: 'general' }, { model: 'local', role: 'variant::general' }]
       .map(pair => ReviewerPairSchema.parse(pair));

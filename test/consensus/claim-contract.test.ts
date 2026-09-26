@@ -19,6 +19,29 @@ const pairs = [
 ];
 
 describe('bounded semantic contracts', () => {
+  it.each(['synthetic-secret-only-for-test', 'sk-syntheticTestCredential123456789'])('does not replicate a source credential into a fresh descriptor: %s', secret => {
+    const finding = { ...original('c001'),
+      description: `A hardcoded secret '${secret}' is used for JWT signing and verification.` };
+    const before = JSON.stringify(finding);
+    const descriptor = describeClaim(finding);
+    const staticDescriptor = describeClaim({ ...finding,
+      description: 'The JWT key remains hardcoded in source. Load this key from external configuration.' });
+
+    expect(JSON.stringify(describeContract(finding))).not.toContain(secret);
+    expect(JSON.stringify(descriptor)).not.toContain(secret);
+    expect(compareClaims(descriptor, staticDescriptor)).toBeDefined();
+    expect(JSON.stringify(finding)).toBe(before);
+  });
+
+  it('compares an original literal observation without rewriting its retained descriptor', () => {
+    const current = describeClaim(original('c001'));
+    const retained = { ...current, evidence: [current.evidence[0]!, "Source literal observed: 'original-test-only-value'"] };
+    const before = JSON.stringify(retained);
+
+    expect(compareClaims(retained, current)).toBeDefined();
+    expect(JSON.stringify(retained)).toBe(before);
+  });
+
   it.each(['title', 'description'])('rejects a SELECT remedy contradicting DELETE in the %s regardless of prose case', field => {
     const select = { ...original('c002'), title: 'SQL injection in readRows',
       description: 'User-controlled input is interpolated into a SQL query string.',

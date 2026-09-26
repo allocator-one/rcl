@@ -58,6 +58,22 @@ function opposed(a: ClaimDescriptor, b: ClaimDescriptor): boolean {
   return hasOpposingSentiment(asFinding(a), asFinding(b), true);
 }
 
+/** Different ordinary operation titles need an explicit grammar, not shared generic evidence. */
+function sameOperation(a: string, b: string): boolean {
+  if (a === b) return true;
+  const expiryOperation = (operation: string): string | undefined => {
+    const separator = operation.indexOf(' :: ');
+    if (separator < 0) return;
+    const title = operation.slice(separator + 4);
+    // These two complete expiry assertions preserve the named collection and
+    // read effect. All other titles require exact operation identity.
+    const match = /^(?:([A-Za-z]+) result survives expiry|Expired ([A-Za-z]+) entries are returned)$/.exec(title);
+    return match ? (match[1] ?? match[2])!.toLowerCase() : undefined;
+  };
+  const left = expiryOperation(a);
+  return left !== undefined && left === expiryOperation(b);
+}
+
 /** High confidence lexical support, not arbitrary-language equivalence. */
 export function compareClaims(a: ClaimDescriptor, b: ClaimDescriptor): 'exact_descriptor' | 'supported_paraphrase' | undefined {
   if (!claimDescriptorSchema.safeParse(a).success || !claimDescriptorSchema.safeParse(b).success) return undefined;
@@ -77,6 +93,7 @@ export function compareClaims(a: ClaimDescriptor, b: ClaimDescriptor): 'exact_de
   if (guards(a) !== guards(b)) return undefined;
   const scope = (d: ClaimDescriptor) => d.operation.split(' :: ')[0];
   if (scope(a) !== scope(b)) return undefined;
+  if (!sameOperation(a.operation, b.operation)) return undefined;
   // Require invariant support AND a second independent field, not merely a
   // helper name, broad concept, location or identical suggested fix.
   // Lexical overlap alone cannot establish subject, argument or condition

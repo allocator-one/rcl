@@ -79,7 +79,9 @@ function hardcodedKey(f: ClaimText): Contract | undefined {
   if (!parts.slice(1).every(part => keyExternalizationClause(part, purpose))) return;
   return { kind: 'embedded-authentication-key', subject: [`${purpose} signing and verification`, binding[1]!, binding[2]!],
     condition: 'The named authentication key is embedded in source instead of loaded from external configuration.',
-    observations: literal ? [`Source literal observed: ${literal[1]}`] : [] };
+    // The original finding retains its source observation. A fresh semantic
+    // descriptor needs only its presence, never another copy of a credential.
+    observations: literal ? ['Source literal observed'] : [] };
 }
 
 function sqlInterpolation(f: ClaimText): Contract | undefined {
@@ -244,12 +246,12 @@ export function compareContractDescriptors(a: ClaimDescriptor, b: ClaimDescripto
   const kind = parse(a);
   if (!kind || parse(b) !== kind) return;
   if (a.operation !== b.operation || a.invariant !== b.invariant || a.evidence[0] !== b.evidence[0]) return;
-  // A source literal is an observation of this named key, not the predicate's
-  // required value: embedding any literal violates this contract. Keep both
-  // observations in their immutable sighting descriptors.
+  // Embedding any literal violates this contract. New descriptors retain only
+  // the observation's presence; historical literal observations stay readable
+  // and are compared without rewriting their immutable descriptor bytes.
   const observation = kind === 'unguarded-map-field-access'
     ? /^Quoted comment observed: ("[^"]+"|“[^”]+”)$/
-    : /^Source literal observed: ('[^']*'|"[^"]*")$/;
+    : /^Source literal observed(?:: ('[^']*'|"[^"]*"))?$/;
   if (![...a.evidence.slice(1), ...b.evidence.slice(1)].every(value => observation.test(value))) return;
   return JSON.stringify(a.evidence) === JSON.stringify(b.evidence) ? 'exact_descriptor' : 'supported_paraphrase';
 }
