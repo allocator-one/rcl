@@ -72,6 +72,21 @@ describe('runReviews successful-seat quorum closure (RCL-105)', () => {
     }
   });
 
+  it('defaults an enabled quorum to two-thirds when its fraction is omitted', async () => {
+    const adapter = delayedAdapter({ fast1: 5, fast2: 5, slow: Infinity });
+    const assignments = ['fast1', 'fast2', 'slow'].map(makeAssignment);
+
+    const reviews = await runReviews(assignments, assignments.map(makePrompt), {
+      timeoutMs: 60_000,
+      maxRetries: 0,
+      concurrency: 3,
+      adapterFactory: () => adapter,
+      quorum: {},
+    });
+
+    expect(reviews.map(review => review.status)).toEqual(['success', 'success', 'canceled']);
+  });
+
   it('cancels a core model when successful quorum is reached', async () => {
     const adapter = delayedAdapter({ fast1: 5, fast2: 5, coreSlow: 150 });
     const assignments = ['fast1', 'fast2', 'coreSlow'].map(makeAssignment);
@@ -114,6 +129,18 @@ describe('runReviews successful-seat quorum closure (RCL-105)', () => {
       adapterFactory: () => adapter,
     });
     expect(reviews.every((r) => r.status === 'success')).toBe(true);
+  });
+
+  it('does not label a declined intent as a quorum cancellation when the round is open', async () => {
+    const assignments = [makeAssignment('declined')];
+    const reviews = await runReviews(assignments, assignments.map(makePrompt), {
+      timeoutMs: 1000,
+      maxRetries: 0,
+      concurrency: 1,
+      adapterFactory: () => delayedAdapter({}),
+      beforeReview: async () => false,
+    });
+    expect(reviews[0]!.error).toBe('Canceled intent declined before provider dispatch');
   });
 
   it('a fraction of 1 requires every seat to succeed', async () => {
@@ -659,6 +686,15 @@ describe('recovery priority and numeric preflight', () => {
     const factory = vi.fn(() => c.adapter);
     await expect(runReviews(assignments, c.prompts, { ...poolOptions, ...invalid, adapterFactory: factory }))
       .rejects.toThrow(/timeout|concurrency/i);
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('rejects a quorum fraction below two-thirds before provider setup', async () => {
+    const assignments = ['a', 'b', 'c'].map(makeAssignment); const c = controlled(assignments);
+    const factory = vi.fn(() => c.adapter);
+    await expect(runReviews(assignments, c.prompts, {
+      ...poolOptions, quorum: { fraction: 0.5 }, adapterFactory: factory,
+    })).rejects.toThrow(/fraction/i);
     expect(factory).not.toHaveBeenCalled();
   });
 });

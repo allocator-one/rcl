@@ -222,9 +222,11 @@ export async function runReviews(
   function abort(): void { closed ??= 'signal'; cancelCalls(); }
   function stopped(): boolean { return closed !== undefined || failure !== undefined; }
   function canceledReview(call: AdapterCall, elapsedMs: number, detail: string): ModelReview {
+    const closure = closed === 'signal' ? 'by operation signal'
+      : closed === 'quorum' ? 'at quorum round closure' : undefined;
     return { model: call.model, role: call.role, provider: call.provider, findings: [],
       durationMs: elapsedMs, status: 'canceled',
-      error: `Canceled ${closed === 'signal' ? 'by operation signal' : 'at quorum round closure'} ${detail}` };
+      error: ['Canceled', closure, detail].filter(Boolean).join(' ') };
   }
   function failedReview(index: number, error: unknown, startedAt: number): ModelReview {
     const call = calls[index]!;

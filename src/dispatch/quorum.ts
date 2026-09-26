@@ -19,15 +19,14 @@ export function resolveQuorumPolicy(seatCount: number, fraction = 2 / 3): Quorum
     throw new Error('Quorum fraction must be between 2/3 and 1');
   }
   // Integer arithmetic preserves the authoritative floor without overflowing
-  // 2 * seatCount. Snap only floating-point multiplication noise at integers.
+  // 2 * seatCount.
   const floor = Math.floor(seatCount / 3) * 2 + Math.ceil((seatCount % 3) * 2 / 3);
-  const product = fraction * seatCount;
-  const nearest = Math.round(product);
-  // Snap only when the configured fraction is exactly the rational boundary
-  // represented by this roster. A fraction even slightly above it is stricter
-  // and must round up, while values such as 0.8 * 35 still resolve to 28.
-  const rounded = product === nearest || fraction === nearest / seatCount
-    ? nearest : Math.ceil(product);
+  // Start with the usual product, then decide boundary cases against the
+  // public ratio contract. This corrects multiplication noise such as
+  // 0.8 * 35 without weakening the next representable value above 2/3.
+  let rounded = Math.ceil(fraction * seatCount);
+  while (rounded > 0 && (rounded - 1) / seatCount >= fraction) rounded--;
+  while (rounded < seatCount && rounded / seatCount < fraction) rounded++;
   return { version: 1, fraction, seatCount, minimumSuccessful: Math.max(2, floor, rounded) };
 }
 

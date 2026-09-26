@@ -17,6 +17,7 @@ describe('successful blocking-seat quorum policy v1', () => {
   it.each([
     [5, 0.8, 4], [18, 0.9, 17], [18, 1, 18], [35, 0.8, 28],
     [4, 0.750000000001, 4], [3, 2 / 3 + Number.EPSILON, 3],
+    [3, 0.6666666666666667, 3],
   ])(
     'preserves a stricter fraction for %i seats at %f', (seats, fraction, minimum) => {
       expect(resolveQuorumPolicy(seats, fraction).minimumSuccessful).toBe(minimum);
