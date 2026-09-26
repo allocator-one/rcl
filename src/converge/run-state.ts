@@ -393,6 +393,13 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
+  const currentLaunch = state.lastLaunch;
+  if (runId !== undefined && currentLaunch?.status === 'completed' &&
+      currentLaunch.round === options.round && currentLaunch.runId === runId &&
+      currentLaunch.successfulReviews !== undefined && currentLaunch.totalReviews !== undefined &&
+      currentLaunch.successfulReviews < Math.max(2, Math.ceil(2 * currentLaunch.totalReviews / 3))) {
+    throw new ConvergeRunStateError(`Round ${options.round} report is inconclusive; reviewer quorum was not met.`);
+  }
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
   for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {

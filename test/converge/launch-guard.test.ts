@@ -225,6 +225,21 @@ describe('native guarded review launch', () => {
     expect((await loadConvergeRunState(options.gitCommonDir, target))?.rounds).toEqual([]);
   });
 
+  it('does not admit an inconclusive report as a reviewed round', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1 });
+    await guardReviewLaunch(options);
+
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [sampleFinding()], runId: completion.runId,
+      reportSha256: completion.reportJsonSha256, headSha: options.headSha }))
+      .rejects.toThrow(/inconclusive|quorum/i);
+
+    expect((await loadConvergeRunState(options.gitCommonDir, target))?.rounds).toEqual([]);
+    await guardReviewLaunch({ ...options, retryReason: 'Provider recovered after inconclusive review.' });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 });
+  });
+
   it('keeps legacy fixed-round retries on the immediately preceding inconclusive head', async () => {
     const options = await fixture();
     await guardReviewLaunch(options);

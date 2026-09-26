@@ -9,6 +9,8 @@
   councils, and delivery-only retries retain their original evidence (RCL-107).
 - Older convergence state without a fixed-round head remains conservative: it
   permits only the immediately preceding inconclusive head for an explicit retry.
+- Reports tied to an inconclusive guarded launch cannot be admitted as a
+  reviewed round, leaving that round available for a bounded retry.
 
 ## 4.1.5 - 2026-09-26
 
