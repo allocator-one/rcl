@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildRunEnvelope, type RunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { describeOutcome, HarnessSink } from '../../src/telemetry/sink.js';
+import { RecoveryRequestBudget } from '../../src/telemetry/recovery-request-budget.js';
 import { fakeFetch, sampleResult } from './fixtures.js';
 
 const CREDENTIAL = { url: 'https://harness.example.test', token: 'aone_TESTTOKEN0123456789', source: 'login' as const };
@@ -75,6 +76,38 @@ describe('HarnessSink.postRun', () => {
 
     expect(requests.map((request) => request.body)).toEqual([serialized, serialized]);
     expect(envelope.run.id).toBe('00000000-0000-4000-8000-000000000099');
+  });
+
+  it.each([true, false])('preserves prepared semantic capability and the recovery POST permit when support is %s', async supported => {
+    const report = sampleResult({ findings: [], belowThresholdFindings: [] });
+    const envelope = buildRunEnvelope(report, { report_json: JSON.stringify(report) }, { level: 'full', delivery: { mode: 'direct' } });
+    envelope.run.gating.bound_classification_protocol = 1;
+    const serialized = JSON.stringify(envelope);
+    const originalRunId = envelope.run.id;
+    const budget = new RecoveryRequestBudget();
+    const { fetch, requests } = fakeFetch(request => request.method === 'GET'
+      ? { status: 200, body: { data: [], meta: { evidence_protocol_version: 2, ...(supported ? { bound_classification_protocol: 1 } : {}) } } }
+      : { status: 201, body: { data: { id: originalRunId, url: 'https://harness.example.test/run', artifacts_expected: [] } } });
+    const s = new HarnessSink({ credential: CREDENTIAL, rclVersion: 'test', requestBudget: budget, fetchImpl: fetch });
+    const prepared = s.preparePostRun(envelope, serialized);
+    expect(prepared.kind).toBe('ready');
+    if (prepared.kind !== 'ready') return;
+    const permit = await s.reserveRecoveryWrite();
+
+    delete envelope.run.gating.bound_classification_protocol;
+    envelope.run.id = '00000000-0000-4000-8000-000000000099';
+    const outcome = await prepared.post({ recoveryWritePermit: permit });
+
+    expect(prepared.serializedEnvelope).toBe(serialized);
+    expect(requests.map(request => request.method)).toEqual(supported ? ['GET', 'POST'] : ['GET']);
+    if (supported) {
+      expect(outcome).toMatchObject({ kind: 'ok', value: { id: originalRunId } });
+      expect(requests[1]!.body).toBe(serialized);
+      expect(() => budget.consumeWrite(permit!)).toThrow('recovery_write_permit_invalid');
+    } else {
+      expect(outcome).toMatchObject({ kind: 'rejected', error: 'unsupported_bound_classification_protocol' });
+      expect(() => budget.consumeWrite(permit!)).not.toThrow();
+    }
   });
 
   it('refuses a receipt that names another run or forgets which artifacts it expects', async () => {
@@ -372,10 +405,13 @@ describe('HarnessSink.getAttestedRunReceipt', () => {
 
   it('runs the actual receipt transport and honors cancellation', async () => {
     const controller = new AbortController();
-    const { sink: s, requests } = attestedSink(() => 'hang');
+    let started!: () => void;
+    const requestStarted = new Promise<void>(resolve => { started = resolve; });
+    const { sink: s, requests } = attestedSink(() => { started(); return 'hang'; });
 
     const original = envelope();
     const pending = s.getAttestedRunReceipt(original, JSON.stringify(original), { signal: controller.signal, timeoutMs: 60_000 });
+    await requestStarted;
     expect(requests).toHaveLength(1);
     controller.abort(new Error('fixture cancellation'));
 
@@ -383,6 +419,60 @@ describe('HarnessSink.getAttestedRunReceipt', () => {
     expect(requests[0]!.signal?.aborted).toBe(true);
     expect(requests[0]!.signal?.reason).toMatchObject({ message: 'fixture cancellation' });
   });
+});
+
+describe('recovery artifact admission', () => {
+  it('keeps a reserved artifact write permit when the workflow is already cancelled', async () => {
+    const budget = new RecoveryRequestBudget();
+    const fetchImpl = vi.fn<typeof fetch>(async () => { throw new Error('cancelled transfer reached transport'); });
+    const s = new HarnessSink({ credential: CREDENTIAL, rclVersion: 'test', fetchImpl, requestBudget: budget });
+    const permit = await s.reserveRecoveryWrite();
+
+    const outcome = await s.putArtifact('same-run', 'report_json', 'original evidence', {
+      signal: AbortSignal.abort(new Error('workflow already stopped')), recoveryWritePermit: permit,
+    });
+
+    expect(outcome).toMatchObject({ kind: 'unavailable' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(() => budget.consumeWrite(permit!)).not.toThrow();
+  });
+
+  for (const method of ['GET', 'PUT'] as const) {
+    it.each(['credential expiry', 'caller deadline', 'cancellation'] as const)(`${method} sends nothing when %s occurs during quota admission`, async boundary => {
+      vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+      vi.setSystemTime(new Date('2026-09-26T00:00:00Z'));
+      const controller = new AbortController();
+      const waits: number[] = [];
+      const budget = new RecoveryRequestBudget({
+        now: () => performance.now(), wallTime: () => Date.now(),
+        sleep: async milliseconds => {
+          waits.push(milliseconds);
+          vi.advanceTimersByTime(milliseconds);
+          if (boundary === 'cancellation') controller.abort(new Error('workflow stopped while waiting for quota'));
+        },
+      });
+      const fetchImpl = vi.fn<typeof fetch>(async () => { throw new Error('expired transfer reached transport'); });
+      try {
+        const s = new HarnessSink({
+          credential: { ...CREDENTIAL, source: 'attest' }, rclVersion: 'test', fetchImpl, requestBudget: budget,
+          attestedExpiresAt: boundary === 'credential expiry' ? '2026-09-26T00:00:01Z' : '2026-09-26T00:02:00Z',
+        });
+        for (let index = 0; index < 240; index++) await budget.acquire();
+        const options = { signal: controller.signal, ...(boundary === 'caller deadline' ? { timeoutMs: 1_000 } : {}) };
+        const outcome = method === 'GET'
+          ? await s.getArtifact('same-run', 'report_json', 25_000_000, options)
+          : await s.putArtifact('same-run', 'report_json', 'original evidence', options);
+
+        expect(outcome).toMatchObject({ kind: 'unavailable' });
+        expect(waits).toEqual([60_000]);
+        expect(fetchImpl).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+  }
 });
 
 describe('HarnessSink.putArtifact', () => {

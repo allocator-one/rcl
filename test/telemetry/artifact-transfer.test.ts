@@ -44,6 +44,18 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('bounded artifact transfer budget', () => {
+  it('keeps a far-future attested expiry from aborting a delayed transfer', async () => {
+    vi.useRealTimers();
+    const t = transport(20);
+    const result = await transfer(sink(t.fetchImpl, {
+      credential: attested, attestedExpiresAt: '2999-01-01T00:00:00Z',
+    }), 'GET');
+
+    expect(result).toMatchObject({ kind: 'ok', value: { sha256: digest('original evidence') } });
+    expect(t.calls).toHaveLength(1);
+    expect(t.calls[0]!.signal!.aborted).toBe(false);
+  });
+
   it('uploads the maximum supported artifact after ten seconds without changing its bytes', async () => {
     const bytes = 'x'.repeat(25_000_000);
     const t = transport(15_000);

@@ -1,3 +1,5 @@
+import { recoverySourceSchema } from '../report/recovery-source.js';
+import { claimDescriptorSchema } from '../consensus/claim-identity.js';
 import { z } from 'zod';
 import type { ArtifactBytes } from './envelope.js';
 import { declareArtifacts } from './envelope.js';
@@ -45,7 +47,8 @@ const run = z.object({
   plan: optional(z.object({ focus: short })),
   runner: z.object({ kind: z.enum(['agent', 'ci', 'human']), agent: optional(text(500)), host: optional(text(500)), ci_run_id: optional(text(500)) }),
   started_at: timestamp, finished_at: timestamp, duration_ms: integer, ci_exit_code: integer,
-  converge: optional(z.object({ target: short, round: optional(integer.min(1)), attempt: optional(integer.min(1)) })),
+  converge: optional(z.object({ target: short, round: optional(integer.min(1)), attempt: optional(integer.min(1)),
+    recovery_source: recoverySourceSchema.optional() })),
   provenance: z.enum(['live', 'backfill']).optional(),
   historical_source: optional(z.object({ original_run_id: uuid, report_sha256: digest }).strict()),
 }).passthrough().superRefine((v, ctx) => {
@@ -62,6 +65,7 @@ const provenance = z.object({
 const finding = z.object({
   ref: text(32, true), identity_key: text(64, true), file: text(20_000, true),
   start_line: integer, end_line: integer, location_provenance: optional(provenance),
+  claim_descriptor: claimDescriptorSchema.optional(),
   severity: z.enum(['critical', 'important', 'minor', 'nitpick']), category: text(64, true),
   title: short, description: optional(text(20_000)), suggested_fix: optional(text(20_000)),
   consensus: optional(map), gating_reason: z.enum(['consensus', 'critical', 'verified', 'none']),
@@ -88,6 +92,10 @@ const envelopeSchema = z.object({
   delivery: z.object({ mode: z.enum(['direct', 'retried']), spooled_at: optional(text(500)) }),
 }).passthrough().superRefine((v, ctx) => {
   if (new Set(v.findings.map((f) => f.ref)).size !== v.findings.length) ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Duplicate finding reference' });
+  const describedKeys = new Set(v.findings.filter(f => f.claim_descriptor !== undefined).map(f => f.identity_key));
+  for (const key of describedKeys) {
+    if (v.findings.filter(f => f.identity_key === key).length > 1) ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Described sightings require unique report keys' });
+  }
   const kinds = v.artifacts_declared.map((a) => a.kind);
   if (new Set(kinds).size !== kinds.length || !kinds.includes('report_json')) ctx.addIssue({ code: 'custom', path: ['artifacts_declared'], message: 'Require one report_json declaration and no duplicate kinds' });
   if (v.run.historical_source && v.run.historical_source.report_sha256 !== v.artifacts_declared.find((a) => a.kind === 'report_json')?.sha256) {

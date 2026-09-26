@@ -30,10 +30,20 @@ export function abortSignalWithTimeout(parent: AbortSignal | undefined, timeoutM
     return { signal: controller.signal, dispose };
   }
   parent?.addEventListener('abort', abortFromParent, { once: true });
-  timer = setTimeout(
-    () => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
-    Math.max(1, Math.floor(timeoutMs))
-  );
+  // Node turns an overflowing delay into one millisecond. Keep long operation
+  // deadlines intact by waking in supported intervals on the monotonic clock.
+  const maximumTimerMs = 2 ** 31 - 1;
+  const deadline = performance.now() + timeoutMs;
+  const schedule = (remainingMs: number): void => {
+    const duration = Math.max(1, Math.floor(remainingMs));
+    timer = setTimeout(
+      duration > maximumTimerMs
+        ? () => schedule(deadline - performance.now())
+        : () => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
+      Math.min(duration, maximumTimerMs)
+    );
+  };
+  schedule(timeoutMs);
 
   return { signal: controller.signal, dispose };
 }

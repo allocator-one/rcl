@@ -167,6 +167,50 @@ describe('source and receipt binding', () => {
     expect(prepared.envelope.findings[0].description).toBe('before\\u0000after');
     expect(f.requests.every(r => r.method === 'GET')).toBe(true);
   });
+  it('retains opaque Markdown NUL bytes with selected JSON NUL provenance and both artifact declarations', async () => {
+    const f = await fixture(r => { r.findings[0]!.description = 'before\0after'; });
+    const json = JSON.stringify(f.report, null, 2);
+    const markdown = 'Original Markdown\0keeps\0both units unchanged.\n';
+    f.selection.originalProse = 'control-code-units-v1';
+    f.selection.reportSha256 = sha256Hex(json);
+    f.selection.markdownSha256 = sha256Hex(markdown);
+    await writeFile(f.selection.reportJson, json);
+    await writeFile(f.selection.reportMd, markdown);
+    f.behavior.proseRepresentation = true;
+
+    expect(await f.preview()).toBe(0);
+    const prepared = JSON.parse(await readFile(f.manifest, 'utf8')).prepared;
+    expect(prepared.transformations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'control_code_unit', original_unit: '0000' }),
+    ]));
+    expect(prepared.envelope.artifacts_declared).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'report_json', sha256: sha256Hex(json) }),
+      expect.objectContaining({ kind: 'report_md', sha256: sha256Hex(markdown) }),
+    ]));
+    expect(await f.apply()).toBe(0);
+    expect(f.stored).toEqual({ report_json: json, report_md: markdown });
+    expect(await readFile(f.selection.reportMd, 'utf8')).toBe(markdown);
+  });
+  it.each([
+    ['without explicit control selection', false, false, 'Original Markdown\0unchanged\n', 'original_artifact_requires_redaction'],
+    ['without retained JSON NUL provenance', true, false, 'Original Markdown\0unchanged\n', 'original_artifact_requires_redaction'],
+    ['with a secret marker', true, true, 'sk-ant-abcdefghijklmnopqrstu\0unchanged\n', 'original_artifact_requires_redaction'],
+    ['with a redaction marker', true, true, '[redacted]\0unchanged\n', 'original_artifact_requires_redaction'],
+    ['with a synthetic marker', true, true, 'SYNTHETIC_TEST_ONLY\0unchanged\n', 'source_marked_synthetic'],
+  ])('refuses Markdown NUL retention %s', async (_label, selected, jsonNul, markdown, reason) => {
+    const f = await fixture(r => { if (jsonNul) r.findings[0]!.description = 'before\0after'; });
+    const json = JSON.stringify(f.report, null, 2);
+    if (selected) f.selection.originalProse = 'control-code-units-v1';
+    f.selection.reportSha256 = sha256Hex(json);
+    f.selection.markdownSha256 = sha256Hex(markdown);
+    await writeFile(f.selection.reportJson, json);
+    await writeFile(f.selection.reportMd, markdown);
+
+    await expect(prepareOriginalRun(f.selection)).rejects.toThrow(reason);
+    expect(f.requests).toEqual([]);
+    await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(f.selection.reportMd, 'utf8')).toBe(markdown);
+  });
   it('keeps default Mode A manifest selection and surrogate records unchanged', async () => {
     const f = await fixture();
     expect(await f.preview()).toBe(0);
@@ -440,4 +484,32 @@ it('checks the complete manifest again when observation metadata makes its forma
   await expect(readFile(f.manifest)).rejects.toMatchObject({ code:'ENOENT' });
   await expect(readdir(f.manifest + '.journal')).rejects.toMatchObject({ code:'ENOENT' });
   expect(await readdir(join(f.dir,'data'))).toEqual([]);
+});
+
+it('preserves a valid recovered producer predecessor marker through immutable original preparation', async () => {
+  const f = await fixture(report => {
+    report.run!.converge = { target: 'recovered', round: 2, recovery_source: { version: 1, native_sha256: 'c'.repeat(64) } };
+    report.run!.gating.bound_classification_protocol = 1;
+  });
+  const original = await readFile(f.selection.reportJson, 'utf8');
+  const prepared = await prepareOriginalRun(f.selection);
+  expect(prepared.artifacts.report_json).toBe(original);
+  expect(prepared.prepared.envelope.run.converge?.recovery_source).toEqual({ version: 1, native_sha256: 'c'.repeat(64) });
+  expect(await readFile(f.selection.reportJson, 'utf8')).toBe(original);
+});
+it.each([
+  { version: 2, native_sha256: 'c'.repeat(64) },
+  { version: 1, native_sha256: 'C'.repeat(64) },
+  { version: 1, native_sha256: 'c'.repeat(64) + '\n' },
+  { version: 1, native_sha256: 'c'.repeat(63) },
+  { version: 1, native_sha256: 'c'.repeat(64), authority: 'attested' },
+  null,
+])('refuses unsupported original predecessor marker %j without rewriting it', async marker => {
+  const f = await fixture(report => {
+    report.run!.converge = { target: 'recovered', round: 2, recovery_source: marker as never };
+    report.run!.gating.bound_classification_protocol = 1;
+  });
+  const original = await readFile(f.selection.reportJson, 'utf8');
+  await expect(prepareOriginalRun(f.selection)).rejects.toThrow(/unsupported_recovery_source/);
+  expect(await readFile(f.selection.reportJson, 'utf8')).toBe(original);
 });
