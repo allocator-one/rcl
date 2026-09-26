@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.1.9 - 2026-09-26
+
+- Retry supported transient provider transport failures within the existing call
+  attempt limit and overall deadline. Permanent errors, cancellation and expired
+  deadlines remain terminal; adapter attempt diagnostics report observed SDK
+  invocations rather than wire requests or billing counts (RCL-126).
+- Add immutable record IDs and original outcome ordering for durable, idempotent
+  model-history batches. Preserve legacy directory aliases, repair interrupted
+  directory creation and retain existing history bytes (RCL-125).
+
 ## 4.1.8 - 2026-09-26
 
 - Normalize freshly generated review prose before report serialization and
