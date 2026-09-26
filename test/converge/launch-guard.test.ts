@@ -185,6 +185,8 @@ describe('native guarded review launch', () => {
       findings: [sampleFinding()], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
     await recordVerdicts({ gitCommonDir: options.gitCommonDir, target, round: 1,
       verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
+    expect((await loadConvergeRunState(options.gitCommonDir, target))?.findings[report.findings[0]!.identity])
+      .toMatchObject({ verdictHeadSha: options.headSha });
 
     await expect(guardReviewLaunch(options)).rejects.toThrow(/fix|unchanged/i);
     await expect(guardReviewLaunch({ ...options, inputSha256: 'f'.repeat(64) })).rejects.toThrow(/fix.*head|head.*fix/i);
@@ -232,6 +234,28 @@ describe('native guarded review launch', () => {
 
     expect(fixedHead.run).toHaveBeenCalledTimes(1);
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
+  });
+
+  it('permits a newer head after the review of a real fix is inconclusive', async () => {
+    const options = await fixture();
+    await guardReviewLaunch(options);
+    const report = await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [sampleFinding()], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    await recordVerdicts({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
+
+    const fixedHead = { ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64),
+      run: vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000002', successfulReviews: 1 }) };
+    await guardReviewLaunch(fixedHead);
+
+    await guardReviewLaunch({ ...fixedHead,
+      headSha: 'f'.repeat(40),
+      inputSha256: 'a'.repeat(64),
+      retryReason: 'Additional fix pushed after the inconclusive review.'
+    });
+
+    expect(fixedHead.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 3 });
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 3 });
   });
 
   it('does not let an infrastructure retry defer admitted in-scope blockers', async () => {

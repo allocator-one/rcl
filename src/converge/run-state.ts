@@ -99,6 +99,8 @@ export interface FindingEntry {
   verdict?: FindingVerdict;
   verdictReason?: string;
   verdictRound?: number;
+  /** Head reviewed by the round that recorded a fixed verdict. Absent in legacy state. */
+  verdictHeadSha?: string;
   /**
    * Severity at the moment the verdict was recorded (RCL-30). A dismissal is
    * terminal on that evidence; only escalation past it re-gates. Absent on
@@ -607,6 +609,8 @@ export interface RoundResolution {
   unresolved: string[];
   /** Identities recorded fixed this round (any status — every fix changes the patch). */
   fixedThisRound: number;
+  /** Fixed-round heads retained for a guarded retry; absent for legacy verdicts. */
+  fixedHeadShas: string[];
   status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
 }
 
@@ -654,6 +658,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   }
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
+  const verdictHeadSha = state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined;
   for (const { key, verdict, reason } of options.verdicts) {
     const entry = state.findings[key];
     if (!entry) {
@@ -669,6 +674,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     recorded.verdict = verdict;
     recorded.verdictRound = options.round;
     recorded.verdictSeverity = severities?.[key] ?? entry.severity;
+    if (verdict === 'fixed' && verdictHeadSha !== undefined) recorded.verdictHeadSha = verdictHeadSha;
     if (reason !== undefined) recorded.verdictReason = reason;
     else if (verdict === 'fixed') delete recorded.verdictReason;
     updated.push(recorded);
@@ -694,11 +700,16 @@ export function resolveRoundResolution(state: ConvergeRunState, round: number): 
     const fixedThisRound = Object.values(state.findings).filter(
       (e) => e.verdict === 'fixed' && e.verdictRound === round
     ).length;
+    const fixedHeadShas = [...new Set(Object.values(state.findings)
+      .filter((e) => e.verdict === 'fixed' && e.verdictRound === round)
+      .map((e) => e.verdictHeadSha)
+      .filter((headSha): headSha is string => headSha !== undefined))];
     return {
       round,
       actionable: actionable.length,
       unresolved,
       fixedThisRound,
+      fixedHeadShas,
       status:
         unresolved.length > 0
           ? 'unresolved'

@@ -128,8 +128,11 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
   if (healthy && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
-  if (!healthy && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha !== options.headSha) {
-    refuse('fix_head_retry_changed', 'An inconclusive review after a real fix may retry only that same resulting head.');
+  if (!healthy && (resolution?.fixedThisRound ?? 0) > 0) {
+    const fixedHeads = resolution?.fixedHeadShas ?? [];
+    if (fixedHeads.includes(options.headSha) || (fixedHeads.length === 0 && previous.headSha !== options.headSha)) {
+      refuse('fix_head_retry_changed', 'An inconclusive review after a real fix cannot reuse the fixed-round head.');
+    }
   }
   if ((previous.hardFailure || !healthy) && !options.retryReason) {
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
