@@ -84,25 +84,42 @@ function hardcodedKey(f: ClaimText): Contract | undefined {
     observations: literal ? ['Source literal observed'] : [] };
 }
 
+/** Accept a direct query argument or an immediately used immutable binding. */
+function sqlParameter(fix: string, query: RegExpExecArray): string | undefined {
+  const before = fix.slice(0, query.index);
+  const after = fix.slice(query.index + query[0].length);
+  const call = '[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*';
+  if (before.trimEnd().endsWith('(')) {
+    return /^\s*,\s*\[\s*([A-Za-z_$][\w$]*)\s*\]\s*\)/.exec(after)?.[1];
+  }
+  const statement = before.slice(Math.max(before.lastIndexOf(';'), before.lastIndexOf('\n')) + 1);
+  const declaration = /^\s*const ([A-Za-z_$][\w$]*)\s*=\s*$/.exec(statement);
+  if (!declaration) return;
+  const binding = declaration[1]!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*;\\s*(?:return\\s+|await\\s+)?${call}\\(\\s*${binding}\\s*,\\s*\\[\\s*([A-Za-z_$][\\w$]*)\\s*\\]\\s*\\)(?:\\s*;)?$`).exec(after.trimEnd())?.[1];
+}
+
 function sqlInterpolation(f: ClaimText): Contract | undefined {
   const title = /^SQL injection(?: vulnerability)? (?:in|via string interpolation in) ([A-Za-z_$][\w$]*|DELETE endpoint)$/i.exec(text(f.title));
   if (!title) return;
   const fix = f.suggestedFix ?? '';
-  const query = /['"](SELECT \* FROM ([A-Za-z_][\w]*) WHERE ([A-Za-z_][\w]*) = (?:\$1|\?)|DELETE FROM ([A-Za-z_][\w]*) WHERE ([A-Za-z_][\w]*) = \$1)['"]/.exec(fix);
-  const parameter = /\[([A-Za-z_$][\w$]*)\]/.exec(fix);
-  if (!query || !parameter) return;
-  const operation = query[2] ? 'SELECT' : 'DELETE';
-  const table = query[2] ?? query[4]!;
-  const column = query[3] ?? query[5]!;
+  const queries = [...fix.matchAll(/(['"])(SELECT \* FROM ([A-Za-z_][\w]*) WHERE ([A-Za-z_][\w]*) = (?:\$1|\?)|DELETE FROM ([A-Za-z_][\w]*) WHERE ([A-Za-z_][\w]*) = \$1)\1/gi)];
+  if (queries.length !== 1) return;
+  const query = queries[0]!;
+  const parameter = sqlParameter(fix, query);
+  if (!parameter) return;
+  const operation = query[3] ? 'SELECT' : 'DELETE';
+  const table = query[3] ?? query[5]!;
+  const column = query[4] ?? query[6]!;
   const parts = sentences(f.description);
   const core = /^(User-controlled input|The ([A-Za-z_$][\w$]*) parameter|The user ID from the URL parameter|The ([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+) value) is (?:directly )?interpolated(?: directly)? into (?:a |the )?(SQL query string|SQL string|SQL query|SQL DELETE statement)(?: without sanitization(?: or parameterization)?)?$/i.exec(parts[0] ?? '');
   if (!core) return;
   const namedSource = core[2] ?? core[3]?.split('.').at(-1);
-  if (namedSource && namedSource !== parameter[1]) return;
+  if (namedSource && namedSource !== parameter) return;
   if (core[4]?.toUpperCase() === 'SQL DELETE STATEMENT' && operation !== 'DELETE') return;
   if (title[1]?.toUpperCase() === 'DELETE ENDPOINT' && operation !== 'DELETE') return;
   if (!parts.slice(1).every(part => /^This (?:is a (?:classic|textbook) SQL injection vulnerability|allows SQL injection attacks)$/i.test(part))) return;
-  return { kind: 'sql-value-interpolation', subject: [title[1]!, operation, table, column, '=', parameter[1]!],
+  return { kind: 'sql-value-interpolation', subject: [title[1]!, operation, table, column, '=', parameter],
     condition: 'The named input value is interpolated into SQL syntax instead of passed as a bound parameter.', observations: [] };
 }
 

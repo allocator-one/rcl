@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { describeClaim, compareClaims } from '../../src/consensus/claim-identity.js';
 import { describeContract } from '../../src/consensus/claim-contract.js';
@@ -60,6 +61,49 @@ describe('bounded semantic contracts', () => {
       description: 'User-controlled input is interpolated into a Sql Delete Statement.',
       suggestedFix: "Use db.query('DELETE FROM users WHERE id = $1', [userId]);" };
     expect(describeContract(finding)).toBeDefined();
+  });
+
+  it('normalizes SQL keyword casing while preserving identifier casing', () => {
+    const finding = original('c002');
+    const lower = { ...finding, suggestedFix: finding.suggestedFix!.replace('SELECT', 'select').replace('FROM', 'from').replace('WHERE', 'where') };
+    expect(compareClaims(describeClaim(finding), describeClaim(lower))).toBeDefined();
+    expect(compareClaims(describeClaim(lower), describeClaim({ ...lower,
+      suggestedFix: lower.suggestedFix.replace('users', 'Users') }))).toBeUndefined();
+  });
+
+  it('binds the SQL input to its query argument rather than an unrelated array', () => {
+    const finding = { ...original('c002'), description: 'User-controlled input is interpolated into a SQL query string.',
+      suggestedFix: "db.query('SELECT * FROM users WHERE id = $1', [userId]);" };
+    const prefixed = { ...finding, suggestedFix: `const fields = [id]; ${finding.suggestedFix}` };
+    expect(compareClaims(describeClaim(finding), describeClaim(prefixed))).toBeDefined();
+    expect(compareClaims(describeClaim(prefixed), describeClaim({ ...prefixed,
+      suggestedFix: prefixed.suggestedFix.replace('[userId]', '[tenantId]') }))).toBeUndefined();
+  });
+
+  it('refuses a suggested query whose parameter is not bound to that call', () => {
+    const finding = { ...original('c002'), description: 'User-controlled input is interpolated into a SQL query string.',
+      suggestedFix: "const fields = [id]; db.query('SELECT * FROM users WHERE id = $1');" };
+    expect(describeContract(finding)).toBeUndefined();
+  });
+
+  it('refuses multiple proposed queries instead of selecting one contract', () => {
+    const finding = { ...original('c002'),
+      suggestedFix: "db.query('SELECT * FROM users WHERE id = $1', [userId]); db.query('DELETE FROM users WHERE id = $1', [userId]);" };
+    expect(describeContract(finding)).toBeUndefined();
+  });
+
+  it('rejects a long malformed query suffix without excessive backtracking', () => {
+    const finding = { ...original('c002'),
+      suggestedFix: "const query = 'SELECT * FROM users WHERE id = $1'; return db.query(query, [userId])" };
+    const script = `import { describeContract } from './src/consensus/claim-contract.ts';
+      const finding = ${JSON.stringify(finding)};
+      finding.suggestedFix += ' '.repeat(200000) + '!';
+      if (describeContract(finding) !== undefined) process.exit(1);`;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
+      encoding: 'utf8', timeout: 4000, env: { PATH: process.env.PATH, LANG: 'C' },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
   });
 
   it('recognizes the supported plural ownership paraphrase without mixing resources', () => {

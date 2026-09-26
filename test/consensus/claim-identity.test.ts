@@ -1,10 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { describeClaim, compareClaims, claimDescriptorSchema } from '../../src/consensus/claim-identity.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 
 describe('versioned semantic claim evidence', () => {
+  it('describes long dotted prose without unbounded anchor backtracking', () => {
+    const module = new URL('../../src/consensus/claim-identity.ts', import.meta.url).href;
+    const script = `import assert from 'node:assert/strict';
+      import { describeClaim, compareClaims } from ${JSON.stringify(module)};
+      const finding = { file: 'src/cache.ts', title: 'Cache invariant', description: 'a.'.repeat(100000), suggestedFix: '' };
+      const left = describeClaim({ ...finding, description: finding.description + 'accepts stale entries' });
+      const right = describeClaim({ ...finding, description: finding.description + 'rejects valid entries' });
+      assert.notEqual(left.invariant, right.invariant);
+      assert.equal(compareClaims(left, right), undefined);`;
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
+      encoding: 'utf8', timeout: 4000, env: { PATH: process.env.PATH, LANG: 'C' },
+    });
+    expect(result.error, result.stderr).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+  });
   it('distinguishes preserved CopyButton, Toast and search allegations', () => {
     const { sightings } = JSON.parse(readFileSync(new URL('../fixtures/semantic-claims.json', import.meta.url), 'utf8'));
     for (const [a, b] of [[0, 2], [1, 3], [4, 5]]) {

@@ -27,9 +27,13 @@ export function describeClaim(finding: Pick<Finding, 'file' | 'title' | 'descrip
   const contract = describeContract(finding);
   if (contract) return claimDescriptorSchema.parse({ ...contract, operation: bounded(contract.operation),
     invariant: bounded(contract.invariant), evidence: contract.evidence.map(bounded) });
-  const symbols = anchors(`${finding.title} ${finding.description}`);
-  const operation = symbols.length ? `${finding.file} :: ${symbols.join(', ')}` : `${finding.file} :: ${finding.title}`;
-  const invariant = bounded(finding.description) || bounded(finding.title) || '[insufficient-evidence: no reviewer invariant]';
-  const evidence = [...new Set([bounded(finding.title), bounded(finding.description), bounded(finding.suggestedFix ?? '')].filter(Boolean))];
+  const title = bounded(finding.title);
+  const description = bounded(finding.description);
+  // Bound regex work before extracting anchors, retaining the omitted-text
+  // commitment so long claims with different endings cannot collapse.
+  const symbols = anchors(`${title} ${description}`);
+  const operation = symbols.length ? `${finding.file} :: ${symbols.join(', ')}` : `${finding.file} :: ${title}`;
+  const invariant = description || title || '[insufficient-evidence: no reviewer invariant]';
+  const evidence = [...new Set([title, description, bounded(finding.suggestedFix ?? '')].filter(Boolean))];
   return claimDescriptorSchema.parse({ version: 1, operation: bounded(operation), invariant, evidence: evidence.length ? evidence : [invariant] });
 }
