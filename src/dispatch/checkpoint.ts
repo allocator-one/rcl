@@ -825,7 +825,7 @@ export class CheckpointJournal {
     return validateHistory(this.plan, records, resultBytes, suppliedBindings);
   }
 
-  private async write<T>(ownership: NativeTargetOwnership, operation: () => Promise<T>): Promise<T> {
+  private async write<T>(ownership: NativeTargetOwnership, operation: (active: NativeTargetOwnership) => Promise<T>): Promise<T> {
     if (!this.commonDir) throw new Error('checkpoint_read_only');
     return withOwnedNativeOperation(ownership, this.commonDir, this.plan.target, async active => {
       await assertNativeTargetOwnership(active, this.commonDir!, this.plan.target);
@@ -834,7 +834,7 @@ export class CheckpointJournal {
           await this.syncHistory(await this.read());
           this.needsResync = false;
         }
-        return await operation();
+        return await operation(active);
       } catch (error) { this.needsResync = true; throw error; }
     });
   }
@@ -956,7 +956,16 @@ export class CheckpointJournal {
   }
 
   finalize(ownership: NativeTargetOwnership): Promise<void> {
-    return this.write(ownership, async () => {
+    return this.write(ownership, async active => {
+      // Retained async delegates share a short phase lock. Close admission
+      // before publishing immutable reviewer history; never await providers.
+      let asyncPhase = false;
+      try { await lstat(join(this.path, 'async')); asyncPhase = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (asyncPhase) {
+        const { sealAsyncPhase } = await import('./checkpoint-async-store.js');
+        await sealAsyncPhase({ commonDir: this.commonDir!, namespace: basename(this.path), plan: this.plan, ownership: active });
+      }
       const state = await this.read();
       for (const record of state.records) if (record.type === 'binding') await this.syncRecord(record);
       if (state.finalized) { await this.syncRecord(state.records.at(-1)!); return; }
