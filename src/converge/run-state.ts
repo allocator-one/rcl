@@ -28,6 +28,11 @@ export const DEFAULT_CONVERGE_ROUND_CAP = 15;
 export const HARD_CONVERGE_ROUND_CAP = 99;
 export const MIN_CONVERGE_ROUNDS = 2;
 
+/** Guarded convergence requires both a two-thirds quorum and at least two reviewers. */
+export function requiredSuccessfulReviews(totalReviews: number): number {
+  return Math.max(2, Math.ceil(2 * totalReviews / 3));
+}
+
 const STATE_VERSION = 1;
 const STATE_DIR = 'rcl-converge-runs';
 const DEFAULT_LINE_WINDOW = 5;
@@ -125,6 +130,8 @@ export interface ConvergeRunState {
     round: number;
     counts: RoundCounts;
     runId?: string;
+    /** This run was bound to a completed guarded launch; its identity cannot be replaced by replay. */
+    launchBound?: true;
     /** Exact reviewed head, retained once the report is admitted. */
     headSha?: string;
     /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
@@ -394,12 +401,16 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
   const currentLaunch = state.lastLaunch;
+  const recordedRound = state.rounds.find((entry) => entry.round === options.round);
+  if (recordedRound?.launchBound && runId !== recordedRound.runId) {
+    throw new ConvergeRunStateError(`Round ${options.round} report run differs from its recorded round launch.`);
+  }
   if (currentLaunch?.status === 'completed' && currentLaunch.round === options.round && currentLaunch.runId !== undefined) {
     if (runId !== currentLaunch.runId) {
       throw new ConvergeRunStateError(`Round ${options.round} report run does not match its admitted launch.`);
     }
     if (currentLaunch.successfulReviews !== undefined && currentLaunch.totalReviews !== undefined &&
-        currentLaunch.successfulReviews < Math.max(2, Math.ceil(2 * currentLaunch.totalReviews / 3))) {
+        currentLaunch.successfulReviews < requiredSuccessfulReviews(currentLaunch.totalReviews)) {
       throw new ConvergeRunStateError(`Round ${options.round} report is inconclusive; reviewer quorum was not met.`);
     }
   }
@@ -589,8 +600,8 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
   // Re-processing a round without a report id (a legacy or mismatched
   // report) must not erase the binding an earlier pass persisted.
-  const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
-  const existingRound = state.rounds.find((entry) => entry.round === options.round);
+  const existingRound = recordedRound;
+  const boundRunId = runId ?? existingRound?.runId;
   if (options.headSha !== undefined && state.lastLaunch?.round === options.round &&
       state.lastLaunch.headSha !== undefined && options.headSha !== state.lastLaunch.headSha) {
     throw new ConvergeRunStateError(`Round ${options.round} report head conflicts with its admitted launch.`);
@@ -603,6 +614,8 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
     { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}),
+      ...(existingRound?.launchBound || (currentLaunch?.status === 'completed' &&
+        currentLaunch.round === options.round && currentLaunch.runId === runId) ? { launchBound: true as const } : {}),
       ...(roundHeadSha !== undefined ? { headSha: roundHeadSha } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {

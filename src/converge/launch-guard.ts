@@ -7,6 +7,7 @@ import {
 } from './attempt-budget.js';
 import {
   initialConvergeRunState, loadConvergeRunState, resolveRoundResolution, validateRoundCap,
+  requiredSuccessfulReviews,
   writeState, ConvergeRoundCapError, type ConvergeRunState,
 } from './run-state.js';
 import type { ConvergeContext } from '../report/run-header.js';
@@ -116,7 +117,7 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
-  const healthy = previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
+  const healthy = previous.successfulReviews! >= requiredSuccessfulReviews(previous.totalReviews!);
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
     refuse('report_not_admitted', `Process the existing report for run ${previous.runId}; do not rerun its reviewers.`);
   }

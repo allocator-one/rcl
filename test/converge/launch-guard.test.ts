@@ -268,6 +268,29 @@ describe('native guarded review launch', () => {
     expect((await loadConvergeRunState(options.gitCommonDir, target))?.rounds).toEqual([]);
   });
 
+  it('preserves a recorded round when a superseded report arrives after a later launch', async () => {
+    const options = await fixture();
+    const retryRunId = '019921a0-0000-7000-8000-000000000002';
+    options.run = vi.fn().mockResolvedValueOnce({ ...completion, successfulReviews: 1 })
+      .mockResolvedValueOnce({ ...completion, runId: retryRunId });
+    await guardReviewLaunch(options);
+    await guardReviewLaunch({ ...options, retryReason: 'Provider recovered after inconclusive review.' });
+    await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: retryRunId, reportSha256: completion.reportJsonSha256,
+      headSha: options.headSha });
+
+    const path = convergeRunStatePath(options.gitCommonDir, target);
+    const state = JSON.parse(await readFile(path, 'utf8'));
+    state.lastLaunch.round = 2;
+    state.lastLaunch.runId = '019921a0-0000-7000-8000-000000000003';
+    await writeFile(path, JSON.stringify(state));
+
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256,
+      headSha: options.headSha })).rejects.toThrow(/recorded round.*run|run.*recorded round/i);
+    expect((await loadConvergeRunState(options.gitCommonDir, target))?.rounds[0]?.runId).toBe(retryRunId);
+  });
+
   it('keeps legacy fixed-round retries on the immediately preceding inconclusive head', async () => {
     const options = await fixture();
     await guardReviewLaunch(options);
