@@ -604,6 +604,7 @@ program
           round,
           findings: report.findings,
           reportSha256,
+          ...(typeof report.run?.target?.head_sha === 'string' ? { headSha: report.run.target.head_sha } : {}),
           ...(maxRounds !== undefined ? { maxRounds } : {}),
           ...(runId !== undefined ? { runId } : {}),
         });

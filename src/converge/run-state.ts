@@ -125,6 +125,8 @@ export interface ConvergeRunState {
     round: number;
     counts: RoundCounts;
     runId?: string;
+    /** Exact reviewed head, retained once the report is admitted. */
+    headSha?: string;
     /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
     severities?: Record<string, ConsensusFinding['severity']>;
   }>;
@@ -321,6 +323,7 @@ export interface ProcessRoundOptions {
   /** The report's own run id, kept so verdicts can be bound to the round's run. */
   runId?: string;
   reportSha256?: string;
+  headSha?: string;
   ownership?: NativeTargetOwnership;
 }
 
@@ -577,9 +580,11 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // Re-processing a round without a report id (a legacy or mismatched
   // report) must not erase the binding an earlier pass persisted.
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
+  const roundHeadSha = options.headSha ?? (state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined);
   state.rounds = [
     ...state.rounds.filter((r) => r.round !== options.round),
-    { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}) },
+    { round: options.round, counts, severities, ...(boundRunId !== undefined ? { runId: boundRunId } : {}),
+      ...(roundHeadSha !== undefined ? { headSha: roundHeadSha } : {}) },
   ].sort((a, b) => a.round - b.round);
   state.lastAnnotations = {
     round: options.round,
@@ -658,7 +663,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   }
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
-  const verdictHeadSha = state.lastLaunch?.round === options.round ? state.lastLaunch.headSha : undefined;
+  const verdictHeadSha = reviewedRound.headSha;
   for (const { key, verdict, reason } of options.verdicts) {
     const entry = state.findings[key];
     if (!entry) {
@@ -675,6 +680,7 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
     recorded.verdictRound = options.round;
     recorded.verdictSeverity = severities?.[key] ?? entry.severity;
     if (verdict === 'fixed' && verdictHeadSha !== undefined) recorded.verdictHeadSha = verdictHeadSha;
+    else delete recorded.verdictHeadSha;
     if (reason !== undefined) recorded.verdictReason = reason;
     else if (verdict === 'fixed') delete recorded.verdictReason;
     updated.push(recorded);
@@ -702,7 +708,7 @@ export function resolveRoundResolution(state: ConvergeRunState, round: number): 
     ).length;
     const fixedHeadShas = [...new Set(Object.values(state.findings)
       .filter((e) => e.verdict === 'fixed' && e.verdictRound === round)
-      .map((e) => e.verdictHeadSha)
+      .map((e) => state.rounds.find((entry) => entry.round === e.verdictRound)?.headSha)
       .filter((headSha): headSha is string => headSha !== undefined))];
     return {
       round,
