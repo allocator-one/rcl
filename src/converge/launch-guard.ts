@@ -119,9 +119,12 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (!options.retryReason) refuse('dispatch_unknown', 'Previous dispatch is unknown; no automatic retry. Supply a bounded retry reason only after recovery.');
     return round;
   }
-  if (previous.deliveryPending && previous.headSha === options.headSha &&
-    ((previous.inputSha256 === options.inputSha256) ||
-    !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
+  const previousRoundAdmitted = state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId);
+  const sameInputs = previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256;
+  if (previous.deliveryPending && (!previousRoundAdmitted || sameInputs)) {
+    if (!sameInputs) {
+      refuse('delivery_pending', `Run ${previous.runId} already completed; reconcile its delivery before reviewing different inputs.`);
+    }
     const delivered = previous.runId && previous.reportJsonSha256 && options.confirmDelivery
       ? await options.confirmDelivery(previous).catch(() => false) : false;
     if (!delivered) {
@@ -133,7 +136,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   const healthy = hasHealthyGuardedLaunch(previous);
   let disposed = false;
-  if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
+  if (healthy && !previousRoundAdmitted) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
     const entry = candidates.find(e => {
       const m = staleManifest(e);

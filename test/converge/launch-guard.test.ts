@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
+import { createGuardedDeliveryConfirmer } from '../../src/converge/delivery-reconcile.js';
 import { claimConvergeAttempt, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
@@ -108,6 +110,37 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 
+  it.each(['missing', 'mismatched', 'unavailable'] as const)(
+    'keeps the original attempt when %s report bytes fail the delivery receipt', async failure => {
+      const options = await fixture();
+      const bytes = Buffer.from('exact report');
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      const deliveredCompletion = { ...completion, reportJsonSha256: digest, successfulReviews: 1,
+        deliveryPending: true, hardFailure: true };
+      options.run = vi.fn().mockResolvedValue(deliveredCompletion);
+      await guardReviewLaunch(options);
+      await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+        findings: [], runId: completion.runId, reportSha256: digest });
+      const artifact = failure === 'unavailable' ? { kind: 'unavailable', reason: 'fixture' }
+        : { kind: 'ok', httpStatus: 200, value: { bytes: failure === 'missing' ? null : Buffer.from('wrong report'), sha256: digest } };
+      const sink = { getArtifact: vi.fn().mockResolvedValue(artifact) };
+      const confirmDelivery = createGuardedDeliveryConfirmer({ target, rclVersion: 'test', cwd: '/',
+        dependencies: { openReadSink: vi.fn().mockResolvedValue({ sink }), getRun: vi.fn().mockResolvedValue({
+          kind: 'ok', httpStatus: 200, value: { id: completion.runId,
+            target: { kind: 'patch', head_sha: options.headSha }, converge: { target, round: 1, attempt: 1 },
+            received_at: '2026-09-26T12:31:20.636Z', repo_verified: true,
+            artifacts: [{ kind: 'report_json', declared_sha256: digest, declared_bytes: bytes.length, stored: true }],
+            findings: [], calls: [] },
+        }) } });
+
+      await expect(guardReviewLaunch({ ...options, confirmDelivery,
+        retryReason: 'Original run received after flush.' })).rejects.toThrow('delivery_pending');
+
+      expect(options.run).toHaveBeenCalledTimes(1);
+      expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+    }
+  );
+
   it('requires a bounded retry reason even after exact delivery confirmation', async () => {
     const options = await fixture();
     options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
@@ -136,18 +169,18 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 
-  it('does not use a prior receipt to reconcile a different head', async () => {
+  it('refuses different inputs until an unadmitted delivery is reconciled', async () => {
     const options = await fixture();
     options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
       deliveryPending: true, hardFailure: true });
     await guardReviewLaunch(options);
     const confirmDelivery = vi.fn().mockResolvedValue(true);
 
-    await guardReviewLaunch({ ...options, headSha: 'd'.repeat(40), confirmDelivery,
-      retryReason: 'A changed head requires a distinct bounded recovery.' });
+    await expect(guardReviewLaunch({ ...options, headSha: 'd'.repeat(40), confirmDelivery,
+      retryReason: 'A changed head requires a distinct bounded recovery.' })).rejects.toThrow('delivery_pending');
 
     expect(confirmDelivery).not.toHaveBeenCalled();
-    expect(options.run).toHaveBeenCalledTimes(2);
+    expect(options.run).toHaveBeenCalledTimes(1);
   });
 
   it('does not let old delivery metadata block a materially changed input after native admission', async () => {

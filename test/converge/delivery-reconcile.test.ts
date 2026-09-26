@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { matchesGuardedDelivery, verifyGuardedDelivery } from '../../src/converge/delivery-reconcile.js';
+import { createGuardedDeliveryConfirmer, matchesGuardedDelivery, verifyGuardedDelivery } from '../../src/converge/delivery-reconcile.js';
 import type { RunDetail } from '../../src/evidence/types.js';
 
 const expected = {
@@ -54,5 +54,46 @@ describe('guarded delivery receipt', () => {
     ] };
 
     expect(await verifyGuardedDelivery(delivered, identity, async () => bytes)).toBe(true);
+  });
+
+  it('confirms only an exact delivered run and downloaded report bytes through the read sink', async () => {
+    const bytes = Buffer.from('exact report');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const identity = { ...expected, reportJsonSha256: digest };
+    const delivered = { ...run(), artifacts: [{ kind: 'report_json', declared_sha256: digest,
+      declared_bytes: bytes.length, stored: true }] };
+    const sink = { getArtifact: vi.fn().mockResolvedValue({ kind: 'ok', httpStatus: 200,
+      value: { bytes, sha256: digest } }) };
+    const confirm = createGuardedDeliveryConfirmer({ target: identity.target, rclVersion: 'test', cwd: '/',
+      dependencies: { openReadSink: vi.fn().mockResolvedValue({ sink }),
+        getRun: vi.fn().mockResolvedValue({ kind: 'ok', httpStatus: 200, value: delivered }) } });
+
+    expect(await confirm({ ...identity, status: 'completed', inputSha256: 'c'.repeat(64),
+      startedAt: '2026-09-26T12:31:20.636Z', pid: 1, successfulReviews: 1, totalReviews: 2,
+      deliveryPending: true, hardFailure: true })).toBe(true);
+    expect(sink.getArtifact).toHaveBeenCalledWith(identity.runId, 'report_json', bytes.length);
+  });
+
+  it.each([
+    ['missing', null],
+    ['mismatched', Buffer.from('wrong report')],
+    ['unavailable', undefined],
+  ])('refuses %s report bytes through the read sink', async (_label, report) => {
+    const bytes = Buffer.from('exact report');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const identity = { ...expected, reportJsonSha256: digest };
+    const delivered = { ...run(), artifacts: [{ kind: 'report_json', declared_sha256: digest,
+      declared_bytes: bytes.length, stored: true }] };
+    const artifact = report === undefined ? { kind: 'unavailable', reason: 'fixture' }
+      : report === null ? { kind: 'ok', httpStatus: 200, value: { bytes: null, sha256: digest } }
+        : { kind: 'ok', httpStatus: 200, value: { bytes: report, sha256: digest } };
+    const sink = { getArtifact: vi.fn().mockResolvedValue(artifact) };
+    const confirm = createGuardedDeliveryConfirmer({ target: identity.target, rclVersion: 'test', cwd: '/',
+      dependencies: { openReadSink: vi.fn().mockResolvedValue({ sink }),
+        getRun: vi.fn().mockResolvedValue({ kind: 'ok', httpStatus: 200, value: delivered }) } });
+
+    expect(await confirm({ ...identity, status: 'completed', inputSha256: 'c'.repeat(64),
+      startedAt: '2026-09-26T12:31:20.636Z', pid: 1, successfulReviews: 1, totalReviews: 2,
+      deliveryPending: true, hardFailure: true })).toBe(false);
   });
 });

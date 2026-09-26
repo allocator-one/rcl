@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
+import { getRun } from '../evidence/reads.js';
 import type { RunDetail } from '../evidence/types.js';
+import { openReadSink, type ReadSinkOptions } from '../telemetry/read-sink.js';
+import type { HarnessSink, SinkOutcome } from '../telemetry/sink.js';
+import type { GuardedLaunchState } from './launch-guard.js';
 
 export interface GuardedDeliveryIdentity {
   runId: string;
@@ -8,6 +12,50 @@ export interface GuardedDeliveryIdentity {
   attempt: number;
   headSha: string;
   reportJsonSha256: string;
+}
+
+interface DeliveryReadSink {
+  getArtifact(runId: string, kind: 'report_json', limit: number): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>>;
+}
+
+export interface DeliveryConfirmationDependencies {
+  openReadSink: (options: ReadSinkOptions) => Promise<{ sink: DeliveryReadSink | null }>;
+  getRun: (sink: DeliveryReadSink, runId: string) => Promise<SinkOutcome<RunDetail>>;
+}
+
+export interface GuardedDeliveryConfirmationOptions {
+  target: string;
+  rclVersion: string;
+  cwd: string;
+  dependencies?: DeliveryConfirmationDependencies;
+}
+
+const defaultDependencies: DeliveryConfirmationDependencies = {
+  openReadSink: async options => {
+    const opened = await openReadSink(options);
+    return { sink: opened.sink };
+  },
+  getRun: (sink, runId) => getRun(sink as HarnessSink, runId),
+};
+
+/** Build the exact-run delivery receipt check used by guarded review launches. */
+export function createGuardedDeliveryConfirmer(options: GuardedDeliveryConfirmationOptions):
+  (previous: GuardedLaunchState) => Promise<boolean> {
+  const dependencies = options.dependencies ?? defaultDependencies;
+  return async previous => {
+    if (!previous.runId || !previous.reportJsonSha256) return false;
+    const opened = await dependencies.openReadSink({ rclVersion: options.rclVersion, cwd: options.cwd });
+    if (!opened.sink) return false;
+    const outcome = await dependencies.getRun(opened.sink, previous.runId);
+    if (outcome.kind !== 'ok') return false;
+    return verifyGuardedDelivery(outcome.value, {
+      runId: previous.runId, target: options.target, round: previous.round, attempt: previous.attempt,
+      headSha: previous.headSha, reportJsonSha256: previous.reportJsonSha256,
+    }, async (runId, limit) => {
+      const artifact = await opened.sink!.getArtifact(runId, 'report_json', limit);
+      return artifact.kind === 'ok' ? artifact.value.bytes : null;
+    });
+  };
 }
 
 /** A delivered run must match the guarded launch and its stored report bytes. */

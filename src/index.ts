@@ -82,7 +82,7 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
-import { verifyGuardedDelivery } from './converge/delivery-reconcile.js';
+import { createGuardedDeliveryConfirmer } from './converge/delivery-reconcile.js';
 import { validateLaunchOutputs, validateLaunchProviders } from './converge/launch-preflight.js';
 import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
 import { readStable, sha256 } from './telemetry/recovery/files.js';
@@ -133,8 +133,6 @@ import type { TelemetryLevel } from './telemetry/envelope.js';
 import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
-import { getRun } from './evidence/reads.js';
-import { openReadSink } from './telemetry/read-sink.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
 import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
@@ -1906,21 +1904,9 @@ async function executeCouncil(
         }
         await validateLaunchOutputs(opts);
       },
-      confirmDelivery: async previous => {
-        if (!previous.runId || !previous.reportJsonSha256) return false;
-        const opened = await openReadSink({ rclVersion: RCL_VERSION, cwd: process.cwd() });
-        if (!opened.sink) return false;
-        const outcome = await getRun(opened.sink, previous.runId);
-        if (outcome.kind !== 'ok') return false;
-        return verifyGuardedDelivery(outcome.value, {
-          runId: previous.runId, target: prepared.converge!.target,
-          round: previous.round, attempt: previous.attempt, headSha: previous.headSha,
-          reportJsonSha256: previous.reportJsonSha256,
-        }, async (runId, limit) => {
-          const artifact = await opened.sink!.getArtifact(runId, 'report_json', limit);
-          return artifact.kind === 'ok' ? artifact.value.bytes : null;
-        });
-      },
+      confirmDelivery: createGuardedDeliveryConfirmer({
+        target: prepared.converge!.target, rclVersion: RCL_VERSION, cwd: process.cwd(),
+      }),
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
           kind: 'attempt_claimed', convergeTarget: claim.target, attempt: claim.attempt,
