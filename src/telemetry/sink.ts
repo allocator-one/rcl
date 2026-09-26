@@ -104,7 +104,7 @@ interface ErrorBody {
   message?: string;
 }
 
-const SIGHTING_BINDING_FIELDS = ['version', 'finding_ref', 'report_json_sha256', 'claim_descriptor', 'match_rationale', 'pending_round'];
+const SIGHTING_BINDING_FIELDS = ['version', 'finding_ref', 'report_json_sha256', 'claim_descriptor', 'match_rationale'];
 
 /** Inspect retained bindings without normalizing or replacing their original values. */
 export function validSightingBinding(entry: Record<string, unknown>): boolean {
@@ -375,7 +375,7 @@ export class HarnessSink {
         const boundVersion = (meta as { bound_classification_protocol?: unknown } | null)?.bound_classification_protocol;
         return { supported: typeof version === 'number' && Number.isInteger(version) && version >= 2 &&
           (!boundClassification || boundVersion === 1) };
-      }, readOptions
+      }, { ...readOptions, requireCompleteRead: true }
     );
     if (capability.kind !== 'ok') return capability;
     if (!capability.value.supported) return {
@@ -532,17 +532,18 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    const preparedEvents = structuredClone(events);
     const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
     // Retained JSON can violate the producer's type. Refuse the batch before
     // inspecting provenance so the outbox preserves it and continues other entries.
-    if (events.some(event => event.kind === 'round_processed' &&
+    if (preparedEvents.some(event => event.kind === 'round_processed' &&
       (event.payload === null || typeof event.payload !== 'object' || Array.isArray(event.payload)))) {
       return { kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
         message: 'round_processed payload must be an object; events were not sent' };
     }
     let boundClassification = false;
     let versionedClassification = false;
-    for (const event of events) {
+    for (const event of preparedEvents) {
       if (event.kind !== 'round_processed') continue;
       const payload = event.payload;
       const markedClassification = 'classification_version' in payload || 'legacy_pending_identities' in payload;
@@ -593,7 +594,7 @@ export class HarnessSink {
       const capability = await this.requireEvidenceProtocol(remaining, boundClassification);
       if (capability.kind !== 'ok') return capability;
     }
-    const body = JSON.stringify({ events });
+    const body = JSON.stringify({ events: preparedEvents });
     const remaining = remainingRequestOptions(options, deadline);
     if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
     const result = await this.request(
@@ -609,7 +610,7 @@ export class HarnessSink {
       const duplicates = data?.['duplicates'];
       const count = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0;
       // Every event sent must be accounted for, inserted or already known.
-      if (!count(inserted) || !count(duplicates) || inserted + duplicates !== events.length) return null;
+      if (!count(inserted) || !count(duplicates) || inserted + duplicates !== preparedEvents.length) return null;
       return { inserted, duplicates };
     });
   }

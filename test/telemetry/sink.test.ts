@@ -4,7 +4,8 @@ import { buildRunEnvelope, type RunEnvelope } from '../../src/telemetry/envelope
 import { buildEvent } from '../../src/telemetry/events.js';
 import { describeOutcome, HarnessSink } from '../../src/telemetry/sink.js';
 import { RecoveryRequestBudget } from '../../src/telemetry/recovery-request-budget.js';
-import { fakeFetch, sampleResult } from './fixtures.js';
+import { describeClaim } from '../../src/consensus/claim-identity.js';
+import { fakeFetch, sampleFinding, sampleResult } from './fixtures.js';
 
 const CREDENTIAL = { url: 'https://harness.example.test', token: 'aone_TESTTOKEN0123456789', source: 'login' as const };
 const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
@@ -17,6 +18,14 @@ function runIdOf(request: { body?: string }): string {
 function sink(handler: Parameters<typeof fakeFetch>[0]) {
   const { fetch, requests } = fakeFetch(handler);
   return { sink: new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.0.0', fetchImpl: fetch, timeoutMs: 500 }), requests };
+}
+
+function sightingIdentity() {
+  return {
+    identity_key: 'report:fixture:original', matched_identity: '0000000000000001', status: 'repeat',
+    version: 1, finding_ref: 'f001', report_json_sha256: 'a'.repeat(64),
+    claim_descriptor: describeClaim(sampleFinding()), match_rationale: 'exact_descriptor', pending_round: null,
+  };
 }
 
 describe('HarnessSink.postRun', () => {
@@ -546,5 +555,73 @@ describe('HarnessSink.postEvents', () => {
       ({ type: 'basic', status: 201, body: null, text: async () => `{"pad":"${'x'.repeat(70_000)}"}` }) as unknown as Response) as typeof fetch;
     const s = new HarnessSink({ credential: CREDENTIAL, rclVersion: '3.0.0', fetchImpl: fake });
     expect(await s.postEvents([buildEvent({ kind: 'attempt_claimed', attempt: 1 })])).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+  });
+
+  it('does not treat a pending-round-only identity as a per-sighting binding', async () => {
+    const { sink: s, requests } = sink(request => request.method === 'GET'
+      ? { status: 200, body: { data: [], meta: { evidence_protocol_version: 2, bound_classification_protocol: 1 } } }
+      : { status: 201, body: { data: { inserted: 1, duplicates: 0 } } });
+    const event = buildEvent({
+      kind: 'round_processed', round: 1,
+      payload: {
+        classification_version: 1,
+        report_json_sha256: 'a'.repeat(64),
+        identities: [{ pending_round: null }],
+      },
+    });
+
+    await expect(s.postEvents([event])).resolves.toMatchObject({ kind: 'ok', value: { inserted: 1, duplicates: 0 } });
+    expect(requests.map(request => request.method)).toEqual(['GET', 'POST']);
+  });
+
+  it('refuses a partial capability read before posting bound events', async () => {
+    const { sink: s, requests } = sink(request => request.method === 'GET'
+      ? { status: 206, body: { data: [], meta: { evidence_protocol_version: 2, bound_classification_protocol: 1 } } }
+      : { status: 201, body: { data: { inserted: 1, duplicates: 0 } } });
+    const event = buildEvent({
+      kind: 'round_processed', round: 1,
+      payload: {
+        classification_version: 1,
+        report_json_sha256: 'a'.repeat(64),
+        identities: [sightingIdentity()],
+      },
+    });
+
+    await expect(s.postEvents([event])).resolves.toMatchObject({ kind: 'rejected', httpStatus: 206 });
+    expect(requests.map(request => request.method)).toEqual(['GET']);
+  });
+
+  it('posts the immutable event snapshot validated before capability admission', async () => {
+    let openCapability!: () => void;
+    const capabilityOpen = new Promise<void>(resolve => { openCapability = resolve; });
+    let answerCapability!: () => void;
+    const capabilityAnswer = new Promise<void>(resolve => { answerCapability = resolve; });
+    const posted: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+      if (init?.method === 'GET') {
+        openCapability();
+        await capabilityAnswer;
+        return new Response(JSON.stringify({ data: [], meta: { evidence_protocol_version: 2, bound_classification_protocol: 1 } }), { status: 200 });
+      }
+      posted.push(init?.body as string);
+      return new Response(JSON.stringify({ data: { inserted: 1, duplicates: 0 } }), { status: 201 });
+    });
+    const s = new HarnessSink({ credential: CREDENTIAL, rclVersion: 'test', fetchImpl });
+    const event = buildEvent({
+      kind: 'round_processed', round: 1,
+      payload: {
+        classification_version: 1,
+        report_json_sha256: 'a'.repeat(64),
+        identities: [sightingIdentity()],
+      },
+    });
+
+    const pending = s.postEvents([event]);
+    await capabilityOpen;
+    (event.payload as { report_json_sha256: string }).report_json_sha256 = 'not-a-valid-digest';
+    answerCapability();
+
+    await expect(pending).resolves.toMatchObject({ kind: 'ok', value: { inserted: 1, duplicates: 0 } });
+    expect(JSON.parse(posted[0]!)).toMatchObject({ events: [{ payload: { report_json_sha256: 'a'.repeat(64) } }] });
   });
 });
