@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import { appendCalls, appendOutcomes, loadModelStats } from '../../src/models/stats-store.js';
 
 const fault = vi.hoisted(() => ({ syncFailures: 0, syncAttempts: 0, readAttempts: 0, partialWrite: false,
@@ -225,6 +226,24 @@ it('flushes previously created ancestor entries again after a failed directory f
   await appendCalls([call('operation:0')], nested);
   expect((await loadModelStats({ dir: nested, now }))[0]?.calls).toBe(1);
 });
+
+
+it.each(['durable intent before target creation', 'partial mkdir chain', 'target visible before published marker', 'published marker', 'bootstrap root before intent document'])(
+  'repairs %s from an independent process before retained acknowledgement', async phase => {
+    const nested = join(dir, 'nested', 'store');
+    const root = join(dir, `.rcl-model-stats-intent-${createHash('sha256').update(nested).digest('hex')}`);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    if (phase !== 'bootstrap root before intent document') {
+      if (phase !== 'durable intent before target creation') await mkdir(nested, { recursive: true, mode: 0o700 });
+      const marker = { version: 1, target: nested, anchor: dir, phase: phase === 'published marker' ? 'published' : 'creating' };
+      await writeFile(join(root, 'intent.json'), JSON.stringify(marker) + '\n');
+    }
+    const program = `import {appendCalls} from ${JSON.stringify(new URL('../../src/models/stats-store.ts', import.meta.url).href)}; await appendCalls(JSON.parse(process.argv[1]), process.argv[2]);`;
+    await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program, JSON.stringify([call('phase:0')]), nested], { timeout: 10_000, env: { PATH: process.env.PATH ?? '', NODE_NO_WARNINGS: '1' } });
+    expect((await readFile(join(nested, 'calls.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line).recordId)).toEqual(['phase:0']);
+    expect(JSON.parse(await readFile(join(root, 'intent.json'), 'utf8'))).toMatchObject({ phase: 'published', target: nested });
+  }, 20_000
+);
 
 it('keeps a published retained-creation intent for a later cooperating process', async () => {
   const nested = join(dir, 'nested', 'store');
