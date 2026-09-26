@@ -10,7 +10,7 @@ import { createCheckpointLateAudit } from '../dispatch/late-audit.js';
 import { executeCheckpointGating } from '../dispatch/checkpoint-gating-execution.js';
 import { defaultAdapterFactory } from '../dispatch/runner.js';
 import { recoverCapturedAssignments, type CapturedRecoveryOptions } from '../dispatch/recovery.js';
-import { decodeRecoveryOperation, type RecoveryOperation } from '../dispatch/recovery-operation.js';
+import { decodeRecoveryOperation, encodeRecoveryOperation, type RecoveryOperation } from '../dispatch/recovery-operation.js';
 import { renderReportArtifacts } from '../output/artifacts.js';
 import type { AssemblyDependencies } from '../report/assembly.js';
 import { assembleCheckpointReview, type CheckpointAssemblyInput } from '../report/checkpoint-assembly.js';
@@ -45,7 +45,7 @@ interface CommonRecoveryOptions extends Pick<CapturedRecoveryOptions,
   rclVersion: string;
   runner: RunHeaderInput['runner'];
   /** Must verify server support and the exact source under the actual producer credential. */
-  preflight: (request: ReviewerRecoveryPreflight) => Promise<void>;
+  preflight: (request: ReviewerRecoveryPreflight, operationBytes: string) => Promise<void>;
   onLateAuditError: (error: unknown, callIndex: number) => void;
   onStage?: AssemblyDependencies['onStage'];
 }
@@ -114,7 +114,6 @@ async function prepare(input: CommonRecoveryOptions, sourceRunId: string) {
   const fresh = decodeCapturedInputs(options.freshCaptureBytes, source.plan);
   if (fresh.bytes !== inspected.captured.bytes || fresh.digest !== inspected.captured.digest) fail('input_mismatch');
   if (!fresh.aggregation) fail('aggregation_required');
-  await options.preflight(preflightRequest(options, source));
   return { options, source, inputSha256 };
 }
 
@@ -149,7 +148,7 @@ async function executeBoundSuccessor(options: CommonRecoveryOptions, source: Rev
         converge: { target: options.target, attempt: claim.attempt, round: operation.successorNativeClaim!.round } },
     };
     const gated = await executeCheckpointGating({ assembly, commonDir: options.commonDir, ownership, journal,
-      beforeLaunch: () => options.preflight(preflightRequest(options, source)),
+      beforeLaunch: () => options.preflight(preflightRequest(options, source), encodeRecoveryOperation(operation)),
       askFactory: model => {
         const adapter = (options.adapterFactory ?? defaultAdapterFactory)(detectProvider(model));
         return (model, system, user, request) => adapter.ask(model, system, user, request);
@@ -191,6 +190,7 @@ export async function applyReviewerRecovery(input: ApplyReviewerRecoveryOptions)
   const result = await guardReviewerRecoveryLaunch({ ...bounds, gitCommonDir: prepared.options.commonDir,
     target: options.target, successorRunId: options.successorRunId, headSha: options.currentHeadSha,
     inputSha256: prepared.inputSha256, nowMs: options.nowMs,
+    beforeClaim: ({ operationBytes }) => options.preflight(preflightRequest(prepared.options, prepared.source), operationBytes),
     run: context => executeBoundSuccessor(prepared.options, prepared.source, context) });
   return result.kind === 'already_quorate' ? result : completed(prepared.options, result, false);
 }
@@ -207,6 +207,7 @@ export async function resumeReviewerRecovery(input: ResumeReviewerRecoveryOption
   const result = await guardReviewerRecoveryResume({ gitCommonDir: prepared.options.commonDir,
     target: options.target, successorRunId: options.successorRunId, headSha: options.currentHeadSha,
     inputSha256: prepared.inputSha256, nowMs: options.nowMs,
+    beforeResume: ({ operationBytes }) => options.preflight(preflightRequest(prepared.options, prepared.source), operationBytes),
     run: context => executeBoundSuccessor(prepared.options, prepared.source, context) });
   return completed(prepared.options, result, result.reusedTerminal);
 }

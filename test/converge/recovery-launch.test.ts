@@ -10,6 +10,7 @@ import { loadConvergeRunState, convergeRunStatePath } from "../../src/converge/r
 import { recoverCapturedAssignments, recoveryAttemptsFromCheckpoint } from "../../src/dispatch/recovery.js";
 import {
   CheckpointJournal,
+  checkpointPath,
   exportCheckpointProof,
   freezeCheckpointPlan,
 } from "../../src/dispatch/checkpoint.js";
@@ -34,7 +35,7 @@ import {
   stableStringify,
 } from "../../src/report/run-header.js";
 import { sanitizeForDelivery } from "../../src/telemetry/envelope.js";
-import { applyReviewerRecovery, resumeReviewerRecovery } from "../../src/evidence/reviewer-recovery.js";
+import { applyReviewerRecovery, resumeReviewerRecovery, type ReviewerRecoveryPreflight } from "../../src/evidence/reviewer-recovery.js";
 import { processReviewerRoundReport } from "../../src/converge/retained-report.js";
 import { loadReviewerLineage } from "../../src/evidence/reviewer-lineage.js";
 
@@ -445,7 +446,7 @@ function coordinator(fixture: Fixture) {
   const called = vi.fn(async (model: string, role: string) => ({
     model, role, provider: 'fake', status: 'success' as const, durationMs: 1, findings: [],
   }));
-  const preflight = vi.fn(async () => {});
+  const preflight = vi.fn(async (_request: ReviewerRecoveryPreflight, _operationBytes: string) => {});
   return { called, preflight, input: {
     commonDir: fixture.dir, target, sourceRunId: fixture.id,
     successorRunId: '22222222-2222-4222-8222-222222222222',
@@ -950,5 +951,78 @@ describe('same-operation guarded reviewer recovery resume', () => {
       }
       expect(await state(fixture)).toEqual(before);
     } finally { kill.mockRestore(); }
+  });
+});
+
+
+describe('operation-bound successor preflight', () => {
+  it('supplies the exact later-persisted operation to source preflight before spending', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    let checked = '';
+    options.preflight.mockImplementationOnce(async (request, operationBytes) => {
+      expect(request.source.runId).toBe(fixture.id);
+      expect(typeof operationBytes).toBe('string');
+      checked = operationBytes;
+      expect(JSON.parse(operationBytes)).toMatchObject({ successorRunId: options.input.successorRunId,
+        successorNativeClaim: { attempt: 2, round: 1 }, expiresAtMs: options.input.expiresAtMs });
+      expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+    });
+    const result = await applyReviewerRecovery(options.input);
+    if (result.kind !== 'completed') throw new Error('Expected completed');
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, options.input.successorRunId));
+    expect((await journal.readBindings()).operation).toBe(checked);
+    expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses direct successor preflight without native, checkpoint or provider changes', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    const spent = await state(fixture), native = await runState(fixture);
+    value.beforeClaim = vi.fn(async () => { throw new Error('source_owner_refused'); }); value.run = vi.fn();
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('source_owner_refused');
+    expect(value.beforeClaim).toHaveBeenCalledTimes(1); expect(value.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+    await expect(CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId))).rejects.toThrow();
+  });
+
+  it('rechecks the same successor deadline after preflight before spending', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture); let now = value.startedAtMs + 1;
+    value.nowMs = () => now; value.beforeClaim = vi.fn(async () => { now = value.expiresAtMs; }); value.run = vi.fn();
+    const spent = await state(fixture), native = await runState(fixture);
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('operation_expired');
+    expect(value.beforeClaim).toHaveBeenCalledTimes(1); expect(value.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('validates saved resume bindings then refuses preflight before changing native or journal state', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const spent = await state(fixture), native = await runState(fixture);
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
+    const bindings = await journal.readBindings(), journalState = await journal.read();
+    const beforeResume = vi.fn(async (bound: any) => { expect(bound.operationBytes).toBe(bindings.operation); throw new Error('resume_source_refused'); });
+    const resume = { ...resumeOptions(value), beforeResume, run: vi.fn() };
+    await expect(guardReviewerRecoveryResume({ ...resume, headSha: 'c'.repeat(40) } as any)).rejects.toThrow('resume_input_mismatch');
+    expect(beforeResume).not.toHaveBeenCalled();
+    await expect(guardReviewerRecoveryResume(resume as any)).rejects.toThrow('resume_source_refused');
+    expect(beforeResume).toHaveBeenCalledTimes(1); expect(resume.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+    expect(await journal.read()).toEqual(journalState); expect(await journal.readBindings()).toEqual(bindings);
+  });
+
+  it('skips source preflight when already quorate or replaying an exact completed terminal', async () => {
+    const quorate = await sealed(2, 'timeout', 3), noWork = coordinator(quorate);
+    noWork.preflight.mockRejectedValue(new Error('no paid invocation to authorize'));
+    await expect(applyReviewerRecovery(noWork.input)).resolves.toEqual({ kind: 'already_quorate', sourceRunId: quorate.id });
+    expect(noWork.preflight).not.toHaveBeenCalled(); expect(noWork.called).not.toHaveBeenCalled();
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const first = await applyReviewerRecovery(options.input);
+    if (first.kind !== 'completed') throw new Error('Expected completed');
+    const native = await runState(fixture), spent = await state(fixture);
+    options.preflight.mockClear(); options.preflight.mockRejectedValue(new Error('no new provider authority')); options.called.mockClear();
+    const replay = await resumeReviewerRecovery(options.input);
+    expect(replay.terminal).toEqual(first.terminal); expect(replay.reusedTerminal).toBe(true);
+    expect(options.preflight).not.toHaveBeenCalled(); expect(options.called).not.toHaveBeenCalled();
+    expect(await runState(fixture)).toEqual(native); expect(await state(fixture)).toEqual(spent);
   });
 });

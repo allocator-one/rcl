@@ -12,6 +12,8 @@ import {
 import type { ConvergeContext } from '../report/run-header.js';
 import type { NativeTargetOwnership } from './target-ownership.js';
 import { scrubText } from '../telemetry/scrub.js';
+import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
+  type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
 import { hasSuccessfulQuorum, resolveQuorumPolicy } from '../dispatch/quorum.js';
 
 const reviewerQuorumSchema = z.object({
@@ -66,6 +68,17 @@ const launchSchema = z.object({
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
 export type GuardedLaunchCompletion = z.infer<typeof completionSchema>;
 
+/** Canonical original descriptor prepared under target ownership, before its claim is spent. */
+export interface PreparedOriginalLaunch {
+  readonly launch: OriginalLaunch;
+  readonly launchBytes: string;
+}
+export interface OriginalLaunchPreflight {
+  input: Omit<OriginalLaunchInput, 'target' | 'originalNativeClaim'>;
+  beforeClaim: (value: PreparedOriginalLaunch) => Promise<void>;
+  nowMs?: () => number;
+}
+
 export interface GuardedLaunchOptions {
   gitCommonDir: string;
   target: string;
@@ -77,9 +90,11 @@ export interface GuardedLaunchOptions {
   intent?: 'review' | 'stop-upstream' | 'stop-review' | 'retry-delivery';
   retryReason?: string;
   validate: () => Promise<void>;
+  /** Optional retained execution only; ordinary launch behavior is unchanged. */
+  originalLaunch?: OriginalLaunchPreflight;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
   /** Reuse this ownership for durable reviewer checkpoints; never take a second target lock. */
-  run: (context: ConvergeContext, ownership: NativeTargetOwnership) => Promise<GuardedLaunchCompletion>;
+  run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch) => Promise<GuardedLaunchCompletion>;
 }
 
 export class ReviewLaunchRefused extends Error {
@@ -163,7 +178,21 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
 }
 
 export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<ConvergeAttemptClaim> {
-  const options = { ...input, target: input.target.trim() };
+  const original = input.originalLaunch;
+  if (original !== undefined && (!original || typeof original.beforeClaim !== 'function' ||
+    original.nowMs !== undefined && typeof original.nowMs !== 'function')) {
+    refuse('invalid_original_preflight', 'Original launch preflight must be callable.');
+  }
+  const options = { ...input, target: input.target.trim(), originalLaunch: original === undefined ? undefined : {
+    input: structuredClone(original.input), beforeClaim: original.beforeClaim, nowMs: original.nowMs,
+  } };
+  let preparedOriginal: PreparedOriginalLaunch | undefined;
+  const assertOriginalLive = () => {
+    if (preparedOriginal && remainingOriginalBudget(preparedOriginal.launch,
+      (options.originalLaunch?.nowMs ?? Date.now)()).remainingMs === 0) {
+      refuse('original_launch_expired', 'The original launch deadline expired before its claim was spent.');
+    }
+  };
   options.gitCommonDir = await realpath(resolve(options.gitCommonDir));
   let state: ConvergeRunState;
   let failure: { error: unknown } | undefined;
@@ -182,6 +211,14 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
       }
       await options.validate();
+      if (options.originalLaunch) {
+        const launch = createOriginalLaunch({ ...options.originalLaunch.input, target: options.target,
+          originalNativeClaim: { attempt: (attempts?.attemptsUsed ?? 0) + 1, round } });
+        preparedOriginal = Object.freeze({ launch, launchBytes: encodeOriginalLaunch(launch) });
+        assertOriginalLive();
+        await options.originalLaunch.beforeClaim(preparedOriginal);
+        assertOriginalLive();
+      }
       state.lastLaunch = {
         status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
@@ -190,13 +227,20 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
       };
     },
     afterClaim: async (claimed, ownership) => {
+      if (preparedOriginal && (preparedOriginal.launch.originalNativeClaim.attempt !== claimed.attempt ||
+        preparedOriginal.launch.originalNativeClaim.round !== state.lastLaunch!.round)) {
+        refuse('original_launch_claim_mismatch', 'The spent claim differs from the prepared original launch.');
+      }
       state.lastLaunch!.attempt = claimed.attempt;
       await writeState(options.gitCommonDir, state, ownership);
       try {
         await options.onClaim?.(claimed);
-        const completion = completionSchema.parse(await options.run({
-          target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
-        }, ownership));
+        const context = { target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt };
+        const completion = completionSchema.parse(await (preparedOriginal
+          ? options.run(context, ownership, preparedOriginal) : options.run(context, ownership)));
+        if (preparedOriginal && completion.runId !== preparedOriginal.launch.runId) {
+          refuse('original_launch_run_mismatch', 'The completion differs from the prepared original run.');
+        }
         state.lastLaunch = { ...state.lastLaunch!, ...completion, status: 'completed' };
       } catch (error) {
         state.lastLaunch!.status = 'failed';

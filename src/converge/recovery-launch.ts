@@ -38,6 +38,12 @@ import { retainedLaunchInputSha256 } from "./retained-report.js";
 import { stableStringify } from "../report/run-header.js";
 import { withNativeTarget, type NativeTargetOwnership } from "./target-ownership.js";
 
+/** Exact canonical operation; the callback grants no authority by itself. */
+export interface BoundRecoveryOperation {
+  readonly operation: RecoveryOperation;
+  readonly operationBytes: string;
+}
+
 export interface ReviewerRecoveryLaunchOptions {
   gitCommonDir: string;
   target: string;
@@ -53,6 +59,8 @@ export interface ReviewerRecoveryLaunchOptions {
   maxAttempts?: number;
   /** Testable clock for the persisted operation deadline; defaults to Date.now. */
   nowMs?: () => number;
+  /** Invoked under target ownership after eligibility, before spending the native claim. */
+  beforeClaim?: (value: BoundRecoveryOperation) => Promise<void>;
   /** Invoked only after the successor checkpoint has all immutable bindings. */
   run: (value: {
     journal: CheckpointJournal;
@@ -267,6 +275,7 @@ export async function guardReviewerRecoveryLaunch(
     maxAttemptsPerCell: input?.maxAttemptsPerCell,
     maxAttempts: input?.maxAttempts,
     nowMs: input?.nowMs,
+    beforeClaim: input?.beforeClaim,
     run: input?.run,
   };
   if (
@@ -278,7 +287,8 @@ export async function guardReviewerRecoveryLaunch(
     typeof snapshot.headSha !== "string" ||
     typeof snapshot.inputSha256 !== "string" ||
     typeof snapshot.run !== "function" ||
-    (snapshot.nowMs !== undefined && typeof snapshot.nowMs !== "function")
+    (snapshot.nowMs !== undefined && typeof snapshot.nowMs !== "function") ||
+    (snapshot.beforeClaim !== undefined && typeof snapshot.beforeClaim !== "function")
   )
     fail("invalid_input");
   const options: ReviewerRecoveryLaunchOptions = {
@@ -294,6 +304,7 @@ export async function guardReviewerRecoveryLaunch(
     fail("invalid_input");
   let source: Source | "already_quorate" | undefined;
   let operation: RecoveryOperation | undefined;
+  let operationBytes: string | undefined;
   let failure: unknown;
   let claim: ConvergeAttemptClaim;
   try {
@@ -343,6 +354,7 @@ export async function guardReviewerRecoveryLaunch(
           maxAdditionalCalls: options.maxAdditionalCalls,
           maxAttemptsPerCell: options.maxAttemptsPerCell,
         });
+        operationBytes = encodeRecoveryOperation(operation);
         assertOperationLive(operation, options);
         const sourcePreview = previewReviewerRecovery(
           source.journal.getPlan().cells,
@@ -360,6 +372,8 @@ export async function guardReviewerRecoveryLaunch(
         );
         if (sourcePreview.nextAction !== "retry_missing_assignments")
           fail("source_not_actionable");
+        await options.beforeClaim?.(Object.freeze({ operation, operationBytes }));
+        assertOperationLive(operation, options);
       },
       afterClaim: async (claim, ownership) => {
         const state = await loadConvergeRunState(
@@ -370,7 +384,7 @@ export async function guardReviewerRecoveryLaunch(
           fail("source_not_current");
         const requiredRound = source.sourceNativeClaim.round;
         if (
-          !operation ||
+          !operation || operationBytes === undefined ||
           operation.successorNativeClaim?.attempt !== claim.attempt ||
           operation.successorNativeClaim.round !== requiredRound
         )
@@ -415,7 +429,7 @@ export async function guardReviewerRecoveryLaunch(
           );
           await journal.bind(
             "operation",
-            encodeRecoveryOperation(operation),
+            operationBytes,
             ownership,
           );
           await options.run({ journal, operation, claim, ownership });
@@ -476,7 +490,10 @@ export async function guardReviewerRecoveryLaunch(
 }
 
 export type ReviewerRecoveryResumeOptions = Pick<ReviewerRecoveryLaunchOptions,
-  "gitCommonDir" | "target" | "successorRunId" | "headSha" | "inputSha256" | "nowMs" | "run">;
+  "gitCommonDir" | "target" | "successorRunId" | "headSha" | "inputSha256" | "nowMs" | "run"> & {
+    /** Exact saved descriptor is validated before this callback or any resume mutation. */
+    beforeResume?: (value: BoundRecoveryOperation) => Promise<void>;
+  };
 export interface ReviewerRecoveryResumeResult {
   kind: "resumed";
   claim: ConvergeAttemptClaim;
@@ -502,11 +519,12 @@ function requireDeadOwner(pid: number): void {
 export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeOptions): Promise<ReviewerRecoveryResumeResult> {
   const snapshot = { gitCommonDir: input?.gitCommonDir, target: input?.target,
     successorRunId: input?.successorRunId, headSha: input?.headSha,
-    inputSha256: input?.inputSha256, nowMs: input?.nowMs, run: input?.run };
+    inputSha256: input?.inputSha256, nowMs: input?.nowMs, run: input?.run, beforeResume: input?.beforeResume };
   if (typeof snapshot.gitCommonDir !== "string" || typeof snapshot.target !== "string" || !snapshot.target.trim() ||
     typeof snapshot.successorRunId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(snapshot.successorRunId) ||
     !/^[a-f0-9]{40}$/.test(snapshot.headSha ?? "") || !/^[a-f0-9]{64}$/.test(snapshot.inputSha256 ?? "") ||
-    typeof snapshot.run !== "function" || snapshot.nowMs !== undefined && typeof snapshot.nowMs !== "function") fail("invalid_resume_input");
+    typeof snapshot.run !== "function" || snapshot.nowMs !== undefined && typeof snapshot.nowMs !== "function" ||
+    snapshot.beforeResume !== undefined && typeof snapshot.beforeResume !== "function") fail("invalid_resume_input");
   const options = { ...snapshot, target: snapshot.target.trim(), gitCommonDir: await realpath(resolve(snapshot.gitCommonDir)) };
   return withNativeTarget(options.gitCommonDir, options.target, async ownership => {
     const [state, attempts] = await Promise.all([
@@ -589,6 +607,7 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
       return { kind: "resumed", claim, operation, reusedTerminal: true };
     }
 
+    if (!priorTerminal) await options.beforeResume?.(Object.freeze({ operation, operationBytes: bindings.operation! }));
     state.lastLaunch = { ...launch, status: "pending", recovery: { ...recovery, resume: { pid: process.pid, phase: "running" } } };
     state.updatedAt = new Date().toISOString();
     await writeState(options.gitCommonDir, state, ownership);
