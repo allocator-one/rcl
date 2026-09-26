@@ -118,6 +118,9 @@ const envelopeSchema = z.object({
     ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Historical location projection must bind the original report digest' });
   }
   if (v.reviewer_recovery !== undefined) {
+    if (v.calls.length !== 0) {
+      ctx.addIssue({ code: 'custom', path: ['calls'], message: 'Reviewer recovery calls are derived from the private artifact' });
+    }
     const source = v.reviewer_recovery.source;
     if (source !== undefined && source.run_id.toLowerCase() === v.run.id.toLowerCase()) {
       ctx.addIssue({ code: 'custom', path: ['reviewer_recovery', 'source', 'run_id'], message: 'Reviewer recovery cannot source its own run' });

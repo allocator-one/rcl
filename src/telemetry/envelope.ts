@@ -267,8 +267,10 @@ function wireCall(review: ModelReview, run: RunHeader, parseFailures: boolean): 
 /**
  * Build the envelope for a finished review. Requires the self-describing
  * header (`result.run`, rcl ≥ 3.0). `envelope` level sends the header,
- * stats and declarations only; `findings` and `full` add findings and calls
- * (artifacts are uploaded separately, only at `full`).
+ * stats and declarations only; `findings` and `full` add findings and legacy
+ * calls (artifacts are uploaded separately, only at `full`). Private reviewer
+ * recovery calls are derived server-side from the validated private artifact,
+ * never from merged report reviews or their inherited usage.
  */
 export function buildRunEnvelope(
   result: ReviewResult,
@@ -288,7 +290,8 @@ export function buildRunEnvelope(
   return {
     run,
     findings: includeRows ? [...kept, ...below] : [],
-    calls: includeRows ? result.reviews.map((review) => wireCall(review, run, parseFailures)) : [],
+    calls: includeRows && options.reviewerRecovery === undefined
+      ? result.reviews.map((review) => wireCall(review, run, parseFailures)) : [],
     stats: result.stats,
     artifacts_declared: declareArtifacts(artifacts),
     ...(options.reviewerRecovery === undefined ? {} : { reviewer_recovery: structuredClone(options.reviewerRecovery) }),
