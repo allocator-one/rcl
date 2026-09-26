@@ -38,6 +38,7 @@ export interface RunnerOptions {
   maxRetries: number;
   concurrency: number;
   verbose?: boolean;
+  /** Progress notification receives an isolated copy after durable acceptance. */
   onReviewComplete?: (review: ModelReview) => void;
   /** Full-matrix original seat instances; omission groups provider/model/role. */
   seatIds?: readonly string[];
@@ -221,6 +222,9 @@ export async function runReviews(
   function fail(error: unknown): void { failure ??= { error }; cancelCalls(); }
   function abort(): void { closed ??= 'signal'; cancelCalls(); }
   function stopped(): boolean { return closed !== undefined || failure !== undefined; }
+  function isAbortError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError';
+  }
   function canceledReview(call: AdapterCall, elapsedMs: number, detail: string): ModelReview {
     const closure = closed === 'signal' ? 'by operation signal'
       : closed === 'quorum' ? 'at quorum round closure' : undefined;
@@ -256,9 +260,10 @@ export async function runReviews(
       if (!matches(index, review)) throw new Error(`Reviewer result does not match planned cell identity at index ${index}`);
       if (dispatched.has(index)) await options.acceptReview?.(review, index);
       results[index] = review;
-      options.onReviewComplete?.(review);
+      const countsTowardQuorum = review.status === 'success' && review.async !== true;
+      options.onReviewComplete?.(structuredClone(review));
       if (review.status === 'error' && options.verbose) console.error(`${review.model}/${review.role}: ${review.error}`);
-      if (review.status === 'success' && review.async !== true) {
+      if (countsTowardQuorum) {
         countSuccess(index);
         if (!closed && policy && hasSuccessfulQuorum(policy, successfulSeats)) { closed = 'quorum'; cancelCalls(); }
       }
@@ -286,26 +291,23 @@ export async function runReviews(
     const cancellation = new Promise<ModelReview>(resolveCancel => {
       cancel = () => {
         canceled = true;
-        resolveCancel(canceledReview(call, Date.now() - startedAt, 'while in flight'));
+        const review = canceledReview(call, Date.now() - startedAt, 'while in flight');
         controller.abort();
+        // Let an abort-aware intent settle first so an unrelated persistence
+        // failure cannot lose the race to the synthetic cancellation result.
+        queueMicrotask(() => resolveCancel(review));
         auditCanceledRaw();
       };
       cancelOutstanding.add(cancel);
     });
     const invoke = async (): Promise<ModelReview> => {
-      let adapter: ReviewAdapter;
-      try {
-        const existing = adapters.get(call.provider);
-        adapter = existing ?? factory(call.provider);
-        if (!existing) adapters.set(call.provider, adapter);
-      } catch (error) { return failedReview(index, error, startedAt); }
       if (options.beforeReview) {
         try {
           if (await options.beforeReview(index, controller.signal) === false) {
             return canceledReview(call, 0, 'intent declined before provider dispatch');
           }
         } catch (error) {
-          if (canceled || controller.signal.aborted || closed) {
+          if ((canceled || controller.signal.aborted || closed) && isAbortError(error)) {
             return canceledReview(call, Date.now() - startedAt, 'while awaiting intent');
           }
           fail(error);
@@ -313,6 +315,12 @@ export async function runReviews(
         }
       }
       if (stopped()) return canceledReview(call, Date.now() - startedAt, 'before provider dispatch');
+      let adapter: ReviewAdapter;
+      try {
+        const existing = adapters.get(call.provider);
+        adapter = existing ?? factory(call.provider);
+        if (!existing) adapters.set(call.provider, adapter);
+      } catch (error) { return failedReview(index, error, startedAt); }
       dispatched.add(index);
       try {
         raw = await adapter.review(call.model, call.role, call.systemPrompt, call.userPrompt,

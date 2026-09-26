@@ -133,14 +133,16 @@ describe('runReviews successful-seat quorum closure (RCL-105)', () => {
 
   it('does not label a declined intent as a quorum cancellation when the round is open', async () => {
     const assignments = [makeAssignment('declined')];
+    const factory = vi.fn(() => delayedAdapter({}));
     const reviews = await runReviews(assignments, assignments.map(makePrompt), {
       timeoutMs: 1000,
       maxRetries: 0,
       concurrency: 1,
-      adapterFactory: () => delayedAdapter({}),
+      adapterFactory: factory,
       beforeReview: async () => false,
     });
     expect(reviews[0]!.error).toBe('Canceled intent declined before provider dispatch');
+    expect(factory).not.toHaveBeenCalled();
   });
 
   it('a fraction of 1 requires every seat to succeed', async () => {
@@ -393,6 +395,24 @@ describe('complete-seat and durable-acceptance boundary', () => {
     expect(onReviewComplete).not.toHaveBeenCalled();
   });
 
+  it('freezes quorum eligibility before invoking the progress callback', async () => {
+    const assignments = ['failed', 'success', 'remaining'].map(makeAssignment);
+    const c = controlled(assignments);
+    const running = runReviews(assignments, c.prompts, {
+      ...poolOptions,
+      adapterFactory: () => c.adapter,
+      onReviewComplete: review => { if (review.model === 'failed') review.status = 'success'; },
+    });
+    c.pending[0]!.resolve(c.result(0, 'error'));
+    c.pending[1]!.resolve(c.result(1));
+    await drain();
+    const prematurelyAborted = c.signals[2]!.aborted;
+    c.pending[2]!.resolve(c.result(2));
+    const reviews = await running;
+    expect(prematurelyAborted).toBe(false);
+    expect(reviews.map(review => review.status)).toEqual(['error', 'success', 'success']);
+  });
+
   it('returns without waiting for a hanging core and fences its late success', async () => {
     const assignments = ['a', 'b', 'core'].map(makeAssignment);
     const c = controlled(assignments);
@@ -563,7 +583,7 @@ describe('retained original matrix and recovery dispatch boundaries', () => {
     const beforeReview = vi.fn((index: number, signal: AbortSignal): Promise<void> => {
       if (index !== 2) return Promise.resolve();
       return new Promise((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(new Error('intent aborted')), { once: true });
+        signal.addEventListener('abort', () => reject(new DOMException('intent aborted', 'AbortError')), { once: true });
       });
     });
     const running = runReviews(assignments, c.prompts, {
@@ -573,6 +593,23 @@ describe('retained original matrix and recovery dispatch boundaries', () => {
     await expect(running).resolves.toEqual([
       c.result(0), c.result(1), expect.objectContaining({ status: 'canceled' }),
     ]);
+    expect(c.started).toEqual([0, 1]);
+  });
+
+  it('does not suppress an independent intent persistence failure during quorum cancellation', async () => {
+    const assignments = ['a', 'b', 'waiting-intent'].map(makeAssignment); const c = controlled(assignments);
+    const beforeReview = vi.fn((index: number, signal: AbortSignal): Promise<void> => {
+      if (index !== 2) return Promise.resolve();
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('intent store unavailable')), { once: true });
+      });
+    });
+    const running = runReviews(assignments, c.prompts, {
+      ...poolOptions, adapterFactory: () => c.adapter, beforeReview,
+    });
+    const rejected = expect(running).rejects.toThrow('intent store unavailable');
+    c.pending[0]!.resolve(c.result(0)); c.pending[1]!.resolve(c.result(1));
+    await rejected;
     expect(c.started).toEqual([0, 1]);
   });
 
