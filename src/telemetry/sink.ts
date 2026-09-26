@@ -3,14 +3,14 @@ import { abortSignalWithTimeout } from './abort-signal.js';
 import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { scrubText } from './scrub.js';
 import type { ArtifactDeclaration, ArtifactKind, RunEnvelope } from './envelope.js';
-import type { ReceiptProbe } from './attested-retry.js';
+import { parseAttestedExpiry, type ReceiptProbe } from './attested-retry.js';
 import type { WireEvent } from './events.js';
 
 /**
  * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
  * envelope, PUT each declared artifact, POST converge events, and GET what
  * Harness holds (a pull request's gate status, one run). Every request
- * runs under a 10 s timeout, carries the client handshake the server's
+ * normally runs under a 10 s timeout (artifacts have bounded headroom), carries the client handshake the server's
  * version floor reads, and sends the token only to the host that minted it
  * (the credential is a `{url, token}` pair resolved elsewhere).
  *
@@ -20,6 +20,8 @@ import type { WireEvent } from './events.js';
  */
 
 export const REQUEST_TIMEOUT_MS = 10_000;
+/** Bounded transfer headroom for supported 25 MB artifacts, not a throughput guarantee. */
+export const ARTIFACT_TRANSFER_TIMEOUT_MS = 120_000;
 /** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
 export const MAX_RESPONSE_BYTES = 64 * 1024;
 /** A read carries a run's findings and calls (up to the bounded evidence envelope) or a gate status; anything past this is not one. */
@@ -77,7 +79,10 @@ export interface SinkOptions {
   credential: HarnessCredential;
   rclVersion: string;
   fetchImpl?: typeof fetch;
+  /** Explicit caller ceiling, including artifact transfers. */
   timeoutMs?: number;
+  /** Known lifetime of a run-bound credential; omitted legacy credentials keep the 10 s cap. */
+  attestedExpiresAt?: string;
 }
 
 interface ErrorBody {
@@ -90,6 +95,8 @@ export class HarnessSink {
   private readonly rclVersion: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly artifactTimeoutMs: number;
+  private readonly artifactExpiry?: { epoch: number; remainingMs: number; startedAt: number };
 
   constructor(options: SinkOptions) {
     // The token travels to the host that minted it, over TLS (loopback
@@ -103,6 +110,17 @@ export class HarnessSink {
     this.rclVersion = options.rclVersion;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.artifactTimeoutMs = Math.min(ARTIFACT_TRANSFER_TIMEOUT_MS, options.timeoutMs ?? ARTIFACT_TRANSFER_TIMEOUT_MS);
+    if (this.credentialSource === 'attest') {
+      if (options.attestedExpiresAt === undefined) {
+        this.artifactTimeoutMs = Math.min(this.artifactTimeoutMs, REQUEST_TIMEOUT_MS);
+      } else {
+        // Use the same accepted timestamp formats and monotonic lifetime rule
+        // as envelope recovery. A backwards wall clock cannot extend validity.
+        const epoch = parseAttestedExpiry(options.attestedExpiresAt) ?? 0;
+        this.artifactExpiry = { epoch, remainingMs: epoch - Date.now(), startedAt: performance.now() };
+      }
+    }
   }
 
   get baseUrl(): string {
@@ -113,12 +131,16 @@ export class HarnessSink {
   get credentialSource(): HarnessCredential['source'] { return this.credential.token.startsWith('rbc_') ? 'attest' : this.credential.source; }
 
   /** Exact bounded raw artifact read; never decode/re-encode original evidence. */
-  async getArtifact(runId: string, kind: ArtifactKind, limit: number): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>> {
+  async getArtifact(runId: string, kind: ArtifactKind, limit: number, options: RequestOptions = {}): Promise<SinkOutcome<{ bytes: Buffer; sha256: string }>> {
     if (!Number.isSafeInteger(limit) || limit < 0 || limit > 25_000_000) throw new Error('invalid_artifact_read_limit');
     if (kind !== 'report_json' && kind !== 'report_md') return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: 'Unsupported artifact selection' };
+    const timeoutMs = this.artifactBudget(options);
+    if (timeoutMs <= 0) return { kind: 'unavailable', reason: 'artifact_transfer_expired' };
+    const signal = abortSignalWithTimeout(options.signal, timeoutMs);
     try {
+      signal.signal.throwIfAborted();
       const response = await this.fetchImpl(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${kind}`, {
-        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual', signal: AbortSignal.timeout(this.timeoutMs),
+        method: 'GET', headers: this.headers('application/octet-stream'), redirect: 'manual', signal: signal.signal,
       });
       if (response.status !== 200) {
         const text = await readBounded(response, MAX_RESPONSE_BYTES);
@@ -133,6 +155,13 @@ export class HarnessSink {
       }
       return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: digest } };
     } catch { return { kind: 'unavailable', reason: 'artifact_read_failed' }; }
+    finally { signal.dispose(); }
+  }
+
+  private artifactBudget(options: RequestOptions): number {
+    const expiry = this.artifactExpiry;
+    return Math.min(this.artifactTimeoutMs, options.timeoutMs ?? this.artifactTimeoutMs,
+      ...(expiry ? [expiry.epoch - Date.now(), expiry.remainingMs - (performance.now() - expiry.startedAt)] : []));
   }
 
   private headers(contentType: string): Record<string, string> {
@@ -151,11 +180,13 @@ export class HarnessSink {
     path: string,
     body: string | undefined,
     contentType: string,
-    options: RequestOptions = {}
+    options: RequestOptions = {},
+    timeoutCeilingMs = this.timeoutMs
   ): Promise<{ status: number; body: unknown } | { failure: string }> {
-    const timeoutMs = Math.max(1, Math.min(this.timeoutMs, options.timeoutMs ?? this.timeoutMs));
+    const timeoutMs = Math.max(1, Math.min(timeoutCeilingMs, options.timeoutMs ?? timeoutCeilingMs));
     const signal = abortSignalWithTimeout(options.signal, timeoutMs);
     try {
+      signal.signal.throwIfAborted();
       const response = await this.fetchImpl(`${this.credential.url}${path}`, {
         method,
         headers: this.headers(contentType),
@@ -326,12 +357,15 @@ export class HarnessSink {
     if (kind !== 'report_json' && kind !== 'report_md') {
       return { kind: 'rejected', httpStatus: 0, error: 'unknown_artifact_kind', message: String(kind) };
     }
+    const timeoutMs = this.artifactBudget(options);
+    if (timeoutMs <= 0) return { kind: 'unavailable', reason: 'artifact_transfer_expired' };
     const result = await this.request(
       'PUT',
       `/api/v1/reviews/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}`,
       bytes,
       'application/octet-stream',
-      options
+      options,
+      timeoutMs
     );
     // The receipt must name the artifact that was sent and carry the digest
     // of exactly those bytes; anything else is not a receipt for this upload.
