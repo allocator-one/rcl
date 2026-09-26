@@ -29,8 +29,8 @@ const kind = (value: unknown): value is string => typeof value === 'string' && /
 const scopeFields = ['org_id', 'run_id', 'repo', 'pr_number'] as const;
 const eventFields = ['id', 'kind', 'run_id', 'converge_target', 'round', 'attempt', 'payload', 'occurred_at'];
 
-export function isEventReceiptScope(value: EventReceiptScope): boolean {
-  return typeof value.base_url === 'string' && normalizeUrl(value.base_url) === value.base_url &&
+export function isEventReceiptScope(value: unknown): value is EventReceiptScope {
+  return object(value) && typeof value.base_url === 'string' && normalizeUrl(value.base_url) === value.base_url &&
     uuid(value.org_id) && uuid(value.run_id) && typeof value.repo === 'string' &&
     /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repo) && positiveCounter(value.pr_number);
 }

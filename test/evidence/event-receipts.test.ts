@@ -158,6 +158,39 @@ describe('selected recovery event receipts', () => {
       .rejects.toThrow('event_receipt_destination_conflict');
     expect(requests).toHaveLength(0);
   });
+
+  it('rejects a null scope before HTTP', async () => {
+    const { sink, requests } = client(body());
+    await expect(readEventReceipts(sink, null as unknown as EventReceiptScope, [EVENT]))
+      .rejects.toThrow('invalid_event_receipt_selection');
+    expect(requests).toHaveLength(0);
+  });
+
+  it('pins selected scope and IDs while the receipt read is pending', async () => {
+    const selectedScope = structuredClone(scope);
+    const ids = [EVENT];
+    const requests: string[] = [];
+    let resolveResponse!: (response: Response) => void;
+    const sink = new HarnessSink({
+      credential: { url: scope.base_url, token: 'synthetic-only-token', source: 'login' },
+      rclVersion: '3.8.0',
+      fetchImpl: async input => {
+        requests.push(String(input));
+        return new Promise<Response>(resolve => { resolveResponse = resolve; });
+      },
+    });
+
+    const pending = readEventReceipts(sink, selectedScope, ids);
+    await Promise.resolve();
+    selectedScope.run_id = OTHER;
+    selectedScope.org_id = OTHER;
+    ids[0] = OTHER;
+    resolveResponse(Response.json(body()));
+
+    await expect(pending).resolves.toMatchObject({ kind: 'ok', value: { receipts: [storedReceipt()], missing: [] } });
+    expect(new URL(requests[0]!).pathname).toBe(`/api/v1/reviews/runs/${RUN}/events`);
+    expect(new URL(requests[0]!).searchParams.get('ids')).toBe(EVENT);
+  });
 });
 
 describe('prepared event receipt equality', () => {

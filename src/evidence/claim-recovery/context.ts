@@ -1,8 +1,7 @@
 import type { HarnessSink, SinkOutcome } from '../../telemetry/sink.js';
-import { normalizeUrl } from '../../telemetry/credentials.js';
 import type { EventReceiptScope } from '../event-receipts.js';
-import { object } from '../original-run/remote.js';
-import { uuidSchema } from '../original-run/source.js';
+import { object, uuidSchema } from './validation/primitives.js';
+import { isEventReceiptScope } from './validation/receipts.js';
 
 export interface ClaimRecoverySelection {
   scope: EventReceiptScope;
@@ -17,11 +16,14 @@ export interface ClaimRecoveryContext { actorUserId: string; eventSequence: numb
 /** Read the current operator and recovery capability against one exact source. */
 export async function readClaimRecoveryContext(sink: HarnessSink, selection: ClaimRecoverySelection,
   expectedActor?: string): Promise<SinkOutcome<ClaimRecoveryContext>> {
-  const { scope, target, round, reportSha256, headSha } = structuredClone(selection);
-  if (!uuidSchema.safeParse(scope.org_id).success || !uuidSchema.safeParse(scope.run_id).success ||
-      normalizeUrl(scope.base_url) !== scope.base_url || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(scope.repo) ||
-      !Number.isSafeInteger(scope.pr_number) || scope.pr_number <= 0 ||
-      !Number.isSafeInteger(round) || round <= 0 || !target || target.trim() !== target ||
+  const cloned: unknown = structuredClone(selection);
+  if (!object(cloned) || !isEventReceiptScope(cloned.scope)) throw new Error('invalid_claim_recovery_selection');
+  const { scope, target, round, reportSha256, headSha } = cloned;
+  if (typeof target !== 'string' ||
+      typeof round !== 'number' || !Number.isSafeInteger(round) || round <= 0 ||
+      typeof reportSha256 !== 'string' || typeof headSha !== 'string' ||
+      !uuidSchema.safeParse(scope.org_id).success || !uuidSchema.safeParse(scope.run_id).success ||
+      !target || target.trim() !== target ||
       !/^[a-f0-9]{64}$/.test(reportSha256) || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(headSha) ||
       expectedActor !== undefined && !uuidSchema.safeParse(expectedActor).success) {
     throw new Error('invalid_claim_recovery_selection');

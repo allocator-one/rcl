@@ -67,4 +67,11 @@ describe('authenticated claim recovery context', () => {
     await expect(readClaimRecoveryContext(attested.sink, selection)).rejects.toThrow('unsupported_attested_recovery');
     expect(attested.calls).toEqual([]);
   });
+
+  it.each([null, {}, { scope: null }])('rejects malformed selection %j before HTTP', async malformed => {
+    const c = client(response());
+    await expect(readClaimRecoveryContext(c.sink, malformed as ClaimRecoverySelection))
+      .rejects.toThrow('invalid_claim_recovery_selection');
+    expect(c.calls).toEqual([]);
+  });
 });
