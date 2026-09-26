@@ -1,17 +1,18 @@
 import { evaluateCiGate } from '../ci.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
-import { deduplicateFindings } from '../consensus/deduper.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
-import type { ModelReview, ReviewResult } from '../consensus/types.js';
-import { computeConsensus, applyReportThresholds } from '../consensus/voter.js';
+import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
 import type { Diff } from '../resolver/types.js';
 import type { Role } from '../roles/types.js';
 import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-header.js';
 import { uuidv7 } from './uuid.js';
+import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
+import { deriveConsensusAssembly, type ConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
 
-interface CompletedReviewInput {
+export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
   arrivedAsync: ModelReview[];
   asyncLaunched: number;
@@ -21,61 +22,51 @@ interface CompletedReviewInput {
   diff: Diff;
   gatingConfig: ResolvedGatingConfig;
   modelWeights?: Map<string, number>;
+  dedupeOrdering?: DedupeOrdering;
+  /** Validated original-seat health for proof-bearing reports; never deserialized counts. */
+  reviewerHealth?: ReviewerHealth;
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
 }
 
-interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monotonicNow' | 'onVerificationProgress'> {
+export interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monotonicNow' | 'onVerificationProgress'> {
   onStage?: (stage: string) => void;
   onVerificationStart?: () => void;
   onWarning?: (warning: string) => void;
+  /** Indices refer to the merged voting reviews in the returned report. */
+  onFindingContributions?: (groups: ConsensusAssemblyContribution[]) => void;
+}
+
+/** Internal replay projection; the checkpoint adapter derives it from validated retained evidence. */
+export interface CompletedReviewProjection {
+  consensus: ConsensusAssembly;
+  findings: ConsensusFinding[];
+  appendix: ConsensusFinding[];
+  verification?: ReviewResult['stats']['verification'];
 }
 
 /** Assemble retained reviewer outputs through consensus, bounded gating, and the run header. */
 export async function assembleCompletedReview(
   input: CompletedReviewInput,
-  dependencies: AssemblyDependencies = {}
+  dependencies: AssemblyDependencies = {},
+  retained?: CompletedReviewProjection,
 ): Promise<ReviewResult & { run: RunHeader }> {
   const { chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff, gatingConfig, modelWeights } = input;
-  const reviews = mergeChunkReviews([...chunkReviews, ...arrivedAsync]);
-
+  if (input.reviewerHealth !== undefined) assertReviewerHealth(input.reviewerHealth);
   dependencies.onStage?.('computing consensus');
-
-  // Deduplicate and compute consensus
-  const groups = deduplicateFindings(
-    reviews,
-    config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
-    config.thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
-    config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore
-  );
-
   const runId = input.run.id ?? uuidv7();
-  const consensusFindings = computeConsensus(
-    runId,
-    groups,
-    reviews,
-    roleMap,
-    {
-      lineWindow: config.thresholds?.dedupeLineWindow,
-      jaccardThreshold: config.thresholds?.jaccardThreshold,
-    },
-    modelWeights
-  );
-
-  const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(
-    consensusFindings,
-    {
-      minConfidence: config.thresholds?.minConfidence,
-      minConsensusScore: config.thresholds?.minConsensusScore,
-    }
-  );
+  const { reviews, consensusFindings, reportFindings, droppedFindings, contributions } = retained?.consensus ?? deriveConsensusAssembly({
+    runId, chunkReviews, arrivedAsync, roleMap, thresholds: config.thresholds, modelWeights,
+    collectContributions: dependencies.onFindingContributions !== undefined,
+    dedupeOrdering: input.dedupeOrdering,
+  });
 
   // Convergence gating (RCL-23): annotate every kept finding with why it
   // does or does not gate; single-model blocking findings get one batched
   // refutation call to a fast direct-API model.
-  let finalFindings = reportFindings;
-  let gatedAppendix = droppedFindings;
-  let verificationStats: ReviewResult['stats']['verification'];
-  if (gatingConfig.mode === 'verified-consensus') {
+  let finalFindings = retained?.findings ?? reportFindings;
+  let gatedAppendix = retained?.appendix ?? droppedFindings;
+  let verificationStats = retained?.verification;
+  if (retained === undefined && gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
     dependencies.onVerificationStart?.();
     const gated = await applyGatingWithFallback(reportFindings, {
       minModels: gatingConfig.minModels,
@@ -102,6 +93,9 @@ export async function assembleCompletedReview(
   }
 
   const keepAppendix = config.output?.belowThresholdAppendix ?? true;
+  if (dependencies.onFindingContributions) {
+    dependencies.onFindingContributions(contributions!);
+  }
   const totalRawFindings = reviews.reduce((sum, r) => sum + r.findings.length, 0);
   const body: ReviewResult = {
     reviews,
@@ -162,7 +156,7 @@ export async function assembleCompletedReview(
       jaccardThreshold: config.thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
     },
     finishedAt: new Date(),
-    ciExitCode: evaluateCiGate(body).exitCode,
+    ciExitCode: evaluateCiGate(body, input.reviewerHealth).exitCode,
   });
   return { run, ...body };
 }
