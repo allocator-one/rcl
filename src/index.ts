@@ -183,7 +183,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   try {
     // One cheap readdir before any credential or config work: most commands
     // find an empty outbox and pay nothing.
-    const entries = await readdir(join(resolveDataDir(), 'outbox')).catch(() => [] as string[]);
+    const entries = (await Promise.all(['outbox', 'reviewer-outbox'].map(directory => readdir(join(resolveDataDir(), directory)).catch(() => [] as string[])))).flat();
     if (entries.length === 0) return;
     await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
   } catch {
@@ -2369,8 +2369,9 @@ async function executeCouncil(
       ? sanitizeForDelivery(result, { parseFailures: runtime?.parseFailures ?? false }) : result;
   postReviewStage('rendering report artifacts');
   const artifacts = renderReportArtifacts(delivered);
+  let reviewerArtifact: ReturnType<typeof serializeReviewerArtifact> | undefined;
   if (retained && checkpointAssembly) {
-    const reviewerArtifact = serializeReviewerArtifact({ assembly: checkpointAssembly, reportBytes: artifacts.report_json,
+    reviewerArtifact = serializeReviewerArtifact({ assembly: checkpointAssembly, reportBytes: artifacts.report_json,
       verificationProof: checkpointGating?.verificationProof,
       representation: { version: 1, parseFailures: runtime?.parseFailures ?? false } });
     await retained.journal.retainTerminalReport({ reportBytes: artifacts.report_json, reviewerArtifactBytes: reviewerArtifact.bytes }, retained.ownership);
@@ -2405,7 +2406,7 @@ async function executeCouncil(
   // retention of the rendered originals. Try both files before any exit code.
   const evidenceRequired = opts.evidenceRequired === true;
   const delivery: DeliveryOutcome = runtime
-    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics }).catch((err: unknown) => ({
+    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics, reviewerArtifact }).catch((err: unknown) => ({
         status: 'error' as const,
         line: `Evidence delivery failed: ${scrubText(String(err), 300)}`,
         exitCode: evidenceRequired ? (4 as const) : (0 as const),

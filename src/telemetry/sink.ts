@@ -5,6 +5,7 @@ import { scrubText } from './scrub.js';
 import type { ArtifactDeclaration, ArtifactKind, RunEnvelope } from './envelope.js';
 import { parseAttestedExpiry, type ReceiptProbe } from './attested-retry.js';
 import type { WireEvent } from './events.js';
+import { MAX_ARTIFACT_BYTES } from './envelope-validation.js';
 
 /**
  * The HTTP side of evidence (epic IO-12475, sections 8.4 and 9): POST the
@@ -52,6 +53,11 @@ export interface ArtifactReceipt {
   url?: string;
   status: 'created' | 'existing';
 }
+
+export interface ReviewerArtifactReference { sha256: string; bytes?: number }
+export interface ReviewerArtifactReceipt { runId: string; sha256: string; bytes: number; status: 'created' | 'existing' }
+export type ReviewerArtifactRead = SinkOutcome<{ bytes: Buffer; sha256: string }> |
+  { kind: 'pending'; runId: string; sha256: string; bytes: number };
 
 export interface EventsReceipt {
   inserted: number;
@@ -155,6 +161,79 @@ export class HarnessSink {
       }
       return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: digest } };
     } catch { return { kind: 'unavailable', reason: 'artifact_read_failed' }; }
+    finally { signal.dispose(); }
+  }
+
+  /** Current authenticated capability only; never a paid-call or source-authority grant. */
+  async checkReviewerRecovery(options: RequestOptions = {}): Promise<SinkOutcome<{ protocol: 1; schema: 1; maxBytes: number }>> {
+    const budget = Math.min(this.timeoutMs, this.artifactBudget(options));
+    if (!Number.isFinite(budget) || budget <= 0) return { kind: 'unavailable', reason: 'reviewer_artifact_expired' };
+    const response = await this.request('GET', '/api/v1/reviews/model-stats', undefined, 'application/json', { ...options, maxResponseBytes: MAX_RESPONSE_BYTES }, budget);
+    if ('failure' in response) return { kind: 'unavailable', reason: 'reviewer_capability_unavailable' };
+    if (response.status !== 200) return privateArtifactFailure(response.status);
+    const body = response.body as { data?: { models?: unknown }; meta?: Record<string, unknown> } | null;
+    if (!Array.isArray(body?.data?.models) || body?.meta?.reviewer_recovery_protocol !== 1 ||
+      body.meta.reviewer_artifact_schema !== 1 || body.meta.reviewer_artifact_max_bytes !== MAX_ARTIFACT_BYTES) {
+      return { kind: 'rejected', httpStatus: 200, error: 'unsupported_reviewer_recovery', message: 'Private reviewer recovery is not supported by this credential endpoint' };
+    }
+    return { kind: 'ok', httpStatus: 200, value: { protocol: 1, schema: 1, maxBytes: MAX_ARTIFACT_BYTES } };
+  }
+
+  /** Exact private upload. The server independently authorizes the owner and validates the declared pair. */
+  async putReviewerArtifact(runId: string, bytes: string, expected: ReviewerArtifactReference & { bytes: number }, options: RequestOptions = {}): Promise<SinkOutcome<ReviewerArtifactReceipt>> {
+    if (!privateReference(runId, expected) || typeof bytes !== 'string' || Buffer.byteLength(bytes) !== expected.bytes ||
+      createHash('sha256').update(bytes, 'utf8').digest('hex') !== expected.sha256) return privateArtifactFailure(0);
+    const startedAt = performance.now(), totalBudget = this.artifactBudget(options);
+    const capability = await this.checkReviewerRecovery(options);
+    if (capability.kind !== 'ok') return capability;
+    const budget = Math.min(this.artifactBudget(options), totalBudget - (performance.now() - startedAt));
+    if (!Number.isFinite(budget) || budget <= 0) return { kind: 'unavailable', reason: 'reviewer_artifact_expired' };
+    const response = await this.request('PUT', `/api/v1/reviews/runs/${encodeURIComponent(runId)}/reviewer-artifact`, bytes,
+      'application/octet-stream', { ...options, maxResponseBytes: MAX_RESPONSE_BYTES }, budget);
+    if ('failure' in response) return { kind: 'unavailable', reason: 'reviewer_artifact_transfer_failed' };
+    if (response.status !== 200 && response.status !== 201) return privateArtifactFailure(response.status);
+    const body = response.body as { data?: unknown; meta?: { status?: unknown } } | null;
+    const status = response.status === 201 ? 'created' : 'existing';
+    if (!privateReceipt(body?.data, runId, expected) || body?.meta?.status !== status) return privateArtifactFailure(0);
+    return { kind: 'ok', httpStatus: response.status, value: { runId, sha256: expected.sha256, bytes: expected.bytes, status } };
+  }
+
+  /** Private owner/grant read. Only an exact, owner-checked pending response permits a subsequent PUT. */
+  async getReviewerArtifact(runId: string, expected: ReviewerArtifactReference, options: RequestOptions = {}): Promise<ReviewerArtifactRead> {
+    if (!privateReference(runId, expected)) return privateArtifactFailure(0);
+    const startedAt = performance.now(), totalBudget = this.artifactBudget(options);
+    const capability = await this.checkReviewerRecovery(options);
+    if (capability.kind !== 'ok') return capability;
+    const budget = Math.min(this.artifactBudget(options), totalBudget - (performance.now() - startedAt));
+    if (!Number.isFinite(budget) || budget <= 0) return { kind: 'unavailable', reason: 'reviewer_artifact_expired' };
+    const signal = abortSignalWithTimeout(options.signal, budget);
+    try {
+      signal.signal.throwIfAborted();
+      const response = await this.fetchImpl(`${this.baseUrl}/api/v1/reviews/runs/${encodeURIComponent(runId)}/reviewer-artifact`, {
+        method: 'GET', headers: { ...this.headers('application/octet-stream'), accept: 'application/octet-stream' }, redirect: 'manual', signal: signal.signal,
+      });
+      if (response.status !== 200) {
+        const raw = await readBounded(response, MAX_RESPONSE_BYTES);
+        let body: { error?: unknown; data?: unknown } | null = null;
+        try { body = JSON.parse(raw ?? 'null'); } catch { /* Never surface private response text. */ }
+        if (response.status === 404 && body?.error === 'reviewer_artifact_pending' && privateReceipt(body.data, runId, expected)) {
+          const data = body.data as { sha256: string; bytes: number };
+          return { kind: 'pending', runId, sha256: data.sha256, bytes: data.bytes };
+        }
+        return privateArtifactFailure(response.type === 'opaqueredirect' ? 302 : response.status);
+      }
+      const bytes = await readBoundedBytes(response, expected.bytes ?? MAX_ARTIFACT_BYTES);
+      const headers = response.headers;
+      if (bytes === null || (expected.bytes !== undefined && bytes.length !== expected.bytes) ||
+        headers.get('x-artifact-sha256') !== expected.sha256 || createHash('sha256').update(bytes).digest('hex') !== expected.sha256 ||
+        headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/octet-stream' ||
+        !['private', 'no-store'].every(directive => headers.get('cache-control')?.split(',').map(value => value.trim().toLowerCase()).includes(directive)) ||
+        headers.get('cache-control')?.split(',').map(value => value.trim().toLowerCase()).includes('public') ||
+        !/^attachment(?:;|$)/i.test(headers.get('content-disposition') ?? '') || headers.get('x-content-type-options')?.toLowerCase() !== 'nosniff') {
+        return privateArtifactFailure(0);
+      }
+      return { kind: 'ok', httpStatus: 200, value: { bytes, sha256: expected.sha256 } };
+    } catch { return { kind: 'unavailable', reason: 'reviewer_artifact_read_failed' }; }
     finally { signal.dispose(); }
   }
 
@@ -510,4 +589,24 @@ export function describeOutcome(outcome: SinkOutcome<unknown>): string {
     case 'unavailable':
       return `unreachable (${printable(outcome.reason)})`;
   }
+}
+
+
+function privateReference(runId: string, expected: ReviewerArtifactReference): boolean {
+  return typeof runId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![\s\S])/i.test(runId) &&
+    expected !== null && typeof expected === 'object' && typeof expected.sha256 === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(expected.sha256) &&
+    (expected.bytes === undefined || Number.isSafeInteger(expected.bytes) && expected.bytes >= 0 && expected.bytes <= MAX_ARTIFACT_BYTES);
+}
+function privateReceipt(value: unknown, runId: string, expected: ReviewerArtifactReference): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const data = value as Record<string, unknown>;
+  return Object.keys(data).sort().join(',') === 'bytes,run_id,sha256' && data.run_id === runId && data.sha256 === expected.sha256 &&
+    Number.isSafeInteger(data.bytes) && (data.bytes as number) >= 0 && (data.bytes as number) <= MAX_ARTIFACT_BYTES &&
+    (expected.bytes === undefined || data.bytes === expected.bytes);
+}
+/** Never echo private route bodies, URLs, prompts or adapter error causes. */
+function privateArtifactFailure(status: number): Exclude<SinkOutcome<never>, { kind: 'ok' }> {
+  if (status === 401 || status === 408 || status === 429 || status >= 500) return { kind: 'unavailable', reason: `reviewer_artifact_http_${status}` };
+  if (status === 409) return { kind: 'conflict', message: 'Private reviewer artifact conflicts with retained evidence' };
+  return { kind: 'rejected', httpStatus: status, error: status === 0 ? 'invalid_reviewer_artifact' : `reviewer_artifact_http_${status}`, message: 'Private reviewer artifact request refused' };
 }
