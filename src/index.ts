@@ -1029,7 +1029,7 @@ telemetry
     }
     const summary = await flushOutbox(runtime, opts.run ? { runId: opts.run } : {});
     if (opts.run && summary.remaining.length === 0 && summary.failed.length === 0 && summary.dropped.length === 0) {
-      const reconciled = await reconcileDeliveredRun(opts.run, runtime.sink, { cwd: process.cwd() });
+      const reconciled = await reconcileDeliveredRun(opts.run, runtime.sink, { cwd: process.cwd() }).catch(() => 'unchanged' as const);
       if (reconciled === 'reconciled') process.stderr.write(chalk.dim('Reconciled delivered run ' + opts.run + ' with its guarded launch state.\n'));
     }
     if (opts.json) {
