@@ -14,7 +14,8 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
+import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
@@ -38,7 +39,8 @@ export interface ConvergeAttemptRecord {
 }
 
 export interface ConvergeAttemptState {
-  version: typeof STATE_VERSION;
+  version: 2 | 3;
+  cycle?: NativeReviewCycle;
   target: string;
   cap: number;
   migratedAttempts: number;
@@ -54,6 +56,7 @@ export interface ConvergeAttemptClaim {
   cap: number;
   stateFile: string;
   warning?: string;
+  cycle?: NativeReviewCycle;
 }
 
 export class ConvergeAttemptBudgetExceededError extends Error {
@@ -111,6 +114,8 @@ interface ClaimOptions {
   targetLockRetryMs?: number;
   beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void>;
   afterClaim?: (claim: ConvergeAttemptClaim, ownership: NativeTargetOwnership) => Promise<void>;
+  ownership?: NativeTargetOwnership;
+  freshReviewOperation?: string;
 }
 
 interface AttemptLockOwner {
@@ -133,7 +138,7 @@ function validateTarget(target: string): string {
   return trimmed;
 }
 
-function validateCap(maxAttempts: number): number {
+export function validateAttemptCap(maxAttempts: number): number {
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
     throw new ConvergeAttemptStateError(
       'maxAttempts (--max-attempts) must be a positive safe integer.'
@@ -164,7 +169,7 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
   const state = value as Partial<ConvergeAttemptState>;
   const attempts = state.attempts;
   if (
-    state.version !== STATE_VERSION ||
+    !validCycleVersion(state, STATE_VERSION) ||
     state.target !== expectedTarget ||
     !Number.isSafeInteger(state.cap) ||
     (state.cap ?? 0) < 1 ||
@@ -591,17 +596,22 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     targetLockRetryMs: options.targetLockRetryMs,
     beforeClaim: options.beforeClaim,
     afterClaim: options.afterClaim,
+    ownership: options.ownership,
+    freshReviewOperation: options.freshReviewOperation,
   };
+  if (claimOptions.freshReviewOperation && !claimOptions.ownership) throw new Error('fresh_review_owner_required');
   // Use one canonical directory for both target ownership and state paths.
   // The caller's textual symlink must not be resolved once for a lock and
   // later again for a state write after it has been retargeted.
   claimOptions.gitCommonDir = await realpath(resolve(claimOptions.gitCommonDir));
   const { gitCommonDir, target } = claimOptions;
-  if (claimOptions.maxAttempts !== undefined) validateCap(claimOptions.maxAttempts);
+  if (claimOptions.maxAttempts !== undefined) validateAttemptCap(claimOptions.maxAttempts);
   let committed: ConvergeAttemptClaim | undefined;
   try {
-    return await withNativeTarget(gitCommonDir, target, async ownership => {
+    const work = async (ownership: NativeTargetOwnership) => {
       await claimOptions.beforeClaim?.(ownership);
+      const { assertFreshReviewClaim } = await import('./fresh-review.js');
+      await assertFreshReviewClaim(gitCommonDir, target, claimOptions.freshReviewOperation);
       committed = await claimConvergeAttemptOwned(claimOptions);
       try {
         await claimOptions.afterClaim?.(committed, ownership);
@@ -609,7 +619,10 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
         throw new ConvergeAttemptPostClaimError(committed, error);
       }
       return committed;
-    }, {
+    };
+    return claimOptions.ownership
+      ? await withOwnedNativeOperation(claimOptions.ownership, gitCommonDir, target, work)
+      : await withNativeTarget(gitCommonDir, target, work, {
       lockTimeoutMs: claimOptions.targetLockTimeoutMs ?? DEFAULT_TARGET_LOCK_TIMEOUT_MS,
       lockRetryMs: claimOptions.targetLockRetryMs,
     });
@@ -638,7 +651,7 @@ function findPostClaimError(error: unknown): ConvergeAttemptPostClaimError | und
 async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<ConvergeAttemptClaim> {
   const target = validateTarget(options.target);
   const requestedCap =
-    options.maxAttempts === undefined ? undefined : validateCap(options.maxAttempts);
+    options.maxAttempts === undefined ? undefined : validateAttemptCap(options.maxAttempts);
   const stateFile = convergeAttemptStatePath(options.gitCommonDir, target);
   const stateDir = join(resolve(options.gitCommonDir), STATE_DIR);
   const lockFile = `${stateFile}.lock`;
@@ -668,6 +681,8 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
   try {
     const timestamp = now().toISOString();
     const stored = await readState(stateFile, target);
+    const { assertReviewCyclePair } = await import('./fresh-review.js');
+    await assertReviewCyclePair(options.gitCommonDir, target, stored?.cycle);
     const previous = stored ?? (await stateFromExistingLedger(options.gitCommonDir, target, timestamp));
     const attemptsUsed = previous?.attemptsUsed ?? 0;
     // Omitting --max-attempts preserves an existing target's configured cap.
@@ -690,7 +705,8 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
 
     const attempt = attemptsUsed + 1;
     const state: ConvergeAttemptState = {
-      version: STATE_VERSION,
+      version: previous?.version ?? STATE_VERSION,
+      ...(previous?.cycle ? { cycle: previous.cycle } : {}),
       target,
       cap: effectiveCap,
       migratedAttempts: previous?.migratedAttempts ?? 0,
@@ -702,7 +718,8 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
       updatedAt: timestamp,
     };
     await writeStateAtomically(stateFile, state);
-    claim = { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile };
+    claim = { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile,
+      ...(state.cycle ? { cycle: state.cycle } : {}) };
   } catch (err) {
     claimError = err;
   }

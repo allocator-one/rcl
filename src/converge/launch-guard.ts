@@ -1,3 +1,9 @@
+import { isDeepStrictEqual } from 'node:util';
+import { assertNoPendingFreshReview, freshReviewCompletionPending, freshReviewRequestVersion, prepareFreshReview, finishFreshReview, verifyReviewCycle } from './fresh-review.js';
+import type { ReviewCycleRemote } from './review-cycle.js';
+import { withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
+import { RegistryCleanupError } from '../coordination/registry-lock.js';
+import { convergeAttemptStatePath } from './attempt-budget.js';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
@@ -21,6 +27,8 @@ const completionSchema = z.object({
   totalReviews: z.number().int().positive().safe(),
   deliveryPending: z.boolean(),
   hardFailure: z.boolean().optional(),
+  exitCode: z.number().int().nonnegative().optional(),
+  reportPath: z.string().min(1).optional(),
 }).refine(value => value.successfulReviews <= value.totalReviews);
 
 export const launchSchema = z.object({
@@ -38,6 +46,8 @@ export const launchSchema = z.object({
   totalReviews: z.number().int().positive().safe().optional(),
   deliveryPending: z.boolean().optional(),
   hardFailure: z.boolean().optional(),
+  exitCode: z.number().int().nonnegative().optional(),
+  reportPath: z.string().min(1).optional(),
 }).strict().refine(value => value.status !== 'completed' || completionSchema.safeParse(value).success);
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
@@ -53,6 +63,8 @@ export interface GuardedLaunchOptions {
   maxRounds?: number;
   intent?: 'review' | 'stop-upstream' | 'stop-review' | 'retry-delivery';
   retryReason?: string;
+  startOver?: boolean;
+  cycleRemote?: ReviewCycleRemote;
   validate: () => Promise<void>;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
   run: (context: ConvergeContext) => Promise<GuardedLaunchCompletion>;
@@ -161,16 +173,64 @@ export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
   return previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
 }
 
-export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<ConvergeAttemptClaim> {
+export interface GuardedLaunchClaim extends ConvergeAttemptClaim {
+  resumedCompletion?: GuardedLaunchCompletion;
+}
+
+export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<GuardedLaunchClaim> {
   const options = { ...input, target: input.target.trim() };
   options.gitCommonDir = await realpath(resolve(options.gitCommonDir));
+  const requestVersion = options.startOver ? await freshReviewRequestVersion(options.gitCommonDir, options.target) : undefined;
+  let completed: GuardedLaunchClaim | undefined;
+  try {
+    return await withNativeTarget(options.gitCommonDir, options.target, async ownership => {
+      if (options.startOver && await freshReviewRequestVersion(options.gitCommonDir, options.target) !== requestVersion) {
+        refuse('fresh_review_request_changed', 'Another launch handled the pending fresh request; inspect its outcome before requesting another cycle.');
+      }
+      completed = await guardReviewLaunchOwned(options, ownership);
+      return completed;
+    }, { lockTimeoutMs: 5_000 });
+  } catch (error) {
+    if (!(error instanceof RegistryCleanupError) || !completed || error.result !== completed) throw error;
+    completed.warning = `Attempt ${completed.attempt}/${completed.cap} is durably recorded; target lock cleanup failed. Do not repeat the claim: ${error.message}`;
+    return completed;
+  }
+}
+
+async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: NativeTargetOwnership): Promise<GuardedLaunchClaim> {
   let state: ConvergeRunState;
   let failure: { error: unknown } | undefined;
+  let freshOperation: string | undefined;
+  if (options.startOver) {
+    if (!options.cycleRemote) refuse('fresh_review_remote_required', 'A fresh review needs a connected Harness PR.');
+    if (options.round !== undefined) refuse('fresh_review_ordinal', 'A fresh review assigns its own round.');
+    await requireLaunch(options, initialConvergeRunState(options.target), 0);
+    const completionPending = await freshReviewCompletionPending(options.gitCommonDir, options.target);
+    if (!completionPending) await options.validate();
+    const fresh = await prepareFreshReview({ ...options, remote: options.cycleRemote, ownership });
+    freshOperation = fresh.operationId;
+    const resumed = await loadConvergeRunState(options.gitCommonDir, options.target);
+    const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
+    if (resumed?.lastLaunch?.status === 'completed' && attempts?.cycle?.id === fresh.cycle.id &&
+      resumed.lastLaunch.attempt === attempts.attemptsUsed) {
+      await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+      return { target: options.target, attempt: attempts.attemptsUsed, attemptsUsed: attempts.attemptsUsed,
+        cap: attempts.cap, cycle: fresh.cycle, stateFile: convergeAttemptStatePath(options.gitCommonDir, options.target),
+        resumedCompletion: completionSchema.parse(resumed.lastLaunch) };
+    }
+    if (completionPending) await options.validate();
+    if (attempts && attempts.attemptsUsed > 0 && options.retryReason === undefined) {
+      options.retryReason = 'Resuming an explicitly requested fresh review after interrupted local dispatch; previous attempts remain spent.';
+    }
+  } else {
+    await assertNoPendingFreshReview(options.gitCommonDir, options.target);
+  }
   const claim = await claimConvergeAttempt({
     gitCommonDir: options.gitCommonDir,
     target: options.target,
     maxAttempts: options.maxAttempts,
-    targetLockTimeoutMs: 5_000,
+    ownership,
+    freshReviewOperation: freshOperation,
     beforeClaim: async () => {
       try {
         state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
@@ -182,12 +242,21 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
       }
       if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
       const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
+      if (!isDeepStrictEqual(state.cycle, attempts?.cycle)) refuse('fresh_review_state_pair_mismatch', 'The native cycle files disagree.');
+      if (state.cycle) {
+        await verifyReviewCycle(options.gitCommonDir, options.target, state.cycle);
+        const remote = options.cycleRemote;
+        if (!remote || remote.repo.toLowerCase() !== state.cycle.repo || remote.prNumber !== state.cycle.prNumber || remote.url !== state.cycle.url) {
+          refuse('fresh_review_remote_mismatch', 'Continue this cycle against its original Harness PR.');
+        }
+        if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
+      }
       const round = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
       const cap = options.maxAttempts ?? attempts?.cap;
       if (cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
       }
-      await options.validate();
+      if (!options.startOver) await options.validate();
       state.lastLaunch = {
         status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
@@ -202,6 +271,7 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
         await options.onClaim?.(claimed);
         const completion = completionSchema.parse(await options.run({
           target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
+          ...(state.cycle ? { cycleId: state.cycle.id } : {}),
         }));
         state.lastLaunch = { ...state.lastLaunch!, ...completion, status: 'completed' };
       } catch (error) {
@@ -210,7 +280,15 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
       }
       state.updatedAt = new Date().toISOString();
       await writeState(options.gitCommonDir, state, ownership);
+      if (freshOperation) await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
     },
+  }).catch(async (error: unknown) => {
+    if (freshOperation && error instanceof ConvergeAttemptBudgetExceededError) {
+      // End only this exhausted operation; the spent/unknown dispatch stays intact.
+      // A later deliberate fresh request may allocate another cycle.
+      await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+    }
+    throw error;
   });
   if (failure) throw failure.error;
   return claim;
