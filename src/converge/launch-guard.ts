@@ -282,6 +282,13 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       await writeState(options.gitCommonDir, state, ownership);
       if (freshOperation) await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
     },
+  }).catch(async (error: unknown) => {
+    if (freshOperation && error instanceof ConvergeAttemptBudgetExceededError) {
+      // End only this exhausted operation; the spent/unknown dispatch stays intact.
+      // A later deliberate fresh request may allocate another cycle.
+      await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+    }
+    throw error;
   });
   if (failure) throw failure.error;
   return claim;

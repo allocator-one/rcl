@@ -371,3 +371,52 @@ it('reconciles delivered evidence only for the current cycle launch without chan
   expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ cap: 20, attemptsUsed: 1 });
   expect(await loadConvergeRunState(options.gitCommonDir, options.target)).toMatchObject({ lastLaunch: { runId: nextId, deliveryPending: true } });
 });
+
+it('ends an interrupted exhausted operation without refunding its unknown dispatch or spending again', async () => {
+  const { prepareFreshReview, reviewCycleDirectory } = await import('../../src/converge/fresh-review.js');
+  const { withNativeTarget } = await import('../../src/converge/target-ownership.js');
+  const { claimConvergeAttempt } = await import('../../src/converge/attempt-budget.js');
+  const options = await freshFixture();
+  const fresh = await withNativeTarget(options.gitCommonDir, options.target, async ownership => {
+    const operation = await prepareFreshReview({ ...options, maxAttempts: 1, remote: options.cycleRemote, ownership });
+    await claimConvergeAttempt({ ...options, ownership, freshReviewOperation: operation.operationId });
+    return operation;
+  });
+  const before = await readFile(convergeAttemptStatePath(options.gitCommonDir, options.target));
+  await expect(guardReviewLaunch(options)).rejects.toThrow('budget exhausted');
+  expect(await readFile(convergeAttemptStatePath(options.gitCommonDir, options.target))).toEqual(before);
+  expect(options.run).not.toHaveBeenCalled();
+  expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(await readFile(join(reviewCycleDirectory(options.gitCommonDir, options.target), `${fresh.operationId}.json`), 'utf8')).phase).toBe('terminal');
+  await guardReviewLaunch(options);
+  expect(options.cycleRemote.start).toHaveBeenCalledTimes(2);
+  expect(options.run).toHaveBeenCalledTimes(1);
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ cap: 20, attemptsUsed: 1, cycle: { history: { attempts: 1 } } });
+});
+
+it('retires a changed-head unfinished operation after recovering its receipt without new reviewer work', async () => {
+  const options = await freshFixture();
+  const start = options.cycleRemote.start.getMockImplementation()!;
+  options.cycleRemote.start.mockImplementationOnce(async request => { await start(request); throw new Error('lost acknowledgement'); });
+  await expect(guardReviewLaunch(options)).rejects.toThrow('lost acknowledgement');
+  options.cycleRemote.start.mockImplementationOnce(async () => (await options.cycleRemote.current())!);
+  await expect(guardReviewLaunch({ ...options, headSha: 'c'.repeat(40) })).rejects.toThrow('fresh_review_operation_head_changed');
+  expect(options.cycleRemote.start.mock.calls[1][0]).toEqual(options.cycleRemote.start.mock.calls[0][0]);
+  expect(options.run).not.toHaveBeenCalled();
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ attemptsUsed: 0 });
+  await guardReviewLaunch({ ...options, headSha: 'c'.repeat(40) });
+  expect(options.run).toHaveBeenCalledTimes(1);
+});
+
+it('does not replay an older completed report as a changed-head unfinished request', async () => {
+  const { reviewCycleDirectory } = await import('../../src/converge/fresh-review.js');
+  const options = await freshFixture();
+  await guardReviewLaunch(options);
+  const state = (await loadConvergeRunState(options.gitCommonDir, options.target))!;
+  const path = join(reviewCycleDirectory(options.gitCommonDir, options.target), `${state.cycle!.operationId}.json`);
+  await writeFile(path, JSON.stringify({ ...JSON.parse(await readFile(path, 'utf8')), phase: 'active' }));
+  await expect(guardReviewLaunch({ ...options, headSha: 'c'.repeat(40) })).rejects.toThrow('fresh_review_operation_head_changed');
+  expect(await loadConvergeRunState(options.gitCommonDir, options.target)).toEqual(state);
+  expect(options.run).toHaveBeenCalledTimes(1);
+  expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
+});

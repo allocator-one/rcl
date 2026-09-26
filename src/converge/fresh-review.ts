@@ -244,6 +244,12 @@ export async function prepareFreshReview(options: FreshReviewOptions): Promise<F
     await finishFreshReview(common, options.target, operation.operationId, options.ownership);
     throw new Error('fresh_review_superseded: this operation ended without new reviewer work; a later explicit --start-over can request a new cycle');
   }
+  if (operation.headSha !== options.headSha) {
+    // Recover the original remote receipt and finish local activation first:
+    // a lost POST acknowledgement must never be mistaken for a noncommit.
+    await finishFreshReview(common, options.target, operation.operationId, options.ownership);
+    throw new Error('fresh_review_operation_head_changed: this operation ended without new reviewer work; inspect its retained outcome before a later explicit fresh request');
+  }
   return { cycle, operationId: operation.operationId };
 }
 
