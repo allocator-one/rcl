@@ -3,12 +3,20 @@ import { loadConvergeRunState, writeState } from './run-state.js';
 import { withNativeTarget } from './target-ownership.js';
 import type { HarnessSink } from '../telemetry/sink.js';
 import { getRun } from '../evidence/reads.js';
+import type { FlushSummary } from '../telemetry/outbox.js';
+
+type FlushReconciliationSummary = Pick<FlushSummary, 'remaining' | 'failed' | 'dropped'>;
+type ReconcileOptions = Parameters<typeof reconcileDeliveredRun>[2];
+
+export function shouldReconcileDeliveredRun(runId: string | undefined, summary: FlushReconciliationSummary): runId is string {
+  return runId !== undefined && summary.remaining.length === 0 && summary.failed.length === 0 && summary.dropped.length === 0;
+}
 
 export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, options: { cwd?: string; gitCommonDir?: string; getRun?: typeof getRun } = {}): Promise<'reconciled' | 'unchanged'> {
   const read = await (options.getRun ?? getRun)(sink, runId);
   if (read.kind !== 'ok') return 'unchanged';
   const detail = read.value, target = detail.converge?.target;
-  if (!target || !/^[A-Za-z0-9._-]+$/.test(target) || detail.id.toLowerCase() !== runId.toLowerCase()) return 'unchanged';
+  if (!target || target === '.' || target === '..' || !/^[A-Za-z0-9._-]+$/.test(target) || detail.id.toLowerCase() !== runId.toLowerCase()) return 'unchanged';
   let common: string;
   try {
     common = options.gitCommonDir ?? await resolveGitCommonDir(options.cwd);
@@ -27,4 +35,21 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
     await writeState(common, state, ownership);
     return 'reconciled';
   });
+}
+
+/** Reconciliation is optional local bookkeeping after a successful flush. */
+export async function reconcileFlushedRun(
+  runId: string | undefined,
+  summary: FlushReconciliationSummary,
+  sink: HarnessSink,
+  options: ReconcileOptions & { reconcile?: typeof reconcileDeliveredRun; onError?: (error: unknown) => void } = {}
+): Promise<'reconciled' | 'unchanged'> {
+  if (!shouldReconcileDeliveredRun(runId, summary)) return 'unchanged';
+  const { reconcile = reconcileDeliveredRun, onError, ...reconcileOptions } = options;
+  try {
+    return await reconcile(runId, sink, reconcileOptions);
+  } catch (error) {
+    onError?.(error);
+    return 'unchanged';
+  }
 }

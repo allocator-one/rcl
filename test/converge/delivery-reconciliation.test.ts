@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initialConvergeRunState, loadConvergeRunState, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
-import { reconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
+import { reconcileDeliveredRun, reconcileFlushedRun, shouldReconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
 const runId = '019921a0-0000-7000-8000-000000000001', head = 'a'.repeat(40);
 const digest = 'c'.repeat(64);
 
@@ -48,6 +48,7 @@ describe('reconcileDeliveredRun', () => {
   it.each([
     ['a mismatched head', (detail: ReturnType<typeof matchingDetail>) => { detail.target.head_sha = 'd'.repeat(40); }],
     ['a non-canonical target', (detail: ReturnType<typeof matchingDetail>) => { detail.converge.target = 'fixture/other'; }],
+    ['a dot target', (detail: ReturnType<typeof matchingDetail>) => { detail.converge.target = '..'; }],
     ['a mismatched round', (detail: ReturnType<typeof matchingDetail>) => { detail.converge.round = 2; }],
     ['a mismatched attempt', (detail: ReturnType<typeof matchingDetail>) => { detail.converge.attempt = 5; }],
     ['a mismatched report digest', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].declared_sha256 = 'd'.repeat(64); }],
@@ -97,5 +98,22 @@ describe('reconcileDeliveredRun', () => {
       await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun: vi.fn().mockResolvedValue({ kind: 'ok', value: noStateRun }) })).resolves.toBe('unchanged');
       expect(await loadConvergeRunState(dir, 'other')).toBeUndefined();
     } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it('only reconciles clean single-run flushes and preserves flush success on an unexpected failure', async () => {
+    const clean = { remaining: [], failed: [], dropped: [] };
+    expect(shouldReconcileDeliveredRun(runId, clean)).toBe(true);
+    expect(shouldReconcileDeliveredRun(undefined, clean)).toBe(false);
+    expect(shouldReconcileDeliveredRun(runId, { ...clean, remaining: [runId] })).toBe(false);
+    expect(shouldReconcileDeliveredRun(runId, { ...clean, failed: [{ id: runId }] })).toBe(false);
+    expect(shouldReconcileDeliveredRun(runId, { ...clean, dropped: [{ id: runId }] })).toBe(false);
+
+    const reconcile = vi.fn().mockRejectedValue(new Error('write denied'));
+    const errors: unknown[] = [];
+    await expect(reconcileFlushedRun(runId, clean, {} as never, { reconcile, onError: error => errors.push(error) })).resolves.toBe('unchanged');
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(errors).toHaveLength(1);
+    await expect(reconcileFlushedRun(undefined, clean, {} as never, { reconcile })).resolves.toBe('unchanged');
+    expect(reconcile).toHaveBeenCalledOnce();
   });
 });

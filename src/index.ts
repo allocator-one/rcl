@@ -82,7 +82,7 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
-import { reconcileDeliveredRun } from './converge/delivery-reconciliation.js';
+import { reconcileFlushedRun } from './converge/delivery-reconciliation.js';
 import { validateLaunchOutputs, validateLaunchProviders } from './converge/launch-preflight.js';
 import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
 import { readStable, sha256 } from './telemetry/recovery/files.js';
@@ -1028,10 +1028,11 @@ telemetry
       return;
     }
     const summary = await flushOutbox(runtime, opts.run ? { runId: opts.run } : {});
-    if (opts.run && summary.remaining.length === 0 && summary.failed.length === 0 && summary.dropped.length === 0) {
-      const reconciled = await reconcileDeliveredRun(opts.run, runtime.sink, { cwd: process.cwd() }).catch(() => 'unchanged' as const);
-      if (reconciled === 'reconciled') process.stderr.write(chalk.dim('Reconciled delivered run ' + opts.run + ' with its guarded launch state.\n'));
-    }
+    const reconciled = await reconcileFlushedRun(opts.run, summary, runtime.sink, {
+      cwd: process.cwd(),
+      onError: error => process.stderr.write(chalk.dim(`Run reconciliation skipped: ${String(error)}\n`)),
+    });
+    if (reconciled === 'reconciled') process.stderr.write(chalk.dim('Reconciled delivered run ' + opts.run + ' with its guarded launch state.\n'));
     if (opts.json) {
       console.log(JSON.stringify(summary, null, 2));
     } else {
