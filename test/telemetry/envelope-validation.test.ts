@@ -14,6 +14,31 @@ describe('validateRunEnvelope', () => {
     expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
   });
 
+  it.each(['prose', 'identifier', 'map-value', 'map-key', 'extension'] as const)(
+    'refuses malformed Unicode in a %s without rewriting the envelope', part => {
+      const result = sampleResult();
+      const artifacts = { report_json: JSON.stringify(result) };
+      const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+      if (part === 'prose') envelope.findings[0]!.description = 'High \uD800 and low \uDFFF';
+      if (part === 'identifier') envelope.run.roster[0]!.model = 'model/\uD800';
+      if (part === 'map-value') envelope.run.thresholds = { nested: [{ value: '\uDFFF' }] } as never;
+      if (part === 'map-key') envelope.run.thresholds = { ['\uD800']: true } as never;
+      if (part === 'extension') Object.assign(envelope, { extension: { value: '\uDFFF' } });
+      const before = JSON.stringify(envelope);
+      expect(validateRunEnvelope(envelope, artifacts)).toContainEqual({ path: 'envelope', message: 'Envelope contains an unpaired UTF-16 surrogate' });
+      expect(JSON.stringify(envelope)).toBe(before);
+    },
+  );
+
+  it('accepts astral pairs and literal backslash-u text in keys and values', () => {
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result) };
+    const envelope = buildRunEnvelope(result, artifacts, { level: 'full', delivery: { mode: 'direct' } });
+    envelope.findings[0]!.description = '😀 \\ud800 \\udfff';
+    envelope.run.thresholds = { ['😀\\ud800']: '𐏿\\udfff' } as never;
+    expect(validateRunEnvelope(envelope, artifacts)).toEqual([]);
+  });
+
   it('refuses provenance that does not bind the normalized coordinates', () => {
     const result = sampleResult();
     Object.assign(result.findings[0]!, {
