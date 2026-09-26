@@ -23,7 +23,10 @@ export function resolveQuorumPolicy(seatCount: number, fraction = 2 / 3): Quorum
   const floor = Math.floor(seatCount / 3) * 2 + Math.ceil((seatCount % 3) * 2 / 3);
   const product = fraction * seatCount;
   const nearest = Math.round(product);
-  const rounded = Math.abs(product - nearest) <= Number.EPSILON * Math.abs(product)
+  // Snap only when the configured fraction is exactly the rational boundary
+  // represented by this roster. A fraction even slightly above it is stricter
+  // and must round up, while values such as 0.8 * 35 still resolve to 28.
+  const rounded = product === nearest || fraction === nearest / seatCount
     ? nearest : Math.ceil(product);
   return { version: 1, fraction, seatCount, minimumSuccessful: Math.max(2, floor, rounded) };
 }

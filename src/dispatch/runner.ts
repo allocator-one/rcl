@@ -160,8 +160,10 @@ export async function runReviews(
 
   const results: ModelReview[] = new Array(calls.length);
   let nextIndex = 0;
-  if (options.seatIds !== undefined && (!Array.isArray(options.seatIds) || options.seatIds.length !== calls.length)) {
-    throw new Error('Invalid seat ID matrix length');
+  if (options.seatIds !== undefined &&
+    (!Array.isArray(options.seatIds) || options.seatIds.length !== calls.length ||
+      calls.some((_call, index) => typeof options.seatIds![index] !== 'string' || options.seatIds![index]!.trim().length === 0))) {
+    throw new Error('Invalid seat ID matrix');
   }
   const seatKeys = calls.map((call, index) => options.seatIds?.[index] ?? JSON.stringify([call.provider, call.model, call.role]));
   const expected = new Map<string, number>();
@@ -300,7 +302,13 @@ export async function runReviews(
           if (await options.beforeReview(index, controller.signal) === false) {
             return canceledReview(call, 0, 'intent declined before provider dispatch');
           }
-        } catch (error) { fail(error); throw error; }
+        } catch (error) {
+          if (canceled || controller.signal.aborted || closed) {
+            return canceledReview(call, Date.now() - startedAt, 'while awaiting intent');
+          }
+          fail(error);
+          throw error;
+        }
       }
       if (stopped()) return canceledReview(call, Date.now() - startedAt, 'before provider dispatch');
       dispatched.add(index);

@@ -531,6 +531,24 @@ describe('retained original matrix and recovery dispatch boundaries', () => {
     await rejected; expect(startedBeforeIntent).toEqual([]); expect(c.started).toEqual([]);
   });
 
+  it('treats an abort-aware intent canceled at quorum as a canceled cell', async () => {
+    const assignments = ['a', 'b', 'waiting-intent'].map(makeAssignment); const c = controlled(assignments);
+    const beforeReview = vi.fn((index: number, signal: AbortSignal): Promise<void> => {
+      if (index !== 2) return Promise.resolve();
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('intent aborted')), { once: true });
+      });
+    });
+    const running = runReviews(assignments, c.prompts, {
+      ...poolOptions, adapterFactory: () => c.adapter, beforeReview,
+    });
+    c.pending[0]!.resolve(c.result(0)); c.pending[1]!.resolve(c.result(1));
+    await expect(running).resolves.toEqual([
+      c.result(0), c.result(1), expect.objectContaining({ status: 'canceled' }),
+    ]);
+    expect(c.started).toEqual([0, 1]);
+  });
+
   it('external cancellation aborts noncooperative calls even without quorum', async () => {
     const assignments = ['a', 'b', 'queued'].map(makeAssignment); const c = controlled(assignments);
     const controller = new AbortController(); const acceptReview = vi.fn(async () => {});
@@ -571,7 +589,7 @@ describe('retained original matrix and recovery dispatch boundaries', () => {
     expect(c.started).toEqual([1]); expect(reviews.map(r => r.status)).toEqual(['success', 'success', 'canceled']);
   });
 
-  it.each([['short'], ['a', ''], ['same', 'same']].map(seatIds => ({ seatIds })))('refuses invalid or inconsistent seat IDs $seatIds', async ({ seatIds }) => {
+  it.each([['short'], ['a', ''], ['same', 'same'], new Array<string>(2)].map(seatIds => ({ seatIds })))('refuses invalid or inconsistent seat IDs $seatIds', async ({ seatIds }) => {
     const assignments = ['a', 'b'].map(makeAssignment); const c = controlled(assignments);
     c.pending[0]!.resolve(c.result(0)); c.pending[1]!.resolve(c.result(1));
     const factory = vi.fn(() => c.adapter);
