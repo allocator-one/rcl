@@ -1,15 +1,14 @@
-import { GoogleGenAI } from '@google/genai';
+import { ApiError, GoogleGenAI } from '@google/genai';
 import { parseReviewOutput } from '../consensus/parser.js';
 import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
 import {
   stripKnownProviderPrefix,
-  retryDelay,
-  sleep,
   attemptWithRetries,
+  isRetryableConnectionError,
+  isRetryableStatus,
   failedReview,
   isBlankOutput,
-  linkAbortSignal,
   reviewFromParse,
   usageFromGoogle,
   ASK_MAX_OUTPUT_TOKENS,
@@ -31,15 +30,7 @@ const BLOCKED_FINISH_REASONS = new Set([
 ]);
 
 function isRetryable(err: unknown): boolean {
-  const errStr = String(err);
-  return (
-    errStr.includes('429') ||
-    errStr.includes('500') ||
-    errStr.includes('502') ||
-    errStr.includes('503') ||
-    errStr.includes('504') ||
-    errStr.includes('RESOURCE_EXHAUSTED')
-  );
+  return err instanceof ApiError ? isRetryableStatus(err.status) : isRetryableConnectionError(err);
 }
 
 export class GoogleAdapter implements ReviewAdapter {
@@ -62,121 +53,91 @@ export class GoogleAdapter implements ReviewAdapter {
     options: AdapterOptions
   ): Promise<ModelReview> {
     const start = Date.now();
-    const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
-    const unlinkAbort = linkAbortSignal(controller, options.signal);
-
-    let lastErr: unknown = new Error('no attempts made');
+    let adapterAttempts = 0;
     const modelId = stripKnownProviderPrefix(model);
 
-    try {
-      for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
-        try {
-          const response = await this.client.models.generateContent({
-            model: modelId,
-            contents: [
-              {
-                role: 'user',
-                parts: [{ text: userPrompt }],
-              },
-            ],
-            config: {
-              systemInstruction: systemPrompt,
-              responseMimeType: 'application/json',
-              maxOutputTokens: 65536,
-              abortSignal: controller.signal,
-              // Same buffer as the other adapters: keep the SDK's own
-              // request timeout above ours so the AbortController stays
-              // the sole owner of timeout classification.
-              httpOptions: { timeout: options.timeoutMs + 30_000 },
+    const outcome = await attemptWithRetries<ModelReview>({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      signal: options.signal,
+      isRetryable,
+      attempt: async (signal) => {
+        adapterAttempts++;
+        const response = await this.client.models.generateContent({
+          model: modelId,
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: userPrompt }],
             },
-          });
-          const usage = usageFromGoogle(response.usageMetadata);
+          ],
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: 'application/json',
+            maxOutputTokens: 65536,
+            abortSignal: signal,
+            // Same buffer as the other adapters: keep the SDK's own
+            // request timeout above ours so the AbortController stays
+            // the sole owner of timeout classification.
+            httpOptions: { timeout: options.timeoutMs + 30_000 },
+          },
+        });
+        const usage = usageFromGoogle(response.usageMetadata);
 
-          const finishReason = response.candidates?.[0]?.finishReason;
-          if (finishReason === 'MAX_TOKENS') {
-            return failedReview({
-              model,
-              role,
-              provider: 'google',
-              startedAt: start,
-              usage,
-              error: 'Response truncated at maxOutputTokens; findings would be incomplete',
-            });
-          }
-
-          // Gemini blocks in-band too: a safety stop yields a candidate with
-          // no usable text rather than an API error.
-          if (finishReason !== undefined && BLOCKED_FINISH_REASONS.has(finishReason)) {
-            return failedReview({
-              model,
-              role,
-              provider: 'google',
-              startedAt: start,
-              usage,
-              error: `Model refused this review (${finishReason}) — the diff was not reviewed`,
-            });
-          }
-
-          const rawOutput = response.text ?? '';
-          if (isBlankOutput(rawOutput)) {
-            return failedReview({
-              model,
-              role,
-              provider: 'google',
-              startedAt: start,
-              usage,
-              error: 'Model returned an empty response; the diff was not reviewed',
-            });
-          }
-
-          const parsed = parseReviewOutput(rawOutput, model, role);
-          for (const w of parsed.warnings) console.warn(w);
-
-          return reviewFromParse({
+        const finishReason = response.candidates?.[0]?.finishReason;
+        if (finishReason === 'MAX_TOKENS') {
+          return failedReview({
             model,
             role,
             provider: 'google',
             startedAt: start,
-            parsed,
             usage,
+            error: 'Response truncated at maxOutputTokens; findings would be incomplete',
           });
-        } catch (err) {
-          lastErr = err;
-          if (controller.signal.aborted) {
-            return {
-              model,
-              role,
-              provider: 'google',
-              findings: [],
-              durationMs: Date.now() - start,
-              status: 'timeout',
-              error: 'Request timed out',
-            };
-          }
-
-          if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
-            await sleep(retryDelay(attempt));
-            continue;
-          }
-          break;
         }
-      }
-    } finally {
-      clearTimeout(timeoutHandle);
-      unlinkAbort();
-    }
 
-    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
-    return {
-      model,
-      role,
-      provider: 'google',
-      findings: [],
-      durationMs: Date.now() - start,
-      status: 'error',
-      error: errMsg,
-    };
+        // Gemini blocks in-band too: a safety stop yields a candidate with
+        // no usable text rather than an API error.
+        if (finishReason !== undefined && BLOCKED_FINISH_REASONS.has(finishReason)) {
+          return failedReview({
+            model,
+            role,
+            provider: 'google',
+            startedAt: start,
+            usage,
+            error: `Model refused this review (${finishReason}) — the diff was not reviewed`,
+          });
+        }
+
+        const rawOutput = response.text ?? '';
+        if (isBlankOutput(rawOutput)) {
+          return failedReview({
+            model,
+            role,
+            provider: 'google',
+            startedAt: start,
+            usage,
+            error: 'Model returned an empty response; the diff was not reviewed',
+          });
+        }
+
+        const parsed = parseReviewOutput(rawOutput, model, role);
+        for (const w of parsed.warnings) console.warn(w);
+
+        return reviewFromParse({
+          model,
+          role,
+          provider: 'google',
+          startedAt: start,
+          parsed,
+          usage,
+        });
+      },
+    });
+    return outcome.ok
+      ? { ...outcome.value, adapterAttempts }
+      : { ...failedReview({ model, role, provider: 'google', startedAt: start,
+          status: outcome.timedOut ? 'timeout' : 'error', error: outcome.error }), adapterAttempts };
   }
 
   async ask(
@@ -188,12 +149,14 @@ export class GoogleAdapter implements ReviewAdapter {
     const start = Date.now();
     const modelId = stripKnownProviderPrefix(model);
 
+    let adapterAttempts = 0;
     const outcome = await attemptWithRetries({
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries ?? 3,
       signal: options.signal,
       isRetryable,
       attempt: async (signal) => {
+        adapterAttempts++;
         const response = await this.client.models.generateContent({
           model: modelId,
           contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
@@ -218,12 +181,13 @@ export class GoogleAdapter implements ReviewAdapter {
 
     const durationMs = Date.now() - start;
     return outcome.ok
-      ? { model, provider: 'google', text: outcome.value, durationMs, status: 'success' }
+      ? { model, provider: 'google', text: outcome.value, durationMs, adapterAttempts, status: 'success' }
       : {
           model,
           provider: 'google',
           text: '',
           durationMs,
+          adapterAttempts,
           status: outcome.timedOut ? 'timeout' : 'error',
           error: outcome.error,
         };

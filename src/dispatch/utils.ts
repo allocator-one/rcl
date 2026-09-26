@@ -277,6 +277,56 @@ export function isRetryableStatus(status: number | undefined): boolean {
   return status !== undefined && RETRYABLE_STATUSES.has(status);
 }
 
+const TRANSIENT_CONNECTION_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+
+/**
+ * Recognize bounded transport causes without guessing from error prose. An
+ * SDK connection-error class may omit its cause; arbitrary errors may not.
+ * Unknown coded causes (including TLS, DNS configuration and invalid URLs),
+ * aborts, cycles and over-depth chains remain terminal.
+ */
+export function isRetryableConnectionError(error: unknown, knownConnectionError = false): boolean {
+  const seen = new Set<object>();
+  const pending: Array<{ error: unknown; depth: number; transient: boolean }> = [{ error, depth: 0, transient: false }];
+  let hasTransientBranch = false;
+  let knownConnectionRoot = false;
+  let inspected = 0;
+
+  while (pending.length > 0) {
+    const { error: current, depth, transient: branchTransient } = pending.pop()!;
+    if (depth >= 8 || ++inspected > 32) return false;
+    if (current === null || typeof current !== 'object' || seen.has(current)) return false;
+    seen.add(current);
+    const cause = current as { name?: unknown; code?: unknown; status?: unknown; cause?: unknown };
+    if (cause.name === 'AbortError' || cause.name === 'APIUserAbortError' || cause.status !== undefined) return false;
+    let transient = branchTransient;
+    if (cause.code !== undefined) {
+      if (typeof cause.code !== 'string' || !TRANSIENT_CONNECTION_CODES.has(cause.code)) return false;
+      transient = true;
+    }
+    const children: unknown[] = [];
+    if (current instanceof AggregateError) {
+      const members = current.errors;
+      if (!Array.isArray(members)) return false;
+      const count = members.length;
+      if (count > 32 - inspected - pending.length - Number(cause.cause !== undefined)) return false;
+      for (let index = 0; index < count; index += 1) children.push(members[index]);
+    }
+    if (cause.cause !== undefined) children.push(cause.cause);
+    if (children.length === 0) {
+      if (!transient && !(knownConnectionError && seen.size === 1)) return false;
+      hasTransientBranch ||= transient;
+      knownConnectionRoot ||= knownConnectionError && depth === 0;
+      continue;
+    }
+    for (const child of children) pending.push({ error: child, depth: depth + 1, transient });
+  }
+  return hasTransientBranch || knownConnectionRoot;
+}
+
 export function retryDelay(attempt: number): number {
   return RETRY_DELAYS[attempt] ?? RETRY_DELAYS[RETRY_DELAYS.length - 1]!;
 }
@@ -335,7 +385,7 @@ export type AttemptOutcome<T> =
   | { ok: false; timedOut: boolean; error: string };
 
 /**
- * Shared timeout-owning retry skeleton for one-off adapter calls (discuss).
+ * Shared timeout-owning retry skeleton for review and one-off adapter calls.
  * The AbortController is the sole owner of timeout classification — the
  * caller's SDK timeout must be set above `timeoutMs` (same convention as the
  * review paths).
@@ -370,6 +420,11 @@ export async function attemptWithRetries<T>(opts: {
     clearTimeout(timeoutHandle);
     unlinkAbort();
     return abortOutcome();
+  }
+  if (opts.timeoutMs <= 0) {
+    clearTimeout(timeoutHandle);
+    unlinkAbort();
+    return { ok: false, timedOut: true, error: 'Request timed out' };
   }
 
   try {

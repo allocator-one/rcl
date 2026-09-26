@@ -1091,6 +1091,16 @@ spec: SPEC.md
 # githubToken: ghp_...
 ```
 
+`maxRetries` limits additional adapter SDK invocations after the first attempt;
+all attempts share the call's `timeout` and parent cancellation signal. Supported
+transient connection failures and HTTP status errors may retry; cancellation,
+expired deadlines, permanent TLS/configuration errors and unusable output do not.
+Report reviews and `ask` results expose `adapterAttempts` when observed. Chunk
+reports sum it only when every part has a known count. It is neither a wire-request
+count nor a billing total: lower-level activity and charges after ambiguous
+transport failures can be unknown. Token usage remains what the SDK response
+exposes, not proof of total charges across retries.
+
 Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`. Executable JS config is never discovered: rcl often runs in untrusted checkouts with provider keys in the environment.
 
 Verifier calls default to the remaining whole-pass budget. Set the optional

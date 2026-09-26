@@ -39,6 +39,15 @@ describe('mergeChunkReviews', () => {
     expect(merged[0]!.durationMs).toBe(20);
   });
 
+  it('sums observed SDK attempts only when every chunk supplies a valid count', () => {
+    const [complete] = mergeChunkReviews([review({ adapterAttempts: 2 }), review({ adapterAttempts: 3, status: 'error' })]);
+    expect(complete!.adapterAttempts).toBe(5);
+    for (const missing of [undefined, -1, NaN]) {
+      const [unknown] = mergeChunkReviews([review({ adapterAttempts: 2 }), review({ adapterAttempts: missing })]);
+      expect(unknown!.adapterAttempts).toBeUndefined();
+    }
+  });
+
   it('keeps distinct reviewers separate', () => {
     const merged = mergeChunkReviews([
       review({ model: 'm1', role: 'general', findings: [finding('a')] }),
