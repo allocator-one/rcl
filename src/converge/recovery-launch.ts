@@ -585,7 +585,9 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     if (launch.status === "completed" && !priorTerminal) fail("resume_terminal_missing");
     const priorState = await readJournal.read();
     const budget = remainingRecoveryBudget(operation, (options.nowMs ?? Date.now)());
-    const beforeIntents = recoveryAttemptsFromCheckpoint(priorState).length;
+    const beforeIntents = stableStringify(priorState.records.filter(record => record.type === "intent"));
+    const beforeVerifierIntents = budget.remainingMs === 0
+      ? stableStringify((await readJournal.readVerification())?.intents ?? []) : undefined;
 
     const finish = async (journal: CheckpointJournal) => {
       const completed = await loadReviewerLineage({ commonDir: options.gitCommonDir, target: options.target, runId: options.successorRunId });
@@ -595,7 +597,10 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
         completed.runs.slice(0, -1).some((entry, index) => entry.terminal.reportSha256 !== lineage.runs[index]!.terminal.reportSha256 ||
           entry.proof.digest !== lineage.runs[index]!.proof.digest)) fail("resume_terminal_mismatch");
       await assertSuccessorAttempts(source, journal, operation);
-      if (budget.remainingMs === 0 && recoveryAttemptsFromCheckpoint(await journal.read()).length !== beforeIntents) fail("resume_expired_dispatch");
+      if (budget.remainingMs === 0 && (
+        stableStringify((await journal.read()).records.filter(record => record.type === "intent")) !== beforeIntents ||
+        stableStringify((await journal.readVerification())?.intents ?? []) !== beforeVerifierIntents
+      )) fail("resume_expired_dispatch");
       const health = final.artifact.health;
       return { reportJsonSha256: terminal.reportSha256, successfulReviews: health.successfulSeats.length,
         totalReviews: health.policy.seatCount,
@@ -607,7 +612,11 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
       return { kind: "resumed", claim, operation, reusedTerminal: true };
     }
 
-    if (!priorTerminal) await options.beforeResume?.(Object.freeze({ operation, operationBytes: bindings.operation! }));
+    // Expired work may seal/reconstruct its local terminal without a live
+    // credential. It cannot authorize new reviewer or verifier dispatch.
+    if (!priorTerminal && budget.remainingMs > 0) {
+      await options.beforeResume?.(Object.freeze({ operation, operationBytes: bindings.operation! }));
+    }
     state.lastLaunch = { ...launch, status: "pending", recovery: { ...recovery, resume: { pid: process.pid, phase: "running" } } };
     state.updatedAt = new Date().toISOString();
     await writeState(options.gitCommonDir, state, ownership);

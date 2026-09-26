@@ -19,6 +19,7 @@ import {
   createOriginalLaunch,
   encodeOriginalLaunch,
 } from "../../src/dispatch/original-launch.js";
+import { executeCheckpointGating } from "../../src/dispatch/checkpoint-gating-execution.js";
 import { captureAggregationInputs } from "../../src/report/aggregation-inputs.js";
 import { captureSupplementalAsync } from "../../src/report/supplemental-async.js";
 import { projectCheckpointReport } from "../../src/report/checkpoint-projection.js";
@@ -353,7 +354,7 @@ async function sealSuccessor(
   fixture: Fixture,
   value: any,
   actions: readonly Action[],
-  options: { intentsFirst?: boolean } = {},
+  options: { intentsFirst?: boolean; verify?: (assembly: any) => Promise<{ bytes: string; digest: string } | undefined> } = {},
 ) {
   const source = inspectReviewerArtifact(
     fixture.sourceTerminal.reviewerArtifactBytes,
@@ -414,7 +415,8 @@ async function sealSuccessor(
     }),
     run,
   };
-  const report = await assembleCheckpointReview(assembly);
+  const verificationProof = await options.verify?.(assembly);
+  const report = await assembleCheckpointReview(assembly, { verificationProof });
   const reportBytes = JSON.stringify(sanitizeForDelivery(report.report));
   await value.journal.retainTerminalReport(
     {
@@ -423,6 +425,7 @@ async function sealSuccessor(
         assembly,
         reportBytes,
         representation: { version: 1, parseFailures: false },
+        ...(verificationProof ? { verificationProof } : {}),
       }).bytes,
     },
     value.ownership,
@@ -513,7 +516,9 @@ describe('retained reviewer recovery coordinator', () => {
     })).rejects.toThrow('crash_after_durable_result');
     const spent = await state(fixture), prior = await runState(fixture);
     options.called.mockClear();
+    options.preflight.mockClear(); options.preflight.mockRejectedValue(new Error('expired_credential_no_remote_access'));
     const resumed = await resumeReviewerRecovery({ ...options.input, nowMs: () => options.input.expiresAtMs + 1 });
+    expect(options.preflight).not.toHaveBeenCalled();
     expect(resumed.health.conclusive).toBe(true);
     expect(options.called).not.toHaveBeenCalled();
     expect(await state(fixture)).toEqual(spent);
@@ -1024,5 +1029,80 @@ describe('operation-bound successor preflight', () => {
     expect(replay.terminal).toEqual(first.terminal); expect(replay.reusedTerminal).toBe(true);
     expect(options.preflight).not.toHaveBeenCalled(); expect(options.called).not.toHaveBeenCalled();
     expect(await runState(fixture)).toEqual(native); expect(await state(fixture)).toEqual(spent);
+  });
+});
+
+
+describe('expired local-only retained finalization', () => {
+  it.each(['uncertain reviewer', 'sealed reviewers missing verifier'] as const)('finishes %s without credential renewal, calls or budget changes', async kind => {
+    const fixture = await sealed(1, 'timeout', 3, kind === 'sealed reviewers missing verifier'
+      ? { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' } : {});
+    const options = coordinator(fixture);
+    const value: any = opts(fixture, { startedAtMs: options.input.startedAtMs, expiresAtMs: options.input.expiresAtMs, nowMs: () => options.input.startedAtMs + 1 });
+    value.run = async (context: any) => {
+      const attempt = { id: 'spent-before-interruption', kind: 'paid' as const };
+      await context.journal.recordIntent('s1:0', attempt, context.ownership);
+      if (kind === 'sealed reviewers missing verifier') {
+        await context.journal.recordResult('s1:0', attempt, { kind: 'success', chunk: 0,
+          reviewBytes: JSON.stringify(review(1, 'success')) }, context.ownership);
+        await context.journal.finalize(context.ownership);
+      }
+      throw new Error('interrupted_before_terminal');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted_before_terminal');
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
+    const bindings = await journal.readBindings(), before = await journal.read(), spent = await state(fixture), native = await runState(fixture);
+    const factory = vi.fn(() => { throw new Error('local_finalize_must_not_create_adapter'); });
+    options.preflight.mockRejectedValue(new Error('expired_credential_no_remote_access'));
+    const input = { ...options.input, nowMs: () => value.expiresAtMs + 1, adapterFactory: factory };
+    // Expiry must not bypass exact saved source/head authority checks.
+    await expect(resumeReviewerRecovery({ ...input, currentHeadSha: 'd'.repeat(40) })).rejects.toThrow('input_mismatch');
+    const resumed = await resumeReviewerRecovery(input);
+    expect(options.preflight).not.toHaveBeenCalled(); expect(factory).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent);
+    expect((await runState(fixture))!.lastLaunch).toMatchObject({ pid: native!.lastLaunch!.pid, attempt: 2, round: 1, status: 'completed' });
+    expect(resumed.operation).toMatchObject({ startedAtMs: value.startedAtMs, expiresAtMs: value.expiresAtMs, maxAdditionalCalls: 1, maxAttemptsPerCell: 2 });
+    expect(await journal.readBindings()).toEqual(bindings);
+    expect((await journal.read()).records.filter(record => record.type === 'intent')).toEqual(before.records.filter(record => record.type === 'intent'));
+    expect(JSON.parse(resumed.terminal.reportBytes).findings[0]).toMatchObject({ id: 'f' });
+    expect(resumed.gate.reportedCiExitCode).toBe(1);
+    if (kind === 'sealed reviewers missing verifier') {
+      expect(await journal.readVerification()).toMatchObject({ intents: [], terminal: { status: 'failed', reason: 'verification_execution_deadline' } });
+      expect(resumed.health.conclusive).toBe(true);
+    } else {
+      expect(await journal.readVerification()).toBeUndefined(); expect((await journal.read()).uncertain).toHaveLength(1);
+      expect(resumed.health.conclusive).toBe(false);
+    }
+    const terminal = await journal.readTerminalReport(), afterNative = await runState(fixture);
+    const replay = await resumeReviewerRecovery(input);
+    expect(replay.reusedTerminal).toBe(true); expect(replay.terminal).toEqual(terminal);
+    expect(await runState(fixture)).toEqual(afterNative); expect(await state(fixture)).toEqual(spent);
+    expect(options.preflight).not.toHaveBeenCalled(); expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('refuses a callback adding a genuine verifier intent after the saved deadline', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' });
+    const value: any = opts(fixture);
+    value.run = async (context: any) => {
+      const attempt = { id: 'reviewer-before-crash', kind: 'paid' as const };
+      await context.journal.recordIntent('s1:0', attempt, context.ownership);
+      await context.journal.recordResult('s1:0', attempt, { kind: 'success', chunk: 0, reviewBytes: JSON.stringify(review(1, 'success')) }, context.ownership);
+      throw new Error('interrupted');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const spent = await state(fixture), ask = vi.fn(async () => ({ model: 'openai/verifier', provider: 'openai', status: 'success' as const,
+      durationMs: 1, text: '[{"id":"F1","verdict":"confirmed"}]' }));
+    // The callback deliberately lies about its clock. Genuine structural phase
+    // bytes must not override the outer guard's observed expired operation.
+    const run = async (context: any) => {
+      await sealSuccessor(fixture, context, [], { verify: async assembly => {
+        const gated = await executeCheckpointGating({ assembly, commonDir: fixture.dir, ownership: context.ownership,
+          journal: context.journal, askFactory: () => ask, beforeLaunch: async () => {}, onLateAuditError: () => {}, nowMs: () => clock + 3 });
+        return gated.verificationProof;
+      } });
+    };
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), nowMs: () => clock + 600_000, run })).rejects.toThrow('resume_expired_dispatch');
+    expect(ask).toHaveBeenCalledOnce(); expect(await state(fixture)).toEqual(spent);
+    expect((await runState(fixture))!.lastLaunch!.status).toBe('failed');
   });
 });
