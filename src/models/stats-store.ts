@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js';
@@ -287,13 +287,30 @@ async function preparedDirectory(target: string, strictPath: boolean): Promise<s
   return dir;
 }
 
+// Legacy callers may use a directory alias. Resolve its existing prefix before
+// naming the intent so legacy and retained writers share one canonical target.
+async function legacyCreationTarget(inputDir: string): Promise<string> {
+  const missing: string[] = [];
+  for (let path = resolve(inputDir); ; path = dirname(path)) {
+    try {
+      const canonical = await realpath(path);
+      if (!(await lstat(canonical)).isDirectory()) throw new Error('unsafe_precision_store');
+      return join(canonical, ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (dirname(path) === path) throw new Error('durable_precision_anchor_required');
+      missing.push(basename(path));
+    }
+  }
+}
+
 /**
  * Current-version writers publish a durable intent before mkdir. Cooperating
  * writers discover it from the target's ancestors and repair its bounded chain
  * before acknowledgement; genuinely pre-existing directories have no intent.
  */
 async function prepareDirectory(inputDir: string, strictPath: boolean): Promise<string> {
-  const target = resolve(inputDir);
+  const target = strictPath ? resolve(inputDir) : await legacyCreationTarget(inputDir);
   let discovered = await discoverIntent(target);
   if (!discovered) {
     await retainedProtocolTestEvent('intent-discovery-miss', target);

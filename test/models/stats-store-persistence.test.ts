@@ -72,6 +72,27 @@ const records = async (file: string) => (await readFile(join(dir, file), 'utf8')
   try { return [JSON.parse(line)]; } catch { return []; }
 });
 
+it('preserves legacy creation through a symlinked ancestor', async () => {
+  const real = join(dir, 'real');
+  const alias = join(dir, 'alias');
+  await mkdir(real);
+  await symlink(real, alias, 'dir');
+  const { recordId: _recordId, ...legacy } = call('unused');
+  await appendCalls([legacy], join(alias, 'nested', 'history'));
+  const saved = await readFile(join(real, 'nested', 'history', 'calls.jsonl'), 'utf8');
+  expect(JSON.parse(saved)).toEqual(legacy);
+});
+
+it('preserves legacy writes through an existing directory symlink', async () => {
+  const real = join(dir, 'real');
+  const alias = join(dir, 'alias');
+  await mkdir(real);
+  await symlink(real, alias, 'dir');
+  const { recordId: _recordId, ...legacy } = call('unused');
+  await appendCalls([legacy], alias);
+  expect(JSON.parse(await readFile(join(real, 'calls.jsonl'), 'utf8'))).toEqual(legacy);
+});
+
 type ProtocolEvent = { type: 'rcl-stats-store-protocol'; event: string; path?: string };
 type ProtocolChild = { child: ChildProcess; events: ProtocolEvent[]; stderr: () => string };
 
@@ -356,9 +377,12 @@ it('rechecks a target that appears after discovery and blocks acknowledgement un
   expect((await records('nested/middle/store/calls.jsonl')).map(row => row.recordId)).toEqual(['race:0']);
 }, 20_000);
 
-it('repairs a current-version legacy creator crash before retained acknowledgement', async () => {
+it.each([false, true])('repairs a legacy creator crash before retained acknowledgement (alias: %s)', async aliasCreator => {
   const nested = join(dir, 'nested', 'middle', 'store');
-  const legacy = protocolChild(nested, 'legacy-race:0', 'target-visible', true);
+  const alias = join(dir, 'alias');
+  if (aliasCreator) await symlink(dir, alias, 'dir');
+  const legacyPath = aliasCreator ? join(alias, 'nested', 'middle', 'store') : nested;
+  const legacy = protocolChild(legacyPath, 'legacy-race:0', 'target-visible', true);
   await protocolEvent(legacy, 'target-visible');
   expect(legacy.events.map(event => event.event)).not.toContain('acknowledged');
 
