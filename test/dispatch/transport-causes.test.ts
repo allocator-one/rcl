@@ -26,4 +26,14 @@ describe('bounded transport cause classification', () => {
   it('lets a permanent inner cause veto a transient outer code', () => {
     expect(isRetryableConnectionError(Object.assign(coded('ECONNRESET'), { cause: coded('CERT_HAS_EXPIRED') }), true)).toBe(false);
   });
+
+  it('recognizes transient errors in a bounded AggregateError', () => {
+    const aggregate = new AggregateError([coded('ETIMEDOUT'), coded('UND_ERR_SOCKET')], 'connection failures');
+    expect(isRetryableConnectionError(new Error('SDK wrapper', { cause: aggregate }), true)).toBe(true);
+  });
+
+  it('lets a permanent AggregateError member veto transient errors', () => {
+    const aggregate = new AggregateError([coded('ETIMEDOUT'), coded('CERT_HAS_EXPIRED')], 'connection failures');
+    expect(isRetryableConnectionError(new Error('SDK wrapper', { cause: aggregate }), true)).toBe(false);
+  });
 });

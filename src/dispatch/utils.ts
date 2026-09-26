@@ -290,9 +290,14 @@ const TRANSIENT_CONNECTION_CODES = new Set([
  */
 export function isRetryableConnectionError(error: unknown, knownConnectionError = false): boolean {
   const seen = new Set<object>();
-  let current = error;
+  const pending: Array<{ error: unknown; depth: number }> = [{ error, depth: 0 }];
   let transient = false;
-  for (let depth = 0; depth < 8; depth++) {
+  let knownConnectionRoot = false;
+  let inspected = 0;
+
+  while (pending.length > 0) {
+    const { error: current, depth } = pending.pop()!;
+    if (depth >= 8 || ++inspected > 32) return false;
     if (current === null || typeof current !== 'object' || seen.has(current)) return false;
     seen.add(current);
     const cause = current as { name?: unknown; code?: unknown; status?: unknown; cause?: unknown };
@@ -301,10 +306,17 @@ export function isRetryableConnectionError(error: unknown, knownConnectionError 
       if (typeof cause.code !== 'string' || !TRANSIENT_CONNECTION_CODES.has(cause.code)) return false;
       transient = true;
     }
-    if (cause.cause === undefined) return transient || (knownConnectionError && seen.size === 1);
-    current = cause.cause;
+    const children: unknown[] = [];
+    if (current instanceof AggregateError) children.push(...current.errors);
+    if (cause.cause !== undefined) children.push(cause.cause);
+    if (children.length === 0) {
+      if (!transient && !(knownConnectionError && seen.size === 1)) return false;
+      knownConnectionRoot ||= knownConnectionError && seen.size === 1;
+      continue;
+    }
+    for (const child of children) pending.push({ error: child, depth: depth + 1 });
   }
-  return false;
+  return transient || knownConnectionRoot;
 }
 
 export function retryDelay(attempt: number): number {
