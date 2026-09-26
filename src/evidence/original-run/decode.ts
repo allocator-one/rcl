@@ -14,6 +14,7 @@ export interface ControlProseTransformation extends ProseTransformation {
 export type OriginalProseTransformation = ProseTransformation | ControlProseTransformation;
 export type OriginalProseMode = 'control-code-units-v1';
 export interface DecodeOriginalReportOptions { originalProse?: OriginalProseMode; exactNumbers?: boolean }
+export const MAX_JSON_DEPTH = 64;
 export const findingProsePath = /^(?:\/(?:findings|belowThresholdFindings)\/\d+|\/reviews\/\d+\/findings\/\d+)\/(?:title|description|suggestedFix)$/;
 const pointer = (parts: string[]) => '/' + parts.map(p => p.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
 const scalarToken = /(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/y;
@@ -126,7 +127,7 @@ function decodeJSON(text:string,options:DecodeOriginalReportOptions,preserveStri
     return result;
   }
   function value(path: string[], depth: number): unknown {
-    if (depth > 64) throw new Error('original_json_too_deep');
+    if (depth > MAX_JSON_DEPTH) throw new Error('original_json_too_deep');
     whitespace();
     if (text[at] === '"') return string(path);
     if (text[at] === '{') {

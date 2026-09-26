@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { decodeRecoveryDocument } from '../../original-run/decode.js';
+import { decodeRecoveryDocument,MAX_JSON_DEPTH } from '../../original-run/decode.js';
 export interface RecoveryMaterial {
   sha256: string;
   text: string;
@@ -36,6 +36,11 @@ type Node=[
   4,
   string
 ];
+interface EncodedNode {
+  node: Node;
+  decodeDepth: number;
+  documentDepth: number;
+}
 /** Lossless tagged encoding; original object keys cannot masquerade as references.
  * Large strings (including original JSON) are retained once by their raw digest. */
 export function packRecoveryMaterial(value: unknown): {
@@ -46,6 +51,12 @@ export function packRecoveryMaterial(value: unknown): {
   let nodes=0;
   const rows=new Map<string,string>();
   let bytes=0;
+  let expanded=0;
+  const seenStrings=new Set<string>();
+  const expand=(amount: number): void => {
+    expanded+=amount;
+    requireMaterial(expanded<=MAX_BYTES);
+  };
   const retain=(text: string): string => {
     const sha=digest(text); if(!rows.has(sha)) {
       bytes+=Buffer.byteLength(text);
@@ -53,41 +64,62 @@ export function packRecoveryMaterial(value: unknown): {
       rows.set(sha,text);
     } return sha;
   };
-  const encode=(v: unknown,depth: number): {node: Node; decodeDepth: number} => {
+  const encode=(v: unknown,depth: number): EncodedNode => {
     requireMaterial(depth<=128&&++nodes<=MAX_NODES);
-    if(typeof v==='string'&&Buffer.byteLength(v)>1024&&!/[\uD800-\uDFFF]/u.test(v))
-      return {node: [3,retain(v)],decodeDepth: 0};
+    if(typeof v==='string'&&Buffer.byteLength(v)>1024&&!/[\uD800-\uDFFF]/u.test(v)) {
+      const sha=retain(v);
+      if(!seenStrings.has(sha)) {
+        expand(Buffer.byteLength(v));
+        seenStrings.add(sha);
+      }
+      return {node: [3,sha],decodeDepth: 0,documentDepth: 1};
+    }
+    const reference=(encoded: EncodedNode,text=JSON.stringify(encoded.node)): EncodedNode => {
+      // A reference adds one reader level before the retained subtree root.
+      requireMaterial(++nodes<=MAX_NODES);
+      return { node: [4,retain(text)],decodeDepth: encoded.decodeDepth+1,documentDepth: 1 };
+    };
     let node: Node;
     let decodeDepth=0;
-    const child=(value: unknown): Node => {
-      const encoded=encode(value,depth+1);
+    let documentDepth=1;
+    const child=(value: unknown,containerDepth: number): Node => {
+      let encoded=encode(value,depth+1);
+      if(encoded.documentDepth+containerDepth>MAX_JSON_DEPTH)
+        encoded=reference(encoded);
       decodeDepth=Math.max(decodeDepth,encoded.decodeDepth+1);
+      documentDepth=Math.max(documentDepth,encoded.documentDepth+containerDepth);
       return encoded.node;
     };
     if(v===null||typeof v==='boolean'||typeof v==='number'||typeof v==='string') {
       requireMaterial(typeof v!=='number'||(Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER));
       node=[0,v];
+      expand(Buffer.byteLength(JSON.stringify(v)));
     }
     else {
       requireMaterial(typeof v==='object'&&v!==null&&!active.has(v as object));
       active.add(v as object);
-      if(Array.isArray(v))
-        node=[1,v.map(x => child(x===undefined? null:x))];
+      if(Array.isArray(v)) {
+        requireMaterial(v.length<=MAX_NODES-nodes);
+        node=[1,Array.from(v,x => child(x===undefined? null:x,2))];
+      }
       else {
         requireMaterial(Object.getPrototypeOf(v)===Object.prototype||Object.getPrototypeOf(v)===null);
-        node=[2,Object.entries(v as Record<string,unknown>).filter(([,x]) => x!==undefined).map(([k,x]) => [k,child(x)])];
+        node=[2,Object.entries(v as Record<string,unknown>).filter(([,x]) => x!==undefined).map(([k,x]) => {
+          expand(Buffer.byteLength(k));
+          return [k,child(x,3)];
+        })];
       }
       active.delete(v as object);
     }
     const text=JSON.stringify(node);
     if(Buffer.byteLength(text)>16384) {
-      // The reader visits both the reference and its retained subtree root.
-      requireMaterial(++nodes<=MAX_NODES);
-      node=[4,retain(text)];
-      decodeDepth++;
+      const referenced=reference({ node,decodeDepth,documentDepth },text);
+      node=referenced.node;
+      decodeDepth=referenced.decodeDepth;
+      documentDepth=referenced.documentDepth;
     }
     requireMaterial(decodeDepth<=MAX_DECODE_DEPTH);
-    return {node,decodeDepth};
+    return {node,decodeDepth,documentDepth};
   };
   const rootSha256=retain(JSON.stringify(encode(value,0).node));
   return { rootSha256,materials: [...rows].map(([sha256,text]) => ({ sha256,text })) };

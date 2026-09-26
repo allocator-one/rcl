@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readClaimProof,writeClaimProof } from '../../src/evidence/claim-recovery/proof-storage.js';
 import { packRecoveryMaterial,unpackRecoveryMaterial } from '../../src/evidence/claim-recovery/validation/materials.js';
+import { decodeRecoveryDocument } from '../../src/evidence/original-run/decode.js';
 import { sha } from './recovery-validation/fixtures.js';
 describe('immutable content-addressed recovery material',() => {
   it('retains exact repeated original strings once and reconstructs the full proof',() => {
@@ -24,6 +25,25 @@ describe('immutable content-addressed recovery material',() => {
       expect(packed.materials.some(row => row.text===value.high||row.text===value.low)).toBe(false);
       await writeClaimProof(join(dir,'proof.json'),join(dir,'pool'),value);
       expect(await readClaimProof(join(dir,'proof.json'),join(dir,'pool'))).toEqual(value);
+    } finally { await rm(dir,{ recursive:true,force:true }); }
+  });
+  it('factors deeply nested objects and arrays into parser-safe material for disk round trips',async () => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-material-depth-'));
+    let mixed: unknown='x'.repeat(2_048);
+    for(let depth=0;depth<100;depth++)
+      mixed=depth%2===0 ? { child: mixed } : [mixed];
+    let boundary: unknown='y'.repeat(2_048);
+    for(let depth=0;depth<128;depth++) boundary={ child: boundary };
+    try {
+      for(const [name,value] of [['mixed',mixed],['boundary',boundary]] as const) {
+        const packed=packRecoveryMaterial(value);
+        expect(packed.materials.length).toBeGreaterThan(1);
+        expect(() => packed.materials.filter(material => material.text.startsWith('[')).forEach(material => decodeRecoveryDocument(material.text))).not.toThrow();
+        expect(unpackRecoveryMaterial(packed.rootSha256,packed.materials)).toEqual(value);
+        const path=join(dir,`${name}.json`);
+        await writeClaimProof(path,join(dir,'pool'),value);
+        expect(await readClaimProof(path,join(dir,'pool'))).toEqual(value);
+      }
     } finally { await rm(dir,{ recursive:true,force:true }); }
   });
   it.each(['missing','mutated','duplicate','unknown-tag','forged-cycle'])('refuses %s referenced material',kind => {
@@ -93,6 +113,27 @@ it('bounds unique retained bytes without recursively copying a prior proof pool 
   expect(restored.previous).toEqual(first.materials);
   expect(restored.proofs).toHaveLength(80);
   expect(restored.proofs.every(p => p.report===original&&p.previous[0]?.sha256===first.materials[0]?.sha256)).toBe(true);
+});
+
+it('refuses inline scalar expansion that the reader cannot reconstruct', () => {
+  const group = Array(1_000).fill('x'.repeat(500));
+  const value = Array(140).fill(group);
+  expect(() => packRecoveryMaterial(value)).toThrow('recovery_material_conflict');
+});
+
+it('refuses repeated size-factored object keys that the reader cannot reconstruct', () => {
+  const key = 'k'.repeat(20_000);
+  const value = Array(3_400).fill({ [key]: null });
+  expect(() => packRecoveryMaterial(value)).toThrow('recovery_material_conflict');
+});
+
+it('normalizes array holes as null material values', () => {
+  const packed = packRecoveryMaterial(new Array(2));
+  expect(unpackRecoveryMaterial(packed.rootSha256, packed.materials)).toEqual([null, null]);
+});
+
+it('refuses oversized sparse arrays before allocating tagged child nodes', () => {
+  expect(() => packRecoveryMaterial(new Array(500_000))).toThrow('recovery_material_conflict');
 });
 
 it('refuses more unique retained materials than the reader can reconstruct', () => {
