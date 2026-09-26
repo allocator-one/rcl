@@ -116,7 +116,7 @@ describe('native guarded review launch', () => {
     await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
       findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
     const confirmDelivery = vi.fn().mockResolvedValue(true);
-    await expect(guardReviewLaunch({ ...options, confirmDelivery })).rejects.toThrow(/retry.*reason/i);
+    await expect(guardReviewLaunch({ ...options, confirmDelivery })).rejects.toThrow('retry_reason_required');
     expect(confirmDelivery).toHaveBeenCalled();
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
@@ -134,6 +134,20 @@ describe('native guarded review launch', () => {
 
     expect(confirmDelivery).toHaveBeenCalled();
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('does not use a prior receipt to reconcile a different head', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
+      deliveryPending: true, hardFailure: true });
+    await guardReviewLaunch(options);
+    const confirmDelivery = vi.fn().mockResolvedValue(true);
+
+    await guardReviewLaunch({ ...options, headSha: 'd'.repeat(40), confirmDelivery,
+      retryReason: 'A changed head requires a distinct bounded recovery.' });
+
+    expect(confirmDelivery).not.toHaveBeenCalled();
+    expect(options.run).toHaveBeenCalledTimes(2);
   });
 
   it('does not let old delivery metadata block a materially changed input after native admission', async () => {

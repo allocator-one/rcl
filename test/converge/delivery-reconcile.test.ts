@@ -43,4 +43,16 @@ describe('guarded delivery receipt', () => {
     expect(await verifyGuardedDelivery({ ...delivered, artifacts: [{ kind: 'report_json', declared_sha256: digest,
       stored: true }] }, identity, async () => bytes)).toBe(false);
   });
+
+  it('uses the stored matching report artifact for the byte receipt', async () => {
+    const bytes = Buffer.from('exact report');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const identity = { ...expected, reportJsonSha256: digest };
+    const delivered = { ...run(), artifacts: [
+      { kind: 'report_json', declared_sha256: 'c'.repeat(64), declared_bytes: 1, stored: false },
+      { kind: 'report_json', declared_sha256: digest, declared_bytes: bytes.length, stored: true },
+    ] };
+
+    expect(await verifyGuardedDelivery(delivered, identity, async () => bytes)).toBe(true);
+  });
 });

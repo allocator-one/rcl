@@ -27,7 +27,8 @@ export async function verifyGuardedDelivery(
   readReport: (runId: string, limit: number) => Promise<Buffer | null>
 ): Promise<boolean> {
   if (!matchesGuardedDelivery(run, expected)) return false;
-  const artifact = run!.artifacts!.find(item => item.kind === 'report_json');
+  const artifact = run!.artifacts!.find(item => item.kind === 'report_json' && item.stored === true &&
+    item.declared_sha256 === expected.reportJsonSha256);
   const bytes = artifact?.declared_bytes;
   if (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 25_000_000) return false;
   try {

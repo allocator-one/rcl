@@ -119,7 +119,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (!options.retryReason) refuse('dispatch_unknown', 'Previous dispatch is unknown; no automatic retry. Supply a bounded retry reason only after recovery.');
     return round;
   }
-  if (previous.deliveryPending && ((previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) ||
+  if (previous.deliveryPending && previous.headSha === options.headSha &&
+    ((previous.inputSha256 === options.inputSha256) ||
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     const delivered = previous.runId && previous.reportJsonSha256 && options.confirmDelivery
       ? await options.confirmDelivery(previous).catch(() => false) : false;
@@ -127,7 +128,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
       refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
     }
     if (!options.retryReason) {
-      refuse('infrastructure_failure', 'A received run needs an explicit bounded retry reason before another review.');
+      refuse('retry_reason_required', 'A received run needs an explicit bounded retry reason before another review.');
     }
   }
   const healthy = hasHealthyGuardedLaunch(previous);
