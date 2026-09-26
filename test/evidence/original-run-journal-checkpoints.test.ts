@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { openJournal } from '../../src/evidence/original-run/journal.js';
 
 const fault = vi.hoisted(() => ({ failures: 0, syncs: 0 }));
@@ -9,7 +9,7 @@ vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
     const handle = await fs.open(...args);
-    if (String(args[0]).endsWith('/00000001.json')) {
+    if (basename(String(args[0])) === '00000001.json') {
       const sync = handle.sync.bind(handle);
       handle.sync = async () => {
         fault.syncs++;
@@ -103,6 +103,14 @@ it('refuses a parseable checkpoint with no valid phase instead of treating it as
   const record = JSON.parse(await readFile(checkpoint, 'utf8'));
   record.phase = { native_verified: true };
   await writeFile(checkpoint, JSON.stringify(record));
+  await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('invalid_recovery_checkpoint');
+});
+
+it('refuses a non-object checkpoint with the journal validation error', async () => {
+  const file = await path();
+  const journal = await openJournal(file, manifest, operation, 'apply');
+  await journal.append('native_verified');
+  await writeFile(join(file, '00000001.json'), 'null');
   await expect(openJournal(file, manifest, operation, 'resume')).rejects.toThrow('invalid_recovery_checkpoint');
 });
 

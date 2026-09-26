@@ -98,6 +98,7 @@ export async function openJournal(path: string, manifestSha: string, operation: 
       torn.push({ file: name, sha256: snapshot.sha256 });
       previous = snapshot.sha256; continue;
     }
+    if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('invalid_recovery_checkpoint');
     if (record.operation_id !== operation || record.manifest_sha256 !== manifestSha || record.sequence !== sequence || record.previous_sha256 !== previous) throw new Error('recovery_journal_binding_conflict');
     if (typeof record.phase !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(record.phase) ||
         typeof record.recorded_at !== 'string' || !Number.isFinite(Date.parse(record.recorded_at)) ||
