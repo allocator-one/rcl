@@ -51,6 +51,11 @@ function scopedTarget(target: unknown, carrier: OccurrenceCarrierSelector): targ
     target.pr_number === carrier.scope.pr_number;
 }
 
+function sameRunSelection(a: OccurrenceRunSelector, b: OccurrenceRunSelector): boolean {
+  return isDeepStrictEqual({ ...a, scope: { ...a.scope, repo: a.scope.repo.toLowerCase() } },
+    { ...b, scope: { ...b.scope, repo: b.scope.repo.toLowerCase() } });
+}
+
 async function listRuns(sink: HarnessSink, carrier: OccurrenceCarrierSelector): Promise<ListedRun[]> {
   const rows: ListedRun[] = []; let total: number | undefined; let pages = 1;
   for (let page = 1; page <= Math.max(pages, 1); page++) {
@@ -180,7 +185,7 @@ export async function readCarrierInventory(sink: HarnessSink, carrier: Occurrenc
       views.push(view);
     }
     const own = views.find(view => view.source.selector.scope.run_id === carrier.scope.run_id)!.source.selector;
-    if (!isDeepStrictEqual(own, { scope: carrier.scope, target: carrier.target, round: carrier.round,
+    if (!sameRunSelection(own, { scope: carrier.scope, target: carrier.target, round: carrier.round,
       headSha: carrier.headSha, reportSha256: carrier.reportSha256 })) conflict('carrier_inventory_carrier_binding_conflict');
     for (const view of views) retainedBytes = await material(sink, view, retainedBytes);
     for (let index = 0; index < selected.length; index++) {
@@ -253,7 +258,7 @@ export async function readClaimTargetHistory(sink: HarnessSink, selection: Occur
       views.push(view);
     }
     const own = views.find(v => v.source.selector.scope.run_id === selection.scope.run_id)!;
-    if (!isDeepStrictEqual(own.source.selector, selection)) conflict('claim_history_source_binding_conflict');
+    if (!sameRunSelection(own.source.selector, selection)) conflict('claim_history_source_binding_conflict');
     const content: ClaimHistoryContent = { readWindow:{startedAt,completedAt:startedAt},actorUserId: actor, sources: [], histories: [] };
     for (const view of views) {
       const index = value(await readClaimEventIndex(sink, view.source.selector.scope, view.sequence));

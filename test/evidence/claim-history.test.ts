@@ -66,4 +66,32 @@ describe('complete pinned claim history',() => {
     });
     expect((await read(f)).kind).not.toBe('ok');
   });
+  it('refuses duplicate receipts in place of a complete indexed event batch', async () => {
+    const f = historyFixture(false);
+    const source = f.sources[0]!;
+    source.corrections = [{ ...source.classifications![0]!, id: uuid(1000), sequence: 2, kind: 'finding_identity_corrected', payload: {} }];
+    source.correctionIds = source.corrections.map(receipt => receipt.id);
+    expect((await read(f)).kind).toBe('ok');
+    let corruptedBatches = 0;
+    f.change((body, url) => {
+      if (url.searchParams.get('ids')) {
+        expect(url.searchParams.get('ids')!.split(',')).toHaveLength(2);
+        expect(body.data).toHaveLength(2);
+        body.data = [body.data[0], body.data[0]];
+        corruptedBatches++;
+      }
+      return body;
+    });
+    expect(await read(f)).toMatchObject({ kind: 'rejected', error: 'malformed_response' });
+    expect(corruptedBatches).toBe(1);
+  });
+
+  it('accepts a selected repository spelling that differs only in case from retained history', async () => {
+    const f = historyFixture(false); const selection = structuredClone(f.sources[0]!.selector);
+    selection.scope.repo = selection.scope.repo.toUpperCase();
+    const result = await readClaimTargetHistory(f.sink, selection, f.actor);
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw Error(JSON.stringify(result));
+    expect(claimHistoryContent(result.value).sources).toEqual(f.sources);
+  });
 });

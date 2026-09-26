@@ -78,6 +78,41 @@ describe('receipt-bound claim split preparation', () => {
       reportKey: 'fedcba9876543210', belowThreshold: true, gating: 'none' } });
   });
 
+  it('binds a marked mapping to its finding reference when report members share an identity', () => {
+    const selection = input(); const report = JSON.parse(selection.reportJson);
+    report.belowThresholdFindings[0].identity = report.findings[0].identity;
+    report.findings[0].claimDescriptor = fixtureDescriptor(report.findings[0]);
+    report.belowThresholdFindings[0].claimDescriptor = fixtureDescriptor(report.belowThresholdFindings[0]);
+    selection.reportJson = JSON.stringify(report);
+    const payload = selection.sourceReceipts[0]!.payload;
+    payload.classification_version = 1; payload.report_json_sha256 = sha(selection.reportJson);
+    payload.identities = [
+      { version: 1, finding_ref: 'f001', report_json_sha256: sha(selection.reportJson), identity_key: report.findings[0].identity,
+        matched_identity: selection.previousIdentity, status: 'suppressed', claim_descriptor: report.findings[0].claimDescriptor, match_rationale: 'exact_descriptor', pending_round: null },
+      { version: 1, finding_ref: 'f002', report_json_sha256: sha(selection.reportJson), identity_key: report.findings[0].identity,
+        matched_identity: selection.previousIdentity, status: 'suppressed', claim_descriptor: report.belowThresholdFindings[0].claimDescriptor, match_rationale: 'exact_descriptor', pending_round: null },
+    ];
+    expect(prepareClaimSplit(selection).source.findingRef).toBe('f001');
+  });
+
+  it('accepts GitHub repository casing differences while retaining the same repository binding', () => {
+    const selection = input(); const report = JSON.parse(selection.reportJson);
+    report.run.target.repo = 'Allocator-One/RCL'; selection.reportJson = JSON.stringify(report);
+    expect(prepareClaimSplit(selection).source.reportKey).toBe('abc123def4567890');
+  });
+
+  it.each(['version', 'missing-ref', 'out-of-range-ref', 'digest'])
+  ('refuses a %s conflict beside a usable unmarked identity mapping', change => {
+    const selection = input(); const rows = selection.sourceReceipts[0]!.payload.identities as Record<string, unknown>[];
+    const invalid: Record<string, unknown> = { ...rows[0], version: 1, finding_ref: 'f001', report_json_sha256: sha(selection.reportJson) };
+    if (change === 'version') invalid.version = 99;
+    if (change === 'missing-ref') delete invalid.finding_ref;
+    if (change === 'out-of-range-ref') invalid.finding_ref = 'f999';
+    if (change === 'digest') invalid.report_json_sha256 = '0'.repeat(64);
+    rows.push(invalid);
+    expect(() => prepareClaimSplit(selection)).toThrow(/claim_split/);
+  });
+
   it.each(['org', 'run', 'target', 'round', 'mapping', 'ambiguous', 'missing', 'duplicate', 'native-round', 'native-key', 'new-key-used', 'descriptor-scrub', 'reason-scrub'])
   ('refuses %s source conflicts before producing a replayable event', change => {
     const selection = input(); const receipt = selection.sourceReceipts[0]!;
@@ -224,6 +259,22 @@ describe('claim splits after an earlier native recovery', () => {
     }
     if (change === 'reserved-identity') next.identity = reserved;
     expect(() => prepareClaimSplit(next)).toThrow(/claim_split/);
+  });
+
+  it('refuses a recovered lineage that changes an existing predecessor finding', () => {
+    const { next } = recovered(); const native = JSON.parse(next.nativeJson);
+    native.findings[next.previousIdentity].title = 'changed after the retained snapshot';
+    next.nativeJson = JSON.stringify(native);
+    expect(() => prepareClaimSplit(next)).toThrow(/claim_split/);
+  });
+
+  it('preserves lineage when an existing finding receives a later verdict', () => {
+    const { next } = recovered(); const native = JSON.parse(next.nativeJson);
+    native.findings[next.previousIdentity].verdict = 'fixed';
+    native.findings[next.previousIdentity].verdictReason = 'Confirmed the fix against the retained review.';
+    native.findings[next.previousIdentity].verdictSeverity = native.findings[next.previousIdentity].severity;
+    next.nativeJson = JSON.stringify(native);
+    expect(prepareClaimSplit(next).source.previousIdentity).toBe(next.previousIdentity);
   });
 
   it('refuses an already-corrected occurrence selected with its original stale mapping', () => {

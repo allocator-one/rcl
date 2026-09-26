@@ -30,10 +30,13 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
       annotations.length > 0 && annotations.every(a => a.gating === 'none');
     if (!provenNonGating) pendingRound ??= entry.firstRound;
   }
-  const criticalAfterDismissal = entry.verdict === 'dismissed' && entry.verdictSeverity !== 'critical'
-    ? state.rounds.filter(r => r.round > (entry.verdictRound ?? 0) && r.severities?.[entry.key] === 'critical').map(r => r.round) : [];
+  const verdictSeverity = entry.verdictSeverity ?? entry.severity;
+  const criticalAfterDismissal = entry.verdict === 'dismissed' && verdictSeverity !== 'critical'
+    ? state.rounds.filter(r => r.round >= (entry.verdictRound ?? 0) && r.severities?.[entry.key] === 'critical').map(r => r.round) : [];
   if (criticalAfterDismissal.length > 0) pendingRound ??= Math.min(...criticalAfterDismissal);
   const regating = state.lastAnnotations?.identities.some(a => a.identity === entry.key && a.status === 'regating' && a.gating !== 'none');
-  if (regating && entry.verdictRound !== state.lastAnnotations!.round) pendingRound ??= state.lastAnnotations!.round;
+  if (regating && !verdictClearsPending(state, entry.key, state.lastAnnotations!.round, entry.verdictRound ?? 0, verdictSeverity)) {
+    pendingRound ??= state.lastAnnotations!.round;
+  }
   return pendingRound;
 }

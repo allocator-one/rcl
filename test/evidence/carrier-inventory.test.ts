@@ -49,6 +49,15 @@ function fixture(legacy = true) {
 async function read(f: ReturnType<typeof fixture>) { return readCarrierInventory(f.sink, f.projection.carrier, f.actor); }
 
 describe('authenticated carrier inventory', () => {
+  it('accepts a selected repository spelling that differs only in case from retained sources', async () => {
+    const f = fixture(false);
+    f.projection.carrier.scope.repo = f.projection.carrier.scope.repo.toUpperCase();
+    const result = await read(f);
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error(JSON.stringify(result));
+    expect(carrierInventoryContent(result.value).inventory.sources).toEqual(f.sources);
+  });
+
   it('reads the complete original prefix including empty and unmarked rounds through GET only', async () => {
     const f = fixture(); const result = await read(f); expect(result.kind).toBe('ok');
     if (result.kind !== 'ok') throw new Error(JSON.stringify(result));

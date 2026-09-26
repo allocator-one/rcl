@@ -47,6 +47,14 @@ describe('authenticated selected receipt verification', () => {
     expect(result).toMatchObject({ kind, reason });
   });
 
+  it('refuses duplicate returned receipts in place of a requested receipt', async () => {
+    const rows = [receipt(1), receipt(2)];
+    const result = await verifyAuthenticatedSelectedReceipts(sink([context(), {
+      data: [rows[0], rows[0]], meta: { org_id: selection.scope.org_id, run_id: selection.scope.run_id, claim_recovery_version: 1 },
+    }, context()]).client, uuid(3), [input(rows)]);
+    expect(result).toEqual({ kind: 'unknown', reason: 'selected_receipt_read_unavailable' });
+  });
+
   it.each([
     ['actor', context(9, uuid(4)), 'authenticated_actor_changed'],
     ['event sequence', context(10), 'source_event_sequence_changed'],

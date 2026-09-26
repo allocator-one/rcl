@@ -90,7 +90,8 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
   const run = report.run as Record<string, unknown>;
   requireEvidence(run.id === scope.run_id && object(run.target) && object(run.converge));
   const target = run.target as Record<string, unknown>; const converge = run.converge as Record<string, unknown>;
-  requireEvidence(['pr', 'patch'].includes(target.kind as string) && target.repo === scope.repo && target.pr_number === scope.pr_number &&
+  requireEvidence(['pr', 'patch'].includes(target.kind as string) && typeof target.repo === 'string' &&
+    target.repo.toLowerCase() === scope.repo.toLowerCase() && target.pr_number === scope.pr_number &&
     typeof target.head_sha === 'string' && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(target.head_sha) &&
     converge.target === input.target && positive(converge.round));
   const cycle = lineage?.state.cycle;
@@ -173,17 +174,27 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
         (member.pending_round === null || positive(member.pending_round) && member.pending_round <= round));
     }
   }
-  const mappings = (classification.payload.identities as unknown[]).filter(r => object(r) && r.identity_key === finding.identity);
-  requireEvidence(mappings.length > 0 && mappings.every(m => object(m) && identity(m.matched_identity) &&
+  const identityMappings = (classification.payload.identities as unknown[]).filter(r => object(r) && r.identity_key === finding.identity);
+  requireEvidence(identityMappings.every(m => object(m) && identity(m.matched_identity) &&
     ['new', 'repeat', 'suppressed', 'regating'].includes(m.status as string)));
-  const previous = new Set(mappings.map(m => (m as Record<string, unknown>).matched_identity));
-  requireEvidence(previous.size === 1);
-  for (const raw of mappings) {
+  // Validate bindings before selecting the requested occurrence: a malformed
+  // marked row must not disappear behind a usable legacy identity mapping.
+  for (const raw of identityMappings) {
     const mapping = raw as Record<string, unknown>;
     if (mapping.version !== undefined || mapping.finding_ref !== undefined || mapping.report_json_sha256 !== undefined) {
-      requireEvidence(mapping.version === 1 && mapping.finding_ref === input.findingRef && mapping.report_json_sha256 === reportSha256);
+      const ref = mapping.finding_ref;
+      const at = typeof ref === 'string' ? Number(ref.slice(1)) - 1 : -1;
+      requireEvidence(mapping.version === 1 && Number.isSafeInteger(at) && at >= 0 &&
+        ref === `f${String(at + 1).padStart(3, '0')}` && object(all[at]) &&
+        (all[at] as Record<string, unknown>).identity === finding.identity && mapping.report_json_sha256 === reportSha256);
     }
   }
+  const mappings = identityMappings.filter(raw => {
+    const mapping = raw as Record<string, unknown>;
+    return mapping.version === undefined || mapping.finding_ref === input.findingRef;
+  });
+  const previous = new Set(mappings.map(m => (m as Record<string, unknown>).matched_identity));
+  requireEvidence(previous.size === 1);
   if (input.correctionId) {
     const correction = input.sourceReceipts.find(r => r.id === input.correctionId)!;
     requireEvidence(correction.kind === 'finding_identity_corrected' && correction.payload.report_json_sha256 === reportSha256 &&

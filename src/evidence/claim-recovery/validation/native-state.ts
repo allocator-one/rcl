@@ -6,7 +6,7 @@ import { claimDescriptorSchema } from './claims.js';
 import type { NativeCorrectionAnchor } from './anchors.js';
 import { decodeRecoveryOriginal as decodeOriginalReport } from './recovery-json.js';
 import { object, uuidSchema } from './primitives.js';
-import type { ConvergeRunState } from './types.js';
+import type { ConvergeRunState, FindingEntry } from './types.js';
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const sha = (raw: string) => createHash('sha256').update(raw).digest('hex');
@@ -67,7 +67,18 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
   return state as unknown as ConvergeRunState;
 }
 
-/** Pure snapshot lineage proof; remote acceptance is validated separately. */
+function retainedFindingIdentity(current: FindingEntry, predecessor: FindingEntry): boolean {
+  // Ordinary verdicts can follow recovery, and semantic sightings update their
+  // caches. Their evidence is validated by the semantic proof kernel; lineage
+  // preserves the original identity rather than freezing those later results.
+  const mutable = new Set(['pendingRound', 'verdict', 'verdictRound', 'verdictSeverity', 'verdictReason',
+    ...(predecessor.claimDescriptor ? ['lastRound', 'models', 'startLine', 'endLine', 'severity'] : [])]);
+  const retained = (entry: FindingEntry) => Object.fromEntries(Object.entries(entry).filter(([key]) => !mutable.has(key)));
+  return isDeepStrictEqual(retained(current), retained(predecessor)) && current.lastRound >= predecessor.lastRound &&
+    (predecessor.verdict === undefined || current.verdict !== undefined && current.verdictRound! >= predecessor.verdictRound!);
+}
+
+/** Pure snapshot lineage and retained identity proof; later semantic updates and remote acceptance are validated separately. */
 export function verifyNativeRecoveryLineage(sourceJson: string, target: string, nativeSourceJsons: string[] = []): {
   state: ConvergeRunState; original: ConvergeRunState; legacy?: ConvergeRunState; reservedIdentities: string[];
 } {
@@ -95,7 +106,8 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
         isDeepStrictEqual(current.migration, predecessor.migration) &&
         isDeepStrictEqual(current.cycle, predecessor.cycle) &&
         predecessor.rounds.every(round => isDeepStrictEqual(current.rounds.find(row => row.round === round.round), round)) &&
-        Object.keys(predecessor.findings).every(key => Object.hasOwn(current.findings, key)));
+        Object.entries(predecessor.findings).every(([key, finding]) =>
+          Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
       current = predecessor;
     }
     let legacy = current.version === 1 ? current : undefined;
