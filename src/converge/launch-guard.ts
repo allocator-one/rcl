@@ -10,6 +10,8 @@ import {
   writeState, ConvergeRoundCapError, type ConvergeRunState,
 } from './run-state.js';
 import type { ConvergeContext } from '../report/run-header.js';
+import { staleManifest } from './stale-report-schema.js';
+import { verifyStaleReportReceipt } from './stale-report.js';
 import { scrubText } from '../telemetry/scrub.js';
 
 const completionSchema = z.object({
@@ -21,7 +23,7 @@ const completionSchema = z.object({
   hardFailure: z.boolean().optional(),
 }).refine(value => value.successfulReviews <= value.totalReviews);
 
-const launchSchema = z.object({
+export const launchSchema = z.object({
   status: z.enum(['pending', 'completed', 'failed']),
   attempt: z.number().int().positive().safe(),
   round: z.number().int().positive().safe(),
@@ -75,7 +77,7 @@ function nextRound(state: ConvergeRunState): number {
   return state.rounds.reduce((latest, entry) => Math.max(latest, entry.round), 0) + 1;
 }
 
-function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): number {
+async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): Promise<number> {
   const intent = options.intent ?? 'review';
   if (!['review', 'stop-upstream', 'stop-review', 'retry-delivery'].includes(intent)) {
     refuse('invalid_intent', 'Choose review, stop-upstream, stop-review, or retry-delivery.');
@@ -104,6 +106,9 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     }
     return round;
   }
+  if (state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt) && previous.attempt !== attemptsUsed) {
+    refuse('stale_report_attempt_mismatch', 'Attempt accounting changed after the inspected stale disposition.');
+  }
   if (previous.attempt !== attemptsUsed) {
     if (!options.retryReason) refuse('untracked_claim', 'Native attempt accounting changed outside the guard; reconcile the original claim and provide an explicit retry reason.');
     return round;
@@ -116,9 +121,18 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
-  const healthy = previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
+  const healthy = hasHealthyGuardedLaunch(previous);
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
-    refuse('report_not_admitted', `Process the existing report for run ${previous.runId}; do not rerun its reviewers.`);
+    const entry = state.staleReportAudit?.find(e => staleManifest(e).attempt === previous.attempt);
+    if (!entry) refuse('report_not_admitted', `Process the existing report for run ${previous.runId}. If materially stale, preview rcl converge-stale with current --head ${options.headSha} --input-sha256 ${options.inputSha256}; never admit stale findings.`);
+    const disposition = staleManifest(entry);
+    if (disposition.runId !== previous.runId || disposition.reportSha256 !== previous.reportJsonSha256 ||
+      disposition.previousHeadSha !== previous.headSha || disposition.previousInputSha256 !== previous.inputSha256 ||
+      disposition.round !== previous.round) refuse('stale_report_launch_mismatch', 'The audited original launch changed.');
+    if (disposition.headSha !== options.headSha || disposition.inputSha256 !== options.inputSha256) {
+      refuse('stale_report_input_mismatch', 'The stale disposition is bound to different current review inputs.');
+    }
+    await verifyStaleReportReceipt(options.gitCommonDir,entry);
   }
   if (healthy && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
     refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
@@ -132,6 +146,11 @@ function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, a
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
   }
   return round;
+}
+
+/** Shared launch-health decision; recovery paths must use the guard's policy. */
+export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
+  return previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
 }
 
 export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<ConvergeAttemptClaim> {
@@ -148,7 +167,7 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
       state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
       if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
       const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
-      const round = requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
+      const round = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
       const cap = options.maxAttempts ?? attempts?.cap;
       if (cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);

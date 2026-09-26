@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
@@ -160,7 +161,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   const name = actionCommand.name();
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-stale' || name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -481,6 +482,43 @@ program
 
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
+program
+  .command('converge-stale')
+  .description('Preview/apply/resume an audited stale unadmitted report disposition; preserves reports, attempts and findings')
+  .option('--preview').option('--apply').option('--resume')
+  .requiredOption('--manifest <path>', 'Exclusive preview output; reviewed manifest for apply/resume')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest digest for apply/resume')
+  .option('--target <target>')
+  .option('--head <sha>', 'Current exact head from the guarded launch refusal')
+  .option('--input-sha256 <sha256>', 'Current effective input digest from the guarded launch refusal; rechecked on continuation')
+  .option('--report <path>', 'Original completed, healthy, delivered report JSON')
+  .option('--report-sha256 <sha256>', 'Original immutable report digest')
+  .option('--reason <text>', 'Source-backed reason this report became materially stale, at most 500 characters')
+  .option('--json')
+  .action(async (opts: Record<string,string|boolean|undefined>) => {
+    try {
+      if ([opts.preview,opts.apply,opts.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_stale_report_mode');
+      const common = await resolveGitCommonDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
+        if (![opts.target,opts.head,opts.inputSha256,opts.report,opts.reportSha256,opts.reason].every(v => typeof v === 'string')) throw new Error('stale_report_preview_arguments_required');
+        const manifest = await previewStaleReport({target:opts.target as string,headSha:opts.head as string,
+          inputSha256:opts.inputSha256 as string,reportPath:opts.report as string,reportSha256:opts.reportSha256 as string,reason:opts.reason as string},common);
+        await writeExclusive(opts.manifest as string,manifest,16384);
+        result = {mode:'preview',manifest,manifestSha256:sha256(serializeRecoveryDocument(manifest))};
+      } else {
+        if ([opts.target,opts.head,opts.inputSha256,opts.report,opts.reportSha256,opts.reason].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
+        result = {mode:opts.apply?'apply':'resume',result:await applyStaleReport({manifest:opts.manifest as string,
+          manifestSha256:opts.manifestSha256 as string,mode:opts.apply?'apply':'resume'},common)};
+      }
+      console.log(JSON.stringify({...result as object,accounting:'unchanged',scope:'local stale disposition only; no admission, provider calls or approval'}));
+    } catch (error) {
+      console.error(JSON.stringify({error:{code:'RCL_CONVERGE_STALE',message:error instanceof Error?error.message:String(error)}}));
+      process.exitCode = 3;
+    }
+  });
+
 program
   .command('converge-gap')
   .description('Preview, apply or resume one evidenced missing-terminal-report audit gap; never creates a round, finding, verdict or attempt')

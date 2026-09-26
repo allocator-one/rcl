@@ -1,3 +1,4 @@
+import { staleManifest, validateStaleReportAudit, type StaleReportEntry } from './stale-report-schema.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
@@ -129,6 +130,7 @@ export interface ConvergeRunState {
   findings: Record<string, FindingEntry>;
   updatedAt: string;
   lastLaunch?: GuardedLaunchState;
+  staleReportAudit?: StaleReportEntry[];
   /** Additive local audit only; entries never stand for an admitted round. */
   roundGapAudit?: { version: 1; entries: RoundGapEntry[] };
   /**
@@ -218,6 +220,7 @@ export async function loadConvergeRunStateEvidence(
     );
   }
   validateRoundGapAudit(state as ConvergeRunState);
+  validateStaleReportAudit(state as ConvergeRunState);
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
@@ -388,6 +391,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
+  if (state.staleReportAudit?.some(entry => staleManifest(entry).runId === runId || staleManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('stale_report_cannot_be_admitted');
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
   for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {

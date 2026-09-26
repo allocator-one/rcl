@@ -308,6 +308,41 @@ describe('rcl review — guarded native launch', () => {
     });
   }, 40_000);
 
+  it('continues an actually changed head and spec through audited stale recovery with local reviewers only', async () => {
+    await withGuardedFixture(async fixture => {
+      const first = await runRclAsync(fixture.args,fixture.repo,fixture.env);
+      expect(first.status,first.stderr).toBe(0);
+      const reportPath = join(fixture.repo,'report.json'), bytes = readFileSync(reportPath);
+      writeFileSync(join(fixture.repo,'a.ts'),'export const a = 2;\n');
+      execFileSync('git',['add','a.ts'],{cwd:fixture.repo,env:GIT_ENV});
+      execFileSync('git',['commit','-q','-m','actual fix'],{cwd:fixture.repo,env:GIT_ENV});
+      const head = execFileSync('git',['rev-parse','HEAD'],{cwd:fixture.repo,env:GIT_ENV,encoding:'utf8'}).trim();
+      writeFileSync(join(fixture.repo,'current-spec.md'),'The committed behavior must return two.\n');
+      const next = [...fixture.args,'--head-sha',head,'--spec','current-spec.md','--json-file','next.json'];
+      const refused = await runRclAsync(next,fixture.repo,fixture.env);
+      expect(refused.status).toBe(1); expect(refused.stderr).toContain('report_not_admitted');
+      const input = refused.stderr.match(/--input-sha256 ([a-f0-9]{64})/)?.[1]; expect(input).toBeTruthy();
+      const calls = fixture.calls(), manifest = join(fixture.repo,'stale.json');
+      const preview = await runRclAsync(['converge-stale','--preview','--manifest',manifest,'--target','guarded-fixture',
+        '--head',head,'--input-sha256',input!,'--report',reportPath,'--report-sha256',sha256Hex(bytes),
+        '--reason','The committed behavior and current specification materially supersede the original review.'],fixture.repo,fixture.env);
+      expect(preview.status,preview.stderr).toBe(0);
+      const digest = sha256Hex(readFileSync(manifest));
+      for (const mode of ['apply','resume']) {
+        const result = await runRclAsync(['converge-stale',`--${mode}`,'--manifest',manifest,'--manifest-sha256',digest],fixture.repo,fixture.env);
+        expect(result.status,result.stderr).toBe(0);
+      }
+      expect(fixture.calls()).toBe(calls);
+      expect(await loadConvergeAttemptState(join(fixture.repo,'.git'),'guarded-fixture')).toMatchObject({attemptsUsed:1});
+      const continued = await runRclAsync(next,fixture.repo,fixture.env);
+      expect(continued.status,continued.stderr).toBe(0);
+      expect(fixture.calls()).toBe(calls+2);
+      expect(JSON.parse(readFileSync(join(fixture.repo,'next.json'),'utf8')).run.converge).toEqual({target:'guarded-fixture',round:1,attempt:2});
+      expect(readFileSync(reportPath)).toEqual(bytes);
+      expect((await loadConvergeRunState(join(fixture.repo,'.git'),'guarded-fixture'))?.rounds).toEqual([]);
+    });
+  },40000);
+
   it('does not spend on base-tip movement but requires review of a changed head', async () => {
     await withGuardedFixture(async fixture => {
       const first = await runRclAsync([...fixture.args, '--launch-intent', 'stop-upstream'], fixture.repo, fixture.env);

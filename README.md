@@ -296,6 +296,36 @@ rcl converge-verdict --target rcl-30 --round 2 \
   --dismissed 'd2baf9675eb450f0=guard already exists'
 ```
 
+### `rcl converge-stale`
+
+A healthy report that became materially stale before admission must be retained without
+assigning its findings or verdicts. The guarded launch refuses with `report_not_admitted`
+and prints the current head and effective input digest. Inspect the actual changes and
+use those exact values to preview a disposition:
+
+```bash
+rcl converge-stale --preview --manifest stale.json --target repo-123 \
+  --head <current-head> --input-sha256 <current-effective-input-sha256> \
+  --report original.json --report-sha256 <original-sha256> \
+  --reason "Committed changes and the current specification supersede this report"
+rcl converge-stale --apply --manifest stale.json --manifest-sha256 <reviewed-manifest-sha256>
+# After an interrupted apply, use the same immutable manifest:
+rcl converge-stale --resume --manifest stale.json --manifest-sha256 <reviewed-manifest-sha256>
+```
+
+Preview writes only its exclusive manifest. Apply retains the original report and native
+snapshots, then atomically adds a digest-bound audit entry under native target ownership.
+It does not admit findings, claim attempts, flush evidence, raise caps, or approve a PR.
+Resume is idempotent. Continue with the original `review --guarded-converge` invocation;
+it recomputes the real head/input digest and checks the retained receipt before claiming
+one normal attempt at the next native ordinal. The stale attempt stays spent.
+
+Unchanged inputs require normal admission. Upstream tip movement alone is insufficient.
+Unknown outcomes, unhealthy reports, pending delivery, missing original evidence, changed
+state and unresolved earlier findings refuse safely. A disposition is bound to one exact
+replacement input: further changes require an inspected recovery decision, not a forged
+manifest or edited native state. Native convergence, enforced review and CI remain required.
+
 ### `rcl converge-gap`
 
 A paid attempt and an admitted report round are separate counters. If an original
