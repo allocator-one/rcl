@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
 import { stableStringify } from '../report/run-header.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
+import type { ModelAnswer } from './adapter.js';
 
 const integer = z.number().int().nonnegative().safe();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -71,6 +72,16 @@ export interface VerificationState {
 }
 
 export function verificationDigest(bytes: string): string { return createHash('sha256').update(bytes).digest('hex'); }
+
+/** Parse exact observed adapter bytes against the frozen verifier route. */
+export function parseVerificationAnswer(bytes: string, plan: Pick<VerificationPlanInput, 'model' | 'provider'>): ModelAnswer {
+  opaque(bytes);
+  let value: unknown;
+  try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_invalid_answer'); }
+  const answer = answerSchema.safeParse(value);
+  refuse(answer.success && answer.data.model === plan.model && answer.data.provider === plan.provider, 'invalid_answer');
+  return freeze(answer.data) as ModelAnswer;
+}
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) freeze(child);
@@ -151,10 +162,7 @@ export function validateVerificationRecords(input: readonly unknown[], context: 
         const row = event.result, launch = byBatch.get(row.batchIndex);
         refuse(launch && launch.attemptId === row.attemptId && !results.has(row.batchIndex), 'missing_or_duplicate_intent');
         refuse(row.finishedAtMs >= launch.startedAtMs, 'invalid_result_time');
-        let value: unknown;
-        try { value = JSON.parse(row.answerBytes); } catch { throw new Error('checkpoint_verification_invalid_answer'); }
-        const answer = answerSchema.safeParse(value);
-        refuse(answer.success && answer.data.model === plan.model && answer.data.provider === plan.provider, 'invalid_answer');
+        parseVerificationAnswer(row.answerBytes, plan);
         results.add(row.batchIndex); outcomes.push(row);
       } else {
         const row = event.terminal;

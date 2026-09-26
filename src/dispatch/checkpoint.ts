@@ -9,7 +9,7 @@ import { syncNativeDirectory } from '../converge/native-lock.js';
 import { decodeOriginalLaunch } from './original-launch.js';
 import { decodeRecoveryOperation } from './recovery-operation.js';
 import {
-  appendVerificationRecord, encodeVerificationProof, snapshotVerificationEvent, validateVerificationRecords,
+  appendVerificationRecord, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent, validateVerificationRecords, verificationDigest,
   type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationPlanInput,
   type VerificationResult, type VerificationState, type VerificationTerminal,
 } from './checkpoint-verification.js';
@@ -64,6 +64,11 @@ const journalRecordSchema = z.discriminatedUnion('type', [
   z.object({ ...recordBase, ...attemptRecord, type: z.literal('uncertain'), reason: z.string().refine(value => !!value.trim() && !/[\0\r\n]/.test(value)) }).strict(),
   z.object({ ...recordBase, type: z.literal('finalization'), finalizedDigest: digestSchema }).strict(),
 ]);
+const verificationLateRecordSchema = z.object({ sequence: integer.positive(), previousDigest: digestSchema, digest: digestSchema,
+  version: z.literal(1), type: z.literal('late-verification-result'), verificationTerminalDigest: digestSchema,
+  result: z.object({ batchIndex: integer, attemptId: z.string().regex(/^[A-Za-z0-9._:-]{1,160}$/), finishedAtMs: integer, answerBytes: z.string().min(1) }).strict(),
+}).strict();
+export type CheckpointLateVerificationRecord = DeepReadonly<z.infer<typeof verificationLateRecordSchema>>;
 const lateRecordSchema = z.object({ ...recordBase, ...attemptRecord,
   version: z.literal(1), type: z.literal('late-result'), planDigest: digestSchema,
   finalizationDigest: digestSchema, intentDigest: digestSchema, reviewSha256: digestSchema, reviewBytes: z.string().min(1),
@@ -461,6 +466,80 @@ export class CheckpointJournal {
    */
   async recordVerificationIntent(input: VerificationIntent, ownership: NativeTargetOwnership): Promise<boolean> {
     return this.appendVerification({ type: 'intent', intent: input }, ownership);
+  }
+
+  /** Late verifier answers are audit-only and never change the sealed verifier proof. */
+  async readLateVerificationAudit(): Promise<readonly CheckpointLateVerificationRecord[]> {
+    const main = await this.readValidated(), context = this.verificationContext(main);
+    const verification = await this.readVerificationValidated(context);
+    if (!verification?.terminal) throw new Error('checkpoint_verification_late_requires_terminal');
+    return this.readLateVerificationAuditValidated(verification);
+  }
+
+  async recordLateVerificationResult(input: VerificationResult, ownership: NativeTargetOwnership): Promise<void> {
+    const snapshot = snapshotVerificationEvent({ type: 'result', result: input });
+    if (snapshot.type !== 'result') throw new Error('checkpoint_verification_late_invalid_result');
+    const result = snapshot.result;
+    return this.write(ownership, async () => {
+      const main = await this.readValidated(), context = this.verificationContext(main);
+      const verification = await this.readVerificationValidated(context);
+      if (!verification?.terminal) throw new Error('checkpoint_verification_late_requires_terminal');
+      parseVerificationAnswer(result.answerBytes, verification.plan);
+      const intent = verification.intents.find(item => item.batchIndex === result.batchIndex && item.attemptId === result.attemptId);
+      if (!intent || result.finishedAtMs < intent.startedAtMs) throw new Error('checkpoint_verification_late_invalid_result');
+      const prior = await this.readLateVerificationAuditValidated(verification);
+      const existing = prior.find(item => item.result.attemptId === result.attemptId);
+      if (existing) {
+        if (existing.result.batchIndex !== result.batchIndex || existing.result.finishedAtMs !== result.finishedAtMs || existing.result.answerBytes !== result.answerBytes) throw new Error('checkpoint_verification_late_conflict');
+        const events = join(this.path, 'verification-late-audit', 'events');
+        for (const record of prior) await syncExisting(join(events, eventFile(record.sequence)), `${canonical(record as unknown as Json)}\n`, true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+        return;
+      }
+      if (prior.length >= verification.intents.length) throw new Error('checkpoint_verification_late_call_cap');
+      const directory = await ensurePrivateChild(this.path, 'verification-late-audit');
+      await ensurePrivateChild(directory, 'events');
+      const terminalDigest = verification.records.at(-1)!.digest;
+      const unsigned = { sequence: prior.length + 1, previousDigest: prior.at(-1)?.digest ?? terminalDigest,
+        version: 1 as const, type: 'late-verification-result' as const, verificationTerminalDigest: terminalDigest, result };
+      const record = { ...unsigned, digest: verificationDigest(canonical(unsigned as unknown as Json)) };
+      const total = prior.reduce((sum, item) => sum + Buffer.byteLength(`${canonical(item as unknown as Json)}\n`, 'utf8'), 0) + Buffer.byteLength(`${canonical(record as unknown as Json)}\n`, 'utf8');
+      if (total > MAX_ARTIFACT_BYTES) throw new Error('checkpoint_verification_late_too_large');
+      const events = join(directory, 'events');
+      for (const existingRecord of prior) await syncExisting(join(events, eventFile(existingRecord.sequence)), `${canonical(existingRecord as unknown as Json)}\n`, true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+      await publishEventExclusive(directory, eventFile(record.sequence), `${canonical(record as unknown as Json)}\n`, MAX_ARTIFACT_BYTES);
+    });
+  }
+
+  private async readLateVerificationAuditValidated(verification: VerificationState): Promise<readonly CheckpointLateVerificationRecord[]> {
+    const directory = join(this.path, 'verification-late-audit');
+    try { await lstat(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Object.freeze([]); throw error; }
+    await inspectDirectory(directory);
+    const rootEntries = await readdir(directory);
+    if (rootEntries.some(name => name !== 'events')) throw new Error('checkpoint_verification_late_unknown_entry');
+    if (!verification.terminal) throw new Error('checkpoint_verification_late_requires_terminal');
+    const terminalDigest = verification.records.at(-1)!.digest;
+    const events = join(directory, 'events');
+    try { await lstat(events); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Object.freeze([]); throw error; }
+    await inspectDirectory(events);
+    const names = (await readdir(events)).sort();
+    if (names.length > verification.intents.length) throw new Error('checkpoint_verification_late_call_cap');
+    const records: CheckpointLateVerificationRecord[] = []; const attempts = new Set<string>(); let previous = terminalDigest; let total = 0;
+    for (const [index, name] of names.entries()) {
+      if (name !== eventFile(index + 1)) throw new Error('checkpoint_verification_late_unknown_entry');
+      const bytes = await readSafe(join(events, name), true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true }); total += Buffer.byteLength(bytes, 'utf8');
+      if (total > MAX_ARTIFACT_BYTES) throw new Error('checkpoint_verification_late_too_large');
+      let value: unknown; try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_late_invalid_record'); }
+      const parsed = verificationLateRecordSchema.safeParse(value); if (!parsed.success) throw new Error('checkpoint_verification_late_invalid_record');
+      const record = parsed.data, { digest: hash, ...unsigned } = record;
+      if (record.sequence !== index + 1 || record.previousDigest !== previous || record.verificationTerminalDigest !== terminalDigest ||
+        hash !== verificationDigest(canonical(unsigned as unknown as Json)) || bytes !== `${canonical(record as unknown as Json)}\n` || attempts.has(record.result.attemptId)) throw new Error('checkpoint_verification_late_invalid_record');
+      const intent = verification.intents.find(item => item.batchIndex === record.result.batchIndex && item.attemptId === record.result.attemptId);
+      if (!intent || record.result.finishedAtMs < intent.startedAtMs) throw new Error('checkpoint_verification_late_invalid_record');
+      parseVerificationAnswer(record.result.answerBytes, verification.plan);
+      attempts.add(record.result.attemptId); records.push(deepFreeze(record)); previous = hash;
+    }
+    return Object.freeze(records);
   }
 
   /** Exact observed adapter bytes; failed/late answers remain physical history. */
