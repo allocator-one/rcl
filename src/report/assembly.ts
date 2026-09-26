@@ -3,14 +3,14 @@ import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
-import type { ModelReview, ReviewResult } from '../consensus/types.js';
+import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
 import type { Diff } from '../resolver/types.js';
 import type { Role } from '../roles/types.js';
 import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-header.js';
 import { uuidv7 } from './uuid.js';
 import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
-import { deriveConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
+import { deriveConsensusAssembly, type ConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
 
 export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
@@ -36,16 +36,25 @@ export interface AssemblyDependencies extends Pick<GatingOptions, 'ask' | 'monot
   onFindingContributions?: (groups: ConsensusAssemblyContribution[]) => void;
 }
 
+/** Internal replay projection; the checkpoint adapter derives it from validated retained evidence. */
+export interface CompletedReviewProjection {
+  consensus: ConsensusAssembly;
+  findings: ConsensusFinding[];
+  appendix: ConsensusFinding[];
+  verification?: ReviewResult['stats']['verification'];
+}
+
 /** Assemble retained reviewer outputs through consensus, bounded gating, and the run header. */
 export async function assembleCompletedReview(
   input: CompletedReviewInput,
-  dependencies: AssemblyDependencies = {}
+  dependencies: AssemblyDependencies = {},
+  retained?: CompletedReviewProjection,
 ): Promise<ReviewResult & { run: RunHeader }> {
   const { chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff, gatingConfig, modelWeights } = input;
   if (input.reviewerHealth !== undefined) assertReviewerHealth(input.reviewerHealth);
   dependencies.onStage?.('computing consensus');
   const runId = input.run.id ?? uuidv7();
-  const { reviews, consensusFindings, reportFindings, droppedFindings, contributions } = deriveConsensusAssembly({
+  const { reviews, consensusFindings, reportFindings, droppedFindings, contributions } = retained?.consensus ?? deriveConsensusAssembly({
     runId, chunkReviews, arrivedAsync, roleMap, thresholds: config.thresholds, modelWeights,
     collectContributions: dependencies.onFindingContributions !== undefined,
     dedupeOrdering: input.dedupeOrdering,
@@ -54,10 +63,10 @@ export async function assembleCompletedReview(
   // Convergence gating (RCL-23): annotate every kept finding with why it
   // does or does not gate; single-model blocking findings get one batched
   // refutation call to a fast direct-API model.
-  let finalFindings = reportFindings;
-  let gatedAppendix = droppedFindings;
-  let verificationStats: ReviewResult['stats']['verification'];
-  if (gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
+  let finalFindings = retained?.findings ?? reportFindings;
+  let gatedAppendix = retained?.appendix ?? droppedFindings;
+  let verificationStats = retained?.verification;
+  if (retained === undefined && gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
     dependencies.onVerificationStart?.();
     const gated = await applyGatingWithFallback(reportFindings, {
       minModels: gatingConfig.minModels,

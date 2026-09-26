@@ -11,6 +11,17 @@ import { loadConvergeAttemptState } from './attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, type RoundReport } from './run-state.js';
 import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 
+async function assertRetainedVerification(journal: CheckpointJournal, inspected: Awaited<ReturnType<typeof inspectReviewerArtifact>>): Promise<void> {
+  const phase = await journal.readVerification();
+  if ((phase !== undefined) !== (inspected.verificationProof !== undefined)) throw new Error('retained_report_verification_mismatch');
+  if (phase !== undefined) {
+    const proof = await journal.exportVerificationProof();
+    if (proof.bytes !== inspected.verificationProof!.bytes || proof.digest !== inspected.verificationProof!.digest) {
+      throw new Error('retained_report_verification_mismatch');
+    }
+  }
+}
+
 export interface ProcessRetainedRoundOptions {
   gitCommonDir: string;
   target: string;
@@ -81,6 +92,7 @@ export async function processRetainedRoundReport(input: ProcessRetainedRoundOpti
     const inspected = inspectReviewerArtifact(terminal.reviewerArtifactBytes, {
       expectedReportBytes: options.reportBytes, expectedRunId: runId, expectedTarget: options.target, expectedPlan: plan,
     });
+    await assertRetainedVerification(journal, inspected);
     const proof = await exportCheckpointProof(journal);
     if (proof.digest !== inspected.proof.digest || proof.bytes !== inspected.proof.bytes ||
       inspected.assembly.projection.proofs.length !== 1) throw new Error('retained_report_checkpoint_mismatch');
@@ -137,6 +149,7 @@ export async function processSupplementedRoundReport(input: ProcessRetainedRound
     const lineage = await loadReviewerLineage({ commonDir, target: options.target, runId });
     const { latest, plan, runs } = lineage;
     const inspected = latest.inspected, operation = inspected.operation;
+    await assertRetainedVerification(latest.journal, inspected);
     if (runs.length < 2 || latest.kind !== 'successor' || !operation?.successorNativeClaim) {
       throw new Error('supplemented_report_successor_required');
     }

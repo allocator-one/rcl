@@ -10,7 +10,8 @@ import { CheckpointJournal, exportCheckpointProof, freezeCheckpointPlan,
   type CheckpointProof, type CheckpointResult } from '../../src/dispatch/checkpoint.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
-import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
+import { assembleCheckpointReview, deriveCheckpointConsensus } from '../../src/report/checkpoint-assembly.js';
+import { planGating } from '../../src/consensus/gating.js';
 import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
@@ -112,6 +113,24 @@ function baseInput(f: Fixture, projection: ReturnType<typeof projectCheckpointRe
 function asyncReview(model: string, item: Finding, status: ModelReview['status'] = 'success'): string {
   return JSON.stringify({ model, role: 'general', provider: 'fake', status, async: true, durationMs: 1,
     findings: [item], ...(status === 'success' ? {} : { error: 'Async failure' }) } satisfies ModelReview);
+}
+
+
+async function sealedVerificationArtifact(failed = false, activeRunId = runId(2)) {
+  const f = fixture({ chunks: 1, verified: true }), commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-artifact-verification-'))); roots.push(commonDir);
+  const launch = createOriginalLaunch({ runId: activeRunId, target: f.plan.target, originalNativeClaim: { attempt: 2, round: 2 }, capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, startedAtMs: 1, expiresAtMs: 1_000, maxPhysicalCalls: 3, maxAttemptsPerCell: 1 });
+  let journal!: CheckpointJournal, checkpoint!: CheckpointProof;
+  await withNativeTarget(commonDir, f.plan.target, async ownership => { journal = await CheckpointJournal.create({ commonDir, namespace: activeRunId, plan: f.plan, ownership }); await journal.bind('captured-inputs', f.capture.bytes, ownership); await journal.bind('launch', encodeOriginalLaunch(launch), ownership);
+    for (const cell of f.plan.cells.filter(cell => ['s0', 's1'].includes(cell.seat))) { const attempt = { id: `review-${cell.id}`, kind: 'paid' as const }, review: ModelReview = { model: cell.model, role: cell.role, provider: cell.route, durationMs: 1, findings: cell.seat === 's0' ? [{ ...finding('important'), severity: 'important' }] : [], status: 'success' }; await journal.recordIntent(cell.id, attempt, ownership); await journal.recordResult(cell.id, attempt, { kind: 'success', chunk: cell.chunk, reviewBytes: JSON.stringify(review) }, ownership); } await journal.finalize(ownership); checkpoint = await exportCheckpointProof(journal); });
+  const base = baseInput(f, projectCheckpointReport({ sources: [], successor: { runId: activeRunId, proof: checkpoint }, policy }));
+  const args = { ...base, run: { ...base.run, id: activeRunId, converge: { target: f.plan.target, round: 2, attempt: 2 } } };
+  const consensus = deriveCheckpointConsensus(args).consensus, aggregation = f.capture.aggregation!;
+  const plan = planGating(consensus.reportFindings, { minModels: aggregation.gating.minModels, verificationModel: aggregation.gating.verificationModel!, verificationTimeoutMs: aggregation.gating.verificationTimeoutMs, verificationPassTimeoutMs: aggregation.gating.verificationPassTimeoutMs, diffFiles: args.diff.files, modelWeights: new Map(aggregation.modelWeights!.map(row => [row.model, row.weight])) });
+  await withNativeTarget(commonDir, f.plan.target, async ownership => { const saved = { runId: activeRunId, gatingPlanBytes: stableStringify(plan), model: plan.model, provider: 'google', batches: plan.batches.map(({ systemPrompt, userPrompt }) => ({ systemPrompt, userPrompt })), startedAtMs: 2, expiresAtMs: 102, verificationTimeoutMs: 100, verificationPassTimeoutMs: 100, maxPhysicalCalls: plan.batches.length }; await journal.beginVerification(saved, ownership); if (!failed) for (const [batchIndex] of plan.batches.entries()) { await journal.recordVerificationIntent({ batchIndex, attemptId: `verify-${batchIndex}`, startedAtMs: 3 }, ownership); await journal.recordVerificationResult({ batchIndex, attemptId: `verify-${batchIndex}`, finishedAtMs: 4, answerBytes: JSON.stringify({ model: plan.model, provider: 'google', status: 'success', durationMs: 1, text: '[{"id":"F1","verdict":"refuted"}]' }) }, ownership); } await journal.finalizeVerification(failed ? { status: 'failed', finishedAtMs: 5, reason: 'deadline' } : { status: 'complete', finishedAtMs: 5 }, ownership); });
+  const verificationProof = await journal.exportVerificationProof(), assembled = await assembleCheckpointReview(args, { verificationProof });
+  const reportBytes = JSON.stringify(sanitizeForDelivery(assembled.report, representation));
+  const artifact = serializeReviewerArtifact({ assembly: args, representation, reportBytes, verificationProof });
+  return { f, args, verificationProof, artifact, reportBytes };
 }
 
 
@@ -261,28 +280,36 @@ describe('private reviewer artifact', () => {
     }
   });
 
-  it('preserves provider refutations as unverified annotations without turning the offline gate green', async () => {
+
+  it('round-trips sealed complete and failed verifier phases without a live ask', async () => {
+    const complete = await sealedVerificationArtifact(), failed = await sealedVerificationArtifact(true);
+    expect(complete.artifact.validation.gate).toMatchObject({ validation: 'deterministic', unresolvedFindingIdentities: [] });
+    expect(JSON.parse(complete.artifact.bytes).verification).toEqual({ bytes: complete.verificationProof.bytes, sha256: complete.verificationProof.digest });
+    expect(validateReviewerArtifact(complete.artifact.bytes, { assembly: complete.args, representation, verificationProof: complete.verificationProof }).bytes).toBe(complete.artifact.bytes);
+    const inspected = inspectReviewerArtifact(complete.artifact.bytes, { expectedReportBytes: complete.reportBytes, expectedRunId: runId(2), expectedTarget: complete.f.plan.target, expectedPlan: complete.f.plan });
+    expect(inspected.verificationProof).toEqual(complete.verificationProof);
+    expect(JSON.parse(failed.reportBytes).findings[0].gating).toBeUndefined();
+  });
+
+  it('refuses omitted, cross-run, rehashed tampered verifier proof and report claims', async () => {
+    const item = await sealedVerificationArtifact();
+    expect(() => serializeReviewerArtifact({ assembly: item.args, representation, reportBytes: item.reportBytes })).toThrow('checkpoint_gating_missing_phase');
+    const changed = rewrite(item.artifact.bytes, wire => { wire.verification.bytes = wire.verification.bytes.replace('refuted', 'unrefuted'); wire.verification.sha256 = sha256Hex(wire.verification.bytes); });
+    expect(() => validateReviewerArtifact(changed, { assembly: item.args, representation })).toThrow();
+    const other = await sealedVerificationArtifact(false, runId(8));
+    expect(() => serializeReviewerArtifact({ assembly: item.args, representation, reportBytes: item.reportBytes, verificationProof: other.verificationProof })).toThrow();
+    const claimed = rewrite(item.artifact.bytes, wire => { const report = JSON.parse(wire.report.bytes); report.stats.verification.unrefuted++; wire.report.bytes = JSON.stringify(report); wire.report.sha256 = sha256Hex(wire.report.bytes); });
+    expect(() => validateReviewerArtifact(claimed, { assembly: item.args, representation })).toThrow('reviewer_artifact_body_mismatch');
+  });
+
+  it('refuses unsupported provider refutations without a sealed verifier proof', async () => {
     const f = fixture({ chunks: 1, verified: true });
     const rows = rowsFor(f, ['s0', 's1'], 'old'); rows[0]!.findings = [{ ...finding('important'), severity: 'important' }];
     const args = input(f, await proof(f, rows), await proof(f, []));
     const ask = vi.fn(async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success' as const,
       durationMs: 1, text: '[]' }));
-    const assembled = await assembleCheckpointReview(args, { ask });
-    const baselineCalls = ask.mock.calls.length;
-    for (const verdict of ['refuted', 'unavailable'] as const) {
-      const raw = structuredClone(assembled.report);
-      raw.findings[0]!.gating = { reason: 'none', verification: { verdict, model: 'google/gemini-3.8-flash', note: 'Recorded evidence only' } };
-      raw.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: verdict === 'refuted' ? 1 : 0,
-        unavailable: verdict === 'unavailable' ? 1 : 0, unrefuted: 0, durationMs: 1 };
-      const artifact = serializeReviewerArtifact({ assembly: args, representation, reportBytes: JSON.stringify(sanitizeForDelivery(raw)) });
-      expect(artifact.validation.gate).toMatchObject({ validation: 'requires_verifier_evidence', conservativeCiExitCode: 1, reportedCiExitCode: 0,
-        unresolvedFindingIdentities: [raw.findings[0]!.identity] });
-      expect(validateReviewerArtifact(artifact.bytes, { assembly: args, representation }).validation.gate.validation).toBe('requires_verifier_evidence');
-    }
-    const bare = structuredClone(assembled.report); bare.findings[0]!.gating = { reason: 'none' };
-    expect(() => serializeReviewerArtifact({ assembly: args, representation, reportBytes: JSON.stringify(sanitizeForDelivery(bare)) }))
-      .toThrow('reviewer_artifact_unverifiable_gating');
-    expect(ask).toHaveBeenCalledTimes(baselineCalls);
+    await expect(assembleCheckpointReview(args, { ask })).rejects.toThrow('checkpoint_gating_missing_phase');
+    expect(ask).not.toHaveBeenCalled();
   });
 
   it('refuses false nonblocking critical annotations and any gate annotation when health is inconclusive', async () => {
@@ -296,7 +323,7 @@ describe('private reviewer artifact', () => {
     const report = await assembleCheckpointReview(incomplete);
     report.report.findings[0]!.gating = { reason: 'critical' };
     expect(() => serializeReviewerArtifact({ assembly: incomplete, representation, reportBytes: JSON.stringify(sanitizeForDelivery(report.report)) }))
-      .toThrow('reviewer_artifact_unverifiable_gating');
+      .toThrow('reviewer_artifact_body_mismatch');
   });
 
   it('round-trips exact nonvoting prose without applying ordinary-report prose transformations to private evidence', async () => {

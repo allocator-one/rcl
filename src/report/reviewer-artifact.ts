@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { evaluateCiGate } from '../ci.js';
 import type { GatingInfo } from '../consensus/gating.js';
-import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
+import type { ModelReview, ReviewResult } from '../consensus/types.js';
 import { decodeCheckpointProof, type CheckpointProof, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
 import { decodeOriginalLaunch, type OriginalLaunch } from '../dispatch/original-launch.js';
 import { decodeRecoveryOperation, type RecoveryOperation } from '../dispatch/recovery-operation.js';
@@ -12,8 +12,9 @@ import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { sanitizeForDelivery } from '../telemetry/envelope.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { originalRunReportSchema, UUID } from '../telemetry/recovery/source.js';
-import { deriveCheckpointConsensus, type CheckpointAssemblyInput, type CheckpointAssemblyContribution,
+import { type CheckpointAssemblyInput, type CheckpointAssemblyContribution,
   type CheckpointAssemblyObservation } from './checkpoint-assembly.js';
+import { deriveCheckpointGating, type SealedVerificationProof } from './checkpoint-gating.js';
 import { projectCheckpointReport, type PhysicalCheckpointAttempt } from './checkpoint-projection.js';
 import { decodeSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 import { describeReviewerEvidence, validateReviewerReportChain, MAX_REVIEWER_LINEAGE_DEPTH, type InspectedReviewerReport, type ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
@@ -26,6 +27,8 @@ export interface ReviewerArtifactContext {
   representation: { version: 1; parseFailures: boolean };
   /** Optional complete inspected chain; external producer/server authority remains separate. */
   lineage?: readonly InspectedReviewerReport[];
+  /** Sealed verifier transcript, structurally replayed only; it confers no external authority. */
+  verificationProof?: SealedVerificationProof;
 }
 export interface ReviewerArtifactGate {
   validation: 'deterministic' | 'requires_verifier_evidence';
@@ -51,14 +54,7 @@ export type ReviewerArtifact = DeepReadonly<{
 }>;
 const validated = new WeakSet<object>();
 const representationSchema = z.object({ version: z.literal(1), parseFailures: z.boolean() }).strict();
-const verificationSchema = z.object({ verdict: z.enum(['refuted', 'unrefuted', 'unavailable']),
-  model: z.string().optional(), note: z.string().optional() }).strict();
-const gatingSchema = z.object({ reason: z.enum(['critical', 'consensus', 'verified', 'none']),
-  verification: verificationSchema.optional() }).strict();
 const integer = z.number().int().nonnegative().safe();
-const verificationStatsSchema = z.object({ model: z.string(), candidates: integer, refuted: integer,
-  unrefuted: integer, unavailable: integer, durationMs: z.number().finite().nonnegative() }).strict();
-
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const uuidSchema = z.string().regex(UUID);
 const metadataSchema = z.object({
@@ -135,36 +131,6 @@ export function isReviewerArtifact(value: unknown): value is ReviewerArtifact {
   return value !== null && typeof value === 'object' && validated.has(value);
 }
 
-function annotate(
-  raw: ConsensusFinding[], expected: ConsensusFinding[], disposition: 'kept' | 'below_threshold',
-  verifiedMode: boolean, minModels: number, weights: Map<string, number> | undefined,
-  annotations: ReviewerArtifactGate['annotations'], unresolved: string[],
-): ConsensusFinding[] {
-  if (raw.length !== expected.length) throw new Error('reviewer_artifact_body_mismatch');
-  return expected.map((finding, index) => {
-    const claimed = raw[index]!.gating;
-    if (claimed === undefined) return finding;
-    const parsed = gatingSchema.safeParse(claimed);
-    if (!verifiedMode || !parsed.success) throw new Error('reviewer_artifact_unverifiable_gating');
-    const gating = parsed.data;
-    const support = finding.consensus.models.reduce((sum, model) => sum + (weights?.get(model) ?? 1), 0);
-    const deterministic = disposition === 'below_threshold' || !['critical', 'important'].includes(finding.severity) ? 'none'
-      : finding.consensus.models.length >= minModels && support >= minModels ? 'consensus'
-      : finding.severity === 'critical' ? 'critical' : undefined;
-    if (deterministic !== undefined) {
-      if (gating.reason !== deterministic || gating.verification !== undefined) throw new Error('reviewer_artifact_unverifiable_gating');
-    } else {
-      const verification = gating.verification;
-      if (!verification || gating.reason !== (verification.verdict === 'unrefuted' ? 'verified' : 'none')) {
-        throw new Error('reviewer_artifact_unverifiable_gating');
-      }
-      unresolved.push(finding.identity!);
-    }
-    annotations.push({ identity: finding.identity!, disposition, gating });
-    return { ...finding, gating };
-  });
-}
-
 function canceledCalls(input: CheckpointAssemblyInput): ReviewResult['stats']['canceledCalls'] {
   const key = (r: Pick<ModelReview, 'model' | 'role'>) => `${r.model}::${r.role}`;
   const completeKeys = new Set(input.projection.seatReviews.filter(seat => seat.complete).map(seat => key(seat.review)));
@@ -180,40 +146,14 @@ function canceledCalls(input: CheckpointAssemblyInput): ReviewResult['stats']['c
 
 function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
   const representation = representationSchema.parse(input.representation);
-  const derived = deriveCheckpointConsensus(input.assembly);
-  const { projection, supplementalAsync } = input.assembly;
+  const gated = deriveCheckpointGating(input.assembly, input.verificationProof);
+  const { derived } = gated, { projection, supplementalAsync } = input.assembly;
   const successor = projection.proofs.at(-1)!;
   const captured = decodeCapturedInputs(successor.proof.bindings['captured-inputs']!, successor.proof.plan);
   const aggregation = captured.aggregation!;
   const raw = decodeReport(input.reportBytes);
   if (!originalRunReportSchema.safeParse(raw).success) throw new Error('reviewer_artifact_invalid_report');
-  // Keep the original object: the permissive compatibility schema is not a
-  // canonicalizer and must not erase altered or unexpected delivered fields.
   const report = raw as ReviewResult & { run: RunHeader & { reviewer_evidence?: unknown } };
-  const verifiedMode = aggregation.gating.mode === 'verified-consensus' && projection.health.conclusive;
-  const weights = aggregation.modelWeights === undefined ? undefined : new Map(aggregation.modelWeights.map(row => [row.model, row.weight]));
-  const annotations: ReviewerArtifactGate['annotations'] = [], unresolved: string[] = [];
-  const findings = annotate(report.findings, derived.consensus.reportFindings, 'kept', verifiedMode,
-    aggregation.gating.minModels, weights, annotations, unresolved);
-  const appendix = aggregation.belowThresholdAppendix && derived.consensus.droppedFindings.length > 0
-    ? annotate(report.belowThresholdFindings ?? [], derived.consensus.droppedFindings, 'below_threshold', verifiedMode,
-      aggregation.gating.minModels, weights, annotations, unresolved) : undefined;
-  // A successful legacy gating pass annotates all findings; fallback annotates
-  // none. Reject a partial mix that cannot come from that assembly boundary.
-  if (annotations.length > 0 && annotations.length !== findings.length + (appendix?.length ?? 0)) {
-    throw new Error('reviewer_artifact_unverifiable_gating');
-  }
-  let verification: ReviewResult['stats']['verification'];
-  if (report.stats.verification !== undefined) {
-    const parsed = verificationStatsSchema.safeParse(report.stats.verification);
-    if (!verifiedMode || !parsed.success || !unresolved.length) throw new Error('reviewer_artifact_unverifiable_gating');
-    verification = parsed.data;
-    const verdicts = annotations.flatMap(item => item.gating.verification ? [item.gating.verification.verdict] : []);
-    if (verification.candidates !== verdicts.length || ['refuted', 'unrefuted', 'unavailable'].some(verdict =>
-      verification![verdict as 'refuted' | 'unrefuted' | 'unavailable'] !== verdicts.filter(value => value === verdict).length)) {
-      throw new Error('reviewer_artifact_stats_mismatch');
-    }
-  }
   const reviews = derived.consensus.reviews, canceled = canceledCalls(input.assembly);
   const stats: ReviewResult['stats'] = {
     totalReviews: reviews.length, successfulReviews: reviews.filter(review => review.status === 'success').length,
@@ -222,11 +162,14 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
     durationMs: report.stats.durationMs,
     ...(supplementalAsync.asyncLaunched > 0 ? { asyncLaunched: supplementalAsync.asyncLaunched } : {}),
     ...(supplementalAsync.reviews.length > 0 ? { asyncMerged: mergeChunkReviews(supplementalAsync.reviews.map(review => structuredClone(review) as ModelReview)).length } : {}),
-    ...(canceled ? { canceledCalls: canceled } : {}), ...(verification ? { verification } : {}),
-    ...(weights ? { modelWeights: Object.fromEntries([...new Set(reviews.map(review => review.model))].map(model => [model, weights.get(model) ?? 1])) } : {}),
+    ...(canceled ? { canceledCalls: canceled } : {}), ...(gated.verification ? { verification: gated.verification } : {}),
+    ...(aggregation.modelWeights ? { modelWeights: Object.fromEntries([...new Set(reviews.map(review => review.model))].map(model => [model, aggregation.modelWeights!.find(row => row.model === model)?.weight ?? 1])) } : {}),
   };
-  const body: ReviewResult = { reviews, findings, ...(appendix ? { belowThresholdFindings: appendix } : {}), stats };
+  const body: ReviewResult = { reviews, findings: gated.findings,
+    ...(aggregation.belowThresholdAppendix && gated.appendix.length > 0 ? { belowThresholdFindings: gated.appendix } : {}), stats };
   const reportedCiExitCode = evaluateCiGate(body, projection.health).exitCode;
+  // Replay annotations may lower the delivered code. Preserve the ungated
+  // consensus verdict for the artifact's conservative offline projection.
   const conservativeCiExitCode = Math.max(reportedCiExitCode, evaluateCiGate({ ...body,
     findings: derived.consensus.reportFindings }, projection.health).exitCode);
   const header = buildRunHeader({ ...input.assembly.run, config: structuredClone(captured.config), diff: input.assembly.diff,
@@ -241,18 +184,21 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
     return { runId: item.runId, reportSha256: item.reportSha256, checkpointSha256: item.proof.digest };
   });
   if (input.lineage !== undefined && lineage.length !== projection.proofs.length) throw new Error('reviewer_artifact_lineage_mismatch');
-  const gate: ReviewerArtifactGate = { validation: unresolved.length ? 'requires_verifier_evidence' : 'deterministic',
-    reportedCiExitCode, conservativeCiExitCode, unresolvedFindingIdentities: unresolved, annotations };
+  const annotations: ReviewerArtifactGate['annotations'] = [...gated.findings, ...gated.appendix].flatMap(finding =>
+    finding.gating === undefined ? [] : [{ identity: finding.identity!, disposition: gated.appendix.includes(finding) ? 'below_threshold' as const : 'kept' as const, gating: finding.gating }]);
+  const gate: ReviewerArtifactGate = { validation: 'deterministic', reportedCiExitCode, conservativeCiExitCode,
+    unresolvedFindingIdentities: [], annotations };
   const newPhysicalAttempts = projection.newPhysicalAttempts.map(({ review: _review, reviewBytes: _bytes, ...attempt }) => attempt);
   const validation = { body: 'deterministic' as const, health: 'derived' as const, gate };
+  const verification = gated.phase === undefined ? undefined : { bytes: gated.phase.proof.bytes, sha256: gated.phase.proof.digest };
   const wire = { version: 1 as const, kind: 'private-reviewer-evidence' as const,
     report: { bytes: input.reportBytes, sha256: sha256Hex(input.reportBytes) }, representation, assembly: assemblyMetadata(input.assembly),
     checkpoints: projection.proofs.map(item => ({ runId: item.runId, sha256: item.proof.digest, bytes: item.proof.bytes })),
-    supplementalAsync: { bytes: supplementalAsync.bytes, sha256: supplementalAsync.digest }, lineage,
+    supplementalAsync: { bytes: supplementalAsync.bytes, sha256: supplementalAsync.digest },
+    ...(verification ? { verification } : {}), lineage,
     contributions: derived.contributions, observations: derived.observations, health: projection.health, newPhysicalAttempts, validation };
   return { wire, projection, derived, validation, newPhysicalAttempts };
 }
-
 /**
  * Serialize PRIVATE evidence after ordinary sanitization/rendering. Pure and
  * provider-free; report-body conservation never establishes source authority,
@@ -277,7 +223,13 @@ export function validateReviewerArtifact(bytes: string, context: ReviewerArtifac
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('reviewer_artifact_invalid_document');
   const report = (raw as { report?: { bytes?: unknown } }).report;
   if (typeof report?.bytes !== 'string') throw new Error('reviewer_artifact_invalid_document');
-  const expected = serializeReviewerArtifact({ ...context, reportBytes: report.bytes });
+  const verification = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse((raw as Record<string, unknown>).verification);
+  if (verification !== undefined && sha256Hex(verification.bytes) !== verification.sha256) throw new Error('reviewer_artifact_verification_mismatch');
+  if (context.verificationProof !== undefined && (verification === undefined || !equal(context.verificationProof, { bytes: verification.bytes, digest: verification.sha256 }))) {
+    throw new Error('reviewer_artifact_verification_mismatch');
+  }
+  const expected = serializeReviewerArtifact({ ...context, reportBytes: report.bytes,
+    ...(verification === undefined ? {} : { verificationProof: { bytes: verification.bytes, digest: verification.sha256 } }) });
   if (expected.bytes !== bytes) throw new Error('reviewer_artifact_mismatch');
   return expected;
 }
@@ -305,6 +257,7 @@ export interface InspectedReviewerArtifact {
   readonly captured: CapturedReviewerInputs;
   readonly supplementalAsync: SupplementalAsync;
   readonly descriptor: ReviewerEvidenceDescriptor;
+  readonly verificationProof?: SealedVerificationProof;
   readonly launch?: OriginalLaunch;
   readonly operation?: RecoveryOperation;
   readonly nativeClaim?: NonNullable<RunHeader['converge']>;
@@ -377,13 +330,18 @@ export function inspectReviewerArtifact(bytes: string, options: InspectReviewerA
     throw new Error('reviewer_artifact_target_mismatch');
   }
   const representation = representationSchema.parse(wire.representation);
+  const verification = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse(wire.verification);
+  if (verification !== undefined && sha256Hex(verification.bytes) !== verification.sha256) throw new Error('reviewer_artifact_verification_mismatch');
+  const verificationProof = verification === undefined ? undefined : { bytes: verification.bytes, digest: verification.sha256 };
   const artifact = validateReviewerArtifact(bytes, { assembly, representation,
+    ...(verificationProof === undefined ? {} : { verificationProof }),
     ...(options.lineage === undefined ? {} : { lineage: options.lineage }) });
   const descriptor = describeReviewerEvidence(last.proof, supplementalAsync);
   const launch = last.proof.bindings.launch === undefined ? undefined : decodeOriginalLaunch(last.proof.bindings.launch);
   const operation = last.proof.bindings.operation === undefined ? undefined : decodeRecoveryOperation(last.proof.bindings.operation);
   return freeze({ artifact, representation, assembly, reportBytes: report.bytes, reportSha256: report.sha256, runId: last.runId, prTarget,
     proof: last.proof, captured, supplementalAsync, descriptor,
+    ...(verificationProof === undefined ? {} : { verificationProof }),
     ...(launch ? { launch } : {}), ...(operation ? { operation } : {}),
     ...(assembly.run.converge ? { nativeClaim: assembly.run.converge } : {}) });
 }

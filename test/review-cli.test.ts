@@ -128,6 +128,7 @@ interface GuardedCliFixture {
   env: Record<string, string>;
   calls: () => number;
   failCall: (call: number) => void;
+  responseForCall: (makeContent: (call: number) => string) => void;
   holdResponses: () => void;
   releaseResponses: () => void;
   firstRequest: Promise<void>;
@@ -143,6 +144,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
   }));
   let calls = 0;
   let failingCall: number | undefined;
+  let responseForCall = (_call: number): string => JSON.stringify({ findings: [] });
   let holdResponses = false;
   const pendingResponses: Array<() => void> = [];
   let notifyRequest: () => void = () => {};
@@ -162,7 +164,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
       response.end(JSON.stringify({
         id: 'fixture', object: 'chat.completion', created: 0, model: 'fixture',
         choices: [{ index: 0, finish_reason: 'stop', message: {
-          role: 'assistant', content: JSON.stringify({ findings: [] }),
+          role: 'assistant', content: responseForCall(call),
         } }],
       }));
     };
@@ -181,6 +183,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
         OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RCL_DATA_DIR: join(repo, 'rcl-data') },
       calls: () => calls,
       failCall: call => { failingCall = call; },
+      responseForCall: makeContent => { responseForCall = makeContent; },
       holdResponses: () => { holdResponses = true; },
       releaseResponses: () => {
         holdResponses = false;
@@ -195,6 +198,34 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
 }
 
 describe('rcl review — guarded native launch', () => {
+  it('retains the actual verifier phase with the original private report and never repeats it for status', async () => {
+    await withGuardedFixture(async fixture => {
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.thresholds = { minConfidence: 0, minConsensusScore: 0 };
+      config.gating = { mode: 'verified-consensus', minModels: 2, verificationModel: 'openai-compat/verifier',
+        verificationTimeout: 10000, verificationPassTimeout: 10000 };
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.responseForCall(call => call === 1 ? JSON.stringify({ findings: [{
+        id: 'F1', file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness',
+        title: 'Missing guard', description: 'The changed line omits its required guard.'
+      }] }) : call === 2 ? JSON.stringify({ findings: [] }) : '[{"id":"F1","verdict":"confirmed"}]');
+      const result = await runRclAsync([...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'],
+        fixture.repo, fixture.env);
+      expect(result.status, result.stderr).toBe(0);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      expect(report.findings[0].gating.reason).toBe('verified');
+      expect(fixture.calls()).toBe(3);
+      const journal = await CheckpointJournal.inspectRead(checkpointPath(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture', report.run.id));
+      const phase = (await journal.readVerification())!;
+      expect(phase.terminal!.status).toBe('complete');expect(phase.intents).toHaveLength(1);
+      expect(phase.outcomes[0]!.answerBytes).toContain('confirmed');
+      const terminal = (await journal.readTerminalReport())!;
+      expect(JSON.parse(terminal.reviewerArtifactBytes).verification.bytes).toBe((await journal.exportVerificationProof()).bytes);
+      const status = await runRclAsync(['reviewers', 'status', 'guarded-fixture', '--run', report.run.id, '--json'], fixture.repo, fixture.env);
+      expect(status.status, status.stderr).toBe(0);expect(fixture.calls()).toBe(3);
+    });
+  }, 40000);
+
   it('retains actual reviewer inputs and immutable terminal artifacts privately in the guarded review command', async () => {
     await withGuardedFixture(async fixture => {
       writeFileSync(join(fixture.repo, 'spec.md'), 'PRIVATE retained council specification');

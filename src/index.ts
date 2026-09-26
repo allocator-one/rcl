@@ -28,10 +28,11 @@ import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
-import { runReviews } from './dispatch/runner.js';
+import { runReviews, defaultAdapterFactory } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { bindOriginalCouncil, executeCapturedOriginal } from './dispatch/original-execution.js';
+import { executeCheckpointGating } from './dispatch/checkpoint-gating-execution.js';
 import { assertOriginalLaunchBudget, createOriginalLaunch, type OriginalLaunch } from './dispatch/original-launch.js';
 import { createCheckpointLateAudit, type CheckpointLateAudit } from './dispatch/late-audit.js';
 import type { CheckpointJournal } from './dispatch/checkpoint.js';
@@ -2289,8 +2290,29 @@ async function executeCouncil(
     projection, supplementalAsync: captureSupplementalAsync(arrivedAsync.map(review => JSON.stringify(review)), asyncLaunched),
     diff, startTime, run: assemblyInput.run,
   } : undefined;
+  const checkpointGating = checkpointAssembly && retained ? await executeCheckpointGating({
+    assembly: checkpointAssembly, commonDir: retained.commonDir, ownership: retained.ownership,
+    journal: retained.journal,
+    askFactory: model => {
+      assemblyDependencies.onVerificationStart?.();
+      const adapter = defaultAdapterFactory(detectProvider(model));
+      return (model, system, user, options) => adapter.ask(model, system, user, options);
+    },
+    beforeLaunch: async () => {
+      if ((await resolveGitHeads()).headSha !== retained.captured.plan.headSha) {
+        throw new ReviewLaunchRefused('head_changed', 'The reviewed head changed before verification.');
+      }
+    },
+    onLateAuditError: error => {
+      process.stderr.write(`Late verifier response could not be retained: ${scrubText(String(error), 300)}\n`);
+    },
+  }) : undefined;
+  if (checkpointGating?.projection.disposition === 'strict_fallback') {
+    process.stderr.write('Retained verification did not complete; using severity gating for this round.\n');
+  }
   const result = checkpointAssembly
-    ? (await assembleCheckpointReview(checkpointAssembly, assemblyDependencies)).report
+    ? (await assembleCheckpointReview(checkpointAssembly, { ...assemblyDependencies,
+      verificationProof: checkpointGating?.verificationProof })).report
     : await assembleCompletedReview(assemblyInput, assemblyDependencies);
   if (checkpointAssembly) result.run.reviewer_evidence = describeReviewerEvidence(
     projection!.proofs.at(-1)!.proof, checkpointAssembly.supplementalAsync);
@@ -2349,6 +2371,7 @@ async function executeCouncil(
   const artifacts = renderReportArtifacts(delivered);
   if (retained && checkpointAssembly) {
     const reviewerArtifact = serializeReviewerArtifact({ assembly: checkpointAssembly, reportBytes: artifacts.report_json,
+      verificationProof: checkpointGating?.verificationProof,
       representation: { version: 1, parseFailures: runtime?.parseFailures ?? false } });
     await retained.journal.retainTerminalReport({ reportBytes: artifacts.report_json, reviewerArtifactBytes: reviewerArtifact.bytes }, retained.ownership);
   }

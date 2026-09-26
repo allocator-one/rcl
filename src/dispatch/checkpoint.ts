@@ -6,8 +6,7 @@ import { z } from 'zod';
 import { originalRawFindingSchema } from '../telemetry/recovery/source.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
-import { decodeOriginalLaunch } from './original-launch.js';
-import { decodeRecoveryOperation } from './recovery-operation.js';
+import { verificationContextFromValidatedCheckpoint } from './checkpoint-verification-context.js';
 import {
   appendVerificationRecord, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent, validateVerificationRecords, verificationDigest,
   type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationPlanInput,
@@ -569,19 +568,7 @@ export class CheckpointJournal {
   }
 
   private verificationContext(main: { state: CheckpointState; bindings: CheckpointBindings }): VerificationContext {
-    if (!main.state.finalized) throw new Error('checkpoint_verification_requires_finalization');
-    const capture = main.bindings['captured-inputs'];
-    const hasLaunch = main.bindings.launch !== undefined, hasOperation = main.bindings.operation !== undefined;
-    if (capture === undefined || hasLaunch === hasOperation) throw new Error('checkpoint_verification_missing_binding');
-    const operationBytes = (main.bindings.launch ?? main.bindings.operation)!;
-    const parent = hasLaunch ? decodeOriginalLaunch(operationBytes) : decodeRecoveryOperation(operationBytes);
-    if (parent.planDigest !== this.plan.digest || parent.target !== this.plan.target || parent.capturedInputsSha256 !== sha256(capture) ||
-      ('successorRunId' in parent && !parent.successorNativeClaim)) throw new Error('checkpoint_verification_binding_mismatch');
-    return { planDigest: this.plan.digest, finalizationDigest: main.state.records.at(-1)!.digest,
-      capturedInputsSha256: sha256(capture), operationSha256: sha256(operationBytes),
-      runId: 'runId' in parent ? parent.runId : parent.successorRunId,
-      startedAtMs: parent.startedAtMs, expiresAtMs: parent.expiresAtMs,
-      reviewerAttemptIds: main.state.records.filter(row => row.type === 'intent').map(row => row.paidAttempt!.id) };
+    return verificationContextFromValidatedCheckpoint(this.plan, main);
   }
 
   private async readVerificationValidated(context: VerificationContext): Promise<VerificationState | undefined> {

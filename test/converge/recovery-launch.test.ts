@@ -91,7 +91,7 @@ function review(
 }
 
 async function sealed(successes: number, failure: SourceFailure = "timeout", seats = 17,
-  extra: { gatingMode?: 'all-findings' | 'verified-consensus'; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
+  extra: { gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "rcl-recovery-"));
   roots.push(dir);
   const diff: any = {
@@ -100,7 +100,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
       {
         filename: "a.ts",
         status: "modified",
-        patch: "@@\n+x",
+        patch: "@@ -0,0 +1 @@\n+x",
         additions: 1,
         deletions: 0,
         language: "typescript",
@@ -165,8 +165,9 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     gating: {
       mode: extra.gatingMode ?? "all-findings",
       minModels: 2,
-      verificationTimeoutMs: 100,
-      verificationPassTimeoutMs: 100,
+      verificationModel: extra.verificationModel,
+      verificationTimeoutMs: extra.verificationModel ? 3000 : 100,
+      verificationPassTimeoutMs: extra.verificationModel ? 5000 : 100,
     },
     belowThresholdAppendix: true,
   });
@@ -546,12 +547,33 @@ describe('retained reviewer recovery coordinator', () => {
     expect(await state(fixture)).toEqual(spent);
   });
 
-  it('refuses an unjournaled verifier before preflight, a new claim or provider calls', async () => {
-    const fixture = await sealed(1, 'timeout', 3, { gatingMode: 'verified-consensus' }), options = coordinator(fixture);
-    await expect(applyReviewerRecovery(options.input)).rejects.toThrow('reviewer_recovery_verifier_retention_required');
-    expect(options.preflight).not.toHaveBeenCalled();
-    expect(options.called).not.toHaveBeenCalled();
-    expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+  it('regenerates and seals a successor verifier phase and resumes without paying again', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' });
+    const options = coordinator(fixture), ask = vi.fn(async () => ({model:'openai/verifier', provider:'openai',
+      status:'success' as const, durationMs:1, text:'[{"id":"F1","verdict":"confirmed"}]'}));
+    const input = {...options.input, adapterFactory: () => ({name:'fake',provider:'fake',review:options.called,ask})};
+    const result = await applyReviewerRecovery(input);
+    if (result.kind !== 'completed') throw new Error('Expected completed recovery');
+    expect(options.called).toHaveBeenCalledTimes(1);expect(ask).toHaveBeenCalledTimes(1);
+    expect(options.preflight.mock.calls.length).toBeGreaterThan(1);
+    const report = JSON.parse(result.terminal.reportBytes);
+    expect(report.findings[0].gating.reason).toBe('verified');
+    const lineage = await loadReviewerLineage({commonDir:await realpath(fixture.dir),target,runId:input.successorRunId});
+    expect(lineage.runs[0]!.terminal).toEqual(fixture.sourceTerminal);
+    expect(lineage.latest.inspected.verificationProof).toBeDefined();
+    expect(await state(fixture)).toMatchObject({attemptsUsed:2});
+    const replay = await resumeReviewerRecovery({...input,nowMs:()=>input.expiresAtMs+1});
+    expect(replay.terminal).toEqual(result.terminal);expect(replay.reusedTerminal).toBe(true);
+    expect(options.called).toHaveBeenCalledTimes(1);expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses deterministic no-verifier gating after recovery when no verifier was captured',async()=>{
+    const fixture=await sealed(1,'timeout',3,{gatingMode:'verified-consensus'}),options=coordinator(fixture);
+    const result=await applyReviewerRecovery(options.input);
+    if(result.kind!=='completed')throw new Error('Expected completed recovery');
+    expect(JSON.parse(result.terminal.reportBytes).findings[0].gating.verification.verdict).toBe('unavailable');
+    expect(JSON.parse(result.terminal.reviewerArtifactBytes).verification).toBeUndefined();
+    expect(options.called).toHaveBeenCalledTimes(1);
   });
 
   it('preserves the frozen async snapshot and never counts it as a blocking seat', async () => {

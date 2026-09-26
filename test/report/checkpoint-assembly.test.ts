@@ -104,6 +104,16 @@ function asyncReview(model: string, item: Finding, status: ModelReview['status']
 }
 
 describe('proof-bound checkpoint assembly', () => {
+  it('refuses a missing retained verifier phase before any live verifier call', async () => {
+    const f = fixture({ chunks: 1, verified: true }), rows = rowsFor(f, ['s0', 's1'], 'complete');
+    rows[0]!.findings = [{ ...finding('candidate'), severity: 'important' }];
+    const args = input(f, await proof(f, rows), await proof(f, []));
+    const ask = vi.fn(async () => ({ model: 'google/gemini-3.8-flash', provider: 'google',
+      status: 'success' as const, text: '[{"id":"F1","verdict":"confirmed"}]', durationMs: 1 }));
+    await expect(assembleCheckpointReview(args, { ask })).rejects.toThrow('checkpoint_gating_missing_phase');
+    expect(ask).not.toHaveBeenCalled();
+  });
+
   it('uses the captured deterministic ordering for both offline and completed reports', async () => {
     const f = fixture({ chunks: 1 }), rows = rowsFor(f, ['s0', 's1'], 'ordered');
     rows[0]!.findings = ['a.ts', 'ä.ts', 'z.ts'].map((file, index) => finding(`f${index}`, file));

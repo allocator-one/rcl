@@ -1,12 +1,13 @@
 import { mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Finding, ModelReview } from '../../src/consensus/types.js';
 import type { Config } from '../../src/config/schema.js';
 import type { Diff } from '../../src/resolver/types.js';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { executeCheckpointGating } from '../../src/dispatch/checkpoint-gating-execution.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
@@ -62,7 +63,7 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
     roleMap: new Map([[role.name, role]]), thresholds: resolvedThresholds,
     gating: { mode: options.verified ? 'verified-consensus' : 'all-findings', minModels: 2,
       verificationModel: options.verified ? 'google/gemini-3.8-flash' : undefined,
-      verificationTimeoutMs: 100, verificationPassTimeoutMs: 100 },
+      verificationTimeoutMs: options.verified ? 3000 : 100, verificationPassTimeoutMs: options.verified ? 5000 : 100 },
     modelWeights: new Map([[models[0]!, 0.75]]), belowThresholdAppendix: options.appendix ?? true });
   const capture = captureReviewerInputs({ plan, policy, patchBytes, configBytes, specBytes, contextBytes, toolsBytes,
     chunkBytes, assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
@@ -87,7 +88,7 @@ async function retained(options: { seats?: number; partial?: boolean; seal?: boo
     validate: async () => {}, run: async (claim, ownership) => {
       run.converge = claim as typeof run.converge;
       const launch = createOriginalLaunch({ runId: id, target, originalNativeClaim: { attempt: 1, round: 1 },
-        capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, startedAtMs: 1000, expiresAtMs: 2000,
+        capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, startedAtMs: 1000, expiresAtMs: options.verified ? 61000 : 2000,
         maxPhysicalCalls: 6, maxAttemptsPerCell: 1 });
       const createJournal = async (commonDir: string, owner: NativeTargetOwnership, suffix: string) => {
         const journal = await CheckpointJournal.create({ commonDir, namespace: id, plan: f.plan, ownership: owner });
@@ -119,9 +120,12 @@ async function retained(options: { seats?: number; partial?: boolean; seal?: boo
       }
       const projection = projectCheckpointReport({ sources: [], successor: { runId: id, proof }, policy });
       const assembly = { projection, supplementalAsync: emptyAsync(), diff: f.diff, startTime: 1000, run };
-      const { report } = await assembleCheckpointReview(assembly, { ask: async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success', durationMs: 1, text: '[]' }) });
+      const gate = options.verified ? await executeCheckpointGating({ assembly, commonDir: gitCommonDir, ownership, journal,
+        askFactory: () => async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success' as const, durationMs: 1, text: '[]' }),
+        beforeLaunch: async () => {}, onLateAuditError: () => {}, nowMs: () => 1100, monotonicNow: () => 0 }) : undefined;
+      const { report } = await assembleCheckpointReview(assembly, ...(gate?.verificationProof ? [{ verificationProof: gate.verificationProof }] : []));
       reportBytes = JSON.stringify(sanitizeForDelivery(report));
-      const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation: { version: 1, parseFailures: false } });
+      const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation: { version: 1, parseFailures: false }, ...(gate?.verificationProof ? { verificationProof: gate.verificationProof } : {}) });
       if (options.terminal !== false) await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
       const health = projection.health;
       return { runId: id, reportJsonSha256: sha256Hex(reportBytes), totalReviews: health.policy.seatCount,
@@ -172,11 +176,25 @@ describe('native admission of an original retained report', () => {
     });
   });
 
-  it('leaves provider-dependent refutation annotations non-admitted until verifier authority exists', async () => {
+  it('admits a structurally replayed sealed verifier phase', async () => {
+    const f = await retained({ verified: true });
+    const phase = await (await CheckpointJournal.inspectRead(f.checkpoint)).readVerification();
+    expect(phase!.terminal!.status).toBe('complete');
+    expect(JSON.parse(f.reportBytes).findings[0].gating.verification.verdict).toBe('unavailable');
+    expect((await processRetainedRoundReport(f)).findings).toHaveLength(1);
+  });
+
+  it.each(['missing', 'replaced'])('refuses a %s verifier journal before admission or lineage reuse', async kind => {
     const f = await retained({ verified: true }), before = await nativeBytes(f);
-    expect(JSON.parse(f.reportBytes).findings[0].gating).toMatchObject({ reason: 'none', verification: { verdict: 'unavailable' } });
-    await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_verifier_evidence_required');
-    expect(await nativeBytes(f)).toEqual(before);
+    const change = kind === 'missing'
+      ? vi.spyOn(CheckpointJournal.prototype, 'readVerification').mockResolvedValue(undefined)
+      : vi.spyOn(CheckpointJournal.prototype, 'exportVerificationProof').mockResolvedValue({ bytes: '{}', digest: 'f'.repeat(64) });
+    try {
+      await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_verification_mismatch');
+      await expect(loadReviewerLineage({ commonDir: f.gitCommonDir, target: f.target, runId: f.id }))
+        .rejects.toThrow('reviewer_lineage_verification_mismatch');
+      expect(await nativeBytes(f)).toEqual(before);
+    } finally { change.mockRestore(); }
   });
 
   it('admits a conclusive original quorum despite a permanent minority failure and pending delivery', async () => {
@@ -283,11 +301,13 @@ async function supplemented(options: { complete?: boolean; verified?: boolean } 
       const run = { ...f.run, id: successor, startedAt: new Date(startedAtMs),
         converge: { target: f.target, ...operation.successorNativeClaim! } };
       const assembly = { projection, supplementalAsync: emptyAsync(), diff: f.f.diff, startTime: startedAtMs, run };
-      const { report } = await assembleCheckpointReview(assembly, { ask: async () => ({
-        model: 'google/gemini-3.8-flash', provider: 'google', status: 'success', durationMs: 1, text: '[]' }) });
+      const gate = options.verified ? await executeCheckpointGating({ assembly, commonDir: f.gitCommonDir, ownership, journal,
+        askFactory: () => async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success' as const, durationMs: 1, text: '[]' }),
+        beforeLaunch: async () => {}, onLateAuditError: () => {}, nowMs: () => startedAtMs + 1, monotonicNow: () => 0 }) : undefined;
+      const { report } = await assembleCheckpointReview(assembly, ...(gate?.verificationProof ? [{ verificationProof: gate.verificationProof }] : []));
       reportBytes = JSON.stringify(sanitizeForDelivery(report));
       const artifact = serializeReviewerArtifact({ assembly, reportBytes,
-        representation: { version: 1, parseFailures: false } });
+        representation: { version: 1, parseFailures: false }, ...(gate?.verificationProof ? { verificationProof: gate.verificationProof } : {}) });
       await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
     } });
   return { ...f, reportBytes, originalReport, sourceJournal, successor };
@@ -393,10 +413,9 @@ describe('native admission of a supplemented retained report', () => {
     expect(await nativeBytes(f)).toEqual(before);
   });
 
-  it('does not treat a provider-dependent verifier annotation as admission authority', async () => {
-    const f = await supplemented({ verified: true }), before = await nativeBytes(f);
-    await expect(processSupplementedRoundReport(f)).rejects.toThrow('supplemented_report_verifier_evidence_required');
-    expect(await nativeBytes(f)).toEqual(before);
+  it('admits a successor with structurally replayed sealed verifier evidence', async () => {
+    const f = await supplemented({ verified: true });
+    expect((await processSupplementedRoundReport(f)).findings).toHaveLength(1);
   });
 });
 

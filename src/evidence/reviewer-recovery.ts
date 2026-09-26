@@ -7,6 +7,8 @@ import { retainedLaunchInputSha256 } from '../converge/retained-report.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof } from '../dispatch/checkpoint.js';
 import { decodeCapturedInputs } from '../dispatch/captured-inputs.js';
 import { createCheckpointLateAudit } from '../dispatch/late-audit.js';
+import { executeCheckpointGating } from '../dispatch/checkpoint-gating-execution.js';
+import { defaultAdapterFactory } from '../dispatch/runner.js';
 import { recoverCapturedAssignments, type CapturedRecoveryOptions } from '../dispatch/recovery.js';
 import { decodeRecoveryOperation, type RecoveryOperation } from '../dispatch/recovery-operation.js';
 import { renderReportArtifacts } from '../output/artifacts.js';
@@ -17,6 +19,7 @@ import { serializeReviewerArtifact, type ReviewerArtifact } from '../report/revi
 import { describeReviewerEvidence } from '../report/reviewer-evidence.js';
 import type { ReviewerHealth } from '../report/reviewer-health.js';
 import { sha256Hex, type RunHeaderInput } from '../report/run-header.js';
+import { detectProvider } from '../roles/dispatcher.js';
 import { sanitizeForDelivery } from '../telemetry/envelope.js';
 import { UUID } from '../telemetry/recovery/source.js';
 import { loadReviewerLineage, type ReviewerLineage } from './reviewer-lineage.js';
@@ -90,6 +93,15 @@ function snapshot(input: CommonRecoveryOptions): CommonRecoveryOptions {
     signal: input.signal, nowMs: input.nowMs, onStage: input.onStage };
 }
 
+function preflightRequest(options: CommonRecoveryOptions, source: ReviewerLineage): ReviewerRecoveryPreflight {
+  const references = source.runs.map(run => ({ runId: run.runId,
+    reportSha256: run.terminal.reportSha256,
+    reviewerArtifactSha256: sha256Hex(run.terminal.reviewerArtifactBytes) }));
+  return { target: options.target, headSha: options.currentHeadSha,
+    successorRunId: options.successorRunId, source: { ...references.at(-1)! },
+    lineage: references.map(reference => ({ ...reference })) };
+}
+
 async function prepare(input: CommonRecoveryOptions, sourceRunId: string) {
   if (!UUID.test(sourceRunId ?? '') || sourceRunId === input.successorRunId) fail('invalid_source');
   const commonDir = await realpath(resolve(input.commonDir));
@@ -101,17 +113,8 @@ async function prepare(input: CommonRecoveryOptions, sourceRunId: string) {
     retainedLaunchInputSha256(inspected.captured.digest, options.currentRunBindings) !== inputSha256) fail('input_mismatch');
   const fresh = decodeCapturedInputs(options.freshCaptureBytes, source.plan);
   if (fresh.bytes !== inspected.captured.bytes || fresh.digest !== inspected.captured.digest) fail('input_mismatch');
-  // A private verifier transcript needs its own persisted intents/results before
-  // the normal verification pass can be resumed without duplicate paid calls.
-  // Until that path exists, refuse before spending rather than silently changing
-  // the frozen gating mode or letting assembly use an unjournaled default adapter.
-  if (fresh.aggregation?.gating.mode !== 'all-findings') fail('verifier_retention_required');
-  const references = source.runs.map(run => ({ runId: run.runId,
-    reportSha256: run.terminal.reportSha256,
-    reviewerArtifactSha256: sha256Hex(run.terminal.reviewerArtifactBytes) }));
-  await options.preflight({ target: options.target, headSha: options.currentHeadSha,
-    successorRunId: options.successorRunId, source: { ...references.at(-1)! },
-    lineage: references.map(reference => ({ ...reference })) });
+  if (!fresh.aggregation) fail('aggregation_required');
+  await options.preflight(preflightRequest(options, source));
   return { options, source, inputSha256 };
 }
 
@@ -145,11 +148,21 @@ async function executeBoundSuccessor(options: CommonRecoveryOptions, source: Rev
         startedAt: new Date(operation.startedAtMs),
         converge: { target: options.target, attempt: claim.attempt, round: operation.successorNativeClaim!.round } },
     };
-    const completed = await assembleCheckpointReview(assembly, { onStage: options.onStage });
+    const gated = await executeCheckpointGating({ assembly, commonDir: options.commonDir, ownership, journal,
+      beforeLaunch: () => options.preflight(preflightRequest(options, source)),
+      askFactory: model => {
+        const adapter = (options.adapterFactory ?? defaultAdapterFactory)(detectProvider(model));
+        return (model, system, user, request) => adapter.ask(model, system, user, request);
+      },
+      onLateAuditError: options.onLateAuditError, signal: options.signal, nowMs: options.nowMs,
+    });
+    const completed = await assembleCheckpointReview(assembly, { onStage: options.onStage,
+      verificationProof: gated.verificationProof });
     completed.report.run.reviewer_evidence = describeReviewerEvidence(proof, assembly.supplementalAsync);
     const representation = original.representation;
     const reportBytes = renderReportArtifacts(sanitizeForDelivery(completed.report, representation)).report_json!;
-    const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation });
+    const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation,
+      verificationProof: gated.verificationProof });
     await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
   } finally {
     // Wait for observations already received, never for a hanging provider.

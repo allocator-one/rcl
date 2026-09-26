@@ -135,6 +135,15 @@ function validatePhysicalHistory(runs: readonly ReviewerLineageRun[], rootClaim:
   }
 }
 
+async function assertVerification(journal: CheckpointJournal, inspected: InspectedReviewerArtifact): Promise<void> {
+  const phase = await journal.readVerification();
+  if ((phase !== undefined) !== (inspected.verificationProof !== undefined)) fail('verification_mismatch');
+  if (phase !== undefined) {
+    const proof = await journal.exportVerificationProof();
+    if (proof.bytes !== inspected.verificationProof!.bytes || proof.digest !== inspected.verificationProof!.digest) fail('verification_mismatch');
+  }
+}
+
 async function loadOne(commonDir: string, target: string, runId: string): Promise<ReviewerLineageRun> {
   const journal = await CheckpointJournal.inspectRead(checkpointPath(commonDir, target, runId));
   const plan = journal.getPlan();
@@ -148,6 +157,7 @@ async function loadOne(commonDir: string, target: string, runId: string): Promis
   });
   if (inspected.proof.digest !== proof.digest || inspected.reportSha256 !== terminal.reportSha256 ||
     inspected.captured.plan.digest !== plan.digest) fail('proof_mismatch');
+  await assertVerification(journal, inspected);
   const kind = inspected.descriptor.kind === 'original' ? 'original' : 'successor';
   return Object.freeze({ runId, journal, plan, state, proof, terminal, inspected, captured: inspected.captured, kind });
 }
