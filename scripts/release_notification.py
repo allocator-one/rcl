@@ -131,10 +131,16 @@ def validate_attestation(document, name, version, repository, sha, run_id=None, 
                 dependency.get('digest', {}).get('gitCommit') == sha for dependency in dependencies)
         except (KeyError, TypeError, ValueError, UnicodeError):
             continue
+        invocation_matches = run_id is None
+        if run_id is not None:
+            prefix = f'https://github.com/{repository}/actions/runs/{run_id}/attempts/'
+            published_attempt = invocation.removeprefix(prefix)
+            invocation_matches = (invocation.startswith(prefix) and published_attempt.isdecimal()
+                                  and 0 < int(published_attempt) <= run_attempt)
         if (payload.get('predicateType') == SLSA_V1 and subject_matches and dependency_matches
                 and workflow == {'repository': f'https://github.com/{repository}',
                                  'path': '.github/workflows/release.yml', 'ref': f'refs/tags/v{version}'}
-                and (run_id is None or invocation == f'https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt}')):
+                and invocation_matches):
             return
     raise NotificationError('Published package provenance does not match the release')
 

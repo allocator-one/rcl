@@ -91,6 +91,15 @@ class ReleaseNotificationTest(unittest.TestCase):
         document = {'dist': {'integrity': integrity, 'attestations': {'url': n.attestation_url('review-council', '4.1.6')},
                               }, 'attestations': attestation['attestations']}
         n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 1)
+        n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 2)
+        with self.assertRaises(n.NotificationError):
+            n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 0)
+        future_payload = json.loads(json.dumps(payload))
+        future_payload['predicate']['runDetails']['metadata']['invocationId'] = \
+            'https://github.com/allocator-one/rcl/actions/runs/42/attempts/2'
+        document['attestations'][0]['bundle']['dsseEnvelope']['payload'] = base64.b64encode(json.dumps(future_payload).encode()).decode()
+        with self.assertRaises(n.NotificationError):
+            n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 1)
         document['attestations'][0]['bundle']['dsseEnvelope']['payload'] = base64.b64encode(json.dumps({**payload, 'subject': []}).encode()).decode()
         with self.assertRaises(n.NotificationError):
             n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 1)
