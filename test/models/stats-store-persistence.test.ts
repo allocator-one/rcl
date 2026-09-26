@@ -1,0 +1,182 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { promisify } from 'node:util';
+import { appendCalls, appendOutcomes, loadModelStats } from '../../src/models/stats-store.js';
+
+const fault = vi.hoisted(() => ({ syncFailures: 0, syncAttempts: 0, partialWrite: false,
+  directory: '', openDenied: '' }));
+vi.mock('node:fs/promises', async original => {
+  const fs = await original<typeof import('node:fs/promises')>();
+  return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    if (fault.openDenied && String(args[0]) === fault.openDenied) {
+      throw Object.assign(new Error('Injected read-only model history'), { code: 'EROFS' });
+    }
+    const handle = await fs.open(...args);
+    if (String(args[0]) === fault.directory || ['calls.jsonl', 'outcomes.jsonl'].includes(basename(String(args[0])))) {
+      const sync = handle.sync.bind(handle);
+      const write = handle.writeFile.bind(handle);
+      handle.sync = async () => {
+        fault.syncAttempts++;
+        if (fault.syncFailures > 0) {
+          fault.syncFailures--;
+          throw Object.assign(new Error('Injected model history fsync failure'), { code: 'EIO' });
+        }
+        return sync();
+      };
+      handle.writeFile = async (...input: Parameters<typeof handle.writeFile>) => {
+        if (fault.partialWrite) {
+          fault.partialWrite = false;
+          const text = String(input[0]);
+          await write(text.slice(0, text.indexOf('\n') + 12));
+          throw Object.assign(new Error('Injected interrupted append'), { code: 'EIO' });
+        }
+        return write(...input);
+      };
+    }
+    return handle;
+  } };
+});
+
+let dir: string;
+const now = new Date('2026-09-22T12:00:00Z');
+const call = (recordId: string) => ({ recordId, ts: now.toISOString(), model: 'fixture', role: 'general',
+  durationMs: 25, status: 'success', source: 'live' as const });
+const outcome = (recordId: string, sequence: number, verdict: 'fixed' | 'dismissed') => ({
+  recordId, order: { scope: 'original-repository/target', sequence }, ts: now.toISOString(),
+  target: 'target', findingKey: 'finding', models: ['fixture'], verdict, source: 'live' as const,
+});
+
+beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-history-persistence-'))); });
+afterEach(async () => {
+  fault.syncFailures = 0; fault.syncAttempts = 0; fault.partialWrite = false;
+  fault.directory = ''; fault.openDenied = '';
+  await rm(dir, { recursive: true, force: true });
+});
+const records = async (file: string) => (await readFile(join(dir, file), 'utf8')).trim().split('\n').flatMap(line => {
+  try { return [JSON.parse(line)]; } catch { return []; }
+});
+
+it('retries the same retained call without duplicating physical history', async () => {
+  await appendCalls([call('operation:0')], dir);
+  const before = await readFile(join(dir, 'calls.jsonl'));
+  await appendCalls([call('operation:0')], dir);
+  expect(await readFile(join(dir, 'calls.jsonl'))).toEqual(before);
+  expect((await loadModelStats({ dir, now }))[0]?.calls).toBe(1);
+});
+
+it('retains separate original calls with identical visible model and timing fields', async () => {
+  await appendCalls([call('operation:0'), call('operation:1')], dir);
+  await appendCalls([call('operation:0'), call('operation:1')], dir);
+  expect((await records('calls.jsonl')).map(row => row.recordId)).toEqual(['operation:0', 'operation:1']);
+  expect((await loadModelStats({ dir, now }))[0]?.calls).toBe(2);
+});
+
+it('refuses an existing record identity reused for different evidence without changing history', async () => {
+  await appendCalls([call('operation:0')], dir);
+  const before = await readFile(join(dir, 'calls.jsonl'));
+  await expect(appendCalls([{ ...call('operation:0'), status: 'error' }], dir)).rejects.toThrow('precision_record_conflict');
+  expect(await readFile(join(dir, 'calls.jsonl'))).toEqual(before);
+});
+
+it('keeps later logical triage effective when an earlier outcome is persisted last', async () => {
+  const later = { ...outcome('later:0', 2, 'dismissed'), ts: '2026-09-22T11:59:00Z' };
+  await appendOutcomes([later], dir);
+  await appendOutcomes([outcome('earlier:0', 1, 'fixed')], dir);
+  const [stats] = await loadModelStats({ dir, now });
+  expect(stats).toMatchObject({ outcomes: 1, fixed: 0 });
+  expect(await records('outcomes.jsonl')).toHaveLength(2);
+});
+
+it('serializes concurrent retries of one retained batch', async () => {
+  await Promise.all(Array.from({ length: 4 }, () => appendCalls([call('operation:0')], dir)));
+  expect(await records('calls.jsonl')).toHaveLength(1);
+});
+
+it('preserves one physical batch across concurrent processes and a later restart', async () => {
+  const program = `import {appendCalls} from ${JSON.stringify(new URL('../../dist/models/stats-store.js', import.meta.url).href)};
+    await appendCalls(JSON.parse(process.argv[1]), process.argv[2]);`;
+  const batch = JSON.stringify([call('operation:0'), call('operation:1')]);
+  const run = () => promisify(execFile)(process.execPath, ['--input-type=module', '-e', program, batch, dir], { timeout: 10_000 });
+  await Promise.all([run(), run(), run()]);
+  const before = await readFile(join(dir, 'calls.jsonl'));
+  const restarted = await run();
+  expect(restarted.stderr).toBe('');
+  expect(await readFile(join(dir, 'calls.jsonl'))).toEqual(before);
+  expect((await records('calls.jsonl')).map(row => row.recordId)).toEqual(['operation:0', 'operation:1']);
+});
+
+it('resumes after an interrupted multi-record append while retaining the torn original tail', async () => {
+  fault.partialWrite = true;
+  const batch = [call('operation:0'), call('operation:1')];
+  await expect(appendCalls(batch, dir)).rejects.toMatchObject({ code: 'EIO' });
+  const interrupted = await readFile(join(dir, 'calls.jsonl'), 'utf8');
+  await appendCalls(batch, dir);
+  expect((await readFile(join(dir, 'calls.jsonl'), 'utf8')).startsWith(interrupted)).toBe(true);
+  expect((await records('calls.jsonl')).map(row => row.recordId)).toEqual(['operation:0', 'operation:1']);
+  await appendCalls(batch, dir);
+  expect((await loadModelStats({ dir, now }))[0]?.calls).toBe(2);
+});
+
+it.each(['calls', 'outcomes'] as const)('requires successful fsync before acknowledging existing %s on retry', async kind => {
+  const persist = () => kind === 'calls'
+    ? appendCalls([call('operation:0')], dir)
+    : appendOutcomes([outcome('operation:0', 1, 'fixed')], dir);
+  fault.syncFailures = 2;
+  await expect(persist()).rejects.toMatchObject({ code: 'EIO' });
+  const before = await readFile(join(dir, `${kind}.jsonl`));
+  await expect(persist()).rejects.toMatchObject({ code: 'EIO' });
+  await persist();
+  expect(fault.syncAttempts).toBe(3);
+  expect(await readFile(join(dir, `${kind}.jsonl`))).toEqual(before);
+});
+
+it('keeps a complete last record without a newline when retry repairs its separator', async () => {
+  await writeFile(join(dir, 'calls.jsonl'), JSON.stringify(call('operation:0')));
+  await appendCalls([call('operation:0'), call('operation:1')], dir);
+  expect((await records('calls.jsonl')).map(row => row.recordId)).toEqual(['operation:0', 'operation:1']);
+});
+
+it('rejects invalid retained ordering before creating a store', async () => {
+  const missing = join(dir, 'missing');
+  await expect(appendOutcomes([outcome('operation:0', -1, 'fixed')], missing)).rejects.toThrow('invalid_precision_order');
+  await expect(readFile(join(missing, 'outcomes.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('flushes previously created ancestor entries again after a failed directory flush', async () => {
+  const nested = join(dir, 'nested', 'store');
+  fault.directory = dir; fault.syncFailures = 2;
+  await expect(appendCalls([call('operation:0')], nested)).rejects.toMatchObject({ code: 'EIO' });
+  await expect(appendCalls([call('operation:0')], nested)).rejects.toMatchObject({ code: 'EIO' });
+  await expect(readFile(join(nested, 'calls.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
+  await appendCalls([call('operation:0')], nested);
+  expect((await loadModelStats({ dir: nested, now }))[0]?.calls).toBe(1);
+});
+
+it.each(['calls', 'outcomes'] as const)('surfaces a read-only %s store and permits the exact batch in a writable override', async kind => {
+  const fallback = join(dir, 'explicit-writable');
+  fault.openDenied = join(dir, `${kind}.jsonl`);
+  const persist = (path: string) => kind === 'calls'
+    ? appendCalls([call('operation:0')], path)
+    : appendOutcomes([outcome('operation:0', 1, 'fixed')], path);
+  await expect(persist(dir)).rejects.toMatchObject({ code: 'EROFS' });
+  await persist(fallback);
+  await persist(fallback);
+  const [stats] = await loadModelStats({ dir: fallback, now });
+  expect(kind === 'calls' ? stats?.calls : stats?.outcomes).toBe(1);
+  await expect(readFile(fault.openDenied)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('refuses two different dispositions claiming the same original logical order', async () => {
+  await writeFile(join(dir, 'outcomes.jsonl'), [outcome('a:0', 1, 'fixed'), outcome('b:0', 1, 'dismissed')].map(row => JSON.stringify(row)).join('\n'));
+  await expect(loadModelStats({ dir, now })).rejects.toThrow('precision_order_conflict');
+});
+
+it('rejects a conflicting logical order before appending it', async () => {
+  await appendOutcomes([outcome('a:0', 1, 'fixed')], dir);
+  const before = await readFile(join(dir, 'outcomes.jsonl'));
+  await expect(appendOutcomes([outcome('b:0', 1, 'dismissed')], dir)).rejects.toThrow('precision_order_conflict');
+  expect(await readFile(join(dir, 'outcomes.jsonl'))).toEqual(before);
+});

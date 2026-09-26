@@ -1,6 +1,8 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { constants } from 'node:fs';
+import { mkdir, open, readFile, realpath } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js';
 
 /**
  * Per-model triage history (RCL-27). The converge ledgers always recorded
@@ -15,6 +17,10 @@ import { join } from 'node:path';
  */
 
 export interface OutcomeRecord {
+  /** Original retained operation and record ordinal; reuse exactly on retry. */
+  recordId?: string;
+  /** Allocated by the owning native operation, never by this auxiliary store. */
+  order?: { scope: string; sequence: number };
   ts: string;
   verdict: 'fixed' | 'dismissed';
   /** Distinct models that supported the finding when it was triaged. */
@@ -26,6 +32,8 @@ export interface OutcomeRecord {
 }
 
 export interface CallRecord {
+  /** Distinct original calls need distinct IDs, even with equal visible fields. */
+  recordId?: string;
   ts: string;
   model: string;
   durationMs: number;
@@ -66,28 +74,101 @@ import { resolveDataDir } from '../config/data-dir.js';
 export { resolveDataDir };
 
 /**
- * Keep each write() below this size and aligned to line boundaries, so two
- * concurrent rcl processes appending to the shared store interleave whole
- * lines instead of tearing them (the reader still skips a torn tail from a
- * mid-write crash).
+ * Bound write buffers at record boundaries. The shared lock serializes this
+ * version's writers; interrupted records remain as audit bytes and readers
+ * skip their torn line. Retained record IDs make partial-batch retry safe.
  */
 const APPEND_CHUNK_BYTES = 64 * 1024;
 
-async function appendJsonl(dir: string, file: string, records: object[]): Promise<void> {
-  if (records.length === 0) return;
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const path = join(dir, file);
-  let chunk = '';
+type PrecisionRecord = OutcomeRecord | CallRecord;
+
+function validateMetadata(record: PrecisionRecord): void {
+  if (record.recordId !== undefined && (typeof record.recordId !== 'string' ||
+      !/^[A-Za-z0-9._:-]{1,200}$/.test(record.recordId))) throw new Error('invalid_precision_record_id');
+  if ('order' in record && record.order !== undefined && (!record.recordId ||
+      !record.order || typeof record.order.scope !== 'string' || record.order.scope.length === 0 ||
+      record.order.scope.length > 1024 || !Number.isSafeInteger(record.order.sequence) || record.order.sequence < 1 ||
+      !record.target || !record.findingKey)) throw new Error('invalid_precision_order');
+}
+
+function parseJsonl<T>(raw: string): T[] {
+  const result: T[] = [];
+  for (const line of raw.split('\n')) {
+    try {
+      const value: unknown = JSON.parse(line);
+      if (value && typeof value === 'object' && !Array.isArray(value)) result.push(value as T);
+    } catch { /* Retain and skip a torn or corrupt line. */ }
+  }
+  return result;
+}
+
+function identityIndex(records: PrecisionRecord[]): Map<string, PrecisionRecord> {
+  const byId = new Map<string, PrecisionRecord>();
+  const byOrder = new Map<string, OutcomeRecord>();
   for (const record of records) {
-    chunk += JSON.stringify(record) + '\n';
-    if (chunk.length >= APPEND_CHUNK_BYTES) {
-      await appendFile(path, chunk, { encoding: 'utf8', mode: 0o600 });
-      chunk = '';
+    validateMetadata(record);
+    if ('order' in record && record.order) {
+      const key = JSON.stringify([record.target, record.findingKey, record.order.scope, record.order.sequence]);
+      const prior = byOrder.get(key);
+      if (prior && !isDeepStrictEqual(prior, record)) throw new Error('precision_order_conflict');
+      byOrder.set(key, record);
     }
+    if (record.recordId === undefined) continue;
+    const prior = byId.get(record.recordId);
+    if (prior && !isDeepStrictEqual(prior, record)) throw new Error('precision_record_conflict');
+    byId.set(record.recordId, record);
   }
-  if (chunk.length > 0) {
-    await appendFile(path, chunk, { encoding: 'utf8', mode: 0o600 });
+  return byId;
+}
+
+async function appendJsonl(inputDir: string, file: string, input: PrecisionRecord[]): Promise<void> {
+  if (input.length === 0) return;
+  // Freeze and validate the entire batch before making any filesystem changes.
+  const records = JSON.parse(JSON.stringify(input)) as PrecisionRecord[];
+  records.forEach(validateMetadata);
+  identityIndex(records);
+  await mkdir(resolve(inputDir), { recursive: true, mode: 0o700 });
+  const dir = await realpath(resolve(inputDir));
+  // An earlier mkdir may have succeeded before its parent flush failed. An
+  // existing path on retry does not prove those directory entries are durable.
+  for (let path = dir; ; path = dirname(path)) {
+    await syncNativeDirectory(path);
+    if (dirname(path) === path) break;
   }
+  await withNativeLock(join(dir, 'model-stats-locks'), file, async () => {
+    const handle = await open(join(dir, file), constants.O_CREAT | constants.O_RDWR | constants.O_APPEND |
+      (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600);
+    try {
+      if (!(await handle.stat()).isFile()) throw new Error('invalid_precision_store');
+      const raw = await handle.readFile('utf8');
+      const existing = identityIndex(parseJsonl<PrecisionRecord>(raw));
+      identityIndex([...existing.values(), ...records]);
+      const pending: PrecisionRecord[] = [];
+      for (const record of records) {
+        const prior = record.recordId === undefined ? undefined : existing.get(record.recordId);
+        if (prior) {
+          if (!isDeepStrictEqual(prior, record)) throw new Error('precision_record_conflict');
+        } else {
+          pending.push(record);
+          if (record.recordId !== undefined) existing.set(record.recordId, record);
+        }
+      }
+      // Never concatenate a retry to a torn tail or an un-terminated complete
+      // record. Its original bytes remain intact; only the separator is added.
+      let chunk = raw.length > 0 && !raw.endsWith('\n') ? '\n' : '';
+      for (const record of pending) {
+        chunk += JSON.stringify(record) + '\n';
+        if (Buffer.byteLength(chunk) >= APPEND_CHUNK_BYTES) {
+          await handle.writeFile(chunk, 'utf8'); chunk = '';
+        }
+      }
+      if (chunk) await handle.writeFile(chunk, 'utf8');
+      // Readback after a failed fsync is not durability. Even an identical
+      // already-present batch must successfully flush before acknowledging it.
+      await handle.sync();
+    } finally { await handle.close(); }
+    await syncNativeDirectory(dir);
+  });
 }
 
 export async function appendOutcomes(records: OutcomeRecord[], dir = resolveDataDir()): Promise<void> {
@@ -98,23 +179,32 @@ export async function appendCalls(records: CallRecord[], dir = resolveDataDir())
   await appendJsonl(dir, CALLS_FILE, records);
 }
 
-async function readJsonl<T>(dir: string, file: string): Promise<T[]> {
+async function readJsonl<T extends PrecisionRecord>(dir: string, file: string): Promise<T[]> {
   let raw: string;
   try {
     raw = await readFile(join(dir, file), 'utf8');
   } catch {
     return [];
   }
-  const out: T[] = [];
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line) as T);
-    } catch {
-      // A torn or corrupt line loses one record, never the store.
+  const parsed = parseJsonl<T>(raw);
+  identityIndex(parsed);
+  const seen = new Set<string>();
+  return parsed.filter(record => {
+    if (record.recordId === undefined) return true;
+    if (seen.has(record.recordId)) return false;
+    seen.add(record.recordId); return true;
+  });
+}
+
+/** Original operation order wins over retry arrival and local clock rollback. */
+function laterOutcome(candidate: OutcomeRecord, current: OutcomeRecord): boolean {
+  if (candidate.order && current.order && candidate.order.scope === current.order.scope) {
+    if (candidate.order.sequence === current.order.sequence && !isDeepStrictEqual(candidate, current)) {
+      throw new Error('precision_order_conflict');
     }
+    return candidate.order.sequence > current.order.sequence;
   }
-  return out;
+  return Date.parse(candidate.ts) >= Date.parse(current.ts);
 }
 
 /**
@@ -158,16 +248,18 @@ export async function loadModelStats(options: {
     return b;
   };
 
-  // Idempotency at load: verdicts can be re-recorded (converge re-runs, a
-  // later verdict superseding an earlier one) and seeds re-run — the LAST
-  // record per (target, findingKey) wins; keyless records pass through.
+  // One effective verdict per finding. Retained native operation order keeps
+  // a delayed auxiliary retry from replacing more recent triage. Legacy rows
+  // lack that order and use their original timestamp, then physical order.
   const outcomesByKey = new Map<string, OutcomeRecord>();
   const keylessOutcomes: OutcomeRecord[] = [];
   for (const rec of await readJsonl<OutcomeRecord>(dir, OUTCOMES_FILE)) {
     if (!Array.isArray(rec.models) || !inWindow(rec.ts)) continue;
     if (rec.verdict !== 'fixed' && rec.verdict !== 'dismissed') continue;
     if (rec.target && rec.findingKey) {
-      outcomesByKey.set(`${rec.target} ${rec.findingKey}`, rec);
+      const key = `${rec.target} ${rec.findingKey}`;
+      const prior = outcomesByKey.get(key);
+      if (!prior || laterOutcome(rec, prior)) outcomesByKey.set(key, rec);
     } else {
       keylessOutcomes.push(rec);
     }
