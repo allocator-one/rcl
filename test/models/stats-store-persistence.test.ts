@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { appendCalls, appendOutcomes, loadModelStats } from '../../src/models/stats-store.js';
 
@@ -162,6 +162,12 @@ it('does not sync the filesystem root while making a nested store durable', asyn
   expect(fault.openedPaths).toContain(nested);
 });
 
+it('does not sync unrelated existing ancestors while making a nested store durable', async () => {
+  const nested = join(dir, 'nested', 'store');
+  await appendCalls([call('operation:0')], nested);
+  expect(fault.openedPaths).not.toContain(dirname(dir));
+});
+
 it('skips malformed retained rows instead of bricking the rest of the history', async () => {
   await writeFile(join(dir, 'calls.jsonl'), [
     JSON.stringify(call('legacy:0')),
@@ -182,6 +188,18 @@ it('keeps the last physical legacy outcome when its timestamp is older', async (
 it('does not let a later legacy outcome replace retained original ordering', async () => {
   await appendOutcomes([outcome('ordered:0', 2, 'fixed')], dir);
   await appendOutcomes([{ ...outcome('legacy:0', 1, 'dismissed'), recordId: undefined, order: undefined }], dir);
+  expect((await loadModelStats({ dir, now }))[0]).toMatchObject({ outcomes: 1, fixed: 1 });
+});
+
+it('keeps physical order when outcomes come from different original operation scopes', async () => {
+  await appendOutcomes([{ ...outcome('scope-a:0', 2, 'fixed'), order: { scope: 'scope-a', sequence: 2 } }], dir);
+  await appendOutcomes([{ ...outcome('scope-b:0', 1, 'dismissed'), order: { scope: 'scope-b', sequence: 1 } }], dir);
+  expect((await loadModelStats({ dir, now }))[0]).toMatchObject({ outcomes: 1, fixed: 0 });
+});
+
+it('lets retained original ordering supersede an earlier legacy outcome', async () => {
+  await appendOutcomes([{ ...outcome('legacy:0', 1, 'dismissed'), recordId: undefined, order: undefined }], dir);
+  await appendOutcomes([outcome('ordered:0', 1, 'fixed')], dir);
   expect((await loadModelStats({ dir, now }))[0]).toMatchObject({ outcomes: 1, fixed: 1 });
 });
 

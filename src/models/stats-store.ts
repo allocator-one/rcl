@@ -19,7 +19,11 @@ import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js'
 export interface OutcomeRecord {
   /** Original retained operation and record ordinal; reuse exactly on retry. */
   recordId?: string;
-  /** Allocated by the owning native operation, never by this auxiliary store. */
+  /**
+   * Allocated by the owning native operation, never by this auxiliary store.
+   * Sequences compare only within one scope; scopes and legacy rows share no
+   * logical clock and retain physical JSONL order when compared to each other.
+   */
   order?: { scope: string; sequence: number };
   ts: string;
   verdict: 'fixed' | 'dismissed';
@@ -148,13 +152,35 @@ function readableRecords<T extends PrecisionRecord>(records: T[]): T[] {
   return accepted;
 }
 
+// A failed parent fsync leaves a created directory entry pending in this process.
+// Retry that bounded chain, but never sync unrelated, pre-existing ancestors.
+const pendingDirectorySyncs = new Map<string, string[]>();
+
 async function syncDirectoryAncestors(inputDir: string): Promise<string> {
   const target = resolve(inputDir);
-  await mkdir(target, { recursive: true, mode: 0o700 });
+  const firstCreated = await mkdir(target, { recursive: true, mode: 0o700 });
   const dir = await realpath(target);
-  for (let path = dir; dirname(path) !== path; path = dirname(path)) {
-    await syncNativeDirectory(path);
+  let paths = pendingDirectorySyncs.get(dir) ?? [];
+
+  if (firstCreated) {
+    const boundary = await realpath(dirname(firstCreated));
+    const created: string[] = [];
+    for (let path = dir; ; path = dirname(path)) {
+      created.push(path);
+      if (path === boundary) break;
+      if (dirname(path) === path) throw new Error('invalid_precision_store');
+    }
+    paths = [...new Set([...paths, ...created])];
   }
+
+  if (paths.length === 0) return dir;
+  try {
+    for (const path of paths) await syncNativeDirectory(path);
+  } catch (error) {
+    pendingDirectorySyncs.set(dir, paths);
+    throw error;
+  }
+  pendingDirectorySyncs.delete(dir);
   return dir;
 }
 
@@ -244,7 +270,11 @@ async function readJsonl<T extends PrecisionRecord>(dir: string, file: string): 
   });
 }
 
-/** Original operation order wins over retry arrival and local clock rollback. */
+/**
+ * Ordered rows take precedence over legacy rows. Sequence is authoritative only
+ * within one original operation scope; different ordered scopes and two legacy
+ * rows have no shared logical clock, so their later physical JSONL row wins.
+ */
 function laterOutcome(candidate: OutcomeRecord, current: OutcomeRecord): boolean {
   if (candidate.order && current.order && candidate.order.scope === current.order.scope) {
     if (candidate.order.sequence === current.order.sequence && !isDeepStrictEqual(candidate, current)) {
@@ -298,9 +328,9 @@ export async function loadModelStats(options: {
     return b;
   };
 
-  // One effective verdict per finding. Retained native operation order keeps
-  // a delayed auxiliary retry from replacing more recent triage. Legacy rows
-  // lack that order and use their original timestamp, then physical order.
+  // One effective verdict per finding. Retained order prevents a delayed retry
+  // from replacing later triage in the same original operation. Ordered rows
+  // beat legacy rows; only all-legacy or cross-scope rows use physical order.
   const outcomesByKey = new Map<string, OutcomeRecord>();
   const keylessOutcomes: OutcomeRecord[] = [];
   for (const rec of await readJsonl<OutcomeRecord>(dir, OUTCOMES_FILE)) {
