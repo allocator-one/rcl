@@ -44,6 +44,28 @@ describe('guarded delivery receipt', () => {
       stored: true }] }, identity, async () => bytes)).toBe(false);
   });
 
+  it.each([0, 25_000_001])('refuses an out-of-range declared report size of %i', async declaredBytes => {
+    const bytes = Buffer.from('exact report');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const identity = { ...expected, reportJsonSha256: digest };
+    const delivered = { ...run(), artifacts: [{ kind: 'report_json', declared_sha256: digest,
+      declared_bytes: declaredBytes, stored: true }] };
+    const readReport = vi.fn().mockResolvedValue(bytes);
+
+    expect(await verifyGuardedDelivery(delivered, identity, readReport)).toBe(false);
+    expect(readReport).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when reading the stored report throws', async () => {
+    const bytes = Buffer.from('exact report');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const identity = { ...expected, reportJsonSha256: digest };
+    const delivered = { ...run(), artifacts: [{ kind: 'report_json', declared_sha256: digest,
+      declared_bytes: bytes.length, stored: true }] };
+
+    expect(await verifyGuardedDelivery(delivered, identity, async () => { throw new Error('fixture read failure'); })).toBe(false);
+  });
+
   it('uses the stored matching report artifact for the byte receipt', async () => {
     const bytes = Buffer.from('exact report');
     const digest = createHash('sha256').update(bytes).digest('hex');
