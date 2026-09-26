@@ -532,6 +532,10 @@ export class HarnessSink {
 
   /** `POST /api/v1/reviews/converge/events` — idempotent on each event id. */
   async postEvents(events: WireEvent[], options: RequestOptions = {}): Promise<SinkOutcome<EventsReceipt>> {
+    if (!Array.isArray(events) || !events.every(event => event !== null && typeof event === 'object' && !Array.isArray(event))) {
+      return { kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
+        message: 'events must be objects; events were not sent' };
+    }
     const preparedEvents = structuredClone(events);
     const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
     // Retained JSON can violate the producer's type. Refuse the batch before

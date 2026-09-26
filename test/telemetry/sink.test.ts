@@ -524,6 +524,18 @@ describe('HarnessSink.putArtifact', () => {
 });
 
 describe('HarnessSink.postEvents', () => {
+  it('rejects malformed retained batches before issuing a request', async () => {
+    const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { inserted: 1, duplicates: 0 } } }));
+
+    for (const events of [null, [null]]) {
+      await expect(s.postEvents(events as unknown as Parameters<typeof s.postEvents>[0])).resolves.toMatchObject({
+        kind: 'rejected', httpStatus: 0, error: 'invalid_event_payload',
+      });
+    }
+
+    expect(requests).toHaveLength(0);
+  });
+
   it('posts the batch and reads the counts, which must account for every event', async () => {
     const { sink: s, requests } = sink(() => ({ status: 201, body: { data: { inserted: 1, duplicates: 1 } } }));
     const events = [
