@@ -277,6 +277,36 @@ export function isRetryableStatus(status: number | undefined): boolean {
   return status !== undefined && RETRYABLE_STATUSES.has(status);
 }
 
+const TRANSIENT_CONNECTION_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+
+/**
+ * Recognize bounded transport causes without guessing from error prose. An
+ * SDK connection-error class may omit its cause; arbitrary errors may not.
+ * Unknown coded causes (including TLS, DNS configuration and invalid URLs),
+ * aborts, cycles and over-depth chains remain terminal.
+ */
+export function isRetryableConnectionError(error: unknown, knownConnectionError = false): boolean {
+  const seen = new Set<object>();
+  let current = error;
+  let transient = false;
+  for (let depth = 0; depth < 8; depth++) {
+    if (current === null || typeof current !== 'object' || seen.has(current)) return false;
+    seen.add(current);
+    const cause = current as { name?: unknown; code?: unknown; status?: unknown; cause?: unknown };
+    if (cause.name === 'AbortError' || cause.name === 'APIUserAbortError' || cause.status !== undefined) return false;
+    if (cause.code !== undefined) {
+      if (typeof cause.code !== 'string' || !TRANSIENT_CONNECTION_CODES.has(cause.code)) return false;
+      transient = true;
+    }
+    if (cause.cause === undefined) return transient || (knownConnectionError && seen.size === 1);
+    current = cause.cause;
+  }
+  return false;
+}
+
 export function retryDelay(attempt: number): number {
   return RETRY_DELAYS[attempt] ?? RETRY_DELAYS[RETRY_DELAYS.length - 1]!;
 }
@@ -335,7 +365,7 @@ export type AttemptOutcome<T> =
   | { ok: false; timedOut: boolean; error: string };
 
 /**
- * Shared timeout-owning retry skeleton for one-off adapter calls (discuss).
+ * Shared timeout-owning retry skeleton for review and one-off adapter calls.
  * The AbortController is the sole owner of timeout classification — the
  * caller's SDK timeout must be set above `timeoutMs` (same convention as the
  * review paths).
@@ -370,6 +400,11 @@ export async function attemptWithRetries<T>(opts: {
     clearTimeout(timeoutHandle);
     unlinkAbort();
     return abortOutcome();
+  }
+  if (opts.timeoutMs <= 0) {
+    clearTimeout(timeoutHandle);
+    unlinkAbort();
+    return { ok: false, timedOut: true, error: 'Request timed out' };
   }
 
   try {

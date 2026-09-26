@@ -41,6 +41,8 @@ export interface TokenUsage {
 }
 
 export interface ModelReview {
+  /** Observed SDK invocations, including ambiguous failures; not wire requests or billing. */
+  adapterAttempts?: number;
   model: string;
   role: string;
   provider: string;

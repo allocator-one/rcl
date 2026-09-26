@@ -80,7 +80,11 @@ function mergeChunkReviewEntries(reviews: ModelReview[], collectContributions: b
     const dropped = parts.reduce((sum, part) => sum + (part.droppedFindings ?? 0), 0);
     const warnings = parts.flatMap((part) => part.warnings ?? []);
     const usage = sumUsage(parts);
+    const attempts = parts.map(part => part.adapterAttempts);
+    const totalAttempts = attempts.every((count): count is number => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)
+      ? attempts.reduce((sum, count) => sum + count, 0) : undefined;
     const degraded = {
+      ...(totalAttempts !== undefined && Number.isSafeInteger(totalAttempts) ? { adapterAttempts: totalAttempts } : {}),
       ...(usage ? { usage } : {}),
       ...(dropped > 0 ? { droppedFindings: dropped } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),

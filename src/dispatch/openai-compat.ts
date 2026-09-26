@@ -5,17 +5,16 @@ import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
 import {
   stripKnownProviderPrefix,
   isRetryableStatus,
-  retryDelay,
-  sleep,
   attemptWithRetries,
+  isRetryableConnectionError,
   failedReview,
   isBlankOutput,
-  linkAbortSignal,
   reviewFromParse,
   usageFromOpenAI,
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
+  if (err instanceof OpenAI.APIConnectionError) return isRetryableConnectionError(err, true);
   return err instanceof OpenAI.APIError && isRetryableStatus(err.status);
 }
 
@@ -68,130 +67,102 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     options: AdapterOptions
   ): Promise<ModelReview> {
     const start = Date.now();
-    const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
-    const unlinkAbort = linkAbortSignal(controller, options.signal);
-
-    let lastErr: unknown = new Error('no attempts made');
+    let adapterAttempts = 0;
     const modelId = stripKnownProviderPrefix(model);
 
-    try {
-      for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
-        try {
-          const createParams: Parameters<typeof this.client.chat.completions.create>[0] = {
-            model: modelId,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-            max_tokens: 16384,
+    const outcome = await attemptWithRetries<ModelReview>({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      signal: options.signal,
+      isRetryable,
+      attempt: async (signal) => {
+        const createParams: Parameters<typeof this.client.chat.completions.create>[0] = {
+          model: modelId,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: 16384,
+        };
+
+        if (this.useJsonMode) {
+          createParams.response_format = { type: 'json_object' };
+        }
+
+        if (this.reasoningEffort) {
+          // OpenRouter extension; not in the OpenAI SDK's param types.
+          (createParams as unknown as Record<string, unknown>)['reasoning'] = {
+            effort: this.reasoningEffort,
           };
+        }
 
-          if (this.useJsonMode) {
-            createParams.response_format = { type: 'json_object' };
-          }
+        adapterAttempts++;
 
-          if (this.reasoningEffort) {
-            // OpenRouter extension; not in the OpenAI SDK's param types.
-            (createParams as unknown as Record<string, unknown>)['reasoning'] = {
-              effort: this.reasoningEffort,
-            };
-          }
+        const response = await this.client.chat.completions.create(
+          createParams,
+          // SDK timeout sits above ours (default 600s would tie or undercut
+          // large configured timeouts); the buffer keeps our AbortController
+          // as the sole owner of timeout classification.
+          { signal: signal, timeout: options.timeoutMs + 30_000 }
+        ) as OpenAI.ChatCompletion;
+        const usage = usageFromOpenAI(response.usage);
 
-          const response = await this.client.chat.completions.create(
-            createParams,
-            // SDK timeout sits above ours (default 600s would tie or undercut
-            // large configured timeouts); the buffer keeps our AbortController
-            // as the sole owner of timeout classification.
-            { signal: controller.signal, timeout: options.timeoutMs + 30_000 }
-          ) as OpenAI.ChatCompletion;
-          const usage = usageFromOpenAI(response.usage);
-
-          const choice = response.choices[0];
-          if (choice?.finish_reason === 'length') {
-            return failedReview({
-              model,
-              role,
-              provider: this.provider,
-              startedAt: start,
-              usage,
-              error: 'Response truncated at token limit; findings would be incomplete',
-            });
-          }
-
-          // OpenRouter reports an upstream Anthropic refusal as
-          // `finish_reason: "content_filter"` with the explanation on
-          // `message.refusal` — HTTP 200, no content.
-          const refusal = (choice?.message as { refusal?: string } | undefined)?.refusal;
-          if (choice?.finish_reason === 'content_filter' || refusal) {
-            return failedReview({
-              model,
-              role,
-              provider: this.provider,
-              startedAt: start,
-              usage,
-              error: `Model refused this review — the diff was not reviewed${refusal ? `: ${refusal}` : ''}`,
-            });
-          }
-
-          const rawOutput = choice?.message?.content ?? '';
-          if (isBlankOutput(rawOutput)) {
-            return failedReview({
-              model,
-              role,
-              provider: this.provider,
-              startedAt: start,
-              usage,
-              error: 'Model returned an empty response; the diff was not reviewed',
-            });
-          }
-
-          const parsed = parseReviewOutput(rawOutput, model, role);
-          for (const w of parsed.warnings) console.warn(w);
-
-          return reviewFromParse({
+        const choice = response.choices[0];
+        if (choice?.finish_reason === 'length') {
+          return failedReview({
             model,
             role,
             provider: this.provider,
             startedAt: start,
-            parsed,
             usage,
+            error: 'Response truncated at token limit; findings would be incomplete',
           });
-        } catch (err) {
-          lastErr = err;
-          if (controller.signal.aborted) {
-            return {
-              model,
-              role,
-              provider: this.provider,
-              findings: [],
-              durationMs: Date.now() - start,
-              status: 'timeout',
-              error: 'Request timed out',
-            };
-          }
-          if (isRetryable(err) && attempt < (options.maxRetries ?? 3)) {
-            await sleep(retryDelay(attempt));
-            continue;
-          }
-          break;
         }
-      }
-    } finally {
-      clearTimeout(timeoutHandle);
-      unlinkAbort();
-    }
 
-    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
-    return {
-      model,
-      role,
-      provider: this.provider,
-      findings: [],
-      durationMs: Date.now() - start,
-      status: 'error',
-      error: errMsg,
-    };
+        // OpenRouter reports an upstream Anthropic refusal as
+        // `finish_reason: "content_filter"` with the explanation on
+        // `message.refusal` — HTTP 200, no content.
+        const refusal = (choice?.message as { refusal?: string } | undefined)?.refusal;
+        if (choice?.finish_reason === 'content_filter' || refusal) {
+          return failedReview({
+            model,
+            role,
+            provider: this.provider,
+            startedAt: start,
+            usage,
+            error: `Model refused this review — the diff was not reviewed${refusal ? `: ${refusal}` : ''}`,
+          });
+        }
+
+        const rawOutput = choice?.message?.content ?? '';
+        if (isBlankOutput(rawOutput)) {
+          return failedReview({
+            model,
+            role,
+            provider: this.provider,
+            startedAt: start,
+            usage,
+            error: 'Model returned an empty response; the diff was not reviewed',
+          });
+        }
+
+        const parsed = parseReviewOutput(rawOutput, model, role);
+        for (const w of parsed.warnings) console.warn(w);
+
+        return reviewFromParse({
+          model,
+          role,
+          provider: this.provider,
+          startedAt: start,
+          parsed,
+          usage,
+        });
+      },
+    });
+    return outcome.ok
+      ? { ...outcome.value, adapterAttempts }
+      : { ...failedReview({ model, role, provider: this.provider, startedAt: start,
+          status: outcome.timedOut ? 'timeout' : 'error', error: outcome.error }), adapterAttempts };
   }
 
   async ask(
@@ -203,9 +174,11 @@ export class OpenAICompatAdapter implements ReviewAdapter {
     const start = Date.now();
     const modelId = stripKnownProviderPrefix(model);
 
+    let adapterAttempts = 0;
     const outcome = await attemptWithRetries({
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries ?? 3,
+      signal: options.signal,
       isRetryable,
       attempt: async (signal) => {
         const createParams: Parameters<typeof this.client.chat.completions.create>[0] = {
@@ -222,6 +195,7 @@ export class OpenAICompatAdapter implements ReviewAdapter {
             effort: this.reasoningEffort,
           };
         }
+        adapterAttempts++;
         const response = (await this.client.chat.completions.create(createParams, {
           signal,
           timeout: options.timeoutMs + 30_000,
@@ -232,12 +206,13 @@ export class OpenAICompatAdapter implements ReviewAdapter {
 
     const durationMs = Date.now() - start;
     return outcome.ok
-      ? { model, provider: this.provider, text: outcome.value, durationMs, status: 'success' }
+      ? { model, provider: this.provider, text: outcome.value, durationMs, adapterAttempts, status: 'success' }
       : {
           model,
           provider: this.provider,
           text: '',
           durationMs,
+          adapterAttempts,
           status: outcome.timedOut ? 'timeout' : 'error',
           error: outcome.error,
         };

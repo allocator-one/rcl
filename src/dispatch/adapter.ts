@@ -13,6 +13,8 @@ export interface AdapterOptions {
 
 /** A free-text answer from one model (discuss path — no findings schema). */
 export interface ModelAnswer {
+  /** Observed SDK invocations, including ambiguous failures; not wire requests or billing. */
+  adapterAttempts?: number;
   model: string;
   provider: string;
   text: string;

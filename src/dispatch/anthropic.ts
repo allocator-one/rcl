@@ -5,12 +5,10 @@ import type { ReviewAdapter, AdapterOptions, ModelAnswer } from './adapter.js';
 import {
   stripKnownProviderPrefix,
   isRetryableStatus,
-  retryDelay,
-  sleep,
   attemptWithRetries,
+  isRetryableConnectionError,
   failedReview,
   isBlankOutput,
-  linkAbortSignal,
   reviewFromParse,
   usageFromAnthropic,
   ASK_MAX_OUTPUT_TOKENS,
@@ -18,10 +16,12 @@ import {
 } from './utils.js';
 
 function isRetryable(err: unknown): boolean {
+  if (err instanceof Anthropic.APIConnectionError) return isRetryableConnectionError(err, true);
   return err instanceof Anthropic.APIError && isRetryableStatus(err.status);
 }
 
 function isRetryableReview(err: unknown, stream: boolean): boolean {
+  if (err instanceof Anthropic.APIConnectionError || err instanceof Anthropic.APIUserAbortError) return isRetryable(err);
   if (isRetryable(err)) return true;
   if (!stream) return false;
 
@@ -31,10 +31,9 @@ function isRetryableReview(err: unknown, stream: boolean): boolean {
   if (err instanceof Anthropic.APIError && err.status === undefined &&
       (err.type === 'overloaded_error' || err.type === 'api_error' ||
         err.type === 'rate_limit_error' || err.type === 'timeout_error')) return true;
-  return err instanceof Anthropic.APIConnectionError ||
-    (err instanceof Anthropic.AnthropicError &&
+  return err instanceof Anthropic.AnthropicError &&
       (err.message === 'stream ended without producing a Message with role=assistant' ||
-        err.message === 'request ended without sending any chunks'));
+        err.message === 'request ended without sending any chunks');
 }
 
 interface ModelProfile {
@@ -76,175 +75,146 @@ export class AnthropicAdapter implements ReviewAdapter {
     options: AdapterOptions
   ): Promise<ModelReview> {
     const start = Date.now();
-    const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
-    const unlinkAbort = linkAbortSignal(controller, options.signal);
-
-    let lastErr: unknown = new Error('no attempts made');
+    let adapterAttempts = 0;
     const modelId = stripKnownProviderPrefix(model);
     // Fable 5.1 counts adaptive thinking against max_tokens. Large review
     // chunks exhausted the old ceiling before any complete findings arrived.
     const profile = profileFor(modelId);
 
-    try {
-      for (let attempt = 0; attempt <= (options.maxRetries ?? 3); attempt++) {
-        try {
-          // Use tool use for reliable JSON extraction
-          const request: Anthropic.MessageCreateParamsNonStreaming = {
-              model: modelId,
-              max_tokens: profile.maxTokens,
-              ...(profile.effort ? { output_config: { effort: profile.effort } } : {}),
-              system: systemPrompt,
-              messages: [{ role: 'user' as const, content: userPrompt }],
-              tools: [
-                {
-                  name: 'report_findings',
-                  description: 'Report code review findings as structured JSON',
-                  input_schema: {
-                    type: 'object' as const,
-                    properties: {
-                      findings: {
-                        type: 'array',
-                        items: {
-                          type: 'object',
-                          properties: {
-                            id: { type: 'string' },
-                            file: { type: 'string' },
-                            startLine: { type: 'number' },
-                            endLine: { type: 'number' },
-                            severity: {
-                              type: 'string',
-                              enum: ['critical', 'important', 'minor', 'nitpick'],
-                            },
-                            category: {
-                              type: 'string',
-                              enum: ['security', 'correctness', 'best-practices', 'tests', 'api-design'],
-                            },
-                            title: { type: 'string' },
-                            description: { type: 'string' },
-                            suggestedFix: { type: 'string' },
+    const outcome = await attemptWithRetries<ModelReview>({
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries ?? 3,
+      signal: options.signal,
+      isRetryable: (err) => isRetryableReview(err, profile.stream),
+      attempt: async (signal) => {
+        // Use tool use for reliable JSON extraction
+        const request: Anthropic.MessageCreateParamsNonStreaming = {
+            model: modelId,
+            max_tokens: profile.maxTokens,
+            ...(profile.effort ? { output_config: { effort: profile.effort } } : {}),
+            system: systemPrompt,
+            messages: [{ role: 'user' as const, content: userPrompt }],
+            tools: [
+              {
+                name: 'report_findings',
+                description: 'Report code review findings as structured JSON',
+                input_schema: {
+                  type: 'object' as const,
+                  properties: {
+                    findings: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string' },
+                          file: { type: 'string' },
+                          startLine: { type: 'number' },
+                          endLine: { type: 'number' },
+                          severity: {
+                            type: 'string',
+                            enum: ['critical', 'important', 'minor', 'nitpick'],
                           },
-                          required: ['id', 'file', 'startLine', 'endLine', 'severity', 'category', 'title', 'description'],
+                          category: {
+                            type: 'string',
+                            enum: ['security', 'correctness', 'best-practices', 'tests', 'api-design'],
+                          },
+                          title: { type: 'string' },
+                          description: { type: 'string' },
+                          suggestedFix: { type: 'string' },
                         },
+                        required: ['id', 'file', 'startLine', 'endLine', 'severity', 'category', 'title', 'description'],
                       },
                     },
-                    required: ['findings'],
                   },
+                  required: ['findings'],
                 },
-              ],
-              tool_choice: { type: 'auto' as const },
-            };
-          // Fable's larger output budget requires the SDK's streaming path.
-          // finalMessage() keeps the same complete-response parsing and
-          // truncation checks used by the nonstreaming path.
-          const requestOptions = {
-            signal: controller.signal,
-            timeout: options.timeoutMs + 30_000,
+              },
+            ],
+            tool_choice: { type: 'auto' as const },
           };
-          const response = profile.stream
-            ? await this.client.messages.stream(request, requestOptions).finalMessage()
-            : await this.client.messages.create(request, requestOptions);
-          const usage = usageFromAnthropic(response.usage);
+        // Fable's larger output budget requires the SDK's streaming path.
+        // finalMessage() keeps the same complete-response parsing and
+        // truncation checks used by the nonstreaming path.
+        const requestOptions = {
+          signal: signal,
+          timeout: options.timeoutMs + 30_000,
+        };
+        adapterAttempts++;
+        const response = profile.stream
+          ? await this.client.messages.stream(request, requestOptions).finalMessage()
+          : await this.client.messages.create(request, requestOptions);
+        const usage = usageFromAnthropic(response.usage);
 
-          if (response.stop_reason === 'max_tokens') {
-            return failedReview({
-              model,
-              role,
-              provider: 'anthropic',
-              startedAt: start,
-              usage,
-              error: 'Response truncated at max_tokens; findings would be incomplete',
-            });
-          }
-
-          // Safety classifiers decline in-band: HTTP 200, no content. Left
-          // unhandled this reads as a clean review of code nobody looked at.
-          if (response.stop_reason === 'refusal') {
-            const details = response.stop_details;
-            const category =
-              details !== null && details !== undefined && 'category' in details
-                ? (details.category as string | null)
-                : null;
-            return failedReview({
-              model,
-              role,
-              provider: 'anthropic',
-              startedAt: start,
-              usage,
-              error: `Model refused this review${category ? ` (${category})` : ''} — the diff was not reviewed`,
-            });
-          }
-
-          // Extract from tool use
-          let rawOutput = '';
-          for (const block of response.content) {
-            if (block.type === 'tool_use' && block.name === 'report_findings') {
-              rawOutput = JSON.stringify(block.input);
-              break;
-            }
-            if (block.type === 'text') {
-              rawOutput += block.text;
-            }
-          }
-
-          if (isBlankOutput(rawOutput)) {
-            return failedReview({
-              model,
-              role,
-              provider: 'anthropic',
-              startedAt: start,
-              usage,
-              error: 'Model returned an empty response; the diff was not reviewed',
-            });
-          }
-
-          // If tool wasn't used, parse text output
-          const parsed = parseReviewOutput(rawOutput, model, role);
-          for (const w of parsed.warnings) console.warn(w);
-
-          return reviewFromParse({
+        if (response.stop_reason === 'max_tokens') {
+          return failedReview({
             model,
             role,
             provider: 'anthropic',
             startedAt: start,
-            parsed,
             usage,
+            error: 'Response truncated at max_tokens; findings would be incomplete',
           });
-        } catch (err) {
-          lastErr = err;
-          if (controller.signal.aborted) {
-            return {
-              model,
-              role,
-              provider: 'anthropic',
-              findings: [],
-              durationMs: Date.now() - start,
-              status: 'timeout',
-              error: 'Request timed out',
-            };
-          }
-          if (isRetryableReview(err, profile.stream) && attempt < (options.maxRetries ?? 3)) {
-            await sleep(retryDelay(attempt));
-            continue;
-          }
-          break;
         }
-      }
-    } finally {
-      clearTimeout(timeoutHandle);
-      unlinkAbort();
-    }
 
-    const errMsg = lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : String(lastErr);
-    return {
-      model,
-      role,
-      provider: 'anthropic',
-      findings: [],
-      durationMs: Date.now() - start,
-      status: 'error',
-      error: errMsg,
-    };
+        // Safety classifiers decline in-band: HTTP 200, no content. Left
+        // unhandled this reads as a clean review of code nobody looked at.
+        if (response.stop_reason === 'refusal') {
+          const details = response.stop_details;
+          const category =
+            details !== null && details !== undefined && 'category' in details
+              ? (details.category as string | null)
+              : null;
+          return failedReview({
+            model,
+            role,
+            provider: 'anthropic',
+            startedAt: start,
+            usage,
+            error: `Model refused this review${category ? ` (${category})` : ''} — the diff was not reviewed`,
+          });
+        }
+
+        // Extract from tool use
+        let rawOutput = '';
+        for (const block of response.content) {
+          if (block.type === 'tool_use' && block.name === 'report_findings') {
+            rawOutput = JSON.stringify(block.input);
+            break;
+          }
+          if (block.type === 'text') {
+            rawOutput += block.text;
+          }
+        }
+
+        if (isBlankOutput(rawOutput)) {
+          return failedReview({
+            model,
+            role,
+            provider: 'anthropic',
+            startedAt: start,
+            usage,
+            error: 'Model returned an empty response; the diff was not reviewed',
+          });
+        }
+
+        // If tool wasn't used, parse text output
+        const parsed = parseReviewOutput(rawOutput, model, role);
+        for (const w of parsed.warnings) console.warn(w);
+
+        return reviewFromParse({
+          model,
+          role,
+          provider: 'anthropic',
+          startedAt: start,
+          parsed,
+          usage,
+        });
+      },
+    });
+    return outcome.ok
+      ? { ...outcome.value, adapterAttempts }
+      : { ...failedReview({ model, role, provider: 'anthropic', startedAt: start,
+          status: outcome.timedOut ? 'timeout' : 'error', error: outcome.error }), adapterAttempts };
   }
 
   async ask(
@@ -256,12 +226,14 @@ export class AnthropicAdapter implements ReviewAdapter {
     const start = Date.now();
     const modelId = stripKnownProviderPrefix(model);
 
+    let adapterAttempts = 0;
     const outcome = await attemptWithRetries({
       timeoutMs: options.timeoutMs,
       maxRetries: options.maxRetries ?? 3,
       signal: options.signal,
       isRetryable,
       attempt: async (signal) => {
+        adapterAttempts++;
         const response = await this.client.messages.create(
           {
             model: modelId,
@@ -287,12 +259,13 @@ export class AnthropicAdapter implements ReviewAdapter {
 
     const durationMs = Date.now() - start;
     return outcome.ok
-      ? { model, provider: 'anthropic', text: outcome.value, durationMs, status: 'success' }
+      ? { model, provider: 'anthropic', text: outcome.value, durationMs, adapterAttempts, status: 'success' }
       : {
           model,
           provider: 'anthropic',
           text: '',
           durationMs,
+          adapterAttempts,
           status: outcome.timedOut ? 'timeout' : 'error',
           error: outcome.error,
         };
