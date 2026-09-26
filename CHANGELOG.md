@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 4.2.0 - 2026-09-26
+
+- Add opt-in `review --retain-reviewers` and `reviewers status`, `preview`,
+  `apply`, and `resume`. Recover eligible missing reviewer calls while preserving
+  successful results, the frozen roster's complete-seat quorum, and native
+  attempt, round, and admission gates (RCL-105).
+- Deliver captured prompts and raw reviewer evidence through a separate private
+  protocol requiring a compatible backend and current scoped credentials.
+  Resume preserves exact saved inputs and finite budgets; it never renews them.
+- Allow `reviewers resume --local-only` to finalize expired saved successors
+  without network calls, new paid work, delivery, or approval. Protected resume
+  requires the same still-live session; ordinary cold restart cannot mint a
+  replacement credential.
+- Reserve bounded finalization and delivery headroom inside the saved deadline.
+  Reviewer, verifier, and async work stop at the same earlier cutoff; delivery
+  remains bounded by the original expiry and is not guaranteed.
+
 ## 4.1.5 - 2026-09-26
 
 - Allow up to two minutes for evidence artifact uploads and exact-byte downloads

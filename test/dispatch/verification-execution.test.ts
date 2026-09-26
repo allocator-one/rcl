@@ -110,6 +110,17 @@ describe('bounded durable verifier execution', () => {
     expect((await f.journal.readVerification())!.uncertain).toHaveLength(1);
   });
 
+  it('rechecks a stricter runtime cutoff after durable intent without changing the saved verifier deadline', async () => {
+    const f = await fixture(1); let now = 2000;
+    const original = f.journal.recordVerificationIntent.bind(f.journal);
+    vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (...args) => { const value = await original(...args); now = 2100; return value; });
+    const ask = vi.fn(async () => answer());
+    const result = await f.execute({ nowMs: () => now, askFactory: () => ask, executionExpiresAtMs: 2100 });
+    expect(result.ok).toBe(false); expect(ask).not.toHaveBeenCalled(); expect(result.newPhysicalCalls).toBe(1);
+    const phase = (await f.journal.readVerification())!;
+    expect(phase.plan.expiresAtMs).toBe(f.saved.expiresAtMs); expect(phase.uncertain).toHaveLength(1);
+  });
+
   it('bounds an adapter that ignores abort and audits its later response without changing the sealed proof', async () => {
     const f = await fixture(1, 15); let resolve!: (value: ReturnType<typeof answer>) => void;
     const ask = vi.fn(() => new Promise<ReturnType<typeof answer>>(done => { resolve = done; }));

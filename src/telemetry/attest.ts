@@ -2,6 +2,7 @@ import { normalizeUrl, type HarnessCredential } from './credentials.js';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ReviewerRecoverySource } from './envelope.js';
+import { parseAttestedExpiry } from './attested-retry.js';
 import { scrubText } from './scrub.js';
 import { readBounded } from './sink.js';
 
@@ -381,4 +382,27 @@ export async function renewAttestation(current: Attestation, options: RenewOptio
   } catch (err) {
     return { attestation: current, renewed: false, failure: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Decode a bounded internal transfer, never new mint authority. The resulting
+ * unbranded session requires scoped server preflight/own-run readback; it cannot
+ * create an unknown run on restart or authorize a new deadline.
+ */
+export function parseTransferredAttestation(bytes: string, runId: string, expectedSource?: ReviewerAttestationRequest): Attestation {
+  const fail = (): never => { throw new AttestError('invalid_attestation',
+    'A valid still-live session for this exact retained run is required; preserve the artifacts and do not relaunch reviewers.'); };
+  if (typeof bytes !== 'string' || Buffer.byteLength(bytes) > 65_536) return fail();
+  let parsed: unknown; try { parsed = JSON.parse(bytes); } catch { return fail(); }
+  const result = z.object({
+    credential: z.object({ url: z.string(), token: z.string().min(5).max(8192).regex(/^rbc_[^\s\x00-\x1f\x7f]+$/), source: z.literal('attest') }).strict(),
+    runId: z.string(), expiresAt: z.string(), audience: z.string(), reviewerRecovery: reviewerRequestSchema.optional(),
+  }).strict().safeParse(parsed);
+  if (!result.success) return fail();
+  const session = result.data, url = normalizeUrl(session.credential.url), expiry = parseAttestedExpiry(session.expiresAt);
+  if (!url || url !== session.credential.url || new URL(url).origin !== session.audience ||
+    session.runId !== runId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![\s\S])/i.test(runId) ||
+    expiry === undefined || expiry <= Date.now() || !isDeepStrictEqual(session.reviewerRecovery, expectedSource)) return fail();
+  if (session.reviewerRecovery) snapshotReviewerAttestation(runId, session.reviewerRecovery);
+  return session;
 }

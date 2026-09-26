@@ -20,6 +20,8 @@ export interface VerificationExecutionOptions {
   /** Caller establishes source/principal/producer authority before any new physical intent. */
   beforeLaunch: () => Promise<void>;
   signal?: AbortSignal;
+  /** Optional stricter runtime cutoff; never changes the persisted phase plan. */
+  executionExpiresAtMs?: number;
   nowMs?: () => number;
   monotonicNow?: () => number;
   /** Caller buffers until sealing and retains with its original ownership; never alters the phase proof. */
@@ -44,6 +46,10 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
     return Promise.reject(new Error('verification_execution_plan_mismatch'));
   }
   const retained = event.plan;
+  const executionExpiresAtMs = options.executionExpiresAtMs ?? retained.expiresAtMs;
+  if (!Number.isSafeInteger(executionExpiresAtMs) || executionExpiresAtMs < 0 || executionExpiresAtMs > retained.expiresAtMs) {
+    return Promise.reject(new Error('verification_execution_invalid_runtime_deadline'));
+  }
   if (!Number.isSafeInteger(options.otherPhysicalCalls) || options.otherPhysicalCalls < 0 || options.otherPhysicalCalls > 500 ||
     typeof options.beforeLaunch !== 'function' || typeof options.askFactory !== 'function' ||
     typeof options.auditLateAnswer !== 'function' || typeof options.onLateAuditError !== 'function') {
@@ -86,7 +92,7 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
     const controller = new AbortController();
     let failure: string | undefined;
     const fail = (reason: string): void => { failure ??= reason; controller.abort(); };
-    const remaining = (): number => retained.expiresAtMs - now();
+    const remaining = (): number => executionExpiresAtMs - now();
     const pendingAudit = new Set<Promise<void>>(), auditErrors: unknown[] = [];
     function audit(row: VerificationResult): void {
       let work: Promise<void>;

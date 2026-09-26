@@ -1,3 +1,5 @@
+import { retainedPaidCutoff } from './retained-time-budget.js';
+import { abortSignalWithTimeout } from '../telemetry/abort-signal.js';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { ConvergeAttemptClaim } from '../converge/attempt-budget.js';
@@ -15,7 +17,7 @@ import { renderReportArtifacts } from '../output/artifacts.js';
 import type { AssemblyDependencies } from '../report/assembly.js';
 import { assembleCheckpointReview, type CheckpointAssemblyInput } from '../report/checkpoint-assembly.js';
 import { projectCheckpointReport } from '../report/checkpoint-projection.js';
-import { serializeReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
+import { inspectReviewerArtifact, serializeReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
 import { describeReviewerEvidence } from '../report/reviewer-evidence.js';
 import type { ReviewerHealth } from '../report/reviewer-health.js';
 import { sha256Hex, type RunHeaderInput } from '../report/run-header.js';
@@ -119,6 +121,13 @@ async function prepare(input: CommonRecoveryOptions, sourceRunId: string) {
 
 async function executeBoundSuccessor(options: CommonRecoveryOptions, source: ReviewerLineage,
   { journal, operation, claim, ownership }: BoundExecution): Promise<void> {
+  // Historical tiny operations can still finalize locally, but never gain a
+  // paid window. New operations are refused before their native claim below.
+  const executionExpiresAtMs = operation.expiresAtMs - operation.startedAtMs < 4
+    ? operation.startedAtMs : retainedPaidCutoff(operation);
+  const remaining = executionExpiresAtMs - (options.nowMs ?? Date.now)();
+  const paidLease = remaining > 0 ? abortSignalWithTimeout(options.signal, remaining) : undefined;
+  const paidSignal = paidLease?.signal ?? options.signal;
   const late = createCheckpointLateAudit({ commonDir: options.commonDir, journal, ownership,
     onError: options.onLateAuditError });
   try {
@@ -127,9 +136,9 @@ async function executeBoundSuccessor(options: CommonRecoveryOptions, source: Rev
     // operation and its durable intents, never from a new command-line budget.
     if (!(await journal.read()).finalized) {
       await recoverCapturedAssignments({ commonDir: options.commonDir, journal, ownership, operation,
-        expectedPlan: source.plan, sourceAttempts: source.attempts, nowMs: options.nowMs,
+        expectedPlan: source.plan, sourceAttempts: source.attempts, nowMs: options.nowMs, runtimeBounds: { expiresAtMs: executionExpiresAtMs },
         adapterFactory: options.adapterFactory, onPhysicalReviewComplete: options.onPhysicalReviewComplete,
-        signal: options.signal, auditLateAttempt: late.accept, onLateAuditError: options.onLateAuditError });
+        signal: paidSignal, auditLateAttempt: late.accept, onLateAuditError: options.onLateAuditError });
       await journal.finalize(ownership);
     }
     await late.flushAfterFinalization();
@@ -141,6 +150,7 @@ async function executeBoundSuccessor(options: CommonRecoveryOptions, source: Rev
       // This operation supplements the frozen blocking roster. It never drains
       // the current async queue or erases the source's already accepted snapshot.
       supplementalAsync: original.supplementalAsync,
+      ...(original.asyncExecution ? { asyncExecution: original.asyncExecution } : {}),
       diff: structuredClone(original.assembly.diff), startTime: operation.startedAtMs,
       run: { ...structuredClone(original.assembly.run), id: operation.successorRunId,
         rclVersion: options.rclVersion, runner: structuredClone(options.runner),
@@ -153,17 +163,21 @@ async function executeBoundSuccessor(options: CommonRecoveryOptions, source: Rev
         const adapter = (options.adapterFactory ?? defaultAdapterFactory)(detectProvider(model));
         return (model, system, user, request) => adapter.ask(model, system, user, request);
       },
-      onLateAuditError: options.onLateAuditError, signal: options.signal, nowMs: options.nowMs,
+      onLateAuditError: options.onLateAuditError, signal: paidSignal, nowMs: options.nowMs, executionExpiresAtMs,
     });
     const completed = await assembleCheckpointReview(assembly, { onStage: options.onStage,
       verificationProof: gated.verificationProof });
     completed.report.run.reviewer_evidence = describeReviewerEvidence(proof, assembly.supplementalAsync);
     const representation = original.representation;
     const reportBytes = renderReportArtifacts(sanitizeForDelivery(completed.report, representation)).report_json!;
+    const preliminary = serializeReviewerArtifact({ assembly, reportBytes, representation, verificationProof: gated.verificationProof });
+    const current = inspectReviewerArtifact(preliminary.bytes, { expectedReportBytes: reportBytes, expectedRunId: operation.successorRunId,
+      expectedTarget: options.target, expectedPlan: source.plan });
     const artifact = serializeReviewerArtifact({ assembly, reportBytes, representation,
-      verificationProof: gated.verificationProof });
+      verificationProof: gated.verificationProof, lineage: [...source.runs.map(run => run.inspected), current] });
     await journal.retainTerminalReport({ reportBytes, reviewerArtifactBytes: artifact.bytes }, ownership);
   } finally {
+    paidLease?.dispose();
     // Wait for observations already received, never for a hanging provider.
     if ((await journal.read()).finalized) await late.drain();
   }
@@ -186,11 +200,16 @@ export async function applyReviewerRecovery(input: ApplyReviewerRecoveryOptions)
   const bounds = { sourceRunId: input.sourceRunId, operationId: input.operationId, startedAtMs: input.startedAtMs,
     expiresAtMs: input.expiresAtMs, maxAdditionalCalls: input.maxAdditionalCalls,
     maxAttemptsPerCell: input.maxAttemptsPerCell, maxAttempts: input.maxAttempts };
+  const executionExpiresAtMs = retainedPaidCutoff(bounds);
   const prepared = await prepare(options, bounds.sourceRunId);
   const result = await guardReviewerRecoveryLaunch({ ...bounds, gitCommonDir: prepared.options.commonDir,
     target: options.target, successorRunId: options.successorRunId, headSha: options.currentHeadSha,
     inputSha256: prepared.inputSha256, nowMs: options.nowMs,
-    beforeClaim: ({ operationBytes }) => options.preflight(preflightRequest(prepared.options, prepared.source), operationBytes),
+    beforeClaim: async ({ operationBytes }) => {
+      if ((options.nowMs ?? Date.now)() >= executionExpiresAtMs) fail('execution_deadline');
+      await options.preflight(preflightRequest(prepared.options, prepared.source), operationBytes);
+      if ((options.nowMs ?? Date.now)() >= executionExpiresAtMs) fail('execution_deadline');
+    },
     run: context => executeBoundSuccessor(prepared.options, prepared.source, context) });
   return result.kind === 'already_quorate' ? result : completed(prepared.options, result, false);
 }

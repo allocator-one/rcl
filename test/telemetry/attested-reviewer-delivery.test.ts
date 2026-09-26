@@ -1,10 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { readTextFixture } from '../support/text-fixture.js';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readTransientInput } from '../../src/telemetry/transient-input.js';
 import { AttestedReviewerDelivery } from '../../src/telemetry/attested-reviewer-delivery.js';
-import { attestRun, type Attestation } from '../../src/telemetry/attest.js';
+import { attestRun, parseTransferredAttestation, type Attestation } from '../../src/telemetry/attest.js';
 import { inspectReviewerArtifact, serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
 import { buildRunEnvelope, declareReviewerRecovery, sha256Hex } from '../../src/telemetry/envelope.js';
 import { createTelemetryRuntime, deliverRun } from '../../src/telemetry/deliver.js';
@@ -14,7 +15,7 @@ afterEach(async () => { vi.restoreAllMocks(); vi.useRealTimers(); await Promise.
 const host = 'https://harness.example.test';
 const env = { HARNESS_API_URL: host, ACTIONS_ID_TOKEN_REQUEST_URL: 'https://actions.example.test/oidc', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'synthetic-request' };
 function fixture(index = 0) {
-  const rows = JSON.parse(readFileSync(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url), 'utf8')).rows;
+  const rows = JSON.parse(readTextFixture(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url))).rows;
   const entries = rows.map((r: any) => inspectReviewerArtifact(r.artifact_bytes, r.expectations));
   const entry = entries[index]!, parent = entries[index - 1];
   const result = JSON.parse(entry.reportBytes); result.run.reviewer_evidence = entry.descriptor;
@@ -104,7 +105,7 @@ describe('transient attested private delivery', () => {
     const f = fixture(), r = remote(f), attestation = await r.mint(); r.lostPrivate(); r.unreadable(true);
     await expect(transport(f, r, attestation).deliver(f)).rejects.toThrow();
     r.unreadable(false);
-    const copied = structuredClone(attestation);
+    const copied = parseTransferredAttestation(JSON.stringify(attestation), f.entry.runId);
     const restarted = transport(f, r, copied);
     expect(await restarted.deliver(f)).toMatchObject({ reportJsonVerified: true });
     expect(r.requests.filter(x => x.method === 'POST' && x.path.endsWith('/runs'))).toHaveLength(1);
@@ -200,5 +201,29 @@ describe('transient attested private delivery', () => {
     expect(delivered).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
     expect(await readdir(root)).not.toContain('reviewer-outbox');
     expect(lines.join('\n')).toContain('captured prompts'); expect(lines.join('\n')).not.toContain('rbc_synthetic');
+  });
+});
+
+describe('bounded transferred attestation', () => {
+  it('refuses expired, malformed, substituted and self-source sessions without disclosing tokens', async () => {
+    const f = fixture(), r = remote(f), session = await r.mint();
+    for (const bad of [{ ...session, credential: { ...session.credential, source: 'login' } },
+      { ...session, expiresAt: new Date(0).toISOString() }, { ...session, audience: 'https://different.test' },
+      { ...session, unknown: true }, { ...session, runId: '00000000-0000-0000-0000-000000000000' }]) {
+      try { parseTransferredAttestation(JSON.stringify(bad), f.entry.runId); throw new Error('unexpected acceptance'); }
+      catch (error) { expect(String(error)).not.toContain(session.credential.token); expect(String(error)).not.toContain('unexpected acceptance'); }
+    }
+    expect(() => parseTransferredAttestation('x'.repeat(65_537), f.entry.runId)).toThrow();
+    expect(() => parseTransferredAttestation('{', f.entry.runId)).toThrow();
+  });
+});
+
+describe('transient input boundaries', () => {
+  it('bounds elapsed input time and byte length without returning raw contents in diagnostics', async () => {
+    const bytes = Buffer.from('opaque-π');
+    expect(await readTransientInput((async function* () { yield bytes.subarray(0, bytes.length - 1); yield bytes.subarray(bytes.length - 1); })(), 20)).toBe('opaque-π');
+    await expect(readTransientInput((async function* () { yield 'private-input'.repeat(5); })(), 16)).rejects.toThrow('transient_input_unavailable');
+    await expect(readTransientInput({ [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) }, 16, 10)).rejects.toThrow('transient_input_unavailable');
+    await expect(readTransientInput((async function* () { yield Buffer.from([0xff]); })(), 16)).rejects.toThrow('transient_input_unavailable');
   });
 });

@@ -1,3 +1,5 @@
+import { readAsyncPhase } from '../dispatch/checkpoint-async-store.js';
+import { encodeAsyncProof } from '../dispatch/checkpoint-async.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointProof, type CheckpointState, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
 import { decodeRecoveryOperation } from '../dispatch/recovery-operation.js';
 import { recoveryAttemptsFromCheckpoint } from '../dispatch/recovery.js';
@@ -214,6 +216,11 @@ export async function loadReviewerLineage(input: LoadReviewerLineageInput): Prom
   }
   validateInspectedReviewerArtifactChain(runs.map(run => run.inspected));
   const root = runs[0]!;
+  if (root.captured.async) {
+    const phase = await readAsyncPhase({ commonDir, namespace: root.runId, plan: root.plan });
+    const proof = encodeAsyncProof(phase.plan, phase.state.records);
+    if (proof.bytes !== root.inspected.asyncExecution?.bytes || proof.digest !== root.inspected.asyncExecution?.digest) fail('async_mismatch');
+  }
   if (!root.inspected.launch || !root.inspected.nativeClaim ||
     root.inspected.launch.originalNativeClaim.attempt !== root.inspected.nativeClaim.attempt ||
     root.inspected.launch.originalNativeClaim.round !== root.inspected.nativeClaim.round) fail('root_claim_mismatch');

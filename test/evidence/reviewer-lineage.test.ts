@@ -1,3 +1,4 @@
+import { readTextFixture } from '../support/text-fixture.js';
 import { mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -183,7 +184,7 @@ describe('sealed reviewer lineage limits', () => {
 // journal writes. The historical last fixture starts a call after quorum; the
 // valid variant records both final intents before either result instead.
 async function retainedThreeGeneration(options: { legacyRoot?: boolean; tamper?: boolean; omitRoot?: boolean; sequentialFinal?: boolean } = {}) {
-  const source = JSON.parse(await readFile(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url), 'utf8'));
+  const source = JSON.parse(readTextFixture(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url)));
   const entries: InspectedReviewerArtifact[] = source.rows.map((row: any) => inspectReviewerArtifact(row.artifact_bytes, row.expectations));
   const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cold-lineage-')));
   roots.push(commonDir);

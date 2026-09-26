@@ -1,3 +1,4 @@
+import { retainedPaidCutoff } from './retained-time-budget.js';
 import { isDeepStrictEqual } from 'node:util';
 import { DEFAULT_MAX_RETRIES } from '../config/defaults.js';
 import { guardReviewLaunch, type GuardedLaunchOptions, type PreparedOriginalLaunch } from '../converge/launch-guard.js';
@@ -33,6 +34,7 @@ export interface RetainedOriginalSession {
   ownership: NativeTargetOwnership;
   run: RetainedOriginalRun & { converge: { target: string; attempt: number; round: number } };
   signal: AbortSignal;
+  executionExpiresAtMs: number;
   /** Only the protected lane; retain this transient coordinator for delivery. */
   delivery?: AttestedReviewerDelivery;
 }
@@ -110,11 +112,12 @@ export async function guardRetainedOriginal(input: RetainedOriginalOptions): Pro
   assertOriginalLaunchBudget(bounds.expiresAtMs - bounds.startedAtMs, bounds.maxPhysicalCalls, bounds.maxAttemptsPerCell);
   const perCell = (captured.config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
   if (bounds.maxAttemptsPerCell > perCell || bounds.maxPhysicalCalls > captured.plan.cells.length * perCell) refuse('retry_bounds');
-  const remaining = bounds.expiresAtMs - Date.now();
+  const executionExpiresAtMs = retainedPaidCutoff(bounds);
+  const remaining = executionExpiresAtMs - Date.now();
   if (remaining <= 0 || Date.now() < bounds.startedAtMs) refuse('deadline');
   const lease = abortSignalWithTimeout(input.signal, remaining);
   let delivery: AttestedReviewerDelivery | undefined;
-  const active = () => { lease.signal.throwIfAborted(); if (Date.now() >= bounds.expiresAtMs || Date.now() < bounds.startedAtMs) refuse('deadline'); };
+  const active = () => { lease.signal.throwIfAborted(); if (Date.now() >= executionExpiresAtMs || Date.now() < bounds.startedAtMs) refuse('deadline'); };
   try {
     active();
     return await guardReviewLaunch({ ...guard, headSha: captured.plan.headSha,
@@ -147,7 +150,7 @@ export async function guardRetainedOriginal(input: RetainedOriginalOptions): Pro
         if ((await journal.readBindings()).launch !== prepared.launchBytes) refuse('launch_mismatch');
         active();
         return execute({ prepared, launch: prepared.launch, captured, journal, ownership,
-          run: { ...run, converge: { target: converge.target, attempt: converge.attempt, round: converge.round } }, signal: lease.signal,
+          run: { ...run, converge: { target: converge.target, attempt: converge.attempt, round: converge.round } }, signal: lease.signal, executionExpiresAtMs,
           ...(delivery ? { delivery } : {}) });
       },
     });

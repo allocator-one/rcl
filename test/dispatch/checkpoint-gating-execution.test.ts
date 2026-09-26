@@ -69,7 +69,8 @@ describe('retained checkpoint verifier integration', () => {
     expect(status.attempts.reviewerAndVerifier).toEqual({ physical: 3, newOnly: 3, uncertain: 0 });
     expect(status.attempts.physical).toBe(2);
     expect(ask).toHaveBeenCalledTimes(1);
-    expect(formatReviewerStatus(status)).toContain('async calls excluded');
+    expect(formatReviewerStatus(status)).toContain('0 current async calls');
+    expect(status.attempts.combined).toEqual({ physical: 3, newOnly: 3, uncertain: 0 });
   });
   it('seals strict fallback when the original lifetime has expired without constructing a provider', async () => {
     const f=await fixture(), factory=vi.fn();

@@ -7,6 +7,7 @@ allowed-tools:
   - Bash(gh auth token:*)
   - Bash(gh repo view:*)
   - Bash(rcl review:*)
+  - Bash(rcl reviewers:*)
   - Bash(rcl roles:*)
   - Bash(git merge-base:*)
   - Bash(git status:*)
@@ -194,7 +195,7 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 
 ### 5a. Evidence (rcl ≥ 3.0)
 
-In a Harness-managed repository (one carrying `.harness-cli/config.json`) with a `harness login`, rcl records every review as evidence on Harness after writing the report files: the run header, findings, reviewer calls and both report files. It never blocks a review on the network — a failed delivery is spooled to `~/.rcl/outbox/` and retried at the start of the next rcl command or by `rcl telemetry flush`. Read the one dim status line rcl prints and relay it:
+For ordinary review delivery in a Harness-managed repository (one carrying `.harness-cli/config.json`) with a `harness login`, rcl records evidence on Harness after writing the report files: the run header, findings, reviewer calls and both report files. It never blocks a review on the network — a failed delivery is spooled to `~/.rcl/outbox/` and retried at the start of the next rcl command or by `rcl telemetry flush`. Read the one dim status line rcl prints and relay it:
 
 - `Evidence recorded: <url>` — the run is on Harness; include the URL in the report back.
 - `Evidence spooled (Harness unreachable); run rcl telemetry flush` — retry with `rcl telemetry flush` (never by re-running the review, which would spend the council again).
@@ -203,6 +204,22 @@ In a Harness-managed repository (one carrying `.harness-cli/config.json`) with a
 - `Evidence not sent: not logged in to Harness …` — tell the user to run `harness login` (CI sets `HARNESS_API_TOKEN` + `HARNESS_API_URL` instead).
 
 The first delivery from a machine prints a one-time notice naming the host and what is sent. Opt out per run with `--no-telemetry`, per machine with `RCL_TELEMETRY=off`, or per project with `harness.telemetry: off` in the config; `harness.telemetry: findings` keeps the raw reports on the machine. Never pass `--no-telemetry` inside `{{PREFIX}}rcl-converge`. A patch-file review can only be evidence when `--head-sha` binds it to a commit.
+
+### Retained missing-reviewer recovery
+
+Use this path only for a run originally captured with `--retain-reviewers`; a legacy report cannot be made resumable after the fact. Asserted originals use `rcl review <target> --retain-reviewers --guarded-converge --converge-target <key>`. Protected originals use a PR target with `--retain-reviewers --attest --converge-target <key>` in the allowed workflow; its internal guard owns accounting, so do not also pass `--guarded-converge` or preclaim an attempt. Both require actual Harness capability and the current credential before paid work. Patch targets retain their exact head/base/PR binding flags. This private evidence contains raw prompts and results; never paste it into public reports or treat generic artifacts as its transport.
+
+Start with `rcl reviewers status <key> --run <source-id> --json`, then `rcl reviewers preview <key> --run <source-id> --max-additional-calls <N> --max-attempts-per-cell <N> --time-budget-ms <N> --json`. Both are local, read-only and provider-free, with zero checkpoint/native/outbox writes or delivery. Use validated private proof of the original frozen reviewer roster and policy to establish the minimum and complete-seat count; a client-reported minimum is not authority on its own. Recorded `blocking` and `secondary` assignments already in that roster count when every required chunk succeeds. Partial chunks, supplemental async and verification results do not fill a reviewer seat. Recovery never adds seats or changes the denominator. Preview is not owner authorization or approval.
+
+When additional paid recovery is within the user's scope, use `rcl reviewers apply <key> --run <source-id> --review-target <target>` with the three explicit finite preview bounds and original config/spec/context/patch-binding options. Only eligible missing chunks are attempted: preserve successes; do not blindly retry unchanged permanent errors or uncertain possibly-billed intents. Apply rechecks actual owner/capability and full ancestry before spend. Once the frozen minimum is met, no more reviewer calls are scheduled; no missing core model is mandatory beyond quorum. If no eligible work remains, report the reason rather than launching a replacement council on unchanged inputs.
+
+Resume an asserted successor with `rcl reviewers resume <key> --run <successor-id> --review-target <target>` and identical binding options. Do not pass new budget flags: its original deadline, per-cell history and cumulative native caps survive interruption. For expired saved work, use `rcl reviewers resume <key> --run <successor-id> --local-only` instead: only output options (`--json`, `--json-file`, `--markdown`) and `--ci` are permitted. Omit review-target/config/spec/context/roster/binding and attestation options. It revalidates the saved capture, full local lineage, operation, native ledger and current local HEAD; originals, invalid state and live unfinished operations refuse. Existing terminal bytes are reused exactly, or expired unfinished work is finalized locally. No credential acquisition, network/provider work, new native claim, budget renewal, upload or admission occurs. Local completion stays pending at exit 4; a failing `--ci` gate takes precedence at exit 1. This preserves evidence, not approval. Preserve the original report and all parent tuples; successor accounting includes only current physical calls, never inherited reviewer/verifier/async usage. Successors do not launch async reviewers. Keep unknown usage unknown.
+
+Asserted recovery stays asserted, bound to the same actor/org/credential kind or exact API token. A new protected apply adds `--attest`, with a live workflow credential and an exact immediate-parent grant; it cannot promote an asserted source. Plain `reviewers resume ... --attest` refuses instead of reminting an already recorded own-run session. Asserted pending delivery uses `rcl telemetry flush --run <id>` through the private reviewer queue and fresh capability/owner checks. Protected credentials never enter the ordinary outbox. Cross-process delivery requires an internal workflow boundary transferring the same still-live session and validating its actual own-run receipt; no production session holder is supplied, so ordinary protected cold restart is unsupported. Never copy credentials through files/argv or substitute fresh authority. Same-process lost-ack retries remain bounded; `--local-only` performs eligible local finalization without delivery or attested authority. Refusal or expiry is not a reason to fall back to generic artifacts, alternate credentials or new spending.
+
+A successful command or reviewer quorum alone is not convergence or merge approval. Preserve findings, triage, freshness, native admission, attested/enforced checks and CI. A marked run missing valid private proof remains inconclusive; never substitute `stats` for it. For an active convergence loop, follow `{{PREFIX}}rcl-converge`'s native caps and retained host handle.
+
+Retained execution reserves `min(120000 ms, floor(saved duration / 4))` inside the existing saved expiry for finalization and private delivery. Reviewer, verifier and async work stop at that earlier cutoff; resume derives the same cutoff from the saved bounds. Delivery remains bounded by the original expiry, live credential and existing transfer limits. The reservation does not guarantee delivery or renew any deadline or spending limit.
 
 ### 6. Report back
 
@@ -220,7 +237,7 @@ Then tell the user:
 - Which PR was reviewed (if PR mode), or which branch and merge-base range (if diff mode)
 - Which spec was used (if any) and where it came from (Harness issue, file, explicit flag)
 - The evidence status line (recorded with its URL, spooled, or not sent and why)
-- Reviewer completion as `stats.successfulReviews` / `stats.totalReviews`, plus every timeout or error. Full-fleet completion is not required. If `stats.successfulReviews < max(2, ceil(2 × stats.totalReviews / 3))`, warn that coverage is partial; a report used by `rcl-converge` is inconclusive below that threshold.
+- Reviewer health, plus every timeout, error or uncertain outcome. Retained runs use complete seats from the original frozen reviewer roster, including its recorded secondary assignments, and the successful-seat minimum from validated proof; report current versus inherited spending separately. Missing proof stays inconclusive. Legacy unmarked reports use `stats.successfulReviews >= max(2, ceil(2 × stats.totalReviews / 3))`. Full-fleet completion is not required.
 - Which models ran and how many findings each returned
 - Link to the posted review comment (from rcl output) only if `--post` or `--inline` was used in PR mode
 - Brief summary: N critical, N important, N minor

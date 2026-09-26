@@ -1,5 +1,6 @@
 import type { AsyncDelegate } from './checkpoint-async-store.js';
 import { openCapturedAsyncDelegate } from './checkpoint-async-store.js';
+import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter } from './adapter.js';
 import { asyncRefuse, parseAsyncReview, type AsyncCall } from './checkpoint-async.js';
 import { stableStringify } from '../report/run-header.js';
@@ -10,6 +11,8 @@ export interface CheckpointAsyncExecutionOptions {
   adapterFactory: (call: AsyncCall) => ReviewAdapter;
   signal?: AbortSignal;
   onLateAuditError: (error: unknown) => void;
+  /** Derived opinion publication only, after exact result durability. Never physical accounting. */
+  onReviewRecorded?: (review: ModelReview) => Promise<void>;
 }
 
 /**
@@ -60,6 +63,7 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       const bytes = stableStringify({ ...result, async: true });
       const review = parseAsyncReview(bytes, call.ref);
       await writer.recordResult(intent.attemptId, bytes, true);
+      await options.onReviewRecorded?.(structuredClone(review) as ModelReview);
       return review.status;
     });
     // A pending result retains only restricted audit authority. Late callbacks

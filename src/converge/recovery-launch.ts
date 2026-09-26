@@ -33,7 +33,6 @@ import {
   decodeRecoveryOperation,
   type RecoveryOperation,
 } from "../dispatch/recovery-operation.js";
-import { inspectReviewerArtifact } from "../report/reviewer-artifact.js";
 import { retainedLaunchInputSha256 } from "./retained-report.js";
 import { stableStringify } from "../report/run-header.js";
 import { withNativeTarget, type NativeTargetOwnership } from "./target-ownership.js";
@@ -438,15 +437,10 @@ export async function guardReviewerRecoveryLaunch(
           if (!successorState.finalized || !terminal)
             fail("successor_terminal_missing");
           const successorProof = await exportCheckpointProof(journal);
-          const inspected = inspectReviewerArtifact(
-            terminal.reviewerArtifactBytes,
-            {
-              expectedReportBytes: terminal.reportBytes,
-              expectedRunId: options.successorRunId,
-              expectedTarget: options.target,
-              expectedPlan: journal.getPlan(),
-            },
-          );
+          await assertSuccessorAttempts(source, journal, operation);
+          const completedLineage = await loadReviewerLineage({ commonDir: options.gitCommonDir,
+            target: options.target, runId: options.successorRunId });
+          const inspected = completedLineage.latest.inspected;
           const health = inspected.artifact.health;
           if (
             inspected.proof.digest !== successorProof.digest ||
@@ -456,7 +450,6 @@ export async function guardReviewerRecoveryLaunch(
             inspected.operation.successorNativeClaim.round !== requiredRound
           )
             fail("successor_proof_mismatch");
-          await assertSuccessorAttempts(source, journal, operation);
           state.lastLaunch = {
             ...state.lastLaunch,
             status: "completed",

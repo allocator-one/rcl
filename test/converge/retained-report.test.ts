@@ -195,7 +195,7 @@ describe('native admission of an original retained report', () => {
       : vi.spyOn(CheckpointJournal.prototype, 'exportVerificationProof').mockResolvedValue({ bytes: '{}', digest: 'f'.repeat(64) });
     try {
       await expect(processRetainedRoundReport(f)).rejects.toThrow('retained_report_verification_mismatch');
-      await expect(inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: f.id })).rejects.toThrow('reviewer_status_verification_mismatch');
+      await expect(inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: f.id })).rejects.toThrow('reviewer_lineage_verification_mismatch');
       await expect(loadReviewerLineage({ commonDir: f.gitCommonDir, target: f.target, runId: f.id }))
         .rejects.toThrow('reviewer_lineage_verification_mismatch');
       expect(await nativeBytes(f)).toEqual(before);
@@ -329,7 +329,7 @@ describe('native admission of a supplemented retained report', () => {
       const operation = createRecoveryOperation({ operationId: runId(30), successorRunId: successorId, sourceRunId: f.id,
         sourceReportSha256: sha256Hex(f.reportBytes), sourceCheckpointSha256: sourceProof.digest,
         capturedInputsSha256: f.f.capture.digest, planDigest: f.f.plan.digest, target: f.target,
-        originalNativeClaim: { attempt: 1, round: 1 }, successorNativeClaim: { attempt: 2, round: 2 },
+        originalNativeClaim: { attempt: 1, round: 1 }, successorNativeClaim: { attempt: 2, round: 1 },
         startedAtMs: 2000, expiresAtMs: 62000, maxAdditionalCalls: 1, maxAttemptsPerCell: 1 });
       const journal = await CheckpointJournal.create({ commonDir: f.gitCommonDir, namespace: successorId, plan: f.f.plan, ownership });
       await journal.bind('captured-inputs', f.f.capture.bytes, ownership);
@@ -339,7 +339,7 @@ describe('native admission of a supplemented retained report', () => {
       const assembly = { projection: projectCheckpointReport({ sources: [{ runId: f.id, proof: sourceProof }],
         successor: { runId: successorId, proof: await journal.exportProof() }, policy }), supplementalAsync: emptyAsync(),
         diff: f.f.diff, startTime: 2000, run: { ...f.run, id: successorId, startedAt: new Date(2000),
-          converge: { target: f.target, attempt: 2, round: 2 } } };
+          converge: { target: f.target, attempt: 2, round: 1 } } };
       const gate = await executeCheckpointGating({ assembly, commonDir: f.gitCommonDir, ownership, journal,
         askFactory: () => async () => ({ model: 'google/gemini-3.8-flash', provider: 'google', status: 'success' as const, durationMs: 1, text: '[]' }),
         beforeLaunch: async () => {}, onLateAuditError: () => {}, nowMs: () => 2001, monotonicNow: () => 0 });
@@ -359,7 +359,7 @@ describe('native admission of a supplemented retained report', () => {
     });
     try {
       await expect(inspectReviewerStatus({ commonDir: f.gitCommonDir, target: f.target, runId: successorId }))
-        .rejects.toThrow('reviewer_status_verification_mismatch');
+        .rejects.toThrow('reviewer_lineage_verification_mismatch');
       expect(await nativeBytes(f)).toEqual(before);
     } finally { change.mockRestore(); }
   });

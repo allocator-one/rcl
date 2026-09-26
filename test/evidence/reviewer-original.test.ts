@@ -48,6 +48,22 @@ function protectedAccess(options: any, fetchImpl: typeof fetch) {
 }
 
 describe('retained original owned launch coordinator', () => {
+  it('refuses preflight that consumes the reserved paid window before native claim', async () => {
+    const options = await fixture(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(options.bounds.startedAtMs);
+    options.access = protectedAccess(options, vi.fn(async () => { vi.setSystemTime(options.bounds.startedAtMs + 23000); return capability(); }) as typeof fetch);
+    await expect(guardRetainedOriginal(options)).rejects.toThrow();
+    expect(options.execute).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.guard.gitCommonDir, target)).toBeUndefined();
+  });
+
+  it('refuses a tiny new lifetime before capability, native claim or provider work', async () => {
+    const options = await fixture(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(options.bounds.startedAtMs);
+    options.bounds.expiresAtMs = options.bounds.startedAtMs + 3;
+    options.access = protectedAccess(options, vi.fn(async () => capability()) as typeof fetch);
+    await expect(guardRetainedOriginal(options)).rejects.toThrow('retained_execution_budget');
+    expect(options.access.fetchImpl).not.toHaveBeenCalled(); expect(options.execute).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.guard.gitCommonDir, target)).toBeUndefined();
+  });
   it('uses the actual non-one guard claim and the SAME immutable launch bytes/header/journal', async () => {
     const options = await fixture(); await seed(options); options.requireExistingNativeState = true;
     let prepared: any;

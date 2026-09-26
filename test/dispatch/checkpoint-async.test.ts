@@ -11,6 +11,7 @@ import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit } from '../../src/dispatch/checkpoint-async-store.js';
+import { runRetainedAsyncWorker } from '../../src/dispatch/retained-async.js';
 import { executeCheckpointAsync } from '../../src/dispatch/checkpoint-async-execution.js';
 import { decodeAsyncProof } from '../../src/dispatch/checkpoint-async.js';
 const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], afterSync: undefined as undefined | ((path:string)=>void)}));
@@ -36,6 +37,24 @@ async function fixture(cap = 3, systemPrompt = prompts.systemPrompt) {
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
 const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
 describe('restricted original async checkpoint phase',()=>{
+ it('publishes opportunistic opinions only after same-journal durable outcomes, including late audit', async()=>{
+  const f=await fixture(),opened=await initialize(f);const published:any[]=[];
+  await seal(f);
+  await runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]), {adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()}),publish:async(value:any)=>published.push(value)});
+  expect(published).toEqual([]);expect((await readAsyncPhase(f.input)).state.intents).toEqual([]);
+  const g=await fixture(),active=await initialize(g);
+  await runRetainedAsyncWorker(JSON.stringify(active.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:async()=>JSON.parse(review())}),publish:async(value:any)=>{
+    expect((await readAsyncPhase(g.input)).state.outcomes).toHaveLength(1);published.push(value);
+  }});
+  expect(published).toHaveLength(1);expect(published[0]).toMatchObject({async:true,status:'success',findings:[{title:'keep'}]});
+ });
+ it('refuses oversized, malformed or forged worker delegation before constructing an adapter',async()=>{
+  const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn();
+  for(const bytes of ['x'.repeat(16385),'null',JSON.stringify({...opened.delegates[0],token:'0'.repeat(64)})]) {
+   await expect(runRetainedAsyncWorker(bytes,{adapterFactory,publish:vi.fn()})).rejects.toThrow();
+  }
+  expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
+ });
  it('retains separate duplicate-route calls and exact raw results without changing blocking health/history',async()=>{
   const f=await fixture(), before=await f.journal.read(), opened=await initialize(f);
   const writers=await Promise.all(opened.delegates.map(openAsyncDelegate)); const intents=await Promise.all(writers.map((w:any)=>w.claim(prompts)));

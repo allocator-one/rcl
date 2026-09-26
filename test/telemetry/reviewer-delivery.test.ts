@@ -1,3 +1,4 @@
+import { readTextFixture } from '../support/text-fixture.js';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -17,7 +18,7 @@ import { deliverRun, flushOutbox, createTelemetryRuntime } from '../../src/telem
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function fixture() {
-  const rows = JSON.parse(await readFile(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url), 'utf8')).rows;
+  const rows = JSON.parse(readTextFixture(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url))).rows;
   const entry = inspectReviewerArtifact(rows[0].artifact_bytes, rows[0].expectations);
   const result = JSON.parse(entry.reportBytes); result.run.reviewer_evidence = entry.descriptor;
   const artifacts = { report_json: JSON.stringify(result), report_md: '# Synthetic review' };

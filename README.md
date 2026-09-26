@@ -92,6 +92,7 @@ Review a PR, a local diff, or uncommitted work.
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` |
 | `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
 | `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
+| `--retain-reviewers` | Capture exact reviewer inputs and results for bounded missing-reviewer recovery; requires compatible Harness evidence and native convergence accounting |
 | `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
@@ -192,30 +193,156 @@ through its retained host handle. Retry evidence with `rcl telemetry flush --run
 <run-id>`, not another council. Intent interpretation and finding adjudication
 remain human/agent decisions; native/enforced evidence and CI still gate merging.
 
-### Private reviewer capture and read-only preview
+### Retained reviewer recovery
 
-The --retain-reviewers option stores exact prepared prompts, configuration,
-patch, roster and per-chunk results in the private Git common-directory
-checkpoint store. It currently requires a guarded patch review with explicit
-head/base and --for-pr bindings, and telemetry disabled. Private reviewer
-artifacts contain raw prompts and results; ordinary reports do not contain them.
-Legacy reports without this capture cannot be reconstructed into resumable runs.
+Use `--retain-reviewers` on the original review to preserve its exact prepared
+prompts, configuration, patch, roster, successful chunks and failed or uncertain
+attempts. Legacy reports without this capture cannot be reconstructed into
+resumable runs. The private Git common-directory store and Harness's separate
+reviewer-artifact endpoint hold the raw evidence; ordinary reports and generic
+artifact downloads do not expose these private bytes.
 
-    rcl reviewers status repo-123 --run <original-run-uuid> --json
-    rcl reviewers preview repo-123 --run <original-run-uuid> --max-additional-calls 3 --max-attempts-per-cell 2 --time-budget-ms 120000 --json
+For an asserted review, use the native guard and your current Harness credential:
 
-Status reports complete blocking seats, missing chunks, saved attempts and
-uncertain outcomes. Preview requires a sealed source and its exact retained
-report/artifact pair. It proposes missing assignments using the frozen quorum
-policy, retains successful assignments, and excludes uncertain and known
-permanent failures. The per-cell limit includes the assignment's prior attempts.
-Already-quorate sources have no eligible reviewer calls.
+```bash
+rcl review owner/repo#123 --retain-reviewers --guarded-converge \
+  --converge-target repo-123 --json-file original.json
+```
 
-Both commands are read-only and make no provider or evidence-delivery calls.
-Preview bounds describe a proposed new successor; they do not renew an existing
-operation or change native caps. A preview does not authorize a retry, admit a
-report or establish server approval. Supported successor execution and compatible
-backend authority are separate requirements.
+Patch reviews also need their captured `--head-sha`, `--base-sha` and `--for-pr`
+bindings. A protected original runs inside the allowed GitHub Actions workflow:
+
+```bash
+rcl review owner/repo#123 --retain-reviewers --attest \
+  --converge-target repo-123 --json-file original.json
+```
+
+The protected path owns native accounting internally; do not combine `--attest`
+with explicit `--guarded-converge` or preclaim an attempt. Both paths require
+compatible Harness capability and the actual credential owner before paid
+intent. Telemetry disabled, an unsupported server or an unauthorized source is
+not a local-only execution fallback.
+
+Inspect a retained run before deciding to spend more:
+
+```bash
+rcl reviewers status repo-123 --run <original-run-uuid> --json
+rcl reviewers preview repo-123 --run <original-run-uuid> \
+  --max-additional-calls 3 --max-attempts-per-cell 2 --time-budget-ms 120000 --json
+```
+
+Status reports complete seats in the original frozen reviewer roster, missing
+chunks, original and successor
+attempts, uncertain outcomes, and the saved budget. Reviewer, verification and
+async spending remain distinct, including inherited async intent and unknown
+outcome accounting. Preview requires a sealed source and its exact retained
+report/artifact pair. Both commands are local and read-only: no provider call,
+new intent, native claim, checkpoint write, report rewrite, telemetry notice or
+outbox delivery. Their output is structural evidence, not current owner
+permission or server approval.
+
+The successful-seat minimum comes from validated private proof of the original
+effective configuration and original frozen reviewer roster. That roster
+includes recorded `blocking` and `secondary` assignments; a seat counts only
+when **all** its required chunks succeeded. Supplemental async and verification
+work do not count toward this minimum. Recovery never adds seats or changes the
+denominator, and a client-reported health field alone is not authoritative.
+Recovery reuses every accepted successful chunk. It schedules only eligible
+missing work, including bounded timeout, parse-failure, transient-failure or
+canceled attempts. An unchanged permanent authentication, quota or configuration
+failure, or an uncertain possibly-billed outcome, is not blindly retried.
+Already-quorate sources require zero new reviewer calls. Once the minimum is
+reached, no new reviewer call is scheduled; accepted concurrent successes remain
+in the report and late results cannot reopen it. There is no requirement to wait
+for a missing core model after quorum.
+
+Apply a previewed budget to create a new immutable successor:
+
+```bash
+rcl reviewers apply repo-123 --run <original-run-uuid> \
+  --review-target owner/repo#123 \
+  --max-additional-calls 3 --max-attempts-per-cell 2 --time-budget-ms 120000
+```
+
+Use the same config, spec, context and patch-binding options as the original.
+RCL checks the target, head, effective merge base, material patch and captured
+inputs. Irrelevant upstream base-tip movement alone does not invalidate an
+otherwise identical capture. A real head, patch, roster, prompt, config, spec or
+context change requires a fresh review. Preview does not authorize apply: apply
+checks live capability, exact owner and the complete source chain before a paid
+intent. Asserted evidence stays asserted; another actor, credential kind or API
+token cannot borrow the source. A renewed CLI login may match the same actor
+and organization; switching credential kind does not. In a protected workflow,
+add `--attest`; the fresh credential grants GET access to exactly the signed immediate parent and
+GET/PUT access to its own run, never arbitrary ancestors or asserted promotion.
+
+Resume an interrupted asserted successor by its own run id:
+
+```bash
+rcl reviewers resume repo-123 --run <successor-run-uuid> \
+  --review-target owner/repo#123
+```
+
+Repeat its binding options. Resume uses the saved absolute deadline and budgets;
+it rejects budget-renewal flags. Protected cold-process restart has the separate
+restriction below; adding `--attest` does not make it resumable.
+Retained execution reserves `min(120000 ms, floor(saved duration / 4))` inside the existing saved expiry for finalization and private delivery. Reviewer, verifier and async work stop at that earlier cutoff; resume derives the same cutoff from the saved bounds. Delivery remains bounded by the original expiry, live credential and existing transfer limits. The reservation does not guarantee delivery or renew any deadline or spending limit.
+
+Per-cell limits include prior attempts across the chain. Each successor claims
+its own native attempt under the existing target caps; it keeps the unadmitted
+round until separate valid admission. Crashes, timeouts and unknown outcomes do
+not refund paid intents or reset caps. Never delete state,
+rename the same target or start another operation to evade an exhausted cap.
+For a saved successor whose operation has expired, finalize durable work locally:
+
+```bash
+rcl reviewers resume repo-123 --run <successor-run-uuid> --local-only \
+  --json-file locally-finalized.json
+```
+
+This resume-only path accepts output options (`--json`, `--json-file`,
+`--markdown`) and `--ci`. Do not pass `--review-target`, config/spec/context,
+roster or binding options, `--attest`, a transferred attestation, or new budgets.
+It revalidates the immutable saved capture, complete local lineage, operation,
+native ledger and current local HEAD. Originals, missing or invalid saved state,
+and live unfinished operations refuse. A retained terminal report is reused
+byte-for-byte; an expired unfinished successor may seal and build it locally.
+There is no credential acquisition, Harness/GitHub/provider/verifier/async call,
+new native claim, upload or admission. Spent attempt counts are not refunded, and the saved deadline is not renewed. Local completion returns exit 4 because delivery was
+not attempted; with `--ci`, a failing gate returns 1 instead. The artifact remains
+local and pending, with no review or merge approval.
+
+The source report and artifact stay byte-for-byte unchanged. The successor has
+its own identity and exact parent tuple, merges preserved and new findings, and
+records only its own physical spending. Inherited reviewer, verifier and async
+usage is never reinserted as successor billing; successors launch no new async
+work. Unknown usage stays unknown, with possibly-billed intent preserved.
+Locks and durable accounting prevent duplicate scheduling on concurrent resume;
+they do not promise exactly-once provider billing after an unknown outcome.
+
+For asserted delivery pending, use `rcl telemetry flush --run <run-id>`: marked
+private entries take the reviewer delivery queue, which rechecks current
+capability and owner access and reuses exact retained bytes. They never fall
+back to generic artifact upload. Protected credentials are not persisted in an
+ordinary outbox. Plain `reviewers resume ... --attest` refuses: it cannot remint
+an already recorded own-run session. An internal workflow boundary can transfer
+the same still-live session, with actual own-run receipt and scoped server
+checks, but no production workflow session holder is supplied. Protected
+cold-process delivery restart is unsupported without that boundary. Do not copy
+credentials through files or command-line arguments, reacquire authority to
+reset a deadline, or substitute another credential. Same-process lost-ack
+retries retain their existing bounds. `--local-only` can preserve eligible saved
+work without delivering it or restoring attested authority. A missing/corrupt
+parent or conflicting receipt is a refusal, not permission to replace evidence.
+
+Exit 0 means the command completed, not review or merge approval. The CI gate
+returns exit 1 for inconclusive health or gating findings. Native cap refusal
+uses exit 2, native accounting/state failure uses exit 3, and pending evidence
+uses exit 4; read the accompanying diagnostic and evidence status. Successful
+reviewer quorum establishes health only. Findings,
+triage, current-head freshness, native admission, attested/enforced checks and
+CI remain separate merge requirements. Missing or invalid private proof stays
+inconclusive; report statistics are not a fallback for a marked run.
 
 ### `rcl converge-attempt`
 
@@ -238,10 +365,12 @@ impossible under any flag). The default is a consent boundary, not a stop: at
 15 rounds the workflow asks the user, and an approved continuation supplies a
 higher `--max-rounds`.
 
-Full-fleet reviewer completion is not required. For the generated
-`rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
-when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Every timeout or
-error must be disclosed, and a result below that threshold is inconclusive.
+Full-fleet reviewer completion is not required. For legacy reports without a
+retained-reviewer marker, the generated `rcl-converge` skill uses
+`stats.successfulReviews >= max(2, ceil(2 × stats.totalReviews / 3))`. Retained
+runs use the frozen successful-seat policy and validated private proof described
+above. Every timeout or error must be disclosed; missing proof or coverage below
+the applicable minimum is inconclusive.
 
 Exit code 2 means the configured cap was exhausted and explicit continuation
 approval is required. Exit code 3 means attempt accounting itself failed
@@ -392,13 +521,17 @@ call (status, latency, token usage), the report's `stats`, and — at the defaul
 `full` level — the JSON and Markdown reports exactly as written, digest-checked
 by the server. The converge commands report their events (attempt claims, cap
 changes, processed rounds, verdicts, resolutions) the same way. Never sent:
-provider API keys, `GITHUB_TOKEN`, the Harness credential, environment
-variables, prompts or raw model answers; every free-text field is truncated
-and scrubbed for key-shaped strings before it leaves the process.
+provider API keys, `GITHUB_TOKEN`, the Harness credential or environment
+variables. Ordinary evidence excludes prompts and raw model answers; its
+free-text fields are truncated and scrubbed for key-shaped strings. Explicit
+`--retain-reviewers` additionally sends exact private reviewer inputs/results to
+the separate authorized reviewer-artifact endpoint, as described above.
 
-The review never blocks on the network. A retryable delivery outage is
+Ordinary review delivery does not block reviewer execution. Retained recovery
+requires capability and owner preflight before paid work; local `reviewers
+status` and `reviewers preview` never flush the outbox. A retryable delivery outage is
 spooled to `~/.rcl/outbox/<run id>/` and retried, with its original run id,
-at the start of every rcl command (bounded to five seconds) or by
+at the start of ordinary rcl commands (bounded to five seconds) or by
 `rcl telemetry flush`. One dim status line says what happened:
 `Evidence recorded: <url>`, `Evidence spooled (Harness unreachable); run rcl
 telemetry flush`, or `Evidence not sent: <host> has not enabled review

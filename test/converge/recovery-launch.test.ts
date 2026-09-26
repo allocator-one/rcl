@@ -19,6 +19,8 @@ import {
   createOriginalLaunch,
   encodeOriginalLaunch,
 } from "../../src/dispatch/original-launch.js";
+import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase } from "../../src/dispatch/checkpoint-async-store.js";
+import { inspectReviewerStatus } from "../../src/evidence/reviewer-status.js";
 import { executeCheckpointGating } from "../../src/dispatch/checkpoint-gating-execution.js";
 import { captureAggregationInputs } from "../../src/report/aggregation-inputs.js";
 import { captureSupplementalAsync } from "../../src/report/supplemental-async.js";
@@ -42,6 +44,7 @@ import { loadReviewerLineage } from "../../src/evidence/reviewer-lineage.js";
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -93,7 +96,7 @@ function review(
 }
 
 async function sealed(successes: number, failure: SourceFailure = "timeout", seats = 17,
-  extra: { gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
+  extra: { async?: boolean; gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "rcl-recovery-"));
   roots.push(dir);
   const diff: any = {
@@ -189,6 +192,9 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     })),
     prompts: plan.cells.map(() => ({ systemPrompt: "sys", userPrompt: "u" })),
     aggregation,
+    ...(extra.async ? { async: { timeoutMs: 1000, maxPhysicalCalls: 2, maxAttemptsPerCall: 1,
+      calls: [0, 1].map(index => ({ assignmentId: `async:${index}`, chunk: 0,
+        assignment: { model: 'bonus', provider: 'fake', role }, prompt: { systemPrompt: 'async-sys', userPrompt: 'async-user' } })) } } : {}),
   });
   const id = "11111111-1111-4111-8111-111111111111";
   const run: any = {
@@ -216,6 +222,10 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
   };
   let sourceProof: any;
   let sourceTerminal: any;
+  if (extra.async) {
+    run.roster.push(...[0, 1].map(() => ({ model: 'bonus', role: 'general', provider: 'fake', lane: 'async' })));
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(clock);
+  }
   await guardReviewLaunch({
     gitCommonDir: dir,
     target,
@@ -248,6 +258,14 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
         ),
         ownership,
       );
+      if (extra.async) {
+        const phase = await initializeAsyncPhase({ commonDir: dir, namespace: id, plan, ownership,
+          calls: captured.async!.calls.map(call => call.ref), maxPhysicalCalls: 2, maxAttemptsPerCall: 1, expiresAtMs: clock + 60_000 });
+        const writers = await Promise.all(phase.delegates.map(openAsyncDelegate));
+        const intent = await writers[0]!.claim({ systemPrompt: 'async-sys', userPrompt: 'async-user' });
+        await writers[0]!.recordResult(intent!.attemptId, JSON.stringify({ model: 'bonus', role: 'general', provider: 'fake', async: true, status: 'success', durationMs: 1, findings: [] }), true);
+        await writers[1]!.claim({ systemPrompt: 'async-sys', userPrompt: 'async-user' });
+      }
       for (let index = 0; index < seats; index++) {
         const attempt = { id: `a${index}`, kind: "paid" as const };
         await journal.recordIntent(`s${index}:0`, attempt, ownership);
@@ -290,7 +308,8 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
           successor: { runId: id, proof },
           policy: captured.policy,
         }),
-        supplementalAsync: extra.supplementalAsync ?? captureSupplementalAsync([], 0),
+        supplementalAsync: extra.supplementalAsync ?? captureSupplementalAsync([], extra.async ? 2 : 0),
+        ...(extra.async ? { asyncExecution: await sealAsyncPhase({ commonDir: dir, namespace: id, plan, ownership }) } : {}),
         diff,
         startTime: 1,
         run,
@@ -325,6 +344,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
       };
     },
   });
+  if (extra.async) vi.useRealTimers();
   return { dir, plan, captured, id, sourceProof, sourceTerminal, run };
 }
 
@@ -464,6 +484,19 @@ function coordinator(fixture: Fixture) {
 }
 
 describe('retained reviewer recovery coordinator', () => {
+  it('inherits exact observed and uncertain original async proof across actual recovery without rebilling', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { async: true }), options = coordinator(fixture);
+    const sourceBytes = JSON.parse(fixture.sourceTerminal!.reviewerArtifactBytes).asyncExecution.bytes;
+    const result = await applyReviewerRecovery(options.input); expect(result.kind).toBe('completed');
+    const lineage = await loadReviewerLineage({ commonDir: fixture.dir, target, runId: options.input.successorRunId });
+    expect(lineage.latest.inspected.asyncExecution!.bytes).toBe(sourceBytes);
+    expect(lineage.latest.inspected.artifact.newAsyncPhysicalAttempts).toEqual([]);
+    const status = await inspectReviewerStatus({ commonDir: fixture.dir, target, runId: options.input.successorRunId, nowMs: 1_800_000_000_100 });
+    expect(status.attempts.async).toMatchObject({ current: { intents: 0, uncertain: 0 }, inherited: { intents: 2, uncertain: 1 } });
+    expect(status.attempts.combined.newOnly).toBe(1); expect(options.called).toHaveBeenCalledTimes(1);
+    await resumeReviewerRecovery(options.input); expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
   it('composes one missing call into immutable terminal evidence before separate native intake', async () => {
     const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
     const result = await applyReviewerRecovery(options.input);
@@ -1035,11 +1068,13 @@ describe('operation-bound successor preflight', () => {
 
 
 describe('expired local-only retained finalization', () => {
-  it.each(['uncertain reviewer', 'sealed reviewers missing verifier'] as const)('finishes %s without credential renewal, calls or budget changes', async kind => {
+  it.each(['uncertain reviewer', 'sealed reviewers missing verifier', 'reserved headroom before expiry'] as const)('finishes %s without credential renewal, calls or budget changes', async kind => {
     const fixture = await sealed(1, 'timeout', 3, kind === 'sealed reviewers missing verifier'
       ? { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' } : {});
     const options = coordinator(fixture);
     const value: any = opts(fixture, { startedAtMs: options.input.startedAtMs, expiresAtMs: options.input.expiresAtMs, nowMs: () => options.input.startedAtMs + 1 });
+    const headroom = kind === 'reserved headroom before expiry';
+    if (headroom) value.maxAdditionalCalls = 2;
     value.run = async (context: any) => {
       const attempt = { id: 'spent-before-interruption', kind: 'paid' as const };
       await context.journal.recordIntent('s1:0', attempt, context.ownership);
@@ -1054,15 +1089,15 @@ describe('expired local-only retained finalization', () => {
     const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
     const bindings = await journal.readBindings(), before = await journal.read(), spent = await state(fixture), native = await runState(fixture);
     const factory = vi.fn(() => { throw new Error('local_finalize_must_not_create_adapter'); });
-    options.preflight.mockRejectedValue(new Error('expired_credential_no_remote_access'));
-    const input = { ...options.input, nowMs: () => value.expiresAtMs + 1, adapterFactory: factory };
+    if (!headroom) options.preflight.mockRejectedValue(new Error('expired_credential_no_remote_access'));
+    const input = { ...options.input, nowMs: () => headroom ? value.expiresAtMs - Math.min(120000, Math.floor((value.expiresAtMs - value.startedAtMs) / 4)) + 1 : value.expiresAtMs + 1, adapterFactory: factory };
     // Expiry must not bypass exact saved source/head authority checks.
     await expect(resumeReviewerRecovery({ ...input, currentHeadSha: 'd'.repeat(40) })).rejects.toThrow('input_mismatch');
     const resumed = await resumeReviewerRecovery(input);
-    expect(options.preflight).not.toHaveBeenCalled(); expect(factory).not.toHaveBeenCalled();
+    expect(options.preflight).toHaveBeenCalledTimes(headroom ? 1 : 0); expect(factory).not.toHaveBeenCalled();
     expect(await state(fixture)).toEqual(spent);
     expect((await runState(fixture))!.lastLaunch).toMatchObject({ pid: native!.lastLaunch!.pid, attempt: 2, round: 1, status: 'completed' });
-    expect(resumed.operation).toMatchObject({ startedAtMs: value.startedAtMs, expiresAtMs: value.expiresAtMs, maxAdditionalCalls: 1, maxAttemptsPerCell: 2 });
+    expect(resumed.operation).toMatchObject({ startedAtMs: value.startedAtMs, expiresAtMs: value.expiresAtMs, maxAdditionalCalls: headroom ? 2 : 1, maxAttemptsPerCell: 2 });
     expect(await journal.readBindings()).toEqual(bindings);
     expect((await journal.read()).records.filter(record => record.type === 'intent')).toEqual(before.records.filter(record => record.type === 'intent'));
     expect(JSON.parse(resumed.terminal.reportBytes).findings[0]).toMatchObject({ id: 'f' });
@@ -1078,7 +1113,7 @@ describe('expired local-only retained finalization', () => {
     const replay = await resumeReviewerRecovery(input);
     expect(replay.reusedTerminal).toBe(true); expect(replay.terminal).toEqual(terminal);
     expect(await runState(fixture)).toEqual(afterNative); expect(await state(fixture)).toEqual(spent);
-    expect(options.preflight).not.toHaveBeenCalled(); expect(factory).not.toHaveBeenCalled();
+    expect(options.preflight).toHaveBeenCalledTimes(headroom ? 1 : 0); expect(factory).not.toHaveBeenCalled();
   });
 
   it('refuses a callback adding a genuine verifier intent after the saved deadline', async () => {

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readTextFixture } from '../support/text-fixture.js';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { inspectReviewerArtifact, serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
 import { buildRunEnvelope, declareReviewerRecovery } from '../../src/telemetry/envelope.js';
@@ -6,7 +6,7 @@ import { validateRunEnvelope } from '../../src/telemetry/envelope-validation.js'
 
 let entries: ReturnType<typeof inspectReviewerArtifact>[];
 beforeAll(() => {
-  const fixture = JSON.parse(readFileSync(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url), 'utf8'));
+  const fixture = JSON.parse(readTextFixture(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url)));
   entries = fixture.rows.map((row: { artifact_bytes: string; expectations: Parameters<typeof inspectReviewerArtifact>[1] }) =>
     inspectReviewerArtifact(row.artifact_bytes, row.expectations));
 });

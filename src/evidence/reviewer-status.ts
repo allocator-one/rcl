@@ -1,3 +1,4 @@
+import { readAsyncPhase } from '../dispatch/checkpoint-async-store.js';
 import { decodeCapturedInputs } from '../dispatch/captured-inputs.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointState, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
 import { decodeOriginalLaunch, remainingOriginalBudget, type OriginalBudget } from '../dispatch/original-launch.js';
@@ -8,7 +9,6 @@ import { recoveryAttemptsFromCheckpoint } from '../dispatch/recovery.js';
 import { decodeRecoveryOperation, remainingRecoveryBudget, type RecoveryBudget } from '../dispatch/recovery-operation.js';
 import { stableStringify } from '../report/run-header.js';
 import { deriveReviewerHealth } from '../report/reviewer-health.js';
-import { inspectReviewerArtifact } from '../report/reviewer-artifact.js';
 import { UUID } from '../telemetry/recovery/source.js';
 import { loadReviewerLineage } from './reviewer-lineage.js';
 
@@ -56,7 +56,9 @@ export interface ReviewerStatus {
         maxPhysicalCalls?: number; expiresAtMs?: number; remainingMs?: number };
       inherited: { intents: number; uncertain: number };
     };
-    /** Async has no complete intent ledger here and is explicitly excluded. */
+    async: { current: { intents: number; uncertain: number; status: 'absent' | 'open' | 'sealed' }; inherited: { intents: number; uncertain: number } };
+    combined: { physical: number; newOnly: number; uncertain: number };
+    /** Compatibility counter; explicitly excludes async. */
     reviewerAndVerifier: { physical: number; newOnly: number; uncertain: number };
   };
   budget: OriginalBudget | RecoveryBudget;
@@ -158,15 +160,6 @@ function seatStatus(plan: FrozenCheckpointPlan, state: CheckpointState, fraction
     successesNeeded: Math.max(0, health.policy.minimumSuccessful - health.successfulSeats.length), conclusive: health.conclusive, seats };
 }
 
-async function assertTerminalVerification(journal: CheckpointJournal, expected: { bytes: string; digest: string } | undefined): Promise<void> {
-  const phase = await journal.readVerification();
-  if ((phase !== undefined) !== (expected !== undefined)) throw new Error('reviewer_status_verification_mismatch');
-  if (phase !== undefined) {
-    const proof = await journal.exportVerificationProof();
-    if (proof.bytes !== expected!.bytes || proof.digest !== expected!.digest) throw new Error('reviewer_status_verification_mismatch');
-  }
-}
-
 async function verifierAttempts(runs: readonly DecodedRun[], nowMs: number): Promise<ReviewerStatus['attempts']['verifier']> {
   const rows = await Promise.all(runs.map(async run => {
     const phase = await run.journal.readVerification();
@@ -184,7 +177,7 @@ async function verifierAttempts(runs: readonly DecodedRun[], nowMs: number): Pro
   return { current, inherited };
 }
 
-function attempts(states: readonly CheckpointState[], selected: CheckpointState, verifier: Awaited<ReturnType<typeof verifierAttempts>>): ReviewerStatus['attempts'] {
+function attempts(states: readonly CheckpointState[], selected: CheckpointState, verifier: Awaited<ReturnType<typeof verifierAttempts>>, async: ReviewerStatus['attempts']['async']): ReviewerStatus['attempts'] {
   const entries = states.flatMap(state => recoveryAttemptsFromCheckpoint(state));
   const selectedEntries = recoveryAttemptsFromCheckpoint(selected);
   const failures = new Map<string, number>();
@@ -194,7 +187,10 @@ function attempts(states: readonly CheckpointState[], selected: CheckpointState,
     failures.set(classification, (failures.get(classification) ?? 0) + 1);
   }
   const uncertain = states.reduce((sum, state) => sum + state.uncertain.length, 0);
-  return { physical: entries.length, newOnly: selectedEntries.length, uncertain, verifier,
+  return { physical: entries.length, newOnly: selectedEntries.length, uncertain, verifier, async,
+    combined: { physical: entries.length + verifier.inherited.intents + verifier.current.intents + async.current.intents + async.inherited.intents,
+      newOnly: selectedEntries.length + verifier.current.intents + async.current.intents,
+      uncertain: uncertain + verifier.inherited.uncertain + verifier.current.uncertain + async.current.uncertain + async.inherited.uncertain },
     reviewerAndVerifier: { physical: entries.length + verifier.inherited.intents + verifier.current.intents,
       newOnly: selectedEntries.length + verifier.current.intents,
       uncertain: uncertain + verifier.inherited.uncertain + verifier.current.uncertain },
@@ -227,15 +223,6 @@ async function sourceLineage(
     const sourceTerminal = await sourceRun.journal.readTerminalReport();
     if (!sourceTerminal || sourceProof.digest !== source.checkpointSha256 || sourceTerminal.reportSha256 !== source.reportSha256 ||
       sourceRun.captureDigest !== run.captureDigest) throw new Error('reviewer_status_source_binding_mismatch');
-    const inspected = inspectReviewerArtifact(sourceTerminal.reviewerArtifactBytes, {
-      expectedReportBytes: sourceTerminal.reportBytes,
-      expectedRunId: source.runId,
-      expectedTarget: target,
-      expectedPlan: sourceRun.plan,
-    });
-    if (!sameRun(inspected.runId, source.runId) || inspected.reportSha256 !== source.reportSha256 || inspected.proof.digest !== source.checkpointSha256 ||
-      inspected.captured.digest !== sourceRun.captureDigest) throw new Error('reviewer_status_source_report_mismatch');
-    await assertTerminalVerification(sourceRun.journal, inspected.verificationProof);
     run = sourceRun; runId = source.runId;
   }
   throw new Error('reviewer_status_lineage_depth');
@@ -272,19 +259,21 @@ export async function inspectReviewerStatus(input: InspectReviewerStatusInput): 
   const capture = decodeCapturedInputs((await run.journal.readBindings())['captured-inputs']!, run.plan);
   const [terminal, chain] = await Promise.all([run.journal.readTerminalReport(),
     sourceLineage(request.commonDir, request.target, run, request.runId, request.nowMs)]);
-  if (terminal) {
-    const inspected = inspectReviewerArtifact(terminal.reviewerArtifactBytes, { expectedReportBytes: terminal.reportBytes,
-      expectedRunId: request.runId, expectedTarget: request.target, expectedPlan: run.plan });
-    await assertTerminalVerification(run.journal, inspected.verificationProof);
-  }
+  if (terminal) await loadReviewerLineage({ commonDir: request.commonDir, target: request.target, runId: request.runId });
+  else if (run.source) await loadReviewerLineage({ commonDir: request.commonDir, target: request.target, runId: run.source.runId });
   const terminalArtifact = { available: terminal !== undefined };
   const merged = chainedState(chain.runs);
   const verifier = await verifierAttempts(chain.runs, request.nowMs);
+  const root = chain.runs[0]!, rootCapture = decodeCapturedInputs((await root.journal.readBindings())['captured-inputs']!, root.plan);
+  const phase = rootCapture.async ? await readAsyncPhase({ commonDir: request.commonDir, namespace: chain.lineage[0]!.runId, plan: root.plan }) : undefined;
+  const asyncRoot = phase ? { intents: phase.state.intents.length, uncertain: phase.state.uncertain.length, status: phase.state.cutoffMs === undefined ? 'open' as const : 'sealed' as const } : { intents: 0, uncertain: 0, status: 'absent' as const };
+  const async = run.kind === 'original' ? { current: asyncRoot, inherited: { intents: 0, uncertain: 0 } }
+    : { current: { intents: 0, uncertain: 0, status: 'absent' as const }, inherited: { intents: asyncRoot.intents, uncertain: asyncRoot.uncertain } };
   const health = seatStatus(run.plan, merged, capture.policy.fraction);
   return freeze({ version: 1 as const, scope: 'local_structural_status_only' as const,
     authorization: 'not_recovery_authorization_or_server_approval' as const, target: request.target, runId: request.runId,
     kind: run.kind, plan: { digest: run.plan.digest, headSha: run.plan.headSha, mergeBaseSha: run.plan.mergeBaseSha, patchSha256: run.plan.patchSha256 },
-    health, attempts: attempts(chain.runs.map(item => item.state), run.state, verifier), budget: run.budget, finalized: run.state.finalized, terminalArtifact, lineage: chain.lineage });
+    health, attempts: attempts(chain.runs.map(item => item.state), run.state, verifier, async), budget: run.budget, finalized: run.state.finalized, terminalArtifact, lineage: chain.lineage });
 }
 
 /** Plain local summary; it deliberately excludes prompts, results, errors and credentials. */
@@ -292,7 +281,8 @@ export function formatReviewerStatus(status: ReviewerStatus): string {
   return `${status.target} run ${status.runId}: ${status.health.successfulSeats}/${status.health.minimumSuccessful} complete seats; ` +
     `${status.attempts.physical} reviewer calls (${status.attempts.uncertain} uncertain); ` +
     `${status.attempts.verifier.current.intents} current verifier calls; ` +
-    `${status.attempts.reviewerAndVerifier.physical} reviewer-plus-verifier calls (async calls excluded); ` +
+    `${status.attempts.async.current.intents} current async calls (${status.attempts.async.current.uncertain} uncertain); ` +
+    `${status.attempts.combined.physical} combined physical intents, ${status.attempts.combined.newOnly} current; ` +
     `${status.finalized ? 'finalized' : 'open'}; terminal artifact ${status.terminalArtifact.available ? 'available' : 'unavailable'}.`;
 }
 

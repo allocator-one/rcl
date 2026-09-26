@@ -22,6 +22,8 @@ export interface CheckpointGatingExecutionOptions {
   beforeLaunch: () => Promise<void>;
   onLateAuditError: (error: unknown, batchIndex: number) => void;
   signal?: AbortSignal;
+  /** Runtime tightening only; existing phase bytes are never replaced on resume. */
+  executionExpiresAtMs?: number;
   nowMs?: () => number;
   monotonicNow?: () => number;
 }
@@ -57,7 +59,11 @@ export function executeCheckpointGating(input: CheckpointGatingExecutionOptions)
     if (context.runId !== options.assembly.run.id) throw new Error('checkpoint_gating_run_mismatch');
     const now = (options.nowMs ?? Date.now)();
     if (!Number.isSafeInteger(now) || now < 0) throw new Error('checkpoint_gating_execution_invalid_clock');
-    const startedAtMs = Math.min(Math.max(now, context.startedAtMs), context.expiresAtMs);
+    const executionExpiresAtMs = options.executionExpiresAtMs ?? context.expiresAtMs;
+    if (!Number.isSafeInteger(executionExpiresAtMs) || executionExpiresAtMs < context.startedAtMs || executionExpiresAtMs > context.expiresAtMs) {
+      throw new Error('checkpoint_gating_execution_invalid_deadline');
+    }
+    const startedAtMs = Math.min(Math.max(now, context.startedAtMs), executionExpiresAtMs);
     const request = {
       runId: context.runId, gatingPlanBytes: stableStringify(plan), model: plan.model,
       provider: detectProvider(plan.model),
@@ -73,14 +79,14 @@ export function executeCheckpointGating(input: CheckpointGatingExecutionOptions)
       }
     }
     const retainedPlan = existing?.plan ?? { ...request, startedAtMs,
-      expiresAtMs: Math.min(startedAtMs + plan.verificationPassTimeoutMs, context.expiresAtMs),
+      expiresAtMs: Math.min(startedAtMs + plan.verificationPassTimeoutMs, executionExpiresAtMs),
       maxPhysicalCalls: Math.min(plan.batches.length, 500 - currentReviewerCalls - originalAsync),
     };
     const audit = createVerificationLateAudit({ commonDir: options.commonDir, journal: options.journal,
       ownership, onError: options.onLateAuditError });
     try {
       const result = await executeVerification({ ...options, ownership, regeneratedPlan: plan,
-        retainedPlan, otherPhysicalCalls: originalAsync, askFactory: () => options.askFactory(plan.model),
+        retainedPlan, executionExpiresAtMs: Math.min(executionExpiresAtMs, retainedPlan.expiresAtMs), otherPhysicalCalls: originalAsync, askFactory: () => options.askFactory(plan.model),
         auditLateAnswer: audit.accept });
       await audit.flushAfterFinalization();
       return { projection: deriveCheckpointGating(options.assembly, result.proof),

@@ -18,6 +18,7 @@ import type { ReviewAdapter } from '../src/dispatch/adapter.js';
 import { Quarantine } from '../src/telemetry/quarantine.js';
 import { buildRunEnvelope } from '../src/telemetry/envelope.js';
 import { sampleResult } from './telemetry/fixtures.js';
+import type { Attestation } from '../src/telemetry/attest.js';
 import { loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport } from '../src/converge/run-state.js';
 import { sha256Hex } from '../src/report/run-header.js';
@@ -94,7 +95,7 @@ function runRclAsync(
         GOOGLE_API_KEY: '',
         OPENROUTER_API_KEY: '',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     onSpawn?.(child);
     let stdout = '';
@@ -131,11 +132,20 @@ interface GuardedCliFixture {
   args: string[];
   env: Record<string, string>;
   calls: () => number;
+  requests: () => number;
   failCall: (call: number) => void;
+  holdCall: (call: number) => void;
+  delayCapability: (ms: number) => void;
   responseForCall: (makeContent: (call: number) => string) => void;
   holdResponses: () => void;
   releaseResponses: () => void;
   firstRequest: Promise<void>;
+  retainedArgs: () => string[];
+  privateRuns: Map<string, { envelope: any; ordinary: Map<string, string>; privateBytes?: string }>;
+  capability: (supported: boolean) => void;
+  protectedEnv: Record<string, string>;
+  minted: Map<string, Attestation>;
+  privateUnreadable: (value: boolean) => void;
 }
 
 async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<void>): Promise<void> {
@@ -146,14 +156,82 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
     models: ['openai-compat/fixture'], secondaryModels: [], asyncModels: [],
     roles: ['general', 'security-auditor'], harness: { telemetry: 'off' },
   }));
-  let calls = 0;
-  let failingCall: number | undefined;
+  let calls = 0, requests = 0;
+  let failingCall: number | undefined, heldCall: number | undefined, capabilityDelay = 0;
   let responseForCall = (_call: number): string => JSON.stringify({ findings: [] });
   let holdResponses = false;
   const pendingResponses: Array<() => void> = [];
   let notifyRequest: () => void = () => {};
   const firstRequest = new Promise<void>(resolve => { notifyRequest = resolve; });
-  const server = createServer((request, response) => {
+  const privateRuns = new Map<string, { envelope: any; ordinary: Map<string, string>; privateBytes?: string }>();
+  let privateSupported = true, privateUnreadable = false;
+  const minted = new Map<string, Attestation>();
+  const protectedHost = 'https://harness.example.test';
+  const server = createServer(async (request, response) => {
+    requests++;
+    if (request.url?.startsWith('/synthetic-oidc')) { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ value: 'synthetic.jwt' })); return; }
+    if (request.url?.startsWith('/fake-github/')) {
+      response.setHeader('content-type', 'application/json');
+      if (request.url.includes('/compare/')) { response.end(JSON.stringify({ merge_base_commit: { sha: head }, files: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-a\n+b\n' }] })); return; }
+      response.end(JSON.stringify({ number: 105, title: 'Synthetic PR', body: '', user: { login: 'fixture' },
+        base: { ref: 'main', sha: head }, head: { ref: 'candidate', sha: head }, changed_files: 1,
+        html_url: 'https://github.com/allocator-one/rcl/pull/105', labels: [], draft: false })); return;
+    }
+    if (request.url?.startsWith('/api/v1/reviews')) {
+      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const bytes = Buffer.concat(chunks).toString('utf8');
+      const answer = (status: number, value: unknown) => { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); };
+      if (request.url.endsWith('/attest')) {
+        if (request.headers.authorization !== 'Bearer synthetic.jwt') return answer(403, { error: 'forbidden' });
+        const body = JSON.parse(bytes);
+        if (privateRuns.has(body.run_id)) return answer(409, { error: 'run_exists' });
+        const source = body.reviewer_recovery?.source;
+        if (source && (!privateRuns.get(source.run_id)?.privateBytes || sha256Hex(privateRuns.get(source.run_id)!.privateBytes!) !== source.reviewer_artifact_sha256)) return answer(403, { error: 'source_unavailable' });
+        const session: Attestation = { credential: { url: protectedHost, token: `rbc_${body.run_id}`, source: 'attest' },
+          runId: body.run_id, audience: protectedHost, expiresAt: new Date(Date.now() + 60000).toISOString(),
+          ...(body.reviewer_recovery ? { reviewerRecovery: body.reviewer_recovery } : {}) };
+        minted.set(body.run_id, session);
+        return answer(201, { data: { credential: session.credential.token, run_id: body.run_id, expires_at: session.expiresAt } });
+      }
+      const protectedSession = [...minted.values()].find(session => `Bearer ${session.credential.token}` === request.headers.authorization);
+      if (!protectedSession && request.headers.authorization !== 'Bearer synthetic-owner') return answer(403, { error: 'forbidden' });
+      if (request.url.endsWith('/model-stats') && capabilityDelay) { const delay = capabilityDelay; capabilityDelay = 0; await new Promise(resolve => setTimeout(resolve, delay)); }
+      if (request.url.endsWith('/model-stats')) return answer(200, { data: { models: [] }, meta: privateSupported ? { reviewer_recovery_protocol: 1, reviewer_artifact_schema: 1, reviewer_artifact_max_bytes: 25000000 } : {} });
+      if (request.url.includes('?page_size=')) return answer(200, { data: [], meta: { location_provenance: true } });
+      if (request.method === 'POST' && request.url.endsWith('/runs')) {
+        const envelope = JSON.parse(bytes), existing = privateRuns.get(envelope.run.id);
+        if (protectedSession && envelope.run.id !== protectedSession.runId) return answer(403, { error: 'forbidden' });
+        if (existing && JSON.stringify(existing.envelope) !== bytes) return answer(409, { error: 'conflict' });
+        privateRuns.set(envelope.run.id, existing ?? { envelope, ordinary: new Map() });
+        return answer(existing ? 200 : 201, { data: { id: envelope.run.id, url: 'http://localhost/run', artifacts_expected: envelope.artifacts_declared.map((row: any) => row.kind) }, meta: { status: existing ? 'existing' : 'created' } });
+      }
+      const match = /^\/api\/v1\/reviews\/runs\/([^/]+)(?:\/(.*))?$/.exec(request.url);
+      const run = match && privateRuns.get(match[1]!); if (!run) return answer(404, { error: 'not_found' });
+      const resource = match![2];
+      if (protectedSession && !(match![1] === protectedSession.runId || request.method === 'GET' && resource === 'reviewer-artifact' && match![1] === protectedSession.reviewerRecovery?.source.run_id)) return answer(403, { error: 'forbidden' });
+      if (!resource) return answer(200, { data: { id: match![1], url: `${protectedHost}/api/v1/reviews/runs/${match![1]}`,
+        envelope_sha256: sha256Hex(JSON.stringify(run.envelope)), artifacts_declared: run.envelope.artifacts_declared,
+        artifacts_expected: run.envelope.artifacts_declared.map((row: any) => row.kind) }, meta: { status: 'existing' } });
+      if (resource === 'reviewer-artifact') {
+        const declaration = run.envelope.reviewer_recovery;
+        if (request.method === 'PUT') {
+          const wire = JSON.parse(bytes);
+          if (run.ordinary.get('report_json') !== wire.report.bytes) return answer(503, { error: 'source_unavailable' });
+          expect(sha256Hex(bytes)).toBe(declaration.sha256); expect(Buffer.byteLength(bytes)).toBe(declaration.bytes);
+          run.privateBytes = bytes;
+          return answer(201, { data: { run_id: match![1], sha256: declaration.sha256, bytes: declaration.bytes }, meta: { status: 'created' } });
+        }
+        if (!run.privateBytes) return answer(404, { error: 'reviewer_artifact_pending', data: { run_id: match![1], sha256: declaration.sha256, bytes: declaration.bytes } });
+        if (privateUnreadable) return answer(503, { error: 'source_unavailable' });
+        response.writeHead(200, { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256Hex(run.privateBytes), 'cache-control': 'private, no-store', 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff' }); response.end(run.privateBytes); return;
+      }
+      const kind = resource?.replace('artifacts/', '');
+      if (!kind) return answer(404, { error: 'not_found' });
+      if (protectedSession && request.method !== 'PUT') return answer(403, { error: 'forbidden' });
+      if (request.method === 'PUT') { run.ordinary.set(kind, bytes); return answer(201, { data: { kind, sha256: sha256Hex(bytes) } }); }
+      const raw = run.ordinary.get(kind); if (raw === undefined) return answer(404, { error: 'not_found' });
+      response.writeHead(200, { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256Hex(raw) }); response.end(raw); return;
+    }
     request.resume();
     calls++;
     notifyRequest();
@@ -172,11 +250,23 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
         } }],
       }));
     };
-    if (holdResponses) pendingResponses.push(respond);
+    if (holdResponses || call === heldCall) pendingResponses.push(respond);
     else respond();
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
+  const preload = join(repo, 'synthetic-workflow.mjs');
+  writeFileSync(preload, `const original = globalThis.fetch;
+    process.env.ACTIONS_ID_TOKEN_REQUEST_URL = 'https://actions.example.test/synthetic-oidc';
+    process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = 'synthetic-request';
+    globalThis.fetch = (input, init) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      if (url.hostname === 'harness.example.test' || url.hostname === 'actions.example.test') return original('http://127.0.0.1:${port}' + url.pathname + url.search, init);
+      if (url.hostname === 'api.github.com') return original('http://127.0.0.1:${port}/fake-github' + url.pathname + url.search, init);
+      if (url.hostname === '127.0.0.1') return original(input, init);
+      throw new Error('unapproved test network');
+    };`);
+
   try {
     await work({
       repo,
@@ -184,16 +274,24 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
         '--head-sha', head, '--base-sha', head, '--json-file', 'report.json',
         '--config', 'config.json', '--no-telemetry'],
       env: { OPENAI_COMPAT_BASE_URL: `http://127.0.0.1:${port}/v1`,
-        OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RCL_DATA_DIR: join(repo, 'rcl-data') },
-      calls: () => calls,
+        OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, HARNESS_API_URL: `http://127.0.0.1:${port}`, HARNESS_API_TOKEN: 'synthetic-owner', RCL_TELEMETRY: '', RCL_DATA_DIR: join(repo, 'rcl-data') },
+      calls: () => calls, requests: () => requests,
       failCall: call => { failingCall = call; },
+      holdCall: call => { heldCall = call; }, delayCapability: ms => { capabilityDelay = ms; },
       responseForCall: makeContent => { responseForCall = makeContent; },
       holdResponses: () => { holdResponses = true; },
       releaseResponses: () => {
         holdResponses = false;
         for (const respond of pendingResponses.splice(0)) respond();
       },
-      firstRequest,
+      firstRequest, privateRuns, minted, privateUnreadable: value => { privateUnreadable = value; },
+      protectedEnv: { GITHUB_TOKEN: 'synthetic-github', GH_TOKEN: 'synthetic-github', NODE_OPTIONS: `--import=${preload}`, HARNESS_API_URL: protectedHost }, capability: supported => { privateSupported = supported; },
+      retainedArgs: () => {
+        const config = JSON.parse(readFileSync(join(repo, 'config.json'), 'utf8')); config.harness.telemetry = 'full';
+        writeFileSync(join(repo, 'config.json'), JSON.stringify(config)); mkdirSync(join(repo, '.harness-cli'), { recursive: true });
+        writeFileSync(join(repo, '.harness-cli/config.json'), JSON.stringify({ team: 'RCL' }));
+        return ['review', 'change.patch', '--guarded-converge', '--converge-target', 'guarded-fixture', '--head-sha', head, '--base-sha', head, '--json-file', 'report.json', '--config', 'config.json'];
+      },
     });
   } finally {
     server.closeAllConnections();
@@ -202,6 +300,272 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
 }
 
 describe('rcl review — guarded native launch', () => {
+  it('finalizes an expired saved successor locally after process loss with zero network or new intents', async () => {
+    await withGuardedFixture(async fixture => {
+      const args = fixture.retainedArgs(), config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.maxRetries = 0; writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.responseForCall(call => call === 1 ? 'unparseable' : '{"findings":[]}');
+      const original = await runRclAsync([...args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'], fixture.repo, fixture.env);
+      expect(original.status, original.stderr).toBe(0);
+      const source = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8')), head = source.run.target.head_sha;
+      fixture.holdCall(3); let child: ChildProcess | undefined;
+      const running = runRclAsync(['reviewers', 'apply', 'guarded-fixture', '--run', source.run.id, '--review-target', 'change.patch',
+        '--head-sha', head, '--base-sha', head, '--for-pr', 'allocator-one/rcl#105', '--config', 'config.json',
+        '--max-additional-calls', '1', '--max-attempts-per-cell', '2', '--time-budget-ms', '2500'], fixture.repo, fixture.env, 10000, process => { child = process; });
+      for (let i = 0; fixture.calls() < 3 && i < 150; i++) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(fixture.calls()).toBe(3); child!.kill('SIGKILL'); await running;
+      const commonDir = realpathSync(join(fixture.repo, '.git')), launch = (await loadConvergeRunState(commonDir, 'guarded-fixture'))!.lastLaunch!;
+      const journal = await CheckpointJournal.inspectRead(checkpointPath(commonDir, 'guarded-fixture', launch.runId!));
+      const operation = JSON.parse((await journal.readBindings()).operation!), before = JSON.stringify((await journal.read()).records.filter(record => record.type === 'intent'));
+      const localArgs = ['reviewers', 'resume', 'guarded-fixture', '--run', launch.runId!, '--local-only', '--json-file', 'local.json'];
+      const requests = fixture.requests();
+      const live = await runRclAsync(localArgs, fixture.repo, { ...fixture.env, HARNESS_API_URL: '', HARNESS_API_TOKEN: '' });
+      expect(live.status).toBe(1); expect(live.stderr).toContain('local_only_operation_live');
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, operation.expiresAtMs - Date.now() + 30)));
+      const local = await runRclAsync(localArgs, fixture.repo, { ...fixture.env, HARNESS_API_URL: '', HARNESS_API_TOKEN: '' });
+      expect(local.status, local.stderr).toBe(4); expect(local.stderr).toContain('Local terminal');
+      expect(fixture.requests()).toBe(requests); expect(fixture.calls()).toBe(3);
+      const terminal = (await journal.readTerminalReport())!;
+      expect(terminal.reportBytes).toBe(readFileSync(join(fixture.repo, 'local.json'), 'utf8'));
+      expect(JSON.stringify((await journal.read()).records.filter(record => record.type === 'intent'))).toBe(before);
+      expect((await journal.readVerification())?.intents ?? []).toEqual([]);
+      expect(await loadConvergeAttemptState(commonDir, 'guarded-fixture')).toMatchObject({ attemptsUsed: 2 });
+      const replay = await runRclAsync(localArgs.slice(0, -2), fixture.repo, { ...fixture.env, HARNESS_API_URL: '', HARNESS_API_TOKEN: '' });
+      expect(replay.status, replay.stderr).toBe(4); expect((await journal.readTerminalReport())!.reportBytes).toBe(terminal.reportBytes);
+      expect(fixture.requests()).toBe(requests);
+    });
+  }, 40000);
+
+  it('runs a protected retained original and signed-parent successor through the real CLI with owned native counters', async () => {
+    await withGuardedFixture(async fixture => {
+      fixture.retainedArgs();
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8')); config.maxRetries = 0;
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.responseForCall(call => call === 1 ? 'unparseable' : '{"findings":[]}');
+      const env = { ...fixture.env, ...fixture.protectedEnv };
+      const incompatible = await runRclAsync(['review', 'allocator-one/rcl#105', '--retain-reviewers', '--attest', '--guarded-converge', '--converge-target', 'guarded-fixture'], fixture.repo, env);
+      expect(incompatible.status).toBe(1); expect(incompatible.stderr).toContain('incompatible_launch');
+      expect(fixture.minted.size).toBe(0); expect(fixture.calls()).toBe(0);
+      const original = await runRclAsync(['review', 'allocator-one/rcl#105', '--retain-reviewers', '--attest', '--converge-target', 'guarded-fixture',
+        '--config', 'config.json', '--json-file', 'protected.json'], fixture.repo, env);
+      expect(original.status, original.stderr).toBe(0); expect(fixture.calls()).toBe(2);
+      const source = JSON.parse(readFileSync(join(fixture.repo, 'protected.json'), 'utf8'));
+      const applied = await runRclAsync(['reviewers', 'apply', 'guarded-fixture', '--run', source.run.id,
+        '--review-target', 'allocator-one/rcl#105', '--config', 'config.json', '--attest', '--max-additional-calls', '1',
+        '--max-attempts-per-cell', '2', '--time-budget-ms', '30000', '--json-file', 'protected-successor.json'], fixture.repo, env);
+      expect(applied.status, applied.stderr).toBe(0); expect(fixture.calls()).toBe(3);
+      const successor = JSON.parse(readFileSync(join(fixture.repo, 'protected-successor.json'), 'utf8'));
+      expect(successor.run.converge).toMatchObject({ attempt: 2, round: 1 });
+      expect(fixture.minted.get(successor.run.id)!.reviewerRecovery!.source.run_id).toBe(source.run.id);
+      expect(fixture.privateRuns.get(successor.run.id)!.envelope.calls).toEqual([]);
+      const before = fixture.minted.size;
+      const refused = await runRclAsync(['reviewers', 'resume', 'guarded-fixture', '--run', successor.run.id,
+        '--review-target', 'allocator-one/rcl#105', '--config', 'config.json', '--attest'], fixture.repo, env);
+      expect(refused.status).toBe(1); expect(refused.stderr).toContain('same_live_session');
+      expect(fixture.minted.size).toBe(before); expect(fixture.calls()).toBe(3);
+    });
+  }, 40000);
+
+  it('reopens protected lost-ACK bytes with an externally held same live session and refuses missing session transfer', async () => {
+    await withGuardedFixture(async fixture => {
+      fixture.retainedArgs(); fixture.privateUnreadable(true);
+      const env = { ...fixture.env, ...fixture.protectedEnv };
+      const original = await runRclAsync(['review', 'allocator-one/rcl#105', '--retain-reviewers', '--attest', '--converge-target', 'guarded-fixture',
+        '--config', 'config.json', '--json-file', 'protected.json'], fixture.repo, env);
+      expect(original.status, original.stderr).toBe(4); expect(fixture.calls()).toBe(2);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'protected.json'), 'utf8'));
+      const bytes = fixture.privateRuns.get(report.run.id)!.privateBytes, session = fixture.minted.get(report.run.id)!;
+      fixture.privateUnreadable(false);
+      const resumed = await runRclAsync(['reviewers', 'resume', 'guarded-fixture', '--run', report.run.id,
+        '--review-target', 'allocator-one/rcl#105', '--config', 'config.json', '--attest', '--attestation-stdin'], fixture.repo, env,
+        30000, child => child.stdin!.end(JSON.stringify(session)));
+      expect(resumed.status, resumed.stderr).toBe(0); expect(fixture.calls()).toBe(2);
+      expect(fixture.privateRuns.get(report.run.id)!.privateBytes).toBe(bytes);
+      expect(resumed.stderr + resumed.stdout).not.toContain(session.credential.token);
+      expect((await loadConvergeRunState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture'))!.lastLaunch!.deliveryPending).toBe(false);
+    });
+  }, 40000);
+
+  it.each(['asserted', 'protected'])('routes a normal guarded retry in %s mode to only eligible unstarted cells after the original finite deadline', async mode => {
+    await withGuardedFixture(async fixture => {
+      const retainedArgs = fixture.retainedArgs();
+      const args = [...(mode === 'asserted' ? [...retainedArgs, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'] :
+        ['review', 'allocator-one/rcl#105', '--retain-reviewers', '--attest', '--converge-target', 'guarded-fixture', '--config', 'config.json', '--json-file', 'report.json']),
+        '--max-attempts', '4', '--max-rounds', '3', '--round', '1'];
+      const env = mode === 'asserted' ? fixture.env : { ...fixture.env, ...fixture.protectedEnv };
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.roles.push('performance-engineer'); config.maxRetries = 0; config.timeout = 2000; config.concurrency = 1;
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.delayCapability(3000); fixture.holdCall(2);
+      const original = await runRclAsync(args, fixture.repo, env);
+      expect(original.status, original.stderr).toBe(0); expect(fixture.calls()).toBe(2);
+      const source = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      const initial = fixture.privateRuns.get(source.run.id)!.privateBytes!;
+      const nativeBefore = await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture');
+      for (const [flag, value] of [['--max-attempts', '5'], ['--max-rounds', '4'], ['--round', '2']]) {
+        const changed = args.map((arg, index) => args[index - 1] === flag ? value! : arg).map(arg => arg === 'report.json' ? 'refused.json' : arg);
+        const refused = await runRclAsync(changed, fixture.repo, env);
+        expect(refused.status).toBe(1); expect(refused.stderr).toContain('preserves_saved_native_limits');
+        expect(fixture.calls()).toBe(2);
+        expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toEqual(nativeBefore);
+      }
+      const next = await runRclAsync(args.map(arg => arg === 'report.json' ? 'next.json' : arg), fixture.repo, env);
+      expect(next.status, next.stderr).toBe(0); expect(fixture.calls()).toBe(3);
+      const successor = JSON.parse(readFileSync(join(fixture.repo, 'next.json'), 'utf8'));
+      expect(successor.run.reviewer_evidence.kind).toBe('supplemented');
+      expect(successor.run.converge).toMatchObject({ attempt: 2, round: 1 });
+      const wire = JSON.parse(fixture.privateRuns.get(successor.run.id)!.privateBytes!);
+      expect(wire.checkpoints).toHaveLength(2); expect(wire.newPhysicalAttempts).toHaveLength(1);
+      expect(fixture.privateRuns.get(source.run.id)!.privateBytes).toBe(initial);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toMatchObject({ attemptsUsed: 2, cap: 4 });
+      expect((await loadConvergeRunState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture'))!.roundCap).toBe(3);
+    });
+  }, 40000);
+
+  it('allows genuinely changed retained inputs through the original guarded retry policy without replacing source evidence', async () => {
+    await withGuardedFixture(async fixture => {
+      const args = fixture.retainedArgs(), config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.maxRetries = 0; writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      writeFileSync(join(fixture.repo, 'spec.md'), 'Original private specification');
+      fixture.responseForCall(call => call === 1 ? 'unparseable' : '{"findings":[]}');
+      const first = await runRclAsync([...args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105', '--spec', 'spec.md'], fixture.repo, fixture.env);
+      expect(first.status, first.stderr).toBe(0); expect(fixture.calls()).toBe(2);
+      const source = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      const sourceBytes = fixture.privateRuns.get(source.run.id)!.privateBytes;
+      writeFileSync(join(fixture.repo, 'spec.md'), 'Materially revised private specification');
+      const nextArgs = [...args.map(arg => arg === 'report.json' ? 'changed.json' : arg), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105', '--spec', 'spec.md'];
+      const next = await runRclAsync([...nextArgs, '--retry-reason', 'Changed specification after the failed original; new inputs require a fresh original'], fixture.repo, fixture.env);
+      expect(next.status, next.stderr).toBe(0); expect(fixture.calls()).toBe(4);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'changed.json'), 'utf8'));
+      expect(report.run.reviewer_evidence.kind).toBe('original'); expect(report.run.id).not.toBe(source.run.id);
+      expect(report.run.converge).toMatchObject({ attempt: 2, round: 1 });
+      expect(fixture.privateRuns.get(source.run.id)!.privateBytes).toBe(sourceBytes);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toMatchObject({ attemptsUsed: 2 });
+    });
+  }, 40000);
+
+  it('uses a distinct ordinary attested original for materially changed automatic inputs under the same native guard', async () => {
+    await withGuardedFixture(async fixture => {
+      fixture.retainedArgs();
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8')); config.maxRetries = 0;
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      writeFileSync(join(fixture.repo, 'spec.md'), 'Original protected specification');
+      fixture.responseForCall(call => call === 1 ? 'unparseable' : '{"findings":[]}');
+      const env = { ...fixture.env, ...fixture.protectedEnv };
+      const args = ['review', 'allocator-one/rcl#105', '--retain-reviewers', '--attest', '--converge-target', 'guarded-fixture',
+        '--config', 'config.json', '--spec', 'spec.md', '--json-file', 'protected.json'];
+      const first = await runRclAsync(args, fixture.repo, env); expect(first.status, first.stderr).toBe(0);
+      const source = JSON.parse(readFileSync(join(fixture.repo, 'protected.json'), 'utf8'));
+      const sourceBytes = fixture.privateRuns.get(source.run.id)!.privateBytes, commonDir = realpathSync(join(fixture.repo, '.git'));
+      const before = await loadConvergeAttemptState(commonDir, 'guarded-fixture');
+      writeFileSync(join(fixture.repo, 'spec.md'), 'Materially revised protected specification');
+      const nextArgs = args.map(arg => arg === 'protected.json' ? 'changed-protected.json' : arg);
+      const refused = await runRclAsync(nextArgs, fixture.repo, env);
+      expect(refused.status).toBe(1); expect(refused.stderr).toContain('infrastructure_failure');
+      expect(fixture.calls()).toBe(2); expect(await loadConvergeAttemptState(commonDir, 'guarded-fixture')).toEqual(before);
+      const next = await runRclAsync([...nextArgs, '--retry-reason', 'Changed specification requires a separately guarded original'], fixture.repo, env);
+      expect(next.status, next.stderr).toBe(0); expect(fixture.calls()).toBe(4);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'changed-protected.json'), 'utf8'));
+      expect(report.run.reviewer_evidence.kind).toBe('original'); expect(report.run.id).not.toBe(source.run.id);
+      expect(report.run.converge).toMatchObject({ attempt: 2, round: 1 });
+      expect(fixture.minted.get(report.run.id)!.reviewerRecovery).toBeUndefined();
+      const wire = JSON.parse(fixture.privateRuns.get(report.run.id)!.privateBytes!);
+      expect(wire.checkpoints).toHaveLength(1); expect(wire.asyncExecution).toBeUndefined();
+      for (const [id, session] of fixture.minted) if (session.reviewerRecovery) {
+        expect(id).not.toBe(report.run.id); expect(fixture.privateRuns.has(id)).toBe(false);
+        expect(existsSync(checkpointPath(commonDir, 'guarded-fixture', id))).toBe(false);
+      }
+      expect(fixture.privateRuns.get(source.run.id)!.privateBytes).toBe(sourceBytes);
+    });
+  }, 40000);
+
+  it('applies and resumes only missing retained assignments without rebilling source calls', async () => {
+    await withGuardedFixture(async fixture => {
+      const args = fixture.retainedArgs(), config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
+      config.maxRetries = 0; writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.responseForCall(call => call === 1 ? 'unparseable fixture' : '{"findings":[]}');
+      const original = await runRclAsync([...args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'], fixture.repo, fixture.env);
+      expect(original.status, original.stderr).toBe(0); expect(fixture.calls()).toBe(2);
+      const source = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      const head = source.run.target.head_sha;
+      const binding = ['--review-target', 'change.patch', '--head-sha', head, '--base-sha', head,
+        '--for-pr', 'allocator-one/rcl#105', '--config', 'config.json'];
+      const applyArgs = ['reviewers', 'apply', 'guarded-fixture', '--run', source.run.id, ...binding,
+        '--max-additional-calls', '1', '--max-attempts-per-cell', '2', '--time-budget-ms', '30000'];
+      const tiny = await runRclAsync(applyArgs.map(arg => arg === '30000' ? '3' : arg), fixture.repo, fixture.env);
+      expect(tiny.status).toBe(1); expect(tiny.stderr).toContain('retained_execution_budget');
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
+      fixture.capability(false);
+      const unsupported = await runRclAsync(applyArgs, fixture.repo, fixture.env);
+      expect(unsupported.status).toBe(1); expect(unsupported.stderr).toContain('capability_unavailable');
+      fixture.capability(true);
+      const wrongBinding = await runRclAsync(applyArgs.map(arg => arg === 'allocator-one/rcl#105' ? 'allocator-one/rcl#106' : arg), fixture.repo, fixture.env);
+      expect(wrongBinding.status).toBe(1); expect(wrongBinding.stderr).toContain('input_mismatch');
+      const storedSource = fixture.privateRuns.get(source.run.id)!, savedSource = storedSource.privateBytes;
+      storedSource.privateBytes = undefined;
+      const unavailable = await runRclAsync(applyArgs, fixture.repo, fixture.env);
+      expect(unavailable.status).toBe(1); expect(unavailable.stderr).toContain('source_unavailable');
+      storedSource.privateBytes = savedSource;
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
+      writeFileSync(join(fixture.repo, 'empty.patch'), '');
+      const empty = await runRclAsync(applyArgs.map(arg => arg === 'change.patch' ? 'empty.patch' : arg), fixture.repo, fixture.env);
+      expect(empty.status).toBe(1); expect(empty.stderr).toContain('input_mismatch');
+      const applied = await runRclAsync(['reviewers', 'apply', 'guarded-fixture', '--run', source.run.id, ...binding,
+        '--max-additional-calls', '1', '--max-attempts-per-cell', '2', '--time-budget-ms', '30000', '--json-file', 'successor.json'], fixture.repo, fixture.env);
+      expect(applied.status, applied.stderr).toBe(0); expect(fixture.calls()).toBe(3);
+      const successor = JSON.parse(readFileSync(join(fixture.repo, 'successor.json'), 'utf8'));
+      expect(successor.run.converge).toMatchObject({ attempt: 2, round: 1 });
+      expect(successor.run.reviewer_evidence.kind).toBe('supplemented');
+      expect(fixture.privateRuns.get(successor.run.id)!.envelope.calls).toEqual([]);
+      const saved = fixture.privateRuns.get(source.run.id)!.privateBytes;
+      const resumed = await runRclAsync(['reviewers', 'resume', 'guarded-fixture', '--run', successor.run.id, ...binding], fixture.repo, fixture.env);
+      expect(resumed.status, resumed.stderr).toBe(0); expect(fixture.calls()).toBe(3);
+      expect(fixture.privateRuns.get(source.run.id)!.privateBytes).toBe(saved);
+      expect(await loadConvergeAttemptState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture')).toMatchObject({ attemptsUsed: 2 });
+      const renewal = await runRclAsync(['reviewers', 'resume', 'guarded-fixture', '--run', successor.run.id, ...binding, '--time-budget-ms', '60000'], fixture.repo, fixture.env);
+      expect(renewal.status).toBe(1); expect(fixture.calls()).toBe(3);
+    });
+  }, 40000);
+
+  it('dispatches captured retained async calls under the same journal and delivers exact original-only accounting', async () => {
+    await withGuardedFixture(async fixture => {
+      const args = fixture.retainedArgs();
+      const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8')); config.asyncModels = ['openai-compat/bonus']; config.maxRetries = 0;
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
+      fixture.holdResponses();
+      const running = runRclAsync([...args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'], fixture.repo, fixture.env);
+      try {
+        await Promise.race([fixture.firstRequest, running.then(result => { throw new Error(result.stderr); })]);
+        const until = Date.now() + 5000; while (fixture.calls() < 3 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20));
+        expect(fixture.calls()).toBe(3);
+      } finally { fixture.releaseResponses(); }
+      const result = await running; expect(result.status, result.stderr).toBe(0);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      const stored = fixture.privateRuns.get(report.run.id)!; const artifact = JSON.parse(stored.privateBytes!);
+      expect(artifact.newAsyncPhysicalAttempts).toHaveLength(1); expect(artifact.asyncExecution).toBeDefined();
+      const asyncProof = JSON.parse(artifact.asyncExecution.bytes), lifetime = asyncProof.plan.context.expiresAtMs - asyncProof.plan.context.startedAtMs;
+      expect(asyncProof.plan.expiresAtMs).toBe(asyncProof.plan.context.expiresAtMs - Math.min(120000, Math.floor(lifetime / 4)));
+      expect(artifact.health.successfulSeats).toHaveLength(2); expect(stored.envelope.calls).toEqual([]);
+      const status = await runRclAsync(['reviewers', 'status', 'guarded-fixture', '--run', report.run.id, '--json'], fixture.repo, fixture.env);
+      expect(status.status, status.stderr).toBe(0); expect(JSON.parse(status.stdout).attempts.async.current.intents).toBe(1);
+      expect(fixture.calls()).toBe(3);
+    });
+  }, 20000);
+
+  it('delivers a retained original only through the actual current-credential capability and private pair', async () => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync([...fixture.retainedArgs(), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'], fixture.repo, fixture.env);
+      expect(result.status, result.stderr).toBe(0); expect(fixture.calls()).toBe(2);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      const stored = fixture.privateRuns.get(report.run.id)!;
+      expect(stored.envelope.calls).toEqual([]); expect(stored.privateBytes).toBeDefined();
+      expect(JSON.parse(stored.privateBytes!).report.bytes).toBe(stored.ordinary.get('report_json'));
+      expect((await loadConvergeRunState(realpathSync(join(fixture.repo, '.git')), 'guarded-fixture'))?.lastLaunch).toMatchObject({ attempt: 1, round: 1, deliveryPending: false });
+    });
+  }, 40000);
+
   it('retains the actual verifier phase with the original private report and never repeats it for status', async () => {
     await withGuardedFixture(async fixture => {
       const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
@@ -213,7 +577,7 @@ describe('rcl review — guarded native launch', () => {
         id: 'F1', file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness',
         title: 'Missing guard', description: 'The changed line omits its required guard.'
       }] }) : call === 2 ? JSON.stringify({ findings: [] }) : '[{"id":"F1","verdict":"confirmed"}]');
-      const result = await runRclAsync([...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'],
+      const result = await runRclAsync([...fixture.retainedArgs(), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'],
         fixture.repo, fixture.env);
       expect(result.status, result.stderr).toBe(0);
       const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
@@ -237,7 +601,7 @@ describe('rcl review — guarded native launch', () => {
     await withGuardedFixture(async fixture => {
       writeFileSync(join(fixture.repo, 'spec.md'), 'PRIVATE retained council specification');
       fixture.holdResponses();
-      const running = runRclAsync([...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105',
+      const running = runRclAsync([...fixture.retainedArgs(), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105',
         '--spec', 'spec.md'], fixture.repo, fixture.env);
       await fixture.firstRequest;
       try {
@@ -294,7 +658,7 @@ describe('rcl review — guarded native launch', () => {
       config.maxRetries = 0;
       writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
       fixture.failCall(3);
-      const args = [...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105', '--ci'];
+      const args = [...fixture.retainedArgs(), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105', '--ci'];
       const result = await runRclAsync(args, fixture.repo, fixture.env);
       expect(result.status, result.stderr).toBe(1);
       expect(fixture.calls()).toBe(3);
@@ -323,7 +687,7 @@ describe('rcl review — guarded native launch', () => {
       expect((await loadConvergeRunState(commonDir, 'guarded-fixture'))!.rounds).toEqual([]);
       const retry = await runRclAsync(args.map(arg => arg === 'report.json' ? 'retry.json' : arg), fixture.repo, fixture.env);
       expect(retry.status).toBe(1);
-      expect(retry.stderr).toContain('infrastructure_failure');
+      expect(retry.stderr).toContain('recovery_launch_source_not_actionable');
       expect(fixture.calls()).toBe(3);
       expect(await loadConvergeAttemptState(commonDir, 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
     });
@@ -362,7 +726,7 @@ describe('rcl review — guarded native launch', () => {
       const config = JSON.parse(readFileSync(join(fixture.repo, 'config.json'), 'utf8'));
       config.timeout = 2_147_483_648;
       writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify(config));
-      const result = await runRclAsync([...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'],
+      const result = await runRclAsync([...fixture.retainedArgs(), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'],
         fixture.repo, fixture.env);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('original_launch_invalid_duration');
@@ -387,7 +751,7 @@ describe('rcl review — guarded native launch', () => {
   it('keeps a privately retained terminal report reusable after a late output collision', async () => {
     await withGuardedFixture(async fixture => {
       fixture.holdResponses();
-      const args = [...fixture.args, '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'];
+      const args = [...fixture.retainedArgs(), '--retain-reviewers', '--for-pr', 'allocator-one/rcl#105'];
       const running = runRclAsync(args, fixture.repo, fixture.env);
       await fixture.firstRequest;
       writeFileSync(join(fixture.repo, 'report.json'), 'preserved');

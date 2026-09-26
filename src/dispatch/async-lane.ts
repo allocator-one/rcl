@@ -270,12 +270,21 @@ export async function runAsyncWorker(
   }
   review.async = true;
 
-  const dir = resolve(spoolFile, '..');
-  const resultFile = join(dir, `result-${payload.targetKey}-${randomUUID()}.json`);
-  const tempFile = `${resultFile}.tmp`;
-  await writeFile(tempFile, JSON.stringify(review), { encoding: 'utf8', mode: 0o600 });
-  await rename(tempFile, resultFile);
+  await publishAsyncReview(resolve(spoolFile, '..'), payload.targetKey, review);
   await rm(spoolFile, { force: true });
+}
+
+/** Publish a derived opportunistic opinion; this store is never physical-call authority. */
+export async function publishAsyncReview(storeDir: string, targetKey: string, review: ModelReview): Promise<void> {
+  if (!/^[A-Za-z0-9._-]+$/.test(targetKey)) throw new Error('invalid async opinion target');
+  const info = await lstat(storeDir);
+  if (!info.isDirectory() || info.isSymbolicLink() || typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error('unsafe async opinion directory');
+  }
+  const resultFile = join(storeDir, `result-${targetKey}-${randomUUID()}.json`);
+  const tempFile = `${resultFile}.tmp`;
+  await writeFile(tempFile, JSON.stringify(review), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await rename(tempFile, resultFile);
 }
 
 function isReviewShape(value: unknown): value is ModelReview {

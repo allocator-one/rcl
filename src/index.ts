@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command, InvalidArgumentError } from 'commander';
+import { Command, Option, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
 import { readdir, readFile, writeFile } from 'fs/promises';
@@ -31,11 +31,18 @@ import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews, defaultAdapterFactory } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
+import { initializeAsyncPhase, sealAsyncPhase } from './dispatch/checkpoint-async-store.js';
+import { readRetainedAsyncInput, runRetainedAsyncWorker, launchRetainedAsyncWorkers } from './dispatch/retained-async.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
 import { executeCheckpointGating } from './dispatch/checkpoint-gating-execution.js';
 import { assertOriginalLaunchBudget, type OriginalLaunch } from './dispatch/original-launch.js';
 import { createCheckpointLateAudit, type CheckpointLateAudit } from './dispatch/late-audit.js';
-import type { CheckpointJournal } from './dispatch/checkpoint.js';
+import { CheckpointJournal, checkpointPath } from './dispatch/checkpoint.js';
+import { decodeRecoveryOperation } from './dispatch/recovery-operation.js';
+import { loadReviewerLineage, type ReviewerLineage } from './evidence/reviewer-lineage.js';
+import { executeReviewerCommand, finalizeReviewerLocally } from './evidence/reviewer-command.js';
+import { readTransientInput } from './telemetry/transient-input.js';
+import { parseAttestedExpiry } from './telemetry/attested-retry.js';
 import { withNativeTarget, type NativeTargetOwnership } from './converge/target-ownership.js';
 import { retainedLaunchInputSha256, processReviewerRoundReport } from './converge/retained-report.js';
 import { AGGREGATION_ALGORITHM, captureAggregationInputs } from './report/aggregation-inputs.js';
@@ -82,6 +89,7 @@ import type { Diff } from './resolver/types.js';
 import {
   DEFAULT_CONVERGE_ATTEMPT_CAP,
   claimConvergeAttempt,
+  loadConvergeAttemptState,
   ConvergeAttemptBudgetExceededError,
   convergeAttemptErrorExitCode,
   ConvergeAttemptStateError,
@@ -143,7 +151,7 @@ import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
 import { credentialHost, type HarnessCredential } from './telemetry/credentials.js';
-import { attestRun, renewAttestation, type Attestation } from './telemetry/attest.js';
+import { attestRun, renewAttestation, parseTransferredAttestation, type Attestation, type ReviewerAttestationRequest } from './telemetry/attest.js';
 import type { TelemetryLevel } from './telemetry/envelope.js';
 import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
@@ -249,7 +257,8 @@ async function attestBeforeReview(
   spinner: Spinner,
   opts: CouncilCliOpts,
   target: string | undefined,
-  gitMode: string | undefined
+  gitMode: string | undefined,
+  recovery?: { runId: string; request?: ReviewerAttestationRequest }
 ): Promise<Attestation> {
   if (gitMode || target === undefined || !isGitHubTarget(target)) {
     throw new Error(
@@ -263,7 +272,13 @@ async function attestBeforeReview(
   if (level !== 'full') throw new Error(attestLevelMessage(level));
 
   spinner.text = 'Attesting to Harness as this GitHub Actions run...';
-  const attestation = await attestRun({ runId: uuidv7(), rclVersion: RCL_VERSION });
+  const runId = recovery?.runId ?? uuidv7();
+  const attestation = opts.attestationStdin
+    ? parseTransferredAttestation(await readTransientInput(process.stdin, 65_536), runId, recovery?.request)
+    : await attestRun({ runId, rclVersion: RCL_VERSION, ...(recovery?.request ? { reviewerRecovery: recovery.request } : {}) });
+  if (opts.attestationStdin && attestation.credential.url !== (process.env['HARNESS_API_URL'] ?? '').replace(/\/+$/, '')) {
+    throw new Error('attestation_transfer_host_mismatch');
+  }
   spinner.info(
     `Attested: run-bound credential from ${credentialHost(attestation.credential)} for run ${attestation.runId} (expires ${attestation.expiresAt})`
   );
@@ -327,7 +342,7 @@ program
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
-  .option('--retain-reviewers', 'Privately retain exact reviewer inputs and results for guarded patch reviews')
+  .option('--retain-reviewers', 'Retain private reviewer inputs/results for owned missing-assignment recovery (requires supported full delivery)')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
@@ -343,7 +358,7 @@ program
     await runReview(target, opts);
   });
 
-const reviewersCommand = program.command('reviewers').description('Inspect retained reviewer work without provider calls');
+const reviewersCommand = program.command('reviewers').description('Inspect retained work or recover only eligible missing assignments within owned native limits');
 reviewersCommand.command('status <target>')
   .description('Read a selected local checkpoint; does not authorize recovery or approve a review')
   .requiredOption('--run <uuid>', 'Exact retained run UUID')
@@ -376,6 +391,65 @@ reviewersCommand.command('preview <target>')
       process.exitCode = 1;
     }
   });
+
+// Apply creates one bounded successor; resume accepts no replacement budgets.
+for (const mode of ['apply', 'resume'] as const) {
+  const command = reviewersCommand.command(`${mode} <target>`)
+    .description(mode === 'apply' ? 'Recover eligible missing assignments after exact source and current-credential preflight' : 'Resume the exact saved operation or retry its terminal delivery without renewing limits')
+    .requiredOption('--run <uuid>', mode === 'apply' ? 'Exact retained source run UUID' : 'Exact retained run UUID')
+    .option('--review-target <target>', mode === 'resume'
+      ? 'Current PR or exact patch used to revalidate frozen inputs; required except --local-only'
+      : 'Current PR or exact patch used to revalidate frozen inputs (required)')
+    .option('--config <path>', 'Path to the unchanged effective configuration')
+    .option('--head-sha <sha>', 'Exact patch head commit')
+    .option('--base-sha <sha>', 'Exact patch effective merge base')
+    .option('--expect-head-sha <sha>', 'Refuse a different current head')
+    .option('--for-pr <owner/repo#N>', 'Patch PR binding')
+    .option('--spec <path>', 'Original specification file')
+    .option('--spec-source <source>', 'Original specification provenance')
+    .option('--context <path>', 'Original context file or directory (repeatable)', (value: string, all: string[]) => [...all, value], [])
+    .option('--role <name>', 'Original role selection').option('--roles <names>', 'Original comma-separated roles')
+    .option('--reviewer <pair>', 'Original model:role (repeatable)', (value: string, all: string[]) => [...all, value], [])
+    .option('--models <models>', 'Original primary models').option('--secondary-models <models>', 'Original secondary models')
+    .option('--async-models <models>', 'Original async models; inherited, never redispatched')
+    .option('--json', 'Print the sanitized ordinary report').option('--json-file <path>', 'Write exact ordinary report bytes to a new file')
+    .option('--markdown <path>', 'Write ordinary Markdown to a new file').option('--ci', 'Return the stored deterministic CI gate result')
+    .option('--attest', 'Protected workflow with exact immediate-parent grant; resume requires its same still-live session')
+    .addOption(new Option('--attestation-stdin').hideHelp());
+  if (mode === 'resume') command.option('--local-only', 'Finalize an expired saved successor offline, with no delivery, new intents or approval');
+  if (mode === 'apply') command.requiredOption('--max-additional-calls <n>', 'Finite new physical call budget')
+    .requiredOption('--max-attempts-per-cell <n>', 'Cumulative attempt cap per frozen cell')
+    .requiredOption('--time-budget-ms <n>', 'Finite duration of the new successor');
+  command.action(async (target: string, opts) => {
+    if (opts.localOnly) {
+      try {
+        const allowed = new Set(['run', 'localOnly', 'json', 'jsonFile', 'markdown', 'ci']);
+        if (Object.entries(opts).some(([key, value]) => !allowed.has(key) && !(Array.isArray(value) && value.length === 0))) {
+          throw new Error('reviewer_recovery_local_only_incompatible_options');
+        }
+        await validateLaunchOutputs(opts, false);
+        const result = await finalizeReviewerLocally({ commonDir: await resolveGitCommonDir(), target, runId: opts.run,
+          currentHeadSha: (await resolveGitHeads()).headSha ?? '', rclVersion: RCL_VERSION, runner: detectRunner(process.env, hostname()) });
+        const report = JSON.parse(result.terminal.reportBytes) as ReviewResult;
+        await writeReportArtifacts({ ...renderReportArtifacts(report), report_json: result.terminal.reportBytes },
+          { jsonFile: opts.jsonFile, markdown: opts.markdown, exclusive: true });
+        if (opts.json) console.log(result.terminal.reportBytes);
+        process.stderr.write(`Local terminal ${opts.run} is available; evidence delivery was not attempted and remains pending or refused. No native admission or approval is implied.\n`);
+        process.exitCode = opts.ci && report.run!.ci_exit_code ? report.run!.ci_exit_code : 4;
+      } catch (error) {
+        console.error(scrubText(error instanceof Error ? error.message : String(error), 500));
+        process.exitCode = error instanceof ConvergeRunStateError || error instanceof ConvergeAttemptStateError ? 3 : 1;
+      }
+      return;
+    }
+    if (!opts.reviewTarget) { console.error('--review-target is required for live recovery or delivery'); process.exitCode = 1; return; }
+    const integer = (value: string) => /^[1-9][0-9]*$/.test(value) ? Number(value) : Number.NaN;
+    await runReview(opts.reviewTarget, { ...opts, convergeTarget: target, retainReviewers: true,
+      guardedConverge: !opts.attest, evidenceRequired: true,
+      retainedRecovery: { mode, runId: opts.run, ...(mode === 'apply' ? { maxAdditionalCalls: integer(opts.maxAdditionalCalls),
+        maxAttemptsPerCell: integer(opts.maxAttemptsPerCell), timeBudgetMs: integer(opts.timeBudgetMs) } : {}) } });
+  });
+}
 
 // review-plan command
 program
@@ -1245,6 +1319,12 @@ program
     }
   });
 
+// A restricted worker receives only a bounded transient delegation on stdin.
+program.command('retained-async-worker', { hidden: true }).action(async () => {
+  try { await runRetainedAsyncWorker(await readRetainedAsyncInput(process.stdin)); process.exit(0); }
+  catch { process.exit(1); }
+});
+
 // Per-model triage history (RCL-27): trailing precision, volume, latency,
 // dead-call rate, and the consensus weight each model earns from them.
 const modelsCmd = program
@@ -1452,6 +1532,12 @@ interface CouncilCliOpts {
   attempt?: string;
   guardedConverge?: boolean;
   retainReviewers?: boolean;
+  attestationStdin?: boolean;
+  retainedRecovery?: { mode: 'apply' | 'resume'; runId: string; maxAdditionalCalls?: number; maxAttemptsPerCell?: number; timeBudgetMs?: number };
+  automaticRecovery?: boolean;
+  freshOriginalPreviousInput?: string;
+  recoverySource?: ReviewerLineage;
+  recoverySuccessorId?: string;
   /** Retain guarded output creation semantics inside the post-claim execution. */
   exclusiveOutputs?: boolean;
   launchIntent?: GuardedLaunchOptions['intent'];
@@ -1526,9 +1612,9 @@ async function prepareCouncil(
     // Freeze effective values before either launch identity or input capture.
     config.thresholds = { ...DEFAULT_THRESHOLDS, ...config.thresholds };
     config.output = { ...config.output, belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true };
-    if (resolveTelemetryLevel(config, { noTelemetry: opts.telemetry === false }, process.env) !== 'off') {
+    if (resolveTelemetryLevel(config, { noTelemetry: opts.telemetry === false }, process.env) !== 'full') {
       throw new ReviewLaunchRefused('reviewer_evidence_backend_unsupported',
-        'Reviewer retention requires a compatible evidence backend. This development operation currently supports --no-telemetry only; it cannot supply a server merge gate.');
+        'Reviewer retention requires full private delivery and a compatible current owner credential.');
     }
   }
 
@@ -1708,10 +1794,10 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   const spinner = ora('Loading configuration...').start();
 
   try {
-    if (opts.retainReviewers && !opts.guardedConverge) {
+    if (opts.retainReviewers && !opts.guardedConverge && !opts.attest) {
       throw new ReviewLaunchRefused('reviewer_retention_requires_guard', 'Retaining reviewer inputs requires --guarded-converge and its owned native claim.');
     }
-    if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
+    if (!opts.guardedConverge && !(opts.retainReviewers && opts.attest) && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
       throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
     }
@@ -1721,6 +1807,14 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       if (converge.attempt !== undefined || opts.attest) {
         throw new ReviewLaunchRefused('incompatible_launch', 'Guarded review claims its own attempt; do not preclaim, pass --attempt, or combine it with --attest.');
       }
+    }
+    // Protected retention selects the same owned guard internally; the explicit
+    // --guarded-converge + --attest combination above remains invalid.
+    if (opts.retainReviewers && opts.attest) {
+      if (resolveConvergeContext(opts, process.env)?.attempt !== undefined) {
+        throw new ReviewLaunchRefused('incompatible_launch', 'Protected retained review derives its numeric attempt from the owned guard; do not preclaim it.');
+      }
+      opts = { ...opts, guardedConverge: true };
     }
     // Exactly one review source: a positional target, --staged, or --working-tree
     const sourceCount = [target, opts.staged, opts.workingTree].filter(Boolean).length;
@@ -1749,8 +1843,8 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         }.`
       );
     }
-    if (opts.retainReviewers && (!patchTarget || !opts.headSha || !opts.baseSha ||
-      !(opts.forPr ?? process.env['RCL_FOR_PR'])?.trim())) {
+    if (opts.retainReviewers && (gitMode || patchTarget && (!opts.headSha || !opts.baseSha ||
+      !(opts.forPr ?? process.env['RCL_FOR_PR'])?.trim()))) {
       throw new ReviewLaunchRefused('reviewer_retention_requires_binding',
         'Retaining reviewer inputs requires a patch file, --head-sha, --base-sha (effective merge base), and --for-pr.');
     }
@@ -1762,11 +1856,56 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         '--evidence-required needs --head-sha for a patch file: evidence must bind to the commit it reviewed.'
       );
     }
+    if (opts.attestationStdin && (!opts.attest || opts.retainedRecovery?.mode !== 'resume')) {
+      throw new Error('attestation_stdin_requires_protected_resume');
+    }
+    if (opts.retainReviewers) {
+      const commonDir = await resolveGitCommonDir(), key = resolveConvergeContext(opts, process.env)?.target;
+      if (!key) throw new ReviewLaunchRefused('target_required', 'Retained execution requires --converge-target.');
+      const state = await loadConvergeRunState(commonDir, key), previous = state?.lastLaunch;
+      if (!opts.retainedRecovery && (opts.launchIntent === undefined || opts.launchIntent === 'review') && previous?.status === 'completed' && previous.reviewerHealth &&
+        previous.reviewerHealth.successfulSeats < previous.reviewerHealth.policy.minimumSuccessful &&
+        previous.headSha === (await resolveGitHeads()).headSha) {
+        // Same-head eligible recovery uses the existing full roster and saved
+        // limits. Failed/permanent/uncertain cells are never blindly resampled.
+        opts = { ...opts, automaticRecovery: true, retainedRecovery: { mode: 'apply', runId: previous.runId! } };
+      }
+      if (opts.retainedRecovery) {
+        if (opts.automaticRecovery) {
+          const attempts = await loadConvergeAttemptState(commonDir, key);
+          const round = resolveConvergeContext(opts, process.env)?.round;
+          if (!attempts || !state || !previous ||
+            opts.maxAttempts !== undefined && Number(opts.maxAttempts) !== attempts.cap ||
+            opts.maxRounds !== undefined && Number(opts.maxRounds) !== state.roundCap ||
+            round !== undefined && round !== previous.round) {
+            throw new Error('reviewer_recovery_preserves_saved_native_limits');
+          }
+        } else if (opts.maxAttempts !== undefined || opts.maxRounds !== undefined || opts.round !== undefined) {
+          throw new Error('reviewer_recovery_preserves_saved_native_limits');
+        }
+        const request = opts.retainedRecovery;
+        let sourceId = request.runId;
+        if (request.mode === 'resume') {
+          const journal = await CheckpointJournal.inspectRead(checkpointPath(commonDir, key, request.runId));
+          const bindings = await journal.readBindings();
+          if (bindings.operation) sourceId = decodeRecoveryOperation(bindings.operation).sourceRunId;
+          else if (!bindings.launch || !(await journal.readTerminalReport())) throw new Error('reviewer_recovery_original_terminal_required');
+          if (opts.attest && !opts.attestationStdin) throw new Error('attestation_resume_requires_same_live_session_on_stdin');
+        }
+        const source = await loadReviewerLineage({ commonDir, target: key, runId: sourceId });
+        opts = { ...opts, recoverySource: source, recoverySuccessorId: request.mode === 'resume' ? request.runId : uuidv7() };
+      }
+    }
     // --attest (RCL-40) runs before any key, config or reviewer work; an
     // attested review is recorded or it does not run, so evidence is required.
     let attestation: Attestation | undefined;
     if (opts.attest) {
-      attestation = await attestBeforeReview(spinner, opts, target, gitMode);
+      const parent = opts.recoverySource?.latest;
+      const originalResume = opts.retainedRecovery?.mode === 'resume' && parent?.runId === opts.retainedRecovery.runId;
+      attestation = await attestBeforeReview(spinner, opts, target, gitMode, opts.recoverySuccessorId ? {
+        runId: opts.recoverySuccessorId, ...(parent && !originalResume ? { request: { version: 1,
+          source: { run_id: parent.runId, report_sha256: parent.terminal.reportSha256, reviewer_artifact_sha256: parent.inspected.artifact.digest } } } : {}),
+      } : undefined);
       opts = { ...opts, evidenceRequired: true };
     }
     assertEvidenceCanBeRequired(opts);
@@ -1816,7 +1955,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       }
     } else {
       const prTarget = parseGitHubTarget(target!);
-      diff = await fetchPRDiff(prTarget, config.githubToken);
+      diff = await fetchPRDiff(prTarget, config.githubToken, undefined, { requireMergeBase: opts.retainReviewers === true });
     }
 
     // Resolve the head BEFORE the empty-diff exit so --expect-head-sha is
@@ -1843,6 +1982,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     }
 
     if (diff.files.length === 0) {
+      if (opts.retainedRecovery) throw new Error('reviewer_recovery_input_mismatch');
       spinner.warn(
         gitMode === 'staged'
           ? 'No staged changes to review.'
@@ -1912,7 +2052,11 @@ interface RetainedCouncilContext {
   journal: CheckpointJournal;
   lateAudit: CheckpointLateAudit;
   signal: AbortSignal;
+  executionExpiresAtMs: number;
   run: RetainedOriginalSession['run'];
+  asyncLaunched: number;
+  runtime: TelemetryRuntime;
+  delivery?: RetainedOriginalSession['delivery'];
 }
 
 async function loadCouncilWeights(opts: CouncilCliOpts, attestation?: Attestation): Promise<Map<string, number> | undefined> {
@@ -1951,16 +2095,92 @@ async function executeCouncil(
     const roster = buildRoster({ assignments, asyncAssignments, coreModels: prepared.coreModels,
       explicit: prepared.explicit, gating: prepared.gatingConfig });
     const commonDir = await resolveGitCommonDir();
+    const retainedRuntime = opts.retainReviewers ? await createTelemetryRuntime({ rclVersion: RCL_VERSION, config,
+      ...(extra.attestation ? { credential: extra.attestation.credential, attestedExpiresAt: extra.attestation.expiresAt } : {}) }) : undefined;
+    if (retainedRuntime && (retainedRuntime.level !== 'full' || !retainedRuntime.repoManaged || !retainedRuntime.credential || !retainedRuntime.sink)) {
+      throw new ReviewLaunchRefused('reviewer_evidence_backend_unsupported', 'Retained reviews need a current Harness credential and full private delivery.');
+    }
+    const capturedAsyncCalls = opts.retainReviewers ? chunks.flatMap(chunk => asyncAssignments.map(assignment => ({ chunk, assignment }))).slice(0, MAX_ASYNC_CALLS_PER_ROUND) : [];
+    const capturedAsyncPrompts = await Promise.all(capturedAsyncCalls.map(({ assignment, chunk }) =>
+      buildPrompt(chunk, assignment.role, { contextDocs, plan: planContext })));
+    const asyncAttempts = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
+    const frozenWeights = opts.recoverySource?.latest.captured.aggregation?.modelWeights;
+    const modelWeights = opts.recoverySource ? (frozenWeights === undefined ? undefined : new Map(frozenWeights.map(entry => [entry.model, entry.weight])))
+      : await loadCouncilWeights(opts, extra.attestation);
     const captured = opts.retainReviewers ? capturePreparedCouncil({
-      target: prepared.converge!.target, headSha: extra.target.headSha!, mergeBaseSha: extra.target.baseSha!,
-      diff, assignments, chunks, prompts, config, specBytes: prepared.specBytes, contextDocs,
+      target: prepared.converge!.target, headSha: extra.target.headSha!, mergeBaseSha: diff.metadata?.mergeBaseSha ?? extra.target.baseSha!,
+      diff, assignments, chunks, prompts, config,
+      ...(capturedAsyncCalls.length ? { async: { assignments: asyncAssignments, prompts: capturedAsyncPrompts,
+        timeoutMs: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS, maxAttemptsPerCall: asyncAttempts,
+        maxPhysicalCalls: capturedAsyncCalls.length * asyncAttempts } } : {}),
+      specBytes: prepared.specBytes, contextDocs,
       compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: AGGREGATION_ALGORITHM },
       aggregationInputs: captureAggregationInputs({ algorithm: AGGREGATION_ALGORITHM,
         diffSha256: diffDigest(diff.files), roleMap, thresholds: { ...DEFAULT_THRESHOLDS, ...config.thresholds },
-        gating: prepared.gatingConfig, modelWeights: await loadCouncilWeights(opts),
+        gating: prepared.gatingConfig, modelWeights,
         belowThresholdAppendix: config.output!.belowThresholdAppendix!,
       }),
     }) : undefined;
+    if (opts.freshOriginalPreviousInput && captured &&
+      retainedLaunchInputSha256(captured.captured.digest, { target: extra.target, roster, spec: prepared.spec }) === opts.freshOriginalPreviousInput) {
+      throw new Error('reviewer_recovery_inputs_changed_during_preparation');
+    }
+    if (opts.automaticRecovery && opts.recoverySource && captured) {
+      const source = opts.recoverySource.latest;
+      const currentInputs = retainedLaunchInputSha256(captured.captured.digest, { target: extra.target, roster, spec: prepared.spec });
+      const sourceInputs = retainedLaunchInputSha256(source.captured.digest, source.inspected.assembly.run);
+      if (captured.captured.bytes !== source.captured.bytes || currentInputs !== sourceInputs) {
+        // Changed effective inputs are a new original, never a modified recovery.
+        // The ordinary guard still requires its existing retry reason and caps.
+        // A signed-parent credential cannot be reinterpreted as an original.
+        const freshOptions = { ...opts, automaticRecovery: undefined, retainedRecovery: undefined,
+          recoverySource: undefined, recoverySuccessorId: undefined, freshOriginalPreviousInput: sourceInputs };
+        if (extra.attestation) {
+          if (!extra.target.repo || !extra.target.prNumber) throw new Error('reviewer_recovery_invalid_protected_target');
+          // This is a distinct original run, not a replacement session for the
+          // unused provisional successor. No source grant is requested or reused.
+          const freshAttestation = await attestBeforeReview(spinner, freshOptions,
+            `${extra.target.repo}#${extra.target.prNumber}`, undefined);
+          const freshPrepared = await prepareCouncil(spinner, freshOptions, undefined, freshAttestation);
+          await assertEvidenceDeliverable(freshOptions, freshPrepared.config, freshAttestation.credential);
+          return executeCouncil(spinner, freshPrepared, diff, freshOptions, { ...extra, attestation: freshAttestation });
+        }
+        return executeCouncil(spinner, prepared, diff, freshOptions, extra, work);
+      }
+    }
+    if (opts.retainedRecovery && opts.recoverySource && captured) {
+      const request = opts.retainedRecovery, root = opts.recoverySource.runs[0]!.inspected.launch!;
+      if ((await resolveGitHeads()).headSha !== captured.plan.headSha) throw new Error('reviewer_recovery_current_head_mismatch');
+      await validateLaunchOutputs(opts, false);
+      const startedAtMs = Date.now(), duration = request.timeBudgetMs ?? (root.expiresAtMs - root.startedAtMs);
+      const maxAdditionalCalls = request.maxAdditionalCalls ?? root.maxPhysicalCalls;
+      const maxAttemptsPerCell = request.maxAttemptsPerCell ?? root.maxAttemptsPerCell;
+      if (request.mode === 'apply' && (![duration, maxAdditionalCalls, maxAttemptsPerCell].every(value => Number.isSafeInteger(value) && value > 0) ||
+        duration > 2_147_483_647 || maxAdditionalCalls > 500)) throw new Error('reviewer_recovery_invalid_bounds');
+      const expiry = extra.attestation ? parseAttestedExpiry(extra.attestation.expiresAt) : undefined;
+      const outcome = await executeReviewerCommand({ mode: request.mode, commonDir, target: prepared.converge!.target,
+        runId: request.runId, successorRunId: opts.recoverySuccessorId!, currentHeadSha: captured.plan.headSha,
+        freshCaptureBytes: captured.captured.bytes, currentRunBindings: { target: extra.target, roster, spec: prepared.spec },
+        runtime: retainedRuntime!, attestation: extra.attestation, rclVersion: RCL_VERSION, runner: detectRunner(process.env, hostname()),
+        ...(request.mode === 'apply' ? { bounds: { operationId: uuidv7(), startedAtMs,
+          expiresAtMs: Math.min(startedAtMs + duration, expiry ?? Number.MAX_SAFE_INTEGER), maxAdditionalCalls, maxAttemptsPerCell } } : {}) });
+      spinner.stop();
+      if (outcome.kind === 'already_quorate') {
+        console.log(`Retained run ${outcome.sourceRunId} is already quorate; no provider or native attempt was spent.`);
+        return { runId: outcome.sourceRunId, reportJsonSha256: opts.recoverySource.latest.terminal.reportSha256, successfulReviews: opts.recoverySource.latest.inspected.artifact.health.successfulSeats.length,
+          totalReviews: captured.plan.roster.length, deliveryPending: false, hardFailure: false };
+      }
+      const artifacts = { ...renderReportArtifacts(outcome.report), report_json: outcome.reportBytes };
+      const diagnostics = await writeReportArtifacts(artifacts, { jsonFile: opts.jsonFile, markdown: opts.markdown, exclusive: true });
+      if (opts.json) console.log(outcome.reportBytes); else printReviewSummary(outcome.report);
+      if (outcome.delivery.line) process.stderr.write(outcome.delivery.line + '\n');
+      if (outcome.delivery.exitCode) process.stderr.write(outcome.delivery.spooled
+        ? `Retry exact private delivery with rcl telemetry flush --run ${outcome.runId}.\n`
+        : `Retained run ${outcome.runId} requires its same live protected session for delivery; no new review is needed.\n`);
+      process.exitCode = opts.ci && outcome.report.run!.ci_exit_code ? outcome.report.run!.ci_exit_code : outcome.delivery.exitCode || (diagnostics.length ? 1 : 0);
+      return { runId: outcome.runId, reportJsonSha256: sha256Hex(outcome.reportBytes), successfulReviews: outcome.report.stats.successfulReviews,
+        totalReviews: outcome.report.stats.totalReviews, deliveryPending: outcome.delivery.status !== 'recorded', hardFailure: false };
+    }
     let completion: GuardedLaunchCompletion | undefined;
     const guardOptions: GuardedLaunchOptions = {
       gitCommonDir: commonDir,
@@ -1985,11 +2205,15 @@ async function executeCouncil(
         }
         await validateLaunchOutputs(opts);
         if (captured) {
+          if ((await resolveGitHeads()).headSha !== captured.plan.headSha) throw new Error('retained_original_current_head_mismatch');
           const plan = buildCouncilRunPlan({ totalCalls: chunkAssignments.length, reviewers: assignments.length,
             chunks: chunks.length, concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
             timeoutMs: config.timeout ?? DEFAULT_TIMEOUT_MS });
           const perCell = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
           assertOriginalLaunchBudget(plan.timeoutBoundMs, chunkAssignments.length * perCell, perCell);
+          if (chunkAssignments.length * perCell + (captured.captured.async?.maxPhysicalCalls ?? 0) > 500) {
+            throw new ReviewLaunchRefused('physical_call_cap', 'Retained reviewer and async reservations exceed the combined 500-call cap.');
+          }
         }
       },
       onClaim: async claim => {
@@ -2014,22 +2238,25 @@ async function executeCouncil(
       const maxAttemptsPerCell = (config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1;
       claim = await guardRetainedOriginal({
         guard: guardOptions, captured: captured.captured, diff, effectiveMergeBaseSha: captured.plan.mergeBaseSha,
-        run: { id: uuidv7(), rclVersion: RCL_VERSION, command: extra.command, target: extra.target, roster,
+        run: { id: extra.attestation?.runId ?? uuidv7(), rclVersion: RCL_VERSION, command: extra.command, target: extra.target, roster,
           ...(prepared.spec ? { spec: prepared.spec } : {}),
           contextFiles: contextDocs.map(doc => ({ path: doc.label, sha256: doc.sha256 })),
           ...(extra.command === 'review-plan' ? { plan: { focus: extra.focus ?? 'comprehensive' } } : {}),
           runner: detectRunner(process.env, hostname()), startedAt: prepared.startedAt },
         bounds: { startedAtMs, expiresAtMs: startedAtMs + plan.timeoutBoundMs,
           maxPhysicalCalls: chunkAssignments.length * maxAttemptsPerCell, maxAttemptsPerCell },
-        // The public retained path is still explicitly local-only. Protected
-        // transport is integrated internally, not enabled by these CLI flags.
-        access: { kind: 'local' }, validate: guardOptions.validate, onClaim: guardOptions.onClaim,
+        access: extra.attestation ? { kind: 'protected', attestation: extra.attestation }
+          : { kind: 'asserted', credential: retainedRuntime!.credential! }, validate: guardOptions.validate, onClaim: guardOptions.onClaim,
         execute: async original => {
-          const { ownership, journal, launch, signal, run } = original;
-          const lateAudit = createCheckpointLateAudit({ commonDir, ownership, journal, onError: error => {
-            process.stderr.write(`Late reviewer response could not be retained: ${scrubText(String(error), 300)}\n`);
+          const { ownership, journal, launch, signal, run, executionExpiresAtMs } = original;
+          const lateAudit = createCheckpointLateAudit({ commonDir, ownership, journal, onError: () => {
+            process.stderr.write('A late reviewer response could not be retained.\n');
           } });
-          const session = { commonDir, ownership, captured, launch, journal, lateAudit, signal, run };
+          const async = captured.captured.async;
+          const delegated = async ? await initializeAsyncPhase({ commonDir, namespace: launch.runId, plan: captured.plan, ownership,
+            calls: async.calls.map(call => call.ref), maxPhysicalCalls: async.maxPhysicalCalls, maxAttemptsPerCall: async.maxAttemptsPerCall, expiresAtMs: executionExpiresAtMs }) : undefined;
+          const asyncLaunched = delegated ? launchRetainedAsyncWorkers(delegated.delegates, () => { process.stderr.write('Retained async worker could not start; no unrecorded call will be inferred.\n'); }, process.argv[1]) : 0;
+          const session = { asyncLaunched, commonDir, ownership, captured, launch, journal, lateAudit, signal, executionExpiresAtMs, run, runtime: retainedRuntime!, delivery: original.delivery };
           try {
             completion = await executeCouncil(spinner, { ...prepared, converge: run.converge }, diff,
               { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work, session);
@@ -2052,7 +2279,7 @@ async function executeCouncil(
   const asyncTargetLabel = extra.asyncTargetLabel;
   let asyncStoreDir: string | undefined;
   let asyncKey: string | undefined;
-  let asyncLaunched = 0;
+  let asyncLaunched = retained?.asyncLaunched ?? 0;
   if (
     asyncTargetLabel !== undefined &&
     (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0)
@@ -2061,7 +2288,7 @@ async function executeCouncil(
       asyncStoreDir = await resolveAsyncStoreDir();
       asyncKey = asyncTargetKey(
         asyncTargetLabel,
-        extra.target.kind === 'patch' ? prepared.converge?.target : undefined
+        retained ? retained.launch.target : extra.target.kind === 'patch' ? prepared.converge?.target : undefined
       );
       let asyncChunkAssignments = chunks.flatMap((chunk) =>
         asyncAssignments.map((assignment) => ({ assignment, chunk }))
@@ -2073,7 +2300,7 @@ async function executeCouncil(
         );
         asyncChunkAssignments = asyncChunkAssignments.slice(0, MAX_ASYNC_CALLS_PER_ROUND);
       }
-      if (asyncChunkAssignments.length > 0) {
+      if (!retained && asyncChunkAssignments.length > 0) {
         const asyncPrompts = await Promise.all(
           asyncChunkAssignments.map(({ assignment, chunk }) =>
             buildPrompt(chunk, assignment.role, {
@@ -2153,6 +2380,7 @@ async function executeCouncil(
     if (retained) {
       const executed = await executeCapturedOriginal({ commonDir: retained.commonDir, ownership: retained.ownership,
         journal: retained.journal, expectedPlan: retained.captured.plan, launch: retained.launch, signal: retained.signal,
+        runtimeBounds: { expiresAtMs: retained.executionExpiresAtMs },
         onPhysicalReviewComplete: review => progress.complete(review),
         auditLateAttempt: retained.lateAudit.accept,
         onLateAuditError: error => process.stderr.write(`Late reviewer audit failed: ${scrubText(String(error), 300)}\n`),
@@ -2238,7 +2466,7 @@ async function executeCouncil(
   // weights read, then delivery — the credential is renewed for the same run
   // id when little of it remains (RCL-40).
   let attestation = extra.attestation;
-  if (attestation) {
+  if (attestation && !retained) {
     const renewal = await renewAttestation(attestation, { rclVersion: RCL_VERSION });
     attestation = renewal.attestation;
     if (renewal.renewed) {
@@ -2302,13 +2530,16 @@ async function executeCouncil(
       }
     },
   };
+  const asyncExecution = retained?.captured.captured.async ? await sealAsyncPhase({ commonDir: retained.commonDir,
+    namespace: retained.launch.runId, plan: retained.captured.plan, ownership: retained.ownership }) : undefined;
   const checkpointAssembly: CheckpointAssemblyInput | undefined = projection ? {
-    projection, supplementalAsync: captureSupplementalAsync(arrivedAsync.map(review => JSON.stringify(review)), asyncLaunched),
+    projection, ...(asyncExecution ? { asyncExecution: { bytes: asyncExecution.bytes, digest: asyncExecution.digest } } : {}),
+    supplementalAsync: captureSupplementalAsync(arrivedAsync.map(review => JSON.stringify(review)), asyncLaunched),
     diff, startTime, run: assemblyInput.run,
   } : undefined;
   const checkpointGating = checkpointAssembly && retained ? await executeCheckpointGating({
     assembly: checkpointAssembly, commonDir: retained.commonDir, ownership: retained.ownership,
-    journal: retained.journal, signal: retained.signal,
+    journal: retained.journal, signal: retained.signal, executionExpiresAtMs: retained.executionExpiresAtMs,
     askFactory: model => {
       assemblyDependencies.onVerificationStart?.();
       const adapter = defaultAdapterFactory(detectProvider(model));
@@ -2363,7 +2594,7 @@ async function executeCouncil(
   let runtime: TelemetryRuntime | undefined;
   let runtimeError: string | undefined;
   try {
-    runtime = await createTelemetryRuntime({
+    runtime = retained?.runtime ?? await createTelemetryRuntime({
       rclVersion: RCL_VERSION,
       config,
       noTelemetry: opts.telemetry === false,
@@ -2422,7 +2653,7 @@ async function executeCouncil(
   // retention of the rendered originals. Try both files before any exit code.
   const evidenceRequired = opts.evidenceRequired === true;
   const delivery: DeliveryOutcome = runtime
-    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics, reviewerArtifact }).catch((err: unknown) => ({
+    ? await deliverRun(runtime, { result: delivered, artifacts, evidenceRequired, outputDiagnostics, reviewerArtifact, attestedReviewer: retained?.delivery }).catch((err: unknown) => ({
         status: 'error' as const,
         line: `Evidence delivery failed: ${scrubText(String(err), 300)}`,
         exitCode: evidenceRequired ? (4 as const) : (0 as const),
