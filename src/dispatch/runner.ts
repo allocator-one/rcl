@@ -64,7 +64,7 @@ export interface RunnerOptions {
    * the cell in the complete supplied assignment/prompt matrix. Called for
    * every dispatched terminal result, including in-flight cancellations, before
    * progress or success counting. Retained/unstarted/ineligible placeholders
-   * bypass this hook: they do not represent newly paid calls. Must not mutate;
+   * bypass this hook: they do not represent newly paid calls. Receives an isolated copy;
    * rejection stops dispatch, aborts remaining calls and rejects the run.
    * The caller owns bounded storage I/O and frozen checkpoint identity.
    */
@@ -217,6 +217,7 @@ export async function runReviews(
   let failure: { error: unknown } | undefined;
   let acceptance = Promise.resolve();
   const dispatched = new Set<number>();
+  const intended = new Set<number>();
   const cancelOutstanding = new Set<() => void>();
   function cancelCalls(): void { for (const cancel of cancelOutstanding) cancel(); }
   function fail(error: unknown): void { failure ??= { error }; cancelCalls(); }
@@ -258,9 +259,11 @@ export async function runReviews(
         review = canceledReview(calls[index]!, received.durationMs, 'before durable acceptance');
       }
       if (!matches(index, review)) throw new Error(`Reviewer result does not match planned cell identity at index ${index}`);
-      if (dispatched.has(index)) await options.acceptReview?.(review, index);
-      results[index] = review;
       const countsTowardQuorum = review.status === 'success' && review.async !== true;
+      if (dispatched.has(index) || intended.has(index)) {
+        await options.acceptReview?.(structuredClone(review), index);
+      }
+      results[index] = review;
       options.onReviewComplete?.(structuredClone(review));
       if (review.status === 'error' && options.verbose) console.error(`${review.model}/${review.role}: ${review.error}`);
       if (countsTowardQuorum) {
@@ -303,10 +306,12 @@ export async function runReviews(
       // Cancellation signals it, but the run still observes how it settles.
       if (options.beforeReview) {
         try {
-          if (await options.beforeReview(index, controller.signal) === false) {
+          const intent = await options.beforeReview(index, controller.signal);
+          if (intent === false) {
             await accept(index, canceledReview(call, 0, 'intent declined before provider dispatch'));
             return;
           }
+          intended.add(index);
         } catch (error) {
           if ((canceled || controller.signal.aborted || closed) && isAbortError(error)) {
             await accept(index, canceledReview(call, Date.now() - startedAt, 'while awaiting intent'));

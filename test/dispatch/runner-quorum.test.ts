@@ -413,6 +413,24 @@ describe('complete-seat and durable-acceptance boundary', () => {
     expect(reviews.map(review => review.status)).toEqual(['error', 'success', 'success']);
   });
 
+  it('isolates durable acceptance from quorum and returned review state', async () => {
+    const assignments = ['failed', 'success', 'remaining'].map(makeAssignment);
+    const c = controlled(assignments);
+    const running = runReviews(assignments, c.prompts, {
+      ...poolOptions,
+      adapterFactory: () => c.adapter,
+      acceptReview: async review => { if (review.model === 'failed') review.status = 'success'; },
+    });
+    c.pending[0]!.resolve(c.result(0, 'error'));
+    c.pending[1]!.resolve(c.result(1));
+    await drain();
+    const prematurelyAborted = c.signals[2]!.aborted;
+    c.pending[2]!.resolve(c.result(2));
+    const reviews = await running;
+    expect(prematurelyAborted).toBe(false);
+    expect(reviews.map(review => review.status)).toEqual(['error', 'success', 'success']);
+  });
+
   it('returns without waiting for a hanging core and fences its late success', async () => {
     const assignments = ['a', 'b', 'core'].map(makeAssignment);
     const c = controlled(assignments);
@@ -630,6 +648,23 @@ describe('retained original matrix and recovery dispatch boundaries', () => {
     c.pending[0]!.resolve(c.result(0)); c.pending[1]!.resolve(c.result(1));
     await rejected;
     expect(c.started).toEqual([0, 1]);
+  });
+
+  it('durably accepts cancellation when intent persisted before quorum closure', async () => {
+    const assignments = ['a', 'b', 'waiting-intent'].map(makeAssignment); const c = controlled(assignments);
+    const intent = deferred<void>();
+    const beforeReview = vi.fn((index: number): Promise<void> => index === 2 ? intent.promise : Promise.resolve());
+    const acceptReview = vi.fn(async () => {});
+    const running = runReviews(assignments, c.prompts, {
+      ...poolOptions, adapterFactory: () => c.adapter, beforeReview, acceptReview,
+    });
+    c.pending[0]!.resolve(c.result(0)); c.pending[1]!.resolve(c.result(1));
+    await drain();
+    intent.resolve();
+    const reviews = await running;
+    expect(c.started).toEqual([0, 1]);
+    expect(reviews[2]!.status).toBe('canceled');
+    expect(acceptReview.mock.calls.map(call => call[1])).toContain(2);
   });
 
   it('external cancellation aborts noncooperative calls even without quorum', async () => {
