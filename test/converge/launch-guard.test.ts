@@ -212,6 +212,28 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 3 });
   });
 
+  it('refuses an old-head retry after the review of a real fix is inconclusive', async () => {
+    const options = await fixture();
+    await guardReviewLaunch(options);
+    const report = await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [sampleFinding()], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    await recordVerdicts({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
+
+    const fixedHead = { ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64),
+      run: vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000002', successfulReviews: 1 }) };
+    await guardReviewLaunch(fixedHead);
+
+    await expect(guardReviewLaunch({ ...fixedHead,
+      headSha: options.headSha,
+      inputSha256: options.inputSha256,
+      retryReason: 'Inconclusive reviewer quorum; provider health checked.'
+    })).rejects.toThrow(/same.*head|fixed.*head/i);
+
+    expect(fixedHead.run).toHaveBeenCalledTimes(1);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
+  });
+
   it('does not let an infrastructure retry defer admitted in-scope blockers', async () => {
     const options = await fixture();
     options.run = vi.fn().mockResolvedValue({ ...completion, hardFailure: true });
