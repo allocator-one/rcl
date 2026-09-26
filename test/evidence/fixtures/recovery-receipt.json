@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "oracle": "58afdfe4bf1eeba3f5c34d87a4a30948802df629",
+  "oracle_source": "test/evidence/recovery-validation/fixtures.ts",
+  "oracle_source_sha256": "64e98226e6eeb5229d0a99ee651d6865933daa94555b50ed1dac4e7c4262deb1",
+  "scope": {
+    "base_url": "https://synthetic.example.test",
+    "org_id": "00000000-0000-7000-8000-000000000002",
+    "run_id": "00000000-0000-7000-8000-000000000001",
+    "repo": "synthetic/recovery",
+    "pr_number": 7
+  },
+  "event_json": "{\"id\":\"00000000-0000-7000-8000-000000000003\",\"kind\":\"finding_claim_split\",\"run_id\":\"00000000-0000-7000-8000-000000000001\",\"converge_target\":\"synthetic-retained-target\",\"round\":1,\"payload\":{\"version\":1,\"org_id\":\"00000000-0000-7000-8000-000000000002\",\"repo\":\"synthetic/recovery\",\"pr_number\":7,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"report_json_sha256\":\"eabc5dff3278f3b0c18d17867e1a64d554a2dedb30c27cca5c39b38f92eaca7e\",\"finding_ref\":\"f001\",\"identity_key\":\"report:00000000-0000-7000-8000-000000000001:original\",\"previous_identity\":\"b506889cacbc747a\",\"matched_identity\":\"2222222222222222\",\"classification\":\"new\",\"reason\":\"Independent retained claim.\",\"claim_descriptor\":{\"version\":1,\"operation\":\"cache.ts :: cache.read\",\"invariant\":\"The cache returns expired entries without checking their expiry timestamp.\",\"evidence\":[\"Check the expiry timestamp before returning a cached result.\"]},\"native_evidence\":{\"source\":\"rcl_converge_state\",\"state_version\":1,\"state_sha256\":\"50dfe4a4739c238db79500a7ea6c4aa0fd8800cad608293b4e448087be7d3a43\"},\"source_event_ids\":[\"00000000-0000-7000-8000-000000000004\"],\"expected_event_sequence\":7},\"occurred_at\":\"2026-09-22T12:00:00.123456Z\"}",
+  "receipt": {
+    "base_url": "https://synthetic.example.test",
+    "org_id": "00000000-0000-7000-8000-000000000002",
+    "run_id": "00000000-0000-7000-8000-000000000001",
+    "repo": "synthetic/recovery",
+    "pr_number": 7,
+    "id": "00000000-0000-7000-8000-000000000003",
+    "kind": "finding_claim_split",
+    "converge_target": "synthetic-retained-target",
+    "round": 1,
+    "payload": {
+      "version": 1,
+      "org_id": "00000000-0000-7000-8000-000000000002",
+      "repo": "synthetic/recovery",
+      "pr_number": 7,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "report_json_sha256": "eabc5dff3278f3b0c18d17867e1a64d554a2dedb30c27cca5c39b38f92eaca7e",
+      "finding_ref": "f001",
+      "identity_key": "report:00000000-0000-7000-8000-000000000001:original",
+      "previous_identity": "b506889cacbc747a",
+      "matched_identity": "2222222222222222",
+      "classification": "new",
+      "reason": "Independent retained claim.",
+      "claim_descriptor": {
+        "version": 1,
+        "operation": "cache.ts :: cache.read",
+        "invariant": "The cache returns expired entries without checking their expiry timestamp.",
+        "evidence": [
+          "Check the expiry timestamp before returning a cached result."
+        ]
+      },
+      "native_evidence": {
+        "source": "rcl_converge_state",
+        "state_version": 1,
+        "state_sha256": "50dfe4a4739c238db79500a7ea6c4aa0fd8800cad608293b4e448087be7d3a43"
+      },
+      "source_event_ids": [
+        "00000000-0000-7000-8000-000000000004"
+      ],
+      "expected_event_sequence": 7
+    },
+    "occurred_at": "2026-09-22T12:00:00.123456Z",
+    "actor_user_id": "00000000-0000-7000-8000-000000000007",
+    "attempt": null
+  },
+  "actor_user_id": "00000000-0000-7000-8000-000000000007"
+}

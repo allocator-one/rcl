@@ -64,6 +64,35 @@ describe('recoverAttestedDelivery', () => {
     expect(receipt).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['expired', 40, 500],
+    ['deadline_exceeded', 500, 40],
+  ] as const)('reports %s when its in-flight timer fires after the wall clock moves backward', async (expected, expiresInMs, deadlineMs) => {
+    vi.useFakeTimers();
+    let epoch = NOW;
+    let elapsed = 0;
+    const post = vi.fn(async (_payload: string, signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    const receipt = vi.fn(async () => ({ kind: 'absent' as const }));
+
+    try {
+      const pending = recoverAttestedDelivery({
+        runId: 'run-1', payload: 'immutable', expiresAt: new Date(NOW + expiresInMs).toISOString(),
+        now: () => epoch, monotonicNow: () => elapsed, deadlineMs, post, receipt,
+      });
+      epoch -= 1_000;
+      elapsed = Math.min(expiresInMs, deadlineMs);
+      await vi.advanceTimersByTimeAsync(elapsed);
+
+      expect(await pending).toEqual({ kind: expected, attempts: 1, recovered: false });
+      expect(post).toHaveBeenCalledExactlyOnceWith('immutable', expect.any(AbortSignal));
+      expect(receipt).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not expire the elapsed deadline when the credential clock moves forward within its validity', async () => {
     let epoch = NOW;
     let elapsed = 0;

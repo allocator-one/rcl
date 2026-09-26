@@ -113,7 +113,8 @@ export async function recoverAttestedDelivery<TRecorded = undefined, TDisabled =
   };
 
   const failed = (error: unknown): TerminalRecoveryOutcome =>
-    error instanceof ActiveOperationBoundaryError && error.kind === 'deadline_exceeded' && now() >= expiresAt
+    error instanceof ActiveOperationBoundaryError && error.kind === 'deadline_exceeded' &&
+      (now() >= expiresAt || monotonicNow() - startedAt >= expiresInMs)
       ? terminalOutcome('expired', attempts)
       : failedOperation(error, attempts);
 

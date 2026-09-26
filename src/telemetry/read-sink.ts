@@ -1,5 +1,6 @@
 import { credentialHost, resolveHarnessCredential, type CredentialResolution, type HarnessCredential } from './credentials.js';
 import { HarnessSink } from './sink.js';
+import type { RecoveryRequestBudget } from './recovery-request-budget.js';
 
 /**
  * A sink for reads (evidence status, model stats): the same credential rules
@@ -9,6 +10,7 @@ import { HarnessSink } from './sink.js';
  */
 
 export interface ReadSinkOptions {
+  requestBudget?: RecoveryRequestBudget;
   rclVersion: string;
   env?: Record<string, string | undefined>;
   cwd?: string;
@@ -37,6 +39,7 @@ export async function openReadSink(options: ReadSinkOptions): Promise<ReadSink> 
       credential: resolved.credential,
       rclVersion: options.rclVersion,
       ...(options.attestedExpiresAt !== undefined ? { attestedExpiresAt: options.attestedExpiresAt } : {}),
+      ...(options.requestBudget ? { requestBudget: options.requestBudget } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     }),
     host: credentialHost(resolved.credential),

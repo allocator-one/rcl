@@ -1,3 +1,4 @@
+import type { ClaimDescriptor, MatchRationale } from '../consensus/claim-identity.js';
 import { uuidv7 } from '../report/uuid.js';
 import { validateReportIdentityMappings, type ReportIdentityMapping } from '../converge/run-state.js';
 import { scrubDeep, scrubIdentifier } from './scrub.js';
@@ -17,6 +18,9 @@ export type ConvergeEventKind =
   | 'round_processed'
   | 'verdicts_recorded'
   | 'finding_identity_corrected'
+  | 'finding_claim_split'
+  | 'finding_obligation_transferred'
+  | 'finding_claim_disposition'
   | 'resolution'
   | 'loss';
 
@@ -25,6 +29,9 @@ export const RUN_BOUND_KINDS: ReadonlySet<ConvergeEventKind> = new Set([
   'round_processed',
   'verdicts_recorded',
   'finding_identity_corrected',
+  'finding_claim_split',
+  'finding_obligation_transferred',
+  'finding_claim_disposition',
   'resolution',
 ]);
 
@@ -57,6 +64,13 @@ export interface RoundIdentity {
   matched_identity: string;
   status: 'new' | 'repeat' | 'suppressed' | 'regating';
   suppress_reason?: string;
+  version?: 1;
+  finding_ref?: string;
+  report_json_sha256?: string;
+  claim_descriptor?: ClaimDescriptor;
+  match_rationale?: MatchRationale;
+  /** Pending obligation as captured when this immutable sighting was classified. */
+  pending_round?: number | null;
 }
 
 /**

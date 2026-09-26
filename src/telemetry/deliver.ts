@@ -404,7 +404,6 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   const preparedPost = runtime.sink.preparePostRun(envelope, serializedEnvelope);
   let posted = preparedPost.kind === 'ready' ? await preparedPost.post() : preparedPost;
   if (posted.kind === 'unavailable' && runtime.attested && runtime.attestedExpiresAt !== undefined) {
-    const sink = runtime.sink;
     deliveryDiagnostics.push({ path: 'delivery.initial_transport', message: posted.reason });
     // Recovery stops on refusal; keep organization disablement distinct in the delivery result.
     if (parseAttestedExpiry(runtime.attestedExpiresAt) === undefined) {

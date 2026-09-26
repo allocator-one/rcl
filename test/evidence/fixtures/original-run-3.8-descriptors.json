@@ -1,0 +1,291 @@
+{
+  "provenance": {
+    "version": "3.8.0",
+    "source_module_sha256": "45ad254ae41e0d56104a4522fd5a37a219199e0dab99da1dbc4a673ffac035ce",
+    "qualification": "Synthetic published preview. Only manifest source path strings are templated for new private test directories; original artifact strings and prepared envelope/digest are unchanged."
+  },
+  "artifacts": {
+    "report_json": "{\n  \"run\": {\n    \"id\": \"019921a0-0000-7000-8000-000000000001\",\n    \"rcl_version\": \"3.8.0\",\n    \"command\": \"review\",\n    \"target\": {\n      \"kind\": \"pr\",\n      \"repo\": \"allocator-one/rcl\",\n      \"pr_number\": 42,\n      \"url\": \"https://github.com/allocator-one/rcl/pull/42\",\n      \"head_sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n      \"base_sha\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\n      \"head_ref\": \"feature\",\n      \"base_ref\": \"main\",\n      \"diff_sha256\": \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\n      \"files\": 3,\n      \"additions\": 40,\n      \"deletions\": 5\n    },\n    \"roster\": [\n      {\n        \"model\": \"anthropic/claude\",\n        \"role\": \"bug-hunter\",\n        \"provider\": \"anthropic\",\n        \"lane\": \"blocking\"\n      },\n      {\n        \"model\": \"openai/gpt\",\n        \"role\": \"security-auditor\",\n        \"provider\": \"openai\",\n        \"lane\": \"secondary\"\n      }\n    ],\n    \"config_sha256\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"thresholds\": {\n      \"min_consensus_score\": 0.5,\n      \"min_confidence\": 0.4,\n      \"dedupe_line_window\": 10,\n      \"jaccard_threshold\": 0.3\n    },\n    \"gating\": {\n      \"mode\": \"verified-consensus\",\n      \"min_models\": 2,\n      \"verification_timeout_ms\": 60000\n    },\n    \"context_files\": [],\n    \"runner\": {\n      \"kind\": \"agent\",\n      \"agent\": \"claude-code\",\n      \"host\": \"mbp\"\n    },\n    \"started_at\": \"2026-09-07T08:44:38.000Z\",\n    \"finished_at\": \"2026-09-07T08:55:51.000Z\",\n    \"duration_ms\": 673000,\n    \"ci_exit_code\": 1\n  },\n  \"reviews\": [\n    {\n      \"model\": \"anthropic/claude\",\n      \"role\": \"bug-hunter\",\n      \"provider\": \"anthropic\",\n      \"findings\": [],\n      \"durationMs\": 12345.6,\n      \"usage\": {\n        \"inputTokens\": 27514,\n        \"outputTokens\": 900,\n        \"reasoningTokens\": 300\n      },\n      \"status\": \"success\"\n    }\n  ],\n  \"findings\": [\n    {\n      \"id\": \"F1\",\n      \"file\": \"lib/foo.ex\",\n      \"startLine\": 20,\n      \"endLine\": 10,\n      \"severity\": \"important\",\n      \"category\": \"correctness\",\n      \"title\": \"Pagination misses tiebreak\",\n      \"description\": \"Original \\ud800 text; pair 😀 and literal \\\\uD800 stay.\",\n      \"suggestedFix\": \"Add id as a tiebreak.\",\n      \"identity\": \"abc123def4567890\",\n      \"consensus\": {\n        \"score\": 0.66,\n        \"total\": 3,\n        \"models\": [\n          \"anthropic/claude\",\n          \"openai/gpt\"\n        ],\n        \"roles\": [\n          \"bug-hunter\"\n        ],\n        \"crossRole\": false,\n        \"crossModel\": true,\n        \"elevated\": false,\n        \"elevation\": \"none\",\n        \"confidence\": 0.8,\n        \"confidenceLabel\": \"High\",\n        \"tier\": \"majority\"\n      },\n      \"gating\": {\n        \"reason\": \"consensus\"\n      },\n      \"claimDescriptor\": {\n        \"version\": 1,\n        \"operation\": \"Update widget\",\n        \"invariant\": \"Keep the independent claim\",\n        \"evidence\": [\n          \"widget.render\",\n          \"visible state\"\n        ]\n      }\n    }\n  ],\n  \"belowThresholdFindings\": [\n    {\n      \"id\": \"F2\",\n      \"file\": \"lib/foo.ex\",\n      \"startLine\": 10,\n      \"endLine\": 12,\n      \"severity\": \"minor\",\n      \"category\": \"correctness\",\n      \"title\": \"Naming\",\n      \"description\": \"Ordering by inserted_at alone is unstable.\",\n      \"suggestedFix\": \"Add id as a tiebreak.\",\n      \"identity\": \"fedcba9876543210\",\n      \"consensus\": {\n        \"score\": 0.66,\n        \"total\": 3,\n        \"models\": [\n          \"anthropic/claude\",\n          \"openai/gpt\"\n        ],\n        \"roles\": [\n          \"bug-hunter\"\n        ],\n        \"crossRole\": false,\n        \"crossModel\": true,\n        \"elevated\": false,\n        \"elevation\": \"none\",\n        \"confidence\": 0.8,\n        \"confidenceLabel\": \"High\",\n        \"tier\": \"majority\"\n      },\n      \"gating\": {\n        \"reason\": \"none\"\n      },\n      \"claimDescriptor\": {\n        \"version\": 1,\n        \"operation\": \"Name widget\",\n        \"invariant\": \"Keep the annotation claim\",\n        \"evidence\": [\n          \"widget.name\"\n        ]\n      }\n    }\n  ],\n  \"stats\": {\n    \"totalReviews\": 2,\n    \"successfulReviews\": 1,\n    \"totalRawFindings\": 3,\n    \"totalDeduped\": 2,\n    \"belowThreshold\": 1,\n    \"durationMs\": 673000\n  }\n}",
+    "report_md": "Synthetic original Markdown with unchanged bytes.\n"
+  },
+  "manifest": {
+    "kind": "rcl-original-run-recovery",
+    "version": 1,
+    "operation_id": "8455cf77-6b04-47c7-983e-a6f4acf3090a",
+    "created_at": "2026-09-22T17:59:06.305Z",
+    "rcl_version": "3.8.0",
+    "destination": {
+      "base_url": "http://127.0.0.1:43210",
+      "org_id": "919921a0-0000-4000-8000-000000000001"
+    },
+    "prepared": {
+      "selection": {
+        "run": "019921a0-0000-7000-8000-000000000001",
+        "forPr": "allocator-one/rcl#42",
+        "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reportJson": "<REPORT_JSON>",
+        "reportSha256": "c3edeb01985fbc74cd9c4830c46228edd3ca2c519b4384436b9c8d8e431a7022",
+        "reportMd": "<REPORT_MD>",
+        "markdownSha256": "1493150c0ab5aae19e242e47126d82b8b57c4c11b3aac0921325d0455aabc429",
+        "originalMode": "asserted"
+      },
+      "sources": {
+        "report_json": {
+          "path": "<REPORT_JSON>",
+          "sha256": "c3edeb01985fbc74cd9c4830c46228edd3ca2c519b4384436b9c8d8e431a7022",
+          "bytes": 4169
+        },
+        "report_md": {
+          "path": "<REPORT_MD>",
+          "sha256": "1493150c0ab5aae19e242e47126d82b8b57c4c11b3aac0921325d0455aabc429",
+          "bytes": 50
+        }
+      },
+      "envelope": {
+        "run": {
+          "id": "019921a0-0000-7000-8000-000000000001",
+          "rcl_version": "3.8.0",
+          "command": "review",
+          "target": {
+            "kind": "pr",
+            "repo": "allocator-one/rcl",
+            "pr_number": 42,
+            "url": "https://github.com/allocator-one/rcl/pull/42",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "head_ref": "feature",
+            "base_ref": "main",
+            "diff_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "files": 3,
+            "additions": 40,
+            "deletions": 5
+          },
+          "roster": [
+            {
+              "model": "anthropic/claude",
+              "role": "bug-hunter",
+              "provider": "anthropic",
+              "lane": "blocking"
+            },
+            {
+              "model": "openai/gpt",
+              "role": "security-auditor",
+              "provider": "openai",
+              "lane": "secondary"
+            }
+          ],
+          "config_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "thresholds": {
+            "min_consensus_score": 0.5,
+            "min_confidence": 0.4,
+            "dedupe_line_window": 10,
+            "jaccard_threshold": 0.3
+          },
+          "gating": {
+            "mode": "verified-consensus",
+            "min_models": 2,
+            "verification_timeout_ms": 60000
+          },
+          "context_files": [],
+          "runner": {
+            "kind": "agent",
+            "agent": "claude-code",
+            "host": "mbp"
+          },
+          "started_at": "2026-09-07T08:44:38.000Z",
+          "finished_at": "2026-09-07T08:55:51.000Z",
+          "duration_ms": 673000,
+          "ci_exit_code": 1
+        },
+        "findings": [
+          {
+            "ref": "f001",
+            "identity_key": "abc123def4567890",
+            "file": "lib/foo.ex",
+            "start_line": 10,
+            "end_line": 20,
+            "location_provenance": {
+              "version": 1,
+              "source": "report_projection",
+              "reason": "reversed_range",
+              "original_start_line": 20,
+              "original_end_line": 10,
+              "report_json_sha256": "c3edeb01985fbc74cd9c4830c46228edd3ca2c519b4384436b9c8d8e431a7022"
+            },
+            "severity": "important",
+            "category": "correctness",
+            "title": "Pagination misses tiebreak",
+            "description": "Original \\uD800 text; pair 😀 and literal \\uD800 stay.",
+            "suggested_fix": "Add id as a tiebreak.",
+            "consensus": {
+              "score": 0.66,
+              "total": 3,
+              "models": [
+                "anthropic/claude",
+                "openai/gpt"
+              ],
+              "roles": [
+                "bug-hunter"
+              ],
+              "crossRole": false,
+              "crossModel": true,
+              "elevated": false,
+              "elevation": "none",
+              "confidence": 0.8,
+              "confidenceLabel": "High",
+              "tier": "majority"
+            },
+            "gating_reason": "consensus",
+            "below_threshold": false,
+            "claim_descriptor": {
+              "version": 1,
+              "operation": "Update widget",
+              "invariant": "Keep the independent claim",
+              "evidence": [
+                "widget.render",
+                "visible state"
+              ]
+            }
+          },
+          {
+            "ref": "f002",
+            "identity_key": "fedcba9876543210",
+            "file": "lib/foo.ex",
+            "start_line": 10,
+            "end_line": 12,
+            "severity": "minor",
+            "category": "correctness",
+            "title": "Naming",
+            "description": "Ordering by inserted_at alone is unstable.",
+            "suggested_fix": "Add id as a tiebreak.",
+            "consensus": {
+              "score": 0.66,
+              "total": 3,
+              "models": [
+                "anthropic/claude",
+                "openai/gpt"
+              ],
+              "roles": [
+                "bug-hunter"
+              ],
+              "crossRole": false,
+              "crossModel": true,
+              "elevated": false,
+              "elevation": "none",
+              "confidence": 0.8,
+              "confidenceLabel": "High",
+              "tier": "majority"
+            },
+            "gating_reason": "none",
+            "below_threshold": true,
+            "claim_descriptor": {
+              "version": 1,
+              "operation": "Name widget",
+              "invariant": "Keep the annotation claim",
+              "evidence": [
+                "widget.name"
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "model": "anthropic/claude",
+            "role": "bug-hunter",
+            "provider": "anthropic",
+            "lane": "blocking",
+            "chunk_index": 0,
+            "status": "success",
+            "duration_ms": 12346,
+            "input_tokens": 27514,
+            "output_tokens": 900,
+            "reasoning_tokens": 300,
+            "dropped_findings": 0,
+            "warnings": [],
+            "async": false
+          }
+        ],
+        "stats": {
+          "totalReviews": 2,
+          "successfulReviews": 1,
+          "totalRawFindings": 3,
+          "totalDeduped": 2,
+          "belowThreshold": 1,
+          "durationMs": 673000
+        },
+        "artifacts_declared": [
+          {
+            "kind": "report_json",
+            "sha256": "c3edeb01985fbc74cd9c4830c46228edd3ca2c519b4384436b9c8d8e431a7022",
+            "bytes": 4169
+          },
+          {
+            "kind": "report_md",
+            "sha256": "1493150c0ab5aae19e242e47126d82b8b57c4c11b3aac0921325d0455aabc429",
+            "bytes": 50
+          }
+        ],
+        "delivery": {
+          "mode": "direct"
+        }
+      },
+      "envelope_sha256": "72543a12e1d1ef192623791175e72970f8bdbd0c53744b2cae99368e3c75b5d2",
+      "transformations": [
+        {
+          "path": "/findings/0/description",
+          "code_unit_offset": 9,
+          "source_byte_offset": 2118,
+          "original_unit": "D800",
+          "replacement": "\\uD800"
+        }
+      ],
+      "transport_derivations": [
+        {
+          "path": "/findings/0/location",
+          "rule": "existing_reversed_range_provenance",
+          "original_sha256": "919facc26debd027f69618670c6d0827a8b55177a139714472145639eb59e8de",
+          "transport_sha256": "5cff5b191634ccbc47fcefe3a3c14d7ce0c5b6d56aef30a21ddef8ab933bc153"
+        },
+        {
+          "path": "/findings/0/verification",
+          "rule": "existing_normalizeVerificationEvidence",
+          "original_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "transport_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        },
+        {
+          "path": "/belowThresholdFindings/0/verification",
+          "rule": "existing_normalizeVerificationEvidence",
+          "original_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+          "transport_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        },
+        {
+          "path": "/calls/0",
+          "rule": "existing_buildRunEnvelope_call_projection_rounding_and_error_summary",
+          "original_sha256": "8e1f3742da2d58ba63311d9bfbda9716c33662282e25cae831f4f099adec131f",
+          "transport_sha256": "939841f95b41e9fdf80cb3795818994f4b5665f3f877c0c4bcec024af5d0980a"
+        }
+      ],
+      "original_mode": {
+        "value": "asserted",
+        "authority": "operator_assertion",
+        "retained_runner": {
+          "kind": "agent",
+          "agent": "claude-code",
+          "host": "mbp"
+        }
+      },
+      "retained_content_limitations": {
+        "report_sha256": "c3edeb01985fbc74cd9c4830c46228edd3ca2c519b4384436b9c8d8e431a7022",
+        "redacted_prose": [],
+        "meaning": "Pre-existing literal markers are retained content, not reconstructed text or proof of an unredacted original."
+      }
+    },
+    "preview": {
+      "run_exists": false,
+      "artifacts": {
+        "report_json": "missing",
+        "report_md": "missing"
+      }
+    }
+  }
+}

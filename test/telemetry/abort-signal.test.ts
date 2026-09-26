@@ -63,6 +63,21 @@ describe('abortSignalWithTimeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('honors a deadline beyond the native timer range without aborting early', () => {
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] });
+    const nativeMaximum = 2 ** 31 - 1;
+    const lease = abortSignalWithTimeout(undefined, nativeMaximum + 1_000);
+
+    vi.advanceTimersByTime(nativeMaximum);
+    expect(lease.signal.aborted).toBe(false);
+    vi.advanceTimersByTime(999);
+    expect(lease.signal.aborted).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(lease.signal.aborted).toBe(true);
+    expect(lease.signal.reason).toMatchObject({ name: 'TimeoutError' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('stays active after disposal even when its former timeout and parent fire', () => {
     vi.useFakeTimers();
     const parent = new AbortController();
