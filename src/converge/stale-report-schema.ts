@@ -24,26 +24,49 @@ export type StaleReportManifest = z.infer<typeof staleManifestSchema>;
 export const staleEntrySchema = z.object({manifestJson:z.string().max(16384),manifestSha256:digest}).strict();
 export type StaleReportEntry = z.infer<typeof staleEntrySchema>;
 
+export class StaleReportAuditError extends Error {
+  constructor(message = 'invalid_stale_report_audit', options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'StaleReportAuditError';
+  }
+}
+
 export function staleManifest(entry: StaleReportEntry): StaleReportManifest {
-  if (!staleEntrySchema.safeParse(entry).success || sha256(entry.manifestJson) !== entry.manifestSha256) throw new Error('invalid_stale_report_audit');
-  return staleManifestSchema.parse(decodeOriginalReport(entry.manifestJson).value);
+  try {
+    if (!staleEntrySchema.safeParse(entry).success || sha256(entry.manifestJson) !== entry.manifestSha256) throw new StaleReportAuditError();
+    return staleManifestSchema.parse(decodeOriginalReport(entry.manifestJson).value);
+  } catch (cause) { throw new StaleReportAuditError(undefined,{cause}); }
 }
 
 export function validateStaleReportAudit(state: ConvergeRunState): void {
   if (state.staleReportAudit === undefined) return;
-  const entries = z.array(staleEntrySchema).min(1).max(10000).parse(state.staleReportAudit);
+  if (!Array.isArray(state.staleReportAudit) || state.staleReportAudit.length === 0 || state.staleReportAudit.length > 10000) {
+    throw new StaleReportAuditError();
+  }
+  const parsed = z.array(staleEntrySchema).min(1).max(10000).safeParse(state.staleReportAudit);
+  if (!parsed.success) throw new StaleReportAuditError();
+  const entries = parsed.data;
   const operations = new Set<string>();
-  const originals = new Map<number, Pick<StaleReportManifest, 'runId' | 'round' | 'previousHeadSha' | 'previousInputSha256'>>();
+  const replacements = new Set<string>();
+  const originals = new Map<number, StaleReportManifest>();
+  const runs = new Map<string,number>();
+  let lastAttempt = 0;
   for (const entry of entries) {
     const m = staleManifest(entry);
     const original = originals.get(m.attempt);
+    const replacement = `${m.attempt}:${m.headSha}:${m.inputSha256}`;
     if (m.target !== state.target || m.inputSha256 === m.previousInputSha256 || operations.has(m.operationId) ||
+      replacements.has(replacement) || m.attempt < lastAttempt ||
+      (runs.has(m.runId) && runs.get(m.runId) !== m.attempt) ||
       state.rounds.some(r => r.runId === m.runId) ||
       (original !== undefined && (original.runId !== m.runId || original.round !== m.round ||
+        original.reportSha256 !== m.reportSha256 || original.attemptSha256 !== m.attemptSha256 ||
+        original.gitCommonDir !== m.gitCommonDir ||
         original.previousHeadSha !== m.previousHeadSha || original.previousInputSha256 !== m.previousInputSha256))) {
-      throw new Error('invalid_stale_report_audit');
+      throw new StaleReportAuditError();
     }
     operations.add(m.operationId);
-    originals.set(m.attempt, {runId:m.runId,round:m.round,previousHeadSha:m.previousHeadSha,previousInputSha256:m.previousInputSha256});
+    replacements.add(replacement);
+    originals.set(m.attempt,m); runs.set(m.runId,m.attempt); lastAttempt = m.attempt;
   }
 }

@@ -10,8 +10,8 @@ import {
   writeState, ConvergeRoundCapError, type ConvergeRunState,
 } from './run-state.js';
 import type { ConvergeContext } from '../report/run-header.js';
-import { staleManifest } from './stale-report-schema.js';
-import { verifyStaleReportReceipt } from './stale-report.js';
+import { staleManifest, StaleReportAuditError } from './stale-report-schema.js';
+import { verifyStaleReportReceipts } from './stale-report.js';
 import { scrubText } from '../telemetry/scrub.js';
 
 const completionSchema = z.object({
@@ -123,7 +123,12 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   const healthy = hasHealthyGuardedLaunch(previous);
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
-    const entry = [...(state.staleReportAudit ?? [])].reverse().find(e => staleManifest(e).attempt === previous.attempt);
+    const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
+    const entry = candidates.find(e => {
+      const m = staleManifest(e);
+      return m.headSha === options.headSha && m.inputSha256 === options.inputSha256;
+    });
+    if (candidates.length > 0 && !entry) refuse('stale_report_input_mismatch', `Inspect these replacement inputs, then preview rcl converge-stale with --head ${options.headSha} --input-sha256 ${options.inputSha256}.`);
     if (!entry) refuse('report_not_admitted', `Process the existing report for run ${previous.runId}. If materially stale, preview rcl converge-stale with current --head ${options.headSha} --input-sha256 ${options.inputSha256}; never admit stale findings.`);
     const disposition = staleManifest(entry);
     if (disposition.runId !== previous.runId || disposition.reportSha256 !== previous.reportJsonSha256 ||
@@ -132,7 +137,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (disposition.headSha !== options.headSha || disposition.inputSha256 !== options.inputSha256) {
       refuse('stale_report_input_mismatch', 'The stale disposition is bound to different current review inputs.');
     }
-    await verifyStaleReportReceipt(options.gitCommonDir,entry);
+
   }
   if (healthy && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
     refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
@@ -164,7 +169,14 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Co
     maxAttempts: options.maxAttempts,
     targetLockTimeoutMs: 5_000,
     beforeClaim: async () => {
-      state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
+      try {
+        state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
+        await verifyStaleReportReceipts(options.gitCommonDir,state.staleReportAudit ?? []);
+      }
+      catch (error) {
+        if (!(error instanceof StaleReportAuditError)) throw error;
+        refuse('stale_report_audit_invalid','Retained stale-report evidence is missing or inconsistent; no attempt was claimed.');
+      }
       if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
       const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
       const round = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);

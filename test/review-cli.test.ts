@@ -332,6 +332,15 @@ describe('rcl review — guarded native launch', () => {
         const result = await runRclAsync(['converge-stale',`--${mode}`,'--manifest',manifest,'--manifest-sha256',digest],fixture.repo,fixture.env);
         expect(result.status,result.stderr).toBe(0);
       }
+      // A later mistaken selection must not strand the earlier correct input.
+      const mistaken = join(fixture.repo,'mistaken.json');
+      const extra = await runRclAsync(['converge-stale','--preview','--manifest',mistaken,'--target','guarded-fixture',
+        '--head',head,'--input-sha256',sha256Hex('mistyped replacement input'),'--report',reportPath,
+        '--report-sha256',sha256Hex(bytes),'--reason','Mistyped replacement input'],fixture.repo,fixture.env);
+      expect(extra.status,extra.stderr).toBe(0);
+      const applied = await runRclAsync(['converge-stale','--apply','--manifest',mistaken,
+        '--manifest-sha256',sha256Hex(readFileSync(mistaken))],fixture.repo,fixture.env);
+      expect(applied.status,applied.stderr).toBe(0);
       expect(fixture.calls()).toBe(calls);
       expect(await loadConvergeAttemptState(join(fixture.repo,'.git'),'guarded-fixture')).toMatchObject({attemptsUsed:1});
       const continued = await runRclAsync(next,fixture.repo,fixture.env);

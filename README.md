@@ -313,20 +313,24 @@ rcl converge-stale --apply --manifest stale.json --manifest-sha256 <reviewed-man
 rcl converge-stale --resume --manifest stale.json --manifest-sha256 <reviewed-manifest-sha256>
 ```
 
-Preview writes only its exclusive manifest. Apply retains the original report and native
-snapshots, then atomically adds a digest-bound audit entry under native target ownership.
+Preview writes only its exclusive manifest. Apply retains the original report and exact
+native snapshots, then atomically adds a digest-bound audit entry under native target ownership.
+Immutable shared objects and reconstructible snapshot templates avoid copying the full
+report and growing history for every correction.
 It does not admit findings, claim attempts, flush evidence, raise caps, or approve a PR.
 Resume is idempotent. Continue with the original `review --guarded-converge` invocation;
-it recomputes the real head/input digest and checks the retained receipt before claiming
+it recomputes the real head/input digest and checks every retained receipt before claiming
 one normal attempt at the next native ordinal. The stale attempt stays spent.
 
 Unchanged inputs require normal admission. Upstream tip movement alone is insufficient.
 Unknown outcomes, unhealthy reports, pending delivery, missing original evidence, changed
 state and unresolved earlier findings refuse safely. A disposition is bound to one exact
 replacement input. If inputs change again before continuation, inspect the new inputs and
-create a new preview and apply operation; it appends an audited supersession for the same
-preserved report. Reusing the same replacement input, forging a manifest or editing native
-state remains refused. Native convergence, enforced review and CI remain required.
+create a new preview and apply operation; it appends another inspected replacement for the
+same preserved report. Every earlier inspected replacement remains usable: returning to
+one needs only the guarded review command, not another disposition. Preview refuses a
+duplicate replacement plan. Missing or changed retained evidence, forged manifests and
+edited native history are refused before an attempt is claimed. Native convergence, enforced review and CI remain required.
 
 ### `rcl converge-gap`
 

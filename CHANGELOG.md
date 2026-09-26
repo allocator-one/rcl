@@ -4,12 +4,14 @@
 
 ## 4.1.6 - 2026-09-26
 
-- Preserve every stale-report disposition while allowing an inspected, newly
-  bound supersession when replacement inputs change before the guarded launch.
-  This repairs a mistyped or subsequently changed input without admitting the
-  original report, spending another attempt, or resetting native accounting
-  (RCL-106).
-- Avoid syncing a read-only retained-evidence file handle on Windows (RCL-106).
+- Add supported preview/apply/resume recovery for a healthy report that became
+  stale before admission. Preserve reports, findings and spending while allowing
+  the next guarded review (RCL-106).
+- Retain every inspected replacement input, verify the complete audit history,
+  and share immutable evidence between corrections. Returning to an earlier
+  replacement no longer requires another disposition (RCL-106).
+- Report invalid audit evidence and missing resume operations explicitly; avoid
+  syncing a read-only retained-evidence file handle on Windows (RCL-106).
 
 ## 4.1.5 - 2026-09-26
 

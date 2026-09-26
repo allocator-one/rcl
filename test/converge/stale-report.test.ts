@@ -89,7 +89,7 @@ it('refuses a deleted receipt rather than treating an audit entry as permission'
   const f = await fixture(), m = await f.prepare(); await f.apply();
   await rm(join(f.dir,'rcl-stale-report-audits',m.operationId,'complete.json'));
   const before = await f.bytes();
-  await expect(guardReviewLaunch({...f.options,...f.selection})).rejects.toThrow();
+  await expect(guardReviewLaunch({...f.options,...f.selection})).rejects.toMatchObject({code:'stale_report_audit_invalid'});
   expect(await f.bytes()).toEqual(before);
   expect(f.options.run).toHaveBeenCalledTimes(1);
 });
