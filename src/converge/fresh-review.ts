@@ -218,7 +218,10 @@ export async function prepareFreshReview(options: FreshReviewOptions): Promise<F
   }
   if (!operation.receipt) throw new Error('fresh_review_receipt_missing');
   const active = await options.remote.current();
-  if (!active || !isDeepStrictEqual(reviewCycleReceiptSchema.parse(active), operation.receipt)) throw new Error('fresh_review_superseded');
+  if (!active) throw new Error('fresh_review_superseded');
+  const activeReceipt = reviewCycleReceiptSchema.parse(active);
+  const superseded = activeReceipt.id !== operation.receipt.id;
+  if (!superseded && !isDeepStrictEqual(activeReceipt, operation.receipt)) throw new Error('fresh_review_receipt_mismatch');
   const cycle: NativeReviewCycle = { id: operation.receipt.id, operationId: operation.operationId,
     previousCycleId: operation.previousCycleId, repo: operation.repo, prNumber: operation.prNumber, url: operation.url,
     archivePath: join(directory, `${operation.operationId}.archive.json`), archiveSha256: operation.archiveSha256,
@@ -234,6 +237,13 @@ export async function prepareFreshReview(options: FreshReviewOptions): Promise<F
     await replaceJson(join(directory, `${operation.operationId}.json`), operation);
   }
   await assertReviewCyclePair(common, options.target, cycle);
+  if (superseded) {
+    // Preserve this operation's history and claims, but do not leave its local
+    // transition permanently pending. This call spends nothing and never retires
+    // the remote winner; another deliberate request may start from that winner.
+    await finishFreshReview(common, options.target, operation.operationId, options.ownership);
+    throw new Error('fresh_review_superseded: this operation ended without new reviewer work; a later explicit --start-over can request a new cycle');
+  }
   return { cycle, operationId: operation.operationId };
 }
 

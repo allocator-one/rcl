@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.1.11 - 2026-09-26
+
+- Add `rcl review owner/repo#123 --start-over` for an explicitly requested fresh
+  review with a new normal budget. Preserve prior spending, original state and
+  reports; ordinary continuation keeps its current budget (RCL-115).
+- Bind native reports, verdicts and asynchronous results to their review cycle.
+  Resume interrupted starts through the same durable operation, and prevent old
+  approvals or late evidence from entering a fresh cycle (RCL-115).
+
 ## 4.1.10 - 2026-09-26
 
 - Reconcile a successfully delivered, authenticated guarded run with its exact native launch record after `telemetry flush --run`, clearing only the pending-delivery marker. Attempt, round, report identity and failure accounting remain unchanged; mismatched evidence remains refused (RCL-130).

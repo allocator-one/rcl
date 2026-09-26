@@ -287,18 +287,28 @@ it('retains a claim interrupted before pending-launch publication and resumes wi
   expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ attemptsUsed: 2 });
 });
 
-it('does not retire a remote winner when an interrupted operation is superseded', async () => {
+it('stops a superseded interrupted operation and allows a later explicit fresh request', async () => {
   const options = await freshFixture();
-  const start = options.cycleRemote.start.getMockImplementation()!;
+  let active: import('../../src/converge/review-cycle.js').ReviewCycleReceipt | null = null;
+  options.cycleRemote.current.mockImplementation(async () => active);
+  options.cycleRemote.start.mockImplementation(async request => {
+    active = { ...request, id: randomUUID(), inserted_at: new Date().toISOString() }; return active;
+  });
   options.cycleRemote.start.mockImplementationOnce(async request => {
-    const original = await start(request);
-    options.cycleRemote.current.mockResolvedValue({ ...original, id: randomUUID(), operation_id: randomUUID(), previous_cycle_id: original.id });
+    const original = { ...request, id: randomUUID(), inserted_at: new Date().toISOString() };
+    active = { ...original, id: randomUUID(), operation_id: randomUUID(), previous_cycle_id: original.id };
     return original;
   });
   await expect(guardReviewLaunch(options)).rejects.toThrow('fresh_review_superseded');
-  await expect(guardReviewLaunch(options)).rejects.toThrow('fresh_review_superseded');
+  const winner = active!.id;
   expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
   expect(options.run).not.toHaveBeenCalled();
+  // A later intentional request is distinct; the failed call itself never retires the winner.
+  await guardReviewLaunch(options);
+  expect(options.cycleRemote.start).toHaveBeenCalledTimes(2);
+  expect(options.cycleRemote.start.mock.calls[1]![0].previous_cycle_id).toBe(winner);
+  expect(options.run).toHaveBeenCalledTimes(1);
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ cap: 20, attemptsUsed: 1 });
 });
 
 it('supports RCL-106 stale continuation inside a fresh cycle and refuses its manifest after another start-over', async () => {
@@ -339,4 +349,25 @@ it('refuses standalone spending while a fresh operation is unfinished', async ()
   await withNativeTarget(options.gitCommonDir, options.target, ownership => prepareFreshReview({ ...options, remote: options.cycleRemote, ownership }));
   await expect(claimConvergeAttempt(options)).rejects.toThrow('fresh_review_pending');
   expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ attemptsUsed: 0 });
+});
+
+
+it('reconciles delivered evidence only for the current cycle launch without changing its budget', async () => {
+  const { reconcileDeliveredRun } = await import('../../src/converge/delivery-reconciliation.js');
+  const options = await freshFixture();
+  options.run.mockResolvedValue({ ...options.completion, deliveryPending: true });
+  await guardReviewLaunch(options);
+  const cycle = (await loadConvergeRunState(options.gitCommonDir, options.target))!.cycle;
+  const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: {
+    id: options.completion.runId, converge: { target: options.target, round: 1, attempt: 1 },
+    target: { kind: 'pull_request', head_sha: options.headSha },
+    artifacts: [{ kind: 'report_json', stored: true, declared_sha256: options.completion.reportJsonSha256 }], findings: [], calls: [] } });
+  expect(await reconcileDeliveredRun(options.completion.runId, {} as never, { gitCommonDir: options.gitCommonDir, getRun })).toBe('reconciled');
+  expect(await loadConvergeRunState(options.gitCommonDir, options.target)).toMatchObject({ cycle, lastLaunch: { deliveryPending: false } });
+  const nextId = randomUUID();
+  options.run.mockResolvedValue({ ...options.completion, runId: nextId, deliveryPending: true });
+  await guardReviewLaunch(options);
+  expect(await reconcileDeliveredRun(options.completion.runId, {} as never, { gitCommonDir: options.gitCommonDir, getRun })).toBe('unchanged');
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ cap: 20, attemptsUsed: 1 });
+  expect(await loadConvergeRunState(options.gitCommonDir, options.target)).toMatchObject({ lastLaunch: { runId: nextId, deliveryPending: true } });
 });
