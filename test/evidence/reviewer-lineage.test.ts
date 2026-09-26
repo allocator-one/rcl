@@ -1,4 +1,6 @@
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -14,7 +16,7 @@ import { loadReviewerLineage } from '../../src/evidence/reviewer-lineage.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
 import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
-import { serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
+import { inspectReviewerArtifact, serializeReviewerArtifact, type InspectedReviewerArtifact } from '../../src/report/reviewer-artifact.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
@@ -173,5 +175,128 @@ describe('sealed reviewer lineage limits', () => {
   it('accepts distinct concurrent intents recorded before quorum completes', async () => {
     const value = await fixture({ concurrentSuccessor: true });
     await expect(loadReviewerLineage({ commonDir: value.commonDir, target, runId: successorId })).resolves.toMatchObject({ latest: { runId: successorId } });
+  });
+});
+
+
+// Rehydrate the real original + two-successor artifact fixture through public
+// journal writes. The historical last fixture starts a call after quorum; the
+// valid variant records both final intents before either result instead.
+async function retainedThreeGeneration(options: { legacyRoot?: boolean; tamper?: boolean; omitRoot?: boolean; sequentialFinal?: boolean } = {}) {
+  const source = JSON.parse(await readFile(new URL('../fixtures/reviewer-artifact-lineage.json', import.meta.url), 'utf8'));
+  const entries: InspectedReviewerArtifact[] = source.rows.map((row: any) => inspectReviewerArtifact(row.artifact_bytes, row.expectations));
+  const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cold-lineage-')));
+  roots.push(commonDir);
+  const target = entries[0]!.proof.plan.target;
+  const artifacts: string[] = [];
+  await withNativeTarget(commonDir, target, async ownership => {
+    for (const [index, original] of entries.entries()) {
+      let entry = original;
+      let journal: CheckpointJournal | undefined;
+      if (!(options.omitRoot && index === 0)) {
+        journal = await CheckpointJournal.create({ commonDir, namespace: entry.runId, plan: source.rows[index].expectations.expectedPlan, ownership });
+        const concurrentFinal = index === 2 && !options.sequentialFinal;
+        const records = concurrentFinal
+          ? [...entry.proof.state.records.filter(record => record.type === 'binding' || record.type === 'intent'),
+            ...entry.proof.state.records.filter(record => record.type !== 'binding' && record.type !== 'intent')]
+          : entry.proof.state.records;
+        for (const record of records) {
+          if (record.type === 'binding') await journal.bind(record.binding!.name, entry.proof.bindings[record.binding!.name]!, ownership);
+          else if (record.type === 'intent') await journal.recordIntent(record.cell!, record.paidAttempt!, ownership);
+          else if (record.type === 'result') {
+            const outcome = entry.proof.state.outcomes.find(item => item.paidAttempt.id === record.paidAttempt!.id)!;
+            await journal.recordResult(record.cell!, record.paidAttempt!, outcome.result, ownership);
+          } else if (record.type === 'uncertain') await journal.recordUncertain(record.cell!, record.paidAttempt!, record.reason!, ownership);
+          else await journal.finalize(ownership);
+        }
+        const proof = await exportCheckpointProof(journal);
+        if (!concurrentFinal) expect(proof.bytes).toBe(entry.proof.bytes);
+        else {
+          expect(proof.state.outcomes).toEqual(entry.proof.state.outcomes);
+          const assembly = { ...entry.assembly, projection: projectCheckpointReport({
+            sources: entries.slice(0, index).map(prior => ({ runId: prior.runId, proof: prior.proof })),
+            successor: { runId: entry.runId, proof }, policy: entry.captured.policy,
+          }) };
+          const rebuilt = serializeReviewerArtifact({ assembly, reportBytes: entry.reportBytes, representation: entry.representation });
+          entry = inspectReviewerArtifact(rebuilt.bytes, source.rows[index].expectations);
+          entries[index] = entry;
+        }
+      }
+      const artifact = serializeReviewerArtifact({ assembly: entry.assembly, reportBytes: entry.reportBytes,
+        representation: entry.representation, ...(options.legacyRoot && index === 0 ? {} : { lineage: entries.slice(0, index + 1) }) });
+      let bytes = artifact.bytes;
+      if (options.tamper && index === 2) {
+        const wire = JSON.parse(bytes);
+        wire.lineage[0].reportSha256 = '0'.repeat(64);
+        bytes = stableStringify(wire);
+      }
+      artifacts.push(bytes);
+      if (journal) await journal.retainTerminalReport({ reportBytes: entry.reportBytes, reviewerArtifactBytes: bytes }, ownership);
+    }
+  });
+  return { commonDir, target, runId: entries.at(-1)!.runId, entries, artifacts };
+}
+
+async function fileInventory(directory: string, prefix = ''): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const name = join(prefix, entry.name), path = join(directory, entry.name);
+    if (entry.isDirectory()) Object.assign(files, await fileInventory(path, name));
+    else files[name] = sha256Hex(await readFile(path, 'utf8'));
+  }
+  return files;
+}
+
+describe('cold retained lineage reopening', () => {
+  it('loads real complete two-successor lineage in a fresh process without network or file mutations', async () => {
+    const value = await retainedThreeGeneration();
+    const before = await fileInventory(value.commonDir);
+    const script = `import fs from 'node:fs'; import net from 'node:net';
+      let networkAttempts = 0;
+      const refuseNetwork = () => { networkAttempts++; throw new Error('unexpected_network'); };
+      globalThis.fetch = refuseNetwork; net.Socket.prototype.connect = refuseNetwork;
+      const { loadReviewerLineage } = await import(${JSON.stringify(new URL('../../src/evidence/reviewer-lineage.ts', import.meta.url).href)});
+      const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+      const result = await loadReviewerLineage(input);
+      console.log(JSON.stringify({ networkAttempts, runs: result.runs.map(run => ({ runId: run.runId,
+        proof: run.proof.digest, report: run.terminal.reportSha256, artifact: run.terminal.reviewerArtifactSha256,
+        capture: run.captured.digest, claim: run.inspected.nativeClaim,
+        outcomes: run.proof.state.outcomes.map(outcome => outcome.result.reviewBytes) })),
+        attempts: result.attempts.map(attempt => attempt.id), latest: result.latest.runId }));`;
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+      cwd: fileURLToPath(new URL('../../', import.meta.url)), encoding: 'utf8', timeout: 20_000,
+      input: JSON.stringify({ commonDir: value.commonDir, target: value.target, runId: value.runId }),
+      env: Object.fromEntries(['HOME', 'PATH', 'LANG', 'LC_ALL', 'TMPDIR'].flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])),
+    });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toEqual({ networkAttempts: 0, runs: value.entries.map((entry, index) => ({
+      runId: entry.runId, proof: entry.proof.digest, report: entry.reportSha256, artifact: sha256Hex(value.artifacts[index]!),
+      capture: entry.captured.digest, claim: entry.nativeClaim,
+      outcomes: entry.proof.state.outcomes.map(outcome => outcome.result.reviewBytes),
+    })), attempts: value.entries.flatMap(entry => entry.proof.state.records.filter(record => record.type === 'intent').map(record => record.paidAttempt!.id)), latest: value.runId });
+    expect(await fileInventory(value.commonDir)).toEqual(before);
+  });
+
+  it('accepts a preserved empty-lineage root followed by full-lineage successors', async () => {
+    const value = await retainedThreeGeneration({ legacyRoot: true });
+    const loaded = await loadReviewerLineage(value);
+    expect(loaded.runs.map(run => run.inspected.artifact.bytes)).toEqual(value.artifacts);
+    expect(loaded.runs.map(run => run.inspected.proof.bytes)).toEqual(value.entries.map(entry => entry.proof.bytes));
+  });
+
+  it('refuses forged uploaded ancestor references even when their terminal digest is valid', async () => {
+    const value = await retainedThreeGeneration({ tamper: true });
+    await expect(loadReviewerLineage(value)).rejects.toThrow('reviewer_artifact_mismatch');
+  });
+
+  it('still refuses the historical fixture that starts a new call after quorum', async () => {
+    const value = await retainedThreeGeneration({ sequentialFinal: true });
+    await expect(loadReviewerLineage(value)).rejects.toThrow('reviewer_lineage_successor_ineligible_attempt');
+  });
+
+  it('requires the actual stored original instead of borrowing its embedded checkpoint', async () => {
+    const value = await retainedThreeGeneration({ omitRoot: true });
+    await expect(loadReviewerLineage(value)).rejects.toThrow();
+    expect(await loadConvergeRunState(value.commonDir, value.target)).toBeUndefined();
   });
 });

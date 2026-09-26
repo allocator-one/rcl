@@ -1,4 +1,5 @@
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointProof, type CheckpointState, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
+import { decodeRecoveryOperation } from '../dispatch/recovery-operation.js';
 import { recoveryAttemptsFromCheckpoint } from '../dispatch/recovery.js';
 import { previewReviewerRecovery } from '../dispatch/recovery-policy.js';
 import type { RecoveryAttempt } from '../dispatch/recovery-policy.js';
@@ -144,7 +145,9 @@ async function assertVerification(journal: CheckpointJournal, inspected: Inspect
   }
 }
 
-async function loadOne(commonDir: string, target: string, runId: string): Promise<ReviewerLineageRun> {
+type StoredReviewerRun = Pick<ReviewerLineageRun, 'runId' | 'journal' | 'plan' | 'state' | 'proof' | 'terminal'>;
+
+async function loadStored(commonDir: string, target: string, runId: string): Promise<StoredReviewerRun> {
   const journal = await CheckpointJournal.inspectRead(checkpointPath(commonDir, target, runId));
   const plan = journal.getPlan();
   if (plan.target !== target) fail('target_mismatch');
@@ -152,8 +155,18 @@ async function loadOne(commonDir: string, target: string, runId: string): Promis
   if (!state.finalized) fail('unsealed');
   if (!terminal) fail('terminal_missing');
   const proof = await exportCheckpointProof(journal);
+  return { runId, journal, plan, state, proof, terminal };
+}
+
+async function inspectStored(stored: StoredReviewerRun, ancestors: readonly InspectedReviewerArtifact[]): Promise<ReviewerLineageRun> {
+  const { runId, journal, plan, state, proof, terminal } = stored;
+  // Only select the legacy representation here. Uploaded references never
+  // supply expected ancestors; the inspector rederives them from stored pairs.
+  const lineage: unknown = JSON.parse(terminal.reviewerArtifactBytes)?.lineage;
+  const legacy = Array.isArray(lineage) && lineage.length === 0;
   const inspected = inspectReviewerArtifact(terminal.reviewerArtifactBytes, {
-    expectedReportBytes: terminal.reportBytes, expectedRunId: runId, expectedTarget: target, expectedPlan: plan,
+    expectedReportBytes: terminal.reportBytes, expectedRunId: runId, expectedTarget: plan.target, expectedPlan: plan,
+    ...(legacy ? {} : { ancestors }),
   });
   if (inspected.proof.digest !== proof.digest || inspected.reportSha256 !== terminal.reportSha256 ||
     inspected.captured.plan.digest !== plan.digest) fail('proof_mismatch');
@@ -168,24 +181,37 @@ export async function loadReviewerLineage(input: LoadReviewerLineageInput): Prom
   const commonDir = input.commonDir;
   const target = input.target.trim();
   const initialRunId = input.runId;
-  const newest: ReviewerLineageRun[] = [];
+  const newest: StoredReviewerRun[] = [];
   const seen = new Set<string>();
   let runId = initialRunId;
   for (let depth = 0; depth < MAX_LINEAGE_DEPTH; depth++) {
     const key = runId.toLowerCase();
     if (seen.has(key)) fail('cycle');
     seen.add(key);
-    const run = await loadOne(commonDir, target, runId);
+    const run = await loadStored(commonDir, target, runId);
     newest.push(run);
-    if (run.kind === 'original') break;
-    const operation = run.inspected.operation;
-    const source = run.inspected.descriptor.kind === 'supplemented' ? run.inspected.descriptor.source : undefined;
-    if (!operation || !source || !sameRun(operation.sourceRunId, source.run_id) ||
-      operation.sourceReportSha256 !== source.report_sha256 || operation.sourceCheckpointSha256 !== source.checkpoint_sha256) fail('source_binding_mismatch');
-    runId = source.run_id;
+    const operationBytes = run.proof.bindings.operation;
+    if (operationBytes === undefined) break;
+    // Discover predecessors from the independently validated saved journal,
+    // never the artifact's embedded checkpoints or claimed lineage references.
+    // Complete capture/source/native-claim checks follow actual inspection.
+    const operation = decodeRecoveryOperation(operationBytes);
+    if (operation.target !== target || operation.planDigest !== run.plan.digest ||
+      !sameRun(operation.successorRunId, runId)) fail('source_binding_mismatch');
+    runId = operation.sourceRunId;
   }
-  if (!newest.length || newest.at(-1)!.kind !== 'original') fail('depth');
-  const runs = newest.reverse();
+  if (!newest.length || newest.at(-1)!.proof.bindings.operation !== undefined) fail('depth');
+  const runs: ReviewerLineageRun[] = [];
+  for (const stored of newest.reverse()) {
+    const run = await inspectStored(stored, runs.map(prior => prior.inspected));
+    if (run.kind === 'successor') {
+      const operation = run.inspected.operation;
+      const source = run.inspected.descriptor.kind === 'supplemented' ? run.inspected.descriptor.source : undefined;
+      if (!operation || !source || !sameRun(operation.sourceRunId, source.run_id) ||
+        operation.sourceReportSha256 !== source.report_sha256 || operation.sourceCheckpointSha256 !== source.checkpoint_sha256) fail('source_binding_mismatch');
+    }
+    runs.push(run);
+  }
   validateInspectedReviewerArtifactChain(runs.map(run => run.inspected));
   const root = runs[0]!;
   if (!root.inspected.launch || !root.inspected.nativeClaim ||
