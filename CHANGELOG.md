@@ -7,6 +7,8 @@
 - Permit an explicit bounded same-head retry after an inconclusive guarded
   review of a fixed head. Healthy unchanged reviews still refuse duplicate
   councils, and delivery-only retries retain their original evidence (RCL-107).
+- Older convergence state without a fixed-round head remains conservative: it
+  permits only the immediately preceding inconclusive head for an explicit retry.
 
 ## 4.1.5 - 2026-09-26
 
