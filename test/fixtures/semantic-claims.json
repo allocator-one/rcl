@@ -1,0 +1,307 @@
+{
+  "source_packet_sha256": "595170d65e634d72c5f1a5b3fe0dda9d68f9e40f33d070ce42985a593e96e413",
+  "purpose": "Preserved allegations for identity separation; not new verdicts or recovery evidence.",
+  "sightings": [
+    {
+      "source_label": "9062-round1",
+      "source_report_sha256": "c7a3a1657353118cd89723d463d43d2e7e0f22cc7e4ef493403bb2162bdf3943",
+      "run_id": "01a0c49d-b1f5-7e19-9757-95fbbe26e721",
+      "json_pointer": "/findings/2",
+      "raw_finding_id": "f001",
+      "report_key": "report:01a0c49d-b1f5-7e19-9757-95fbbe26e721:7d0ad5d3be3d7e3e",
+      "derived_wire_ref": "f003",
+      "wire_ref_basis": "Original immutable kept-array position under envelope.findingRef(index); not a fresh server read.",
+      "original_finding": {
+        "id": "f001",
+        "file": "lib/allocator_one_web/components_newui/molecules/copy_button.ex",
+        "startLine": 89,
+        "endLine": 102,
+        "severity": "critical",
+        "category": "correctness",
+        "title": "aria-label overrides visible text causing WCAG 2.5.3 Label in Name failure",
+        "description": "When `icon_only` is false, the button renders with `aria-label={@label}` while its visible text transitions to `@copied_label` (e.g., 'Link copied') upon click. Under WCAG 2.5.3 (Label in Name, Level A), the accessible name must contain the visible label. Because `aria-label` remains fixed to `@label` ('Copy' or 'Copy link') while the visible text shows `@copied_label`, speech-input users attempting to activate the button by its visible text ('Click Link copied') will fail. Furthermore, screen reader users navigating the copied state will hear the original copy label rather than the confirmation.",
+        "suggestedFix": "Do not specify `aria-label` or `title` when `icon_only={false}`, allowing the button's visible text to supply the accessible name:\n\n```elixir\n      title={@icon_only && @label}\n      aria-label={@icon_only && @label}\n```",
+        "consensus": {
+          "score": 1,
+          "total": 18,
+          "models": [
+            "google/gemini-3.8-flash"
+          ],
+          "roles": [
+            "accessibility-auditor"
+          ],
+          "crossRole": false,
+          "crossModel": false,
+          "elevated": false,
+          "elevation": "none",
+          "confidence": 0.2551356102461075,
+          "confidenceLabel": "Low",
+          "tier": "single",
+          "weightedScore": 0.8013561024610749,
+          "modelWeights": {
+            "google/gemini-3.8-flash": 0.8013561024610749
+          }
+        },
+        "identity": "report:01a0c49d-b1f5-7e19-9757-95fbbe26e721:7d0ad5d3be3d7e3e",
+        "gating": {
+          "reason": "critical"
+        }
+      }
+    },
+    {
+      "source_label": "9062-round1",
+      "source_report_sha256": "c7a3a1657353118cd89723d463d43d2e7e0f22cc7e4ef493403bb2162bdf3943",
+      "run_id": "01a0c49d-b1f5-7e19-9757-95fbbe26e721",
+      "json_pointer": "/findings/27",
+      "raw_finding_id": "f002",
+      "report_key": "report:01a0c49d-b1f5-7e19-9757-95fbbe26e721:ee2b474f59f5b6a4",
+      "derived_wire_ref": "f028",
+      "wire_ref_basis": "Original immutable kept-array position under envelope.findingRef(index); not a fresh server read.",
+      "original_finding": {
+        "id": "f002",
+        "file": "lib/allocator_one_web/components_newui/molecules/toast.ex",
+        "startLine": 141,
+        "endLine": 143,
+        "severity": "important",
+        "category": "correctness",
+        "title": "Unstable random UUID in inner/1 causes DOM node replacement on every render",
+        "description": "In `Toast.inner/1`, the id is assigned via `assign_new(:id, fn -> \"flash-#{assigns.type}-#{Ecto.UUID.generate()}\" end)`. `Toast.inner/1` is a stateless functional component, not a LiveComponent, and callers in `flash_group/1` do not pass an `:id`. As a result, `assign_new/3` computes a new random UUID on every render. When LiveView patches the DOM, morphdom sees a new `id` on each update and destroys the existing DOM node instead of patching it. This unmounts the `.ClearFlash` hook, resets auto-dismiss deadlines, re-triggers entrance animations, and prevents `updated()` from ever executing.",
+        "suggestedFix": "Generate a deterministic default id based on the type (and message index if in a list), such as `\"flash-#{assigns.type}\"`, or pass explicit stable IDs from `flash_group/1`.",
+        "consensus": {
+          "score": 1,
+          "total": 18,
+          "models": [
+            "google/gemini-3.8-flash"
+          ],
+          "roles": [
+            "edge-case-hunter"
+          ],
+          "crossRole": false,
+          "crossModel": false,
+          "elevated": false,
+          "elevation": "none",
+          "confidence": 0.4651356102461075,
+          "confidenceLabel": "Medium",
+          "tier": "single",
+          "weightedScore": 0.8013561024610749,
+          "modelWeights": {
+            "google/gemini-3.8-flash": 0.8013561024610749
+          }
+        },
+        "identity": "report:01a0c49d-b1f5-7e19-9757-95fbbe26e721:ee2b474f59f5b6a4",
+        "gating": {
+          "reason": "verified",
+          "verification": {
+            "verdict": "unrefuted",
+            "model": "google/gemini-3.8-flash",
+            "note": "Toast.inner is a functional component whose assigns map generates a new UUID on every render when :id is omitted, changing the DOM id on each patch."
+          }
+        }
+      }
+    },
+    {
+      "source_label": "9062-round2",
+      "source_report_sha256": "e65ab1dcda75542bc348a4a8f3d84ba3628841a0a864d3dd82923d1583abc0ea",
+      "run_id": "01a0c4b9-ab3f-77f8-b84a-02ed1a0f1895",
+      "json_pointer": "/findings/17",
+      "raw_finding_id": "f001",
+      "report_key": "report:01a0c4b9-ab3f-77f8-b84a-02ed1a0f1895:7d0ad5d3be3d7e3e",
+      "derived_wire_ref": "f018",
+      "wire_ref_basis": "Original immutable kept-array position under envelope.findingRef(index); not a fresh server read.",
+      "original_finding": {
+        "id": "f001",
+        "file": "lib/allocator_one_web/components_newui/molecules/copy_button.ex",
+        "startLine": 88,
+        "endLine": 89,
+        "severity": "important",
+        "category": "correctness",
+        "title": "Redundant aria-disabled with native disabled removes toast from tab order",
+        "description": "The button sets both `disabled={@disabled}` and `aria-disabled={@disabled && \"true\"}`. Natively disabled buttons are removed from the tab order entirely, so keyboard and screen-reader users cannot discover the control or learn why it is unavailable (e.g. the storybook `labelled_disabled` variation with empty content). WCAG-friendly disabled patterns prefer `aria-disabled=\"true\"` alone (keeping the element focusable) OR native `disabled` alone \u2014 combining both is redundant, and if discoverability of the disabled action matters, the control should stay focusable. The JS hook already checks `aria-disabled` separately, so only one mechanism is needed.",
+        "suggestedFix": "Choose one strategy: keep the button focusable with `aria-disabled={@disabled && \"true\"}` plus the hook's click guard (already implemented), and drop the native `disabled` attribute; or keep native `disabled` and drop `aria-disabled`.",
+        "consensus": {
+          "score": 1,
+          "total": 18,
+          "models": [
+            "anthropic/claude-fable-5"
+          ],
+          "roles": [
+            "accessibility-auditor"
+          ],
+          "crossRole": false,
+          "crossModel": false,
+          "elevated": false,
+          "elevation": "none",
+          "confidence": 0.24917173103313076,
+          "confidenceLabel": "Low",
+          "tier": "single",
+          "weightedScore": 0.7417173103313076,
+          "modelWeights": {
+            "anthropic/claude-fable-5": 0.7417173103313076
+          }
+        },
+        "identity": "report:01a0c4b9-ab3f-77f8-b84a-02ed1a0f1895:7d0ad5d3be3d7e3e",
+        "gating": {
+          "reason": "verified",
+          "verification": {
+            "verdict": "unrefuted",
+            "model": "google/gemini-3.8-flash",
+            "note": "The button combines native disabled and aria-disabled, which is redundant and removes it from the accessibility tree/tab order."
+          }
+        }
+      }
+    },
+    {
+      "source_label": "9062-round2",
+      "source_report_sha256": "e65ab1dcda75542bc348a4a8f3d84ba3628841a0a864d3dd82923d1583abc0ea",
+      "run_id": "01a0c4b9-ab3f-77f8-b84a-02ed1a0f1895",
+      "json_pointer": "/findings/19",
+      "raw_finding_id": "f006",
+      "report_key": "report:01a0c4b9-ab3f-77f8-b84a-02ed1a0f1895:ee2b474f59f5b6a4",
+      "derived_wire_ref": "f020",
+      "wire_ref_basis": "Original immutable kept-array position under envelope.findingRef(index); not a fresh server read.",
+      "original_finding": {
+        "id": "f006",
+        "file": "lib/allocator_one_web/components_newui/molecules/toast.ex",
+        "startLine": 148,
+        "endLine": 160,
+        "severity": "important",
+        "category": "correctness",
+        "title": "role=\"alert\" on a hidden-then-shown toast may not announce reliably",
+        "description": "The toast div is rendered with class `hidden` and revealed via `phx-mounted={show_toast(@id)}`. Elements inserted into the DOM already containing `role=\"alert\"` content while `display:none` and later revealed are inconsistently announced by screen readers \u2014 many only announce content *added* to an already-visible live region. Since the content exists at insertion time and only visibility changes, some AT will never announce the toast. This affects all flash messages (WCAG 4.1.3 Status Messages, Level AA).",
+        "suggestedFix": "Render the toast visible (or use opacity/transform for the entrance animation instead of `hidden`), or inject the message text into an already-mounted `aria-live=\"polite\"`/`role=\"status\"` region after reveal.",
+        "consensus": {
+          "score": 1,
+          "total": 18,
+          "models": [
+            "anthropic/claude-fable-5"
+          ],
+          "roles": [
+            "accessibility-auditor"
+          ],
+          "crossRole": false,
+          "crossModel": false,
+          "elevated": false,
+          "elevation": "none",
+          "confidence": 0.24917173103313076,
+          "confidenceLabel": "Low",
+          "tier": "single",
+          "weightedScore": 0.7417173103313076,
+          "modelWeights": {
+            "anthropic/claude-fable-5": 0.7417173103313076
+          }
+        },
+        "identity": "report:01a0c4b9-ab3f-77f8-b84a-02ed1a0f1895:ee2b474f59f5b6a4",
+        "gating": {
+          "reason": "verified",
+          "verification": {
+            "verdict": "unrefuted",
+            "model": "google/gemini-3.8-flash",
+            "note": "The root element pairs role=\"alert\" with the initial 'hidden' class, which causes inconsistent screen reader announcements upon display."
+          }
+        }
+      }
+    },
+    {
+      "source_label": "8972-round1",
+      "source_report_sha256": "ddf194587eec7245a997fe216599b00220ad18b341b706ca00f6f74990a41025",
+      "run_id": "01a0bc6a-0328-7966-94fc-96e9a49ca911",
+      "json_pointer": "/findings/10",
+      "raw_finding_id": "f002",
+      "report_key": "report:01a0bc6a-0328-7966-94fc-96e9a49ca911:ba3a806986f42ddb",
+      "derived_wire_ref": "f011",
+      "wire_ref_basis": "Original immutable kept-array position under envelope.findingRef(index); not a fresh server read.",
+      "original_finding": {
+        "id": "f002",
+        "file": "lib/allocator_one/cap_tables/issuer_links.ex",
+        "startLine": 100,
+        "endLine": 105,
+        "severity": "important",
+        "category": "correctness",
+        "title": "search/5 interpolates unvalidated entity_id into query before scoping",
+        "description": "In search/5, `link_scope(entity_id, :attached)` pins entity_id into the query without first canonicalizing it via resource_id/1. entity_org/3 does validate the id, but link_scope is called with the original raw `entity_id` term, not the canonicalized value. If the raw value differs from its canonical form (e.g. uppercase UUID, or a value Ecto.UUID.cast accepts but the DB comparison treats differently) the attached search could silently return no rows or mismatch. Similarly in connected/3, the raw entity_id is interpolated into the where clause. This is inconsistent with the careful canonicalization done everywhere else in the module.",
+        "suggestedFix": "Canonicalize entity_id once (via resource_id/1) and thread the canonical value into link_scope/connected queries instead of the raw input.",
+        "consensus": {
+          "score": 1,
+          "total": 13,
+          "models": [
+            "anthropic/claude-fable-5"
+          ],
+          "roles": [
+            "general"
+          ],
+          "crossRole": false,
+          "crossModel": false,
+          "elevated": false,
+          "elevation": "none",
+          "confidence": 0.2640416574340793,
+          "confidenceLabel": "Low",
+          "tier": "single",
+          "weightedScore": 0.7404165743407933,
+          "modelWeights": {
+            "anthropic/claude-fable-5": 0.7404165743407933
+          }
+        },
+        "identity": "report:01a0bc6a-0328-7966-94fc-96e9a49ca911:ba3a806986f42ddb",
+        "gating": {
+          "reason": "verified",
+          "verification": {
+            "model": "google/gemini-3.8-flash",
+            "verdict": "unrefuted",
+            "note": "search/5 and connected/3 pass the raw entity_id parameter into Ecto where clauses rather than the canonicalized entity_id from entity_org/3."
+          }
+        }
+      }
+    },
+    {
+      "source_label": "8972-round3",
+      "source_report_sha256": "e868ffc8d1742e6d544032e6ddf08630c44aef8e3b9169f73873b06bd924ac50",
+      "run_id": "01a0bc94-93ee-7b66-966f-dc5c8615f99d",
+      "json_pointer": "/findings/8",
+      "raw_finding_id": "9d093dc8-8397-4ee2-a2e7-cc076524ef87",
+      "report_key": "report:01a0bc94-93ee-7b66-966f-dc5c8615f99d:ba3a806986f42ddb",
+      "derived_wire_ref": "f009",
+      "wire_ref_basis": "Original immutable kept-array position under envelope.findingRef(index); not a fresh server read.",
+      "original_finding": {
+        "id": "9d093dc8-8397-4ee2-a2e7-cc076524ef87",
+        "file": "lib/allocator_one/cap_tables/issuer_links.ex",
+        "startLine": 106,
+        "endLine": 112,
+        "severity": "important",
+        "category": "correctness",
+        "title": "Exact UUID result can be excluded by name matches",
+        "description": "UUID searches match both the exact table ID and issuer names containing the UUID, then order all matches by table ID and apply the 25-row limit. If at least 25 name matches sort before the exact-ID table, the requested identity is omitted. This violates the requirement that exact UUID lookup make identities beyond duplicate-name and overflow windows reachable.",
+        "suggestedFix": "For canonical UUID terms, order the exact ID match ahead of name matches before applying the limit, followed by table ID for deterministic ordering. Alternatively, fetch the exact match separately and prepend it while keeping the combined result bounded to 25.",
+        "consensus": {
+          "score": 1,
+          "total": 18,
+          "models": [
+            "openai/gpt-5.6-sol"
+          ],
+          "roles": [
+            "spec-compliance"
+          ],
+          "crossRole": false,
+          "crossModel": false,
+          "elevated": false,
+          "elevation": "none",
+          "confidence": 0.4706908494349253,
+          "confidenceLabel": "Medium",
+          "tier": "single",
+          "weightedScore": 0.8569084943492526,
+          "modelWeights": {
+            "openai/gpt-5.6-sol": 0.8569084943492526
+          }
+        },
+        "identity": "report:01a0bc94-93ee-7b66-966f-dc5c8615f99d:ba3a806986f42ddb",
+        "gating": {
+          "reason": "verified",
+          "verification": {
+            "model": "google/gemini-3.8-flash",
+            "verdict": "unrefuted",
+            "note": "UUID matches are combined with name matches via OR and ordered solely by table.id before limit(25), allowing name matches to displace the exact ID."
+          }
+        }
+      }
+    }
+  ]
+}

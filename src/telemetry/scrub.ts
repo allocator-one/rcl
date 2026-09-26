@@ -9,12 +9,6 @@
 export const MAX_FREE_TEXT = 2_000;
 export const REDACTED = '[redacted]';
 
-/** Normalize newly produced human text before report hashing, never retained originals. */
-export function normalizeGeneratedText(value: string): string {
-  return value.replace(/[\uD800-\uDFFF]/gu, '\uFFFD')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
-}
-
 const DISPLAY_MARKS = /[\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
 const DISPLAY_LINE_SEPARATORS = /\r\n|[\r\u0085\u2028\u2029]/g;
 
@@ -27,6 +21,12 @@ export function sanitizePresentation(value: string, { multiline }: { multiline: 
   return value.replace(DISPLAY_LINE_SEPARATORS, lineReplacement)
     .replace(multiline ? /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g : /[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(DISPLAY_MARKS, '');
+}
+
+/** Normalize newly produced human text before report hashing, never retained originals. */
+export function normalizeGeneratedText(value: string): string {
+  return value.replace(/[\uD800-\uDFFF]/gu, '\uFFFD')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
 }
 
 /** Escape display controls in JSON source without changing parsed semantic values. */
