@@ -5,9 +5,9 @@
 ## 4.1.10 - 2026-09-26
 
 - Allow a bounded guarded retry after delayed evidence delivery only when
-  Harness confirms the exact prior run, head, round, attempt, and stored report
-  digest. Missing or mismatched receipts still block reviewer launch without
-  spending an attempt (RCL-130).
+  Harness confirms the exact prior run, head, round, attempt, and downloaded
+  report bytes. Require an explicit retry reason; missing or mismatched evidence
+  still blocks reviewer launch without spending an attempt (RCL-130).
 
 ## 4.1.9 - 2026-09-26
 

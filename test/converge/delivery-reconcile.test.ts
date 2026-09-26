@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { matchesGuardedDelivery } from '../../src/converge/delivery-reconcile.js';
+import { createHash } from 'node:crypto';
+import { matchesGuardedDelivery, verifyGuardedDelivery } from '../../src/converge/delivery-reconcile.js';
 import type { RunDetail } from '../../src/evidence/types.js';
 
 const expected = {
@@ -28,5 +29,18 @@ describe('guarded delivery receipt', () => {
     expect(matchesGuardedDelivery({ ...run(), artifacts: [{ kind: 'report_json', declared_sha256: 'c'.repeat(64), stored: true }] }, expected)).toBe(false);
     expect(matchesGuardedDelivery({ ...run(), artifacts: [{ kind: 'report_json', declared_sha256: expected.reportJsonSha256, stored: false }] }, expected)).toBe(false);
     expect(matchesGuardedDelivery({ ...run(), repo_verified: false }, expected)).toBe(false);
+  });
+
+  it('checks downloaded report bytes against the guarded digest', async () => {
+    const bytes = Buffer.from('exact report');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const identity = { ...expected, reportJsonSha256: digest };
+    const delivered = { ...run(), artifacts: [{ kind: 'report_json', declared_sha256: digest,
+      declared_bytes: bytes.length, stored: true }] };
+    expect(await verifyGuardedDelivery(delivered, identity, async () => bytes)).toBe(true);
+    expect(await verifyGuardedDelivery(delivered, identity, async () => Buffer.from('wrong report'))).toBe(false);
+    expect(await verifyGuardedDelivery(delivered, identity, async () => null)).toBe(false);
+    expect(await verifyGuardedDelivery({ ...delivered, artifacts: [{ kind: 'report_json', declared_sha256: digest,
+      stored: true }] }, identity, async () => bytes)).toBe(false);
   });
 });

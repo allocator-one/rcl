@@ -108,6 +108,19 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 
+  it('requires a bounded retry reason even after exact delivery confirmation', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
+      deliveryPending: true, hardFailure: true });
+    await guardReviewLaunch(options);
+    await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    const confirmDelivery = vi.fn().mockResolvedValue(true);
+    await expect(guardReviewLaunch({ ...options, confirmDelivery })).rejects.toThrow(/retry.*reason/i);
+    expect(confirmDelivery).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
   it('does not let old delivery metadata block a materially changed input after native admission', async () => {
     const options = await fixture();
     options.run = vi.fn().mockResolvedValue({ ...completion, deliveryPending: true });
