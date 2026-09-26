@@ -290,18 +290,19 @@ const TRANSIENT_CONNECTION_CODES = new Set([
  */
 export function isRetryableConnectionError(error: unknown, knownConnectionError = false): boolean {
   const seen = new Set<object>();
-  const pending: Array<{ error: unknown; depth: number }> = [{ error, depth: 0 }];
-  let transient = false;
+  const pending: Array<{ error: unknown; depth: number; transient: boolean }> = [{ error, depth: 0, transient: false }];
+  let hasTransientBranch = false;
   let knownConnectionRoot = false;
   let inspected = 0;
 
   while (pending.length > 0) {
-    const { error: current, depth } = pending.pop()!;
+    const { error: current, depth, transient: branchTransient } = pending.pop()!;
     if (depth >= 8 || ++inspected > 32) return false;
     if (current === null || typeof current !== 'object' || seen.has(current)) return false;
     seen.add(current);
     const cause = current as { name?: unknown; code?: unknown; status?: unknown; cause?: unknown };
     if (cause.name === 'AbortError' || cause.name === 'APIUserAbortError' || cause.status !== undefined) return false;
+    let transient = branchTransient;
     if (cause.code !== undefined) {
       if (typeof cause.code !== 'string' || !TRANSIENT_CONNECTION_CODES.has(cause.code)) return false;
       transient = true;
@@ -311,12 +312,13 @@ export function isRetryableConnectionError(error: unknown, knownConnectionError 
     if (cause.cause !== undefined) children.push(cause.cause);
     if (children.length === 0) {
       if (!transient && !(knownConnectionError && seen.size === 1)) return false;
-      knownConnectionRoot ||= knownConnectionError && seen.size === 1;
+      hasTransientBranch ||= transient;
+      knownConnectionRoot ||= knownConnectionError && depth === 0;
       continue;
     }
-    for (const child of children) pending.push({ error: child, depth: depth + 1 });
+    for (const child of children) pending.push({ error: child, depth: depth + 1, transient });
   }
-  return transient || knownConnectionRoot;
+  return hasTransientBranch || knownConnectionRoot;
 }
 
 export function retryDelay(attempt: number): number {

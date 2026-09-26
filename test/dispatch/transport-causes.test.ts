@@ -36,4 +36,12 @@ describe('bounded transport cause classification', () => {
     const aggregate = new AggregateError([coded('ETIMEDOUT'), coded('CERT_HAS_EXPIRED')], 'connection failures');
     expect(isRetryableConnectionError(new Error('SDK wrapper', { cause: aggregate }), true)).toBe(false);
   });
+
+  it.each([
+    [new Error('invalid configuration'), coded('ECONNRESET')],
+    [coded('ECONNRESET'), new Error('invalid configuration')],
+  ])('keeps uncoded AggregateError members terminal regardless of order', (...errors: Error[]) => {
+    const aggregate = new AggregateError(errors, 'connection failures');
+    expect(isRetryableConnectionError(new Error('SDK wrapper', { cause: aggregate }), true)).toBe(false);
+  });
 });
