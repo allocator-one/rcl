@@ -581,6 +581,9 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // report) must not erase the binding an earlier pass persisted.
   const boundRunId = runId ?? state.rounds.find((r) => r.round === options.round)?.runId;
   const existingRound = state.rounds.find((entry) => entry.round === options.round);
+  if (options.headSha !== undefined && state.lastLaunch?.round === options.round && options.headSha !== state.lastLaunch.headSha) {
+    throw new ConvergeRunStateError(`Round ${options.round} report head conflicts with its admitted launch.`);
+  }
   if (options.headSha !== undefined && existingRound?.headSha !== undefined && options.headSha !== existingRound.headSha) {
     throw new ConvergeRunStateError(`Round ${options.round} head conflicts with its admitted launch.`);
   }
@@ -620,7 +623,7 @@ export interface RoundResolution {
   /** Identities recorded fixed this round (any status — every fix changes the patch). */
   fixedThisRound: number;
   /** Fixed-round heads retained for a guarded retry; absent for legacy verdicts. */
-  fixedHeadShas: string[];
+  fixedHeadShas?: string[];
   status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
 }
 
