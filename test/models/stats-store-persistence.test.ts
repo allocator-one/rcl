@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { execFile, fork, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -407,6 +407,18 @@ it('keeps a published retained-creation intent for a later cooperating process',
   });
   await appendCalls([call('operation:1')], nested);
   expect((await loadModelStats({ dir: nested, now }))[0]?.calls).toBe(2);
+});
+
+it('rejects a retained store replaced by a symlink after its intent is published', async () => {
+  const nested = join(dir, 'nested', 'store');
+  const redirected = join(dir, 'redirected');
+  await appendCalls([call('operation:0')], nested);
+  await mkdir(redirected);
+  await rm(nested, { recursive: true, force: true });
+  await symlink(redirected, nested);
+
+  await expect(appendCalls([call('operation:1')], nested)).rejects.toThrow('unsafe_precision_store');
+  await expect(readFile(join(redirected, 'calls.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
 it.each(['calls', 'outcomes'] as const)('surfaces a read-only %s store and permits the exact batch in a writable override', async kind => {

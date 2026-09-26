@@ -279,6 +279,14 @@ async function createRetainedChain(target: string, anchor: string): Promise<void
   }
 }
 
+async function preparedDirectory(target: string, strictPath: boolean): Promise<string> {
+  const info = await lstat(target);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('unsafe_precision_store');
+  const dir = await realpath(target);
+  if (strictPath && dir !== target) throw new Error('unsafe_precision_store');
+  return dir;
+}
+
 /**
  * Current-version writers publish a durable intent before mkdir. Cooperating
  * writers discover it from the target's ancestors and repair its bounded chain
@@ -290,13 +298,7 @@ async function prepareDirectory(inputDir: string, strictPath: boolean): Promise<
   if (!discovered) {
     await retainedProtocolTestEvent('intent-discovery-miss', target);
     try {
-      const existing = await lstat(target);
-      if (!existing.isDirectory() || existing.isSymbolicLink()) throw new Error('unsafe_precision_store');
-      const dir = await realpath(target);
-      // Legacy callers have always accepted a pre-existing data directory
-      // reached through a system ancestor alias. Retained callers keep the
-      // stricter path boundary for their identity-bearing history.
-      if (strictPath && dir !== target) throw new Error('unsafe_precision_store');
+      const dir = await preparedDirectory(target, strictPath);
       // The target may have appeared after the first discovery pass. Its
       // creator publishes the intent before mkdir, so a second pass closes
       // that race without burdening genuinely pre-existing stores.
@@ -343,7 +345,7 @@ async function prepareDirectory(inputDir: string, strictPath: boolean): Promise<
       await retainedProtocolTestEvent('published-intent-durable', join(durableCreation.root, 'intent.json'));
     }
   });
-  return await realpath(target);
+  return await preparedDirectory(target, strictPath);
 }
 
 async function trailingSeparator(handle: Awaited<ReturnType<typeof open>>): Promise<string> {
