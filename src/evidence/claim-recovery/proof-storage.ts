@@ -40,12 +40,27 @@ export async function writeClaimProof(path: string,pool: string,value: unknown):
     }
     else {
       const temporary=join(pool,randomUUID()+'.tmp');
-      await writeExclusiveBytes(temporary,Buffer.from(row.text,'utf8'));
       try {
-        await link(temporary,destination);
+        await writeExclusiveBytes(temporary,Buffer.from(row.text,'utf8'));
+        try {
+          await link(temporary,destination);
+        }
+        catch(e) {
+          if((e as NodeJS.ErrnoException).code!=='EEXIST')
+            throw e;
+          const current=await readStable(destination,MAX);
+          if(current.sha256!==row.sha256||current.text!==row.text)
+            throw new Error('claim_proof_material_conflict');
+        }
       }
       finally {
-        await unlink(temporary);
+        try {
+          await unlink(temporary);
+        }
+        catch(e) {
+          if((e as NodeJS.ErrnoException).code!=='ENOENT')
+            throw e;
+        }
       }
     }
   }

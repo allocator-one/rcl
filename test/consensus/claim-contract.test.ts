@@ -51,6 +51,13 @@ describe('bounded semantic contracts', () => {
     expect(describeContract({ ...plural, description: plural.description.replace("users' posts", "users' notes") })).toBeUndefined();
   });
 
+  it('normalizes resource casing across ownership titles and descriptions', () => {
+    const finding = { file: 'src/posts.ts', title: 'Missing authorization check allows any user to delete any Post',
+      description: "Any authenticated user can delete any other user's POST. There is no check that the requesting user owns the post being deleted." };
+
+    expect(describeContract(finding)).toBeDefined();
+  });
+
   it('recognizes uppercase privilege literals while retaining their exact value', () => {
     const role = (literal: string) => ({ file: 'src/auth.ts', title: 'Admin check uses username instead of role',
       description: `The requireAdmin middleware checks user.username === '${literal}' instead of checking a proper role field.` });
@@ -60,6 +67,13 @@ describe('bounded semantic contracts', () => {
     expect(compareClaims(describeClaim(role('admin')), describeClaim(role('Admin')))).toBeUndefined();
     expect(compareClaims(describeClaim(role('Admin')),
       describeClaim({ ...role('Admin'), title: 'ADMIN check uses username instead of role' }))).toBeDefined();
+  });
+
+  it('rejects a role-field comparison that contradicts the username privilege contract', () => {
+    const finding = { file: 'src/auth.ts', title: 'Admin check uses username instead of role',
+      description: "The requireAdmin middleware checks user.role === 'admin' instead of checking a proper role field." };
+
+    expect(describeContract(finding)).toBeUndefined();
   });
 
   it('recognizes complete missing-map-key assertions with named access and presence condition', () => {

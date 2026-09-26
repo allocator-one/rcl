@@ -113,13 +113,14 @@ function ownerAuthorization(f: ClaimText): Contract | undefined {
   let resource: string | undefined;
   // A named route is supported only when it names this file's resource and
   // its sole parameter is the target id. Other routes/conditions stay raw.
-  const fileResource = f.file.split('/').at(-1)?.replace(/\.[^.]+$/, '');
+  const fileResource = f.file.split('/').at(-1)?.replace(/\.[^.]+$/, '').toLowerCase();
   for (const part of parts) {
     const effect = /^Any authenticated user can delete any (?:other user's ([a-z]+)(?: by supplying a different user ID in the URL)?|([a-z]+) including other users' ([a-z]+)s)$/i.exec(part);
     if (effect) {
-      const target = effect[1] ?? effect[3]!;
+      const target = (effect[1] ?? effect[3]!).toLowerCase();
+      const namedResource = effect[2]?.toLowerCase();
       if (resource && resource !== target ||
-          effect[2] && effect[2] !== target && effect[2] !== `${target}s`) return;
+          namedResource && namedResource !== target && namedResource !== `${target}s`) return;
       resource = target;
       deletion = true;
     } else if (/^The endpoint only (?:checks|validates) authentication but not authorization$/i.test(part)) {
@@ -127,17 +128,18 @@ function ownerAuthorization(f: ClaimText): Contract | undefined {
     } else {
       const route = /^The DELETE \/([A-Za-z_][\w]*)\/:id endpoint only (?:checks|validates) authentication but not authorization$/i.exec(part);
       if (route) {
-        if (route[1] !== fileResource) return;
+        if (route[1]!.toLowerCase() !== fileResource) return;
         ownership = true;
         continue;
       }
       const owner = /^There is no check that the requesting user owns the ([a-z]+) being deleted$/i.exec(part);
-      if (!owner || resource && resource !== owner[1]) return;
-      resource = owner[1];
+      const ownerResource = owner?.[1]?.toLowerCase();
+      if (!ownerResource || resource && resource !== ownerResource) return;
+      resource = ownerResource;
       ownership = true;
     }
   }
-  if (!deletion || !ownership || !resource || title[1] && title[1] !== resource) return;
+  if (!deletion || !ownership || !resource || title[1] && title[1].toLowerCase() !== resource) return;
   return { kind: 'absent-owner-authorization', subject: ['authenticated user', 'DELETE', resource, 'requesting user owns target resource'],
     condition: 'Authentication alone permits deletion of another user resource without checking ownership.', observations: [] };
 }
@@ -163,6 +165,7 @@ function labelPrivilege(f: ClaimText): Contract | undefined {
   const parts = sentences(f.description);
   const core = /^The ([A-Za-z_$][\w$]*) (?:middleware|guard) checks (?:if )?([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*) === ('[^']*'|"[^"]*") (?:instead of checking a proper role field|which is a broken security check)$/i.exec(parts[0] ?? '');
   if (!core) return;
+  if (core[2]!.split('.').at(-1)?.toLowerCase() !== 'username') return;
   const literal = core[3]!.slice(1, -1);
   if ((title[1] ?? title[2])!.toLowerCase() !== literal.toLowerCase()) return;
   // The effects and remedy must refer to the same privilege named in the

@@ -26,7 +26,7 @@ describe('immutable content-addressed recovery material',() => {
       expect(await readClaimProof(join(dir,'proof.json'),join(dir,'pool'))).toEqual(value);
     } finally { await rm(dir,{ recursive:true,force:true }); }
   });
-  it.each(['missing','mutated','duplicate','unknown-tag','cycle'])('refuses %s referenced material',kind => {
+  it.each(['missing','mutated','duplicate','unknown-tag','forged-cycle'])('refuses %s referenced material',kind => {
     const packed=packRecoveryMaterial({ text: 'x'.repeat(5000) });
     let root=packed.rootSha256;
     if(kind==='missing')
@@ -40,19 +40,33 @@ describe('immutable content-addressed recovery material',() => {
       root=sha(text);
       packed.materials.push({ sha256: root,text });
     }
-    if(kind==='cycle') {
+    if(kind==='forged-cycle') {
+      // A valid content-addressed cycle would require a SHA-256 fixed point.
+      // A forged recursive reference therefore fails at digest validation.
       const text='[4,"'+root+'"]';
       root=sha(text);
       packed.materials.push({ sha256: root,text });
       packed.materials[0]!.text='changed';
     }
-    expect(() => unpackRecoveryMaterial(root,packed.materials)).toThrow();
+    expect(() => unpackRecoveryMaterial(root,packed.materials)).toThrow('recovery_material_conflict');
   });
   it('does not mistake original object keys or marker-shaped arrays for references',() => {
     const value={ '$rcl_material_sha256': 'a'.repeat(64),x: [3,'a'.repeat(64)] };
     const p=packRecoveryMaterial(value);
     expect(unpackRecoveryMaterial(p.rootSha256,p.materials)).toEqual(value);
   });
+});
+
+it('allows concurrent identical proof writers to share content-addressed material', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rcl-material-concurrent-'));
+  const pool = join(dir, 'pool');
+  const value = { original: 'x'.repeat(64_000), rows: Array.from({ length: 32 }, (_, sequence) => ({ sequence })) };
+  try {
+    const paths = Array.from({ length: 8 }, (_, index) => join(dir, `proof-${index}.json`));
+    await Promise.all(paths.map(path => writeClaimProof(path, pool, value)));
+    await expect(Promise.all(paths.map(path => readClaimProof(path, pool)))).resolves.toEqual(paths.map(() => value));
+    expect((await readdir(pool)).every(name => !name.endsWith('.tmp'))).toBe(true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 it('bounds unique retained bytes without recursively copying a prior proof pool into later proofs',() => {
   const original='x'.repeat(1024*1024);

@@ -37,5 +37,7 @@ it('evicts bounded entries and never caches duplicate-key refusal', () => {
   for (let i = 0; i < 17; i++) decodeRecoveryOriginal(original('eviction '+i));
   const calls = spy.mock.calls.length; decodeRecoveryOriginal(first); expect(spy.mock.calls.length).toBe(calls + 1);
   const duplicate = '{"x":1,"x":2,"description":"'+'x'.repeat(1200)+'"}';
+  const beforeDuplicate = spy.mock.calls.length;
   expect(() => decodeRecoveryOriginal(duplicate)).toThrow(); expect(() => decodeRecoveryOriginal(duplicate)).toThrow();
+  expect(spy.mock.calls.length).toBe(beforeDuplicate + 2);
 });
