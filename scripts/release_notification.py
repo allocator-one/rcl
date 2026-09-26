@@ -63,13 +63,15 @@ def json_response(url, *, headers=None):
 def validate_run(run, repository):
     tag = run.get('head_branch', '')
     sha = run.get('head_sha', '')
+    head_repository = run.get('head_repository')
     if (run.get('path') != '.github/workflows/release.yml'
             or run.get('event') != 'push'
             or run.get('status') != 'completed'
             or run.get('conclusion') != 'success'
-            or run.get('head_repository', {}).get('full_name') != repository
-            or not tag.startswith('v') or not STABLE.fullmatch(tag[1:])
-            or not re.fullmatch(r'[0-9a-f]{40}', sha)):
+            or not isinstance(head_repository, dict)
+            or head_repository.get('full_name') != repository
+            or not isinstance(tag, str) or not tag.startswith('v') or not STABLE.fullmatch(tag[1:])
+            or not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)):
         raise NotificationError('Expected a successful stable Release tag run in this repository')
     return tag[1:], sha
 
@@ -85,9 +87,14 @@ def previous_version(metadata, version):
     return max(earlier, key=lambda value: tuple(map(int, value.split('.'))))
 
 
-def validate_package(package, name, version, sha):
-    if (package.get('name') != name or package.get('version') != version
-            or (package.get('gitHead') and package['gitHead'] != sha)):
+def validate_package(package, name, version, sha, *, require_git_head=False):
+    if not isinstance(package, dict):
+        raise NotificationError('Published package identity does not match the release')
+    git_head = package.get('gitHead')
+    if (package.get('name') != name
+            or package.get('version') != version
+            or (git_head is not None and git_head != sha)
+            or (require_git_head and (not isinstance(git_head, str) or git_head != sha))):
         raise NotificationError('Published package identity does not match the release')
 
 
@@ -98,7 +105,10 @@ def text(value, limit):
 def build_payload(repository, version, previous, comparison):
     package, product, _key = PROJECTS[repository]
     commits = []
-    for item in comparison.get('commits', [])[:80]:
+    commits_for_summary = comparison.get('commits', [])
+    if not isinstance(commits_for_summary, list):
+        commits_for_summary = []
+    for item in commits_for_summary[-80:]:
         author = item.get('author') or {}
         commit = item.get('commit') or {}
         commits.append({
@@ -128,6 +138,23 @@ def build_payload(repository, version, previous, comparison):
         'files': [{key: text(item.get(key), 1000) if key in ('filename', 'status') else item.get(key, 0)
                    for key in ('filename', 'status', 'additions', 'deletions')} for item in files[:40]],
     }
+
+
+def latest_comparison(github, previous, version):
+    comparison_path = f'compare/v{previous}...v{version}?per_page=100'
+    comparison = github(comparison_path)
+    commits = comparison.get('commits')
+    total = comparison.get('total_commits')
+    if not isinstance(commits, list) or not isinstance(total, int) or total < len(commits):
+        raise NotificationError('Release comparison has invalid commit evidence')
+    if total <= 100:
+        return comparison
+    last_page = (total - 1) // 100 + 1
+    latest_page = github(f'{comparison_path}&page={last_page}')
+    latest_commits = latest_page.get('commits')
+    if not isinstance(latest_commits, list):
+        raise NotificationError('Release comparison has invalid commit evidence')
+    return {**comparison, 'commits': latest_commits}
 
 
 def encode_payload(payload):
@@ -183,8 +210,17 @@ def main():
     registry = f'https://registry.npmjs.org/{urllib.parse.quote(package_name, safe="")}'
     metadata = json_response(registry)
     previous = previous_version(metadata, version)
-    validate_package(metadata['versions'][version], package_name, version, sha)
-    comparison = github(f'compare/v{previous}...v{version}?per_page=100')
+    versions = metadata.get('versions', {})
+    if not isinstance(versions, dict):
+        raise NotificationError('Release version is not published on npm')
+    validate_package(versions.get(version), package_name, version, sha, require_git_head=True)
+    previous_package = versions.get(previous)
+    previous_sha = previous_package.get('gitHead') if isinstance(previous_package, dict) else None
+    if not isinstance(previous_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_sha):
+        raise NotificationError('Previous published package has no verifiable commit')
+    if github(f'commits/v{previous}').get('sha') != previous_sha:
+        raise NotificationError('Previous release tag does not match the published package')
+    comparison = latest_comparison(github, previous, version)
     if comparison.get('status') != 'ahead':
         raise NotificationError('Release comparison must advance from the previous published tag')
     payload = build_payload(repository, version, previous, comparison)
@@ -192,8 +228,8 @@ def main():
     if dry_run:
         print(f'Validated {repository} v{version}: {len(body)} bytes, {payload["included_commits"]} commits; no webhook sent.')
         return
-    response = json.loads(request(url, headers=signed_headers(secret, repository, version, body, int(time.time())), body=body))
-    print(f'Accepted {PROJECTS[repository][1]} {version}; delivery {response.get("delivery_id", "accepted")}.')
+    request(url, headers=signed_headers(secret, repository, version, body, int(time.time())), body=body)
+    print(f'Accepted {PROJECTS[repository][1]} {version}.')
 
 
 if __name__ == '__main__':

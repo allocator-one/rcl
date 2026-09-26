@@ -28,7 +28,8 @@ class ReleaseNotificationTest(unittest.TestCase):
         for change in [{'conclusion': 'failure'}, {'status': 'in_progress'},
                        {'event': 'pull_request'}, {'head_branch': 'main'},
                        {'head_branch': 'v4.1.6-beta.1'}, {'path': '.github/workflows/ci.yml'},
-                       {'head_repository': {'full_name': 'attacker/rcl'}}]:
+                       {'head_repository': {'full_name': 'attacker/rcl'}}, {'head_repository': None},
+                       {'head_branch': None}, {'head_sha': None}]:
             with self.subTest(change=change), self.assertRaises(n.NotificationError):
                 n.validate_run(self.run_data(**change), 'allocator-one/rcl')
 
@@ -52,6 +53,28 @@ class ReleaseNotificationTest(unittest.TestCase):
         self.assertNotIn('private@example.com', json.dumps(p))
         self.assertEqual(p['commits'][0]['author_name'], 'Ada')
 
+    def test_payload_keeps_the_most_recent_bounded_commits(self):
+        comparison = {'total_commits': 81, 'commits': [
+            {'sha': f'{index:040x}', 'commit': {'message': str(index), 'author': {}}, 'author': {}}
+            for index in range(81)]}
+        payload = n.build_payload('allocator-one/rcl', '4.1.6', '4.1.5', comparison)
+        self.assertEqual(payload['included_commits'], 80)
+        self.assertEqual(payload['commits'][0]['message'], '1')
+        self.assertEqual(payload['commits'][-1]['message'], '80')
+
+    def test_comparison_fetches_last_page_when_initial_page_is_not_complete(self):
+        calls = []
+
+        def github(path):
+            calls.append(path)
+            return ({'total_commits': 101, 'commits': [{}] * 100}
+                    if len(calls) == 1 else {'commits': [{'sha': 'latest'}]})
+
+        comparison = n.latest_comparison(github, '4.1.5', '4.1.6')
+        self.assertEqual(comparison['commits'], [{'sha': 'latest'}])
+        self.assertEqual(calls, ['compare/v4.1.5...v4.1.6?per_page=100',
+                                 'compare/v4.1.5...v4.1.6?per_page=100&page=2'])
+
     def test_signature_binds_exact_bytes_and_key_is_product_version_stable(self):
         body = n.encode_payload({'current_version': '4.1.6'})
         headers = n.signed_headers('x' * 43, 'allocator-one/rcl', '4.1.6', body, 123)
@@ -62,6 +85,9 @@ class ReleaseNotificationTest(unittest.TestCase):
 
     def test_rejects_wrong_publication_identity(self):
         n.validate_package({'name': 'review-council', 'version': '4.1.6'}, 'review-council', '4.1.6', 'a' * 40)
+        with self.assertRaises(n.NotificationError):
+            n.validate_package({'name': 'review-council', 'version': '4.1.6'}, 'review-council', '4.1.6', 'a' * 40,
+                               require_git_head=True)
         for publication in [{'name': 'other', 'version': '4.1.6'},
                             {'name': 'review-council', 'version': '4.1.5'},
                             {'name': 'review-council', 'version': '4.1.6', 'gitHead': 'b' * 40}]:
@@ -70,15 +96,18 @@ class ReleaseNotificationTest(unittest.TestCase):
 
     def test_end_to_end_verification_posts_only_after_all_evidence_matches(self):
         manifest = {'name': 'review-council', 'version': '4.1.6'}
+        published_manifest = {**manifest, 'gitHead': 'a' * 40}
+        previous_manifest = {'name': 'review-council', 'version': '4.1.5', 'gitHead': 'b' * 40}
         responses = [self.run_data(), {'sha': 'a' * 40},
                      {'content': base64.b64encode(json.dumps(manifest).encode()).decode()},
-                     {'versions': {'4.1.5': {}, '4.1.6': manifest}},
+                     {'versions': {'4.1.5': previous_manifest, '4.1.6': published_manifest}},
+                     {'sha': 'b' * 40},
                      {'status': 'ahead', 'total_commits': 1, 'commits': [], 'files': []}]
         env = {'GITHUB_REPOSITORY': 'allocator-one/rcl', 'RELEASE_RUN_ID': '42', 'GH_TOKEN': 'private-github-token',
                'INFRA_ONE_RELEASE_WEBHOOK_URL': 'https://venture.infra.one/api/webhooks/automations/56840af9-aa90-4afe-98cf-45fcd42bd0fe',
                'INFRA_ONE_RELEASE_WEBHOOK_SECRET': 'x' * 43}
         with patch.dict(os.environ, env, clear=True), patch.object(n, 'json_response', side_effect=responses), \
-                patch.object(n, 'request', return_value=b'{"delivery_id":"delivery-1"}') as post, \
+                patch.object(n, 'request', return_value=b'') as post, \
                 contextlib.redirect_stdout(io.StringIO()):
             n.main()
         self.assertEqual(post.call_count, 1)
