@@ -82,6 +82,7 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
+import { matchesGuardedDelivery } from './converge/delivery-reconcile.js';
 import { validateLaunchOutputs, validateLaunchProviders } from './converge/launch-preflight.js';
 import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
 import { readStable, sha256 } from './telemetry/recovery/files.js';
@@ -132,6 +133,8 @@ import type { TelemetryLevel } from './telemetry/envelope.js';
 import { uuidv7 } from './report/uuid.js';
 import { runEvidenceStatus } from './evidence/status.js';
 import { runEvidenceShow } from './evidence/show.js';
+import { getRun } from './evidence/reads.js';
+import { openReadSink } from './telemetry/read-sink.js';
 import { runFindingRecovery, type FindingRecoveryOptions } from './evidence/recover-finding.js';
 import { runOriginalRecovery, type OriginalRunOptions } from './evidence/recover-run.js';
 import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retriage-finding.js';
@@ -1902,6 +1905,17 @@ async function executeCouncil(
           throw new ReviewLaunchRefused('insufficient_reviewers', 'Convergence needs at least two reviewer assignments for a conclusive round.');
         }
         await validateLaunchOutputs(opts);
+      },
+      confirmDelivery: async previous => {
+        if (!previous.runId || !previous.reportJsonSha256) return false;
+        const opened = await openReadSink({ rclVersion: RCL_VERSION, cwd: process.cwd() });
+        if (!opened.sink) return false;
+        const outcome = await getRun(opened.sink, previous.runId);
+        return outcome.kind === 'ok' && matchesGuardedDelivery(outcome.value, {
+          runId: previous.runId, target: prepared.converge!.target,
+          round: previous.round, attempt: previous.attempt, headSha: previous.headSha,
+          reportJsonSha256: previous.reportJsonSha256,
+        });
       },
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({

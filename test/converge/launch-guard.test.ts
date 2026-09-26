@@ -77,6 +77,37 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 
+  it('retries an inconclusive delivered run only after exact receipt reconciliation', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
+      deliveryPending: true, hardFailure: true });
+    await guardReviewLaunch(options);
+    await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    const confirmDelivery = vi.fn().mockResolvedValue(true);
+    await guardReviewLaunch({ ...options, confirmDelivery,
+      retryReason: 'Original run received after flush; reviewer quorum was inconclusive.' });
+
+    expect(confirmDelivery).toHaveBeenCalledWith(expect.objectContaining({ runId: completion.runId,
+      reportJsonSha256: completion.reportJsonSha256, attempt: 1, round: 1 }));
+    expect(options.run).toHaveBeenCalledTimes(2);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
+  });
+
+  it('keeps the original attempt when delivery reconciliation is unavailable', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
+      deliveryPending: true, hardFailure: true });
+    await guardReviewLaunch(options);
+    await processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1,
+      findings: [], runId: completion.runId, reportSha256: completion.reportJsonSha256 });
+    await expect(guardReviewLaunch({ ...options, confirmDelivery: vi.fn().mockResolvedValue(false),
+      retryReason: 'Original run received after flush.' })).rejects.toThrow('delivery_pending');
+
+    expect(options.run).toHaveBeenCalledTimes(1);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
   it('does not let old delivery metadata block a materially changed input after native admission', async () => {
     const options = await fixture();
     options.run = vi.fn().mockResolvedValue({ ...completion, deliveryPending: true });

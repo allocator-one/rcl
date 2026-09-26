@@ -54,6 +54,8 @@ export interface GuardedLaunchOptions {
   intent?: 'review' | 'stop-upstream' | 'stop-review' | 'retry-delivery';
   retryReason?: string;
   validate: () => Promise<void>;
+  /** Authenticated exact-run receipt check; no local delivery flag is trusted on its own. */
+  confirmDelivery?: (previous: GuardedLaunchState) => Promise<boolean>;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
   run: (context: ConvergeContext) => Promise<GuardedLaunchCompletion>;
 }
@@ -119,7 +121,11 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   if (previous.deliveryPending && ((previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) ||
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
-    refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
+    const delivered = previous.runId && previous.reportJsonSha256 && options.confirmDelivery
+      ? await options.confirmDelivery(previous).catch(() => false) : false;
+    if (!delivered) {
+      refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
+    }
   }
   const healthy = hasHealthyGuardedLaunch(previous);
   let disposed = false;
