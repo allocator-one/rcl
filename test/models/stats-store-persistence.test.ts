@@ -6,8 +6,8 @@ import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import { appendCalls, appendOutcomes, loadModelStats } from '../../src/models/stats-store.js';
 
-const fault = vi.hoisted(() => ({ syncFailures: 0, syncAttempts: 0, partialWrite: false,
-  directory: '', openDenied: '' }));
+const fault = vi.hoisted(() => ({ syncFailures: 0, syncAttempts: 0, readAttempts: 0, partialWrite: false,
+  directory: '', openDenied: '', openedPaths: [] as string[] }));
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
@@ -15,8 +15,10 @@ vi.mock('node:fs/promises', async original => {
       throw Object.assign(new Error('Injected read-only model history'), { code: 'EROFS' });
     }
     const handle = await fs.open(...args);
+    fault.openedPaths.push(String(args[0]));
     if (String(args[0]) === fault.directory || ['calls.jsonl', 'outcomes.jsonl'].includes(basename(String(args[0])))) {
       const sync = handle.sync.bind(handle);
+      const read = handle.readFile.bind(handle);
       const write = handle.writeFile.bind(handle);
       handle.sync = async () => {
         fault.syncAttempts++;
@@ -35,6 +37,10 @@ vi.mock('node:fs/promises', async original => {
         }
         return write(...input);
       };
+      handle.readFile = async (...input: Parameters<typeof handle.readFile>) => {
+        fault.readAttempts++;
+        return read(...input);
+      };
     }
     return handle;
   } };
@@ -51,8 +57,8 @@ const outcome = (recordId: string, sequence: number, verdict: 'fixed' | 'dismiss
 
 beforeEach(async () => { dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-history-persistence-'))); });
 afterEach(async () => {
-  fault.syncFailures = 0; fault.syncAttempts = 0; fault.partialWrite = false;
-  fault.directory = ''; fault.openDenied = '';
+  fault.syncFailures = 0; fault.syncAttempts = 0; fault.readAttempts = 0; fault.partialWrite = false;
+  fault.directory = ''; fault.openDenied = ''; fault.openedPaths = [];
   await rm(dir, { recursive: true, force: true });
 });
 const records = async (file: string) => (await readFile(join(dir, file), 'utf8')).trim().split('\n').flatMap(line => {
@@ -137,6 +143,36 @@ it('keeps a complete last record without a newline when retry repairs its separa
   await writeFile(join(dir, 'calls.jsonl'), JSON.stringify(call('operation:0')));
   await appendCalls([call('operation:0'), call('operation:1')], dir);
   expect((await records('calls.jsonl')).map(row => row.recordId)).toEqual(['operation:0', 'operation:1']);
+});
+
+it('keeps legacy writes append-only without rereading retained history', async () => {
+  await appendCalls([{ ...call('legacy:0'), recordId: undefined }], dir);
+  expect(fault.readAttempts).toBe(0);
+});
+
+it('does not sync the filesystem root while making a nested store durable', async () => {
+  const nested = join(dir, 'nested', 'store');
+  await appendCalls([call('operation:0')], nested);
+  expect(fault.openedPaths).not.toContain('/');
+  expect(fault.openedPaths).toContain(dir);
+  expect(fault.openedPaths).toContain(nested);
+});
+
+it('skips malformed retained rows instead of bricking the rest of the history', async () => {
+  await writeFile(join(dir, 'calls.jsonl'), [
+    JSON.stringify(call('legacy:0')),
+    JSON.stringify({ ...call('broken:0'), recordId: 'contains spaces' }),
+  ].join('\n'));
+  await appendCalls([call('operation:0')], dir);
+  expect((await loadModelStats({ dir, now }))[0]?.calls).toBe(2);
+});
+
+it('keeps the last physical legacy outcome when its timestamp is older', async () => {
+  await appendOutcomes([{ ...outcome('legacy:0', 1, 'fixed'), recordId: undefined, order: undefined,
+    ts: '2026-09-22T12:00:00Z' }], dir);
+  await appendOutcomes([{ ...outcome('legacy:1', 1, 'dismissed'), recordId: undefined, order: undefined,
+    ts: '2026-09-22T11:00:00Z' }], dir);
+  expect((await loadModelStats({ dir, now }))[0]).toMatchObject({ outcomes: 1, fixed: 0 });
 });
 
 it('rejects invalid retained ordering before creating a store', async () => {

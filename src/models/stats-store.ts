@@ -81,6 +81,7 @@ export { resolveDataDir };
 const APPEND_CHUNK_BYTES = 64 * 1024;
 
 type PrecisionRecord = OutcomeRecord | CallRecord;
+type IdentityIndex = { byId: Map<string, PrecisionRecord>; byOrder: Map<string, OutcomeRecord> };
 
 function validateMetadata(record: PrecisionRecord): void {
   if (record.recordId !== undefined && (typeof record.recordId !== 'string' ||
@@ -102,7 +103,7 @@ function parseJsonl<T>(raw: string): T[] {
   return result;
 }
 
-function identityIndex(records: PrecisionRecord[]): Map<string, PrecisionRecord> {
+function identityIndex(records: PrecisionRecord[]): IdentityIndex {
   const byId = new Map<string, PrecisionRecord>();
   const byOrder = new Map<string, OutcomeRecord>();
   for (const record of records) {
@@ -118,7 +119,52 @@ function identityIndex(records: PrecisionRecord[]): Map<string, PrecisionRecord>
     if (prior && !isDeepStrictEqual(prior, record)) throw new Error('precision_record_conflict');
     byId.set(record.recordId, record);
   }
-  return byId;
+  return { byId, byOrder };
+}
+
+/** Existing history can contain torn or older malformed rows; preserve bytes and use valid first-seen records. */
+function readableRecords<T extends PrecisionRecord>(records: T[]): T[] {
+  const accepted: T[] = [];
+  const seen = { byId: new Map<string, PrecisionRecord>(), byOrder: new Map<string, OutcomeRecord>() };
+  for (const record of records) {
+    try {
+      validateMetadata(record);
+    } catch { /* Existing corrupt metadata loses one record, never the store. */
+      continue;
+    }
+    if ('order' in record && record.order) {
+      const key = JSON.stringify([record.target, record.findingKey, record.order.scope, record.order.sequence]);
+      const prior = seen.byOrder.get(key);
+      if (prior && !isDeepStrictEqual(prior, record)) throw new Error('precision_order_conflict');
+      seen.byOrder.set(key, record);
+    }
+    if (record.recordId !== undefined) {
+      const prior = seen.byId.get(record.recordId);
+      if (prior && !isDeepStrictEqual(prior, record)) throw new Error('precision_record_conflict');
+      seen.byId.set(record.recordId, record);
+    }
+    accepted.push(record);
+  }
+  return accepted;
+}
+
+async function syncDirectoryAncestors(inputDir: string): Promise<string> {
+  const target = resolve(inputDir);
+  await mkdir(target, { recursive: true, mode: 0o700 });
+  const dir = await realpath(target);
+  for (let path = dir; ; path = dirname(path)) {
+    await syncNativeDirectory(path);
+    if (dirname(path) === path || dirname(path) === '/') break;
+  }
+  return dir;
+}
+
+async function trailingSeparator(handle: Awaited<ReturnType<typeof open>>): Promise<string> {
+  const { size } = await handle.stat();
+  if (size === 0) return '';
+  const tail = Buffer.alloc(1);
+  await handle.read(tail, 0, 1, size - 1);
+  return tail[0] === 10 ? '' : '\n';
 }
 
 async function appendJsonl(inputDir: string, file: string, input: PrecisionRecord[]): Promise<void> {
@@ -127,35 +173,39 @@ async function appendJsonl(inputDir: string, file: string, input: PrecisionRecor
   const records = JSON.parse(JSON.stringify(input)) as PrecisionRecord[];
   records.forEach(validateMetadata);
   identityIndex(records);
-  await mkdir(resolve(inputDir), { recursive: true, mode: 0o700 });
-  const dir = await realpath(resolve(inputDir));
-  // An earlier mkdir may have succeeded before its parent flush failed. An
-  // existing path on retry does not prove those directory entries are durable.
-  for (let path = dir; ; path = dirname(path)) {
-    await syncNativeDirectory(path);
-    if (dirname(path) === path) break;
-  }
+  // An earlier mkdir may have succeeded before its parent flush failed. Sync
+  // its ancestry on every retry, but never attempt the filesystem root.
+  const dir = await syncDirectoryAncestors(inputDir);
   await withNativeLock(join(dir, 'model-stats-locks'), file, async () => {
     const handle = await open(join(dir, file), constants.O_CREAT | constants.O_RDWR | constants.O_APPEND |
       (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600);
     try {
       if (!(await handle.stat()).isFile()) throw new Error('invalid_precision_store');
-      const raw = await handle.readFile('utf8');
-      const existing = identityIndex(parseJsonl<PrecisionRecord>(raw));
-      identityIndex([...existing.values(), ...records]);
+      const retained = records.some(record => record.recordId !== undefined);
+      const raw = retained ? await handle.readFile('utf8') : '';
+      const existingRecords = retained ? readableRecords(parseJsonl<PrecisionRecord>(raw)) : [];
+      const existing = identityIndex(existingRecords);
       const pending: PrecisionRecord[] = [];
       for (const record of records) {
-        const prior = record.recordId === undefined ? undefined : existing.get(record.recordId);
+        const prior = record.recordId === undefined ? undefined : existing.byId.get(record.recordId);
         if (prior) {
           if (!isDeepStrictEqual(prior, record)) throw new Error('precision_record_conflict');
         } else {
+          if ('order' in record && record.order) {
+            const key = JSON.stringify([record.target, record.findingKey, record.order.scope, record.order.sequence]);
+            const priorOrder = existing.byOrder.get(key);
+            if (priorOrder && !isDeepStrictEqual(priorOrder, record)) throw new Error('precision_order_conflict');
+            existing.byOrder.set(key, record);
+          }
           pending.push(record);
-          if (record.recordId !== undefined) existing.set(record.recordId, record);
+          if (record.recordId !== undefined) existing.byId.set(record.recordId, record);
         }
       }
       // Never concatenate a retry to a torn tail or an un-terminated complete
       // record. Its original bytes remain intact; only the separator is added.
-      let chunk = raw.length > 0 && !raw.endsWith('\n') ? '\n' : '';
+      let chunk = retained
+        ? (raw.length > 0 && !raw.endsWith('\n') ? '\n' : '')
+        : await trailingSeparator(handle);
       for (const record of pending) {
         chunk += JSON.stringify(record) + '\n';
         if (Buffer.byteLength(chunk) >= APPEND_CHUNK_BYTES) {
@@ -186,8 +236,7 @@ async function readJsonl<T extends PrecisionRecord>(dir: string, file: string): 
   } catch {
     return [];
   }
-  const parsed = parseJsonl<T>(raw);
-  identityIndex(parsed);
+  const parsed = readableRecords(parseJsonl<T>(raw));
   const seen = new Set<string>();
   return parsed.filter(record => {
     if (record.recordId === undefined) return true;
@@ -204,7 +253,7 @@ function laterOutcome(candidate: OutcomeRecord, current: OutcomeRecord): boolean
     }
     return candidate.order.sequence > current.order.sequence;
   }
-  return Date.parse(candidate.ts) >= Date.parse(current.ts);
+  return true;
 }
 
 /**
