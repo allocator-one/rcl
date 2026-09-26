@@ -1,5 +1,5 @@
 import { readStable } from '../telemetry/recovery/files.js';
-import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
+import { serializeRecoveryDocument, writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
 import { lockSystemCommand } from '../evidence/original-run/lock-scope.js';
 import { ReviewCycleRejected } from './cycle-remote.js';
@@ -17,6 +17,7 @@ import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js
 import { cycleHistorySchema, nativeReviewCycleSchema, reviewCycleReceiptSchema,
   type NativeReviewCycle, type ReviewCycleRemote } from './review-cycle.js';
 
+const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const hash = (value: Buffer) => createHash('sha256').update(value).digest('hex');
 const snapshotSchema = z.object({ bytes: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().nullable();
 const archiveSchema = z.object({
@@ -123,7 +124,7 @@ export async function assertFreshReviewClaim(common: string, target: string, ope
 }
 
 async function readArchive(directory: string, operation: Operation): Promise<Archive> {
-  const bytes = (await readStable(join(directory, `${operation.operationId}.archive.json`), 64 * 1024 * 1024)).raw;
+  const bytes = (await readStable(join(directory, `${operation.operationId}.archive.json`), MAX_ARCHIVE_BYTES)).raw;
   if (hash(bytes) !== operation.archiveSha256) throw new Error('fresh_review_archive_changed');
   const archive = archiveSchema.parse(JSON.parse(bytes.toString()));
   if (archive.target !== operation.target || archive.operationId !== operation.operationId) throw new Error('fresh_review_archive_mismatch');
@@ -140,7 +141,7 @@ export async function verifyReviewCycle(common: string, target: string, cycle: N
   if (cycle.archivePath !== join(directory, `${cycle.operationId}.archive.json`)) throw new Error('fresh_review_archive_path_mismatch');
   await inspectDirectory(dirname(directory));
   await inspectDirectory(directory);
-  const bytes = (await readStable(cycle.archivePath, 64 * 1024 * 1024)).raw;
+  const bytes = (await readStable(cycle.archivePath, MAX_ARCHIVE_BYTES)).raw;
   if (hash(bytes) !== cycle.archiveSha256) throw new Error('fresh_review_archive_changed');
   const archive = archiveSchema.parse(JSON.parse(bytes.toString()));
   if (archive.target !== target || archive.operationId !== cycle.operationId || !isDeepStrictEqual(archive.history, cycle.history)) {
@@ -174,6 +175,11 @@ export async function prepareFreshReview(options: FreshReviewOptions): Promise<F
     const archive: Archive = { version: 1, target: options.target, operationId, history,
       files: { run: await snapshot(convergeRunStatePath(common, options.target)),
         attempts: await snapshot(convergeAttemptStatePath(common, options.target)), ledger } };
+    // Bound the exact encoded document before publishing any operation/barrier.
+    // Each individually bounded snapshot may grow during base64 encoding.
+    if (Buffer.byteLength(serializeRecoveryDocument(archive)) > MAX_ARCHIVE_BYTES) {
+      throw new Error('fresh_review_archive_too_large: prior history exceeds the supported archive limit; no fresh operation was published');
+    }
     await privateDirectory(dirname(directory));
     await privateDirectory(directory);
     const archivePath = join(directory, `${operationId}.archive.json`);

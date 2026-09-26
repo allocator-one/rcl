@@ -420,3 +420,22 @@ it('does not replay an older completed report as a changed-head unfinished reque
   expect(options.run).toHaveBeenCalledTimes(1);
   expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
 });
+
+it('refuses an oversized encoded archive before publishing an operation or changing prior spending', async () => {
+  const { reviewCycleDirectory } = await import('../../src/converge/fresh-review.js');
+  const options = await freshFixture();
+  await guardReviewLaunch(options);
+  const runPath = convergeRunStatePath(options.gitCommonDir, options.target);
+  const attemptPath = convergeAttemptStatePath(options.gitCommonDir, options.target);
+  const pointerPath = join(reviewCycleDirectory(options.gitCommonDir, options.target), 'current.json');
+  const before = await Promise.all([runPath, attemptPath, pointerPath].map(path => readFile(path)));
+  const ledger = join(options.gitCommonDir, `rcl-converge-${options.target}-ledger.md`);
+  await writeFile(ledger, Buffer.alloc(49 * 1024 * 1024, 32));
+  await expect(guardReviewLaunch(options)).rejects.toThrow('fresh_review_archive_too_large');
+  expect(await Promise.all([runPath, attemptPath, pointerPath].map(path => readFile(path)))).toEqual(before);
+  expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
+  expect(options.run).toHaveBeenCalledTimes(1);
+  await rm(ledger);
+  await guardReviewLaunch(options);
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ attemptsUsed: 1, cycle: { history: { attempts: 1 } } });
+});

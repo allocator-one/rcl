@@ -134,7 +134,7 @@ export class HarnessSink {
   /** Actor-authorized cycle creation; never fall back from a run-bound credential. */
   async startReviewCycle(repo: string, prNumber: number, request: ReviewCycleRequest): Promise<SinkOutcome<ReviewCycleReceipt>> {
     if (this.credentialSource === 'attest') throw new Error('fresh_review_requires_actor_credential');
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || !Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('fresh_review_requires_pr');
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split('/').some(segment => segment === '.' || segment === '..') || !Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('fresh_review_requires_pr');
     const path = `/api/v1/reviews/prs/${repo.split('/').map(encodeURIComponent).join('/')}/${prNumber}/cycles`;
     const result = await this.request('POST', path, JSON.stringify(request), 'application/json');
     return this.classify(result, body => {
