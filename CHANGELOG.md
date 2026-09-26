@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 4.1.10 - 2026-09-26
+
+- Reconcile a successfully delivered, authenticated guarded run with its exact native launch record after `telemetry flush --run`, clearing only the pending-delivery marker. Attempt, round, report identity and failure accounting remain unchanged; mismatched evidence remains refused (RCL-130).
+
+
 ## 4.1.9 - 2026-09-26
 
 - Retry supported transient provider transport failures within the existing call
