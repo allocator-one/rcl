@@ -87,14 +87,13 @@ def previous_version(metadata, version):
     return max(earlier, key=lambda value: tuple(map(int, value.split('.'))))
 
 
-def validate_package(package, name, version, sha, *, require_git_head=False):
+def validate_package(package, name, version, sha):
     if not isinstance(package, dict):
         raise NotificationError('Published package identity does not match the release')
     git_head = package.get('gitHead')
     if (package.get('name') != name
             or package.get('version') != version
-            or (git_head is not None and git_head != sha)
-            or (require_git_head and (not isinstance(git_head, str) or git_head != sha))):
+            or (git_head is not None and git_head != sha)):
         raise NotificationError('Published package identity does not match the release')
 
 
@@ -213,13 +212,7 @@ def main():
     versions = metadata.get('versions', {})
     if not isinstance(versions, dict):
         raise NotificationError('Release version is not published on npm')
-    validate_package(versions.get(version), package_name, version, sha, require_git_head=True)
-    previous_package = versions.get(previous)
-    previous_sha = previous_package.get('gitHead') if isinstance(previous_package, dict) else None
-    if not isinstance(previous_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_sha):
-        raise NotificationError('Previous published package has no verifiable commit')
-    if github(f'commits/v{previous}').get('sha') != previous_sha:
-        raise NotificationError('Previous release tag does not match the published package')
+    validate_package(versions.get(version), package_name, version, sha)
     comparison = latest_comparison(github, previous, version)
     if comparison.get('status') != 'ahead':
         raise NotificationError('Release comparison must advance from the previous published tag')

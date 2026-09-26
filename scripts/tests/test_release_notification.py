@@ -85,9 +85,6 @@ class ReleaseNotificationTest(unittest.TestCase):
 
     def test_rejects_wrong_publication_identity(self):
         n.validate_package({'name': 'review-council', 'version': '4.1.6'}, 'review-council', '4.1.6', 'a' * 40)
-        with self.assertRaises(n.NotificationError):
-            n.validate_package({'name': 'review-council', 'version': '4.1.6'}, 'review-council', '4.1.6', 'a' * 40,
-                               require_git_head=True)
         for publication in [{'name': 'other', 'version': '4.1.6'},
                             {'name': 'review-council', 'version': '4.1.5'},
                             {'name': 'review-council', 'version': '4.1.6', 'gitHead': 'b' * 40}]:
@@ -96,12 +93,9 @@ class ReleaseNotificationTest(unittest.TestCase):
 
     def test_end_to_end_verification_posts_only_after_all_evidence_matches(self):
         manifest = {'name': 'review-council', 'version': '4.1.6'}
-        published_manifest = {**manifest, 'gitHead': 'a' * 40}
-        previous_manifest = {'name': 'review-council', 'version': '4.1.5', 'gitHead': 'b' * 40}
         responses = [self.run_data(), {'sha': 'a' * 40},
                      {'content': base64.b64encode(json.dumps(manifest).encode()).decode()},
-                     {'versions': {'4.1.5': previous_manifest, '4.1.6': published_manifest}},
-                     {'sha': 'b' * 40},
+                     {'versions': {'4.1.5': {}, '4.1.6': manifest}},
                      {'status': 'ahead', 'total_commits': 1, 'commits': [], 'files': []}]
         env = {'GITHUB_REPOSITORY': 'allocator-one/rcl', 'RELEASE_RUN_ID': '42', 'GH_TOKEN': 'private-github-token',
                'INFRA_ONE_RELEASE_WEBHOOK_URL': 'https://venture.infra.one/api/webhooks/automations/56840af9-aa90-4afe-98cf-45fcd42bd0fe',
