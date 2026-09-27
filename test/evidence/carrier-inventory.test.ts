@@ -49,6 +49,22 @@ function fixture(legacy = true) {
 async function read(f: ReturnType<typeof fixture>) { return readCarrierInventory(f.sink, f.projection.carrier, f.actor); }
 
 describe('authenticated carrier inventory', () => {
+  it('refuses a self-consistent artifact that differs from the authenticated run digest', async () => {
+    const f = fixture(false);
+    expect((await read(f)).kind).toBe('ok');
+    const source = f.sources[0]!;
+    const original = source.reportJson!;
+    const report = JSON.parse(original);
+    report.findings[0].title = 'Altered cache entries';
+    const alternate = JSON.stringify(report);
+    expect(Buffer.byteLength(alternate)).toBe(Buffer.byteLength(original));
+    expect(sha(alternate)).not.toBe(source.selector.reportSha256);
+    // The transport body and header agree; the authenticated run stays pinned.
+    source.reportJson = alternate;
+    source.selector.reportSha256 = sha(alternate);
+    expect(await read(f)).toMatchObject({ kind: 'conflict', message: 'carrier_inventory_artifact_changed' });
+  });
+
   it('rejects a carrier classification ID that differs from the authenticated run', async () => {
     const f = fixture(false);
     f.projection.carrier.classificationId = uuid(999);

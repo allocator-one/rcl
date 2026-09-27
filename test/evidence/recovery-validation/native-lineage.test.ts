@@ -57,6 +57,25 @@ function twoStepLineage() {
 }
 
 describe('retained snapshot lineage', () => {
+  it('refuses a foreign target for otherwise valid current state', () => {
+    const f = recoveredFixture();
+    const current = JSON.stringify(f.state);
+    expect(verifyNativeRecoveryLineage(current, target, [f.sourceJson]).original).toEqual(JSON.parse(f.sourceJson));
+    expect(() => verifyNativeRecoveryLineage(current, 'other-retained-target', [f.sourceJson]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
+  it('refuses an exactly hashed foreign-target predecessor', () => {
+    const f = recoveredFixture();
+    expect(verifyNativeRecoveryLineage(JSON.stringify(f.state), target, [f.sourceJson]).original)
+      .toEqual(JSON.parse(f.sourceJson));
+    const foreign = JSON.stringify({ ...JSON.parse(f.sourceJson), target: 'other-retained-target' });
+    const current = structuredClone(f.state);
+    current.recovery.operations[0]!.sourceSha256 = sha(foreign);
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(current), target, [foreign]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
   it.each(['scalar-anchors', 'missing-anchors', 'null-anchor', 'invalid-anchor-identity',
     'scalar-receipts', 'missing-receipts', 'null-operation', 'invalid-operation-id',
     'invalid-source-version', 'invalid-source-digest'])('refuses %s in an otherwise valid recovery lineage', change => {
