@@ -432,6 +432,7 @@ export function exportCheckpointProof(journal: CheckpointJournal): Promise<Check
 
 export class CheckpointJournal {
   private needsResync = false;
+  private verificationAcknowledgment?: { ownership: NativeTargetOwnership; sequence: number; digest: string };
   private constructor(private readonly path: string, private readonly plan: FrozenCheckpointPlan, private readonly commonDir?: string) {}
 
   static async create(input: { commonDir: string; namespace: string; plan: FrozenCheckpointPlan; ownership: NativeTargetOwnership }): Promise<CheckpointJournal> {
@@ -674,13 +675,28 @@ export class CheckpointJournal {
       const record = prior ? undefined : appendVerificationRecordToValidatedRecords(snapshot, event, context);
       if (!state && event.type !== 'plan') throw new Error('checkpoint_verification_missing_plan');
       const directory = await ensurePrivateChild(this.path, 'verification'); await ensurePrivateChild(directory, 'events');
-      for (const existing of records) {
-        await syncExisting(join(directory, 'events', eventFile(existing.sequence)), `${canonical(existing as unknown as Json)}\n`, true,
-          { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+      const tip = records.at(-1);
+      const acknowledged = this.verificationAcknowledgment;
+      const canSkipHistorySync = tip !== undefined && acknowledged?.ownership === ownership &&
+        acknowledged.sequence === tip.sequence && acknowledged.digest === tip.digest;
+      try {
+        if (!canSkipHistorySync) {
+          for (const existing of records) {
+            await syncExisting(join(directory, 'events', eventFile(existing.sequence)), `${canonical(existing as unknown as Json)}\n`, true,
+              { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
+          }
+        }
+        if (!record) return false;
+        await publishEventExclusive(directory, eventFile(record.sequence), `${canonical(record as unknown as Json)}\n`, MAX_ARTIFACT_BYTES);
+        this.verificationAcknowledgment = { ownership, sequence: record.sequence, digest: record.digest };
+        return true;
+      } catch (error) {
+        this.verificationAcknowledgment = undefined;
+        throw error;
       }
-      if (!record) return false;
-      await publishEventExclusive(directory, eventFile(record.sequence), `${canonical(record as unknown as Json)}\n`, MAX_ARTIFACT_BYTES);
-      return true;
+    }).catch(error => {
+      this.verificationAcknowledgment = undefined;
+      throw error;
     });
   }
 
@@ -912,8 +928,8 @@ export class CheckpointJournal {
     await syncExisting(join(this.path, 'plan.json'), `${canonical(this.plan as unknown as Json)}\n`);
     for (const record of state.records) await this.syncRecord(record);
   }
-  private async append(record: Omit<JournalRecord, 'sequence' | 'previousDigest' | 'digest'>): Promise<void> {
-    const { state, bytesRead } = await this.readValidated();
+  private async append(record: Omit<JournalRecord, 'sequence' | 'previousDigest' | 'digest'>, snapshot: { state: CheckpointState; bytesRead: number }): Promise<void> {
+    const { state, bytesRead } = snapshot;
     const previousDigest = state.records.at(-1)?.digest ?? this.plan.digest;
     const unsigned = { ...record, sequence: state.records.length + 1, previousDigest } as Omit<JournalRecord, 'digest'>;
     const complete = { ...unsigned, digest: recordDigest(unsigned) };
@@ -933,7 +949,7 @@ export class CheckpointJournal {
     if (Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('checkpoint_invalid_binding');
     const binding = { name: parsed.data, file: bindingFile(parsed.data), sha256: sha256(bytes) };
     return this.write(ownership, async () => {
-      const { state, bindings } = await this.readValidated();
+      const snapshot = await this.readValidated(); const { state, bindings } = snapshot;
       const prior = state.records.find(record => record.type === 'binding' && record.binding?.name === binding.name);
       if (prior) {
         if (bindings[binding.name] !== bytes) throw new Error('checkpoint_binding_conflict');
@@ -951,7 +967,7 @@ export class CheckpointJournal {
         });
         await syncExisting(path, bytes, true, { singleLink: true });
       }
-      await this.append({ type: 'binding', binding });
+      await this.append({ type: 'binding', binding }, snapshot);
     });
   }
 
@@ -959,7 +975,7 @@ export class CheckpointJournal {
     const attempt = snapshotAttempt(paidAttempt);
     return this.write(ownership, async () => {
       this.cell(cell);
-      const state = await this.read();
+      const snapshot = await this.readValidated(); const state = snapshot.state;
       if (state.finalized) throw new Error('checkpoint_finalized');
       const prior = state.records.find(record => record.type === 'intent' && record.paidAttempt?.id === attempt.id);
       if (prior) {
@@ -968,7 +984,7 @@ export class CheckpointJournal {
         return;
       }
       if (state.successes.some(success => success.cell === cell)) throw new Error('checkpoint_success_immutable');
-      await this.append({ type: 'intent', cell, paidAttempt: attempt });
+      await this.append({ type: 'intent', cell, paidAttempt: attempt }, snapshot);
     });
   }
   async recordUncertain(cell: string, paidAttempt: PaidAttempt, reason: string, ownership: NativeTargetOwnership): Promise<void> {
@@ -976,14 +992,14 @@ export class CheckpointJournal {
     requireText(reason, 'reason');
     return this.write(ownership, async () => {
       this.cell(cell);
-      const state = await this.read();
+      const snapshot = await this.readValidated(); const state = snapshot.state;
       if (state.finalized) throw new Error('checkpoint_finalized');
       if (!state.records.some(record => record.type === 'intent' && record.cell === cell && record.paidAttempt?.id === attempt.id && record.paidAttempt.kind === attempt.kind)) throw new Error('checkpoint_missing_intent');
       const prior = state.records.find(record => record.type === 'uncertain' && record.cell === cell && record.paidAttempt?.id === attempt.id && record.reason === reason);
       if (prior) { await this.syncRecord(prior); return; }
       if (state.records.some(record => record.type === 'result' && record.cell === cell && record.paidAttempt?.id === attempt.id)) throw new Error('checkpoint_terminal_result_exists');
       if (state.successes.some(success => success.cell === cell)) throw new Error('checkpoint_success_immutable');
-      await this.append({ type: 'uncertain', cell, paidAttempt: attempt, reason });
+      await this.append({ type: 'uncertain', cell, paidAttempt: attempt, reason }, snapshot);
     });
   }
   async recordResult(cell: string, paidAttempt: PaidAttempt, result: CheckpointResult, ownership: NativeTargetOwnership): Promise<void> {
@@ -991,7 +1007,7 @@ export class CheckpointJournal {
     this.cell(cell);
     validateResult(captured, this.plan.cells.find(candidate => candidate.id === cell)!);
     return this.write(ownership, async () => {
-      const state = await this.read();
+      const snapshot = await this.readValidated(); const state = snapshot.state;
       if (state.finalized) throw new Error('checkpoint_finalized');
       const existing = state.records.find(record => record.type === 'result' && record.cell === cell && record.paidAttempt?.id === attempt.id);
       if (existing) {
@@ -1012,7 +1028,7 @@ export class CheckpointJournal {
         });
         await syncExisting(resultPath, captured.reviewBytes, true, { singleLink: true });
       }
-      await this.append({ type: 'result', cell, paidAttempt: attempt, result: { kind: captured.kind, chunk: captured.chunk, reviewSha256: sha256(captured.reviewBytes), resultFile, ...(captured.kind === 'failure' ? { possiblyBilled: captured.possiblyBilled } : {}) } });
+      await this.append({ type: 'result', cell, paidAttempt: attempt, result: { kind: captured.kind, chunk: captured.chunk, reviewSha256: sha256(captured.reviewBytes), resultFile, ...(captured.kind === 'failure' ? { possiblyBilled: captured.possiblyBilled } : {}) } }, snapshot);
     });
   }
 
@@ -1027,10 +1043,10 @@ export class CheckpointJournal {
         const { sealAsyncPhase } = await import('./checkpoint-async-store.js');
         await sealAsyncPhase({ commonDir: this.commonDir!, namespace: basename(this.path), plan: this.plan, ownership: active });
       }
-      const state = await this.read();
+      const snapshot = await this.readValidated(); const state = snapshot.state;
       for (const record of state.records) if (record.type === 'binding') await this.syncRecord(record);
       if (state.finalized) { await this.syncRecord(state.records.at(-1)!); return; }
-      await this.append({ type: 'finalization', finalizedDigest: sha256(canonical(state.records as unknown as Json)) });
+      await this.append({ type: 'finalization', finalizedDigest: sha256(canonical(state.records as unknown as Json)) }, snapshot);
     });
   }
 }

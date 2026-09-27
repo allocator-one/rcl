@@ -332,6 +332,38 @@ describe('durable verifier phase in the existing checkpoint', () => {
     expect((await f.journal.readVerification())!.outcomes).toHaveLength(2);
   });
 
+  it('does not re-fsync acknowledged verification history on a normal append', async () => {
+    const f = await fixture();
+    await runOwned(f, async owner => {
+      await f.journal.beginVerification(planInput(), owner); await f.journal.recordVerificationIntent(intent(), owner);
+      durability.synced = [];
+      await f.journal.recordVerificationResult(outcome(), owner);
+    });
+    expect(durability.synced).not.toContain(join(f.path, 'verification', 'events', '00000001.json'));
+    expect(durability.synced).not.toContain(join(f.path, 'verification', 'events', '00000002.json'));
+  });
+
+  it('reflushes when a stale journal instance observes a phase advanced by another writer', async () => {
+    const f = await fixture();
+    await runOwned(f, async owner => {
+      await f.journal.beginVerification(planInput(), owner);
+      const advanced = await CheckpointJournal.openWrite({ commonDir: f.commonDir, namespace, plan: f.plan, ownership: owner });
+      await advanced.recordVerificationIntent(intent(), owner);
+      durability.synced = [];
+      await f.journal.recordVerificationResult(outcome(), owner);
+    });
+    expect(durability.synced).toContain(join(f.path, 'verification', 'events', '00000001.json'));
+    expect(durability.synced).toContain(join(f.path, 'verification', 'events', '00000002.json'));
+  });
+
+  it('reflushes an acknowledged phase when the caller ownership changes', async () => {
+    const f = await fixture();
+    await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));
+    durability.synced = [];
+    await runOwned(f, owner => f.journal.recordVerificationIntent(intent(), owner));
+    expect(durability.synced).toContain(join(f.path, 'verification', 'events', '00000001.json'));
+  });
+
   it('reestablishes durability after a visible intent fsync failure without authorizing a duplicate launch', async () => {
     const f = await fixture();
     await runOwned(f, async owner => {

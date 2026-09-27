@@ -6,11 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type CheckpointPlanInput } from '../../src/dispatch/checkpoint.js';
 
-const durability = vi.hoisted(() => ({ failPath: '', synced: [] as string[], pauseStagedWrite: false, stagedWriteStarted: undefined as (() => void) | undefined, stagedWriteRelease: undefined as Promise<void> | undefined, stagedWriteUsed: false }));
+const durability = vi.hoisted(() => ({ failPath: '', synced: [] as string[], opened: [] as string[], pauseStagedWrite: false, stagedWriteStarted: undefined as (() => void) | undefined, stagedWriteRelease: undefined as Promise<void> | undefined, stagedWriteUsed: false }));
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
-    const handle = await fs.open(...args), sync = handle.sync.bind(handle), path = String(args[0]);
+    const handle = await fs.open(...args), sync = handle.sync.bind(handle), path = String(args[0]); durability.opened.push(path);
     handle.sync = async () => {
       durability.synced.push(path);
       if (durability.failPath === path) {
@@ -37,7 +37,7 @@ vi.mock('node:fs/promises', async original => {
 });
 
 const roots: string[] = [];
-afterEach(async () => { durability.failPath = ''; durability.synced = []; durability.pauseStagedWrite = false; durability.stagedWriteStarted = undefined; durability.stagedWriteRelease = undefined; durability.stagedWriteUsed = false; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { durability.failPath = ''; durability.synced = []; durability.opened = []; durability.pauseStagedWrite = false; durability.stagedWriteStarted = undefined; durability.stagedWriteRelease = undefined; durability.stagedWriteUsed = false; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 async function root() { const path = await realpath(await mkdtemp(join(tmpdir(), 'rcl-checkpoint-'))); roots.push(path); return path; }
 const target = 'allocator-one/rcl#105', namespace = 'rcl-105-fixture';
 function plan(overrides: Partial<CheckpointPlanInput> = {}): CheckpointPlanInput {
@@ -45,6 +45,22 @@ function plan(overrides: Partial<CheckpointPlanInput> = {}): CheckpointPlanInput
 }
 function failure(status = 'error') { return { kind: 'failure' as const, chunk: 0, possiblyBilled: true, reviewBytes: JSON.stringify({ model: 'openai/gpt-6-sol', role: 'general', provider: 'openai', status, durationMs: 7, findings: [], error: 'network', usage: { inputTokens: 2 } }) }; }
 async function withStore<T>(work: (store: CheckpointJournal, ownership: NativeTargetOwnership, commonDir: string) => Promise<T>) { const commonDir = await root(); return withNativeTarget(commonDir, target, async ownership => work(await CheckpointJournal.create({ commonDir, namespace, plan: freezeCheckpointPlan(plan()), ownership }), ownership, commonDir)); }
+
+describe('checkpoint append read budget', () => {
+  it('uses one fresh main-history pass for an append and revalidates on the next operation', async () => {
+    await expect(withStore(async (store, ownership, commonDir) => {
+      const attempt = { id: 'read-budget', kind: 'paid' as const };
+      await store.recordIntent('blocking/general:0', attempt, ownership);
+      durability.opened = [];
+      await store.recordUncertain('blocking/general:0', attempt, 'lost', ownership);
+      expect(durability.opened.filter(path => path.endsWith(`${sep}plan.json`))).toHaveLength(1);
+      const event = join(checkpointPath(commonDir, target, namespace), 'events', '00000001.json');
+      expect(durability.opened.filter(path => path === event)).toHaveLength(1);
+      await writeFile(event, 'invalid retained event');
+      await store.recordIntent('blocking/general:0', { id: 'after-tamper', kind: 'paid' }, ownership);
+    })).rejects.toThrow('checkpoint_invalid_record');
+  });
+});
 
 describe('checkpoint plan', () => {
   it('freezes a complete per-seat prompt matrix and rejects missing/aliased identity inputs', () => {
