@@ -46,6 +46,7 @@ export interface BlockingHealthSummary {
 
 const seatKey = (model: string, role: string): string => JSON.stringify([model, role]);
 const STATUSES = new Set<unknown>(['success', 'timeout', 'error', 'parse_failed', 'canceled']);
+const LANES = new Set<unknown>(['blocking', 'secondary', 'async', 'verification']);
 const nonblank = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
 /**
@@ -64,7 +65,12 @@ export function deriveBlockingHealth(input: {
   fraction?: number;
 }): BlockingHealth {
   const seats = new Map<string, { model: string; role: string }>();
+  if (!Array.isArray(input.roster) || !Array.isArray(input.reviews)) throw new Error('Invalid roster or reviewer rows');
   for (const entry of input.roster) {
+    // An unknown lane must never silently drop a seat from the requirement.
+    if (!entry || !nonblank(entry.model) || !nonblank(entry.role) || !LANES.has(entry.lane)) {
+      throw new Error('Invalid roster entry identity or lane');
+    }
     if (entry.lane === 'blocking') seats.set(seatKey(entry.model, entry.role), { model: entry.model, role: entry.role });
   }
   const rows = new Map<string, ModelReview>();

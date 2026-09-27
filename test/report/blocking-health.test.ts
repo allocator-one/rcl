@@ -203,6 +203,15 @@ describe('blocking reviewer health (RCL-136)', () => {
     expect(deriveBlockingHealth({ roster: withAsync.run.roster, reviews: withAsync.reviews }).excludedSuccesses.async).toBe(1);
   });
 
+  it('refuses roster entries with an unknown lane or blank identity instead of dropping seats', () => {
+    for (const change of [{ lane: 'blockng' }, { model: '' }, { role: ' ' }]) {
+      const value = report([...seats(2, 'blocking', ['success']), ...seats(2, 'blocking', ['timeout'], 'slow')]);
+      delete value.stats.blockingHealth;
+      value.run.roster = value.run.roster.map((entry) => entry.model.startsWith('slow') ? { ...entry, ...change } as never : entry);
+      expect(() => assertAdmissibleReportHealth(value)).toThrow(expect.objectContaining({ code: 'report_health_unverifiable' }));
+    }
+  });
+
   it('refuses rows without a model, role or known status', () => {
     for (const row of [{ role: 'general', status: 'success' }, { model: 'm', role: ' ', status: 'success' }, { model: 'm', role: 'r', status: 'done' }]) {
       const value = report(seats(3, 'blocking', ['success']));
