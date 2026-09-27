@@ -43,7 +43,9 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
       criticalSighting = criticalSighting === undefined ? round.round : Math.min(criticalSighting, round.round);
     }
   }
-  if (criticalSighting !== undefined && (pendingRound === undefined ||
+  // A later pending round cannot hide an earlier critical sighting that the
+  // stored verdict does not clear. Preserve the earliest unresolved obligation.
+  if (criticalSighting !== undefined && (pendingRound === undefined || criticalSighting < pendingRound ||
       verdictClearsPending(state, entry.key, pendingRound, entry.verdictRound ?? 0, verdictSeverity))) {
     pendingRound = criticalSighting;
   }

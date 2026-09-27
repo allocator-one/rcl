@@ -147,4 +147,30 @@ describe('legacy pending obligations', () => {
     expect(migratedLegacyPendingRound(entry, value)).toBe(2);
   });
 
+  it('retains an earlier critical sighting ahead of a later uncleared pending round', () => {
+    const entry = finding({ severity: 'important', firstRound: 1, lastRound: 5, verdict: 'dismissed', verdictRound: 3,
+      verdictSeverity: 'important', pendingRound: 5 });
+    const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'important';
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'critical' } });
+    value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
+    value.rounds.push({ round: 4, counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
+    value.rounds.push({ round: 5, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'important' } });
+    const accepted = verifyNativeRecoveryLineage(JSON.stringify({ ...value, version: 1 }), value.target).state;
+    expect(migratedLegacyPendingRound(accepted.findings[entry.key]!, accepted)).toBe(2);
+  });
+
+  it('keeps a later pending round when a critical verdict already clears the earlier critical sighting', () => {
+    const entry = finding({ severity: 'important', firstRound: 1, lastRound: 5, verdict: 'fixed', verdictRound: 3,
+      verdictSeverity: 'critical', pendingRound: 5 });
+    const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'important';
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'critical' } });
+    value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
+    value.rounds.push({ round: 4, counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
+    value.rounds.push({ round: 5, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'important' } });
+    const accepted = verifyNativeRecoveryLineage(JSON.stringify({ ...value, version: 1 }), value.target).state;
+    expect(migratedLegacyPendingRound(accepted.findings[entry.key]!, accepted)).toBe(5);
+  });
+
 });
