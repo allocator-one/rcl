@@ -235,6 +235,7 @@ describe('retained snapshot lineage', () => {
     try {
       expect(verifyNativeRecoveryLineage(source, target, [sourceJson]).original.rounds).toEqual(original.rounds);
     } finally { find.mockRestore(); }
-    expect(visited).toBeLessThan(100 * original.rounds.length);
+    // Repeated linear lookups visit 4,950 entries for this 99-round history.
+    expect(visited).toBeLessThan(4 * original.rounds.length);
   });
 });
