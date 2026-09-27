@@ -118,6 +118,14 @@ describe('retained snapshot lineage', () => {
       .toEqual([sha(f.original), sha(f.intermediate)]);
   });
 
+  it('refuses a sighting-less descendant whose exact semantic-v2 root carried sightings', () => {
+    const f = recoveredFixture(2);
+    const descendant = structuredClone(f.state);
+    delete descendant.sightings;
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(descendant), target, [f.sourceJson]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
   it.each(['missing', 'tampered', 'interchanged'])('refuses a %s intermediate predecessor snapshot', change => {
     const f = twoStepLineage();
     const snapshots = change === 'missing' ? [f.original] :

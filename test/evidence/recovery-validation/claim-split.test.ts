@@ -475,6 +475,14 @@ describe('released fresh-review cycle compatibility', () => {
       eventId: uuid(805), findingRef: 'f002', identity: '3333333333333333', previousIdentity: second.matched_identity };
     expect(verifyNativeRecoveryLineage(recovered.nativeJson, recovered.target, recovered.nativeSourceJsons).original).toEqual(fixture.native);
     expect(prepareClaimSplit(recovered).source).toMatchObject({ findingRef: 'f002', gating: 'none', belowThreshold: true });
+    const secondEvent = prepareClaimSplit(recovered).event;
+    const secondReceipt = { ...recovered.scope, ...secondEvent, actor_user_id: uuid(7), attempt: null };
+    const twice = structuredClone(native);
+    twice.recovery.operations.push({ operationId: uuid(806), sourceVersion: 3, sourceSha256: sha(recovered.nativeJson),
+      anchors: [correctionAnchor(recovered, secondReceipt, uuid(7), uuid(806))], sourceReceipts: recovered.sourceReceipts });
+    twice.sightings = [];
+    expect(verifyNativeRecoveryLineage(JSON.stringify(twice), recovered.target,
+      [selection.nativeJson, recovered.nativeJson]).original).toEqual(fixture.native);
     for (const change of ['id', 'archive', 'history', 'absent']) {
       const altered = structuredClone(native);
       if (change === 'id') altered.cycle.id = uuid(804);

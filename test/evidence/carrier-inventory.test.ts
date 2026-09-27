@@ -113,7 +113,14 @@ describe('authenticated carrier inventory', () => {
       }
       return body;
     });
-    expect((await read(f)).kind).not.toBe('ok');
+    const result = await read(f);
+    expect(result.kind).not.toBe('ok');
+    const expected = {
+      sequence: { kind: 'conflict', message: 'carrier_inventory_source_changed' },
+      classification: { kind: 'conflict', message: 'carrier_inventory_source_changed' },
+      'run-set': { kind: 'conflict', message: 'carrier_inventory_run_set_changed' },
+    }[kind] ?? { kind: 'rejected', error: 'malformed_response' };
+    expect(result).toMatchObject(expected);
   });
 
   it.each(['scope', 'duplicate', 'partial', 'pagination', 'over-limit', 'ambiguous-target'])('refuses %s inventory answers', async kind => {
@@ -129,7 +136,11 @@ describe('authenticated carrier inventory', () => {
       }
       return body;
     });
-    expect((await read(f)).kind).not.toBe('ok');
+    const result = await read(f);
+    expect(result.kind).not.toBe('ok');
+    const expected = kind === 'duplicate' ? { kind: 'conflict', message: 'carrier_inventory_duplicate_or_missing_run' } :
+      { kind: 'rejected', error: 'malformed_response' };
+    expect(result).toMatchObject(expected);
   });
 
   it('bounds aggregate original source material before downloading any artifact', async () => {

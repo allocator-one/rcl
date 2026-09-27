@@ -221,20 +221,22 @@ describe('original occurrence classification', () => {
     'keeps %s membership lookup linear at the full supported finding count', kind => {
     const { transfer, report } = fixture(kind === 'marked-shared');
     const prototype = report.findings[0];
-    report.findings = Array.from({ length: 2000 }, (_, index) => ({ ...structuredClone(prototype), identity: kind === 'marked-shared' ? 'shared-raw' : `raw-${index}` }));
+    const selectedRawIdentity = prototype.identity;
+    report.findings = Array.from({ length: 2000 }, (_, index) => ({ ...structuredClone(prototype),
+      identity: index === 0 ? selectedRawIdentity : kind === 'marked-shared' ? 'shared-raw' : `raw-${index}` }));
     report.belowThresholdFindings = [];
     rebind(transfer, report);
     if (kind === 'legacy-shared') {
       // The split helper correctly refuses ambiguous legacy membership; this
       // reader must retain that unresolved source without preparing a split.
-      for (const finding of report.findings) finding.identity = 'shared-raw';
+      for (const finding of report.findings.slice(1)) finding.identity = 'shared-raw';
       const source = transfer.split.source;
       source.reportJson = JSON.stringify(report);
       const artifact = (source.storedRun.artifacts as Array<Record<string, unknown>>)[0]!;
       artifact.declared_sha256 = sha(source.reportJson);
       artifact.declared_bytes = Buffer.byteLength(source.reportJson);
-      for (const member of source.storedRun.findings as Array<Record<string, unknown>>) member.identity_key = 'shared-raw';
-      for (const row of source.classification.payload.identities as Array<Record<string, unknown>>) row.identity_key = 'shared-raw';
+      for (const member of (source.storedRun.findings as Array<Record<string, unknown>>).slice(1)) member.identity_key = 'shared-raw';
+      for (const row of (source.classification.payload.identities as Array<Record<string, unknown>>).slice(1)) row.identity_key = 'shared-raw';
     }
     const originalSome = Array.prototype.some;
     const originalFilter = Array.prototype.filter;
@@ -248,7 +250,10 @@ describe('original occurrence classification', () => {
     try {
       const result = validateOccurrenceSource(transfer.split.source);
       expect(result.members).toHaveLength(2000);
-      expect(result.members.every(member => kind === 'legacy-shared'
+      expect(result.members[0]).toMatchObject({ raw: { identity: selectedRawIdentity },
+        identity: transfer.split.selection.previousIdentity });
+      expect(result.members[0]).not.toHaveProperty('unresolvedReason');
+      expect(result.members.slice(1).every(member => kind === 'legacy-shared'
         ? member.identity === undefined && member.unresolvedReason === 'classification-ambiguous'
         : member.identity === transfer.split.selection.previousIdentity && member.unresolvedReason === undefined)).toBe(true);
     } finally { some.mockRestore(); filter.mockRestore(); }

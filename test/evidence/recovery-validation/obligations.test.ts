@@ -41,10 +41,10 @@ describe('legacy pending obligations', () => {
     expect(migratedLegacyPendingRound(entry, value)).toBe(2);
   });
 
-  it('uses the retained entry severity when a legacy dismissal has no verdict severity', () => {
+  it('retains a later critical sighting when a legacy critical dismissal predates it', () => {
     const entry = finding({ lastRound: 2 }); const value = state(entry);
     value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'critical' } });
-    expect(migratedLegacyPendingRound(entry, value)).toBeUndefined();
+    expect(migratedLegacyPendingRound(entry, value)).toBe(2);
   });
 
   it('retains a same-round critical regating obligation until its verdict is critical', () => {
@@ -74,6 +74,24 @@ describe('legacy pending obligations', () => {
     value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
     value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 0, regating: 1 }, severities: { [entry.key]: 'critical' } });
     expect(migratedLegacyPendingRound(entry, value)).toBe(3);
+  });
+
+  it('retains a later critical sighting after an earlier important fixed verdict', () => {
+    const entry = finding({ severity: 'important', verdict: 'fixed', verdictRound: 1, verdictSeverity: 'important',
+      pendingRound: undefined, lastRound: 2 });
+    const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'important';
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 0, regating: 1 }, severities: { [entry.key]: 'critical' } });
+    expect(migratedLegacyPendingRound(entry, value)).toBe(2);
+  });
+
+  it('lets a later critical fixed verdict clear an earlier critical sighting', () => {
+    const entry = finding({ severity: 'critical', verdict: 'fixed', verdictRound: 2, verdictSeverity: 'critical',
+      pendingRound: undefined, lastRound: 2 });
+    const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'critical';
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 0, regating: 1 }, severities: { [entry.key]: 'critical' } });
+    expect(migratedLegacyPendingRound(entry, value)).toBeUndefined();
   });
 
   it('keeps an older critical pending obligation when a later sighting is also critical', () => {

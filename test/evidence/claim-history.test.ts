@@ -64,7 +64,15 @@ describe('complete pinned claim history',() => {
       }
       return body;
     });
-    expect((await read(f)).kind).not.toBe('ok');
+    const result = await read(f);
+    expect(result.kind).not.toBe('ok');
+    const expected = {
+      'missing-receipt': { kind: 'conflict', message: 'claim_history_receipt_unavailable' },
+      'inline-prefix': { kind: 'conflict', message: 'claim_history_inline_index_conflict' },
+      'false-complete': { kind: 'conflict', message: 'claim_history_inline_index_conflict' },
+      'sequence-drift': { kind: 'conflict', message: 'claim_history_changed' },
+    }[kind] ?? { kind: 'rejected', error: 'malformed_response' };
+    expect(result).toMatchObject(expected);
   });
   it('refuses duplicate receipts in place of a complete indexed event batch', async () => {
     const f = historyFixture(false);

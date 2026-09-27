@@ -34,8 +34,12 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
     if (!provenNonGating) pendingRound ??= entry.firstRound;
   }
   let criticalSighting: number | undefined;
-  if (entry.verdict === 'dismissed' && verdictSeverity !== 'critical') for (const round of state.rounds) {
-    if (round.severities?.[entry.key] === 'critical') {
+  if (entry.verdict) for (const round of state.rounds) {
+    // The round is critical. Its stored verdict can discharge it only when it
+    // is itself critical and is no earlier than this sighting; keep the scan
+    // linear for parser-accepted retained history.
+    if (round.severities?.[entry.key] === 'critical' &&
+        !(verdictSeverity === 'critical' && (entry.verdictRound ?? 0) >= round.round)) {
       criticalSighting = criticalSighting === undefined ? round.round : Math.min(criticalSighting, round.round);
     }
   }

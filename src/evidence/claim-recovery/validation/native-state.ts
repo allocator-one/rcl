@@ -59,11 +59,11 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     requireSource(entry.verdictSeverity === undefined || ['critical', 'important', 'minor', 'nitpick'].includes(entry.verdictSeverity as string));
     requireSource(entry.claimDescriptor === undefined || state.version !== 1 && claimDescriptorSchema.safeParse(entry.claimDescriptor).success);
   }
-  // A recovered v3 descendant of released cycle-v2 has no semantic sighting
-  // cache either. The exact predecessor is required and checked below.
-  const recoveredCycleV2 = state.version === 3 && state.sightings === undefined &&
-    ((state.recovery as Record<string, unknown>).operations as Record<string, unknown>[]).at(-1)?.sourceVersion === 2;
-  requireSource(state.version === 1 || cycleOrigin || Array.isArray(state.sightings) || recoveredCycleV2);
+  // A recovered v3 descendant may omit its semantic sighting cache only
+  // provisionally. The full snapshot walk below proves its released cycle-v2
+  // root; this parser must not trust an operation's claimed source version.
+  requireSource(state.version === 1 || cycleOrigin || Array.isArray(state.sightings) ||
+    state.version === 3 && state.sightings === undefined);
   if (state.lastAnnotations !== undefined) {
     requireSource(object(state.lastAnnotations)); const annotations = state.lastAnnotations as Record<string, unknown>;
     requireSource(positive(annotations.round) && seen.has(annotations.round) && Array.isArray(annotations.identities) &&
@@ -114,11 +114,13 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
       used.add(digest); return nativeSource(snapshots.get(digest)!, target);
     };
     let current = state;
+    let requiresReleasedCycleRoot = false;
     const reserved = new Set<string>();
     if (state.version === 3) for (const anchor of recoveryAnchors(state)) {
       requireSource(identity(anchor.identity) && !reserved.has(anchor.identity)); reserved.add(anchor.identity);
     }
     while (current.version === 3) {
+      requiresReleasedCycleRoot ||= current.sightings === undefined;
       const operations = current.recovery!.operations; const operation = operations.at(-1)!;
       requireSource(object(operation) && uuid(operation.operationId));
       const predecessor = take(operation.sourceSha256);
@@ -132,6 +134,11 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
           Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
       current = predecessor;
     }
+    // Every sighting-less v3 link is admissible only when its exact walked root
+    // is an authentic released cycle-v2 snapshot. The link checks above retain
+    // the cycle byte-for-byte through every recovery operation.
+    if (requiresReleasedCycleRoot) requireSource(current.version === 2 && current.cycle !== undefined &&
+      current.sightings === undefined && current.migration === undefined);
     let legacy = current.version === 1 ? current : undefined;
     if (current.version === 2 && current.migration) {
       legacy = take(current.migration.sourceSha256);
