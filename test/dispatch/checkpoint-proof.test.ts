@@ -184,6 +184,28 @@ describe('portable finalized checkpoint proof', () => {
     expect(() => decodeCheckpointProof('x'.repeat(MAX_CHECKPOINT_PROOF_BYTES + 1))).toThrow('checkpoint_proof_too_large');
   });
 
+  it.each(['plan', 'record'] as const)('rejects a deeply nested malformed portable %s with a checkpoint error', location => {
+    const nested = '{"extra":'.repeat(10_000) + 'null' + '}'.repeat(10_000);
+    const bytes = location === 'plan'
+      ? `{"version":1,"plan":${nested},"records":[],"outcomes":[],"bindings":{}}`
+      : `{"version":1,"plan":${canonical(plan())},"records":[${nested}],"outcomes":[],"bindings":{}}`;
+    expect(() => decodeCheckpointProof(bytes)).toThrow(location === 'plan' ? 'checkpoint_invalid_plan' : 'checkpoint_invalid_record');
+  });
+
+  it('keeps a valid wide portable proof canonical', async () => {
+    const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-proof-wide-'))); roots.push(commonDir);
+    const base = plan(), chunks = Array.from({ length: 250 }, (_, index) => ({ index, total: 250, digest: hash(`wide-chunk-${index}`) }));
+    const wide = freezeCheckpointPlan({ ...base, chunks,
+      prompts: base.roster.flatMap(({ seat }) => chunks.map(({ index }) => ({ seat, chunk: index, systemSha256: hash(`${seat}-system`), userSha256: hash(`${seat}-${index}`) }))) });
+    await withNativeTarget(commonDir, target, async owner => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace: 'wide-proof', plan: wide, ownership: owner });
+      await journal.finalize(owner);
+      const proof = await exportCheckpointProof(journal);
+      expect(decodeCheckpointProof(proof.bytes, wide)).toEqual(proof);
+      expect(proof.bytes).toBe(canonical(JSON.parse(proof.bytes)));
+    });
+  });
+
   it('bounds serialized proof size without truncating individually valid binding files', async () => {
     const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-proof-'))); roots.push(commonDir);
     let journal!: CheckpointJournal;

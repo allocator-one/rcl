@@ -405,8 +405,12 @@ export function decodeCheckpointProof(bytes: string, expectedPlan?: FrozenCheckp
   const parsed = proofWireSchema.safeParse(value);
   if (!parsed.success) throw new Error('checkpoint_invalid_proof');
   const wire = parsed.data;
-  if (canonical(wire as unknown as Json) !== bytes) throw new Error('checkpoint_proof_noncanonical');
-  const plan = decodePlan(canonical(wire.plan as Json));
+  // Validate the untrusted branches before recursively canonicalizing the
+  // portable envelope. The wire schema intentionally leaves plan and records
+  // opaque until their dedicated validators run.
+  const suppliedPlan = frozenPlanSchema.safeParse(wire.plan);
+  if (!suppliedPlan.success) throw new Error('checkpoint_invalid_plan');
+  const plan = decodePlan(canonical(suppliedPlan.data as Json));
   if (expectedPlan && !matchingPlan(plan, decodePlan(canonical(expectedPlan as unknown as Json)))) throw new Error('checkpoint_plan_mismatch');
   const records = validateRecordChain(wire.records, plan);
   const references = records.filter(record => record.type === 'result');
@@ -418,6 +422,7 @@ export function decodeCheckpointProof(bytes: string, expectedPlan?: FrozenCheckp
   }
   const { state, bindings } = validateHistory(plan, records, resultBytes, wire.bindings);
   if (!state.finalized) throw new Error('checkpoint_proof_unsealed');
+  if (canonical(wire as unknown as Json) !== bytes) throw new Error('checkpoint_proof_noncanonical');
   const proof: CheckpointProof = deepFreeze({ version: 1 as const, bytes, digest: sha256(bytes), plan, state, bindings });
   validatedProofs.add(proof);
   return proof;
