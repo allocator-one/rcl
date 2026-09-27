@@ -4,7 +4,6 @@ import { BUILTIN_ROLES } from '../../src/roles/builtin.js';
 import type { Config } from '../../src/config/schema.js';
 
 const emptyConfig: Config = {};
-const RULES = '# Project rules\nUse gettext.';
 const SPEC = '# Spec\nThe API returns JSON.';
 
 afterEach(() => {
@@ -12,21 +11,21 @@ afterEach(() => {
 });
 
 describe("resolveRoles — 'all' keyword", () => {
-  it("['all'] returns all roles when rules and spec content exist", async () => {
-    const roles = await resolveRoles(emptyConfig, ['all'], RULES, SPEC);
+  it("['all'] returns all roles when spec content exists", async () => {
+    const roles = await resolveRoles(emptyConfig, ['all'], SPEC);
     expect(roles).toHaveLength(BUILTIN_ROLES.length);
   });
 
   it("['all'] skips content-dependent roles when their content is absent", async () => {
     const roles = await resolveRoles(emptyConfig, ['all']);
-    expect(roles).toHaveLength(BUILTIN_ROLES.length - 2);
+    expect(roles).toHaveLength(BUILTIN_ROLES.length - 1);
     const names = roles.map((r) => r.name);
     expect(names).not.toContain('project-rules');
     expect(names).not.toContain('spec-compliance');
   });
 
   it("['ALL'] is case-insensitive", async () => {
-    const roles = await resolveRoles(emptyConfig, ['ALL'], RULES, SPEC);
+    const roles = await resolveRoles(emptyConfig, ['ALL'], SPEC);
     expect(roles).toHaveLength(BUILTIN_ROLES.length);
   });
 
@@ -44,17 +43,17 @@ describe("resolveRoles — 'all' keyword", () => {
 });
 
 describe('resolveRoles — content-dependent roles', () => {
-  it('default resolution drops project-rules and spec-compliance without content', async () => {
+  it('default resolution drops spec-compliance without content', async () => {
     const roles = await resolveRoles(emptyConfig);
     const names = roles.map((r) => r.name);
     expect(names).not.toContain('project-rules');
     expect(names).not.toContain('spec-compliance');
   });
 
-  it('default resolution includes them when their content exists', async () => {
-    const roles = await resolveRoles(emptyConfig, undefined, RULES, SPEC);
+  it('default resolution includes spec-compliance when spec content exists', async () => {
+    const roles = await resolveRoles(emptyConfig, undefined, SPEC);
     const names = roles.map((r) => r.name);
-    expect(names).toContain('project-rules');
+    expect(names).not.toContain('project-rules');
     expect(names).toContain('spec-compliance');
     // and the content is embedded in the role prompt (the single carrier)
     const specRole = roles.find((r) => r.name === 'spec-compliance')!;
@@ -66,6 +65,34 @@ describe('resolveRoles — content-dependent roles', () => {
     const roles = await resolveRoles(emptyConfig, ['spec-compliance']);
     expect(roles.map((r) => r.name)).toEqual(['spec-compliance']);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no spec file'));
+  });
+});
+
+describe('retired built-in roles', () => {
+  it.each([undefined, ['all']])('excludes retired seats from %j with a specification', async (requested) => {
+    const roles = await resolveRoles(emptyConfig, requested, SPEC);
+    const names = roles.map((role) => role.name);
+    expect(names).not.toContain('project-rules');
+    expect(names).not.toContain('dead-code');
+    expect(names).toContain('general');
+    expect(names).toContain('spec-compliance');
+    expect(BUILTIN_ROLES.map((role) => role.name)).toEqual(names);
+  });
+
+  it('warns and skips stale explicit names while keeping valid roles', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const roles = await resolveRoles(emptyConfig, ['general', 'project-rules', 'dead-code']);
+    expect(roles.map((role) => role.name)).toEqual(['general']);
+    expect(warn).toHaveBeenCalledWith('Warning: unknown role "project-rules", skipping');
+    expect(warn).toHaveBeenCalledWith('Warning: unknown role "dead-code", skipping');
+  });
+
+  it('still accepts an explicitly configured custom role with a retired name', async () => {
+    const roles = await resolveRoles({
+      customRoles: [{ name: 'project-rules', systemPrompt: 'Our custom review instructions.' }],
+    }, ['project-rules']);
+    expect(roles).toHaveLength(1);
+    expect(roles[0]!.systemPrompt).toBe('Our custom review instructions.');
   });
 });
 
@@ -113,7 +140,7 @@ describe('resolveRoles — case-variant custom override', () => {
     const config: Config = {
       customRoles: [{ name: 'Security-Auditor', systemPrompt: 'my custom security prompt' }],
     };
-    const roles = await resolveRoles(config, ['all'], RULES, SPEC);
+    const roles = await resolveRoles(config, ['all'], SPEC);
 
     const securityRoles = roles.filter((r) => r.name === 'security-auditor');
     expect(securityRoles).toHaveLength(1);

@@ -1,4 +1,4 @@
-import { readFile, access } from 'fs/promises';
+import { access } from 'fs/promises';
 import { join } from 'path';
 import { BUILTIN_ROLES, getRoleByName } from './builtin.js';
 import type { Role } from './types.js';
@@ -24,16 +24,6 @@ export async function findProjectRulesFile(cwd: string = process.cwd()): Promise
     }
   }
   return null;
-}
-
-export async function loadProjectRulesContent(cwd?: string): Promise<string | null> {
-  const filePath = await findProjectRulesFile(cwd);
-  if (!filePath) return null;
-  try {
-    return await readFile(filePath, 'utf-8');
-  } catch {
-    return null;
-  }
 }
 
 export function buildCustomRole(config: {
@@ -67,7 +57,6 @@ export function buildCustomRole(config: {
 export async function resolveRoles(
   config: Config,
   requestedRoles?: string[],
-  projectRulesContent?: string,
   specContent?: string
 ): Promise<Role[]> {
   const roles = new Map<string, Role>();
@@ -84,18 +73,6 @@ export async function resolveRoles(
       const role = buildCustomRole(customConfig);
       roles.set(role.name, role);
     }
-  }
-
-  // Augment project-rules role with actual content
-  if (projectRulesContent) {
-    const projectRulesRole = roles.get('project-rules')!;
-    roles.set('project-rules', {
-      ...projectRulesRole,
-      systemPrompt:
-        projectRulesRole.systemPrompt +
-        '\n\n## Project Rules File Content\n\n' +
-        projectRulesContent,
-    });
   }
 
   // Augment spec-compliance role with actual spec content
@@ -115,7 +92,6 @@ export async function resolveRoles(
   // dropped from default/'all' expansion and kept (with a warning) only
   // when requested by name.
   const missingContent = new Set<string>();
-  if (!projectRulesContent) missingContent.add('project-rules');
   if (!specContent) missingContent.add('spec-compliance');
 
   // Determine which roles to use
@@ -139,10 +115,8 @@ export async function resolveRoles(
         continue;
       }
       if (missingContent.has(role.name)) {
-        const missing =
-          role.name === 'project-rules' ? 'project rules file' : 'spec file';
         console.warn(
-          `Warning: role "${role.name}" was requested but no ${missing} was found — it will run without that content`
+          `Warning: role "${role.name}" was requested but no spec file was found — it will run without that content`
         );
       }
       result.push(role);

@@ -28,7 +28,7 @@ import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js
 import { chunkDiff } from './prepare/chunker.js';
 import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
-import { resolveRoles, loadProjectRulesContent } from './roles/loader.js';
+import { resolveRoles, findProjectRulesFile } from './roles/loader.js';
 import { buildAssignments, detectProvider } from './roles/dispatcher.js';
 import { runReviews } from './dispatch/runner.js';
 import { mergeChunkReviews } from './dispatch/merge.js';
@@ -1591,14 +1591,13 @@ async function prepareCouncil(
     requestedRoles = [...requestedRoles, 'spec-compliance'];
   }
 
-  // Load project rules
-  const projectRulesContent = await loadProjectRulesContent();
+  // Repository rules remain shared review context without a dedicated seat.
+  const projectRulesFile = await findProjectRulesFile();
 
   // Resolve roles
   const roles = await resolveRoles(
     config,
     requestedRoles,
-    projectRulesContent ?? undefined,
     specContent
   );
 
@@ -1646,6 +1645,9 @@ async function prepareCouncil(
       : buildAssignments({ models: asyncModels, roles: generalRoles, roleMap, deterministic: opts.guardedConverge });
 
   const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
+  if (projectRulesFile && !contextFiles.some(path => resolve(path) === projectRulesFile)) {
+    contextFiles.push(projectRulesFile);
+  }
 
   // Resolve gating now: a config error (e.g. an aggregator-routed verifier)
   // must fail before any model time is spent, and the verifier is chosen
