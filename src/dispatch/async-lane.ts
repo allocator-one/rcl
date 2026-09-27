@@ -302,6 +302,11 @@ export interface AsyncResultReference {
   bytesBase64: string;
 }
 
+interface ObservedAsyncResult {
+  path: string;
+  bytes: Buffer;
+}
+
 /**
  * Collect (and consume) every arrived async result for this target. Corrupt
  * files are skipped and removed; other targets' files are left alone except
@@ -320,7 +325,7 @@ export async function collectAsyncResults(
   }
 
   const collected: ModelReview[] = [];
-  const artifacts: AsyncResultReference[] = [];
+  const observed: ObservedAsyncResult[] = [];
   const consumed: string[] = [];
   const expired: string[] = [];
   const now = Date.now();
@@ -333,11 +338,7 @@ export async function collectAsyncResults(
         if (isReviewShape(parsed)) {
           parsed.async = true;
           collected.push(parsed);
-          artifacts.push({
-            path,
-            sha256: createHash('sha256').update(bytes).digest('hex'),
-            bytesBase64: bytes.toString('base64'),
-          });
+          observed.push({ path, bytes });
         }
       } catch {
         // Corrupt or half-written by an interrupted worker — drop it below.
@@ -358,7 +359,14 @@ export async function collectAsyncResults(
   // Validate the entire union before consuming even the first retained opinion.
   try { assertUnambiguousReviewerIdentities([...(options.blockingReviews ?? []), ...collected]); }
   catch (error) {
-    if (error instanceof AmbiguousReviewerIdentityError) await options.onIdentityRefused?.(error, artifacts);
+    if (error instanceof AmbiguousReviewerIdentityError) {
+      const artifacts = observed.map(({ path, bytes }) => ({
+        path,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        bytesBase64: bytes.toString('base64'),
+      }));
+      await options.onIdentityRefused?.(error, artifacts);
+    }
     throw error;
   }
   for (const path of consumed) await rm(path, { force: true });
