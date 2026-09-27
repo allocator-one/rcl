@@ -55,8 +55,9 @@ are supplied as shared context to the remaining reviewers. Remove the retired
 names from explicit role lists; they follow the usual unknown-role warning and
 skip behavior unless you define a custom role with that name.
 
-With the default three blocking models, reviews schedule 14 blocking seats, or
-15 when a specification enables `spec-compliance`. The async general reviewer
+The default Fable and Sol general reviewers plus specialist assignments schedule
+13 blocking seats, or 14 when a specification enables `spec-compliance`. Gemini
+is eligible for specialist assignments only. The async general reviewer
 and verifier are separate; quorum is calculated from the blocking roster.
 
 List roles in the terminal:
@@ -1035,6 +1036,9 @@ Place `.review-council.yml` in your project root and run `rcl` from there. rcl l
 models:
   - anthropic/claude-fable-5-1
   - openai/gpt-6-sol
+
+# Specialist assignments only; no additional general reviewer.
+secondaryModels:
   - google/gemini-3.8-flash
 
 # Async bonus reviewers — fired with each round, never awaited. Results that
@@ -1073,8 +1077,8 @@ thresholds:
   jaccardThreshold: 0.3    # weighted title+description similarity threshold for dedup
 
 # Convergence gating: which findings block convergence / CI (RCL-23).
-# A finding gates when multi-model, critical, or unrefuted by a cheap
-# verification pass; refuted single-model claims stay in the report but
+# A finding gates when multi-model, critical, or confirmed with source evidence by the
+# verifier; refuted or insufficient-evidence single-model claims stay visible but
 # stop blocking, and so does a claim the pass could not check (verdict
 # unavailable): verification promotes nothing it did not check. Report
 # JSON marks every finding with gating.reason
@@ -1082,7 +1086,8 @@ thresholds:
 gating:
   mode: verified-consensus        # or all-findings (legacy: severity alone decides)
   minModels: 2                    # distinct models for consensus gating
-  verificationModel: google/gemini-3.8-flash  # direct-API only
+  verificationModel: openai/gpt-6-astra  # direct-API only
+  verificationReasoningEffort: high     # OpenAI verifier only; separate from reviewer effort
   verificationPassTimeout: 180000 # ms for the complete verification queue
 
 # Output defaults
@@ -1135,6 +1140,27 @@ transport failures can be unknown. Token usage remains what the SDK response
 exposes, not proof of total charges across retries.
 
 Supported config file names: `.review-council.yml`, `.review-council.yaml`, `.review-council.json`. Executable JS config is never discovered: rcl often runs in untrusted checkouts with provider keys in the environment.
+
+The verifier uses three verdicts: `confirmed`, `refuted`, and
+`insufficient_evidence`. Confirmation requires a reachable failure mechanism and
+exact code excerpts from the supplied change; citations are checked against that
+source before a claim can be promoted to `verified`. Missing context or inability
+to refute a claim is not confirmation. This checks citation provenance, not semantic
+truth: the verifier still has to reason correctly. Infrastructure failures remain
+`unavailable`. Historical `unrefuted` verdicts retain their original meaning.
+
+Astra defaults to `high` effort. Set `gating.verificationReasoningEffort` to `low`,
+`medium`, `high`, `xhigh`, or `max` for an OpenAI verifier. The setting is included
+in the report header and retained verification plan. Other provider overrides
+retain their provider effort defaults and reject this OpenAI-only setting.
+
+The top-level `reasoningEffort` applies only to OpenRouter reviewers. Direct
+Sol and Gemini reviewers use their provider defaults (currently `medium`).
+Fable 5.1 reviews explicitly use `medium`, streaming, and 32,768 output tokens;
+that profile recovered large-review completion in RCL-103, but has not established
+quality parity with Anthropic's recommended `high` starting point. Kimi K3's
+advertised native effort levels are `low`, `high`, and `max`; RCL's OpenRouter
+`medium` request does not establish which native level the router uses.
 
 Verifier calls default to the remaining whole-pass budget. Set the optional
 `gating.verificationTimeout` in milliseconds to impose a shorter per-call limit;

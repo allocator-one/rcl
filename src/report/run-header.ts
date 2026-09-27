@@ -85,6 +85,7 @@ export interface RunHeader {
     bound_classification_protocol?: 1;
     min_models: number;
     verification_model?: string;
+    verification_reasoning_effort?: ResolvedGatingConfig['verificationReasoningEffort'];
     verification_timeout_ms: number;
     verification_pass_timeout_ms?: number;
   };
@@ -459,6 +460,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(input.gating.verificationModel !== undefined
         ? { verification_model: input.gating.verificationModel }
         : {}),
+      ...(input.gating.verificationReasoningEffort ? { verification_reasoning_effort: input.gating.verificationReasoningEffort } : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
       verification_pass_timeout_ms: input.gating.verificationPassTimeoutMs,
     },

@@ -53,13 +53,13 @@ describe('deterministic verifier planning and replay', () => {
       findings[31]!.title = 'mutated after dispatch';
       findings[31]!.consensus.models.push('other');
       opts.diffFiles[0]!.patch = '@@ -0,0 +1 @@\n+changed();';
-      return answer('[{"id":"F8","verdict":"confirmed"}]');
+      return answer('[{"id":"F8","verdict":"refuted","reason":"guard exists"}]');
     } });
     expect(prompts).toHaveLength(4);
     expect(prompts[3]).toContain('claim 31');
     expect(prompts[3]).not.toContain('mutated after dispatch');
     expect(result.findings[31]).toEqual({ ...original[31], gating: {
-      reason: 'verified', verification: { model: opts.verificationModel, verdict: 'unrefuted' },
+      reason: 'none', verification: { model: opts.verificationModel, verdict: 'refuted', note: 'guard exists' },
     } });
   });
 
@@ -86,9 +86,9 @@ describe('deterministic verifier planning and replay', () => {
     ], 17.5);
     expect(result.findings[0]!.gating).toMatchObject({ reason: 'none', verification: { verdict: 'refuted', note: 'guard exists' } });
     expect(result.findings[1]!.gating).toMatchObject({ reason: 'none', verification: { verdict: 'unavailable' } });
-    expect(result.findings[8]!.gating).toMatchObject({ reason: 'verified', verification: { verdict: 'unrefuted' } });
+    expect(result.findings[8]!.gating).toMatchObject({ reason: 'none', verification: { verdict: 'insufficient_evidence' } });
     expect(result.verification).toEqual({ model: options().verificationModel, candidates: 9,
-      refuted: 1, unrefuted: 1, unavailable: 7, durationMs: 17.5 });
+      refuted: 1, unrefuted: 0, confirmed: 0, insufficientEvidence: 1, unavailable: 7, durationMs: 17.5 });
   });
 
   it('retains deterministic critical and no-context decisions alongside a failed verifier request', () => {

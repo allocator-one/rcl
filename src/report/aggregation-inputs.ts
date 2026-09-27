@@ -15,6 +15,7 @@ const verifierSchema = GatingSchema.shape.verificationModel.unwrap().min(1).refi
 const gatingSchema = z.object({
   mode: GatingSchema.shape.mode.unwrap(), minModels: GatingSchema.shape.minModels.unwrap().safe(),
   verificationModel: verifierSchema.nullable(),
+  verificationReasoningEffort: GatingSchema.shape.verificationReasoningEffort,
   verificationTimeoutMs: GatingSchema.shape.verificationTimeout.unwrap(),
   verificationPassTimeoutMs: GatingSchema.shape.verificationPassTimeout.unwrap(),
 }).strict();

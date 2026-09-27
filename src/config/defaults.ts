@@ -1,5 +1,5 @@
 /**
- * Core (blocking) council — every round waits for these and only these.
+ * Primary council — general reviewers; specialists also use secondary models.
  * Direct-API models only: the RCL-21 audit (922 rounds, 15,268 calls) found
  * the OpenRouter wing at p50 7–9.5 min per call with 19–39% dead calls,
  * last-finisher in 97.6% of rounds; the audited direct trio answered in
@@ -10,7 +10,6 @@
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5-1',
   'openai/gpt-6-sol',
-  'google/gemini-3.8-flash',
 ] as const;
 
 /**
@@ -21,14 +20,8 @@ export const DEFAULT_MODELS = [
  */
 export const DEFAULT_ASYNC_MODELS = ['openrouter/moonshotai/kimi-k3'] as const;
 
-/**
- * Secondary models — specialized round-robin only, no general role.
- * Empty by default since RCL-25: qwen3.8-max, deepseek-v4-flash and grok-4.5
- * were removed after the audit (24–39% dead calls, worst finding-cost in the
- * council). Before any slow model earns a seat back, try it via its direct
- * provider API instead of OpenRouter and re-measure.
- */
-export const DEFAULT_SECONDARY_MODELS = [] as const;
+/** Gemini contributes specialist reviews without adding a general-review seat. */
+export const DEFAULT_SECONDARY_MODELS = ['google/gemini-3.8-flash'] as const;
 
 export const DEFAULT_THRESHOLDS = {
   minConsensusScore: 0.4,

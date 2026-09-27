@@ -227,7 +227,7 @@ describe('verification evidence delivery', () => {
     expect(result.findings[0]!.gating!.verification!.note).toBe(input.verification_note);
   });
 
-  it.each(['refuted', 'unrefuted', 'unavailable'] as const)('preserves %s evidence in kept and below-threshold findings at the selected level', (verdict) => {
+  it.each(['confirmed', 'refuted', 'insufficient_evidence', 'unrefuted', 'unavailable'] as const)('preserves %s evidence in kept and below-threshold findings at the selected level', (verdict) => {
     const result = sampleResult();
     for (const f of [...result.findings, ...result.belowThresholdFindings!]) {
       f.gating = { reason: 'none', verification: { verdict, model: 'google/gemini-3.8-flash', note: 'The earlier branch returns.' } };
