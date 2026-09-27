@@ -24,4 +24,50 @@ describe('transient input bounds', () => {
     expect(from).not.toHaveBeenCalled();
     from.mockRestore();
   });
+
+  it('enforces the monotonic deadline while an iterator eagerly yields empty chunks', async () => {
+    let calls = 0;
+    const returned = vi.fn(async () => ({ done: true as const, value: undefined }));
+    const stream: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            calls++;
+            if (calls > 100) throw new Error('iterator safety bound exceeded');
+            return { done: false as const, value: new Uint8Array() };
+          },
+          return: returned,
+        };
+      },
+    };
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now++);
+
+    await expect(readTransientInput(stream, 1, 10)).rejects.toThrow('transient_input_unavailable');
+
+    expect(calls).toBeLessThan(20);
+    expect(returned).toHaveBeenCalledOnce();
+    clock.mockRestore();
+  });
+
+  it('does not retain empty chunks while assembling bounded input', async () => {
+    const values = [...Array.from({ length: 32 }, () => new Uint8Array()), Buffer.from('ok')];
+    const stream: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            const value = values.shift();
+            return value ? { done: false as const, value } : { done: true as const, value: undefined };
+          },
+        };
+      },
+    };
+    const concat = vi.spyOn(Buffer, 'concat');
+
+    await expect(readTransientInput(stream, 2)).resolves.toBe('ok');
+
+    expect(concat).toHaveBeenCalledOnce();
+    expect(concat.mock.calls[0]?.[0]).toHaveLength(1);
+    concat.mockRestore();
+  });
 });

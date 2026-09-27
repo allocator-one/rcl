@@ -186,6 +186,21 @@ describe('spool → worker → collect round trip', () => {
     expect(await readFile(path, 'utf8')).toBe(bytes);
   });
 
+  it('keeps structural directory checks on Windows without applying POSIX mode or uid rules', async () => {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const targetKey = asyncTargetKey('windows-directory');
+    await chmod(dir, 0o702);
+
+    try {
+      await publishAsyncReview(dir, targetKey, {
+        model: 'fixture', role: 'general', provider: 'fake', findings: [], durationMs: 1, status: 'success', async: true,
+      });
+      expect(await collectAsyncResults(dir, targetKey)).toMatchObject([{ model: 'fixture', status: 'success' }]);
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
   it('worker consumes a spool file and writes a result the next collect merges, marked async', async () => {
     const targetKey = asyncTargetKey('repo#1');
     const spools = await spoolAsyncCalls([spec], {

@@ -10,7 +10,7 @@ export interface CheckpointAsyncExecutionOptions {
   /** Construction only; the executor supplies the exact captured route and prompts. */
   adapterFactory: (call: AsyncCall) => ReviewAdapter;
   signal?: AbortSignal;
-  onLateAuditError: (error: unknown) => void;
+  onLateAuditError: (error: unknown, attemptId: string) => void | Promise<void>;
   /** Derived opinion publication only, after exact result durability. Never physical accounting. */
   onReviewRecorded?: (review: ModelReview) => Promise<void>;
 }
@@ -59,21 +59,39 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       throw error;
     }
     if (!intent || !raw) break;
-    const observed = raw.then(async result => {
+    const persist = async (result: Awaited<ReturnType<ReviewAdapter['review']>>) => {
       const bytes = stableStringify({ ...result, async: true });
       const review = parseAsyncReview(bytes, call.ref);
       await writer.recordResult(intent.attemptId, bytes, true);
       await options.onReviewRecorded?.(structuredClone(review) as ModelReview);
       return review.status;
-    });
-    // A pending result retains only restricted audit authority. Late callbacks
-    // cannot reopen the sealed proof or mutate a finalized blocking report.
-    const safe = observed.catch(error => { if (expired) { options.onLateAuditError(error); return undefined; } throw error; });
-    let status: Awaited<typeof safe>;
-    try { status = await Promise.race([safe, stopped]); } finally {
+    };
+    const response = raw.then(
+      result => ({ kind: 'result' as const, result }),
+      error => ({ kind: 'error' as const, error }),
+    );
+    let outcome: Awaited<typeof response> | undefined;
+    try { outcome = await Promise.race([response, stopped]); } finally {
       if (timer !== undefined) clearTimeout(timer);
       options.signal?.removeEventListener('abort', stop);
     }
+    if (outcome === undefined) {
+      // A pending provider response retains only restricted audit authority.
+      // Its eventual result cannot reopen the sealed proof or blocking report.
+      void response.then(async late => {
+        if (late.kind === 'error') throw late.error;
+        await persist(late.result);
+      }).catch(async error => { await options.onLateAuditError(error, intent.attemptId); })
+        // The sink is already the final bounded durability attempt. Contain its
+        // own failure so a detached worker cannot create an unhandled rejection.
+        .catch(() => {});
+      break;
+    }
+    if (outcome.kind === 'error') throw outcome.error;
+    // The immutable deadline bounds provider response time. Once a response is
+    // observed, validation and durable result publication must finish rather
+    // than being abandoned by the same timer.
+    const status = await persist(outcome.result);
     if (status !== 'timeout' || expired) break;
   }
   return { newPhysicalCalls };

@@ -288,8 +288,9 @@ export async function publishAsyncReview(storeDir: string, targetKey: string, re
 
 async function assertSafeAsyncOpinionDirectory(storeDir: string): Promise<void> {
   const info = await lstat(storeDir);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o022) !== 0 ||
-      typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+  const unsafePosixMetadata = process.platform !== 'win32' &&
+    ((info.mode & 0o022) !== 0 || typeof process.getuid === 'function' && info.uid !== process.getuid());
+  if (!info.isDirectory() || info.isSymbolicLink() || unsafePosixMetadata) {
     throw new Error('unsafe async opinion directory');
   }
 }

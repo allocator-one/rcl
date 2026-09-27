@@ -29,6 +29,7 @@ interface OpinionCycle { version: 1; cycleId: string | null }
 interface Metadata { version: 1; plan: AsyncPlan; grants: string[]; opinionCycle?: OpinionCycle }
 interface Phase { plan: AsyncPlan; state: AsyncState }
 export interface AsyncLateRecord { sequence: number; previousDigest: string; digest: string; sealedProofSha256: string; result: AsyncResult }
+export interface AsyncLateFailure { sequence: number; kind: 'late_audit_failure'; callIndex: number; attemptId: string; digest: string }
 const delegateSchema = z.object({ version: z.literal(1), commonDir: z.string().min(1), namespace: z.string().min(1), target: z.string().min(1),
   checkpointPath: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/), callIndex: z.number().int().nonnegative().safe(), token: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const metadataSchema = z.object({ version: z.literal(1), plan: z.unknown(), grants: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(8),
@@ -155,7 +156,7 @@ export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ del
     const prepared = await child(staging, `async-${randomUUID()}.pending`), identity = await lstat(prepared);
     let published = false;
     try {
-      await child(prepared, 'events'); await child(prepared, 'late');
+      await child(prepared, 'events'); await child(prepared, 'late'); await child(prepared, 'failures');
       await publish(prepared, join(prepared, 'phase.json'), stableStringify(metadata) + '\n');
       await syncNativeDirectory(prepared);
       // Native ownership serializes initializers. Never replace an existing
@@ -277,6 +278,43 @@ async function appendLate(location: Location, proof: AsyncProof, result: AsyncRe
 }
 export function readAsyncLateAudit(input: LocationInput): Promise<readonly AsyncLateRecord[]> {
   const location = snapshotLocation(input); return locked(location, (metadata, state) => lateAt(location, encodeAsyncProof(metadata.plan, state.records)));
+}
+
+async function lateFailuresAt(location: Location, plan: AsyncPlan, state: AsyncState): Promise<AsyncLateFailure[]> {
+  const directory = join(location.phasePath, 'failures'); await privateDirectory(directory); const names = (await readdir(directory)).sort();
+  asyncRefuse(names.length <= plan.maxPhysicalCalls, 'late_failure_cap'); const rows: AsyncLateFailure[] = [], seen = new Set<string>();
+  for (const [index, name] of names.entries()) {
+    asyncRefuse(name === filename(index + 1), 'late_failure_sequence'); const bytes = await safeRead(join(directory, name)); let row: unknown;
+    try { row = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_late_failure'); }
+    asyncRefuse(row && typeof row === 'object' && Object.keys(row).sort().join(',') === 'attemptId,callIndex,digest,kind,sequence', 'invalid_late_failure');
+    const candidate = row as AsyncLateFailure, { digest, ...unsigned } = candidate;
+    const intent = state.intents.find(value => value.attemptId === candidate.attemptId);
+    asyncRefuse(stableStringify(candidate) + '\n' === bytes && candidate.sequence === index + 1 && candidate.kind === 'late_audit_failure' &&
+      intent?.callIndex === candidate.callIndex && !seen.has(candidate.attemptId) && sha256Hex(stableStringify(unsigned)) === digest, 'invalid_late_failure');
+    seen.add(candidate.attemptId); rows.push(candidate);
+  }
+  return freezeAsync(rows);
+}
+
+/** Record a bounded private diagnostic when a late result cannot be audited. */
+export async function recordAsyncLateFailure(input: AsyncDelegate, attemptId: string): Promise<void> {
+  const { location, delegate } = await delegatedLocation(structuredClone(input));
+  await locked(location, async (metadata, state) => {
+    authorize(metadata, delegate); const intent = state.intents.find(value => value.attemptId === attemptId);
+    asyncRefuse(intent?.callIndex === delegate.callIndex, 'late_failure_intent');
+    const rows = await lateFailuresAt(location, metadata.plan, state), existing = rows.find(row => row.attemptId === attemptId);
+    if (existing) {
+      await resync(join(location.phasePath, 'failures', filename(existing.sequence)), stableStringify(existing) + '\n'); return;
+    }
+    const unsigned = { sequence: rows.length + 1, kind: 'late_audit_failure' as const, callIndex: delegate.callIndex, attemptId };
+    const record = { ...unsigned, digest: sha256Hex(stableStringify(unsigned)) };
+    await publish(location.phasePath, join(location.phasePath, 'failures', filename(record.sequence)), stableStringify(record) + '\n');
+  });
+}
+
+/** Structural private diagnostic read; entries contain no provider error bytes. */
+export function readAsyncLateFailures(input: LocationInput): Promise<readonly AsyncLateFailure[]> {
+  const location = snapshotLocation(input); return locked(location, (metadata, state) => lateFailuresAt(location, metadata.plan, state));
 }
 
 /** Authenticated restricted executor input, read only from the same journal and captured matrix. */

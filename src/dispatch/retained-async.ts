@@ -5,7 +5,7 @@ import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter } from './adapter.js';
 import { CheckpointJournal } from './checkpoint.js';
 import { decodeCapturedInputs } from './captured-inputs.js';
-import { openCapturedAsyncDelegate, type AsyncDelegate } from './checkpoint-async-store.js';
+import { openCapturedAsyncDelegate, recordAsyncLateFailure, type AsyncDelegate } from './checkpoint-async-store.js';
 import { executeCheckpointAsync } from './checkpoint-async-execution.js';
 import { defaultAdapterFactory } from './runner.js';
 import { asyncTargetKey, publishAsyncReview, resolveAsyncStoreDir, workerEnv } from './async-lane.js';
@@ -50,7 +50,7 @@ export async function runRetainedAsyncWorker(bytes: string, dependencies: {
   let latest: ModelReview | undefined;
   await executeCheckpointAsync({ delegate,
     adapterFactory: call => (dependencies.adapterFactory ?? (provider => defaultAdapterFactory(provider, captured.config.reasoningEffort)))(call.provider),
-    onLateAuditError: () => {}, onReviewRecorded: async review => { latest = review; },
+    onLateAuditError: (_error, attemptId) => recordAsyncLateFailure(delegate, attemptId), onReviewRecorded: async review => { latest = review; },
   });
   if (latest) {
     const publish = dependencies.publish ?? (async review => publishAsyncReview(await resolveAsyncStoreDir(delegate.commonDir), opinionTarget, review));

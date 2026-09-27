@@ -5,13 +5,16 @@ export async function readTransientInput(stream: AsyncIterable<Uint8Array | stri
   }
   const iterator = stream[Symbol.asyncIterator]();
   const chunks: Buffer[] = []; let size = 0, timer: ReturnType<typeof setTimeout> | undefined;
+  const monotonicStart = performance.now();
   const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('transient_input_timeout')), timeoutMs); });
   try {
     while (true) {
+      if (performance.now() - monotonicStart >= timeoutMs) throw new Error('transient_input_timeout');
       const part = await Promise.race([iterator.next(), timeout]);
       if (part.done) break;
       const incoming = typeof part.value === 'string' ? Buffer.byteLength(part.value) : part.value.byteLength;
       if (incoming > maxBytes - size) throw new Error('transient_input_too_large');
+      if (incoming === 0) continue;
       const bytes = Buffer.from(part.value); size += incoming;
       chunks.push(bytes);
     }
