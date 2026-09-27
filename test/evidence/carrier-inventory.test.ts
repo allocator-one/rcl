@@ -239,6 +239,43 @@ describe('authenticated carrier inventory', () => {
     }
   });
 
+  it('bounds receipt matching across the full correction inventory', async () => {
+    const f = fixture(false); const source = f.sources[0]!; const classification = source.classifications![0]!;
+    source.corrections = Array.from({ length: 2000 }, (_, index) => ({
+      ...classification, id: uuid(10_000 + index), sequence: index + 2, kind: 'finding_identity_corrected', payload: {},
+    }));
+    source.correctionIds = source.corrections.map(receipt => receipt.id);
+    f.change(body => {
+      if (body.meta.recovery) body.meta.recovery.event_sequence = 2001;
+      return body;
+    });
+    let selectorIdReads = 0;
+    const getJson = f.sink.getJson.bind(f.sink);
+    const observe = vi.spyOn(f.sink, 'getJson').mockImplementation((async (...args: Parameters<typeof getJson>) => {
+      const result = await getJson(...args);
+      const view = result.kind === 'ok' ? result.value as { eventSelectors?: Array<Record<string, unknown>> } : undefined;
+      if (Array.isArray(view?.eventSelectors)) {
+        // Keep the real response decoder and every selector value; count data
+        // reads regardless of which lookup algorithm consumes the inventory.
+        view.eventSelectors = view.eventSelectors.map(selector => new Proxy(selector, {
+          get(target, property, receiver) {
+            if (property === 'id') selectorIdReads++;
+            return Reflect.get(target, property, receiver);
+          },
+        }));
+      }
+      return result;
+    }) as typeof f.sink.getJson);
+    try {
+      const result = await read(f);
+      expect(result.kind).toBe('ok');
+      if (result.kind !== 'ok') throw new Error(JSON.stringify(result));
+      expect(carrierInventoryContent(result.value).inventory.sources[0]!.corrections).toEqual(source.corrections);
+      expect(selectorIdReads).toBeGreaterThanOrEqual(source.corrections.length + 1);
+      expect(selectorIdReads).toBeLessThan(20_000);
+    } finally { observe.mockRestore(); }
+  });
+
   it('rejects destination and operator mismatches before reading any endpoint', async () => {
     const f = fixture(false); const carrier = structuredClone(f.projection.carrier); carrier.scope.base_url = 'https://other.example.test';
     await expect(readCarrierInventory(f.sink, carrier, f.actor)).rejects.toThrow('carrier_inventory_destination_conflict');

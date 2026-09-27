@@ -122,6 +122,7 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
         isDeepStrictEqual(operations.slice(0, -1), predecessor.recovery?.operations ?? []) &&
         isDeepStrictEqual(current.migration, predecessor.migration) &&
         isDeepStrictEqual(current.cycle, predecessor.cycle) &&
+        current.roundCap === predecessor.roundCap &&
         retainedRounds(current, predecessor) &&
         Object.entries(predecessor.findings).every(([key, finding]) =>
           Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
@@ -130,7 +131,7 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
     let legacy = current.version === 1 ? current : undefined;
     if (current.version === 2 && current.migration) {
       legacy = take(current.migration.sourceSha256);
-      requireSource(legacy.version === 1 && retainedRounds(current, legacy) &&
+      requireSource(legacy.version === 1 && current.roundCap === legacy.roundCap && retainedRounds(current, legacy) &&
         Object.entries(legacy.findings).every(([key, finding]) =>
           Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
     }

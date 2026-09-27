@@ -136,12 +136,13 @@ async function material(sink: HarnessSink, view: RunView, retainedBytes: number)
     source.reportJson = report;
   }
   const ids = [...(view.classificationId ? [view.classificationId] : []), ...view.correctionIds];
+  const selectorsById = new Map(view.eventSelectors.map(selector => [selector.id, selector]));
   for (let offset = 0; offset < ids.length; offset += 50) {
     const read = value(await readEventReceipts(sink, source.selector.scope, ids.slice(offset, offset + 50)));
     for (const receipt of read.receipts) {
       retainedBytes += Buffer.byteLength(JSON.stringify(receipt), 'utf8');
       if (retainedBytes > MAX_CARRIER_READ_BYTES) conflict('carrier_inventory_read_limit');
-      const selector = view.eventSelectors.find(event => event.id === receipt.id);
+      const selector = selectorsById.get(receipt.id);
       if (!selector || receipt.sequence !== selector.sequence || receipt.kind !== selector.kind ||
           receipt.sequence > view.sequence || receipt.converge_target !== source.selector.target || receipt.round !== source.selector.round) {
         conflict('carrier_inventory_receipt_selector_conflict');

@@ -45,6 +45,7 @@ interface UnboundMappings extends PositionedMapping {
   identity: string | undefined;
   hasDescriptor: boolean;
   descriptorsAgree: boolean;
+  statusesAgree: boolean;
 }
 
 /** Selected receipt content, not authentication or proof of inventory completeness. */
@@ -139,9 +140,10 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
         if (group.identity !== row.matched_identity) group.identity = undefined;
         group.hasDescriptor ||= row.claim_descriptor !== undefined;
         group.descriptorsAgree &&= isDeepStrictEqual(group.row.claim_descriptor, row.claim_descriptor);
+        group.statusesAgree &&= group.row.status === row.status;
       } else {
         unboundMappings.set(row.identity_key, { row, order, identity: row.matched_identity,
-          hasDescriptor: row.claim_descriptor !== undefined, descriptorsAgree: true });
+          hasDescriptor: row.claim_descriptor !== undefined, descriptorsAgree: true, statusesAgree: true });
       }
     }
   }
@@ -164,6 +166,10 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
     const mapping = !bound ? unbound?.row : !unbound || bound.order < unbound.order ? bound.row : unbound.row;
     const ambiguous = unbound && (occurrenceCounts.get(raw.identity)! > 1 || unbound.identity === undefined ||
       bound && bound.row.matched_identity !== unbound.identity);
+    // A single association cannot inherit whichever contradictory status was
+    // listed first. An identity-only correction cannot settle that conflict.
+    if (unbound && !ambiguous) requireSource(unbound.statusesAgree &&
+      (!bound || bound.row.status === unbound.row.status));
     const unresolvedReason = mapping === undefined ? 'classification-unavailable' :
       ambiguous ? 'classification-ambiguous' : undefined;
     // Released unmarked classifications may cover kept findings only. Preserve

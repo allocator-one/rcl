@@ -72,12 +72,36 @@ describe('original occurrence classification', () => {
     const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
     const bound = rows[0]!;
     const unbound = { identity_key: bound.identity_key, matched_identity: bound.matched_identity,
-      status: 'repeat', claim_descriptor: bound.claim_descriptor };
+      status: bound.status, claim_descriptor: bound.claim_descriptor };
     delete source.classification.payload.classification_version;
     source.classification.payload.identities = boundFirst ? [...rows, unbound] : [unbound, ...rows];
     const member = validateOccurrenceSource(source).members[0]!;
     expect(member.mapping).toBe(boundFirst ? bound : unbound);
     expect(member.identity).toBe(transfer.split.selection.previousIdentity);
+  });
+
+  it.each([false, true])('refuses contradictory legacy statuses for one occurrence (suppressed first: %s)', suppressedFirst => {
+    const { transfer } = fixture();
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const suppressed = { ...rows[0]!, status: 'suppressed' };
+    const regating = { ...rows[0]!, status: 'regating' };
+    source.classification.payload.identities = [
+      ...(suppressedFirst ? [suppressed, regating] : [regating, suppressed]), ...rows.slice(1),
+    ];
+    expect(() => validateOccurrenceSource(source)).toThrow('occurrence_source_conflict');
+  });
+
+  it.each([false, true])('refuses a legacy status conflicting with its exact positional binding (bound first: %s)', boundFirst => {
+    const { transfer } = fixture(true);
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const bound = rows[0]!;
+    const unbound = { identity_key: bound.identity_key, matched_identity: bound.matched_identity,
+      status: bound.status === 'suppressed' ? 'regating' : 'suppressed', claim_descriptor: bound.claim_descriptor };
+    delete source.classification.payload.classification_version;
+    source.classification.payload.identities = boundFirst ? [...rows, unbound] : [unbound, ...rows];
+    expect(() => validateOccurrenceSource(source)).toThrow('occurrence_source_conflict');
   });
 
   it('retains ambiguity when an unbound mapping disagrees with an exact positional mapping', () => {

@@ -70,6 +70,20 @@ describe('retained snapshot lineage', () => {
     expect(() => verifyNativeRecoveryLineage(JSON.stringify(f.current), target, [f.original])).toThrow(/native_recovery/);
   });
 
+  it('refuses a recovery that changes the retained round cap', () => {
+    const f = recoveredFixture();
+    f.state.roundCap++;
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(f.state), target, [f.sourceJson]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
+  it('refuses a legacy migration that changes the retained round cap', () => {
+    const f = migrated();
+    f.current.roundCap++;
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(f.current), target, [f.original]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
   it('refuses oversized retained snapshots before hashing their bytes', () => {
     const f = recoveredFixture();
     const oversized = 'x'.repeat(64 * 1024 * 1024 + 1);
