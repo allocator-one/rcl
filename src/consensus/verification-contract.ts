@@ -25,7 +25,8 @@ function nonempty(value: unknown): value is string {
 /** Validate citation provenance, not the semantic truth of the model's explanation. */
 function sourceContains(patch: string, quote: string): boolean {
   const source = patch.split('\n')
-    .filter(line => !line.startsWith('@@') && !line.startsWith('+++') && !line.startsWith('---') && !line.startsWith('\\'))
+    .filter(line => !line.startsWith('@@') && !line.startsWith('+++') && !line.startsWith('---') &&
+      !line.startsWith('\\') && !line.startsWith('-'))
     .map(line => /^[ +\-]/.test(line) ? line.slice(1) : line).join('\n');
   return source.includes(quote);
 }

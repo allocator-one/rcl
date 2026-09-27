@@ -60,6 +60,21 @@ describe('evidence-based verifier contract', () => {
     expect(result.verification).toMatchObject({ confirmed: 0, insufficientEvidence: 1 });
   });
 
+  it('does not treat deleted source as confirmation evidence', async () => {
+    const deleted = {
+      ...confirmed,
+      evidence: [{ file: 'account.ts', quote: 'await accounts.delete(request.params.accountId);' }],
+    };
+    const result = await applyGating([finding], {
+      ...opts,
+      diffFiles: [{ ...opts.diffFiles[0], patch: '@@ -1 +1 @@\n-await accounts.delete(request.params.accountId);\n+await accounts.delete(currentAccountId);' }],
+      ask: async () => answer([deleted]),
+    });
+    expect(result.findings[0]!.gating).toMatchObject({
+      reason: 'none', verification: { verdict: 'insufficient_evidence' },
+    });
+  });
+
   it('keeps legacy unrefuted semantics when replaying a retained version-one plan', () => {
     const plan = planGating([finding], opts);
     plan.version = 1;
