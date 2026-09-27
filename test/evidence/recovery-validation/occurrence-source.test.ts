@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+const decodedOverride = vi.hoisted(() => ({ value: undefined as unknown }));
+vi.mock('../../../src/evidence/claim-recovery/validation/recovery-json.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/evidence/claim-recovery/validation/recovery-json.js')>();
+  return { ...actual, decodeRecoveryOriginal: (raw: string, options: unknown) =>
+    raw === '__oversized-decoded-findings__' ? decodedOverride.value : actual.decodeRecoveryOriginal(raw, options) };
+});
 import { requireReason, validateOccurrenceSource } from '../../../src/evidence/claim-recovery/validation/occurrence-source.js';
 import { fixture, rebind } from './occurrence-fixtures.js';
 import { sha, uuid } from './fixtures.js';
@@ -20,6 +26,23 @@ describe('original occurrence classification', () => {
 
   it('accepts a 2,000-code-point astral reason at the UTF-16 boundary', () => {
     expect(() => requireReason('😀'.repeat(2000))).not.toThrow();
+  });
+
+  it('refuses an oversized decoded combined finding list before iteration', () => {
+    const { transfer, report } = fixture();
+    const findings = Array.from({ length: 2000 }, () => report.findings[0]!);
+    const appendix = [report.findings[0]!]; let enumerated = false;
+    Object.defineProperty(findings, Symbol.iterator, { value: () => { enumerated = true; throw new Error('findings_enumerated'); } });
+    Object.defineProperty(appendix, Symbol.iterator, { value: () => { enumerated = true; throw new Error('appendix_enumerated'); } });
+    decodedOverride.value = { transformations: [], value: { ...report, findings, belowThresholdFindings: appendix } };
+    transfer.split.source.reportJson = '__oversized-decoded-findings__';
+    const artifact = (transfer.split.source.storedRun.artifacts as Array<Record<string, unknown>>)[0]!;
+    artifact.declared_sha256 = sha(transfer.split.source.reportJson);
+    artifact.declared_bytes = Buffer.byteLength(transfer.split.source.reportJson);
+    try {
+      expect(() => validateOccurrenceSource(transfer.split.source)).toThrow('occurrence_source_conflict');
+      expect(enumerated).toBe(false);
+    } finally { decodedOverride.value = undefined; }
   });
 
   it('retains unambiguous unmarked membership, including a separately named appendix occurrence', () => {

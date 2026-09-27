@@ -94,8 +94,10 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
   requireSource(originals.length === 1 && originals[0].declared_sha256 === digest && originals[0].stored === true &&
     originals[0].declared_bytes === Buffer.byteLength(input.reportJson));
   requireSource(Array.isArray(report.findings) && (report.belowThresholdFindings === undefined || Array.isArray(report.belowThresholdFindings)));
-  const kept = report.findings; const all = [...kept, ...(report.belowThresholdFindings as unknown[] | undefined ?? [])];
-  requireSource(all.length <= 2000 && Array.isArray(stored.findings) && stored.findings.length === all.length);
+  const kept = report.findings; const below = report.belowThresholdFindings as unknown[] | undefined ?? [];
+  requireSource(kept.length + below.length <= 2000);
+  const all = [...kept, ...below];
+  requireSource(Array.isArray(stored.findings) && stored.findings.length === all.length);
   const storedMembers = new Map<string, Record<string, unknown>>();
   for (const member of stored.findings) {
     requireSource(object(member) && typeof member.ref === 'string' && !storedMembers.has(member.ref));
