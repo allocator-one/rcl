@@ -126,6 +126,19 @@ describe('retained snapshot lineage', () => {
       .toThrow('native_recovery_lineage_conflict');
   });
 
+  it('refuses a sighting-less intermediate v3 link even when the newest v3 has sightings', () => {
+    const f = recoveredFixture(2);
+    const intermediate = structuredClone(f.state);
+    delete intermediate.sightings;
+    const intermediateJson = JSON.stringify(intermediate);
+    const newest = structuredClone(intermediate);
+    newest.sightings = [];
+    newest.recovery.operations.push({ operationId: uuid(990), sourceVersion: 3, sourceSha256: sha(intermediateJson),
+      anchors: [{ identity: '3333333333333333' }], sourceReceipts: [] });
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(newest), target, [f.sourceJson, intermediateJson]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
   it.each(['missing', 'tampered', 'interchanged'])('refuses a %s intermediate predecessor snapshot', change => {
     const f = twoStepLineage();
     const snapshots = change === 'missing' ? [f.original] :
