@@ -1080,11 +1080,12 @@ output:
   belowThresholdAppendix: true  # false drops below-threshold findings outright
 
 # Concurrency and reliability
-concurrency: 6
+concurrency: 9        # maximum simultaneous blocking reviewer calls per process
+                      # set to 6 to retain the previous limit
 timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
-# quorumFraction: 0.75  # round closes once this share of calls has completed; stragglers
-                        # are canceled and recorded (core `models` are never canceled).
+# quorumFraction: 0.75  # round closes once this share of blocking seats succeeds
+                        # on every chunk; all stragglers can be canceled, including core models.
                         # Default: exactly 2/3 — leave unset for that; 1 disables.
 maxRetries: 3
 
@@ -1105,6 +1106,11 @@ spec: SPEC.md
 # GitHub token (prefer GITHUB_TOKEN env var instead)
 # githubToken: ghp_...
 ```
+
+`concurrency` limits blocking reviewer calls within one RCL process. Separate
+RCL processes share provider capacity without sharing this limit; async reviewers
+and verification use their own scheduling. Set `concurrency: 6` in the applicable
+configuration to restore the previous limit for new reviews.
 
 `maxRetries` limits additional adapter SDK invocations after the first attempt;
 all attempts share the call's `timeout` and parent cancellation signal. Supported

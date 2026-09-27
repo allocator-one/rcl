@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { runReviews, defaultAdapterFactory } from '../../src/dispatch/runner.js';
+import { DEFAULT_CONCURRENCY } from '../../src/config/defaults.js';
 import { detectProvider } from '../../src/roles/dispatcher.js';
 import type { ReviewAdapter } from '../../src/dispatch/adapter.js';
 import type { Role, ReviewAssignment } from '../../src/roles/types.js';
@@ -53,6 +54,40 @@ function delayedAdapter(
 }
 
 describe('runReviews worker pool', () => {
+  it('runs a chunked council with at most nine default blocking calls in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      let active = 0;
+      let peak = 0;
+      const adapter: ReviewAdapter = {
+        name: 'fake', provider: 'fake',
+        review: async (model) => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise(resolve => setTimeout(resolve, 10));
+          active--;
+          return successReview(model, 'fake');
+        },
+      };
+      const seats = Array.from({ length: 17 }, (_, i) => makeAssignment(`seat-${i}`, 'fake'));
+      const assignments = [...seats, ...seats];
+      const pending = runReviews(assignments, assignments.map(makePrompt), {
+        timeoutMs: 1000, maxRetries: 0, concurrency: DEFAULT_CONCURRENCY,
+        adapterFactory: () => adapter,
+      });
+      await vi.runAllTimersAsync();
+      const reviews = await pending;
+
+      expect(peak).toBe(9);
+      expect(active).toBe(0);
+      expect(reviews).toHaveLength(34);
+      expect(reviews.every(review => review.status === 'success')).toBe(true);
+      expect(reviews.map(review => review.model)).toEqual(assignments.map(assignment => assignment.model));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not head-of-line block: a slow call does not stall queued calls beyond pool width', async () => {
     const completions: string[] = [];
     const adapter = delayedAdapter({ slow: 80, fast1: 5, fast2: 5 }, completions);

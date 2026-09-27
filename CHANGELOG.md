@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Raise default blocking reviewer concurrency from six to nine per process.
+  Explicit `concurrency` settings still take precedence; set `concurrency: 6`
+  to retain the previous limit (RCL-132).
+
 ## 4.1.11 - 2026-09-26
 
 - Add `rcl review owner/repo#123 --start-over` for an explicitly requested fresh

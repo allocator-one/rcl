@@ -79,7 +79,7 @@ export const DEFAULT_MAX_RETRIES = 3;
  * took the council from 10/17 to 17/17 completed reviews.
  */
 export const DEFAULT_REASONING_EFFORT = 'medium';
-export const DEFAULT_CONCURRENCY = 6;
+export const DEFAULT_CONCURRENCY = 9;
 
 export const DEFAULT_SEVERITY_ORDER = [
   'critical',
