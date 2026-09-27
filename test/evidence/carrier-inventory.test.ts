@@ -49,6 +49,12 @@ function fixture(legacy = true) {
 async function read(f: ReturnType<typeof fixture>) { return readCarrierInventory(f.sink, f.projection.carrier, f.actor); }
 
 describe('authenticated carrier inventory', () => {
+  it('rejects a carrier classification ID that differs from the authenticated run', async () => {
+    const f = fixture(false);
+    f.projection.carrier.classificationId = uuid(999);
+    expect(await read(f)).toMatchObject({ kind: 'conflict', message: 'carrier_inventory_carrier_binding_conflict' });
+  });
+
   it('accepts a selected repository spelling that differs only in case from retained sources', async () => {
     const f = fixture(false);
     f.projection.carrier.scope.repo = f.projection.carrier.scope.repo.toUpperCase();

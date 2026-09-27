@@ -189,8 +189,8 @@ export async function readCarrierInventory(sink: HarnessSink, carrier: Occurrenc
       if (retainedBytes > MAX_CARRIER_READ_BYTES) conflict('carrier_inventory_read_limit');
       views.push(view);
     }
-    const own = views.find(view => view.source.selector.scope.run_id === carrier.scope.run_id)!.source.selector;
-    if (!sameRunSelection(own, { scope: carrier.scope, target: carrier.target, round: carrier.round,
+    const own = views.find(view => view.source.selector.scope.run_id === carrier.scope.run_id)!;
+    if (own.classificationId !== carrier.classificationId || !sameRunSelection(own.source.selector, { scope: carrier.scope, target: carrier.target, round: carrier.round,
       headSha: carrier.headSha, reportSha256: carrier.reportSha256 })) conflict('carrier_inventory_carrier_binding_conflict');
     for (const view of views) retainedBytes = await material(sink, view, retainedBytes);
     for (let index = 0; index < selected.length; index++) {
