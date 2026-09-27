@@ -77,7 +77,7 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
     scrubIdentifier(input.target) === input.target && identity(input.previousIdentity) && identity(input.identity) &&
     input.previousIdentity !== input.identity && Number.isSafeInteger(input.expectedEventSequence) && input.expectedEventSequence >= 0);
   instant(input.occurredAt);
-  requireEvidence(claimDescriptorSchema.safeParse(input.descriptor).success && typeof input.reason === 'string' &&
+  requireEvidence(claimDescriptorSchema.safeParse(input.descriptor).success && typeof input.reason === 'string' && input.reason.length <= 4000 &&
     input.reason.trim().length > 0 && [...input.reason].length <= 2000 &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input.reason));
   const native = original(input.nativeJson); const report = original(input.reportJson, true);

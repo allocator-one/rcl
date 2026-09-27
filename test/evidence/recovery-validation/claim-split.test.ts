@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,6 +53,26 @@ function input(): ClaimSplitInput {
 }
 
 describe('receipt-bound claim split preparation', () => {
+  it('rejects an oversized reason before enumerating its code points', () => {
+    const selection = input(); selection.reason = 'x'.repeat(4001);
+    const iterator = String.prototype[Symbol.iterator];
+    let enumerated = false;
+    const spy = vi.spyOn(String.prototype, Symbol.iterator).mockImplementation(function (this: string) {
+      if (this.valueOf() === selection.reason) enumerated = true;
+      return iterator.call(this);
+    });
+    try {
+      expect(() => prepareClaimSplit(selection)).toThrow('claim_split_source_conflict');
+      expect(enumerated).toBe(false);
+    }
+    finally { spy.mockRestore(); }
+  });
+
+  it('accepts a 2,000-code-point astral reason at the UTF-16 boundary', () => {
+    const selection = input(); selection.reason = '😀'.repeat(2000);
+    expect(() => prepareClaimSplit(selection)).not.toThrow();
+  });
+
   it('splits an original member without inheriting the conflated verdict or rewriting evidence', () => {
     const selection = input(); const before = structuredClone(selection);
     const prepared = prepareClaimSplit(selection);

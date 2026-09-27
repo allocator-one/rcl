@@ -13,7 +13,7 @@ export const counter = (v: unknown): v is number => typeof v === 'number' && Num
 const positive = (v: unknown): v is number => counter(v) && v > 0 && v <= 2_147_483_647;
 export function requireSource(valid: unknown): asserts valid { if (!valid) throw new Error('occurrence_source_conflict'); }
 export function requireReason(value: unknown): asserts value is string {
-  requireSource(typeof value === 'string' && value.trim().length > 0 && [...value].length <= 2000 &&
+  requireSource(typeof value === 'string' && value.length <= 4000 && value.trim().length > 0 && [...value].length <= 2000 &&
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value) && !/[\uD800-\uDFFF]/u.test(value));
 }
 

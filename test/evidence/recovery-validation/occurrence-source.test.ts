@@ -1,9 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateOccurrenceSource } from '../../../src/evidence/claim-recovery/validation/occurrence-source.js';
+import { requireReason, validateOccurrenceSource } from '../../../src/evidence/claim-recovery/validation/occurrence-source.js';
 import { fixture, rebind } from './occurrence-fixtures.js';
 import { sha, uuid } from './fixtures.js';
 
 describe('original occurrence classification', () => {
+  it('rejects an oversized reason before enumerating its code points', () => {
+    const value = 'x'.repeat(4001); const iterator = String.prototype[Symbol.iterator];
+    let enumerated = false;
+    const spy = vi.spyOn(String.prototype, Symbol.iterator).mockImplementation(function (this: string) {
+      if (this.valueOf() === value) enumerated = true;
+      return iterator.call(this);
+    });
+    try {
+      expect(() => requireReason(value)).toThrow('occurrence_source_conflict');
+      expect(enumerated).toBe(false);
+    }
+    finally { spy.mockRestore(); }
+  });
+
+  it('accepts a 2,000-code-point astral reason at the UTF-16 boundary', () => {
+    expect(() => requireReason('😀'.repeat(2000))).not.toThrow();
+  });
+
   it('retains unambiguous unmarked membership, including a separately named appendix occurrence', () => {
     const { transfer } = fixture();
     const result = validateOccurrenceSource(transfer.split.source);

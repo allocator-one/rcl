@@ -12,6 +12,27 @@ const state = (entry: FindingEntry): ConvergeRunState => ({
 });
 
 describe('legacy pending obligations', () => {
+  it('derives an open legacy finding obligation from its first round', () => {
+    const entry = finding({ verdict: undefined, verdictRound: undefined, verdictSeverity: undefined, firstRound: 1, lastRound: 2 });
+    const value = state(entry);
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 } });
+    expect(migratedLegacyPendingRound(entry, value)).toBe(1);
+  });
+
+  it('preserves an explicit pending obligation across later nongating evidence', () => {
+    const entry = finding({ pendingRound: 1, lastRound: 2 }); const value = state(entry);
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 } });
+    value.lastAnnotations = { round: 2, identities: [{ identity: entry.key, status: 'suppressed', gating: 'none' }] };
+    expect(migratedLegacyPendingRound(entry, value)).toBe(1);
+  });
+
+  it('retains an explicit pending obligation after a fixed verdict but invents none without one', () => {
+    const explicit = finding({ verdict: 'fixed', verdictRound: 1, pendingRound: 1 });
+    expect(migratedLegacyPendingRound(explicit, state(explicit))).toBe(1);
+    const settled = finding({ verdict: 'fixed', verdictRound: 1, pendingRound: undefined });
+    expect(migratedLegacyPendingRound(settled, state(settled))).toBeUndefined();
+  });
+
   it('uses the retained entry severity when a legacy dismissal has no verdict severity', () => {
     const entry = finding({ lastRound: 2 }); const value = state(entry);
     value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'critical' } });

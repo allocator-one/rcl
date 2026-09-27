@@ -118,6 +118,18 @@ describe('retained snapshot lineage', () => {
       .toEqual([sha(f.original), sha(f.intermediate)]);
   });
 
+  it.each(['missing', 'tampered', 'interchanged'])('refuses a %s intermediate predecessor snapshot', change => {
+    const f = twoStepLineage();
+    const snapshots = change === 'missing' ? [f.original] :
+      change === 'tampered' ? [f.original, `${f.intermediate} `] : [f.original, f.intermediate];
+    const source = JSON.parse(f.current);
+    if (change === 'interchanged') {
+      const operations = source.recovery.operations;
+      [operations[0].sourceSha256, operations[1].sourceSha256] = [operations[1].sourceSha256, operations[0].sourceSha256];
+    }
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(source), target, snapshots)).toThrow('native_recovery_lineage_conflict');
+  });
+
   it('refuses individually allowed snapshots over the aggregate budget before hashing any predecessor', () => {
     const f = twoStepLineage();
     // These are size-preflight inputs, not claimed as parseable source evidence.
