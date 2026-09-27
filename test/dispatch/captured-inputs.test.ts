@@ -164,4 +164,23 @@ describe('captured reviewer inputs', () => {
     expect(Object.isFrozen(decoded.assignments[0]!.role)).toBe(true);
     expect(() => decodeCapturedInputs(' '.repeat(8 * 1024 * 1024 + 1), input.plan)).toThrow();
   });
+  it('binds an async call to its declared chunk index when frozen chunks are stored out of order', () => {
+    const base = fixture();
+    const chunks = [{ index: 1, total: 2, digest: sha256Hex('other chunk') }, { index: 0, total: 2, digest: sha256Hex('chunk') }];
+    const plan = freezeCheckpointPlan({ ...base.plan, chunks,
+      prompts: chunks.flatMap(chunk => base.plan.roster.map(seat => ({ seat: seat.seat, chunk: chunk.index,
+        systemSha256: sha256Hex('System €'), userSha256: sha256Hex('Review patch') }))),
+    });
+    const assignments = plan.cells.map(cell => base.assignments.find(assignment => assignment.model === cell.model)!);
+    const prompts = plan.cells.map(() => ({ systemPrompt: 'System €', userPrompt: 'Review patch' }));
+    const async = { timeoutMs: 1000, maxAttemptsPerCall: 2, maxPhysicalCalls: 2,
+      calls: [{ assignmentId: 'async:0', chunk: 0, assignment: assignments[0]!,
+        prompt: { systemPrompt: 'Async private system', userPrompt: 'Async private user' } }] };
+    const captured = captureReviewerInputs({ ...base, plan, assignments, prompts, chunkBytes: ['other chunk', 'chunk'], async });
+    expect(captured.async!.calls[0]!.ref.chunkSha256).toBe(sha256Hex('chunk'));
+    const positional = JSON.parse(captured.bytes);
+    positional.async.calls[0].chunkSha256 = sha256Hex('other chunk');
+    expect(() => decodeCapturedInputs(stableStringify(positional), plan)).toThrow('capture_invalid_async_matrix');
+  });
+
 });

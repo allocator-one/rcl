@@ -31,16 +31,16 @@ afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.s
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
-async function fixture(cap = 3, systemPrompt = prompts.systemPrompt) {
+async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, permutedChunks = false) {
  const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'async-phase-'))); roots.push(commonDir);
  const configBytes = '{}', toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
- const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: sha256Hex('[]'), configSha256: sha256Hex(configBytes), specSha256: sha256Hex(''), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 }, roster: ['a','b'].map(seat => ({seat, model: seat, role: 'general', route: 'fake'})), chunks: [{index:0,total:1,digest:sha256Hex('chunk')}], prompts: ['a','b'].map(seat=>({seat,chunk:0,systemSha256:sha256Hex('s'),userSha256:sha256Hex('u')})) });
+ const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: sha256Hex('[]'), configSha256: sha256Hex(configBytes), specSha256: sha256Hex(''), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 }, roster: ['a','b'].map(seat => ({seat, model: seat, role: 'general', route: 'fake'})), chunks: permutedChunks ? [{index:1,total:2,digest:sha256Hex('other chunk')},{index:0,total:2,digest:sha256Hex('chunk')}] : [{index:0,total:1,digest:sha256Hex('chunk')}], prompts: (permutedChunks ? [1,0] : [0]).flatMap(chunk=>['a','b'].map(seat=>({seat,chunk,systemSha256:sha256Hex('s'),userSha256:sha256Hex('u')}))) });
  const role = { name:'general',systemPrompt:'s',focus:[],description:'d',isSpecialized:false };
- const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})), async: { timeoutMs: 1000, maxPhysicalCalls: cap, maxAttemptsPerCall: 2, calls: ['assignment-a','assignment-b'].map(assignmentId=>({assignmentId,chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{...prompts,systemPrompt}})) } });
+ const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:permutedChunks ? ['other chunk','chunk'] : ['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})), async: { timeoutMs: 1000, maxPhysicalCalls: cap, maxAttemptsPerCall: 2, calls: ['assignment-a','assignment-b'].map(assignmentId=>({assignmentId,chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{...prompts,systemPrompt}})) } });
  const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim:{attempt:3,round:2},startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:2,maxAttemptsPerCell:1});
  let journal!: CheckpointJournal;
  await withNativeTarget(commonDir,target,async ownership=>{journal=await CheckpointJournal.create({commonDir,namespace:runId,plan,ownership});await journal.bind('captured-inputs',captured.bytes,ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);});
- const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks[0]!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
+ const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks.find(chunk=>chunk.index===0)!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
  const input = {commonDir,namespace:runId,plan,calls,maxPhysicalCalls:cap,maxAttemptsPerCall:2,expiresAtMs:launch.expiresAtMs};
  return {commonDir,plan,journal,launch,captured,input,path:checkpointPath(commonDir,target,runId)};
 }
@@ -203,4 +203,12 @@ describe('async replay append cost',()=>{
   expect(()=>appendAsyncRecordToValidatedState(wrongPlanState,event,{...phase.plan,expiresAtMs:phase.plan.expiresAtMs-1})).toThrow('unvalidated_state');
   expect(opened.delegates).toHaveLength(2);
  });
+});
+
+
+it('initializes, reopens and seals a phase against a declared chunk index stored out of array order', async()=>{
+ const f=await fixture(2,prompts.systemPrompt,true),opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]!);
+ const intent=await writer.claim(prompts);expect(intent).toBeDefined();await writer.recordResult(intent!.attemptId,review(),true);
+ const sealed=await seal(f),reopened=await readAsyncPhase(f.input);
+ expect(reopened.plan.calls[0]!.chunkSha256).toBe(sha256Hex('chunk'));expect(reopened.state.outcomes[0]!.reviewBytes).toBe(review());expect(sealed.physicalAttempts).toHaveLength(1);
 });

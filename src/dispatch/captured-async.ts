@@ -30,7 +30,7 @@ export function captureAsyncInputs(input: CaptureAsyncInputs, plan: FrozenCheckp
   return capturedAsyncSchema.parse({ version: 1, timeoutMs: input.timeoutMs,
     maxAttemptsPerCall: input.maxAttemptsPerCall, maxPhysicalCalls: input.maxPhysicalCalls,
     calls: input.calls.map(call => ({ id: `${call.assignmentId}:${call.chunk}`, assignment: call.assignmentId,
-      chunk: call.chunk, chunkSha256: plan.chunks[call.chunk]?.digest, model: call.assignment.model,
+      chunk: call.chunk, chunkSha256: plan.chunks.find(chunk => chunk.index === call.chunk)?.digest, model: call.assignment.model,
       provider: call.assignment.provider, role: call.assignment.role.name, roleSha256: add(stableStringify(call.assignment.role)),
       systemPromptSha256: add(call.prompt.systemPrompt), userPromptSha256: add(call.prompt.userPrompt) })) });
 }
@@ -42,7 +42,7 @@ export function decodeCapturedAsync(wire: z.infer<typeof capturedAsyncSchema>, p
   const calls = wire.calls.map(({ roleSha256, ...ref }) => {
     const role = decodeRole(get(roleSha256));
     const signature = stableStringify([ref.provider, ref.model, ref.role, roleSha256]);
-    if (ref.id !== `${ref.assignment}:${ref.chunk}` || ids.has(ref.id) || plan.chunks[ref.chunk]?.digest !== ref.chunkSha256 ||
+    if (ref.id !== `${ref.assignment}:${ref.chunk}` || ids.has(ref.id) || plan.chunks.find(chunk => chunk.index === ref.chunk)?.digest !== ref.chunkSha256 ||
       role.name !== ref.role || assignments.has(ref.assignment) && assignments.get(ref.assignment) !== signature) {
       throw new Error('capture_invalid_async_matrix');
     }

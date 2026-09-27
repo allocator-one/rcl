@@ -80,7 +80,7 @@ async function metadataAt(location: Location): Promise<Metadata> {
   const plan = validateAsyncPlan(parsed.data.plan), { context, captured } = await contextAt(location);
   assertCapturedAsyncPlan(plan, captured);
   asyncRefuse(stableStringify(plan.context) === stableStringify(context) && parsed.data.grants.length === plan.calls.length && new Set(parsed.data.grants).size === plan.calls.length, 'parent_binding');
-  for (const call of plan.calls) asyncRefuse(location.plan.chunks[call.chunk]?.digest === call.chunkSha256, 'call');
+  for (const call of plan.calls) asyncRefuse(location.plan.chunks.find(chunk => chunk.index === call.chunk)?.digest === call.chunkSha256, 'call');
   return { version: 1, plan, grants: parsed.data.grants };
 }
 async function recordsAt(location: Location, plan: AsyncPlan): Promise<AsyncState> {
@@ -119,7 +119,7 @@ export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ del
     const plan = validateAsyncPlan({ version: 1, context, calls, maxPhysicalCalls, maxAttemptsPerCall, expiresAtMs });
     assertCapturedAsyncPlan(plan, captured);
     asyncRefuse(Date.now() >= context.startedAtMs && Date.now() < plan.expiresAtMs, 'deadline');
-    for (const call of plan.calls) asyncRefuse(location.plan.chunks[call.chunk]?.digest === call.chunkSha256, 'call');
+    for (const call of plan.calls) asyncRefuse(location.plan.chunks.find(chunk => chunk.index === call.chunk)?.digest === call.chunkSha256, 'call');
     try { await lstat(location.phasePath); throw new Error('checkpoint_async_already_initialized'); } catch (error) { if (!isMissing(error)) throw error; }
     const tokens = calls.map(() => randomBytes(32).toString('hex')); const metadata: Metadata = { version: 1, plan, grants: tokens.map(sha256Hex) };
     // The visible async directory is the initialization commit point. Preparing
