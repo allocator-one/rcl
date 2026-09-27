@@ -54,6 +54,8 @@ const nonblank = (value: unknown): value is string => typeof value === 'string' 
  * required chunk succeeded. Secondary, async and verification successes are
  * counted separately and never reach the quorum. Duplicate model/role
  * assignments are one seat, as in the merged report and on the server.
+ * A synchronous row outside a non-empty roster is refused rather than
+ * counted, so an added row can never create a seat.
  * A stricter supported fraction raises the requirement; 2/3 is the floor.
  */
 export function deriveBlockingHealth(input: {
@@ -87,7 +89,12 @@ export function deriveBlockingHealth(input: {
     }
     if (rows.has(key)) throw new Error(`Duplicate blocking reviewer row for ${review.model}/${review.role}`);
     rows.set(key, review);
-    if (!seats.has(key)) seats.set(key, { model: review.model, role: review.role });
+    if (!seats.has(key)) {
+      // Every row RCL writes is rostered; only a legacy report without a
+      // roster falls back to treating its synchronous rows as blocking.
+      if (input.roster.length > 0) throw new Error(`Unrostered reviewer row for ${review.model}/${review.role}`);
+      seats.set(key, { model: review.model, role: review.role });
+    }
   }
   const policy = resolveQuorumPolicy(seats.size, input.fraction ?? DEFAULT_QUORUM_FRACTION);
   const successfulSeats: BlockingSeat[] = [];

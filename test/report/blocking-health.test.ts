@@ -192,6 +192,17 @@ describe('blocking reviewer health (RCL-136)', () => {
     expect(health.successfulSeats).toHaveLength(2);
   });
 
+  it('refuses a synchronous row outside the roster instead of letting it create a seat', () => {
+    const value = report([...seats(6, 'blocking', ['success']), ...seats(4, 'blocking', ['timeout'], 'slow')]);
+    delete value.stats.blockingHealth;
+    const inflated = { ...value, reviews: [...value.reviews, ...[1, 2, 3].map((n) => part(`extra-${n}`, 'general', 'success'))] };
+    expect(() => deriveBlockingHealth({ roster: inflated.run.roster, reviews: inflated.reviews })).toThrow(/Unrostered reviewer row/);
+    expect(() => assertAdmissibleReportHealth(inflated)).toThrow(expect.objectContaining({ code: 'report_health_unverifiable' }));
+    // Unrostered async rows stay async opinions.
+    const withAsync = { ...value, reviews: [...value.reviews, part('late-async', 'general', 'success', { async: true })] };
+    expect(deriveBlockingHealth({ roster: withAsync.run.roster, reviews: withAsync.reviews }).excludedSuccesses.async).toBe(1);
+  });
+
   it('refuses rows without a model, role or known status', () => {
     for (const row of [{ role: 'general', status: 'success' }, { model: 'm', role: ' ', status: 'success' }, { model: 'm', role: 'r', status: 'done' }]) {
       const value = report(seats(3, 'blocking', ['success']));

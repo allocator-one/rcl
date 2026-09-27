@@ -47,6 +47,7 @@ import {
   type AsyncResultReference,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
+import { resolveQuorumPolicy } from './dispatch/quorum.js';
 import { assertAdmissibleReportHealth, deriveBlockingHealth, describeBlockingHealth, ReportHealthError, type BlockingHealth } from './report/blocking-health.js';
 import { resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
@@ -2289,8 +2290,15 @@ async function executeCouncil(
   });
   const { run } = result;
   // The same derivation converge-report and the server apply to this report.
-  const blockingHealth = deriveBlockingHealth({ roster: run.roster, reviews: result.reviews,
-    fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION });
+  // A report it cannot judge is recorded as inconclusive, never as healthy.
+  let blockingHealth: BlockingHealth | undefined;
+  let blockingHealthError: string | undefined;
+  try {
+    blockingHealth = deriveBlockingHealth({ roster: run.roster, reviews: result.reviews,
+      fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION });
+  } catch (error) {
+    blockingHealthError = error instanceof Error ? error.message : String(error);
+  }
 
   spinner.succeed('Review complete');
   process.stderr.write(
@@ -2315,7 +2323,9 @@ async function executeCouncil(
       ) + '\n'
     );
   }
-  process.stderr.write((blockingHealth.conclusive ? chalk.dim : chalk.yellow)(describeBlockingHealth(blockingHealth)) + '\n');
+  process.stderr.write(blockingHealth
+    ? (blockingHealth.conclusive ? chalk.dim : chalk.yellow)(describeBlockingHealth(blockingHealth)) + '\n'
+    : chalk.yellow(`Blocking reviewer health could not be derived (${blockingHealthError}); the report will not be admitted.`) + '\n');
 
   // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
   // turn a finished review into a failure unless --evidence-required asks.
@@ -2410,7 +2420,9 @@ async function executeCouncil(
     successfulReviews: result.stats.successfulReviews,
     totalReviews: result.stats.totalReviews,
     // Aggregate counters stay the report's own stats; launch health is blocking-only.
-    reviewerHealth: { version: 1, policy: blockingHealth.policy, successfulSeats: blockingHealth.successfulSeats.length },
+    reviewerHealth: blockingHealth
+      ? { version: 1, policy: blockingHealth.policy, successfulSeats: blockingHealth.successfulSeats.length }
+      : { version: 1, policy: resolveQuorumPolicy(0), successfulSeats: 0 },
     deliveryPending: delivery.spooled || delivery.exitCode !== 0,
     ...(prepared.converge?.cycleId ? {
       exitCode: opts.ci && run.ci_exit_code !== 0 ? run.ci_exit_code : delivery.exitCode || (outputDiagnostics.length > 0 ? 1 : 0),

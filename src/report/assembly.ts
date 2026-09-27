@@ -46,6 +46,18 @@ export interface CompletedReviewProjection {
   verification?: ReviewResult['stats']['verification'];
 }
 
+/**
+ * A report whose rows cannot be matched to its roster still completes: the
+ * summary is omitted, and admission derives health again and refuses it.
+ */
+function blockingHealthStats(roster: RunHeaderInput['roster'], reviews: ModelReview[], fraction: number) {
+  try {
+    return { blockingHealth: summarizeBlockingHealth(deriveBlockingHealth({ roster, reviews, fraction })) };
+  } catch {
+    return {};
+  }
+}
+
 /** Assemble retained reviewer outputs through consensus, bounded gating, and the run header. */
 export async function assembleCompletedReview(
   input: CompletedReviewInput,
@@ -127,9 +139,7 @@ export async function assembleCompletedReview(
               .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
           }
         : {}),
-      blockingHealth: summarizeBlockingHealth(deriveBlockingHealth({
-        roster: input.run.roster, reviews, fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION,
-      })),
+      ...blockingHealthStats(input.run.roster, reviews, config.quorumFraction ?? DEFAULT_QUORUM_FRACTION),
       ...(verificationStats ? { verification: verificationStats } : {}),
       // Applied weights for this run's models, so the report shows what
       // scaled the votes (RCL-27).
