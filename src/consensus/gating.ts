@@ -446,8 +446,9 @@ export function relevantPatchExcerpt(
   ranges: Array<{ start: number; end: number }>
 ): string {
   if (ranges.length === 0) return '';
-  if (!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(patch)) {
-    return patch.length <= MAX_PATCH_CHARS ? patch : '';
+  const normalizedPatch = patch.replace(/\r\n?/g, '\n');
+  if (!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(normalizedPatch)) {
+    return normalizedPatch.length <= MAX_PATCH_CHARS ? normalizedPatch : '';
   }
   if (
     ranges.some(
@@ -458,7 +459,7 @@ export function relevantPatchExcerpt(
     return '';
   }
 
-  const parsed = parseUnifiedDiff(patch);
+  const parsed = parseUnifiedDiff(normalizedPatch);
   if (!parsed.ok) return '';
   const { hunks } = parsed.diff;
 

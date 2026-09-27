@@ -25,11 +25,23 @@ function nonempty(value: unknown): value is string {
 
 /** Validate citation provenance, not the semantic truth of the model's explanation. */
 function sourceContains(patch: string, quote: string): boolean {
+  const normalizedPatch = patch.replace(/\r\n?/g, '\n');
+  const normalizedQuote = quote.replace(/\r\n?/g, '\n');
+  const parsed = parseUnifiedDiff(normalizedPatch);
+  if (parsed.ok) {
+    return parsed.diff.hunks.some(hunk => (['oldCount', 'newCount'] as const).some(side => {
+      const source = hunk.body
+        .filter(line => !line.marker && line[side] > 0)
+        .map(line => line.text.slice(1))
+        .join('\n');
+      return source.includes(normalizedQuote);
+    }));
+  }
   const fileHeader = /^(?:\+\+\+|---) (?:[ab]\/|\/dev\/null)/;
-  const source = patch.split('\n')
+  const source = normalizedPatch.split('\n')
     .filter(line => !line.startsWith('@@') && !fileHeader.test(line) && !line.startsWith('\\'))
     .map(line => /^[ +\-]/.test(line) ? line.slice(1) : line).join('\n');
-  return source.includes(quote);
+  return source.includes(normalizedQuote);
 }
 
 /** Invalid confirmations remain visible as uncertainty, never promoted to blocking. */
@@ -76,3 +88,4 @@ export function parseVerificationVerdicts(
   }
   return result;
 }
+import { parseUnifiedDiff } from '../prepare/unified-diff.js';

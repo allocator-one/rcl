@@ -95,6 +95,35 @@ describe('evidence-based verifier contract', () => {
     });
   });
 
+  it.each([
+    ['normalizes CRLF source', '@@ -0,0 +1,2 @@\r\n+const account = load();\r\n+remove(account);', 'const account = load();\nremove(account);', 'verified'],
+    ['does not join separate hunks', '@@ -1 +1 @@\n first line\n@@ -10 +10 @@\n second line', 'first line\nsecond line', 'none'],
+  ])('%s', async (_label, patch, quote, reason) => {
+    const result = await applyGating([{ ...finding, endLine: 2 }], {
+      ...opts,
+      diffFiles: [{ ...opts.diffFiles[0], patch }],
+      ask: async () => answer([{
+        ...confirmed,
+        evidence: [{ file: 'account.ts', quote }],
+      }]),
+    });
+    expect(result.findings[0]!.gating!.reason).toBe(reason);
+  });
+
+  it('replays version-two confirmations only when their evidence remains valid', () => {
+    const plan = planGating([finding], opts);
+    const confirmedResult = replayGating(plan, [{ batchIndex: 0, kind: 'answer', answer: answer([confirmed]) }], 1);
+    expect(confirmedResult.findings[0]!.gating).toMatchObject({ reason: 'verified', verification: { verdict: 'confirmed' } });
+
+    const invalidPlan = planGating([finding], opts);
+    const invalidResult = replayGating(invalidPlan, [{ batchIndex: 0, kind: 'answer', answer: answer([{
+      ...confirmed, evidence: [{ file: 'account.ts', quote: 'not supplied' }],
+    }]) }], 1);
+    expect(invalidResult.findings[0]!.gating).toMatchObject({
+      reason: 'none', verification: { verdict: 'insufficient_evidence' },
+    });
+  });
+
   it('keeps legacy unrefuted semantics when replaying a retained version-one plan', () => {
     const plan = planGating([finding], opts);
     plan.version = 1;
