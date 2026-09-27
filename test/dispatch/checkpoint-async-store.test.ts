@@ -61,6 +61,16 @@ describe('restricted original async checkpoint persistence',()=>{
   expect(await (await openAsyncDelegate(JSON.parse(JSON.stringify(opened.delegates[0])))).claim(prompts)).toBeUndefined();
   const proof=await seal(f);expect(proof.state.uncertain).toEqual([first]);expect(proof.physicalAttempts[0]).toMatchObject({outcomeCertainty:'uncertain',possiblyBilled:true,reviewBytes:null,durationMs:null,usage:null});
  });
+ it('uses the latest retained phase time when a clock rollback seals and finalizes',async()=>{
+  const f=await fixture(),opened=await initialize(f),a=await openAsyncDelegate(opened.delegates[0]),b=await openAsyncDelegate(opened.delegates[1]);
+  vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.startedAtMs+20);const observed=await a.claim(prompts);
+  vi.setSystemTime(f.launch.startedAtMs+21);const pending=await b.claim(prompts);
+  vi.setSystemTime(f.launch.startedAtMs+30);await a.recordResult(observed!.attemptId,review(),true);
+  vi.setSystemTime(f.launch.startedAtMs+25);await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
+  expect((await readAsyncPhase(f.input)).state.cutoffMs).toBe(f.launch.startedAtMs+30);expect((await f.journal.read()).finalized).toBe(true);
+  await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
+  expect(await b.recordResult(pending!.attemptId,review(),true)).toBe('late');expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
+ });
  it('admits only durable failed-outcome retries and honors one atomic global cap',async()=>{
   const f=await fixture(2),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);await w.recordResult(first.attemptId,review('timeout'),true);
   const other=await openAsyncDelegate(opened.delegates[1]);const next=await Promise.all([w.claim(prompts),other.claim(prompts)]);expect(next.filter(Boolean)).toHaveLength(1);expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(2);

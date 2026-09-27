@@ -103,6 +103,12 @@ async function locked<T>(location: Location, work: (metadata: Metadata, state: A
 async function append(location: Location, state: AsyncState, plan: AsyncPlan, event: AsyncEvent): Promise<AsyncRecord> {
   const record = appendAsyncRecordToValidatedState(state, event, plan); await publish(location.phasePath, join(location.phasePath, 'events', filename(record.sequence)), stableStringify(record) + '\n'); return record;
 }
+function logicalCutoffMs(plan: AsyncPlan, state: AsyncState): number {
+  let cutoffMs = Math.max(Date.now(), plan.context.startedAtMs);
+  for (const intent of state.intents) cutoffMs = Math.max(cutoffMs, intent.startedAtMs);
+  for (const outcome of state.outcomes) cutoffMs = Math.max(cutoffMs, outcome.finishedAtMs);
+  asyncRefuse(Number.isSafeInteger(cutoffMs), 'clock'); return cutoffMs;
+}
 /** Only initialization under live native ownership may create restricted per-call delegations. */
 export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ delegates: readonly AsyncDelegate[]; plan: AsyncPlan }> {
   const location = snapshotLocation(input), calls = structuredClone(input.calls), { ownership, maxPhysicalCalls, maxAttemptsPerCall, expiresAtMs } = input;
@@ -201,7 +207,7 @@ export function sealAsyncPhase(input: LocationInput & { ownership: NativeTargetO
   const location = snapshotLocation(input);
   return withOwnedNativeOperation(input.ownership, location.commonDir, location.plan.target, () => locked(location, async (metadata, state) => {
     let records = state.records;
-    if (state.cutoffMs === undefined) records = [...records, await append(location, state, metadata.plan, { type: 'seal', cutoffMs: Date.now() })];
+    if (state.cutoffMs === undefined) records = [...records, await append(location, state, metadata.plan, { type: 'seal', cutoffMs: logicalCutoffMs(metadata.plan, state) })];
     for (const record of records) await resync(join(location.phasePath, 'events', filename(record.sequence)), stableStringify(record) + '\n');
     return decodeAsyncProof(encodeAsyncProof(metadata.plan, records).bytes, metadata.plan.context);
   }));
