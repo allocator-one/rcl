@@ -185,7 +185,6 @@ function callError(review: ModelReview, parseFailures: boolean): string | undefi
   return scrubText(firstLine, MAX_PARSER_ERROR_SUMMARY);
 }
 
-
 function wireCall(review: ModelReview, run: RunHeader, parseFailures: boolean): WireCall {
   const error = callError(review, parseFailures);
   return {

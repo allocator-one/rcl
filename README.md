@@ -1128,9 +1128,11 @@ timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 # quorumFraction: 0.75  # round closes once this share of blocking seats succeeds
                         # on every chunk; all stragglers can be canceled, including core models.
-                        # Secondary/async successes never count. Also raises the
-                        # report's blocking-health requirement.
-                        # Default: exactly 2/3 — leave unset for that; 1 disables.
+                        # Secondary successes never count; secondary calls still
+                        # running at closure are canceled. Also raises the report's
+                        # blocking-health requirement.
+                        # Default: exactly 2/3 — leave unset for that; 1 disables
+                        # closure and waits for every call.
 maxRetries: 3
 
 # Reasoning budget for providers that support it (currently OpenRouter).

@@ -745,11 +745,13 @@ program
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
           const code =
-            err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
-              ? err.code
-              : err instanceof ReportHealthError
+            err instanceof ConvergeRunStateError && err.message === 'report_health_inconclusive'
+              ? 'report_health_inconclusive'
+              : err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
                 ? err.code
-                : 'RCL_CONVERGE_REPORT_ERROR';
+                : err instanceof ReportHealthError
+                  ? err.code
+                  : 'RCL_CONVERGE_REPORT_ERROR';
           const health = err instanceof ReportHealthError && err.health ? { reviewerHealth: blockingHealthJson(err.health) } : {};
           console.error(JSON.stringify({ error: { code, message, ...health } }));
         } else {
@@ -758,7 +760,9 @@ program
         // Exit 2 = round-cap consent boundary (mirrors converge-attempt);
         // exit 3 = state/infrastructure failure; exit 4 = reviewer health
         // is inconclusive or unverifiable, so nothing was admitted.
-        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : err instanceof ReportHealthError ? 4 : 3;
+        const healthRefusal = err instanceof ReportHealthError ||
+          (err instanceof ConvergeRunStateError && err.message === 'report_health_inconclusive');
+        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : healthRefusal ? 4 : 3;
       }
     }
   );

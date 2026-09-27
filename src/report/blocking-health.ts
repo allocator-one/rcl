@@ -19,7 +19,7 @@ export function reviewLane(review: Pick<ModelReview, 'model' | 'role' | 'async'>
 export interface BlockingSeat {
   model: string;
   role: string;
-  /** `missing` means the roster names the seat but the report has no row for it. */
+  /** `missing`: the roster names the seat but no blocking row covers it. */
   status: ModelReview['status'] | 'missing';
 }
 
@@ -45,6 +45,8 @@ export interface BlockingHealthSummary {
 }
 
 const seatKey = (model: string, role: string): string => JSON.stringify([model, role]);
+const STATUSES = new Set<unknown>(['success', 'timeout', 'error', 'parse_failed', 'canceled']);
+const nonblank = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
 /**
  * Blocking health over merged report rows. A blocking seat counts only when
@@ -66,12 +68,23 @@ export function deriveBlockingHealth(input: {
   const rows = new Map<string, ModelReview>();
   const excludedSuccesses = { secondary: 0, async: 0, verification: 0 };
   for (const review of input.reviews) {
+    if (!review || !nonblank(review.model) || !nonblank(review.role) || !STATUSES.has(review.status)) {
+      throw new Error('Invalid reviewer row identity or status');
+    }
     const lane = reviewLane(review, input.roster);
     if (lane !== 'blocking') {
       if (review.status === 'success') excludedSuccesses[lane]++;
       continue;
     }
     const key = seatKey(review.model, review.role);
+    // An async-only row on a blocking seat cannot supply that seat's coverage.
+    if (review.async === true) {
+      if (review.status === 'success') excludedSuccesses.async++;
+      if (!seats.has(key)) continue;
+      if (rows.has(key)) throw new Error(`Duplicate blocking reviewer row for ${review.model}/${review.role}`);
+      rows.set(key, review);
+      continue;
+    }
     if (rows.has(key)) throw new Error(`Duplicate blocking reviewer row for ${review.model}/${review.role}`);
     rows.set(key, review);
     if (!seats.has(key)) seats.set(key, { model: review.model, role: review.role });
@@ -81,8 +94,7 @@ export function deriveBlockingHealth(input: {
   const unsuccessfulSeats: BlockingSeat[] = [];
   for (const [key, seat] of seats) {
     const review = rows.get(key);
-    // An async-only merged row cannot stand in for a blocking seat's coverage.
-    const status = review === undefined ? 'missing' : review.async === true ? 'canceled' : review.status;
+    const status = review === undefined || review.async === true ? 'missing' : review.status;
     (status === 'success' ? successfulSeats : unsuccessfulSeats).push({ ...seat, status });
   }
   return {

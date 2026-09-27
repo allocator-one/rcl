@@ -183,6 +183,23 @@ describe('blocking reviewer health (RCL-136)', () => {
       .toEqual([{ model: 'dup', role: 'general', status: 'timeout' }]);
   });
 
+  it('never lets an async-only row cover a blocking seat, and counts it as an async success', () => {
+    const value = report(seats(3, 'blocking', ['success']));
+    value.reviews[2] = { ...value.reviews[2]!, async: true };
+    const health = deriveBlockingHealth({ roster: value.run.roster, reviews: value.reviews });
+    expect(health.unsuccessfulSeats).toEqual([{ model: 'blocking-3', role: 'bug-hunter', status: 'missing' }]);
+    expect(health.excludedSuccesses.async).toBe(1);
+    expect(health.successfulSeats).toHaveLength(2);
+  });
+
+  it('refuses rows without a model, role or known status', () => {
+    for (const row of [{ role: 'general', status: 'success' }, { model: 'm', role: ' ', status: 'success' }, { model: 'm', role: 'r', status: 'done' }]) {
+      const value = report(seats(3, 'blocking', ['success']));
+      value.reviews.push({ findings: [], durationMs: 1, provider: 'fake', ...row } as never);
+      expect(() => assertAdmissibleReportHealth(value)).toThrow(expect.objectContaining({ code: 'report_health_unverifiable' }));
+    }
+  });
+
   it('refuses ambiguous duplicate blocking rows instead of counting either one', () => {
     const value = report(seats(3, 'blocking', ['success']));
     value.reviews.push({ ...value.reviews[0]! });

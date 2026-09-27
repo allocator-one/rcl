@@ -48,12 +48,14 @@ type Behavior = 'success' | 'reject-late' | 'hang';
 
 /**
  * A synthetic OpenAI-compatible provider. Each model answers with a finding,
- * answers HTTP 400 only after every immediate answer has been sent, or never
- * answers (the client's own per-call timeout applies).
+ * answers HTTP 400 only after `releaseAfter` immediate answers were sent and
+ * received, or never answers (the client's own per-call timeout applies).
  */
-async function syntheticProvider(behavior: (model: string) => Behavior) {
+async function syntheticProvider(behavior: (model: string) => Behavior, releaseAfter = 0) {
   const calls: string[] = [];
   const late: Array<() => void> = [];
+  let answered = 0;
+  const releaseLate = () => { if (answered >= releaseAfter) for (const reject of late.splice(0)) reject(); };
   const open: ServerResponse[] = [];
   const server = createServer((request, response) => {
     let body = '';
@@ -67,9 +69,11 @@ async function syntheticProvider(behavior: (model: string) => Behavior) {
       if (mode === 'hang') return;
       if (mode === 'reject-late') {
         late.push(() => { response.writeHead(400, { 'content-type': 'application/json' }); response.end('{"error":{"message":"synthetic rejection"}}'); });
-        setTimeout(() => late.shift()?.(), 1_500);
+        releaseLate();
         return;
       }
+      // Count an answer only once the client has it, then release late rejections.
+      response.on('finish', () => { answered++; setTimeout(releaseLate, 200); });
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ id: 'x', object: 'chat.completion', created: 0, model,
         choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ findings: [{
@@ -145,7 +149,8 @@ describe('rcl review and converge-report — blocking reviewer quorum (RCL-136)'
     const target = 'blocking-ten';
     const { repo, review } = await repository(10, 4, target);
     let recovered = false;
-    const provider = await syntheticProvider((model) => !recovered && ['b7', 'b8', 'b9', 'b10'].includes(model) ? 'reject-late' : 'success');
+    // Rejections wait until all 10 bonus-inflated successes (6 blocking + 4 secondary) were answered.
+    const provider = await syntheticProvider((model) => !recovered && ['b7', 'b8', 'b9', 'b10'].includes(model) ? 'reject-late' : 'success', 10);
     const env = { OPENAI_COMPAT_BASE_URL: provider.url, OPENAI_BASE_URL: provider.url, RCL_DATA_DIR: join(repo, 'rcl-data') };
     try {
       const first = await rcl(review, repo, env);
@@ -175,6 +180,14 @@ describe('rcl review and converge-report — blocking reviewer quorum (RCL-136)'
           excludedSuccesses: { secondary: 4, async: 1, verification: 0 },
           incompleteSeats: ['b7', 'b8', 'b9', 'b10'].map((model) => ({ model: `openai-compat/${model}`, role: expect.any(String), status: 'error' })) },
       });
+      expect(await loadConvergeRunState(common, target)).toMatchObject({ rounds: [], findings: {} });
+      // A rewritten copy that looks healthy is still refused: the launch recorded inconclusive health.
+      const forged = { ...report, reviews: report.reviews.map((row: object) => ({ ...row, status: 'success' })),
+        stats: { ...report.stats, blockingHealth: undefined } };
+      writeFileSync(join(repo, 'forged.json'), JSON.stringify(forged));
+      const forgedAdmission = await rcl(['converge-report', '--target', target, '--round', '1', '--report', 'forged.json', '--json'], repo, env);
+      expect(forgedAdmission.status).toBe(4);
+      expect(JSON.parse(forgedAdmission.stderr).error.code).toBe('report_health_inconclusive');
       expect(await loadConvergeRunState(common, target)).toMatchObject({ rounds: [], findings: {} });
 
       // Supported continuation: same round, one more bounded attempt, nothing reset.

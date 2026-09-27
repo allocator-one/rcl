@@ -2,11 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
+import { guardReviewLaunch, hasHealthyGuardedLaunch, launchSchema, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
 import { claimConvergeAttempt, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
-import { hasHealthyGuardedLaunch, launchSchema } from '../../src/converge/launch-guard.js';
 import { resolveQuorumPolicy } from '../../src/dispatch/quorum.js';
 
 const directories: string[] = [];

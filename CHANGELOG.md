@@ -11,7 +11,8 @@
   required seats, conclusive) under the configured `quorumFraction`;
   secondary, async and verification results keep their findings but never
   count. Aggregate `successfulReviews` / `totalReviews` are unchanged and
-  informational.
+  informational. `quorumFraction: 1` still waits for every call, secondary
+  reviewers included.
 - `rcl converge-report` refuses an inconclusive report with exit 4 before it
   reads or writes native state, naming the completed, required and incomplete
   blocking seats. Guarded launches record blocking health, so an inconclusive

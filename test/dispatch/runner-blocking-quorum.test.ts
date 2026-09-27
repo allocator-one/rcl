@@ -45,6 +45,7 @@ function scriptedAdapter(script: (model: string, call: number) => Scripted) {
   return {
     adapter, aborted,
     heldCount: () => [...held.values()].reduce((sum, list) => sum + list.length, 0),
+    // One outstanding wait at a time is enough for these sequential scenarios.
     whenHeld: (count: number) => new Promise<void>((resolve) => {
       const check = () => { if ([...held.values()].reduce((sum, list) => sum + list.length, 0) >= count) resolve(); };
       notify = check;
@@ -129,7 +130,7 @@ describe('runner closes quorum on blocking seats only (RCL-136)', () => {
 
   it('requires every chunk of a blocking seat before it counts toward closure', async () => {
     const { assignments, prompts, roster, blockingLanes } = council(['b1', 'b2', 'b3'], ['s1'], 2);
-    // Every seat's first chunk succeeds at once; b2's second chunk is held.
+    // Every seat's first chunk succeeds at once; b2's and b3's second chunks are held.
     const fake = scriptedAdapter((model, call) => model === 'b2' && call === 1 ? 'held' : model === 'b3' && call === 1 ? 'held' : 'success');
     const run = runReviews(assignments, prompts, {
       timeoutMs: 60_000, maxRetries: 0, concurrency: 8, adapterFactory: () => fake.adapter,
@@ -149,15 +150,32 @@ describe('runner closes quorum on blocking seats only (RCL-136)', () => {
 
   it('preserves a stricter explicit quorum fraction', async () => {
     const { assignments, prompts, roster, blockingLanes } = council(names('b', 10), names('s', 4));
-    const fake = scriptedAdapter((model) => model === 'b10' ? 'held' : 'success');
+    const fake = scriptedAdapter((model) => model === 'b9' ? 'held' : 'success');
+    const run = runReviews(assignments, prompts, {
+      timeoutMs: 60_000, maxRetries: 0, concurrency: 14, adapterFactory: () => fake.adapter,
+      quorum: { fraction: 0.95, blocking: blockingLanes },
+    });
+    await fake.whenHeld(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fake.aborted).toEqual([]); // 9/10 blocking seats do not meet 0.95
+    fake.release('b9', 'success');
+    const reviews = await run;
+    expect(reviews.every((review) => review.status === 'success')).toBe(true);
+    expect(deriveBlockingHealth({ roster, reviews: mergeChunkReviews(reviews), fraction: 0.95 }).policy.minimumSuccessful).toBe(10);
+  });
+
+  it('keeps a fraction of 1 as wait-for-all, including unfinished secondary reviewers', async () => {
+    const { assignments, prompts, roster, blockingLanes } = council(names('b', 10), names('s', 4));
+    const fake = scriptedAdapter((model) => model === 'b10' || model === 's4' ? 'held' : 'success');
     const run = runReviews(assignments, prompts, {
       timeoutMs: 60_000, maxRetries: 0, concurrency: 14, adapterFactory: () => fake.adapter,
       quorum: { fraction: 1, blocking: blockingLanes },
     });
-    await fake.whenHeld(1);
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(fake.aborted).toEqual([]);
+    await fake.whenHeld(2);
     fake.release('b10', 'success');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fake.aborted).toEqual([]); // every blocking seat is complete; s4 is still awaited
+    fake.release('s4', 'success');
     const reviews = await run;
     expect(reviews.every((review) => review.status === 'success')).toBe(true);
     expect(deriveBlockingHealth({ roster, reviews: mergeChunkReviews(reviews), fraction: 1 }).conclusive).toBe(true);

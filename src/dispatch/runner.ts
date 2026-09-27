@@ -79,9 +79,9 @@ export interface RunnerOptions {
    * must succeed. `blocking` marks each call's lane (default: every call);
    * secondary calls run and keep their results but never count toward, or
    * close, the quorum. At quorum cancel every outstanding call, including
-   * core models, without waiting for noncooperative adapters. Omission keeps
-   * wait-for-all. coreModels is accepted for source compatibility but grants
-   * no exemption.
+   * core models and secondary calls, without waiting for noncooperative
+   * adapters. Omission or a fraction of 1 keeps wait-for-all. coreModels is
+   * accepted for source compatibility but grants no exemption.
    */
   quorum?: { fraction?: number; coreModels?: readonly string[]; blocking?: readonly boolean[] };
 }
@@ -189,7 +189,11 @@ export async function runReviews(
     seatLanes.set(key, isBlocking(index));
     if (isBlocking(index)) expected.set(key, (expected.get(key) ?? 0) + 1);
   }
-  const policy = options.quorum ? resolveQuorumPolicy(expected.size, options.quorum.fraction) : undefined;
+  // A fraction of 1 is the documented wait-for-all setting: the whole
+  // blocking roster is required and no call, secondary included, is canceled.
+  const policy = options.quorum && (options.quorum.fraction ?? 2 / 3) < 1
+    ? resolveQuorumPolicy(expected.size, options.quorum.fraction) : undefined;
+  if (options.quorum) resolveQuorumPolicy(expected.size, options.quorum.fraction);
   const successfulChunks = new Map<string, number>();
   let successfulSeats = 0;
   function countSuccess(index: number): void {
