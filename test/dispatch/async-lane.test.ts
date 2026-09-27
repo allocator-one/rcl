@@ -302,3 +302,18 @@ describe('spool → worker → collect round trip', () => {
     expect(collected).toHaveLength(1);
   });
 });
+
+
+describe('reviewer identity eligibility before async consumption', () => {
+  it('retains exact collected artifact bytes when they collide with completed blocking reviews', async () => {
+    const key = asyncTargetKey('identity-refusal');
+    const path = join(dir, `result-${key}-old.json`);
+    const bytes = JSON.stringify({ model: 'vendor::alpha', role: 'security', provider: 'fake',
+      findings: [], durationMs: 7, status: 'error', error: 'original error', usage: { inputTokens: 4 } }) + '\n';
+    await writeFile(path, bytes);
+    const blocking = [{ model: 'vendor', role: 'alpha::security' }];
+    await expect(collectAsyncResults(dir, key, { blockingReviews: blocking })).rejects.toThrow(/ambiguous_reviewer_identity/);
+    expect(await readFile(path, 'utf8')).toBe(bytes);
+    expect(await readdir(dir)).toEqual([`result-${key}-old.json`]);
+  });
+});

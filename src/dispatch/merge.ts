@@ -1,3 +1,4 @@
+import { assertUnambiguousReviewerIdentities } from './reviewer-identity.js';
 import type { ModelReview, TokenUsage } from '../consensus/types.js';
 
 /**
@@ -54,6 +55,7 @@ function origins(parts: readonly IndexedReview[]): RawFindingOrigin[][] {
 
 /** Existing merge semantics with positional source lineage retained alongside each returned finding. */
 function mergeChunkReviewEntries(reviews: ModelReview[], collectContributions: boolean): MergedReviewEntry[] {
+  assertUnambiguousReviewerIdentities(reviews);
   const byReviewer = new Map<string, IndexedReview[]>();
   const order: string[] = [];
   for (const [reviewIndex, review] of reviews.entries()) {

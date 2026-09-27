@@ -1,3 +1,4 @@
+import { AmbiguousReviewerIdentityError, assertUnambiguousReviewerIdentities, type ReviewerIdentity } from './reviewer-identity.js';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
@@ -290,6 +291,8 @@ function isReviewShape(value: unknown): value is ModelReview {
   );
 }
 
+export interface AsyncResultReference { path: string; sha256: string }
+
 /**
  * Collect (and consume) every arrived async result for this target. Corrupt
  * files are skipped and removed; other targets' files are left alone except
@@ -297,7 +300,8 @@ function isReviewShape(value: unknown): value is ModelReview {
  */
 export async function collectAsyncResults(
   storeDir: string,
-  targetKey: string
+  targetKey: string,
+  options: { blockingReviews?: readonly ReviewerIdentity[]; onIdentityRefused?: (error: AmbiguousReviewerIdentityError, artifacts: AsyncResultReference[]) => Promise<void> } = {},
 ): Promise<ModelReview[]> {
   let entries: string[];
   try {
@@ -307,31 +311,44 @@ export async function collectAsyncResults(
   }
 
   const collected: ModelReview[] = [];
+  const artifacts: AsyncResultReference[] = [];
+  const consumed: string[] = [];
+  const expired: string[] = [];
   const now = Date.now();
   for (const name of entries) {
     const path = join(storeDir, name);
     if (name.startsWith(`result-${targetKey}-`) && name.endsWith('.json')) {
       try {
-        const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+        const bytes = await readFile(path);
+        const parsed: unknown = JSON.parse(bytes.toString('utf8'));
         if (isReviewShape(parsed)) {
           parsed.async = true;
           collected.push(parsed);
+          artifacts.push({ path, sha256: createHash('sha256').update(bytes).digest('hex') });
         }
       } catch {
         // Corrupt or half-written by an interrupted worker — drop it below.
       }
-      await rm(path, { force: true });
+      consumed.push(path);
       continue;
     }
     // TTL sweep for abandoned spools/results from other runs.
     if (name.startsWith('pending-') || name.startsWith('result-')) {
       try {
         const info = await stat(path);
-        if (now - info.mtimeMs > STALE_TTL_MS) await rm(path, { force: true });
+        if (now - info.mtimeMs > STALE_TTL_MS) expired.push(path);
       } catch {
         // Already gone — nothing to sweep.
       }
     }
   }
+  // Validate the entire union before consuming even the first retained opinion.
+  try { assertUnambiguousReviewerIdentities([...(options.blockingReviews ?? []), ...collected]); }
+  catch (error) {
+    if (error instanceof AmbiguousReviewerIdentityError) await options.onIdentityRefused?.(error, artifacts);
+    throw error;
+  }
+  for (const path of consumed) await rm(path, { force: true });
+  for (const path of expired) await rm(path, { force: true }).catch(() => undefined);
   return collected;
 }

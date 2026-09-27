@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { AmbiguousReviewerIdentityError, assertUnambiguousReviewerIdentities } from './dispatch/reviewer-identity.js';
+import { retainAssemblyRefusal } from './output/assembly-refusal.js';
 import { createReviewCycleRemote } from './converge/cycle-remote.js';
 import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
@@ -1644,6 +1646,8 @@ async function prepareCouncil(
       ? []
       : buildAssignments({ models: asyncModels, roles: generalRoles, roleMap, deterministic: opts.guardedConverge });
 
+  assertUnambiguousReviewerIdentities([...assignments, ...asyncAssignments].map(({ model, role }) => ({ model, role: role.name })));
+
   const contextFiles = [...(opts.context ?? []), ...(config.context ?? [])];
   if (projectRulesFile && !contextFiles.some(path => resolve(path) === projectRulesFile)) {
     contextFiles.push(projectRulesFile);
@@ -2112,13 +2116,33 @@ async function executeCouncil(
 
   postReviewStage('collecting and merging reviewer outputs');
 
+  const preserveRefusedReviews = async (error: AmbiguousReviewerIdentityError, asyncArtifacts: Array<{ path: string; sha256: string }> = []) => {
+    try {
+      const path = await retainAssemblyRefusal(resolveDataDir(), {
+        run: { ...(extra.attestation ? { id: extra.attestation.runId } : {}), command: extra.command, target: extra.target,
+          startedAt: prepared.startedAt.toISOString(), ...(prepared.converge ? { converge: prepared.converge } : {}) },
+        chunkReviews, asyncArtifacts,
+      });
+      process.stderr.write(`Assembly refused; observed reviewer results retained privately at ${path}\n`);
+    } catch (retentionError) {
+      error.message += ` Observed reviewer results could not be retained: ${String(retentionError)}`;
+      throw error;
+    }
+  };
+  try { assertUnambiguousReviewerIdentities(chunkReviews); }
+  catch (error) {
+    if (error instanceof AmbiguousReviewerIdentityError) await preserveRefusedReviews(error);
+    throw error;
+  }
+
   // Collect async results from earlier rounds of this target (marked async).
   // Report assembly collapses the completed calls to one (model, role) review.
   let arrivedAsync: ModelReview[] = [];
   if (asyncStoreDir && asyncKey) {
     try {
-      arrivedAsync = await collectAsyncResults(asyncStoreDir, asyncKey);
+      arrivedAsync = await collectAsyncResults(asyncStoreDir, asyncKey, { blockingReviews: chunkReviews, onIdentityRefused: preserveRefusedReviews });
     } catch (err) {
+      if (err instanceof AmbiguousReviewerIdentityError) throw err;
       console.warn(`Could not collect async reviewer results: ${String(err)}`);
     }
   }
