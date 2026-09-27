@@ -76,6 +76,21 @@ describe('checkpoint plan', () => {
 });
 
 describe('checkpoint journal', () => {
+
+  it('preserves adapter invocation diagnostics without admitting multiple SDK calls per durable intent', async () => {
+    await withStore(async (store, ownership) => {
+      const attempt = { id: 'adapter-diagnostics', kind: 'paid' as const }, cell = 'blocking/general:0';
+      await store.recordIntent(cell, attempt, ownership);
+      const before = await store.read(), review = JSON.parse(completeReview());
+      await expect(store.recordResult(cell, attempt, { kind: 'success', chunk: 0,
+        reviewBytes: JSON.stringify({ ...review, adapterAttempts: 2 }) }, ownership)).rejects.toThrow('checkpoint_invalid_result');
+      expect(await store.read()).toEqual(before);
+      const bytes = JSON.stringify({ ...review, adapterAttempts: 1 }, null, 2) + '\n';
+      await store.recordResult(cell, attempt, { kind: 'success', chunk: 0, reviewBytes: bytes }, ownership);
+      expect((await store.read()).successes[0]?.reviewBytes).toBe(bytes);
+    });
+  });
+
   it.each(['failure', 'success'] as const)('refuses new uncertainty after a %s result without changing retained bytes', async kind => {
     const commonDir = await root(), frozen = freezeCheckpointPlan(plan());
     const cell = 'blocking/general:0', attempt = { id: 'completed', kind: 'paid' as const };

@@ -119,4 +119,19 @@ describe('late verifier audit regressions', () => {
         expect(errors).toHaveLength(1);
         expect(await f.journal.readLateVerificationAudit()).toEqual([]);
     });
+    it('keeps a buffered result available when its first persistence attempt fails', async () => {
+        const f = await fixture(false), errors: unknown[] = [];
+        await owned(f, async (owner) => {
+            const audit = createVerificationLateAudit({ commonDir: f.dir, journal: f.journal, ownership: owner, onError: error => errors.push(error) });
+            await audit.accept(result());
+            await f.journal.finalizeVerification({ status: 'failed', finishedAtMs: 12, reason: 'timeout' }, owner);
+            const record = vi.spyOn(f.journal, 'recordLateVerificationResult').mockRejectedValueOnce(new Error('synthetic late audit write failure'));
+            await expect(audit.flushAfterFinalization()).rejects.toThrow('synthetic late audit write failure');
+            expect(await f.journal.readLateVerificationAudit()).toEqual([]);
+            await audit.flushAfterFinalization();
+            expect(await f.journal.readLateVerificationAudit()).toHaveLength(1);
+            record.mockRestore();
+        });
+        expect(errors).toHaveLength(1);
+    });
 });

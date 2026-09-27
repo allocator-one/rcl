@@ -279,14 +279,19 @@ export async function runAsyncWorker(
 /** Publish a derived opportunistic opinion; this store is never physical-call authority. */
 export async function publishAsyncReview(storeDir: string, targetKey: string, review: ModelReview): Promise<void> {
   if (!/^[A-Za-z0-9._-]+$/.test(targetKey)) throw new Error('invalid async opinion target');
-  const info = await lstat(storeDir);
-  if (!info.isDirectory() || info.isSymbolicLink() || typeof process.getuid === 'function' && info.uid !== process.getuid()) {
-    throw new Error('unsafe async opinion directory');
-  }
+  await assertSafeAsyncOpinionDirectory(storeDir);
   const resultFile = join(storeDir, `result-${targetKey}-${randomUUID()}.json`);
   const tempFile = `${resultFile}.tmp`;
   await writeFile(tempFile, JSON.stringify(review), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   await rename(tempFile, resultFile);
+}
+
+async function assertSafeAsyncOpinionDirectory(storeDir: string): Promise<void> {
+  const info = await lstat(storeDir);
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o022) !== 0 ||
+      typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error('unsafe async opinion directory');
+  }
 }
 
 function isReviewShape(value: unknown): value is ModelReview {
@@ -328,9 +333,11 @@ export async function collectAsyncResults(
 ): Promise<ModelReview[]> {
   let entries: string[];
   try {
+    await assertSafeAsyncOpinionDirectory(storeDir);
     entries = await readdir(storeDir);
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
 
   const collected: ModelReview[] = [];

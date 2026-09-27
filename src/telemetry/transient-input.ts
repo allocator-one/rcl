@@ -10,8 +10,9 @@ export async function readTransientInput(stream: AsyncIterable<Uint8Array | stri
     while (true) {
       const part = await Promise.race([iterator.next(), timeout]);
       if (part.done) break;
-      const bytes = Buffer.from(part.value); size += bytes.length;
-      if (size > maxBytes) throw new Error('transient_input_too_large');
+      const incoming = typeof part.value === 'string' ? Buffer.byteLength(part.value) : part.value.byteLength;
+      if (incoming > maxBytes - size) throw new Error('transient_input_too_large');
+      const bytes = Buffer.from(part.value); size += incoming;
       chunks.push(bytes);
     }
     return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));

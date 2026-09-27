@@ -1,5 +1,11 @@
+import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
+import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
+import { claimConvergeAttempt } from '../../src/converge/attempt-budget.js';
+import { finishFreshReview, prepareFreshReview } from '../../src/converge/fresh-review.js';
+import { randomUUID } from 'node:crypto';
+import * as asyncLane from '../../src/dispatch/async-lane.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, execFile } from 'node:child_process';
@@ -21,13 +27,13 @@ afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.s
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
-async function fixture(cap = 3, systemPrompt = prompts.systemPrompt) {
+async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, originalNativeClaim = {attempt:3,round:2}) {
  const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'async-phase-'))); roots.push(commonDir);
  const configBytes = '{}', toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: sha256Hex('[]'), configSha256: sha256Hex(configBytes), specSha256: sha256Hex(''), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 }, roster: ['a','b'].map(seat => ({seat, model: seat, role: 'general', route: 'fake'})), chunks: [{index:0,total:1,digest:sha256Hex('chunk')}], prompts: ['a','b'].map(seat=>({seat,chunk:0,systemSha256:sha256Hex('s'),userSha256:sha256Hex('u')})) });
  const role = { name:'general',systemPrompt:'s',focus:[],description:'d',isSpecialized:false };
  const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})), async: { timeoutMs: 1000, maxPhysicalCalls: cap, maxAttemptsPerCall: 2, calls: ['assignment-a','assignment-b'].map(assignmentId=>({assignmentId,chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{...prompts,systemPrompt}})) } });
- const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim:{attempt:3,round:2},startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:2,maxAttemptsPerCell:1});
+ const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim,startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:2,maxAttemptsPerCell:1});
  let journal!: CheckpointJournal;
  await withNativeTarget(commonDir,target,async ownership=>{journal=await CheckpointJournal.create({commonDir,namespace:runId,plan,ownership});await journal.bind('captured-inputs',captured.bytes,ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);});
  const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks[0]!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
@@ -36,7 +42,105 @@ async function fixture(cap = 3, systemPrompt = prompts.systemPrompt) {
 }
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
 const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
+const completion = {runId,reportJsonSha256:'c'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false};
+async function launchOriginal(f:Awaited<ReturnType<typeof fixture>>,
+ remote:Parameters<typeof prepareFreshReview>[0]['remote'],
+ pending?: (delegates:Awaited<ReturnType<typeof initialize>>['delegates'])=>Promise<void>) {
+ let delegates!:Awaited<ReturnType<typeof initialize>>['delegates'], cycleId='';
+ await withNativeTarget(f.commonDir,target,async ownership=>{
+  const fresh=await prepareFreshReview({gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,remote,ownership});
+  const state=(await loadConvergeRunState(f.commonDir,target))!;
+  await claimConvergeAttempt({gitCommonDir:f.commonDir,target,ownership,freshReviewOperation:fresh.operationId,
+   beforeClaim:async claimOwnership=>{
+    state.lastLaunch={status:'pending',attempt:1,round:1,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),startedAt:new Date().toISOString(),pid:process.pid};
+    await writeState(f.commonDir,state,claimOwnership);
+   },
+   afterClaim:async(claim,claimOwnership)=>{
+    state.lastLaunch!.attempt=claim.attempt;await writeState(f.commonDir,state,claimOwnership);
+    cycleId=state.cycle!.id;delegates=(await initializeAsyncPhase({...f.input,ownership:claimOwnership})).delegates;
+    await pending?.(delegates);
+    state.lastLaunch={...state.lastLaunch!,...completion,status:'completed'};state.updatedAt=new Date().toISOString();
+    await writeState(f.commonDir,state,claimOwnership);
+    await finishFreshReview(f.commonDir,target,fresh.operationId,claimOwnership);
+   }
+  });
+ });
+ return {delegates,cycleId};
+}
+function causalMessages(error:unknown):string {
+ if(error instanceof AggregateError)return [error.message,...error.errors.map(causalMessages)].join(' ');
+ if(error instanceof Error)return [error.message,error.cause?causalMessages(error.cause):''].join(' ');
+ return String(error);
+}
 describe('restricted original async checkpoint phase',()=>{
+
+ it.each(['pending', 'same-cycle-before', 'fresh-cycle-before', 'same-cycle-during', 'fresh-cycle-during'] as const)(
+  'binds async output to the actual original cycle with %s advancement', async timing => {
+   const f=await fixture(3,prompts.systemPrompt,{attempt:1,round:1});
+   const store=join(f.commonDir,'async-opinions');await mkdir(store,{mode:0o700});
+   const directory=vi.spyOn(asyncLane,'resolveAsyncStoreDir').mockResolvedValue(store);
+   let active:import('../../src/converge/review-cycle.js').ReviewCycleReceipt|null=null;
+   const remote={repo:'allocator-one/rcl',prNumber:105,url:'https://harness.example',
+    current:async()=>active,start:async(request:import('../../src/converge/review-cycle.js').ReviewCycleRequest)=>
+     (active={...request,id:randomUUID(),inserted_at:new Date().toISOString()})};
+   const guard={gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),cycleRemote:remote,validate:async()=>{}};
+   let originalCycle='',delegates:Awaited<ReturnType<typeof initialize>>['delegates'];
+   const adapter=vi.fn(async()=>JSON.parse(review()));
+   const worker=()=>runRetainedAsyncWorker(JSON.stringify(delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter})});
+   const advance=async(fresh:boolean)=>{
+    if(!fresh)await processRoundReport({gitCommonDir:f.commonDir,target,round:1,findings:[],runId,reportSha256:completion.reportJsonSha256,cycleId:originalCycle});
+    await guardReviewLaunch({...guard,inputSha256:'e'.repeat(64),startOver:fresh,
+     run:async()=>({...completion,runId:randomUUID()})});
+   };
+   try {
+    const launched=await launchOriginal(f,remote,timing==='pending'?async current=>{delegates=current;await worker();}:undefined);
+    originalCycle=launched.cycleId;delegates=launched.delegates;
+    if(timing.endsWith('-before')){await advance(timing.startsWith('fresh'));await worker();}
+    if(timing.endsWith('-during')){adapter.mockImplementationOnce(async()=>{await advance(timing.startsWith('fresh'));return JSON.parse(review());});await worker();}
+    expect(adapter).toHaveBeenCalledOnce();
+    expect(await asyncLane.collectAsyncResults(store,asyncLane.asyncTargetKey('',target))).toEqual([]);
+    const current=(await loadConvergeRunState(f.commonDir,target))!.cycle!.id;
+    if(current!==originalCycle)expect(await asyncLane.collectAsyncResults(store,asyncLane.asyncTargetKey('',target,current))).toEqual([]);
+    expect(await asyncLane.collectAsyncResults(store,asyncLane.asyncTargetKey('',target,originalCycle))).toMatchObject([{status:'success',async:true}]);
+    expect((await seal(f)).state.intents).toHaveLength(1);
+   } finally {directory.mockRestore();}
+ });
+
+ it.each([false,true])('refuses changed opinion-cycle metadata even if the public delegate digest is recomputed (%s)',async recompute=>{
+  const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn(()=>({provider:'fake',name:'fake',ask:vi.fn(),review:async()=>JSON.parse(review())}));
+  const path=join(f.path,'async','phase.json'),metadata=JSON.parse(await readFile(path,'utf8'));
+  metadata.opinionCycle.cycleId=randomUUID();await writeFile(path,stableStringify(metadata)+'\n',{mode:0o600});
+  const delegate={...opened.delegates[0]!};
+  if(recompute)delegate.planDigest=sha256Hex(stableStringify({plan:metadata.plan,opinionCycle:metadata.opinionCycle}));
+  await expect(runRetainedAsyncWorker(JSON.stringify(delegate),{adapterFactory,publish:vi.fn()})).rejects.toThrow('invalid_delegate');
+  expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
+ });
+
+ it('refuses async execution without an immutable opinion-cycle binding before paid intent',async()=>{
+  const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn(()=>({provider:'fake',name:'fake',ask:vi.fn(),review:async()=>JSON.parse(review())}));
+  const path=join(f.path,'async','phase.json'),metadata=JSON.parse(await readFile(path,'utf8'));delete metadata.opinionCycle;
+  await writeFile(path,stableStringify(metadata)+'\n',{mode:0o600});
+  await expect(runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory,publish:vi.fn()})).rejects.toThrow('opinion_cycle');
+  expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
+ });
+ it('refuses async initialization for a different original native claim',async()=>{
+  const f=await fixture();let active:import('../../src/converge/review-cycle.js').ReviewCycleReceipt|null=null;
+  const remote={repo:'allocator-one/rcl',prNumber:105,url:'https://harness.example',current:async()=>active,
+   start:async(request:import('../../src/converge/review-cycle.js').ReviewCycleRequest)=>(active={...request,id:randomUUID(),inserted_at:new Date().toISOString()})};
+  let failure:unknown;try{await launchOriginal(f,remote);}catch(error){failure=error;}
+  expect(causalMessages(failure)).toContain('native_claim');
+  await expect(readFile(join(f.path,'async','phase.json'))).rejects.toMatchObject({code:'ENOENT'});
+ });
+
+ it('preserves adapter invocation diagnostics without accepting hidden async retries', async()=>{
+  const f=await fixture(),opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]);
+  const intent=await writer.claim(prompts);
+  await expect(writer.recordResult(intent.attemptId,review('success',{adapterAttempts:2}),true)).rejects.toThrow('invalid_review');
+  expect((await readAsyncPhase(f.input)).state.outcomes).toEqual([]);
+  const bytes=review('success',{adapterAttempts:1});await writer.recordResult(intent.attemptId,bytes,true);
+  expect((await seal(f)).state.outcomes[0].reviewBytes).toBe(bytes);
+ });
+
  it('publishes opportunistic opinions only after same-journal durable outcomes, including late audit', async()=>{
   const f=await fixture(),opened=await initialize(f);const published:any[]=[];
   await seal(f);

@@ -69,7 +69,7 @@ export function validateAsyncPlan(input: unknown): AsyncPlan {
 /** Exact schema-valid observed bytes; no provider truth or billing authority is inferred. */
 export function parseAsyncReview(bytes: string, call: AsyncCall) {
   assertAsyncReviewBytes(bytes); let value: unknown; try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_review'); }
-  const parsed = asyncReviewSchema.safeParse(value); asyncRefuse(parsed.success && parsed.data.model === call.model && parsed.data.role === call.role && parsed.data.provider === call.provider, 'invalid_review');
+  const parsed = asyncReviewSchema.safeParse(value); asyncRefuse(parsed.success && (parsed.data.adapterAttempts ?? 0) <= 1 && parsed.data.model === call.model && parsed.data.role === call.role && parsed.data.provider === call.provider, 'invalid_review');
   return freezeAsync(parsed.data);
 }
 /** Bound caller bytes before hashing, parsing or acquiring a persistence lock. */

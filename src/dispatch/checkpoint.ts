@@ -48,6 +48,7 @@ const reviewSchema = z.object({
   usage: z.object({ inputTokens: integer.optional(), outputTokens: integer.optional(), reasoningTokens: integer.optional() }).strict().optional(),
   error: z.string().optional(), droppedFindings: integer.optional(), warnings: z.array(z.string()).optional(),
   async: z.literal(false).optional(),
+  adapterAttempts: integer.optional(),
 }).strict();
 /** Strict raw blocking-review wire schema, shared by supplemental async capture. */
 export const blockingCheckpointReviewSchema = reviewSchema;
@@ -314,7 +315,10 @@ function validateReviewBytes(bytes: string, cell: CheckpointCell): z.infer<typeo
   boundedBytes(bytes);
   let review: unknown; try { review = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_result'); }
   const parsed = reviewSchema.safeParse(review);
-  if (!parsed.success) throw new Error('checkpoint_invalid_result');
+  // The retained executor disables internal adapter retries: each durable
+  // physical intent can bind at most one observed SDK invocation. Preserve
+  // that counter in exact raw bytes; do not relabel it as billing or a claim.
+  if (!parsed.success || (parsed.data.adapterAttempts ?? 0) > 1) throw new Error('checkpoint_invalid_result');
   const item = parsed.data;
   if (item.model !== cell.model || item.role !== cell.role || item.provider !== cell.route) throw new Error('checkpoint_result_cell_mismatch');
   return item;

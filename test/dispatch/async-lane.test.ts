@@ -4,7 +4,7 @@ vi.mock('node:crypto', { spy: true });
 
 import * as crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,6 +14,7 @@ import {
   spoolAsyncCalls,
   runAsyncWorker,
   collectAsyncResults,
+  publishAsyncReview,
   workerEnv,
 } from '../../src/dispatch/async-lane.js';
 import type { ReviewAdapter } from '../../src/dispatch/adapter.js';
@@ -162,6 +163,28 @@ describe('spool → worker → collect round trip', () => {
       },
     };
   }
+
+  it.each([0o720, 0o702])('refuses an opinion directory writable outside its owner (%o)', async mode => {
+    await chmod(dir, mode);
+
+    await expect(publishAsyncReview(dir, asyncTargetKey('unsafe-directory'), {
+      model: 'fixture', role: 'general', provider: 'fake', findings: [], durationMs: 1, status: 'success', async: true,
+    })).rejects.toThrow('unsafe async opinion directory');
+
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it.each([0o720, 0o702])('refuses to collect from an opinion directory writable outside its owner (%o)', async mode => {
+    const targetKey = asyncTargetKey('unsafe-collection');
+    const path = join(dir, `result-${targetKey}-fixture.json`);
+    const bytes = JSON.stringify({ model: 'fixture', role: 'general', provider: 'fake', findings: [], durationMs: 1, status: 'success', async: true });
+    await writeFile(path, bytes);
+    await chmod(dir, mode);
+
+    await expect(collectAsyncResults(dir, targetKey)).rejects.toThrow('unsafe async opinion directory');
+
+    expect(await readFile(path, 'utf8')).toBe(bytes);
+  });
 
   it('worker consumes a spool file and writes a result the next collect merges, marked async', async () => {
     const targetKey = asyncTargetKey('repo#1');

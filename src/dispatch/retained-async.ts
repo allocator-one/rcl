@@ -41,16 +41,19 @@ export async function runRetainedAsyncWorker(bytes: string, dependencies: {
 } = {}): Promise<void> {
   if (typeof bytes !== 'string' || Buffer.byteLength(bytes) > MAX_ASYNC_DELEGATE_BYTES || Buffer.from(bytes).toString('utf8') !== bytes) refuse();
   let delegate: AsyncDelegate; try { delegate = JSON.parse(bytes); } catch { return refuse(); }
-  await openCapturedAsyncDelegate(delegate);
+  const original = await openCapturedAsyncDelegate(delegate);
   const journal = await CheckpointJournal.inspectRead(delegate.checkpointPath);
   const captured = decodeCapturedInputs((await journal.readBindings())['captured-inputs']!, journal.getPlan());
+  // This immutable private phase binding was proven under original native ownership.
+  // A pending launch need not have a runId, and later rounds cannot redirect it.
+  const opinionTarget = asyncTargetKey('', delegate.target, original.opinionCycle.cycleId ?? undefined);
   let latest: ModelReview | undefined;
   await executeCheckpointAsync({ delegate,
     adapterFactory: call => (dependencies.adapterFactory ?? (provider => defaultAdapterFactory(provider, captured.config.reasoningEffort)))(call.provider),
     onLateAuditError: () => {}, onReviewRecorded: async review => { latest = review; },
   });
   if (latest) {
-    const publish = dependencies.publish ?? (async review => publishAsyncReview(await resolveAsyncStoreDir(delegate.commonDir), asyncTargetKey('', delegate.target), review));
+    const publish = dependencies.publish ?? (async review => publishAsyncReview(await resolveAsyncStoreDir(delegate.commonDir), opinionTarget, review));
     await publish(latest);
   }
   // The hidden command exits here even if an adapter ignored abort. Unknown

@@ -37,8 +37,9 @@ export function createVerificationLateAudit(options: {
   };
   async function drain(): Promise<void> {
     while (pending.size) await Promise.all([...pending]);
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError([...errors], 'late_verification_audit_failed');
+    const retained = errors.splice(0);
+    if (retained.length === 1) throw retained[0];
+    if (retained.length > 1) throw new AggregateError(retained, 'late_verification_audit_failed');
     if (buffered.length) throw new Error('late_verification_audit_requires_terminal');
   }
   return Object.freeze({
@@ -60,7 +61,11 @@ export function createVerificationLateAudit(options: {
       const phase = await journal.readVerification();
       if (!phase?.terminal) throw new Error('late_verification_audit_requires_terminal');
       active = true;
-      for (const result of buffered.splice(0)) void write(result);
+      const batch = buffered.splice(0);
+      const persisted = await Promise.all(batch.map(async result => {
+        try { await write(result); return true; } catch { return false; }
+      }));
+      buffered.unshift(...batch.filter((_, index) => !persisted[index]));
       await drain();
     },
     drain,
