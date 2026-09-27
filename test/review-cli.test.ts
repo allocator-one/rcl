@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -1024,7 +1024,16 @@ describe('reviewer identity eligibility at CLI boundaries', () => {
           ['openai-compat/vendor', 'alpha::general', 'Retained blocking result'],
           ['openai-compat/vendor', 'security-auditor', 'Retained blocking result'],
         ]);
-        expect(retained.asyncArtifacts).toEqual([{ path, sha256: sha256Hex(bytes) }]);
+        expect(retained.asyncArtifacts).toEqual([{
+          path,
+          sha256: sha256Hex(bytes),
+          bytesBase64: Buffer.from(bytes).toString('base64'),
+        }]);
+        utimesSync(path, new Date(0), new Date(0));
+        await collectAsyncResults(store, asyncTargetKey('different-target'));
+        expect(existsSync(path)).toBe(false);
+        expect(Buffer.from(retained.asyncArtifacts[0].bytesBase64, 'base64').toString('utf8')).toBe(bytes);
+        expect(sha256Hex(Buffer.from(retained.asyncArtifacts[0].bytesBase64, 'base64'))).toBe(sha256Hex(bytes));
         expect(retained).not.toHaveProperty('findings');
         expect(retained).not.toHaveProperty('ci_exit_code');
         expect(statSync(refused).mode & 0o777).toBe(0o700);

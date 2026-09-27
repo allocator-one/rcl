@@ -291,7 +291,16 @@ function isReviewShape(value: unknown): value is ModelReview {
   );
 }
 
-export interface AsyncResultReference { path: string; sha256: string }
+/**
+ * Exact bytes observed before a refusal. The original file remains untouched,
+ * while the private refusal artifact can still recover it after normal store
+ * cleanup removes the source path.
+ */
+export interface AsyncResultReference {
+  path: string;
+  sha256: string;
+  bytesBase64: string;
+}
 
 /**
  * Collect (and consume) every arrived async result for this target. Corrupt
@@ -324,7 +333,11 @@ export async function collectAsyncResults(
         if (isReviewShape(parsed)) {
           parsed.async = true;
           collected.push(parsed);
-          artifacts.push({ path, sha256: createHash('sha256').update(bytes).digest('hex') });
+          artifacts.push({
+            path,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+            bytesBase64: bytes.toString('base64'),
+          });
         }
       } catch {
         // Corrupt or half-written by an interrupted worker — drop it below.

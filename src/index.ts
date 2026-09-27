@@ -44,6 +44,7 @@ import {
   collectAsyncResults,
   currentBranchLabel,
   MAX_ASYNC_CALLS_PER_ROUND,
+  type AsyncResultReference,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { resolveGatingConfig } from './consensus/gating.js';
@@ -2116,7 +2117,7 @@ async function executeCouncil(
 
   postReviewStage('collecting and merging reviewer outputs');
 
-  const preserveRefusedReviews = async (error: AmbiguousReviewerIdentityError, asyncArtifacts: Array<{ path: string; sha256: string }> = []) => {
+  const preserveRefusedReviews = async (error: AmbiguousReviewerIdentityError, asyncArtifacts: AsyncResultReference[] = []) => {
     try {
       const path = await retainAssemblyRefusal(resolveDataDir(), {
         run: { ...(extra.attestation ? { id: extra.attestation.runId } : {}), command: extra.command, target: extra.target,
