@@ -59,7 +59,11 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     requireSource(entry.verdictSeverity === undefined || ['critical', 'important', 'minor', 'nitpick'].includes(entry.verdictSeverity as string));
     requireSource(entry.claimDescriptor === undefined || state.version !== 1 && claimDescriptorSchema.safeParse(entry.claimDescriptor).success);
   }
-  requireSource(state.version === 1 || cycleOrigin || Array.isArray(state.sightings));
+  // A recovered v3 descendant of released cycle-v2 has no semantic sighting
+  // cache either. The exact predecessor is required and checked below.
+  const recoveredCycleV2 = state.version === 3 && state.sightings === undefined &&
+    ((state.recovery as Record<string, unknown>).operations as Record<string, unknown>[]).at(-1)?.sourceVersion === 2;
+  requireSource(state.version === 1 || cycleOrigin || Array.isArray(state.sightings) || recoveredCycleV2);
   if (state.lastAnnotations !== undefined) {
     requireSource(object(state.lastAnnotations)); const annotations = state.lastAnnotations as Record<string, unknown>;
     requireSource(positive(annotations.round) && seen.has(annotations.round) && Array.isArray(annotations.identities) &&

@@ -127,7 +127,7 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
       retainedBinding.round === round && retainedBinding.reportSha256 === reportSha256 &&
       typeof retainedBinding.sourcePath === 'string' && retainedBinding.sourcePath.length > 0);
   }
-  if (native.version === 3 || native.version === 2 && native.cycle === undefined) {
+  if ((native.version === 3 || native.version === 2 && native.cycle === undefined) && Array.isArray(native.sightings)) {
     requireEvidence(Array.isArray(native.sightings));
     const members = (native.sightings as unknown[]).filter(s => object(s) && s.runId === scope.run_id && s.findingRef === input.findingRef);
     if (members.length > 0) {
@@ -144,6 +144,14 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
         origin.findings[input.previousIdentity]?.key === input.previousIdentity &&
         origin.rounds.some(record => record.round === round && isDeepStrictEqual(record, rounds[0])));
     }
+  }
+  else if (native.version === 3 || native.version === 2 && native.cycle === undefined) {
+    // A recovered successor of released cycle-v2 retains the exact cycle
+    // source but has no semantic sighting cache of its own.
+    const origin = lineage?.legacy ?? (lineage?.original.cycle ? lineage.original : undefined);
+    requireEvidence(origin && Object.hasOwn(origin.findings, input.previousIdentity) &&
+      origin.findings[input.previousIdentity]?.key === input.previousIdentity &&
+      origin.rounds.some(record => record.round === round && isDeepStrictEqual(record, rounds[0])));
   }
 
   const ids = [input.classificationId, ...(input.correctionId ? [input.correctionId] : [])];

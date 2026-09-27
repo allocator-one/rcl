@@ -469,6 +469,7 @@ describe('released fresh-review cycle compatibility', () => {
     const anchor = correctionAnchor(selection, receipt, uuid(7), uuid(803));
     const native = JSON.parse(retainedFixture({ sourceJson: selection.nativeJson, target: selection.target,
       operationId: uuid(803), anchors: [anchor], reports: [selection.reportJson], sourceReceipts: selection.sourceReceipts }).resultJson);
+    delete native.sightings;
     const second = (selection.sourceReceipts[0]!.payload.identities as Array<{ matched_identity: string }>)[1]!;
     const recovered = { ...selection, nativeJson: JSON.stringify(native), nativeSourceJsons: [selection.nativeJson],
       eventId: uuid(805), findingRef: 'f002', identity: '3333333333333333', previousIdentity: second.matched_identity };

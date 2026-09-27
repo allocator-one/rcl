@@ -119,4 +119,14 @@ describe('legacy pending obligations', () => {
     expect(migratedLegacyPendingRound(accepted.findings[entry.key]!, accepted)).toBe(1);
   });
 
+  it('retains an intervening critical sighting before a later noncritical dismissal', () => {
+    const entry = finding({ severity: 'minor', firstRound: 1, lastRound: 3, verdict: 'dismissed', verdictRound: 3,
+      verdictSeverity: 'important', pendingRound: undefined });
+    const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'minor';
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'critical' } });
+    value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
+    expect(migratedLegacyPendingRound(entry, value)).toBe(2);
+  });
+
 });
