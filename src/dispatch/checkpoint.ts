@@ -8,7 +8,7 @@ import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
 import { verificationContextFromValidatedCheckpoint } from './checkpoint-verification-context.js';
 import {
-  appendVerificationRecordToValidatedRecords, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent,
+  appendVerificationRecordWithSuccessor, cloneValidatedVerificationRecords, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent,
   validateVerificationRecords, validateVerificationRecordsForAppend, verificationDigest,
   type ValidatedVerificationRecords,
   type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationPlanInput,
@@ -433,6 +433,7 @@ export function exportCheckpointProof(journal: CheckpointJournal): Promise<Check
 export class CheckpointJournal {
   private needsResync = false;
   private verificationAcknowledgment?: { ownership: NativeTargetOwnership; sequence: number; digest: string };
+  private verificationPrefixCache?: { ownership: NativeTargetOwnership; context: VerificationContext; bytes: readonly string[]; snapshot: ValidatedVerificationRecords };
   private constructor(private readonly path: string, private readonly plan: FrozenCheckpointPlan, private readonly commonDir?: string) {}
 
   static async create(input: { commonDir: string; namespace: string; plan: FrozenCheckpointPlan; ownership: NativeTargetOwnership }): Promise<CheckpointJournal> {
@@ -628,20 +629,20 @@ export class CheckpointJournal {
   }
 
   private async readVerificationValidated(context: VerificationContext, pending?: PendingPublication[]): Promise<VerificationState | undefined> {
-    return (await this.readVerificationValidatedForAppend(context, pending)).state;
+    return (await this.readVerificationValidatedForAppend(context, pending)).snapshot.state;
   }
 
-  private async readVerificationValidatedForAppend(context: VerificationContext, pending?: PendingPublication[]): Promise<ValidatedVerificationRecords> {
+  private async readVerificationValidatedForAppend(context: VerificationContext, pending?: PendingPublication[], ownership?: NativeTargetOwnership): Promise<{ snapshot: ValidatedVerificationRecords; bytes: readonly string[] }> {
     const directory = join(this.path, 'verification');
     try { await lstat(directory); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return validateVerificationRecordsForAppend([], context); throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { snapshot: validateVerificationRecordsForAppend([], context), bytes: [] }; throw error; }
     await inspectDirectory(directory);
     const entries = await readdir(directory);
     if (entries.some(name => name !== 'events')) throw new Error('checkpoint_verification_unknown_entry');
     // A crash while publishing the empty directories consumed no intent.
-    if (!entries.length) return validateVerificationRecordsForAppend([], context);
+    if (!entries.length) return { snapshot: validateVerificationRecordsForAppend([], context), bytes: [] };
     const events = join(directory, 'events'); await inspectDirectory(events);
-    const names = (await readdir(events)).sort(), values: unknown[] = [];
+    const names = (await readdir(events)).sort(), bytesBySequence: string[] = [];
     if (names.length > 1002) throw new Error('checkpoint_verification_too_many_records');
     let totalBytes = 0;
     for (const [index, name] of names.entries()) {
@@ -652,16 +653,23 @@ export class CheckpointJournal {
       let value: unknown;
       try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_invalid_record'); }
       if (bytes !== `${canonical(value as Json)}\n`) throw new Error('checkpoint_verification_noncanonical');
-      values.push(value);
+      bytesBySequence.push(bytes);
     }
-    return validateVerificationRecordsForAppend(values, context);
+    const cache = this.verificationPrefixCache;
+    if (cache && cache.ownership === ownership && cache.context.runId === context.runId && cache.context.planDigest === context.planDigest &&
+      cache.bytes.length === bytesBySequence.length && cache.bytes.every((bytes, index) => bytes === bytesBySequence[index])) {
+      try { return { snapshot: cloneValidatedVerificationRecords(cache.snapshot, context), bytes: bytesBySequence }; }
+      catch { this.verificationPrefixCache = undefined; }
+    } else if (cache) this.verificationPrefixCache = undefined;
+    const values = bytesBySequence.map(bytes => JSON.parse(bytes));
+    return { snapshot: validateVerificationRecordsForAppend(values, context), bytes: bytesBySequence };
   }
 
   private async appendVerification(input: VerificationEvent, ownership: NativeTargetOwnership): Promise<boolean> {
     const event = snapshotVerificationEvent(input);
     return this.write(ownership, async () => {
       const context = this.verificationContext(await this.readValidated());
-      const snapshot = await recoverPublications(pending => this.readVerificationValidatedForAppend(context, pending)), state = snapshot.state, records = state?.records ?? [];
+      const read = await recoverPublications(pending => this.readVerificationValidatedForAppend(context, pending, ownership)), snapshot = read.snapshot, state = snapshot.state, records = state?.records ?? [];
       const prior = records.find(row => row.event.type === event.type &&
         (event.type === 'intent' ? row.event.type === 'intent' && row.event.intent.attemptId === event.intent.attemptId
           : event.type === 'result' ? row.event.type === 'result' && row.event.result.attemptId === event.result.attemptId : true));
@@ -672,7 +680,7 @@ export class CheckpointJournal {
       if (await this.terminalReportEntries() !== undefined && (!state?.terminal || !prior)) {
         throw new Error('checkpoint_verification_report_finalized');
       }
-      const record = prior ? undefined : appendVerificationRecordToValidatedRecords(snapshot, event, context);
+      const appended = prior ? undefined : appendVerificationRecordWithSuccessor(snapshot, event, context); const record = appended?.record;
       if (!state && event.type !== 'plan') throw new Error('checkpoint_verification_missing_plan');
       const directory = await ensurePrivateChild(this.path, 'verification'); await ensurePrivateChild(directory, 'events');
       const tip = records.at(-1);
@@ -689,13 +697,14 @@ export class CheckpointJournal {
         if (!record) return false;
         await publishEventExclusive(directory, eventFile(record.sequence), `${canonical(record as unknown as Json)}\n`, MAX_ARTIFACT_BYTES);
         this.verificationAcknowledgment = { ownership, sequence: record.sequence, digest: record.digest };
+        this.verificationPrefixCache = { ownership, context, bytes: [...read.bytes, `${canonical(record as unknown as Json)}\n`], snapshot: appended!.successor };
         return true;
       } catch (error) {
-        this.verificationAcknowledgment = undefined;
+        this.verificationAcknowledgment = undefined; this.verificationPrefixCache = undefined;
         throw error;
       }
     }).catch(error => {
-      this.verificationAcknowledgment = undefined;
+      this.verificationAcknowledgment = undefined; this.verificationPrefixCache = undefined;
       throw error;
     });
   }

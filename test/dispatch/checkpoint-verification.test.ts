@@ -12,7 +12,7 @@ vi.mock('../../src/report/run-header.js', async original => {
 });
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
-import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, decodeVerificationProof, snapshotVerificationEvent,
+import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, appendVerificationRecordWithSuccessor, decodeVerificationProof, snapshotVerificationEvent,
   validateVerificationRecordsForAppend, validateVerificationRecords } from '../../src/dispatch/checkpoint-verification.js';
 import { planGating } from '../../src/consensus/gating.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
@@ -228,6 +228,57 @@ describe('durable verifier phase in the existing checkpoint', () => {
     expect((await f.journal.readVerification())!.intents).toEqual([intent()]);
   });
 
+  it('reuses an exact same-owner verification prefix after fresh disk checks', async () => {
+    const f = await fixture(), saved = planInput();
+    await runOwned(f, async owner => {
+      await f.journal.beginVerification(saved, owner);
+      await f.journal.recordVerificationIntent(intent(), owner);
+      const parse = JSON.parse; let planParses = 0;
+      const spy = vi.spyOn(JSON, 'parse').mockImplementation((...args: Parameters<typeof JSON.parse>) => {
+        if (args[0] === saved.gatingPlanBytes) planParses += 1;
+        return parse(...args);
+      });
+      try {
+        await f.journal.recordVerificationResult(outcome(), owner);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(planParses).toBe(0);
+    });
+    expect((await f.journal.readVerification())!.outcomes).toEqual([outcome()]);
+  });
+
+  it('keeps successor snapshots equivalent to full validation while consuming only the prior brand', async () => {
+    const f = await fixture(); await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));
+    const main = await f.journal.exportProof(), phase = (await f.journal.readVerification())!;
+    const context = { planDigest: main.plan.digest, finalizationDigest: main.state.records.at(-1)!.digest,
+      capturedInputsSha256: hash(main.bindings['captured-inputs']!), operationSha256: hash(main.bindings.launch!),
+      runId, startedAtMs: 100, expiresAtMs: 1000, reviewerAttemptIds: ['reviewer-0'] };
+    const initial = validateVerificationRecordsForAppend(phase.records, context), original = structuredClone(initial.state);
+    const first = appendVerificationRecordWithSuccessor(initial, { type: 'intent', intent: intent() }, context);
+    expect(initial.state).toEqual(original);
+    expect(() => appendVerificationRecordToValidatedRecords(initial, { type: 'intent', intent: intent() }, context)).toThrow('unvalidated_state');
+    const second = appendVerificationRecordWithSuccessor(first.successor, { type: 'result', result: outcome() }, context);
+    const expected = appendVerificationRecord([...phase.records, first.record], { type: 'result', result: outcome() }, context);
+    expect(second.record).toEqual(expected);
+    expect(second.successor.state).toEqual(validateVerificationRecords([...phase.records, first.record, second.record], context));
+    expect(() => appendVerificationRecordWithSuccessor(second.successor, { type: 'terminal', terminal: { status: 'failed', finishedAtMs: 800, reason: 'deadline' } }, { ...context, expiresAtMs: 1001 })).toThrow('unvalidated_state');
+  });
+
+  it.each(['bytes', 'permissions'] as const)('invalidates a warm same-owner prefix cache when existing %s change', async mutation => {
+    const f = await fixture(), events = join(f.path, 'verification', 'events'), plan = join(events, '00000001.json');
+    await expect(runOwned(f, async owner => {
+      await f.journal.beginVerification(planInput(), owner);
+      await f.journal.recordVerificationIntent(intent(), owner);
+      if (mutation === 'bytes') {
+        const original = await readFile(plan, 'utf8'), changed = original.replace('claim 0', 'changed');
+        expect(changed).not.toBe(original); await writeFile(plan, changed);
+      } else await chmod(plan, 0o644);
+      await f.journal.recordVerificationResult(outcome(), owner);
+    })).rejects.toThrow(mutation === 'bytes' ? 'checkpoint_verification_invalid_record' : 'checkpoint_symlink');
+    expect(await readdir(events)).toEqual(['00000001.json', '00000002.json']);
+  });
+
   it('brands one verifier append snapshot, rejects forgery or stale reuse and preserves exact record bytes', async () => {
     const f = await fixture(); await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));
     const main = await f.journal.exportProof(), phase = (await f.journal.readVerification())!;
@@ -356,11 +407,21 @@ describe('durable verifier phase in the existing checkpoint', () => {
     expect(durability.synced).toContain(join(f.path, 'verification', 'events', '00000002.json'));
   });
 
-  it('reflushes an acknowledged phase when the caller ownership changes', async () => {
-    const f = await fixture();
-    await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));
-    durability.synced = [];
-    await runOwned(f, owner => f.journal.recordVerificationIntent(intent(), owner));
+  it('revalidates rather than reusing a cached prefix when caller ownership changes', async () => {
+    const f = await fixture(), saved = planInput();
+    await runOwned(f, owner => f.journal.beginVerification(saved, owner));
+    const parse = JSON.parse; let planParses = 0;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((...args: Parameters<typeof JSON.parse>) => {
+      if (args[0] === saved.gatingPlanBytes) planParses += 1;
+      return parse(...args);
+    });
+    try {
+      durability.synced = [];
+      await runOwned(f, owner => f.journal.recordVerificationIntent(intent(), owner));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(planParses).toBe(1);
     expect(durability.synced).toContain(join(f.path, 'verification', 'events', '00000001.json'));
   });
 

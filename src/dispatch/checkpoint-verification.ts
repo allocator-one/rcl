@@ -87,6 +87,24 @@ interface VerificationValidationMetadata {
 }
 const validatedVerificationRecords = new WeakMap<ValidatedVerificationRecords, VerificationValidationMetadata>();
 
+function snapshotFromMetadata(metadata: VerificationValidationMetadata): ValidatedVerificationRecords {
+  const state = metadata.plan === undefined ? undefined : freeze({ plan: metadata.plan, records: [...metadata.records], intents: [...metadata.intents],
+    outcomes: [...metadata.outcomes], uncertain: metadata.intents.filter(row => !metadata.results.has(row.batchIndex)), ...(metadata.terminal ? { terminal: metadata.terminal } : {}) });
+  const snapshot = freeze(state ? { state } : {});
+  validatedVerificationRecords.set(snapshot, metadata);
+  return snapshot;
+}
+function cloneMetadata(metadata: VerificationValidationMetadata): VerificationValidationMetadata {
+  return { ...metadata, records: [...metadata.records], intents: [...metadata.intents], outcomes: [...metadata.outcomes],
+    byBatch: new Map(metadata.byBatch), ids: new Set(metadata.ids), results: new Set(metadata.results) };
+}
+/** Internal checkpoint-only continuation after exact disk-byte comparison. */
+export function cloneValidatedVerificationRecords(snapshot: ValidatedVerificationRecords, context: VerificationContext): ValidatedVerificationRecords {
+  const metadata = validatedVerificationRecords.get(snapshot);
+  refuse(metadata && metadata.contextFingerprint === contextFingerprint(context), 'unvalidated_state');
+  return snapshotFromMetadata(cloneMetadata(metadata));
+}
+
 export function verificationDigest(bytes: string): string { return createHash('sha256').update(bytes).digest('hex'); }
 
 /** Parse exact observed adapter bytes against the frozen verifier route. */
@@ -284,7 +302,8 @@ export function validateVerificationRecordsForAppend(input: readonly unknown[], 
 }
 
 /** Append only to a snapshot returned by this module's full validator in the same operation. */
-export function appendVerificationRecordToValidatedRecords(snapshot: ValidatedVerificationRecords, event: VerificationEvent, context: VerificationContext): VerificationRecord {
+/** Internal checkpoint-only append; the journal may cache its successor only after durable publication. */
+export function appendVerificationRecordWithSuccessor(snapshot: ValidatedVerificationRecords, event: VerificationEvent, context: VerificationContext): { record: VerificationRecord; successor: ValidatedVerificationRecords } {
   const metadata = validatedVerificationRecords.get(snapshot);
   refuse(metadata && metadata.contextFingerprint === contextFingerprint(context), 'unvalidated_state');
   validatedVerificationRecords.delete(snapshot);
@@ -292,9 +311,15 @@ export function appendVerificationRecordToValidatedRecords(snapshot: ValidatedVe
   const captured = snapshotVerificationEvent(event); checkVerificationEvent(captured, metadata.records.length, metadata, context);
   const unsigned = { sequence: metadata.records.length + 1, previousDigest: metadata.previousDigest,
     bindings: binding(context), event: captured };
-  const record = { ...unsigned, digest: verificationDigest(stableStringify(unsigned)) };
+  const record = freeze({ ...unsigned, digest: verificationDigest(stableStringify(unsigned)) });
   refuse(metadata.retainedBytes + Buffer.byteLength(stableStringify(record), 'utf8') + 1 <= MAX_ARTIFACT_BYTES, 'too_large');
-  return freeze(record);
+  const next = cloneMetadata(metadata);
+  next.retainedBytes += Buffer.byteLength(stableStringify(record), 'utf8') + 1;
+  retainVerificationEvent(captured, next); next.records.push(record); next.previousDigest = record.digest;
+  return { record, successor: snapshotFromMetadata(next) };
+}
+export function appendVerificationRecordToValidatedRecords(snapshot: ValidatedVerificationRecords, event: VerificationEvent, context: VerificationContext): VerificationRecord {
+  return appendVerificationRecordWithSuccessor(snapshot, event, context).record;
 }
 export function appendVerificationRecord(records: readonly VerificationRecord[], event: VerificationEvent, context: VerificationContext): VerificationRecord {
   return appendVerificationRecordToValidatedRecords(validateVerificationRecordsForAppend(records, context), event, context);
