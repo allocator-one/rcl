@@ -77,6 +77,24 @@ describe('evidence-based verifier contract', () => {
     });
   });
 
+  it.each([
+    ['an added line beginning with ++', '@@ -0,0 +1 @@\n+++i;', '++i;'],
+    ['a removed line beginning with --', '@@ -1 +0,0 @@\n--- retained source comment', '-- retained source comment'],
+  ])('retains provenance for %s', async (_label, patch, quote) => {
+    const result = await applyGating([finding], {
+      ...opts,
+      diffFiles: [{ ...opts.diffFiles[0], patch }],
+      ask: async () => answer([{
+        id: 'F1', verdict: 'confirmed', reason: 'The supplied source establishes the regression.',
+        failureMechanism: 'The changed source reaches the reported outcome.',
+        evidence: [{ file: 'account.ts', quote }],
+      }]),
+    });
+    expect(result.findings[0]!.gating).toMatchObject({
+      reason: 'verified', verification: { verdict: 'confirmed' },
+    });
+  });
+
   it('keeps legacy unrefuted semantics when replaying a retained version-one plan', () => {
     const plan = planGating([finding], opts);
     plan.version = 1;
