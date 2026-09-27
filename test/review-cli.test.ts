@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -964,4 +964,82 @@ describe('rcl review — bounded verification fallback', () => {
       );
     }
   }, 10_000);
+});
+
+
+describe('reviewer identity eligibility at CLI boundaries', () => {
+  it.each(['blocking', 'async'] as const)('refuses a blocking/%s collision before attempt, provider, or spool creation', async lane => {
+    await withGuardedFixture(async fixture => {
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify({
+        models: lane === 'blocking' ? ['openai-compat/vendor', 'openai-compat/vendor::alpha'] : ['openai-compat/vendor'],
+        secondaryModels: [], asyncModels: lane === 'async' ? ['openai-compat/vendor::alpha'] : [],
+        roles: ['general', 'alpha::general'], customRoles: [{ name: 'alpha::general', systemPrompt: 'Synthetic local role' }],
+        maxRetries: 0, timeout: 1000, asyncTimeout: 1000, harness: { telemetry: 'off' },
+      }));
+      const result = await runRclAsync(fixture.args, fixture.repo, fixture.env);
+      expect.soft(result.stderr).toContain('ambiguous_reviewer_identity');
+      expect.soft(result.status).toBe(1);
+      expect.soft(fixture.calls()).toBe(0);
+      expect.soft(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+      expect.soft(existsSync(join(fixture.repo, '.git', 'rcl-async'))).toBe(false);
+      expect.soft(existsSync(join(fixture.repo, 'report.json'))).toBe(false);
+    });
+  }, 40_000);
+
+  it('refuses collected legacy async collisions without consuming the stored opinion or refunding calls', async () => {
+    await withGuardedFixture(async fixture => {
+      writeFileSync(join(fixture.repo, 'config.json'), JSON.stringify({
+        models: ['openai-compat/vendor'], secondaryModels: [], asyncModels: ['openai-compat/unused'],
+        roles: ['security-auditor', 'alpha::general'], customRoles: [{ name: 'alpha::general', systemPrompt: 'Synthetic local role' }],
+        maxRetries: 0, harness: { telemetry: 'off' },
+      }));
+      const store = await resolveAsyncStoreDir(fixture.repo);
+      const key = asyncTargetKey(join(fixture.repo, 'change.patch'), 'guarded-fixture');
+      const path = join(store, `result-${key}-retained.json`);
+      const bytes = JSON.stringify({ model: 'openai-compat/vendor::alpha', role: 'general', provider: 'openai-compat',
+        findings: [], durationMs: 7, status: 'success', usage: { inputTokens: 4 } }) + '\n';
+      writeFileSync(path, bytes);
+      const result = await runRclAsync([...fixture.args, '--reviewer', 'openai-compat/vendor:alpha::general',
+        '--reviewer', 'openai-compat/vendor:security-auditor'], fixture.repo, fixture.env);
+      expect.soft(result.status).toBe(1);
+      expect.soft(result.stderr).toContain('ambiguous_reviewer_identity');
+      expect.soft(existsSync(join(fixture.repo, 'report.json'))).toBe(false);
+      expect.soft(existsSync(path)).toBe(true);
+      if (existsSync(path)) expect(readFileSync(path, 'utf8')).toBe(bytes);
+      expect(fixture.calls()).toBe(2);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toMatchObject({ attemptsUsed: 1 });
+      const refused = join(fixture.env.RCL_DATA_DIR!, 'assembly-refused');
+      expect(existsSync(refused)).toBe(true);
+      if (existsSync(refused)) {
+        const files = readdirSync(refused);
+        expect(files).toHaveLength(1);
+        const retainedPath = join(refused, files[0]!);
+        const retained = JSON.parse(readFileSync(retainedPath, 'utf8'));
+        expect(retained.status).toBe('assembly_refused');
+        expect(retained.run.converge).toEqual({ target: 'guarded-fixture', round: 1, attempt: 1 });
+        expect(retained.chunkReviews).toHaveLength(2);
+        expect(retained.chunkReviews.map((r: { status: string }) => r.status)).toEqual(['success', 'success']);
+        expect(retained.chunkReviews.map((r: { model: string; role: string; findings: Array<{ title: string }> }) =>
+          [r.model, r.role, r.findings[0]?.title])).toEqual([
+          ['openai-compat/vendor', 'alpha::general', 'Retained blocking result'],
+          ['openai-compat/vendor', 'security-auditor', 'Retained blocking result'],
+        ]);
+        expect(retained.asyncArtifacts).toEqual([{
+          path,
+          sha256: sha256Hex(bytes),
+          bytesBase64: Buffer.from(bytes).toString('base64'),
+        }]);
+        utimesSync(path, new Date(0), new Date(0));
+        await collectAsyncResults(store, asyncTargetKey('different-target'));
+        expect(existsSync(path)).toBe(false);
+        expect(Buffer.from(retained.asyncArtifacts[0].bytesBase64, 'base64').toString('utf8')).toBe(bytes);
+        expect(sha256Hex(Buffer.from(retained.asyncArtifacts[0].bytesBase64, 'base64'))).toBe(sha256Hex(bytes));
+        expect(retained).not.toHaveProperty('findings');
+        expect(retained).not.toHaveProperty('ci_exit_code');
+        expect(statSync(refused).mode & 0o777).toBe(0o700);
+        expect(statSync(retainedPath).mode & 0o777).toBe(0o600);
+      }
+    }, [{ file: 'a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', confidence: 0.9,
+      title: 'Retained blocking result', description: 'This result must survive refusal.' }]);
+  }, 40_000);
 });

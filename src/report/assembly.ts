@@ -1,3 +1,4 @@
+import { assertUnambiguousReviewerIdentities } from '../dispatch/reviewer-identity.js';
 import { evaluateCiGate } from '../ci.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import type { DedupeOrdering } from '../consensus/deduper.js';
@@ -51,6 +52,7 @@ export async function assembleCompletedReview(
   retained?: CompletedReviewProjection,
 ): Promise<ReviewResult & { run: RunHeader }> {
   const { chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff, gatingConfig, modelWeights } = input;
+  assertUnambiguousReviewerIdentities([...chunkReviews, ...arrivedAsync, ...(retained?.consensus.reviews ?? [])]);
   if (input.reviewerHealth !== undefined) assertReviewerHealth(input.reviewerHealth);
   dependencies.onStage?.('computing consensus');
   const runId = input.run.id ?? uuidv7();

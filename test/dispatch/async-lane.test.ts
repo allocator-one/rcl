@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+vi.mock('node:crypto', { spy: true });
+
+import * as crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,6 +36,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
+  vi.clearAllMocks();
 });
 
 describe('partitionAsyncAssignments', () => {
@@ -263,6 +268,26 @@ describe('spool → worker → collect round trip', () => {
     expect(collected).toEqual([]);
   });
 
+  it('does not encode or hash retained bytes when a successful collection needs no refusal artifact', async () => {
+    const targetKey = asyncTargetKey('successful-collection');
+    const [spool] = await spoolAsyncCalls([spec], {
+      storeDir: dir, targetKey, timeoutMs: 1000, maxRetries: 0,
+    });
+    await runAsyncWorker(spool!, () => fakeAdapter(1));
+
+    vi.clearAllMocks();
+    const toString = vi.spyOn(Buffer.prototype, 'toString');
+    const onIdentityRefused = vi.fn();
+
+    const collected = await collectAsyncResults(dir, targetKey, { onIdentityRefused });
+
+    expect(collected).toHaveLength(1);
+    expect(onIdentityRefused).not.toHaveBeenCalled();
+    expect(crypto.createHash).not.toHaveBeenCalled();
+    expect(toString).not.toHaveBeenCalledWith('base64');
+    toString.mockRestore();
+  });
+
   it('records a failed async call as a non-success review instead of losing it', async () => {
     const failing: ReviewAdapter = {
       name: 'fake',
@@ -300,5 +325,20 @@ describe('spool → worker → collect round trip', () => {
     await runAsyncWorker(spools[0]!, () => fakeAdapter(1));
     const collected = await collectAsyncResults(dir, targetKey);
     expect(collected).toHaveLength(1);
+  });
+});
+
+
+describe('reviewer identity eligibility before async consumption', () => {
+  it('retains exact collected artifact bytes when they collide with completed blocking reviews', async () => {
+    const key = asyncTargetKey('identity-refusal');
+    const path = join(dir, `result-${key}-old.json`);
+    const bytes = JSON.stringify({ model: 'vendor::alpha', role: 'security', provider: 'fake',
+      findings: [], durationMs: 7, status: 'error', error: 'original error', usage: { inputTokens: 4 } }) + '\n';
+    await writeFile(path, bytes);
+    const blocking = [{ model: 'vendor', role: 'alpha::security' }];
+    await expect(collectAsyncResults(dir, key, { blockingReviews: blocking })).rejects.toThrow(/ambiguous_reviewer_identity/);
+    expect(await readFile(path, 'utf8')).toBe(bytes);
+    expect(await readdir(dir)).toEqual([`result-${key}-old.json`]);
   });
 });
