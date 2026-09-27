@@ -33,6 +33,13 @@ describe('legacy pending obligations', () => {
     expect(migratedLegacyPendingRound(settled, state(settled))).toBeUndefined();
   });
 
+  it('retains the first-sighting obligation when an earlier retained verdict cannot discharge it', () => {
+    const entry = finding({ firstRound: 2, lastRound: 2, verdict: 'fixed', verdictRound: 1, pendingRound: undefined });
+    const value = state(entry);
+    value.rounds.push({ round: 2, counts: { new: 1, repeat: 0, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'critical' } });
+    expect(migratedLegacyPendingRound(entry, value)).toBe(2);
+  });
+
   it('uses the retained entry severity when a legacy dismissal has no verdict severity', () => {
     const entry = finding({ lastRound: 2 }); const value = state(entry);
     value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'critical' } });
@@ -73,6 +80,17 @@ describe('legacy pending obligations', () => {
     const value = state(entry);
     value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
     value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 0, regating: 1 }, severities: { [entry.key]: 'critical' } });
+    expect(migratedLegacyPendingRound(entry, value)).toBe(1);
+  });
+
+  it('derives the earliest critical sighting from a parser-accepted large retained history', () => {
+    const entry = finding({ verdict: 'dismissed', verdictRound: 1, verdictSeverity: 'important', pendingRound: undefined });
+    const value = state(entry);
+    value.rounds = Array.from({ length: 140_000 }, (_, index) => ({
+      round: index + 1,
+      counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 },
+      severities: { [entry.key]: 'critical' },
+    }));
     expect(migratedLegacyPendingRound(entry, value)).toBe(1);
   });
 

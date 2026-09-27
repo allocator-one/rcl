@@ -24,18 +24,23 @@ export function verdictClearsPending(state: ConvergeRunState, key: string, pendi
 /** Derive only the explicit migration obligation from the unchanged v1 snapshot. */
 export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeRunState): number | undefined {
   let pendingRound = entry.pendingRound;
-  if (!entry.verdict) {
+  const verdictCanClear = entry.verdict && entry.verdictRound !== undefined && entry.verdictRound >= entry.firstRound;
+  if (!verdictCanClear) {
     const annotations = state.lastAnnotations?.identities.filter(a => a.identity === entry.key) ?? [];
     const provenNonGating = entry.firstRound === entry.lastRound && entry.lastRound === state.lastAnnotations?.round &&
       annotations.length > 0 && annotations.every(a => a.gating === 'none');
     if (!provenNonGating) pendingRound ??= entry.firstRound;
   }
   const verdictSeverity = entry.verdictSeverity ?? entry.severity;
-  const criticalAfterDismissal = entry.verdict === 'dismissed' && verdictSeverity !== 'critical'
-    ? state.rounds.filter(r => r.round >= (entry.verdictRound ?? 0) && r.severities?.[entry.key] === 'critical').map(r => r.round) : [];
-  if (criticalAfterDismissal.length > 0 && (pendingRound === undefined ||
+  let criticalAfterDismissal: number | undefined;
+  if (entry.verdict === 'dismissed' && verdictSeverity !== 'critical') for (const round of state.rounds) {
+    if (round.round >= (entry.verdictRound ?? 0) && round.severities?.[entry.key] === 'critical') {
+      criticalAfterDismissal = criticalAfterDismissal === undefined ? round.round : Math.min(criticalAfterDismissal, round.round);
+    }
+  }
+  if (criticalAfterDismissal !== undefined && (pendingRound === undefined ||
       verdictClearsPending(state, entry.key, pendingRound, entry.verdictRound ?? 0, verdictSeverity))) {
-    pendingRound = Math.min(...criticalAfterDismissal);
+    pendingRound = criticalAfterDismissal;
   }
   const regating = state.lastAnnotations?.identities.some(a => a.identity === entry.key && a.status === 'regating' && a.gating !== 'none');
   if (regating && !verdictClearsPending(state, entry.key, state.lastAnnotations!.round, entry.verdictRound ?? 0, verdictSeverity)) {
