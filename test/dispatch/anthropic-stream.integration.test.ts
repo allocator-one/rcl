@@ -98,8 +98,8 @@ describe('Anthropic Fable streaming over real SDK SSE', () => {
       expect(requests[0]).toMatchObject({
         model: 'claude-fable-5-1',
         stream: true,
-        max_tokens: 32768,
-        output_config: { effort: 'medium' },
+        max_tokens: 65536,
+        output_config: { effort: 'high' },
         tool_choice: { type: 'auto' },
       });
       expect(review.status).toBe('success');

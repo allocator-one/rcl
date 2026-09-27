@@ -1107,10 +1107,11 @@ asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headro
 maxRetries: 3
 
 # Reasoning budget for providers that support it (currently OpenRouter).
-# low | medium | high — default medium. Unbounded reasoning makes these
+# low | medium | high — default low (supported by the default Kimi K3).
+# Check the selected model's supported levels before overriding. Unbounded reasoning makes these
 # models spend the whole completion budget thinking before they answer;
-# raise to 'high' for deeper review at the cost of latency and tokens.
-reasoningEffort: medium
+# select a supported higher level when evaluation justifies deeper review.
+reasoningEffort: low
 
 # Context files to attach to every review
 context:
@@ -1156,11 +1157,14 @@ retain their provider effort defaults and reject this OpenAI-only setting.
 
 The top-level `reasoningEffort` applies only to OpenRouter reviewers. Direct
 Sol and Gemini reviewers use their provider defaults (currently `medium`).
-Fable 5.1 reviews explicitly use `medium`, streaming, and 32,768 output tokens;
-that profile recovered large-review completion in RCL-103, but has not established
-quality parity with Anthropic's recommended `high` starting point. Kimi K3's
-advertised native effort levels are `low`, `high`, and `max`; RCL's OpenRouter
-`medium` request does not establish which native level the router uses.
+Fable 5.1 reviews explicitly use `high`, streaming, and a 65,536-token output
+ceiling so thinking and findings share adequate headroom. This follows
+[Anthropic's recommended starting effort](https://platform.claude.com/docs/en/build-with-claude/effort)
+while preserving RCL's whole-call timeout and rejection of incomplete output.
+OpenRouter reviewers default to `low`, a supported level for the default Kimi K3;
+explicit `reasoningEffort` overrides are preserved. Kimi K3 advertises `low`,
+`high`, and `max`, so avoid overriding it to `medium`. Effort labels are
+provider-specific and do not imply equal compute or quality across models.
 
 Verifier calls default to the remaining whole-pass budget. Set the optional
 `gating.verificationTimeout` in milliseconds to impose a shorter per-call limit;

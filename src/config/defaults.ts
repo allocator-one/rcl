@@ -68,10 +68,11 @@ export const DEFAULT_MAX_RETRIES = 3;
 /**
  * Reasoning budget for OpenRouter-hosted models. Unbounded, they spend the
  * whole completion budget (and many minutes) thinking before emitting any
- * findings; 'medium' is calibrated against this repo's own diffs, where it
- * took the council from 10/17 to 17/17 completed reviews.
+ * findings. Kimi K3, the default async model, supports low/high/max, not
+ * medium. Use the supported low level while retaining the output/time caps;
+ * explicit configuration can still select another effort for other models.
  */
-export const DEFAULT_REASONING_EFFORT = 'medium';
+export const DEFAULT_REASONING_EFFORT = 'low';
 export const DEFAULT_CONCURRENCY = 9;
 
 export const DEFAULT_SEVERITY_ORDER = [
