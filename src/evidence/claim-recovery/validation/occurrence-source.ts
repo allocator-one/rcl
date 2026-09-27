@@ -22,6 +22,8 @@ export interface OccurrenceMember {
   raw: Record<string, unknown>;
   stored: Record<string, unknown>;
   mapping?: Record<string, unknown>;
+  /** Status is independent from identity: corrections prove identity, not a row choice. */
+  classificationStanding: { kind: 'known'; status: 'new' | 'repeat' | 'suppressed' | 'regating' } | { kind: 'unknown' };
   identity?: string;
   unresolvedReason?: 'classification-unavailable' | 'classification-ambiguous';
   correction?: StoredEventReceipt;
@@ -179,7 +181,12 @@ export function validateOccurrenceSource(input: OccurrenceSource): ValidatedOccu
     if (unbound?.hasDescriptor || bound?.row.claim_descriptor !== undefined) requireSource(
       (!unbound || unbound.descriptorsAgree && isDeepStrictEqual(unbound.row.claim_descriptor, raw.claimDescriptor)) &&
       (!bound || isDeepStrictEqual(bound.row.claim_descriptor, raw.claimDescriptor)));
-    out.members.push({ ref, raw, stored: member,
+    const statusesAgree = !unbound || unbound.statusesAgree && (!bound || bound.row.status === unbound.row.status);
+    const classificationStanding = statusesAgree && !ambiguous && mapping ?
+      { kind: 'known' as const, status: mapping.status as 'new' | 'repeat' | 'suppressed' | 'regating' } :
+      statusesAgree && unbound ? { kind: 'known' as const, status: unbound.row.status as 'new' | 'repeat' | 'suppressed' | 'regating' } :
+        { kind: 'unknown' as const };
+    out.members.push({ ref, raw, stored: member, classificationStanding,
       ...(unresolvedReason ? { unresolvedReason } : { mapping: mapping!, identity: mapping!.matched_identity as string }),
       severity: raw.severity as ClaimSeverity, gating: index >= kept.length ? 'none' : (gating.reason as string | undefined ??
         (['critical', 'important'].includes(raw.severity as string) ? 'legacy-blocking' : 'none')) });

@@ -84,6 +84,70 @@ describe('original occurrence classification', () => {
     expect(member.unresolvedReason).toBeUndefined();
   });
 
+  it('keeps a uniform classification status after an identity-only correction without choosing a mapping row', () => {
+    const { transfer } = fixture();
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const original = rows[0]!;
+    delete source.classification.payload.classification_version;
+    source.classification.payload.identities = [
+      { ...original, status: 'new' },
+      { ...original, status: 'new', matched_identity: '4444444444444444' },
+      ...rows.slice(1),
+    ];
+    source.corrections = [{ ...source.classification, id: uuid(952), kind: 'finding_identity_corrected', actor_user_id: uuid(953),
+      sequence: 2, received_at: '2026-09-22T11:30:00.123456Z', payload: { org_id: source.scope.org_id,
+        repo: source.scope.repo, pr_number: source.scope.pr_number, head_sha: transfer.sourceContext.headSha,
+        report_json_sha256: sha(source.reportJson), finding_ref: 'f001', identity_key: original.identity_key,
+        matched_identity: '3333333333333333' } }];
+
+    const member = validateOccurrenceSource(source).members[0]!;
+    expect(member).toMatchObject({ identity: '3333333333333333', classificationStanding: { kind: 'known', status: 'new' } });
+    expect(member.mapping).toBeUndefined();
+  });
+
+  it('keeps classification standing unknown when an identity-only correction follows conflicting statuses', () => {
+    const { transfer } = fixture();
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const original = rows[0]!;
+    delete source.classification.payload.classification_version;
+    source.classification.payload.identities = [
+      { ...original, status: 'new' },
+      { ...original, status: 'regating', matched_identity: '4444444444444444' },
+      ...rows.slice(1),
+    ];
+    source.corrections = [{ ...source.classification, id: uuid(954), kind: 'finding_identity_corrected', actor_user_id: uuid(955),
+      sequence: 2, received_at: '2026-09-22T11:30:00.123456Z', payload: { org_id: source.scope.org_id,
+        repo: source.scope.repo, pr_number: source.scope.pr_number, head_sha: transfer.sourceContext.headSha,
+        report_json_sha256: sha(source.reportJson), finding_ref: 'f001', identity_key: original.identity_key,
+        matched_identity: '3333333333333333' } }];
+
+    const member = validateOccurrenceSource(source).members[0]!;
+    expect(member).toMatchObject({ identity: '3333333333333333', classificationStanding: { kind: 'unknown' } });
+    expect(member.mapping).toBeUndefined();
+  });
+
+  it.each([false, true])('keeps standing unknown for conflicting bound and unbound rows in either order (bound first: %s)', boundFirst => {
+    const { transfer } = fixture(true);
+    const source = transfer.split.source;
+    const rows = source.classification.payload.identities as Array<Record<string, unknown>>;
+    const bound = rows[0]!;
+    const unbound = { identity_key: bound.identity_key, matched_identity: '4444444444444444', status: 'regating',
+      claim_descriptor: bound.claim_descriptor };
+    delete source.classification.payload.classification_version;
+    source.classification.payload.identities = boundFirst ? [...rows, unbound] : [unbound, ...rows];
+    source.corrections = [{ ...source.classification, id: uuid(boundFirst ? 956 : 957), kind: 'finding_identity_corrected',
+      actor_user_id: uuid(958), sequence: 2, received_at: '2026-09-22T11:30:00.123456Z', payload: {
+        org_id: source.scope.org_id, repo: source.scope.repo, pr_number: source.scope.pr_number, head_sha: transfer.sourceContext.headSha,
+        report_json_sha256: sha(source.reportJson), finding_ref: 'f001', identity_key: bound.identity_key,
+        matched_identity: '3333333333333333' } }];
+
+    const member = validateOccurrenceSource(source).members[0]!;
+    expect(member).toMatchObject({ identity: '3333333333333333', classificationStanding: { kind: 'unknown' } });
+    expect(member.mapping).toBeUndefined();
+  });
+
   it.each([false, true])('preserves receipt order when bound and unbound mappings agree (bound first: %s)', boundFirst => {
     const { transfer } = fixture(true);
     const source = transfer.split.source;
