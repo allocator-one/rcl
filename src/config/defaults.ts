@@ -1,5 +1,5 @@
 /**
- * Core (blocking) council — every round waits for these and only these.
+ * Primary council — general reviewers; specialists also use secondary models.
  * Direct-API models only: the RCL-21 audit (922 rounds, 15,268 calls) found
  * the OpenRouter wing at p50 7–9.5 min per call with 19–39% dead calls,
  * last-finisher in 97.6% of rounds; the audited direct trio answered in
@@ -10,7 +10,6 @@
 export const DEFAULT_MODELS = [
   'anthropic/claude-fable-5-1',
   'openai/gpt-6-sol',
-  'google/gemini-3.8-flash',
 ] as const;
 
 /**
@@ -21,14 +20,8 @@ export const DEFAULT_MODELS = [
  */
 export const DEFAULT_ASYNC_MODELS = ['openrouter/moonshotai/kimi-k3'] as const;
 
-/**
- * Secondary models — specialized round-robin only, no general role.
- * Empty by default since RCL-25: qwen3.8-max, deepseek-v4-flash and grok-4.5
- * were removed after the audit (24–39% dead calls, worst finding-cost in the
- * council). Before any slow model earns a seat back, try it via its direct
- * provider API instead of OpenRouter and re-measure.
- */
-export const DEFAULT_SECONDARY_MODELS = [] as const;
+/** Gemini contributes specialist reviews without adding a general-review seat. */
+export const DEFAULT_SECONDARY_MODELS = ['google/gemini-3.8-flash'] as const;
 
 export const DEFAULT_THRESHOLDS = {
   minConsensusScore: 0.4,
@@ -75,10 +68,11 @@ export const DEFAULT_MAX_RETRIES = 3;
 /**
  * Reasoning budget for OpenRouter-hosted models. Unbounded, they spend the
  * whole completion budget (and many minutes) thinking before emitting any
- * findings; 'medium' is calibrated against this repo's own diffs, where it
- * took the council from 10/17 to 17/17 completed reviews.
+ * findings. Kimi K3, the default async model, supports low/high/max, not
+ * medium. Use the supported low level while retaining the output/time caps;
+ * explicit configuration can still select another effort for other models.
  */
-export const DEFAULT_REASONING_EFFORT = 'medium';
+export const DEFAULT_REASONING_EFFORT = 'low';
 export const DEFAULT_CONCURRENCY = 9;
 
 export const DEFAULT_SEVERITY_ORDER = [

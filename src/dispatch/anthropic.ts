@@ -38,12 +38,14 @@ function isRetryableReview(err: unknown, stream: boolean): boolean {
 
 interface ModelProfile {
   maxTokens: number;
-  effort?: 'medium';
+  effort?: 'high';
   stream: boolean;
 }
 
 const DEFAULT_PROFILE: ModelProfile = { maxTokens: 16384, stream: false };
-const FABLE_51_PROFILE: ModelProfile = { maxTokens: 32768, effort: 'medium', stream: true };
+// Fable's recommended high effort needs headroom for thinking plus findings.
+// Keep streaming and the existing whole-call deadline from RCL-103.
+const FABLE_51_PROFILE: ModelProfile = { maxTokens: 65536, effort: 'high', stream: true };
 
 function profileFor(modelId: string): ModelProfile {
   // Claude 4.6+ uses dateless pinned API IDs; this profile applies to the

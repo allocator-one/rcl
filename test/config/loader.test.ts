@@ -122,13 +122,13 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
     }
   });
 
-  it('defaults the blocking council to the three direct-API models', async () => {
+  it('keeps two primary general reviewers and Gemini only for specialists', async () => {
     const config = await loadConfig(undefined, dir);
     expect(config.models).toEqual([
       'anthropic/claude-fable-5-1',
       'openai/gpt-6-sol',
-      'google/gemini-3.8-flash',
     ]);
+    expect(config.secondaryModels).toEqual(['google/gemini-3.8-flash']);
   });
 
   it('keeps kimi-k3 as the default async (non-blocking) reviewer', async () => {

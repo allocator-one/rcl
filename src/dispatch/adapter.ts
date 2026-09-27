@@ -1,6 +1,9 @@
+import type { VerificationReasoningEffort } from '../config/schema.js';
 import type { ModelReview } from '../consensus/types.js';
 
 export interface AdapterOptions {
+  /** Explicit OpenAI ask effort; omitted calls retain their provider default. */
+  reasoningEffort?: VerificationReasoningEffort;
   timeoutMs: number;
   maxRetries: number;
   /**

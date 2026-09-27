@@ -152,6 +152,8 @@ export class OpenAIAdapter implements ReviewAdapter {
         const response = await this.client.chat.completions.create(
           {
             model: modelId,
+            // Astra also supports max; the pinned SDK enum predates that value.
+            ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort as OpenAI.ReasoningEffort } : {}),
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt },

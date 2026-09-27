@@ -60,6 +60,7 @@ describe('completed council terminal artifacts', () => {
       config: { thresholds: { minConfidence: 0, minConsensusScore: 0 } },
       gatingConfig: {
         mode: 'verified-consensus', minModels: 2, verificationModel: 'openai/synthetic-verifier',
+        verificationReasoningEffort: 'high',
         verificationTimeoutMs: 60_000, verificationPassTimeoutMs: 100,
       },
       run: {
@@ -85,12 +86,13 @@ describe('completed council terminal artifacts', () => {
     expect(completed, 'terminal assembly must finish at the whole-pass deadline').toBe(true);
     const result = await assembly;
     expect(ask).toHaveBeenCalledTimes(3); // The queued fourth batch never launches.
+    expect(ask.mock.calls.every((call) => call[3].reasoningEffort === 'high')).toBe(true);
     expect(ask.mock.calls.every((call) => call[3].timeoutMs <= 100 && call[3].signal?.aborted)).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
     expect(chunkReviews).toEqual(retainedInputs);
     expect(result.run).toMatchObject({
       id: runId, ci_exit_code: 1, duration_ms: 100,
-      gating: { verification_pass_timeout_ms: 100 },
+      gating: { verification_pass_timeout_ms: 100, verification_reasoning_effort: 'high' },
       converge: { target: 'synthetic-rcl-85', round: 20, attempt: 20 },
     });
     expect(result.stats).toMatchObject({ totalReviews: 17, successfulReviews: 16, totalRawFindings: 32, totalDeduped: 32 });

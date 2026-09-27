@@ -122,8 +122,8 @@ describe('anthropic automatic tool choice', () => {
     expect(stream).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         model: 'claude-fable-5-1',
-        max_tokens: 32768,
-        output_config: { effort: 'medium' },
+        max_tokens: 65536,
+        output_config: { effort: 'high' },
         tool_choice: { type: 'auto' },
       }),
       expect.any(Object),

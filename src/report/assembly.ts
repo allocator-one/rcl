@@ -62,7 +62,7 @@ export async function assembleCompletedReview(
 
   // Convergence gating (RCL-23): annotate every kept finding with why it
   // does or does not gate; single-model blocking findings get one batched
-  // refutation call to a fast direct-API model.
+  // evidence-based adjudication call.
   let finalFindings = retained?.findings ?? reportFindings;
   let gatedAppendix = retained?.appendix ?? droppedFindings;
   let verificationStats = retained?.verification;
@@ -71,6 +71,7 @@ export async function assembleCompletedReview(
     const gated = await applyGatingWithFallback(reportFindings, {
       minModels: gatingConfig.minModels,
       verificationModel: gatingConfig.verificationModel,
+      verificationReasoningEffort: gatingConfig.verificationReasoningEffort,
       verificationTimeoutMs: gatingConfig.verificationTimeoutMs,
       verificationPassTimeoutMs: gatingConfig.verificationPassTimeoutMs,
       ask: dependencies.ask,

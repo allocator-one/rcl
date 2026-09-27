@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
+import { MAX_TIMER_DELAY_MS, VerificationReasoningEffortSchema } from '../config/schema.js';
 import { stableStringify } from '../report/run-header.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import type { ModelAnswer } from './adapter.js';
@@ -43,11 +43,12 @@ const answerSchema = z.object({ model: text, provider: text, text: z.string(),
 // Validate request-bearing fields here. Finding semantics are independently
 // regenerated from captured source before replay; arbitrary annotations are not
 // authenticated merely by matching this structural schema.
-const requestPlanSchema = z.object({ version: z.literal(1), findings: z.array(z.unknown()),
+const requestPlanSchema = z.object({ version: z.union([z.literal(1), z.literal(2)]), findings: z.array(z.unknown()),
   initialGating: z.array(z.unknown()), candidateIndices: z.array(integer), model: text,
+  verificationReasoningEffort: VerificationReasoningEffortSchema.optional(),
   verificationTimeoutMs: integer.min(1).max(MAX_TIMER_DELAY_MS),
   verificationPassTimeoutMs: integer.min(1).max(MAX_TIMER_DELAY_MS),
-  batches: z.array(z.object({ findingIndices: z.array(integer), systemPrompt: z.string(), userPrompt: z.string() }).strict()).max(500),
+  batches: z.array(z.object({ findingIndices: z.array(integer), systemPrompt: z.string(), userPrompt: z.string(), sourcePatches: z.record(z.string(), z.string()).optional() }).strict()).max(500),
 }).strict();
 
 export type VerificationPlanInput = z.infer<typeof planSchema>;

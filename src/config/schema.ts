@@ -49,10 +49,12 @@ export const OutputSchema = z.object({
 });
 
 export const ReasoningEffortSchema = z.enum(['low', 'medium', 'high']);
+export const VerificationReasoningEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+export type VerificationReasoningEffort = z.infer<typeof VerificationReasoningEffortSchema>;
 
 /**
  * Convergence gating (RCL-23). `verified-consensus` (default): a finding
- * gates only when multi-model, critical, or unrefuted by the verification
+ * gates only when multi-model, critical, or confirmed with evidence by the verification
  * pass. `all-findings` restores the legacy behavior where every
  * critical/important finding gates.
  */
@@ -62,6 +64,8 @@ export const GatingSchema = z.object({
   minModels: z.number().int().min(2).optional(),
   /** Direct-API model for the refutation pass (openrouter/ is rejected). */
   verificationModel: z.string().optional(),
+  /** OpenAI verifier effort, independent of reviewer reasoning effort. */
+  verificationReasoningEffort: VerificationReasoningEffortSchema.optional(),
   /** Per-call timeout (ms) for the verification pass. */
   verificationTimeout: TimerDelaySchema.optional(),
   /** Whole-pass timeout (ms) across every verification batch. */

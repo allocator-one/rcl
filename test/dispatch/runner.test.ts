@@ -205,7 +205,7 @@ describe('runReviews worker pool', () => {
       expect(reviews[0]!.status).toBe('success');
       expect(reviews[0]!.provider).toBe('openrouter');
       expect(captured['model']).toBe('moonshotai/kimi-k3');
-      expect(captured['reasoning']).toEqual({ effort: 'medium' });
+      expect(captured['reasoning']).toEqual({ effort: 'low' });
     } finally {
       if (prev === undefined) delete process.env['OPENROUTER_API_KEY'];
       else process.env['OPENROUTER_API_KEY'] = prev;
@@ -222,7 +222,7 @@ describe('runReviews worker pool', () => {
       const fallback = defaultAdapterFactory('openrouter') as unknown as {
         reasoningEffort: string;
       };
-      expect(fallback.reasoningEffort).toBe('medium');
+      expect(fallback.reasoningEffort).toBe('low');
 
       // ...and the config value when it does.
       const configured = defaultAdapterFactory('openrouter', 'high') as unknown as {

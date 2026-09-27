@@ -2,9 +2,24 @@
 
 ## Unreleased
 
+## 4.1.12 - 2026-09-27
+
 - Raise default blocking reviewer concurrency from six to nine per process.
   Explicit `concurrency` settings still take precedence; set `concurrency: 6`
   to retain the previous limit (RCL-132).
+- Remove the redundant `project-rules` and `dead-code` built-in reviewer roles.
+  Discovered repository rules are shared with the remaining roles, and explicit
+  retired-role names retain the usual unknown-role warning and skip behavior
+  (RCL-133).
+- Verify important single-model findings with an Astra high-effort three-way
+  evidence contract: only a source-backed, concrete failure mechanism confirms
+  a finding; refuted and insufficient-evidence results remain visible without
+  promoting it to verified gating. Retain historical plan and report semantics.
+- Use Fable 5.1 high-effort streaming with a 65,536-token ceiling, and default
+  OpenRouter reasoning effort to low while preserving explicit overrides and
+  existing timeout and failure handling. The default blocking general roster is
+  now Fable and Sol; Gemini remains available for specialist assignments
+  (RCL-134).
 
 ## 4.1.11 - 2026-09-26
 

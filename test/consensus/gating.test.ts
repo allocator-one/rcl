@@ -49,6 +49,10 @@ function diffFile(filename: string, patch = '@@ -0,0 +1 @@\n+const x = 1;'): Fil
   return { filename, status: 'modified', additions: 1, deletions: 0, patch, language: 'ts' };
 }
 
+const confirmedResponse = JSON.stringify([{ id: 'F1', verdict: 'confirmed', reason: 'The constant is wrong.',
+  failureMechanism: 'The incorrect constant propagates to callers.',
+  evidence: [{ file: 'src/a.ts', quote: 'const x = 1;' }] }]);
+
 const baseOpts = {
   minModels: 2,
   verificationModel: 'google/gemini-3.6-flash',
@@ -119,7 +123,7 @@ describe('applyGating (RCL-23)', () => {
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"refuted","reason":"guard exists"},{"id":"F2","verdict":"confirmed","reason":"real"}]',
+        text: '[{"id":"F1","verdict":"refuted","reason":"guard exists"},{"id":"F2","verdict":"confirmed","reason":"real","failureMechanism":"The incorrect constant propagates to callers.","evidence":[{"file":"src/a.ts","quote":"const x = 1;"}]}]',
         durationMs: 10,
         status: 'success',
       })
@@ -138,9 +142,9 @@ describe('applyGating (RCL-23)', () => {
     });
     expect(findings[1]!.gating).toMatchObject({
       reason: 'verified',
-      verification: { verdict: 'unrefuted' },
+      verification: { verdict: 'confirmed' },
     });
-    expect(verification).toMatchObject({ candidates: 2, refuted: 1, unrefuted: 1 });
+    expect(verification).toMatchObject({ candidates: 2, refuted: 1, confirmed: 1 });
   });
 
   // RCL-60: production ran 12, 32, 62 and 73 candidates through one call and
@@ -204,7 +208,7 @@ describe('applyGating (RCL-23)', () => {
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"}]',
+        text: confirmedResponse,
         durationMs: 1,
         status: 'success',
       })
@@ -369,7 +373,7 @@ describe('applyGating (RCL-23)', () => {
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"}]',
+        text: confirmedResponse,
         durationMs: 5,
         status: 'success',
       })
@@ -489,7 +493,7 @@ describe('applyGating (RCL-23)', () => {
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"},{"id":"F1","verdict":"refuted"}]',
+        text: '[{"id":"F1","verdict":"confirmed","reason":"real","failureMechanism":"The incorrect constant propagates to callers.","evidence":[{"file":"src/a.ts","quote":"const x = 1;"}]},{"id":"F1","verdict":"refuted"}]',
         durationMs: 5,
         status: 'success',
       })
@@ -510,7 +514,7 @@ describe('applyGating (RCL-23)', () => {
       return {
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"}]',
+        text: confirmedResponse,
         durationMs: 5,
         status: 'success',
       };
@@ -532,7 +536,7 @@ describe('precision-weighted consensus gating (RCL-27)', () => {
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"}]',
+        text: confirmedResponse,
         durationMs: 5,
         status: 'success',
       })
@@ -554,7 +558,7 @@ describe('precision-weighted consensus gating (RCL-27)', () => {
       async (): Promise<ModelAnswer> => ({
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"}]',
+        text: confirmedResponse,
         durationMs: 5,
         status: 'success',
       })
@@ -787,7 +791,7 @@ describe('applyGating hunk scoping', () => {
       return {
         model: 'google/gemini-3.6-flash',
         provider: 'google',
-        text: '[{"id":"F1","verdict":"confirmed"}]',
+        text: confirmedResponse,
         durationMs: 5,
         status: 'success',
       };
@@ -938,9 +942,9 @@ describe('resolveGatingConfig', () => {
     it('uses the default verifier when its provider is already in the roster', () => {
       const cfg = resolveGatingConfig(undefined, [
         'anthropic/claude-fable-5',
-        'google/gemini-3.8-flash',
+        'openai/gpt-6-sol',
       ]);
-      expect(cfg.verificationModel).toBe('google/gemini-3.8-flash');
+      expect(cfg.verificationModel).toBe('openai/gpt-6-astra');
     });
 
     it('falls back to a direct-API roster model when the default provider is not configured', () => {
