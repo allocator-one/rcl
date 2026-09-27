@@ -60,18 +60,20 @@ describe('evidence-based verifier contract', () => {
     expect(result.verification).toMatchObject({ confirmed: 0, insufficientEvidence: 1 });
   });
 
-  it('does not treat deleted source as confirmation evidence', async () => {
-    const deleted = {
-      ...confirmed,
-      evidence: [{ file: 'account.ts', quote: 'await accounts.delete(request.params.accountId);' }],
+  it('retains a removed guard as provenance for a confirmed regression', async () => {
+    const removedGuard = {
+      id: 'F1', verdict: 'confirmed',
+      reason: 'The account authorization guard was removed before deletion.',
+      failureMechanism: 'An authenticated caller supplies another account ID, the removed guard no longer rejects it, and deletion proceeds.',
+      evidence: [{ file: 'account.ts', quote: 'await authorize(request.user, accountId);' }],
     };
     const result = await applyGating([finding], {
       ...opts,
-      diffFiles: [{ ...opts.diffFiles[0], patch: '@@ -1 +1 @@\n-await accounts.delete(request.params.accountId);\n+await accounts.delete(currentAccountId);' }],
-      ask: async () => answer([deleted]),
+      diffFiles: [{ ...opts.diffFiles[0], patch: '@@ -1,2 +1 @@\n-await authorize(request.user, accountId);\n await accounts.delete(request.params.accountId);' }],
+      ask: async () => answer([removedGuard]),
     });
     expect(result.findings[0]!.gating).toMatchObject({
-      reason: 'none', verification: { verdict: 'insufficient_evidence' },
+      reason: 'verified', verification: { verdict: 'confirmed' },
     });
   });
 

@@ -8,6 +8,7 @@ Return ONLY a JSON array, one entry per finding id:
 [{"id":"F1","verdict":"confirmed"|"refuted"|"insufficient_evidence","reason":"brief explanation","failureMechanism":"trigger, reachable execution path and incorrect outcome","evidence":[{"file":"exact supplied filename","quote":"exact source code excerpt, without diff prefixes"}]}]
 
 confirmed: The supplied evidence establishes a concrete reachable bug. Explain the trigger, execution path and incorrect outcome in failureMechanism. Include at least one exact code quote from the finding's file in evidence. Explain why relevant guards or invariants do not prevent it. Plausibility, an absent excerpt, reviewer agreement and inability to disprove a claim are not confirmation.
+The supplied change may quote additions, context, or removals. Citation matching establishes provenance in that change; decide whether a removed guard introduces a reachable regression from the failure mechanism and surrounding context.
 refuted: The claim is false, already handled or inapplicable. Explain the concrete counterevidence in reason. Do not dismiss a real bug merely because a suggested fix is poor.
 insufficient_evidence: The supplied context cannot establish or refute the claim. State the specific missing caller, schema, API contract or other evidence. Use this verdict when unsure. Never invent source, callers, API semantics or runtime observations.
 
@@ -25,8 +26,7 @@ function nonempty(value: unknown): value is string {
 /** Validate citation provenance, not the semantic truth of the model's explanation. */
 function sourceContains(patch: string, quote: string): boolean {
   const source = patch.split('\n')
-    .filter(line => !line.startsWith('@@') && !line.startsWith('+++') && !line.startsWith('---') &&
-      !line.startsWith('\\') && !line.startsWith('-'))
+    .filter(line => !line.startsWith('@@') && !line.startsWith('+++') && !line.startsWith('---') && !line.startsWith('\\'))
     .map(line => /^[ +\-]/.test(line) ? line.slice(1) : line).join('\n');
   return source.includes(quote);
 }
