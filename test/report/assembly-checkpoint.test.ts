@@ -52,3 +52,36 @@ describe('checkpoint health and contributions through shared assembly', () => {
       disposition: 'kept', contributions: [{ reviewIndex: 0, findingIndex: 0 }, { reviewIndex: 0, findingIndex: 1 }, { reviewIndex: 1, findingIndex: 0 }] }]);
   });
 });
+
+
+describe('reviewer identity eligibility at shared report assembly', () => {
+  it.each(['raw', 'retained'] as const)('refuses ambiguous %s opinions before callbacks or verifier requests', async source => {
+    const input = fixture();
+    const raw = [{ ...review('vendor::alpha'), role: 'security' }, { ...review('vendor'), role: 'alpha::security' }];
+    const retained = { consensus: { reviews: raw, consensusFindings: [], reportFindings: [], droppedFindings: [] }, findings: [], appendix: [] };
+    if (source === 'raw') input.chunkReviews = raw;
+    const before = JSON.stringify({ input, retained });
+    const ask = vi.fn(), onStage = vi.fn();
+    await expect(assembleCompletedReview(input, { ask, onStage }, source === 'retained' ? retained : undefined))
+      .rejects.toThrow(/ambiguous_reviewer_identity/);
+    expect(ask).not.toHaveBeenCalled();
+    expect(onStage).not.toHaveBeenCalled();
+    expect(JSON.stringify({ input, retained })).toBe(before);
+  });
+
+  it('retains distinct complete health seats for duplicate exact reviewer tuples', async () => {
+    const input = fixture();
+    input.chunkReviews = [review('vendor::alpha'), review('vendor::alpha'), { ...review('other'), status: 'error' }];
+    const duplicatePlan = { ...plan,
+      roster: plan.roster.map((seat, i) => ({ ...seat, model: input.chunkReviews[i]!.model })),
+      cells: plan.cells.map((cell, i) => ({ ...cell, model: input.chunkReviews[i]!.model })),
+    };
+    const health = deriveReviewerHealth(duplicatePlan, input.chunkReviews.slice(0, 2).map((review, i) => ({ cell: `s${i}:0`, review })), { version: 1, fraction: 2 / 3 });
+    const result = await assembleCompletedReview({ ...input, reviewerHealth: health });
+    expect(health.successfulSeats).toEqual(['s0', 's1']);
+    expect(health.incompleteSeats).toEqual(['s2']);
+    expect(health.policy.minimumSuccessful).toBe(2);
+    expect(health.conclusive).toBe(true);
+    expect(result.reviews.map(r => [r.model, r.role, r.durationMs])).toEqual([['vendor::alpha', 'general', 2], ['other', 'general', 1]]);
+  });
+});

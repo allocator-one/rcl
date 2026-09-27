@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeChunkReviews } from '../../src/dispatch/merge.js';
+import { mergeChunkReviews, mergeChunkReviewsWithContributions } from '../../src/dispatch/merge.js';
 import type { ModelReview } from '../../src/consensus/types.js';
 
 function review(over: Partial<ModelReview>): ModelReview {
@@ -220,5 +220,29 @@ describe('mergeChunkReviews — token usage', () => {
     expect(mergeChunkReviews([review({ usage: {} }), review({ usage: {} })])[0]).not.toHaveProperty(
       'usage'
     );
+  });
+});
+
+
+describe('reviewer identity eligibility at merge', () => {
+  it.each([
+    ['ordinary', mergeChunkReviews], ['contributions', mergeChunkReviewsWithContributions],
+  ] as const)('refuses distinct colliding tuples through the %s API without changing raw evidence', (_name, merge) => {
+    const raw = [review({ model: 'vendor::alpha', role: 'security', findings: [finding('a')], usage: { inputTokens: 7 } }),
+      review({ model: 'vendor', role: 'alpha::security', findings: [finding('b')], async: true, status: 'error', error: 'retained error' })];
+    const before = JSON.stringify(raw);
+    expect(() => merge(raw)).toThrow(/ambiguous_reviewer_identity/);
+    expect(JSON.stringify(raw)).toBe(before);
+  });
+
+  it('preserves duplicate exact tuples and unambiguous separator names with original accounting', () => {
+    const raw = [review({ model: 'vendor::alpha', role: 'security', findings: [finding('a')], durationMs: 3 }),
+      review({ model: 'vendor::alpha', role: 'security', findings: [finding('b')], durationMs: 4 }),
+      review({ model: 'vendor', role: 'beta::security', findings: [finding('c')], durationMs: 5 })];
+    const before = JSON.stringify(raw);
+    expect(mergeChunkReviewsWithContributions(raw)).toEqual({ reviews: [
+      review({ model: 'vendor::alpha', role: 'security', findings: [finding('a'), finding('b')], durationMs: 7 }), raw[2],
+    ], contributions: [[[{ reviewIndex: 0, findingIndex: 0 }], [{ reviewIndex: 1, findingIndex: 0 }]], [[{ reviewIndex: 2, findingIndex: 0 }]]] });
+    expect(JSON.stringify(raw)).toBe(before);
   });
 });
