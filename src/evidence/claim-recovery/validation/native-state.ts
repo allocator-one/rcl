@@ -39,7 +39,7 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
   const rounds = state.rounds as Record<string, unknown>[]; const seen = new Set<number>();
   const positive = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) > 0;
   for (const round of rounds) {
-    requireSource(object(round) && positive(round.round) && !seen.has(round.round) && object(round.counts) &&
+    requireSource(object(round) && positive(round.round) && round.round <= (state.roundCap as number) && !seen.has(round.round) && object(round.counts) &&
       ['new', 'repeat', 'suppressed', 'regating'].every(k => Number.isSafeInteger((round.counts as Record<string, unknown>)[k]) && ((round.counts as Record<string, number>)[k] ?? -1) >= 0));
     seen.add(round.round as number);
     requireSource(round.runId === undefined || uuid(round.runId));

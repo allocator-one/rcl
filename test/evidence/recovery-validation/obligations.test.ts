@@ -21,17 +21,26 @@ describe('legacy pending obligations', () => {
   });
 
   it('preserves an explicit pending obligation across later nongating evidence', () => {
-    const entry = finding({ pendingRound: 1, lastRound: 2 }); const value = state(entry);
+    const entry = finding({ pendingRound: 1, verdictSeverity: 'important', lastRound: 2 }); const value = state(entry);
     value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 } });
     value.lastAnnotations = { round: 2, identities: [{ identity: entry.key, status: 'suppressed', gating: 'none' }] };
     expect(migratedLegacyPendingRound(entry, value)).toBe(1);
   });
 
-  it('retains an explicit pending obligation after a fixed verdict but invents none without one', () => {
+  it('clears an explicit pending obligation after a fixed verdict but invents none without one', () => {
     const explicit = finding({ verdict: 'fixed', verdictRound: 1, pendingRound: 1 });
-    expect(migratedLegacyPendingRound(explicit, state(explicit))).toBe(1);
+    expect(migratedLegacyPendingRound(explicit, state(explicit))).toBeUndefined();
     const settled = finding({ verdict: 'fixed', verdictRound: 1, pendingRound: undefined });
     expect(migratedLegacyPendingRound(settled, state(settled))).toBeUndefined();
+  });
+
+  it('keeps the earliest critical sighting when no verdict exists and a later pending round is retained', () => {
+    const entry = finding({ verdict: undefined, verdictRound: undefined, verdictSeverity: undefined,
+      pendingRound: 2, firstRound: 1, lastRound: 2 });
+    const value = state(entry);
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 },
+      severities: { [entry.key]: 'important' } });
+    expect(migratedLegacyPendingRound(entry, value)).toBe(1);
   });
 
   it('retains the first-sighting obligation when an earlier retained verdict cannot discharge it', () => {

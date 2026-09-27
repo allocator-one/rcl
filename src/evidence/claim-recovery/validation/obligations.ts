@@ -25,6 +25,10 @@ export function verdictClearsPending(state: ConvergeRunState, key: string, pendi
 export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeRunState): number | undefined {
   let pendingRound = entry.pendingRound;
   const verdictSeverity = entry.verdictSeverity ?? entry.severity;
+  if (pendingRound !== undefined && entry.verdict && entry.verdictRound !== undefined &&
+      verdictClearsPending(state, entry.key, pendingRound, entry.verdictRound, verdictSeverity)) {
+    pendingRound = undefined;
+  }
   const verdictCanClear = entry.verdict && entry.verdictRound !== undefined && entry.verdictRound >= entry.firstRound &&
     verdictClearsPending(state, entry.key, entry.firstRound, entry.verdictRound, verdictSeverity);
   if (!verdictCanClear) {
@@ -34,7 +38,7 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
     if (!provenNonGating) pendingRound ??= entry.firstRound;
   }
   let criticalSighting: number | undefined;
-  if (entry.verdict) for (const round of state.rounds) {
+  for (const round of state.rounds) {
     // The round is critical. Its stored verdict can discharge it only when it
     // is itself critical and is no earlier than this sighting; keep the scan
     // linear for parser-accepted retained history.

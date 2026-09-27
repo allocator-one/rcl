@@ -84,6 +84,14 @@ describe('retained snapshot lineage', () => {
       .toThrow('native_recovery_lineage_conflict');
   });
 
+  it('refuses a snapshot with a round beyond its declared cap', () => {
+    const f = legacyFixture();
+    f.state.roundCap = 2;
+    f.state.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
+    f.state.findings[f.key].lastRound = 3;
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(f.state), target)).toThrow('native_recovery_lineage_conflict');
+  });
+
   it('refuses oversized retained snapshots before hashing their bytes', () => {
     const f = recoveredFixture();
     const oversized = 'x'.repeat(64 * 1024 * 1024 + 1);
@@ -168,11 +176,13 @@ describe('retained snapshot lineage', () => {
     expect(createHash).toHaveBeenCalledTimes(sourceHashes);
   });
 
-  it('bounds round lookup work for large retained histories without changing their contents', () => {
+  it('bounds round lookup work for the largest permitted retained history without changing its contents', () => {
     const f = recoveredFixture();
     const original = JSON.parse(f.sourceJson);
-    original.rounds = Array.from({ length: 1000 }, (_, index) => ({ ...original.rounds[0], round: index + 1 }));
+    original.roundCap = 99;
+    original.rounds = Array.from({ length: 99 }, (_, index) => ({ ...original.rounds[0], round: index + 1 }));
     const sourceJson = JSON.stringify(original);
+    f.state.roundCap = 99;
     f.state.rounds = structuredClone(original.rounds);
     f.state.recovery.operations[0]!.sourceSha256 = sha(sourceJson);
     const source = JSON.stringify(f.state);
