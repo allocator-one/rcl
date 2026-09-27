@@ -31,14 +31,17 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
   }
   const verdictCanClear = entry.verdict && entry.verdictRound !== undefined && entry.verdictRound >= entry.firstRound &&
     verdictClearsPending(state, entry.key, entry.firstRound, entry.verdictRound, verdictSeverity);
+  const annotations = state.lastAnnotations?.identities.filter(a => a.identity === entry.key) ?? [];
+  const provenNonGating = entry.firstRound === entry.lastRound && entry.lastRound === state.lastAnnotations?.round &&
+    annotations.length > 0 && annotations.every(a => a.gating === 'none');
   if (!verdictCanClear) {
-    const annotations = state.lastAnnotations?.identities.filter(a => a.identity === entry.key) ?? [];
-    const provenNonGating = entry.firstRound === entry.lastRound && entry.lastRound === state.lastAnnotations?.round &&
-      annotations.length > 0 && annotations.every(a => a.gating === 'none');
     if (!provenNonGating) pendingRound ??= entry.firstRound;
   }
   let criticalSighting: number | undefined;
   for (const round of state.rounds) {
+    // Severity alone cannot create an obligation for this proven nongating
+    // sighting. Other retained rounds still carry conservative critical vetoes.
+    if (provenNonGating && round.round === entry.firstRound) continue;
     // The round is critical. Its stored verdict can discharge it only when it
     // is itself critical and is no earlier than this sighting; keep the scan
     // linear for parser-accepted retained history.

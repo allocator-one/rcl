@@ -13,6 +13,29 @@ const state = (entry: FindingEntry): ConvergeRunState => ({
 });
 
 describe('legacy pending obligations', () => {
+  it('does not create a critical obligation for a proven nongating single sighting', () => {
+    const entry = finding({ verdict: undefined, verdictRound: undefined });
+    const value = state(entry);
+    value.lastAnnotations = { round: 1, identities: [{ identity: entry.key, status: 'new', gating: 'none' }] };
+    const accepted = verifyNativeRecoveryLineage(JSON.stringify({ ...value, version: 1 }), value.target).state;
+    expect(migratedLegacyPendingRound(accepted.findings[entry.key]!, accepted)).toBeUndefined();
+  });
+
+  it('keeps an explicit pending obligation despite a nongating single sighting', () => {
+    const entry = finding({ verdict: undefined, verdictRound: undefined, pendingRound: 1 });
+    const value = state(entry);
+    value.lastAnnotations = { round: 1, identities: [{ identity: entry.key, status: 'new', gating: 'none' }] };
+    expect(migratedLegacyPendingRound(entry, value)).toBe(1);
+  });
+
+  it('keeps an earlier critical ledger entry outside the proven nongating sighting', () => {
+    const entry = finding({ verdict: undefined, verdictRound: undefined, firstRound: 2, lastRound: 2 });
+    const value = state(entry);
+    value.rounds.push({ round: 2, counts: { new: 1, repeat: 0, suppressed: 0, regating: 0 }, severities: { [entry.key]: 'critical' } });
+    value.lastAnnotations = { round: 2, identities: [{ identity: entry.key, status: 'new', gating: 'none' }] };
+    expect(migratedLegacyPendingRound(entry, value)).toBe(1);
+  });
+
   it('derives an open legacy finding obligation from its first round', () => {
     const entry = finding({ verdict: undefined, verdictRound: undefined, verdictSeverity: undefined, firstRound: 1, lastRound: 2 });
     const value = state(entry);
