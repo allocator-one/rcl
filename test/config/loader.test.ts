@@ -28,6 +28,7 @@ describe('loadConfig', () => {
   it('returns defaults when no config exists', async () => {
     const config = await loadConfig(undefined, dir);
     expect(config.models).toEqual([...DEFAULT_MODELS]);
+    expect(config.concurrency).toBe(9);
   });
 
   it('loads a valid yaml config', async () => {
@@ -39,6 +40,13 @@ describe('loadConfig', () => {
     expect(config.models).toEqual(['openai-compat/llama3.2']);
     expect(config.timeout).toBe(60000);
     expect(config.secondaryModels).toEqual([]);
+    expect(config.concurrency).toBe(9);
+  });
+
+  it('preserves an explicit concurrency of six for rollback', async () => {
+    await writeFile(join(dir, '.review-council.yml'), 'concurrency: 6\n');
+    const config = await loadConfig(undefined, dir);
+    expect(config.concurrency).toBe(6);
   });
 
   it('ignores executable config files during search', async () => {
