@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { migratedLegacyPendingRound } from '../../../src/evidence/claim-recovery/validation/obligations.js';
+import { verifyNativeRecoveryLineage } from '../../../src/evidence/claim-recovery/validation/native-state.js';
 import type { ConvergeRunState, FindingEntry } from '../../../src/evidence/claim-recovery/validation/types.js';
 
 const finding = (overrides: Partial<FindingEntry> = {}): FindingEntry => ({
@@ -103,4 +104,19 @@ describe('legacy pending obligations', () => {
     value.lastAnnotations = { round: 3, identities: [{ identity: entry.key, status: 'regating', gating: 'consensus' }] };
     expect(migratedLegacyPendingRound(entry, value)).toBe(3);
   });
+  it('retains a critical first sighting after an important fixed verdict', () => {
+    const entry = finding({ severity: 'critical', verdict: 'fixed', verdictRound: 1, verdictSeverity: 'important', pendingRound: undefined });
+    const value = state(entry);
+    const accepted = verifyNativeRecoveryLineage(JSON.stringify({ ...value, version: 1 }), value.target).state;
+    expect(migratedLegacyPendingRound(accepted.findings[entry.key]!, accepted)).toBe(1);
+  });
+
+  it('retains an earlier critical sighting after a later important dismissal', () => {
+    const entry = finding({ severity: 'critical', firstRound: 1, lastRound: 2, verdict: 'dismissed', verdictRound: 2, verdictSeverity: 'important', pendingRound: undefined });
+    const value = state(entry);
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
+    const accepted = verifyNativeRecoveryLineage(JSON.stringify({ ...value, version: 1 }), value.target).state;
+    expect(migratedLegacyPendingRound(accepted.findings[entry.key]!, accepted)).toBe(1);
+  });
+
 });

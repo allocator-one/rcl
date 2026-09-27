@@ -24,14 +24,15 @@ export function verdictClearsPending(state: ConvergeRunState, key: string, pendi
 /** Derive only the explicit migration obligation from the unchanged v1 snapshot. */
 export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeRunState): number | undefined {
   let pendingRound = entry.pendingRound;
-  const verdictCanClear = entry.verdict && entry.verdictRound !== undefined && entry.verdictRound >= entry.firstRound;
+  const verdictSeverity = entry.verdictSeverity ?? entry.severity;
+  const verdictCanClear = entry.verdict && entry.verdictRound !== undefined && entry.verdictRound >= entry.firstRound &&
+    verdictClearsPending(state, entry.key, entry.firstRound, entry.verdictRound, verdictSeverity);
   if (!verdictCanClear) {
     const annotations = state.lastAnnotations?.identities.filter(a => a.identity === entry.key) ?? [];
     const provenNonGating = entry.firstRound === entry.lastRound && entry.lastRound === state.lastAnnotations?.round &&
       annotations.length > 0 && annotations.every(a => a.gating === 'none');
     if (!provenNonGating) pendingRound ??= entry.firstRound;
   }
-  const verdictSeverity = entry.verdictSeverity ?? entry.severity;
   let criticalAfterDismissal: number | undefined;
   if (entry.verdict === 'dismissed' && verdictSeverity !== 'critical') for (const round of state.rounds) {
     if (round.round >= (entry.verdictRound ?? 0) && round.severities?.[entry.key] === 'critical') {
