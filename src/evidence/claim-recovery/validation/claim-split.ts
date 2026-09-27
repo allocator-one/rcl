@@ -199,13 +199,13 @@ function prepare(input: ClaimSplitInput): PreparedClaimSplit {
     all.filter(member => object(member) && member.identity === finding.identity).length === 1 ||
     mappings.every(mapping => object(mapping) && mapping.version === 1));
   const previous = new Set(mappings.map(m => (m as Record<string, unknown>).matched_identity));
-  requireEvidence(previous.size === 1);
+  requireEvidence(previous.size > 0);
   if (input.correctionId) {
     const correction = input.sourceReceipts.find(r => r.id === input.correctionId)!;
     requireEvidence(correction.kind === 'finding_identity_corrected' && correction.payload.report_json_sha256 === reportSha256 &&
       correction.payload.finding_ref === input.findingRef && correction.payload.identity_key === finding.identity &&
       correction.payload.matched_identity === input.previousIdentity);
-  } else requireEvidence(previous.has(input.previousIdentity));
+  } else requireEvidence(previous.size === 1 && previous.has(input.previousIdentity));
   const payload = {
     version: 1, org_id: scope.org_id, repo: scope.repo, pr_number: scope.pr_number, head_sha: target.head_sha,
     report_json_sha256: reportSha256, finding_ref: input.findingRef, identity_key: finding.identity,

@@ -75,4 +75,14 @@ describe('legacy pending obligations', () => {
     value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 0, regating: 1 }, severities: { [entry.key]: 'critical' } });
     expect(migratedLegacyPendingRound(entry, value)).toBe(1);
   });
+
+  it('moves a cleared legacy pending obligation to a later open regating round', () => {
+    const entry = finding({ severity: 'important', pendingRound: 1, verdictRound: 2, verdictSeverity: 'important', lastRound: 3 });
+    const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'important';
+    value.rounds.push({ round: 2, counts: { new: 0, repeat: 0, suppressed: 1, regating: 0 }, severities: { [entry.key]: 'important' } });
+    value.rounds.push({ round: 3, counts: { new: 0, repeat: 0, suppressed: 0, regating: 1 } });
+    value.lastAnnotations = { round: 3, identities: [{ identity: entry.key, status: 'regating', gating: 'consensus' }] };
+    expect(migratedLegacyPendingRound(entry, value)).toBe(3);
+  });
 });

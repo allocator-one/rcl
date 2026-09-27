@@ -141,7 +141,7 @@ describe('receipt-bound claim split preparation', () => {
     if (change === 'target') receipt.converge_target = 'other';
     if (change === 'round') receipt.round = 1;
     if (change === 'mapping') receipt.payload.identities = [];
-    if (change === 'ambiguous') (receipt.payload.identities as unknown[]).push({ identity_key: 'abc123def4567890', matched_identity: '9999999999999999' });
+    if (change === 'ambiguous') (receipt.payload.identities as unknown[]).push({ identity_key: 'abc123def4567890', matched_identity: '9999999999999999', status: 'suppressed' });
     if (change === 'missing') selection.sourceReceipts = [];
     if (change === 'duplicate') selection.sourceReceipts.push(structuredClone(receipt));
     if (change === 'native-round') { const n = JSON.parse(selection.nativeJson); n.rounds[0].runId = uuid(9); selection.nativeJson = JSON.stringify(n); }
@@ -204,6 +204,9 @@ describe('receipt-bound claim split preparation', () => {
     expect(() => prepareClaimSplit(selection)).toThrow(/claim_split/);
 
     selection.correctionId = uuid(990);
+    (selection.sourceReceipts[0]!.payload.identities as Record<string, unknown>[]).push({
+      identity_key: report.findings[0].identity, matched_identity: '9999999999999999', status: 'suppressed',
+    });
     selection.sourceReceipts.push({ ...selection.sourceReceipts[0]!, id: selection.correctionId,
       kind: 'finding_identity_corrected', payload: { report_json_sha256: sha(selection.reportJson),
         finding_ref: selection.findingRef, identity_key: report.findings[0].identity,

@@ -39,7 +39,9 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
   }
   const regating = state.lastAnnotations?.identities.some(a => a.identity === entry.key && a.status === 'regating' && a.gating !== 'none');
   if (regating && !verdictClearsPending(state, entry.key, state.lastAnnotations!.round, entry.verdictRound ?? 0, verdictSeverity)) {
-    pendingRound ??= state.lastAnnotations!.round;
+    if (pendingRound === undefined || verdictClearsPending(state, entry.key, pendingRound, entry.verdictRound ?? 0, verdictSeverity)) {
+      pendingRound = state.lastAnnotations!.round;
+    }
   }
   return pendingRound;
 }
