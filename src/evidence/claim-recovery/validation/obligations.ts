@@ -33,7 +33,10 @@ export function migratedLegacyPendingRound(entry: FindingEntry, state: ConvergeR
   const verdictSeverity = entry.verdictSeverity ?? entry.severity;
   const criticalAfterDismissal = entry.verdict === 'dismissed' && verdictSeverity !== 'critical'
     ? state.rounds.filter(r => r.round >= (entry.verdictRound ?? 0) && r.severities?.[entry.key] === 'critical').map(r => r.round) : [];
-  if (criticalAfterDismissal.length > 0) pendingRound ??= Math.min(...criticalAfterDismissal);
+  if (criticalAfterDismissal.length > 0 && (pendingRound === undefined ||
+      verdictClearsPending(state, entry.key, pendingRound, entry.verdictRound ?? 0, verdictSeverity))) {
+    pendingRound = Math.min(...criticalAfterDismissal);
+  }
   const regating = state.lastAnnotations?.identities.some(a => a.identity === entry.key && a.status === 'regating' && a.gating !== 'none');
   if (regating && !verdictClearsPending(state, entry.key, state.lastAnnotations!.round, entry.verdictRound ?? 0, verdictSeverity)) {
     pendingRound ??= state.lastAnnotations!.round;
