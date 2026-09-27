@@ -49,11 +49,16 @@ afterEach(() => {
   }
 });
 
+// Two complete blocking seats: the smallest conclusive council converge-report admits.
+const healthyReviews = ['m1', 'm2'].map((model) => ({
+  model, role: 'general', provider: 'test', findings: [], durationMs: 1, status: 'success',
+}));
+
 describe('converge-report identity collision', () => {
   it('reports the collision as a structured native blocker without persisting a round', () => {
     const repo = tempRepository();
     const report = join(repo, 'report.json');
-    writeFileSync(report, JSON.stringify({ findings: [
+    writeFileSync(report, JSON.stringify({ reviews: healthyReviews, findings: [
       sampleFinding({ identity: 'same-key', startLine: 11, endLine: 11 }),
       sampleFinding({ identity: 'same-key', startLine: 19, endLine: 19 }),
     ] }));
@@ -95,7 +100,7 @@ describe('converge-verdict severity telemetry', () => {
       if (reversed) findings.reverse();
       const report = join(repo, 'report.json');
       const runId = sampleRunHeader().id;
-      writeFileSync(report, JSON.stringify({ run: { id: runId, converge: { target: 'severity-test', round: 1 } }, findings }));
+      writeFileSync(report, JSON.stringify({ run: { id: runId, converge: { target: 'severity-test', round: 1 } }, reviews: healthyReviews, findings }));
       const env = { PATH: process.env['PATH'], HOME: repo, XDG_CONFIG_HOME: join(repo, 'config'),
         GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice, RCL_DATA_DIR: join(repo, 'account'),
         HARNESS_API_TOKEN: 'synthetic-test-token', HARNESS_API_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
@@ -116,7 +121,7 @@ describe('converge-verdict severity telemetry', () => {
 
       const laterReport = join(repo, 'later-report.json');
       writeFileSync(laterReport, JSON.stringify({ run: { id: '019921a0-0000-7000-8000-000000000002',
-        converge: { target: 'severity-test', round: 2 } }, findings: [sampleFinding()] }));
+        converge: { target: 'severity-test', round: 2 } }, reviews: healthyReviews, findings: [sampleFinding()] }));
       await run(['converge-report', '--report', laterReport], 2);
       await run(['converge-verdict', '--dismissed', `${key}=original critical evidence reviewed`]);
       expect(events.filter((event) => event.kind === 'verdicts_recorded').at(-1)).toMatchObject({ run_id: runId,

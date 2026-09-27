@@ -1,6 +1,7 @@
 import { assertUnambiguousReviewerIdentities } from '../dispatch/reviewer-identity.js';
 import { evaluateCiGate } from '../ci.js';
-import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import { DEFAULT_QUORUM_FRACTION, DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import { deriveBlockingHealth, summarizeBlockingHealth } from './blocking-health.js';
 import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
@@ -126,6 +127,9 @@ export async function assembleCompletedReview(
               .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
           }
         : {}),
+      blockingHealth: summarizeBlockingHealth(deriveBlockingHealth({
+        roster: input.run.roster, reviews, fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION,
+      })),
       ...(verificationStats ? { verification: verificationStats } : {}),
       // Applied weights for this run's models, so the report shows what
       // scaled the votes (RCL-27).

@@ -47,6 +47,7 @@ import {
   type AsyncResultReference,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
+import { assertAdmissibleReportHealth, deriveBlockingHealth, describeBlockingHealth, ReportHealthError, type BlockingHealth } from './report/blocking-health.js';
 import { resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
@@ -101,6 +102,7 @@ import {
 } from './models/stats-store.js';
 import { buildSeedRecords } from './models/seed.js';
 import {
+  assignmentLane,
   buildRoster,
   configDigest,
   diffDigest,
@@ -568,6 +570,18 @@ program
     } catch (error) { console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_GAP', message: error instanceof Error ? error.message : String(error) } })); process.exitCode = 3; }
   });
 
+function blockingHealthJson(health: BlockingHealth) {
+  return {
+    conclusive: health.conclusive,
+    blockingSeats: health.policy.seatCount,
+    successfulBlockingSeats: health.successfulSeats.length,
+    requiredSuccessfulSeats: health.policy.minimumSuccessful,
+    quorumFraction: health.policy.fraction,
+    incompleteSeats: health.unsuccessfulSeats,
+    excludedSuccesses: health.excludedSuccesses,
+  };
+}
+
 program
   .command('converge-report')
   .description(
@@ -624,6 +638,9 @@ program
         if (!Array.isArray(report.findings)) {
           throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
         }
+        // Reviewer health gates admission before any native state is read or
+        // written: an inconclusive report is never triaged (RCL-136).
+        const health = assertAdmissibleReportHealth(report);
 
         // The round remembers the report's run id only when it is a UUID and
         // the report was produced for this converge target (a report copied
@@ -697,6 +714,7 @@ program
                 target: opts.target,
                 round,
                 roundCap: result.roundCap,
+                reviewerHealth: blockingHealthJson(health),
                 counts: result.counts,
                 actionableGating: actionable.length,
                 findings: classified,
@@ -708,6 +726,7 @@ program
           return;
         }
 
+        console.log(chalk.dim(describeBlockingHealth(health)));
         console.log(
           `Round ${round}/${result.roundCap} for ${opts.target}: ` +
             `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
@@ -728,14 +747,18 @@ program
           const code =
             err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
               ? err.code
-              : 'RCL_CONVERGE_REPORT_ERROR';
-          console.error(JSON.stringify({ error: { code, message } }));
+              : err instanceof ReportHealthError
+                ? err.code
+                : 'RCL_CONVERGE_REPORT_ERROR';
+          const health = err instanceof ReportHealthError && err.health ? { reviewerHealth: blockingHealthJson(err.health) } : {};
+          console.error(JSON.stringify({ error: { code, message, ...health } }));
         } else {
           console.error(chalk.red(message));
         }
         // Exit 2 = round-cap consent boundary (mirrors converge-attempt);
-        // exit 3 = state/infrastructure failure.
-        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : 3;
+        // exit 3 = state/infrastructure failure; exit 4 = reviewer health
+        // is inconclusive or unverifiable, so nothing was admitted.
+        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : err instanceof ReportHealthError ? 4 : 3;
       }
     }
   );
@@ -2101,12 +2124,15 @@ async function executeCouncil(
         maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
         concurrency,
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
-        // Quorum closure (RCL-26): the round stops waiting once the quorum
-        // fraction of calls has completed; the blocking council's own models
-        // are core and never canceled.
+        // Quorum closure (RCL-26, RCL-136): the round stops waiting once the
+        // configured fraction of blocking seats completed every chunk — the
+        // same seats and policy as the report's blocking health and the
+        // server's gate. Secondary seats never count toward that quorum.
         quorum: {
           fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION,
           coreModels: config.models ?? DEFAULT_MODELS,
+          blocking: chunkAssignments.map((ca) =>
+            assignmentLane(ca.assignment.model, prepared.coreModels, prepared.explicit) === 'blocking'),
         },
         onReviewComplete: (review) => progress.complete(review),
       }
@@ -2258,6 +2284,9 @@ async function executeCouncil(
     },
   });
   const { run } = result;
+  // The same derivation converge-report and the server apply to this report.
+  const blockingHealth = deriveBlockingHealth({ roster: run.roster, reviews: result.reviews,
+    fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION });
 
   spinner.succeed('Review complete');
   process.stderr.write(
@@ -2282,6 +2311,7 @@ async function executeCouncil(
       ) + '\n'
     );
   }
+  process.stderr.write((blockingHealth.conclusive ? chalk.dim : chalk.yellow)(describeBlockingHealth(blockingHealth)) + '\n');
 
   // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
   // turn a finished review into a failure unless --evidence-required asks.
@@ -2375,6 +2405,8 @@ async function executeCouncil(
     reportJsonSha256: sha256Hex(artifacts.report_json),
     successfulReviews: result.stats.successfulReviews,
     totalReviews: result.stats.totalReviews,
+    // Aggregate counters stay the report's own stats; launch health is blocking-only.
+    reviewerHealth: { version: 1, policy: blockingHealth.policy, successfulSeats: blockingHealth.successfulSeats.length },
     deliveryPending: delivery.spooled || delivery.exitCode !== 0,
     ...(prepared.converge?.cycleId ? {
       exitCode: opts.ci && run.ci_exit_code !== 0 ? run.ci_exit_code : delivery.exitCode || (outputDiagnostics.length > 0 ? 1 : 0),

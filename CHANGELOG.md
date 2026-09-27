@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 4.1.13 - 2026-09-28
+
+- Align reviewer health with the blocking-reviewer quorum Harness enforces
+  (RCL-136). Round closure now counts only complete blocking seats, so
+  secondary successes no longer cancel unfinished blocking reviewers.
+  Reports record `stats.blockingHealth` (blocking seats, completed seats,
+  required seats, conclusive) under the configured `quorumFraction`;
+  secondary, async and verification results keep their findings but never
+  count. Aggregate `successfulReviews` / `totalReviews` are unchanged and
+  informational.
+- `rcl converge-report` refuses an inconclusive report with exit 4 before it
+  reads or writes native state, naming the completed, required and incomplete
+  blocking seats. Guarded launches record blocking health, so an inconclusive
+  launch continues through the existing bounded `--retry-reason` path at the
+  same round. Earlier reports, rounds, verdicts, attempts and caps are not
+  rewritten. Aggregate-only launch records written by earlier versions keep
+  their original rule.
+- Update the `rcl` and `rcl-converge` skills to read blocking health rather
+  than aggregate review counts.
+
 ## 4.1.12 - 2026-09-27
 
 - Raise default blocking reviewer concurrency from six to nine per process.

@@ -241,10 +241,20 @@ impossible under any flag). The default is a consent boundary, not a stop: at
 15 rounds the workflow asks the user, and an approved continuation supplies a
 higher `--max-rounds`.
 
-Full-fleet reviewer completion is not required. For the generated
-`rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
-when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Every timeout or
-error must be disclosed, and a result below that threshold is inconclusive.
+Full-fleet reviewer completion is not required. Reviewer health counts only
+the report roster's blocking seats, and a seat counts only when every one of
+its chunks succeeded. A round is conclusive when at least
+`max(2, ceil(2 × blocking seats / 3))` blocking seats completed, or more under
+a stricter configured `quorumFraction`. Each report records this as
+`stats.blockingHealth` (`seats`, `successful`, `required`, `conclusive`).
+Secondary, async and verification results keep their findings but never count
+toward the quorum, so the aggregate `stats.successfulReviews` /
+`stats.totalReviews` are informational only: 11 of 17 blocking seats plus one
+async success is 12/18 in aggregate yet inconclusive, because 12 blocking
+seats are required. This is the rule Harness applies to delivered evidence.
+Round closure uses the same seats and policy: bonus successes never cancel
+unfinished blocking reviewers. Every timeout or error must be disclosed, and a
+result below the requirement is inconclusive.
 
 Exit code 2 means the configured cap was exhausted and explicit continuation
 approval is required. Exit code 3 means attempt accounting itself failed
@@ -290,6 +300,21 @@ on its evidence and fresh corroboration alone never reopens it), or `regating`
 genuinely new evidence). The same call enforces the evidence-round cap:
 default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
 code 2 is the cap consent boundary; exit 3 is a state failure.
+
+Before reading or writing native state, `converge-report` derives blocking
+reviewer health from the report's roster and rows. An inconclusive report exits
+4 (`report_health_inconclusive`) and is not admitted: its findings are not
+classified or triaged. The refusal names the completed blocking seats, the
+required count, every missing, failed or canceled seat, and the excluded
+secondary/async successes (with `--json`, as `error.reviewerHealth`). A report
+whose recorded `stats.blockingHealth` disagrees with its rows exits 4 with
+`report_health_unverifiable`. The report, its attempt and all earlier rounds
+stay unchanged. Continue with the same guarded review command plus
+`--retry-reason`: the guard records blocking health for every new launch,
+requires that explicit reason for an inconclusive one, and spends one more
+attempt at the same round without resetting caps or cycle history. Retained
+missing-reviewer recovery remains a separate workflow. Conclusive health does
+not replace triage, and merging still requires matching enforced review and CI.
 
 A report key must identify one canonical identity, status and suppression reason.
 `converge-report` refuses conflicting mappings with exit 3 before writing the
@@ -1103,6 +1128,8 @@ timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 # quorumFraction: 0.75  # round closes once this share of blocking seats succeeds
                         # on every chunk; all stragglers can be canceled, including core models.
+                        # Secondary/async successes never count. Also raises the
+                        # report's blocking-health requirement.
                         # Default: exactly 2/3 — leave unset for that; 1 disables.
 maxRetries: 3
 

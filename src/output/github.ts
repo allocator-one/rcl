@@ -100,6 +100,10 @@ function buildSummaryComment(result: ReviewResult, demoted: ConsensusFinding[]):
     '',
     `**${stats.successfulReviews}/${stats.totalReviews}** reviewers completed · ` +
       `**${stats.totalDeduped}** unique findings (from ${stats.totalRawFindings} raw)`,
+    ...(stats.blockingHealth
+      ? ['', `Blocking reviewers: **${stats.blockingHealth.successful}/${stats.blockingHealth.seats}** complete, ` +
+          `${stats.blockingHealth.required} required — ${stats.blockingHealth.conclusive ? 'conclusive' : '**inconclusive**'}`]
+      : []),
     '',
   ];
 

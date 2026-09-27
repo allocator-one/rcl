@@ -402,9 +402,15 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   await assertNoPendingFreshReview(gitCommonDir, target);
   await assertReviewCyclePair(gitCommonDir, target, state.cycle);
   if (options.cycleId !== state.cycle?.id) throw new ConvergeRunStateError('review_cycle_mismatch');
+  const { hasHealthyGuardedLaunch } = await import('./launch-guard.js');
+  // A guarded launch that recorded inconclusive blocking health is never
+  // admitted, whatever its aggregate counters say (RCL-136).
+  if (state.lastLaunch?.status === 'completed' && state.lastLaunch.reviewerHealth !== undefined &&
+    state.lastLaunch.runId === runId && !hasHealthyGuardedLaunch(state.lastLaunch)) {
+    throw new ConvergeRunStateError('report_health_inconclusive');
+  }
   if (state.cycle) {
     const launch = state.lastLaunch;
-    const { hasHealthyGuardedLaunch } = await import('./launch-guard.js');
     if (!launch || launch.status !== 'completed' || !hasHealthyGuardedLaunch(launch) ||
       launch.runId !== runId || launch.reportJsonSha256 !== options.reportSha256 || launch.round !== options.round) {
       throw new ConvergeRunStateError('review_cycle_launch_mismatch');

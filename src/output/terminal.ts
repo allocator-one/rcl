@@ -59,6 +59,14 @@ export function printReviewSummary(result: ReviewResult): void {
       `${stats.successfulReviews}/${stats.totalReviews} ` +
       chalk.dim(`(${(stats.durationMs / 1000).toFixed(1)}s)`)
   );
+  if (stats.blockingHealth) {
+    const health = stats.blockingHealth;
+    console.log(
+      chalk.bold('Blocking reviewers: ') +
+        `${health.successful}/${health.seats} complete, ${health.required} required — ` +
+        (health.conclusive ? chalk.green('conclusive') : chalk.yellow('inconclusive'))
+    );
+  }
   console.log(
     chalk.bold('Raw findings: ') +
       stats.totalRawFindings +

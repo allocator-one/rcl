@@ -260,6 +260,11 @@ export function configDigest(config: Config): string {
   return sha256Hex(stableStringify(projection));
 }
 
+/** A dispatched seat's lane: the council's own models block, the others are secondary. */
+export function assignmentLane(model: string, coreModels: readonly string[], explicit = false): 'blocking' | 'secondary' {
+  return explicit || coreModels.includes(model) ? 'blocking' : 'secondary';
+}
+
 export function buildRoster(input: {
   assignments: readonly ReviewAssignment[];
   asyncAssignments: readonly ReviewAssignment[];
@@ -269,12 +274,11 @@ export function buildRoster(input: {
   explicit?: boolean;
   gating: ResolvedGatingConfig;
 }): RosterEntry[] {
-  const core = new Set(input.coreModels);
   const roster: RosterEntry[] = input.assignments.map((a) => ({
     model: a.model,
     role: a.role.name,
     provider: a.provider,
-    lane: input.explicit || core.has(a.model) ? 'blocking' : 'secondary',
+    lane: assignmentLane(a.model, input.coreModels, input.explicit),
   }));
   for (const a of input.asyncAssignments) {
     roster.push({ model: a.model, role: a.role.name, provider: a.provider, lane: 'async' });
