@@ -1,6 +1,24 @@
 import { describe, it, expect, vi } from 'vitest';
 import { detectProvider, buildRoleAssignments, buildAssignments, buildExplicitAssignments } from '../../src/roles/dispatcher.js';
 import type { Role } from '../../src/roles/types.js';
+import { resolveRoles } from '../../src/roles/loader.js';
+import { DEFAULT_MODELS } from '../../src/config/defaults.js';
+import { resolveQuorumPolicy } from '../../src/dispatch/quorum.js';
+
+describe('default council roster', () => {
+  it.each([
+    { spec: undefined, seats: 14 },
+    { spec: 'The feature must meet its acceptance criteria.', seats: 15 },
+  ])('derives quorum from $seats remaining blocking seats', async ({ spec, seats }) => {
+    const roles = await resolveRoles({}, undefined, spec);
+    const assignments = buildRoleAssignments([...DEFAULT_MODELS], roles, [], true);
+    expect(assignments).toHaveLength(seats);
+    expect(assignments.filter((assignment) => assignment.role.name === 'general').map((assignment) => assignment.model))
+      .toEqual([...DEFAULT_MODELS]);
+    expect(assignments.some((assignment) => ['project-rules', 'dead-code'].includes(assignment.role.name))).toBe(false);
+    expect(resolveQuorumPolicy(assignments.length).minimumSuccessful).toBe(10);
+  });
+});
 
 describe('detectProvider', () => {
   it('detects anthropic from explicit prefix', () => {

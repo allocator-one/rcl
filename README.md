@@ -44,8 +44,20 @@ rcl review changes.patch --ci --markdown report.md
 | 🏗️ `architecture` | Module boundaries, coupling, and architectural patterns |
 | 🐛 `bug-hunter` | Logic errors, null paths, race conditions, off-by-one |
 | ♿ `accessibility-auditor` | WCAG compliance, ARIA roles, keyboard navigation |
-| 📋 `project-rules` | Enforces repo conventions from `AGENTS.md`, `CLAUDE.md`, etc. |
 | 📄 `spec-compliance` | Checks implementation against a spec or plan file |
+| `regression-hunter` | Changed defaults, weakened guards, and lost behavior |
+| `dependency-hygiene` | Unnecessary dependencies, external requests, and privacy leaks |
+| `edge-case-hunter` | Boundary values, unusual inputs, and failure paths |
+
+`project-rules` and `dead-code` are no longer built-in reviewer roles. Repository
+rules discovered in `AGENTS.md`, `CLAUDE.md`, or the other supported rules files
+are supplied as shared context to the remaining reviewers. Remove the retired
+names from explicit role lists; they follow the usual unknown-role warning and
+skip behavior unless you define a custom role with that name.
+
+With the default three blocking models, reviews schedule 14 blocking seats, or
+15 when a specification enables `spec-compliance`. The async general reviewer
+and verifier are separate; quorum is calculated from the blocking roster.
 
 List roles in the terminal:
 

@@ -130,6 +130,7 @@ interface GuardedCliFixture {
   args: string[];
   env: Record<string, string>;
   calls: () => number;
+  requestBodies: () => Array<{ messages: Array<{ content: string }> }>;
   holdResponses: () => void;
   releaseResponses: () => void;
   firstRequest: Promise<void>;
@@ -144,12 +145,16 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
     roles: ['general', 'security-auditor'], harness: { telemetry: 'off' },
   }));
   let calls = 0;
+  const requestBodies: Array<{ messages: Array<{ content: string }> }> = [];
   let holdResponses = false;
   const pendingResponses: Array<() => void> = [];
   let notifyRequest: () => void = () => {};
   const firstRequest = new Promise<void>(resolve => { notifyRequest = resolve; });
   const server = createServer((request, response) => {
-    request.resume();
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => { requestBodies.push(JSON.parse(body)); });
     calls++;
     notifyRequest();
     const respond = () => {
@@ -175,6 +180,7 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
       env: { OPENAI_COMPAT_BASE_URL: `http://127.0.0.1:${port}/v1`,
         OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RCL_DATA_DIR: join(repo, 'rcl-data') },
       calls: () => calls,
+      requestBodies: () => requestBodies,
       holdResponses: () => { holdResponses = true; },
       releaseResponses: () => {
         holdResponses = false;
@@ -189,6 +195,26 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
 }
 
 describe('rcl review — guarded native launch', () => {
+  it.each([false, true])('shares repository rules once without a dedicated seat (explicit context: %s)', async (explicitContext) => {
+    await withGuardedFixture(async fixture => {
+      const rules = '# Project rules\nUse gettext for application text.\n';
+      writeFileSync(join(fixture.repo, 'AGENTS.md'), rules);
+      const args = explicitContext ? [...fixture.args, '--context', './AGENTS.md'] : fixture.args;
+      const result = await runRclAsync(args, fixture.repo, fixture.env);
+      expect(result.status, result.stderr).toBe(0);
+      expect(fixture.requestBodies()).toHaveLength(2);
+      for (const request of fixture.requestBodies()) {
+        expect(request.messages.map(message => message.content).join('\n').split(rules.trim())).toHaveLength(2);
+      }
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+      expect(report.run.roster.filter((seat: { lane: string }) => seat.lane === 'blocking').map((seat: { role: string }) => seat.role))
+        .toEqual(['general', 'security-auditor']);
+      expect(report.run.context_files).toEqual([{
+        path: expect.stringContaining('AGENTS.md'), sha256: sha256Hex(rules),
+      }]);
+    });
+  });
+
   it('normalizes fresh reviewer prose before writing report bytes with telemetry off', async () => {
     await withGuardedFixture(async fixture => {
       const result = await runRclAsync([...fixture.args, '--markdown', 'report.md'], fixture.repo, fixture.env);

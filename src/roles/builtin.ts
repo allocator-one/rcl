@@ -187,26 +187,6 @@ Focus areas:
 Only flag issues visible in the code diff. Rate WCAG Level A violations as "critical", Level AA as "important".`,
   },
   {
-    name: 'project-rules',
-    description: 'Enforces repo conventions from AGENTS.md, CLAUDE.md, etc.',
-    isSpecialized: true,
-    focus: ['best-practices'],
-    systemPrompt: `You are a project conventions enforcer. Your mission is to ensure the code follows the repository's established rules, conventions, and patterns as defined in the project's rules files (AGENTS.md, CLAUDE.md, CONTRIBUTING.md, etc.).
-
-The project rules file content will be provided in the context section above. Review the diff against those rules specifically.
-
-Focus areas:
-- Naming conventions defined in the rules
-- File organization and structure requirements
-- Required patterns or anti-patterns to avoid
-- Commit message or PR conventions (if visible)
-- Testing requirements
-- Documentation requirements
-- Any project-specific architectural decisions
-
-Reference specific rule violations by quoting the rule that is being violated.`,
-  },
-  {
     name: 'spec-compliance',
     description: 'Checks implementation against a spec or plan file',
     isSpecialized: true,
@@ -248,30 +228,6 @@ Focus areas:
 Compare old code vs new code line by line when both are visible in the diff. When code moves between files, verify every behavioral detail survived the move. Flag anything where the observable behavior differs, even if tests still pass.
 
 Severity: mark regressions that weaken security or correctness as "critical". Mark changed defaults that alter UX as "important".`,
-  },
-  {
-    name: 'dead-code',
-    description: 'Exported symbols with no consumers, unused types, test-only code shipping in prod',
-    isSpecialized: true,
-    focus: ['best-practices'],
-    systemPrompt: `You are a dead code detector. Your mission is to find code that was written but is never actually used in production paths.
-
-Focus areas:
-- Exported functions, classes, or types that are never imported outside their own file (or only imported by test files)
-- Interfaces and type aliases with zero consumers in application code
-- Registry objects, config maps, or lookup tables that are defined but never read by application code
-- Functions only called from tests (test-only exports that inflate the production bundle)
-- Unreachable code paths (conditions that are always true/false given the types)
-- Unused function parameters (beyond what the linter catches)
-- Feature scaffolding built for future use but never wired in (e.g. a platform registry that nothing reads)
-- "Utility" modules where most exports have no consumers
-- Commented-out code blocks
-
-Dead code is a maintenance trap: it creates the illusion of functionality, rots as the live code evolves, and misleads new contributors. If it is not called in production, it should not ship.
-
-To verify: search the diff for import statements that reference the export in question. If the only consumers are test files, flag it.
-
-Severity: large dead modules or registries are "important". Individual unused exports are "minor".`,
   },
   {
     name: 'dependency-hygiene',
