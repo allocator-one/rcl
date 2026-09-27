@@ -42,6 +42,21 @@ describe('verification input bound compatibility', () => {
     expect(() => decodeVerificationProof(bytes, context)).toThrow('checkpoint_verification_invalid_record');
   });
 
+  it('rejects a deeply nested gating plan before canonical serialization', () => {
+    const nested = '{\"extra\":'.repeat(10_000) + 'null' + '}'.repeat(10_000);
+    const gatingPlanBytes = `{\"version\":1,\"findings\":[${nested}],\"initialGating\":[],\"candidateIndices\":[],\"model\":\"openai/verifier\",\"verificationTimeoutMs\":100,\"verificationPassTimeoutMs\":600,\"batches\":[]}`;
+    const input = { type: 'plan' as const, plan: { ...plan(0), gatingPlanBytes } };
+    expect(() => snapshotVerificationEvent(input)).toThrow('checkpoint_verification_invalid_gating_plan');
+  });
+
+  it('keeps a wide canonical gating plan compatible with the byte-bounded wire format', () => {
+    const findings = Array.from({ length: 3_000 }, (_, index) => ({ index, values: Array.from({ length: 20 }, () => index) }));
+    const wire = { version: 1, findings, initialGating: Array(3_000).fill(null), candidateIndices: findings.map(({ index }) => index),
+      model: 'openai/verifier', verificationTimeoutMs: 100, verificationPassTimeoutMs: 600, batches: [] };
+    const input = { type: 'plan' as const, plan: { ...plan(0), gatingPlanBytes: stableStringify(wire) } };
+    expect(snapshotVerificationEvent(input)).toEqual(input);
+  });
+
   it('keeps canonical proof validation after structural validation', () => {
     const records = history(2), bytes = stableStringify({ version: 1, records });
     expect(decodeVerificationProof(bytes, context)).toEqual(validateVerificationRecords(records, context));

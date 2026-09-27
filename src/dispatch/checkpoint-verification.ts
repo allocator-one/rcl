@@ -125,6 +125,35 @@ function boundRawStrings(value: unknown, fields: readonly string[], budget: { by
   }
 }
 /** Inspect only the finite wire shape; shared objects count at each serialized occurrence. */
+const MAX_GATING_PLAN_DEPTH = 64;
+function* jsonChildren(value: object): Generator<unknown> {
+  if (Array.isArray(value)) {
+    for (const child of value) yield child;
+  } else {
+    for (const key in value) {
+      if (Object.hasOwn(value, key)) yield (value as Record<string, unknown>)[key];
+    }
+  }
+}
+/** Reject only nesting unsafe for the recursive canonical serializer; sibling count remains byte-bounded. */
+function preflightGatingPlanDepth(value: unknown): void {
+  const ancestors: Iterator<unknown>[] = [];
+  let current: unknown = value;
+  while (true) {
+    if (current && typeof current === 'object') {
+      refuse(ancestors.length <= MAX_GATING_PLAN_DEPTH, 'invalid_gating_plan');
+      ancestors.push(jsonChildren(current));
+    }
+    let next: IteratorResult<unknown> | undefined;
+    while (ancestors.length) {
+      next = ancestors.at(-1)!.next();
+      if (!next.done) break;
+      ancestors.pop();
+    }
+    if (!next || next.done) return;
+    current = next.value;
+  }
+}
 function preflightRawVerificationEvent(value: unknown, budget = { bytes: 0 }): void {
   const event = rawObject(value);
   boundRawStrings(event, ['type'], budget);
@@ -163,7 +192,9 @@ export function snapshotVerificationEvent(input: VerificationEvent): Verificatio
     let value: unknown;
     try { value = JSON.parse(event.plan.gatingPlanBytes); } catch { throw new Error('checkpoint_verification_invalid_gating_plan'); }
     const saved = requestPlanSchema.safeParse(value);
-    refuse(saved.success && stableStringify(value) === event.plan.gatingPlanBytes, 'invalid_gating_plan');
+    refuse(saved.success, 'invalid_gating_plan');
+    preflightGatingPlanDepth(value);
+    refuse(stableStringify(value) === event.plan.gatingPlanBytes, 'invalid_gating_plan');
     const plan = saved.data;
     refuse(plan.model === event.plan.model && plan.verificationTimeoutMs === event.plan.verificationTimeoutMs &&
       plan.verificationPassTimeoutMs === event.plan.verificationPassTimeoutMs &&
