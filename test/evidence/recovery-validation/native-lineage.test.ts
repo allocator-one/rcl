@@ -57,6 +57,44 @@ function twoStepLineage() {
 }
 
 describe('retained snapshot lineage', () => {
+  it.each(['scalar-anchors', 'missing-anchors', 'null-anchor', 'invalid-anchor-identity',
+    'scalar-receipts', 'missing-receipts', 'null-operation', 'invalid-operation-id',
+    'invalid-source-version', 'invalid-source-digest'])('refuses %s in an otherwise valid recovery lineage', change => {
+    const f = recoveredFixture();
+    expect(verifyNativeRecoveryLineage(JSON.stringify(f.state), target, [f.sourceJson]).original)
+      .toEqual(JSON.parse(f.sourceJson));
+    const state = JSON.parse(JSON.stringify(f.state));
+    const operation = state.recovery.operations[0];
+    if (change === 'scalar-anchors') operation.anchors = operation.anchors[0];
+    if (change === 'missing-anchors') delete operation.anchors;
+    if (change === 'null-anchor') operation.anchors = [null];
+    if (change === 'invalid-anchor-identity') operation.anchors[0].identity = 'not-an-identity';
+    if (change === 'scalar-receipts') operation.sourceReceipts = operation.sourceReceipts[0];
+    if (change === 'missing-receipts') delete operation.sourceReceipts;
+    if (change === 'null-operation') state.recovery.operations[0] = null;
+    if (change === 'invalid-operation-id') operation.operationId = '';
+    if (change === 'invalid-source-version') operation.sourceVersion = 4;
+    if (change === 'invalid-source-digest') operation.sourceSha256 = 123;
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(state), target, [f.sourceJson]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
+  it.each(['null-container', 'array-container', 'invalid-digest', 'missing-path', 'invalid-path',
+    'missing-timestamp', 'invalid-timestamp'])('refuses migration %s without accepting malformed retained metadata', change => {
+    const f = migrated();
+    expect(verifyNativeRecoveryLineage(JSON.stringify(f.current), target, [f.original]).legacy).toEqual(f.state);
+    const current = JSON.parse(JSON.stringify(f.current));
+    if (change === 'null-container') current.migration = null;
+    if (change === 'array-container') current.migration = [];
+    if (change === 'invalid-digest') current.migration.sourceSha256 = 123;
+    if (change === 'missing-path') delete current.migration.snapshotPath;
+    if (change === 'invalid-path') current.migration.snapshotPath = 123;
+    if (change === 'missing-timestamp') delete current.migration.migratedAt;
+    if (change === 'invalid-timestamp') current.migration.migratedAt = 123;
+    expect(() => verifyNativeRecoveryLineage(JSON.stringify(current), target, [f.original]))
+      .toThrow('native_recovery_lineage_conflict');
+  });
+
   it('preserves legacy migration with a later ordinary verdict and pending cache', () => {
     const f = migrated();
     Object.assign(f.current.findings[f.key], { verdict: 'fixed', verdictRound: 1,

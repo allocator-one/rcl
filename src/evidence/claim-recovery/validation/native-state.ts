@@ -12,6 +12,7 @@ const MAX_BYTES = 64 * 1024 * 1024;
 /** Total predecessor bytes admitted by one proof; outer readers must enforce this while reading too. */
 export const MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const sha = (raw: string) => createHash('sha256').update(raw).digest('hex');
+const digest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const uuid = (value: unknown): value is string => uuidSchema.safeParse(value).success;
 const identity = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value);
 const requireSource = (valid: unknown): void => { if (!valid) throw new Error('native_recovery_source_conflict'); };
@@ -34,7 +35,13 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     Number.isSafeInteger(state.roundCap) && (state.roundCap as number) >= 2 && (state.roundCap as number) <= 99 &&
     Array.isArray(state.rounds) && object(state.findings) && typeof state.updatedAt === 'string');
   requireSource(state.version === 3 ? object(state.recovery) && [1, 2].includes(state.recovery.version as number) &&
-    Array.isArray(state.recovery.operations) && state.recovery.operations.length > 0 : state.recovery === undefined);
+    Array.isArray(state.recovery.operations) && state.recovery.operations.length > 0 &&
+    state.recovery.operations.every(operation => object(operation) && uuid(operation.operationId) &&
+      [1, 2, 3].includes(operation.sourceVersion as number) && digest(operation.sourceSha256) &&
+      Array.isArray(operation.anchors) && operation.anchors.every(anchor => object(anchor) && identity(anchor.identity)) &&
+      Array.isArray(operation.sourceReceipts)) : state.recovery === undefined);
+  requireSource(state.migration === undefined || object(state.migration) && digest(state.migration.sourceSha256) &&
+    typeof state.migration.snapshotPath === 'string' && typeof state.migration.migratedAt === 'string');
   requireSource(state.version !== 1 || state.sightings === undefined && state.migration === undefined);
   const rounds = state.rounds as Record<string, unknown>[]; const seen = new Set<number>();
   const positive = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) > 0;
