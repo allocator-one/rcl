@@ -21,6 +21,7 @@ export function createVerificationLateAudit(options: {
   if (typeof onError !== 'function') throw new Error('Late verification audit requires an error sink');
   const buffered: VerificationResult[] = [], pending = new Set<Promise<void>>(), continuations = new Set<Promise<void>>(), errors: unknown[] = [];
   let active = false;
+  let activation: Promise<void> | undefined;
   const captureError = (error: unknown, index: number): void => { errors.push(error); try { onError(error, index); } catch (sink) { errors.push(sink); } };
   const track = (operation: Promise<void>, index: number): Promise<void> => {
     const completion = operation.then(() => {}, error => { captureError(error, index); });
@@ -47,6 +48,19 @@ export function createVerificationLateAudit(options: {
     if (buffered.length) throw new Error('late_verification_audit_requires_terminal');
   }
   const drain = (): Promise<void> => finish(true);
+  async function activate(): Promise<void> {
+    await assertNativeTargetOwnership(ownership, commonDir, journal.getPlan().target);
+    const phase = await journal.readVerification();
+    if (!phase?.terminal) throw new Error('late_verification_audit_requires_terminal');
+    if (active) { await finish(false); return; }
+    while (buffered.length > 0) {
+      const result = buffered.shift()!;
+      try { await write(result); }
+      catch { buffered.unshift(result); break; }
+    }
+    if (buffered.length === 0) active = true;
+    await finish(false);
+  }
   return Object.freeze({
     retain(operation: Promise<void>, batchIndex: number): void {
       if (!(operation instanceof Promise) || !Number.isSafeInteger(batchIndex) || batchIndex < 0) {
@@ -70,16 +84,11 @@ export function createVerificationLateAudit(options: {
       } catch (error) { return track(Promise.reject(error), typeof index === 'number' ? index : -1); }
     },
     async flushAfterFinalization(): Promise<void> {
-      await assertNativeTargetOwnership(ownership, commonDir, journal.getPlan().target);
-      const phase = await journal.readVerification();
-      if (!phase?.terminal) throw new Error('late_verification_audit_requires_terminal');
-      active = true;
-      const batch = buffered.splice(0);
-      const persisted = await Promise.all(batch.map(async result => {
-        try { await write(result); return true; } catch { return false; }
-      }));
-      buffered.unshift(...batch.filter((_, index) => !persisted[index]));
-      await finish(false);
+      if (activation) return activation;
+      const operation = activate();
+      activation = operation;
+      try { await operation; }
+      finally { if (activation === operation) activation = undefined; }
     },
     drain,
   });

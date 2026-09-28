@@ -31,6 +31,7 @@ export function createCheckpointLateAudit(options: {
   const pending = new Set<Promise<void>>();
   const errors: unknown[] = [];
   let active = false;
+  let activation: Promise<void> | undefined;
 
   function retain(error: unknown, index: number): void {
     errors.push(error);
@@ -57,6 +58,20 @@ export function createCheckpointLateAudit(options: {
     if (retainedErrors.length > 1) throw new AggregateError(retainedErrors, 'late_audit_failed');
     if (buffered.length > 0) throw new Error('late_audit_requires_finalization');
   }
+  async function activate(): Promise<void> {
+    // Check even an empty queue: activation is not permission to write before
+    // the caller's main history has been sealed. Failed early flush can retry.
+    await assertNativeTargetOwnership(ownership, commonDir, plan.target);
+    if (!(await journal.read()).finalized) throw new Error('late_audit_requires_finalization');
+    if (active) { await drain(); return; }
+    while (buffered.length > 0) {
+      const observation = buffered.shift()!;
+      try { await write(observation); }
+      catch { buffered.unshift(observation); break; }
+    }
+    if (buffered.length === 0) active = true;
+    await drain();
+  }
   return Object.freeze({
     accept(review: ModelReview, callIndex: number, paidAttempt: PaidAttempt): Promise<void> {
       try {
@@ -80,19 +95,11 @@ export function createCheckpointLateAudit(options: {
       } catch (error) { return track(Promise.reject(error), callIndex); }
     },
     async flushAfterFinalization(): Promise<void> {
-      // Check even an empty queue: activation is not permission to write before
-      // the caller's main history has been sealed. Failed early flush can retry.
-      await assertNativeTargetOwnership(ownership, commonDir, plan.target);
-      if (!(await journal.read()).finalized) throw new Error('late_audit_requires_finalization');
-      active = true;
-      const batch = buffered.splice(0);
-      let failedAt = -1;
-      for (let index = 0; index < batch.length; index += 1) {
-        try { await write(batch[index]!); }
-        catch { failedAt = index; break; }
-      }
-      if (failedAt >= 0) buffered.unshift(...batch.slice(failedAt));
-      await drain();
+      if (activation) return activation;
+      const operation = activate();
+      activation = operation;
+      try { await operation; }
+      finally { if (activation === operation) activation = undefined; }
     },
     drain,
   });

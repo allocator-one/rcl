@@ -144,11 +144,15 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
           const timer = setTimeout(() => { fail('verification_execution_request_timeout'); }, timeoutMs);
           controller.signal.addEventListener('abort', onAbort, { once: true });
           if (controller.signal.aborted) { onAbort(); return; }
+          let settleContinuation!: () => void;
+          const retainedContinuation = new Promise<void>(resolve => { settleContinuation = resolve; });
+          try { options.registerLateAudit(retainedContinuation, batchIndex); }
+          catch { fail('verification_execution_late_audit_unavailable'); finish(); settleContinuation(); return; }
           let request: ReturnType<AskFn>;
           try { request = ask!(plan.model, batch.systemPrompt, batch.userPrompt, { timeoutMs, maxRetries: 0, signal: call.signal,
               ...(plan.verificationReasoningEffort ? { reasoningEffort: plan.verificationReasoningEffort } : {}) }); }
-          catch { fail('verification_execution_request_failed'); finish(); return; }
-          const continuation = request.then(async answer => {
+          catch { fail('verification_execution_request_failed'); finish(); settleContinuation(); return; }
+          void request.then(async answer => {
             // Snapshot the adapter's actual response, never a manufactured timeout.
             const answerBytes = JSON.stringify(answer);
             parseVerificationAnswer(answerBytes, retained);
@@ -160,9 +164,7 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
               // response or audit failure remains visible through the error sink.
               try { options.onLateAuditError(error, batchIndex); } catch (sinkError) { auditErrors.push(sinkError); }
             } else { fail('verification_execution_request_failed'); finish(); }
-          });
-          try { options.registerLateAudit(continuation, batchIndex); }
-          catch { fail('verification_execution_late_audit_unavailable'); finish(); }
+          }).finally(settleContinuation);
         });
         if (observed) {
           // Keep exact schema fields; the intent timestamp is not part of a result.

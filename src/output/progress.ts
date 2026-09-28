@@ -46,6 +46,7 @@ export function buildCouncilRunPlan(options: {
   providers?: readonly string[];
   providerConcurrency?: Readonly<Record<string, number>>;
 }): CouncilRunPlan {
+  assertReviewWorkWithinLimit(options.chunks, options.reviewers);
   if (!Number.isFinite(options.concurrency)) throw new Error('Invalid review concurrency');
   const concurrency = Math.max(1, Math.floor(options.concurrency));
   let waves: number;

@@ -137,4 +137,35 @@ describe('late verifier audit regressions', () => {
         });
         expect(errors).toHaveLength(1);
     });
+    it('keeps concurrent results behind a failed activation batch in FIFO order', async () => {
+        const f = await fixture(false, 3), errors: unknown[] = [];
+        let releaseWrite!: () => void;
+        let writeStarted!: () => void;
+        const started = new Promise<void>(resolve => { writeStarted = resolve; });
+        const release = new Promise<void>(resolve => { releaseWrite = resolve; });
+        await owned(f, async (owner) => {
+            const audit = createVerificationLateAudit({ commonDir: f.dir, journal: f.journal, ownership: owner, onError: error => errors.push(error) });
+            await audit.accept(result('first', 0));
+            await audit.accept(result('second', 1));
+            await f.journal.finalizeVerification({ status: 'failed', finishedAtMs: 12, reason: 'timeout' }, owner);
+            const record = f.journal.recordLateVerificationResult.bind(f.journal);
+            const writeError = new Error('synthetic activation failure');
+            vi.spyOn(f.journal, 'recordLateVerificationResult').mockImplementationOnce(async () => {
+                writeStarted(); await release; throw writeError;
+            }).mockImplementation(record);
+            const flushing = audit.flushAfterFinalization();
+            await started;
+            await audit.accept(result('third', 2));
+            releaseWrite();
+            await expect(flushing).rejects.toBe(writeError);
+            expect(await f.journal.readLateVerificationAudit()).toEqual([]);
+            await audit.flushAfterFinalization(); await audit.drain();
+            expect((await f.journal.readLateVerificationAudit()).map(row => row.result.answerBytes)).toEqual([
+                result('first', 0).answerBytes,
+                result('second', 1).answerBytes,
+                result('third', 2).answerBytes,
+            ]);
+        });
+        expect(errors).toEqual([expect.objectContaining({ message: 'synthetic activation failure' })]);
+    });
 });

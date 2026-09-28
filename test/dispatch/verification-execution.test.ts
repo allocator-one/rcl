@@ -188,6 +188,18 @@ describe('bounded durable verifier execution', () => {
     expect((await f.journal.readVerification())!.uncertain).toHaveLength(1); expect(f.factory).not.toHaveBeenCalled();
   });
 
+  it('registers the retained continuation before starting a provider request', async () => {
+    const f = await fixture(1), ask = vi.fn(async () => answer());
+    const result = await f.execute({
+      askFactory: () => ask,
+      registerLateAudit: () => { throw new Error('audit owner unavailable'); },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.newPhysicalCalls).toBe(1);
+    expect(ask).not.toHaveBeenCalled();
+    expect((await f.journal.readVerification())!.terminal?.reason).toBe('verification_execution_late_audit_unavailable');
+  });
+
   it('does not reinterpret a completed phase when cancellation arrives during its final persistence', async () => {
     const f = await fixture(1), controller = new AbortController(), seal = f.journal.finalizeVerification.bind(f.journal);
     let sealed = false;

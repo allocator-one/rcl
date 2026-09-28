@@ -159,6 +159,37 @@ describe('owned late-result coordinator', () => {
     });
   });
 
+  it('keeps concurrent observations behind a failed activation batch in FIFO order', async () => {
+    const input = await fixture(), writeError = new Error('synthetic activation failure');
+    const writeStarted = deferred<void>(), releaseWrite = deferred<void>();
+    await withNativeTarget(input.commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ ...input, namespace: 'activation-fifo', ownership });
+      for (let index = 0; index < 3; index += 1) {
+        await journal.recordIntent(`s${index}:0`, attempt(`original-${index}`), ownership);
+      }
+      const audit = createCheckpointLateAudit({ commonDir: input.commonDir, journal, ownership, onError: vi.fn() });
+      await audit.accept(review(0), 0, attempt('original-0'));
+      await audit.accept(review(1), 1, attempt('original-1'));
+      await journal.finalize(ownership);
+      const record = journal.recordLateResult.bind(journal);
+      vi.spyOn(journal, 'recordLateResult').mockImplementationOnce(async () => {
+        writeStarted.resolve(); await releaseWrite.promise; throw writeError;
+      }).mockImplementation(record);
+
+      const flushing = audit.flushAfterFinalization();
+      await writeStarted.promise;
+      await audit.accept(review(2), 2, attempt('original-2'));
+      releaseWrite.resolve();
+      await expect(flushing).rejects.toBe(writeError);
+      expect(await journal.readLateAudit()).toEqual([]);
+
+      await audit.flushAfterFinalization(); await audit.drain();
+      expect((await journal.readLateAudit()).map(row => row.reviewBytes)).toEqual([
+        JSON.stringify(review(0)), JSON.stringify(review(1)), JSON.stringify(review(2)),
+      ]);
+    });
+  });
+
   it('uses only the original ownership and reports a response arriving after release', async () => {
     const input = await fixture(), errors = vi.fn(); let audit!: CheckpointLateAudit, journal!: CheckpointJournal;
     await withNativeTarget(input.commonDir, target, async ownership => {

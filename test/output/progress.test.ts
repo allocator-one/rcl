@@ -79,6 +79,18 @@ describe('council run planning', () => {
     }
   });
 
+  it('refuses retained wave simulation beyond the paid-work safety limit', () => {
+    expect(() => buildCouncilRunPlan({
+      totalCalls: 513,
+      reviewers: 513,
+      chunks: 1,
+      concurrency: 1,
+      timeoutMs: 1_000,
+      providers: Array(513).fill('openai'),
+      providerConcurrency: { openai: 1 },
+    })).toThrow(/513 blocking calls.*safety limit of 512/i);
+  });
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
     'rejects non-finite global concurrency %s before wave simulation',
     concurrency => {
