@@ -14,7 +14,7 @@ allowed-tools:
   - Bash(git rev-parse:*)
   - Bash(rcl --version)
   - Bash(git diff:*)
-  - Bash(env -u GIT_EXTERNAL_DIFF git diff:*)
+  - Bash(env -u GIT_EXTERNAL_DIFF git:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
   - Bash(npm view review-council:*)
@@ -157,9 +157,9 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 
 ### 2a. Check what leaves the machine
 
-The patch and the spec are sent to several external model providers. Before running, read both as that disclosure: the local patch file; `gh pr diff <PR_NUMBER> --repo <REPO>` in PR mode (always pass `--repo` explicitly — an explicit `<REPO>#<PR_NUMBER>` target can differ from the current directory's repository, and an unscoped `gh pr diff <PR_NUMBER>` would then inspect the wrong PR); or, for `rcl review --staged` / `--working-tree`, the equivalent local diff (`git diff --no-ext-diff --no-textconv --cached` for staged, `git diff --no-ext-diff --no-textconv HEAD` for working-tree, which covers staged and unstaged together) captured to a temp file the same way step 1b does. Also read `<SPEC>` if one was resolved. Stop and tell the user if any of it contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
+The patch and the spec are sent to several external model providers. In PR mode, capture the head **before** reading anything else: `gh pr view <PR_NUMBER> --repo <REPO> --json headRefOid -q .headRefOid`. Capturing it after the diff would only prove the head matched once the diff had already been fetched — not that the diff itself came from that head. Then read the disclosure material: the local patch file; `gh pr diff <PR_NUMBER> --repo <REPO>` in PR mode (always pass `--repo` explicitly — an explicit `<REPO>#<PR_NUMBER>` target can differ from the current directory's repository, and an unscoped `gh pr diff <PR_NUMBER>` would then inspect the wrong PR); or, for `rcl review --staged` / `--working-tree`, the equivalent local diff (`git diff --no-ext-diff --no-textconv --cached` for staged, `git diff --no-ext-diff --no-textconv HEAD` for working-tree, which covers staged and unstaged together) captured to a temp file the same way step 1b does. Also read `<SPEC>` if one was resolved. Stop and tell the user if any of it contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
 
-In PR mode, capture the head alongside this check: `gh pr view <PR_NUMBER> --repo <REPO> --json headRefOid -q .headRefOid`. This check and the later fetch inside `rcl review` are two separate reads of the same target, and step 3's registry lookups (and a possible install) run between them, so the gap is not always as narrow as "the same agent runs both back to back" — a PR can pick up a genuine push in that window. Immediately before launching step 5, re-run that same `gh pr view ... -q .headRefOid` command; if the result differs from what step 2a captured, the PR moved during this check and the patch you inspected is stale — repeat step 2a against the new head before reviewing it, rather than reviewing on the strength of a disclosure check for code that is no longer what will be sent. If even that residual gap is unacceptable for a given PR, capture and bind instead — `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` (see "Fresh review requests" above) reviews the exact patch this step inspected.
+In PR mode, re-run that same `gh pr view ... -q .headRefOid` command a second time right after fetching the diff. If it now differs from the head you captured before reading anything, the PR moved while the diff was being fetched — the diff you just inspected may not even be from the head you captured, so start this step over from the head capture rather than trusting either read. This check and the later fetch inside `rcl review` are two separate reads of the same target, and step 3's registry lookups (and a possible install) run between them, so the gap is not always as narrow as "the same agent runs both back to back" — a PR can pick up a genuine push in that window. Immediately before launching step 5, re-run `gh pr view ... -q .headRefOid` a third time; if the result differs from the head this step settled on, the PR moved again — repeat this step against the new head before reviewing it, rather than reviewing on the strength of a disclosure check for code that is no longer what will be sent. If even that residual gap is unacceptable for a given PR, capture and bind instead — `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` (see "Fresh review requests" above) reviews the exact patch this step inspected. The same read-modify race applies to `--staged`/`--working-tree` reviews (the working tree can change while the temp-file diff is being captured, or afterward, before `rcl review` reads it again) — diff it a second time immediately before launch and restart this step if it differs.
 
 ### 3. Check rcl is available
 
@@ -168,11 +168,18 @@ Always run the latest published release — never pin a version. A pin has to be
 **Before running anything else in this step**, drop any `PATH` entry the repository under review controls — otherwise every check below still trusts whichever `npm`, `node`, or `rcl` that entry resolves to first, no matter what `$RCL_BIN` itself turns out to be. Compute a filtered `PATH` and export it for the rest of this shell:
 
 ```bash
-RCL_SAFE_PATH="" && RCL_REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)
+RCL_REPO_TOP=$(pwd -P)
+while [ "$RCL_REPO_TOP" != "/" ] && [ ! -e "$RCL_REPO_TOP/.git" ]; do
+  RCL_REPO_TOP=$(cd "$RCL_REPO_TOP/.." && pwd -P)
+done
+[ -e "$RCL_REPO_TOP/.git" ] || RCL_REPO_TOP=""
+RCL_SAFE_PATH=""
 while IFS= read -r dir; do
   [ -n "$dir" ] || continue
   resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
-  case "$resolved" in "$RCL_REPO_TOP"|"$RCL_REPO_TOP"/*) continue ;; esac
+  if [ -n "$RCL_REPO_TOP" ]; then
+    case "$resolved" in "$RCL_REPO_TOP"|"$RCL_REPO_TOP"/*) continue ;; esac
+  fi
   RCL_SAFE_PATH="$RCL_SAFE_PATH:$dir"
 done <<EOF
 $(printf '%s' "$PATH" | tr ':' '\n')
@@ -180,7 +187,9 @@ EOF
 export PATH="${RCL_SAFE_PATH#:}"
 ```
 
-This resolves each `PATH` entry with `cd ... && pwd -P` (not a plain string comparison) before excluding it, because a symlinked checkout path (e.g. macOS's `/tmp` → `/private/tmp`) would otherwise let a repo-local entry slip through under its unresolved name. Read it with `while read`, not an unquoted `for dir in $PATH`: zsh does not word-split an unquoted expansion the way bash does, so that would silently iterate the whole colon-joined string as one entry and filter nothing. A directory that no longer exists or isn't readable is dropped too — harmless, since nothing can resolve through it anyway. This is the shell's live `PATH` for the remainder of this step **and if you re-run `rcl_run` from the same shell** (step 5) — repeat it in any later, separate shell invocation, since `export` does not survive into a fresh one.
+`RCL_REPO_TOP` is found by walking up from the current directory with `cd`/`pwd -P` (shell builtins) looking for `.git`, deliberately **not** `git rev-parse --show-toplevel`: resolving the boundary itself through an external, PATH-resolved `git` would leave the one command that decides what to exclude unprotected by the exclusion it's computing. `pwd -P` also means this comparison is canonical on both sides from the start, unlike comparing against `git`'s own output. Guard the empty case explicitly — if no `.git` is found by the time this reaches `/`, `RCL_REPO_TOP` is left empty and the `case` is skipped entirely rather than run: `"$RCL_REPO_TOP"/*` with an empty `RCL_REPO_TOP` is the pattern `/*`, which matches every absolute path and would silently empty `PATH` completely. Resolve each remaining `PATH` entry with `cd ... && pwd -P` too (not a plain string comparison) before excluding it, for the same canonicalization reason (e.g. macOS's `/tmp` → `/private/tmp`). Read it with `while read`, not an unquoted `for dir in $PATH`: zsh does not word-split an unquoted expansion the way bash does, so that would silently iterate the whole colon-joined string as one entry and filter nothing. A directory that no longer exists or isn't readable is dropped too — harmless, since nothing can resolve through it anyway.
+
+This is the shell's live `PATH` for the remainder of this step **and if you re-run `rcl_run` from the same shell** (step 5) — repeat it in any later, separate shell invocation, since `export` does not survive into a fresh one. It does not retroactively protect `gh`/`git` calls already made earlier in steps 1–2a, or the `$(gh auth token)` substitution step 5 evaluates before calling `rcl_run` (that command substitution runs in the calling shell, before the function — and therefore before its own internal copy of this same filtering — ever executes): closing those needs `gh`/`git` resolved through an already-trusted `PATH`, which this technique cannot bootstrap on its own without assuming a fixed install layout (a hardcoded `/usr/bin/git` exists on this kind of system but no equivalent fixed path exists for `gh`, `npm`, `node`, or `rcl`, which are installed by a package manager, not the OS). Treat that as a known, narrower residual: it exposes only the credentials those specific calls carry (a GitHub token; `gh`'s own stored auth), not every credential this skill handles, for the rest of a compromised PATH to reach.
 
 Resolve the latest release, its registry integrity and the installed executable's path — without running it yet:
 
@@ -236,11 +245,18 @@ Note: this repo is review-council's own source. Reviews default to the published
 
 ```bash
 rcl_run() {
-  RCL_SAFE_PATH="" && RCL_REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)
+  RCL_REPO_TOP=$(pwd -P)
+  while [ "$RCL_REPO_TOP" != "/" ] && [ ! -e "$RCL_REPO_TOP/.git" ]; do
+    RCL_REPO_TOP=$(cd "$RCL_REPO_TOP/.." && pwd -P)
+  done
+  [ -e "$RCL_REPO_TOP/.git" ] || RCL_REPO_TOP=""
+  RCL_SAFE_PATH=""
   while IFS= read -r dir; do
     [ -n "$dir" ] || continue
     resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
-    case "$resolved" in "$RCL_REPO_TOP"|"$RCL_REPO_TOP"/*) continue ;; esac
+    if [ -n "$RCL_REPO_TOP" ]; then
+      case "$resolved" in "$RCL_REPO_TOP"|"$RCL_REPO_TOP"/*) continue ;; esac
+    fi
     RCL_SAFE_PATH="$RCL_SAFE_PATH:$dir"
   done <<EOF
 $(printf '%s' "$PATH" | tr ':' '\n')

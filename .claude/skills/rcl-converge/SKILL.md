@@ -18,7 +18,7 @@ allowed-tools:
   - Bash(git status:*)
   - Bash(git merge-base:*)
   - Bash(git diff:*)
-  - Bash(env -u GIT_EXTERNAL_DIFF git diff:*)
+  - Bash(env -u GIT_EXTERNAL_DIFF git:*)
   - Bash(git log:*)
   - Bash(git rev-parse:*)
   - Bash(git add:*)
