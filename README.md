@@ -1135,6 +1135,8 @@ output:
 # Concurrency and reliability
 concurrency: 9        # maximum simultaneous blocking reviewer calls per process
                       # set to 6 to retain the previous limit
+providerConcurrency:  # provider admission caps, applied in addition to concurrency
+  anthropic: 2        # default: bound the observed high-effort Fable burst
 timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 # quorumFraction: 0.75  # round closes once this share of blocking seats succeeds
@@ -1165,10 +1167,14 @@ spec: SPEC.md
 # githubToken: ghp_...
 ```
 
-`concurrency` limits blocking reviewer calls within one RCL process. Separate
-RCL processes share provider capacity without sharing this limit; async reviewers
-and verification use their own scheduling. Set `concurrency: 6` in the applicable
-configuration to restore the previous limit for new reviews.
+`concurrency` limits all blocking reviewer calls within one RCL process.
+`providerConcurrency` adds stricter provider admission caps; increasing the global
+limit never bypasses them. The scheduler scans past a saturated provider so calls
+for other providers continue without changing the original result order. Anthropic
+defaults to two concurrent calls to prevent the observed five-seat Fable 5.1 burst;
+the existing 540-second call deadline is unchanged. Providers with no default or
+explicit entry use only the global limit. Separate RCL processes do not share these
+limits; async reviewers and verification use their own scheduling.
 
 `maxRetries` limits additional adapter SDK invocations after the first attempt;
 all attempts share the call's `timeout` and parent cancellation signal. Supported

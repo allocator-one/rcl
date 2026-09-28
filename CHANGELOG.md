@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 4.4.0 - 2026-09-28
+
+- Add provider-aware blocking-call admission with a default Anthropic limit of
+  two concurrent calls. Saturated providers no longer block later providers in
+  the global queue, and increasing global `concurrency` cannot bypass an explicit
+  `providerConcurrency` cap (RCL-139).
+
 ## 4.3.0 - 2026-09-28
 
 - Add `rcl review --retry-report <path> --retry-reason <reason>` for bounded

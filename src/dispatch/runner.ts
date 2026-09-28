@@ -8,6 +8,7 @@ import { OpenAIAdapter } from './openai.js';
 import { GoogleAdapter } from './google.js';
 import { OpenAICompatAdapter } from './openai-compat.js';
 import { DEFAULT_REASONING_EFFORT } from '../config/defaults.js';
+import { MODEL_PROVIDER_SET } from '../config/providers.js';
 import type { ReasoningEffort } from '../config/schema.js';
 import { hasSuccessfulQuorum, resolveQuorumPolicy } from './quorum.js';
 
@@ -37,6 +38,8 @@ export interface RunnerOptions {
   timeoutMs: number;
   maxRetries: number;
   concurrency: number;
+  /** Per-provider admission caps, enforced alongside global concurrency. */
+  providerConcurrency?: Readonly<Record<string, number>>;
   verbose?: boolean;
   /** Progress notification receives an isolated copy after durable acceptance. */
   onReviewComplete?: (review: ModelReview) => void;
@@ -135,6 +138,13 @@ export async function runReviews(
   if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
     throw new Error('Runner concurrency must be a positive safe integer');
   }
+  const providerLimits = new Map<string, number>();
+  for (const [provider, limit] of Object.entries(options.providerConcurrency ?? {})) {
+    if (!MODEL_PROVIDER_SET.has(provider) || !Number.isSafeInteger(limit) || limit < 1) {
+      throw new Error('Runner provider concurrency must use canonical providers and positive safe integers');
+    }
+    providerLimits.set(provider, limit);
+  }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 2_147_483_647) {
     throw new Error('Runner timeout must be positive and within the supported timer range');
   }
@@ -163,7 +173,6 @@ export async function runReviews(
   const adapters = new Map<string, ReviewAdapter>();
 
   const results: ModelReview[] = new Array(calls.length);
-  let nextIndex = 0;
   if (options.seatIds !== undefined &&
     (!Array.isArray(options.seatIds) || options.seatIds.length !== calls.length ||
       calls.some((_call, index) => typeof options.seatIds![index] !== 'string' || options.seatIds![index]!.trim().length === 0))) {
@@ -373,15 +382,78 @@ export async function runReviews(
   if (options.signal?.aborted) abort();
   else options.signal?.addEventListener('abort', abort, { once: true });
   try {
-    const queue = [...eligible];
-    const width = Math.min(options.concurrency, queue.length);
-    const workers = Array.from({ length: width }, async () => {
-      while (!failure && nextIndex < queue.length) {
-        const index = queue[nextIndex++]!;
-        await runOne(index);
+    const pendingByProvider = new Map<string, {
+      entries: Array<{ index: number; priority: number }>;
+      next: number;
+    }>();
+    let priority = 0;
+    for (const index of eligible) {
+      const provider = calls[index]!.provider;
+      const pending = pendingByProvider.get(provider) ?? { entries: [], next: 0 };
+      pending.entries.push({ index, priority: priority++ });
+      pendingByProvider.set(provider, pending);
+    }
+    let queued = eligible.size;
+    const activeByProvider = new Map<string, number>();
+    const active = new Set<Promise<void>>();
+    let completed = 0;
+    let completionWaiter: (() => void) | undefined;
+    const signalCompletion = (): void => {
+      completed++;
+      completionWaiter?.();
+      completionWaiter = undefined;
+    };
+    const waitForCompletion = async (): Promise<void> => {
+      if (completed === 0) await new Promise<void>(resolve => { completionWaiter = resolve; });
+      completed--;
+    };
+    const providerLimit = (provider: string): number =>
+      Math.min(options.concurrency, providerLimits.get(provider) ?? options.concurrency);
+    const nextRunnable = (): number | undefined => {
+      let selectedProvider: string | undefined;
+      let selectedPriority = Number.POSITIVE_INFINITY;
+      for (const [provider, pending] of pendingByProvider) {
+        if ((activeByProvider.get(provider) ?? 0) >= providerLimit(provider)) continue;
+        const entry = pending.entries[pending.next];
+        if (entry !== undefined && entry.priority < selectedPriority) {
+          selectedProvider = provider;
+          selectedPriority = entry.priority;
+        }
       }
-    });
-    await Promise.allSettled(workers);
+      if (selectedProvider === undefined) return undefined;
+      const pending = pendingByProvider.get(selectedProvider)!;
+      const selected = pending.entries[pending.next++]!;
+      queued--;
+      if (pending.next === pending.entries.length) pendingByProvider.delete(selectedProvider);
+      return selected.index;
+    };
+    const start = (index: number): void => {
+      const provider = calls[index]!.provider;
+      activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + 1);
+      let task!: Promise<void>;
+      task = runOne(index).catch(fail).finally(() => {
+        const remaining = (activeByProvider.get(provider) ?? 1) - 1;
+        if (remaining === 0) activeByProvider.delete(provider);
+        else activeByProvider.set(provider, remaining);
+        active.delete(task);
+        signalCompletion();
+      });
+      active.add(task);
+    };
+
+    while (queued > 0 && !stopped()) {
+      while (active.size < options.concurrency && !stopped()) {
+        // Select only among provider heads. This preserves the earliest
+        // runnable call and per-provider FIFO order without rescanning every
+        // queued call whenever one capped provider completes.
+        const index = nextRunnable();
+        if (index === undefined) break;
+        start(index);
+      }
+      if (active.size === 0) break;
+      await waitForCompletion();
+    }
+    await Promise.allSettled([...active]);
     if (failure) throw failure.error;
     // Ineligible cells still occupy their original matrix positions. These
     // placeholders have no provider invocation and cannot become paid results.

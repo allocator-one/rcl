@@ -1,7 +1,8 @@
 import type { Role, ReviewAssignment } from './types.js';
 import type { ReviewerPair } from '../config/schema.js';
+import type { ModelProvider } from '../config/providers.js';
 
-export type ModelProvider = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'openai-compat';
+export type { ModelProvider } from '../config/providers.js';
 
 export function detectProvider(model: string): ModelProvider {
   // Handle explicit provider prefix (e.g. "anthropic/claude-sonnet-4-5")
