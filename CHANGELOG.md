@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.4.4 - 2026-09-28
+
 - Sync the `rcl` and `rcl-converge` skills into consumer repositories: after every
   successful Release, the new Sync skills workflow renders vendored copies from the
   released tag and opens or updates one pull request per repository in
