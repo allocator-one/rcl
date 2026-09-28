@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.4.1 - 2026-09-28
+
 - Let a bounded legacy recovery validate its original inconclusive source against the
   original head and input while claiming a separately recorded changed-input attempt.
   The original cycle, spending and caps remain preserved; the original source transfers
