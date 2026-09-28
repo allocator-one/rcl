@@ -40,12 +40,13 @@ const BLOCKS = ['claude', 'codex', 'source', 'vendored'];
 
 function applyBlocks(text, keep) {
   // Keep each retained block's body (minus its markers); drop every other
-  // block's body and markers entirely.
+  // block's body and markers entirely. `\r?\n` (not a bare `\n`) so this
+  // still matches if a source file has CRLF line endings.
   let out = text;
   for (const name of BLOCKS) {
     out = keep.has(name)
-      ? out.replace(new RegExp(`^\\{\\{#${name}\\}\\}\\n|^\\{\\{/${name}\\}\\}\\n`, 'gm'), '')
-      : out.replace(new RegExp(`^\\{\\{#${name}\\}\\}\\n[\\s\\S]*?^\\{\\{/${name}\\}\\}\\n`, 'gm'), '');
+      ? out.replace(new RegExp(`^\\{\\{#${name}\\}\\}\\r?\\n|^\\{\\{/${name}\\}\\}\\r?\\n`, 'gm'), '')
+      : out.replace(new RegExp(`^\\{\\{#${name}\\}\\}\\r?\\n[\\s\\S]*?^\\{\\{/${name}\\}\\}\\r?\\n`, 'gm'), '');
   }
   return out;
 }
@@ -53,7 +54,7 @@ function applyBlocks(text, keep) {
 function renderWith(source, { dir, flavor, prefix }, banner, origin) {
   const keep = new Set([flavor === 'claude' ? 'claude' : 'codex', origin]);
   // Frontmatter must stay first, so the provenance banner goes after it.
-  const withBanner = source.replace(/^(---\n[\s\S]*?\n---\n)/, `$1\n${banner}`);
+  const withBanner = source.replace(/^(---\r?\n[\s\S]*?\r?\n---\r?\n)/, `$1\n${banner}`);
   return applyBlocks(withBanner, keep).replaceAll('{{PREFIX}}', prefix).replaceAll('{{DIR}}', dir);
 }
 

@@ -4,6 +4,7 @@ description: Drive the current PR or branch diff to a converged Review Council v
 argument-hint: "[PR#N] [--max-rounds N] [--max-attempts N] [--roles <roles>] [--spec <path>] [--post-final]"
 allowed-tools:
   - Bash(gh pr view:*)
+  - Bash(gh pr diff:*)
   - Bash(gh pr comment:*)
   - Bash(gh pr merge:*)  # disarming only — see hard rules; the command is `gh pr merge <PR> --disable-auto`
   - Bash(gh auth token:*)
@@ -36,8 +37,6 @@ allowed-tools:
   - Bash(realpath:*)
   - Bash(head -1:*)
   - Bash(tr:*)
-  - Bash(rcl_run GITHUB_TOKEN=:*)
-  - Bash(rcl_run "$RCL_BIN":*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
   - Read
@@ -138,7 +137,7 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
 
    Start the command with the host's `run_in_background: true` and retain its task handle. Let the command remain foreground inside that task. Continue from the task-completion notification, never from an unrelated PID or a report appearing early.
 
-   Launch through the `rcl` skill's allowlisted-environment helper: define `rcl_run` from its step 5 in the same shell. Use `"$RCL_BIN"` (from its step 3), not the bare `rcl` name, for the same reason as the `rcl` skill's own step 5 — re-resolve it first if this shell never ran step 3.
+   Launch through the `rcl` skill's allowlisted-environment helper: define `rcl_run` from its step 5 in the same shell. Use `"$RCL_BIN"` (from its step 3), not the bare `rcl` name, for the same reason as the `rcl` skill's own step 5 — if this shell never ran step 3, run all of it again first (PATH filter, resolution, and the path/ownership/interpreter checks), not just a bare re-resolve. This launch, like the `rcl` skill's own, is deliberately not in `allowed-tools` and prompts each time — confirm it matches what is shown here before approving.
 
    ```bash
    rcl_run <TOKEN_ARG> "$RCL_BIN" review <target> --guarded-converge <START_OVER_ARG> \

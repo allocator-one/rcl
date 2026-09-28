@@ -26,6 +26,12 @@ jobs:
   sync:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    # Scopes the app private key to an environment with deployment branch/tag
+    # rules (restrict it to `main` and `v*`, matching notify-release.yml's
+    # release-announcements environment): a repo secret alone is readable by
+    # any workflow run on any branch with write access, including one from an
+    # altered workflow on a non-default branch.
+    environment: skill-sync
     steps:
       - name: Resolve the released tag
         id: ref
@@ -37,16 +43,24 @@ jobs:
           # workflow_run.head_branch is null for a run triggered by a tag push
           # (tags aren't branches), so it can never name the released tag here.
           # Look the tag up by the commit the completed Release run actually
-          # ran on instead: the tags API resolves annotated tags to their
-          # commit, so this works for either tag style. More than one tag can
-          # point at the same commit (e.g. a re-tag); the API's own ordering
-          # doesn't identify which one triggered this run, so prefer the
-          # highest version among matches as the release that just happened.
+          # ran on instead. head_sha's exact meaning for a tag-triggered run
+          # isn't documented for certain either way, so try both
+          # interpretations: the tags API's .commit.sha (always the commit, for
+          # either tag style) first, then the lower-level refs API's
+          # .object.sha (the tag object's own sha for an annotated tag) as a
+          # fallback, in case head_sha is that instead. More than one tag can
+          # point at the same commit (e.g. a re-tag); ordering doesn't
+          # identify which one triggered this run, so prefer the highest
+          # version among matches as the release that just happened.
           if [ -n "$DISPATCH_REF" ]; then
             ref=$DISPATCH_REF
           else
             ref=$(gh api "repos/${{ github.repository }}/tags" --paginate \
               --jq ".[] | select(.commit.sha == \"$RUN_SHA\") | .name" | sort -rV | head -n1)
+            if [ -z "$ref" ]; then
+              ref=$(gh api "repos/${{ github.repository }}/git/refs/tags" --paginate \
+                --jq ".[] | select(.object.sha == \"$RUN_SHA\") | .ref" | sed 's#^refs/tags/##' | sort -rV | head -n1)
+            fi
           fi
           if ! printf '%s\n' "$ref" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
             echo "::error::Only a stable release tag (vX.Y.Z) can be synced, got '$ref'"

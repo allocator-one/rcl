@@ -40,6 +40,10 @@ describe('vendored skills', () => {
       for (const target of TARGETS as Target[]) copies.push([`${target.dir}/${skill} (own)`, render(readSource(skill), target, skill)]);
     }
     for (const [path, content] of copies) {
+      // A Bash(rcl_run ...:*) allowlist entry would auto-approve anything typed
+      // after its fixed prefix, since rcl_run ends in `env -i "$@"` — the review
+      // launch must always prompt, never be silently auto-approved.
+      expect(content, path).not.toMatch(/Bash\(rcl_run/);
       expect(content, path).toContain('untrusted data');
       expect(content, path).toContain('--no-ext-diff --no-textconv');
       if (path.includes('rcl-converge')) {

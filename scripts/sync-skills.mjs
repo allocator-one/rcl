@@ -65,7 +65,7 @@ function run(cmd, args, options = {}) {
  */
 function assertNoUnsafeSymlink(root, relPath) {
   let cur = root;
-  for (const part of relPath.split('/')) {
+  for (const part of relPath.split(/[/\\]/)) {
     cur = join(cur, part);
     let stat;
     try {
