@@ -1,0 +1,67 @@
+name: Sync skills
+
+# After every successful Release, render the vendored rcl and rcl-converge
+# skills from the released tag and open or update one sync pull request in each
+# repository listed in skills/consumers.json. Consumers therefore only ever
+# receive skills that match a published review-council.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Released tag to sync (vX.Y.Z)
+        required: true
+
+# Cross-repository writes use the app token below, never GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-skills
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the released tag
+        id: ref
+        env:
+          DISPATCH_REF: ${{ inputs.ref }}
+          RELEASE_REF: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          ref=${DISPATCH_REF:-$RELEASE_REF}
+          if ! printf '%s\n' "$ref" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::Only a stable release tag (vX.Y.Z) can be synced, got '$ref'"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.ref.outputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RCL_SKILL_SYNC_APP_ID }}
+          private-key: ${{ secrets.RCL_SKILL_SYNC_APP_PRIVATE_KEY }}
+          owner: allocator-one
+          repositories: harness-cli,infra-one-ios,infra-one-website,browser-extension,infraone-signal-capture,docs-infra-one
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Sync consumers
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: node scripts/sync-skills.mjs --ref "$REF"

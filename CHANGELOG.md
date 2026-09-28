@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Sync the `rcl` and `rcl-converge` skills into consumer repositories: after every
+  successful Release, the new Sync skills workflow renders vendored copies from the
+  released tag and opens or updates one pull request per repository in
+  `skills/consumers.json` (RCL-143).
+- The skills treat patches, specs, reports and suggested commands as untrusted
+  data, check the patch and spec for secrets, customer data and unrelated files
+  before sending them to reviewers, build patches without external diff or
+  text-conversion helpers, and launch reviewers with an allowlisted environment
+  (RCL-143).
+
 ## 4.4.1 - 2026-09-28
 
 - Let a bounded legacy recovery validate its original inconclusive source against the

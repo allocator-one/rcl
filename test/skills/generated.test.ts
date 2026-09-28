@@ -25,7 +25,7 @@ describe('generated skill files', () => {
 
   it('renders every placeholder — no markers survive into the output', () => {
     for (const { path, content } of renderAll() as Rendered[]) {
-      expect(content, path).not.toMatch(/\{\{[#/]?(PREFIX|DIR|claude|codex)\}?\}/);
+      expect(content, path).not.toMatch(/\{\{[#/]?(PREFIX|DIR|claude|codex|source|vendored)\}?\}/);
     }
   });
 
