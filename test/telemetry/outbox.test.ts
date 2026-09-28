@@ -119,6 +119,54 @@ describe('Outbox', () => {
     expect(calls.map(call => call.method)).toEqual(['postRun', 'putArtifact']);
   });
 
+  it.each(['stats', 'finding'] as const)('keeps queued verified-consensus evidence when original %s differ from the envelope', async part => {
+    const result = sampleResult();
+    const original = structuredClone(result);
+    if (part === 'stats') original.stats.totalReviews += 1;
+    else original.findings[0]!.title = 'Different original title';
+    const bytes = JSON.stringify(original);
+    const queued = buildRunEnvelope(result, { report_json: bytes }, { level: 'findings', delivery: { mode: 'direct' } });
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued, artifacts: { report_json: bytes } });
+
+    const { sink, calls } = fakeSink({});
+    const first = await outbox.flush(sink);
+
+    expect(first.failed).toEqual([{ id: queued.run.id, reason: expect.stringContaining(`report_json ${part === 'finding' ? 'findings' : part}`) }]);
+    expect(calls).toEqual([]);
+    expect(await readFile(join(dir, queued.run.id, 'artifacts', 'report_json.json'), 'utf8')).toBe(bytes);
+  });
+
+  it.each([
+    { version: '4.4.5', reason: 'verified', verdict: undefined, accepted: false },
+    { version: '4.4.5', reason: 'none', verdict: 'confirmed', accepted: false },
+    { version: '4.4.5', reason: 'none', verdict: 'unknown', accepted: false },
+    { version: '4.4.5', reason: 'consensus', verdict: 'confirmed', accepted: false },
+    { version: '4.4.5', reason: 'critical', verdict: 'refuted', accepted: false },
+    { version: '3.5.0', reason: 'verified', verdict: 'unavailable', accepted: true },
+    { version: '3.5.1', reason: 'verified', verdict: 'unavailable', accepted: true },
+    { version: '3.5.1+build', reason: 'verified', verdict: 'unavailable', accepted: false },
+    { version: '3.6.0', reason: 'verified', verdict: 'unavailable', accepted: false },
+  ] as const)('checks reason/verdict coherence when replaying a $version queued run ($reason $verdict)', async ({ version, reason, verdict, accepted }) => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: version }) });
+    report.findings[0]!.gating = { reason, verification: { model: 'openai/gpt', verdict } } as never;
+    report.stats.verification = { model: 'openai/gpt', candidates: 1, refuted: 0, unrefuted: 0,
+      confirmed: verdict === 'confirmed' ? 1 : 0, insufficientEvidence: 0,
+      unavailable: verdict === 'unavailable' ? 1 : 0, durationMs: 12 };
+    const bytes = JSON.stringify(report);
+    const queued = buildRunEnvelope(report, { report_json: bytes }, { level: 'full', delivery: { mode: 'direct' } });
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued, artifacts: { report_json: bytes } });
+    const { sink, calls } = fakeSink({});
+
+    const summary = await outbox.flush(sink);
+
+    expect(summary.failed).toEqual(accepted ? [] : [{ id: queued.run.id,
+      reason: expect.stringContaining('findings.0.gating.verification.verdict') }]);
+    expect(calls.filter(call => call.method === 'postRun')).toHaveLength(accepted ? 1 : 0);
+    if (!accepted) expect(await readFile(join(dir, queued.run.id, 'artifacts', 'report_json.json'), 'utf8')).toBe(bytes);
+  });
+
   it('retains an oversized queued report and its events without reading or posting the artifact', async () => {
     const report = sampleResult({ run: sampleRunHeader({ rcl_version: '4.4.4' }) });
     const bytes = JSON.stringify(report);

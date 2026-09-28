@@ -21,7 +21,7 @@ import { buildEvent } from '../../src/telemetry/events.js';
 import { NOTICE_FILE } from '../../src/telemetry/notice.js';
 import { fakeFetch, sampleResult, type RecordedRequest } from './fixtures.js';
 
-const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
+const ARTIFACTS = { report_json: JSON.stringify(sampleResult()), report_md: '# r' };
 
 function acceptEverything(request: RecordedRequest): { status: number; body?: unknown } {
   if (request.url.endsWith('/api/v1/reviews/runs')) {
@@ -143,7 +143,7 @@ describe('telemetry delivery', () => {
     result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The original explanation.' } };
     result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
       confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
-    const outcome = await deliverRun(rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    const outcome = await deliverRun(rt, { result, artifacts: { ...ARTIFACTS, report_json: JSON.stringify(result) }, evidenceRequired: true });
     expect(outcome).toMatchObject({ status: 'rejected', exitCode: 4, spooled: false });
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0]!.body!).findings[0].verification_note).toBe('The original explanation.');
@@ -214,7 +214,8 @@ describe('telemetry delivery', () => {
     // A finding that quotes the environment, as a careless model might. (The
     // Harness token never reaches a model: it is not in any prompt.)
     result.findings[0]!.description = `Leaked: ${Object.values(poison).join(' ')}`;
-    await deliverRun(rt, { result, artifacts: ARTIFACTS });
+    const safe = sanitizeForDelivery(result);
+    await deliverRun(rt, { result: safe, artifacts: { ...ARTIFACTS, report_json: JSON.stringify(safe) } });
 
     expect(requests.length).toBeGreaterThanOrEqual(3);
     for (const request of requests) {

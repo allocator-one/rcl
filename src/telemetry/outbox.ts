@@ -4,6 +4,7 @@ import { resolveDataDir } from '../config/data-dir.js';
 import { sha256Hex, type ArtifactKind, type RunEnvelope } from './envelope.js';
 import { MAX_ARTIFACT_BYTES, validateRunEnvelope } from './envelope-validation.js';
 import { buildEvent, type WireEvent } from './events.js';
+import { verifiedConsensusReportProblem } from './report-consistency.js';
 import type { HarnessSink, RequestOptions } from './sink.js';
 
 /**
@@ -50,7 +51,6 @@ export const INTERRUPTED_SPOOL_MS = 10 * 60 * 1000;
 const ARTIFACT_FILES: Record<ArtifactKind, string> = { report_json: 'report_json.json', report_md: 'report_md.md' };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENTRY_ID = /^(?:events-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const GATING_REASONS = new Set(['consensus', 'critical', 'verified', 'none']);
 
 /** 4.4.5 is the first release with the original-report check and this queued replay guard. */
 function hasGuardedProducer(version: unknown): boolean {
@@ -60,45 +60,6 @@ function hasGuardedProducer(version: unknown): boolean {
   const [major, minor, patch] = match.slice(1).map(Number);
   if (![major, minor, patch].every(Number.isSafeInteger)) return false;
   return major! > 4 || (major === 4 && (minor! > 4 || (minor === 4 && patch! >= 5)));
-}
-
-/** Check the immutable report; an older builder could turn an absent label into wire `none`. */
-function verifiedConsensusReportProblem(report: unknown, envelope: RunEnvelope): string | undefined {
-  if (!isRecord(report) || !isRecord(report['run']) || !isRecord(report['run']['gating']) ||
-      report['run']['id'] !== envelope.run.id || report['run']['rcl_version'] !== envelope.run.rcl_version ||
-      report['run']['gating']['mode'] !== 'verified-consensus') {
-    return 'report_json does not match the queued verified-consensus run';
-  }
-  if (!Array.isArray(report['findings']) ||
-      (report['belowThresholdFindings'] !== undefined && !Array.isArray(report['belowThresholdFindings']))) {
-    return 'report_json findings are missing or malformed';
-  }
-  const groups = [
-    ['findings', report['findings']],
-    ['belowThresholdFindings', report['belowThresholdFindings'] ?? []],
-  ] as const;
-  const sourceFindings = groups.flatMap(([, findings]) => findings);
-  // `envelope` telemetry omits rows entirely, even when the report has findings.
-  const hasWireFindings = envelope.findings.length > 0;
-  if (hasWireFindings && sourceFindings.length !== envelope.findings.length) return 'report_json finding count differs from the queued envelope';
-  let hasVerification = false;
-  let wireIndex = 0;
-  for (const [group, findings] of groups) {
-    for (const [index, finding] of findings.entries()) {
-      if (!isRecord(finding) || !isRecord(finding['gating']) || !GATING_REASONS.has(finding['gating']['reason'] as string)) {
-        return `${group}.${index}.gating.reason missing or invalid in report_json`;
-      }
-      if (finding['gating']['verification'] !== undefined) hasVerification = true;
-      const wire = envelope.findings[wireIndex++];
-      if (hasWireFindings && (wire?.gating_reason !== finding['gating']['reason'] || wire?.below_threshold !== (group === 'belowThresholdFindings'))) {
-        return `${group}.${index}.gating.reason differs from the queued envelope`;
-      }
-    }
-  }
-  if (hasVerification && (!isRecord(report['stats']) || report['stats']['verification'] == null)) {
-    return 'stats.verification missing for annotated candidates in report_json';
-  }
-  return undefined;
 }
 
 export class OutboxError extends Error {
@@ -633,7 +594,7 @@ export class Outbox {
           if (declared.sha256 !== sha256Hex(report.raw) || declared.bytes !== Buffer.byteLength(report.raw, 'utf8')) {
             return this.markFailed(dir, 'report_json digest or size differs from the queued envelope');
           }
-          const problem = verifiedConsensusReportProblem(report.value, envelope);
+          const problem = verifiedConsensusReportProblem(report.value, envelope, report.raw);
           if (problem) return this.markFailed(dir, problem);
         } else if (!hasGuardedProducer(envelope.run.rcl_version)) {
           return this.markFailed(dir, 'report_json unavailable; queued verified-consensus producer or envelope cannot prove original gating labels');

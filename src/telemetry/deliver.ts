@@ -14,6 +14,7 @@ import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outb
 import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
+import { verifiedConsensusReportProblem } from './report-consistency.js';
 
 /**
  * Evidence delivery for a finished review and for the converge commands
@@ -380,6 +381,15 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   }
   const diagnostics = validateRunEnvelope(envelope, input.artifacts);
   diagnostics.push(...verifiedConsensusDiagnostics(input.result));
+  if (diagnostics.length === 0 && envelope.run.gating?.mode === 'verified-consensus') {
+    try {
+      const report = JSON.parse(input.artifacts.report_json) as unknown;
+      const problem = verifiedConsensusReportProblem(report, envelope, input.artifacts.report_json);
+      if (problem) diagnostics.push({ path: 'report_json', message: problem });
+    } catch {
+      diagnostics.push({ path: 'report_json', message: 'report_json malformed; verified-consensus source cannot be checked' });
+    }
+  }
   if (diagnostics.length > 0) {
     const retention = await retainRun(runtime, input, envelope, diagnostics);
     return { status: 'rejected', runId, spooled: false, retention, exitCode: exitFor('rejected', evidenceRequired),

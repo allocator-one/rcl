@@ -266,6 +266,57 @@ describe('source and receipt binding', () => {
     expect(await readFile(f.selection.reportJson, 'utf8')).toBe(f.text);
     await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+  it.each([
+    ['verified', undefined, 'original_verified_consensus_verification_unavailable'],
+    ['verified', 'refuted', 'original_verified_consensus_gating_inconsistent'],
+    ['verified', 'insufficient_evidence', 'original_verified_consensus_gating_inconsistent'],
+    ['none', 'confirmed', 'original_verified_consensus_gating_inconsistent'],
+    ['none', 'unrefuted', 'original_verified_consensus_gating_inconsistent'],
+    ['consensus', 'confirmed', 'original_verified_consensus_gating_inconsistent'],
+    ['critical', 'confirmed', 'original_verified_consensus_gating_inconsistent'],
+  ] as const)('refuses contradictory original %s/%s verification before HTTP', async (reason, verdict, error) => {
+    const f = await fixture(r => {
+      r.run!.rcl_version = '4.4.4';
+      r.findings[0]!.gating = { reason, ...(verdict ? { verification: { verdict } } : {}) } as never;
+      if (verdict) r.stats.verification = { model: 'openai/gpt', candidates: 1, refuted: 0, unrefuted: 0, unavailable: 0, durationMs: 12 };
+    });
+    expect(await f.preview()).toBe(2);
+    expect(JSON.parse(f.stdout.at(-1)!)).toMatchObject({ status: 'incomplete', error, stage: 'input', exit_code: 2 });
+    expect(f.requests).toEqual([]);
+    expect(await readFile(f.selection.reportJson, 'utf8')).toBe(f.text);
+    await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('preserves the historical unavailable gate through v3.5.0 but refuses it from v3.6.0', async () => {
+    const make = async (version: string) => fixture(r => {
+      r.run!.rcl_version = version;
+      r.findings[0]!.gating = { reason: 'verified', verification: { verdict: 'unavailable' } };
+      r.stats.verification = { model: 'openai/gpt', candidates: 1, refuted: 0, unrefuted: 0, unavailable: 1, durationMs: 12 };
+    });
+    const old = await make('3.5.0');
+    expect((await prepareOriginalRun(old.selection)).prepared.envelope.findings[0]).toMatchObject({
+      gating_reason: 'verified', verification_verdict: 'unavailable',
+    });
+    const newVersion = await make('3.6.0');
+    expect(await newVersion.preview()).toBe(2);
+    expect(JSON.parse(newVersion.stdout.at(-1)!)).toMatchObject({
+      status: 'incomplete', error: 'original_verified_consensus_gating_inconsistent', stage: 'input', exit_code: 2,
+    });
+    expect(newVersion.requests).toEqual([]);
+  });
+  it.each([
+    ['4.4.4', 'confirmed'],
+    ['3.5.0', 'unrefuted'],
+  ] as const)('accepts valid %s verified/%s original evidence', async (version, verdict) => {
+    const f = await fixture(r => {
+      r.run!.rcl_version = version;
+      r.findings[0]!.gating = { reason: 'verified', verification: { verdict } };
+      r.stats.verification = { model: 'openai/gpt', candidates: 1, refuted: 0,
+        unrefuted: verdict === 'unrefuted' ? 1 : 0, unavailable: 0, durationMs: 12 };
+    });
+    expect((await prepareOriginalRun(f.selection)).prepared.envelope.findings[0]).toMatchObject({
+      gating_reason: 'verified', verification_verdict: verdict,
+    });
+  });
   it('accepts zero-candidate verified-consensus and historical all-findings originals', async () => {
     const empty = await fixture(r => {
       r.findings = []; r.belowThresholdFindings = [];

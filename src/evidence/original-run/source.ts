@@ -82,6 +82,16 @@ function retainedRedactions(value: unknown, path = ''): Array<{ path: string; co
   return [];
 }
 
+/** RCL-62 first shipped in 3.6.0; earlier verifier outages could retain a blocking gate. */
+function permitsHistoricalUnavailableGate(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!version) return false;
+  const major = Number(version[1]), minor = Number(version[2]), patch = Number(version[3]);
+  return [major, minor, patch].every(Number.isSafeInteger) && major >= 1 &&
+    (major < 3 || (major === 3 && minor < 6));
+}
+
 /** The envelope builder supplies `none` for absent labels, so inspect the immutable source first. */
 function assertVerifiedConsensusSource(value: unknown): void {
   if (!value || typeof value !== 'object') return;
@@ -94,6 +104,20 @@ function assertVerifiedConsensusSource(value: unknown): void {
   const reasons = new Set<unknown>(['consensus', 'critical', 'verified', 'none']);
   if (findings.some(finding => !reasons.has(finding?.gating?.reason))) {
     throw new Error('original_verified_consensus_gating_unavailable');
+  }
+  const historicalUnavailableGate = permitsHistoricalUnavailableGate(report.run.rcl_version);
+  for (const finding of findings) {
+    const { reason, verification } = finding.gating!;
+    if (reason === 'verified' && verification === undefined) {
+      throw new Error('original_verified_consensus_verification_unavailable');
+    }
+    const verdict = verification?.verdict;
+    const consistent = reason === 'verified'
+      ? verdict === 'confirmed' || verdict === 'unrefuted' || (verdict === 'unavailable' && historicalUnavailableGate)
+      : reason === 'none'
+        ? verification === undefined || verdict === 'refuted' || verdict === 'insufficient_evidence' || verdict === 'unavailable'
+        : verification === undefined;
+    if (!consistent) throw new Error('original_verified_consensus_gating_inconsistent');
   }
   if (findings.some(finding => finding.gating?.verification !== undefined) && report.stats?.verification == null) {
     throw new Error('original_verified_consensus_verification_stats_unavailable');
