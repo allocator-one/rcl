@@ -36,6 +36,7 @@ allowed-tools:
   - Bash(command -v node)
   - Bash(realpath:*)
   - Bash(head -1:*)
+  - Bash(tr:*)
   - Bash(rcl_run:*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)

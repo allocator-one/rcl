@@ -25,6 +25,7 @@ allowed-tools:
   - Bash(command -v node)
   - Bash(realpath:*)
   - Bash(head -1:*)
+  - Bash(tr:*)
   - Bash(rcl_run:*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -152,11 +153,28 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 
 The patch and the spec are sent to several external model providers. Before running, read both as that disclosure: the local patch file; `gh pr diff <PR_NUMBER> --repo <REPO>` in PR mode (always pass `--repo` explicitly — an explicit `<REPO>#<PR_NUMBER>` target can differ from the current directory's repository, and an unscoped `gh pr diff <PR_NUMBER>` would then inspect the wrong PR); or, for `rcl review --staged` / `--working-tree`, the equivalent local diff (`git diff --no-ext-diff --no-textconv --cached` for staged, `git diff --no-ext-diff --no-textconv HEAD` for working-tree, which covers staged and unstaged together) captured to a temp file the same way step 1b does. Also read `<SPEC>` if one was resolved. Stop and tell the user if any of it contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
 
-This check and the later fetch inside `rcl review` are two separate reads of the same target: in PR mode, the PR can in principle change between them. For the default in-session review this is a narrow window (the same agent runs both steps back to back); if the gap matters for a given PR, capture and bind instead — `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` (see "Fresh review requests" above) reviews the exact patch this step inspected.
+In PR mode, capture the head alongside this check: `gh pr view <PR_NUMBER> --repo <REPO> --json headRefOid -q .headRefOid`. This check and the later fetch inside `rcl review` are two separate reads of the same target, and step 3's registry lookups (and a possible install) run between them, so the gap is not always as narrow as "the same agent runs both back to back" — a PR can pick up a genuine push in that window. Immediately before launching step 5, re-run that same `gh pr view ... -q .headRefOid` command; if the result differs from what step 2a captured, the PR moved during this check and the patch you inspected is stale — repeat step 2a against the new head before reviewing it, rather than reviewing on the strength of a disclosure check for code that is no longer what will be sent. If even that residual gap is unacceptable for a given PR, capture and bind instead — `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` (see "Fresh review requests" above) reviews the exact patch this step inspected.
 
 ### 3. Check rcl is available
 
 Always run the latest published release — never pin a version. A pin has to be bumped by hand in every copy of this skill on every release, and in practice it doesn't happen — copies have sat on versions that were several releases stale, or (worse) on a version that was never published at all, which makes review fail outright. For a reproducible run against a specific version, install that version yourself before invoking the skill and say so.
+
+**Before running anything else in this step**, drop any `PATH` entry the repository under review controls — otherwise every check below still trusts whichever `npm`, `node`, or `rcl` that entry resolves to first, no matter what `$RCL_BIN` itself turns out to be. Compute a filtered `PATH` and export it for the rest of this shell:
+
+```bash
+RCL_SAFE_PATH="" && RCL_REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)
+while IFS= read -r dir; do
+  [ -n "$dir" ] || continue
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+  case "$resolved" in "$RCL_REPO_TOP"|"$RCL_REPO_TOP"/*) continue ;; esac
+  RCL_SAFE_PATH="$RCL_SAFE_PATH:$dir"
+done <<EOF
+$(printf '%s' "$PATH" | tr ':' '\n')
+EOF
+export PATH="${RCL_SAFE_PATH#:}"
+```
+
+This resolves each `PATH` entry with `cd ... && pwd -P` (not a plain string comparison) before excluding it, because a symlinked checkout path (e.g. macOS's `/tmp` → `/private/tmp`) would otherwise let a repo-local entry slip through under its unresolved name. Read it with `while read`, not an unquoted `for dir in $PATH`: zsh does not word-split an unquoted expansion the way bash does, so that would silently iterate the whole colon-joined string as one entry and filter nothing. A directory that no longer exists or isn't readable is dropped too — harmless, since nothing can resolve through it anyway. This is the shell's live `PATH` for the remainder of this step **and if you re-run `rcl_run` from the same shell** (step 5) — repeat it in any later, separate shell invocation, since `export` does not survive into a fresh one.
 
 Resolve the latest release, its registry integrity and the installed executable's path — without running it yet:
 
@@ -212,7 +230,17 @@ Note: this repo is review-council's own source. Reviews default to the published
 
 ```bash
 rcl_run() {
-  for name in HOME PATH USER LANG LC_ALL TERM TMPDIR RCL_TELEMETRY RCL_DEBUG \
+  RCL_SAFE_PATH="" && RCL_REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+    case "$resolved" in "$RCL_REPO_TOP"|"$RCL_REPO_TOP"/*) continue ;; esac
+    RCL_SAFE_PATH="$RCL_SAFE_PATH:$dir"
+  done <<EOF
+$(printf '%s' "$PATH" | tr ':' '\n')
+EOF
+  set -- "PATH=${RCL_SAFE_PATH#:}" "$@"
+  for name in HOME USER LANG LC_ALL TERM TMPDIR RCL_TELEMETRY RCL_DEBUG \
       ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY \
       OPENAI_COMPAT_API_KEY OPENAI_COMPAT_BASE_URL HARNESS_API_TOKEN HARNESS_API_URL; do
     if value=$(printenv "$name"); then set -- "$name=$value" "$@"; fi
@@ -221,7 +249,7 @@ rcl_run() {
 }
 ```
 
-Values pass through as separate arguments, so no value is ever re-split or re-parsed by the shell. Add a variable to the list only when a configured reviewer needs it, and never add `GH_TOKEN`, `SSH_AUTH_SOCK` or cloud credentials. In PR mode pass the GitHub token as an explicit assignment after `rcl_run`, as below; a patch captured and bound to a PR with `--for-pr` (see "Fresh review requests" above) still needs one, since RCL fetches PR/GitHub state for that binding — never pass one to a bare, unbound patch-file review.
+`rcl_run` recomputes its own safe `PATH` (identically to step 3's, above) rather than forwarding the ambient one verbatim — the reviewer process it launches must not resolve `git`, `npm`, or anything else it shells out to through a repository-controlled directory either, and this function can run in a fresh shell that never saw step 3's `export`. Values otherwise pass through as separate arguments, so no value is ever re-split or re-parsed by the shell. Add a variable to the list only when a configured reviewer needs it, and never add `GH_TOKEN`, `SSH_AUTH_SOCK` or cloud credentials. In PR mode pass the GitHub token as an explicit assignment after `rcl_run`, as below; a patch captured and bound to a PR with `--for-pr` (see "Fresh review requests" above) still needs one, since RCL fetches PR/GitHub state for that binding — never pass one to a bare, unbound patch-file review.
 
 **Always write the full report to files** with `--markdown` and `--json-file`. The console output is long and the critical/important findings print at the top, so reading it off stdout — especially piped through `head`/`tail` — silently drops the most important findings. The files are the source of truth; the console is throwaway.
 
