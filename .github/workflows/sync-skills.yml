@@ -84,7 +84,7 @@ jobs:
           client-id: ${{ vars.RCL_SKILL_SYNC_APP_ID }}
           private-key: ${{ secrets.RCL_SKILL_SYNC_APP_PRIVATE_KEY }}
           owner: allocator-one
-          repositories: harness-cli,infra-one-ios,infra-one-website,browser-extension,infraone-signal-capture,docs-infra-one
+          repositories: harness-cli,infra-one-ios,browser-extension,infraone-signal-capture,docs-infra-one
           permission-contents: write
           permission-pull-requests: write
 
