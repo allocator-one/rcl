@@ -25,7 +25,7 @@ describe('generated skill files', () => {
 
   it('renders every placeholder — no markers survive into the output', () => {
     for (const { path, content } of renderAll() as Rendered[]) {
-      expect(content, path).not.toMatch(/\{\{[#/]?(PREFIX|DIR|claude|codex)\}?\}/);
+      expect(content, path).not.toMatch(/\{\{[#/]?(PREFIX|DIR|claude|codex|source|vendored)\}?\}/);
     }
   });
 
@@ -50,10 +50,15 @@ describe('generated skill files', () => {
         expect(content, path).toContain(isClaudeTarget(path) ? 'run_in_background' : 'nohup');
         continue;
       }
-      expect(content, path).toContain('rcl review <target> --guarded-converge');
+      expect(content, path).toContain('"$RCL_BIN" review <target> --guarded-converge');
       expect(content, path).not.toContain("rcl converge-attempt --target");
       expect(content, path).not.toContain('nohup');
-      expect(content, path).not.toContain('GITHUB_TOKEN=');
+      // Assert the actual launch command's shape, not just that the token string
+      // appears somewhere (which the explanatory prose alone would also satisfy).
+      expect(content, path).toMatch(/rcl_run <TOKEN_ARG> "\$RCL_BIN" review <target> --guarded-converge/);
+      expect(content, path).not.toMatch(/rcl_run GITHUB_TOKEN="\$\(gh auth token\)" "\$RCL_BIN" review <target> --guarded-converge/);
+      expect(content, path).not.toContain('rcl_run rcl review <target>');
+      expect(content, path).toContain('`<TOKEN_ARG>` is `GITHUB_TOKEN="$(gh auth token)"`');
       expect(content, path).not.toContain('--round <R> --attempt <ATTEMPT>');
       expect(content, path).toContain(isClaudeTarget(path) ? 'run_in_background: true' : 'persistent exec session');
       expect(content, path).toContain('native admitted state');

@@ -86,6 +86,33 @@ A final job, after publish, creates the GitHub Release for the tag with notes
 extracted from the matching `CHANGELOG.md` section and the tarball attached.
 Every `CHANGELOG.md` release needs a `## X.Y.Z` heading or that job fails.
 
+## Skill distribution
+
+`skills/src/rcl.md` and `skills/src/rcl-converge.md` are the only sources for
+the `rcl` and `rcl-converge` skills. `npm run build:skills` renders this
+repository's own copies under `.claude/`, `.agents/` and `.codex/`; `npm test`
+fails when they drift. Mark text that only applies inside this repository (its
+own quality gates, dogfooding the working tree) with `{{#source}}…{{/source}}`
+and give consumers repository-neutral wording in `{{#vendored}}…{{/vendored}}`.
+
+After every successful **Release**, `.github/workflows/sync-skills.yml` renders
+the vendored copies from the released tag and runs `scripts/sync-skills.mjs`,
+which opens or updates one `rcl-skill-sync` pull request in every repository in
+`skills/consumers.json`. Consumers therefore only receive skills that match a
+published CLI. The skill directories in those repositories belong to the sync:
+their own review rules go in their `AGENTS.md` or `CLAUDE.md`. allocator-one
+keeps its own, repository-specific lineage and is not a consumer.
+
+The workflow needs a GitHub App with Contents and Pull requests write access,
+installed on exactly the consumer repositories: its client ID in the
+`RCL_SKILL_SYNC_APP_ID` variable and its private key in the
+`RCL_SKILL_SYNC_APP_PRIVATE_KEY` secret. To add a consumer, add it to
+`skills/consumers.json`, to the workflow's `repositories:` list (a test keeps
+them equal) and to the app installation. To resync by hand, dispatch the
+workflow with a released tag, or run
+`GH_TOKEN=… node scripts/sync-skills.mjs --ref vX.Y.Z [--only owner/repo] [--dry-run]`
+from a checkout of that tag.
+
 ## Release announcements
 
 `.github/workflows/notify-release.yml` follows successful `Release` runs and
