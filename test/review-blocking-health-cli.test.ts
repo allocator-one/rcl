@@ -181,13 +181,13 @@ describe('rcl review and converge-report — blocking reviewer quorum (RCL-136)'
           incompleteSeats: ['b7', 'b8', 'b9', 'b10'].map((model) => ({ model: `openai-compat/${model}`, role: expect.any(String), status: 'error' })) },
       });
       expect(await loadConvergeRunState(common, target)).toMatchObject({ rounds: [], findings: {} });
-      // A rewritten copy that looks healthy is still refused: the launch recorded inconclusive health.
+      // A rewritten copy that looks healthy is still refused: it is not the launch's report.
       const forged = { ...report, reviews: report.reviews.map((row: object) => ({ ...row, status: 'success' })),
         stats: { ...report.stats, blockingHealth: undefined } };
       writeFileSync(join(repo, 'forged.json'), JSON.stringify(forged));
       const forgedAdmission = await rcl(['converge-report', '--target', target, '--round', '1', '--report', 'forged.json', '--json'], repo, env);
-      expect(forgedAdmission.status).toBe(4);
-      expect(JSON.parse(forgedAdmission.stderr).error.code).toBe('report_health_inconclusive');
+      expect(forgedAdmission.status).toBe(3);
+      expect(JSON.parse(forgedAdmission.stderr).error.message).toBe('report_launch_mismatch');
       expect(await loadConvergeRunState(common, target)).toMatchObject({ rounds: [], findings: {} });
 
       // Supported continuation: same round, one more bounded attempt, nothing reset.

@@ -162,6 +162,10 @@ export function assertAdmissibleReportHealth(report: Pick<ReviewResult, 'reviews
     if (!Array.isArray(report.reviews)) throw new Error('report has no reviews array');
     const fraction = recorded === undefined ? DEFAULT_QUORUM_FRACTION : (recorded as { fraction?: unknown }).fraction;
     if (typeof fraction !== 'number') throw new Error('recorded blocking health has no fraction');
+    // Only a report without a run header predates rosters; a header must name its seats.
+    if (report.run !== undefined && (!Array.isArray(report.run?.roster) || report.run.roster.length === 0)) {
+      throw new Error('run header has no roster');
+    }
     health = deriveBlockingHealth({ roster: report.run?.roster ?? [], reviews: report.reviews, fraction });
     if (recorded !== undefined && !isDeepStrictEqual(recorded, summarizeBlockingHealth(health))) {
       throw new Error('recorded blocking health does not match the report rows');

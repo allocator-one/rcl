@@ -193,7 +193,8 @@ export async function runReviews(
   // blocking roster is required and no call, secondary included, is canceled.
   const policy = options.quorum && (options.quorum.fraction ?? 2 / 3) < 1
     ? resolveQuorumPolicy(expected.size, options.quorum.fraction) : undefined;
-  if (options.quorum) resolveQuorumPolicy(expected.size, options.quorum.fraction);
+  // Validation only: an unsupported fraction must still throw when it disables closure.
+  if (options.quorum && !policy) resolveQuorumPolicy(expected.size, options.quorum.fraction);
   const successfulChunks = new Map<string, number>();
   let successfulSeats = 0;
   function countSuccess(index: number): void {

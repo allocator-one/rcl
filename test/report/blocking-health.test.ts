@@ -212,6 +212,15 @@ describe('blocking reviewer health (RCL-136)', () => {
     }
   });
 
+  it('refuses a run header without a roster instead of treating secondary rows as blocking', () => {
+    const value = report([...seats(11, 'blocking', ['success']), ...seats(6, 'blocking', ['timeout'], 'slow'), ...seats(4, 'secondary', ['success'])]);
+    delete value.stats.blockingHealth;
+    for (const roster of [[], undefined]) {
+      expect(() => assertAdmissibleReportHealth({ ...value, run: { ...value.run, roster } as never }))
+        .toThrow(expect.objectContaining({ code: 'report_health_unverifiable' }));
+    }
+  });
+
   it('refuses rows without a model, role or known status', () => {
     for (const row of [{ role: 'general', status: 'success' }, { model: 'm', role: ' ', status: 'success' }, { model: 'm', role: 'r', status: 'done' }]) {
       const value = report(seats(3, 'blocking', ['success']));

@@ -260,6 +260,11 @@ describe('native guarded review launch', () => {
     await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1, findings: [sampleFinding()],
       runId: completion.runId, reportSha256: completion.reportJsonSha256 })).rejects.toThrow('report_health_inconclusive');
     expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ rounds: [], findings: {} });
+    // Other bytes or another round for the same run are a launch mismatch, not a health verdict.
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1, findings: [],
+      runId: completion.runId, reportSha256: 'd'.repeat(64) })).rejects.toThrow('report_launch_mismatch');
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 2, findings: [],
+      runId: completion.runId, reportSha256: completion.reportJsonSha256 })).rejects.toThrow('report_launch_mismatch');
     const fresh = options;
     await expect(guardReviewLaunch(fresh)).rejects.toThrow('infrastructure_failure');
     fresh.run = vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000003',

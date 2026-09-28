@@ -405,12 +405,15 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const { hasHealthyGuardedLaunch } = await import('./launch-guard.js');
   // A guarded launch that recorded inconclusive blocking health is never
   // admitted, whatever its aggregate counters say (RCL-136).
-  if (state.lastLaunch?.status === 'completed' && state.lastLaunch.reviewerHealth !== undefined &&
-    state.lastLaunch.runId === runId && !hasHealthyGuardedLaunch(state.lastLaunch)) {
-    throw new ConvergeRunStateError('report_health_inconclusive');
+  const launch = state.lastLaunch;
+  if (launch?.status === 'completed' && launch.reviewerHealth !== undefined && launch.runId === runId) {
+    // The run's own report bytes and round, or nothing: a rewritten copy is not admissible evidence.
+    if (launch.round !== options.round || launch.reportJsonSha256 !== options.reportSha256) {
+      throw new ConvergeRunStateError('report_launch_mismatch');
+    }
+    if (!hasHealthyGuardedLaunch(launch)) throw new ConvergeRunStateError('report_health_inconclusive');
   }
   if (state.cycle) {
-    const launch = state.lastLaunch;
     if (!launch || launch.status !== 'completed' || !hasHealthyGuardedLaunch(launch) ||
       launch.runId !== runId || launch.reportJsonSha256 !== options.reportSha256 || launch.round !== options.round) {
       throw new ConvergeRunStateError('review_cycle_launch_mismatch');

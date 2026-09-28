@@ -53,6 +53,7 @@ afterEach(() => {
 const healthyReviews = ['m1', 'm2'].map((model) => ({
   model, role: 'general', provider: 'test', findings: [], durationMs: 1, status: 'success',
 }));
+const healthyRoster = healthyReviews.map(({ model, role, provider }) => ({ model, role, provider, lane: 'blocking' }));
 
 describe('converge-report identity collision', () => {
   it('reports the collision as a structured native blocker without persisting a round', () => {
@@ -100,7 +101,7 @@ describe('converge-verdict severity telemetry', () => {
       if (reversed) findings.reverse();
       const report = join(repo, 'report.json');
       const runId = sampleRunHeader().id;
-      writeFileSync(report, JSON.stringify({ run: { id: runId, converge: { target: 'severity-test', round: 1 } }, reviews: healthyReviews, findings }));
+      writeFileSync(report, JSON.stringify({ run: { id: runId, roster: healthyRoster, converge: { target: 'severity-test', round: 1 } }, reviews: healthyReviews, findings }));
       const env = { PATH: process.env['PATH'], HOME: repo, XDG_CONFIG_HOME: join(repo, 'config'),
         GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice, RCL_DATA_DIR: join(repo, 'account'),
         HARNESS_API_TOKEN: 'synthetic-test-token', HARNESS_API_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
@@ -121,7 +122,7 @@ describe('converge-verdict severity telemetry', () => {
 
       const laterReport = join(repo, 'later-report.json');
       writeFileSync(laterReport, JSON.stringify({ run: { id: '019921a0-0000-7000-8000-000000000002',
-        converge: { target: 'severity-test', round: 2 } }, reviews: healthyReviews, findings: [sampleFinding()] }));
+        roster: healthyRoster, converge: { target: 'severity-test', round: 2 } }, reviews: healthyReviews, findings: [sampleFinding()] }));
       await run(['converge-report', '--report', laterReport], 2);
       await run(['converge-verdict', '--dismissed', `${key}=original critical evidence reviewed`]);
       expect(events.filter((event) => event.kind === 'verdicts_recorded').at(-1)).toMatchObject({ run_id: runId,
