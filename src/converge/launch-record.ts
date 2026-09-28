@@ -27,7 +27,9 @@ export const completionSchema = z.object({
 }).refine(value => value.successfulReviews <= value.totalReviews)
   .refine(value => value.reviewerHealth === undefined ||
     (value.reviewerHealth.policy.seatCount <= value.totalReviews &&
-      value.reviewerHealth.successfulSeats <= value.successfulReviews),
+      value.reviewerHealth.successfulSeats <= value.successfulReviews &&
+      value.reviewerHealth.policy.seatCount - value.reviewerHealth.successfulSeats <=
+        value.totalReviews - value.successfulReviews),
   'Blocking reviewer health must be a subset of aggregate review counts');
 
 export const launchSchema = z.object({

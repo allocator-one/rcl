@@ -33,7 +33,7 @@ describe('guarded launch blocking health', () => {
   });
 
   it.each([
-    [6, 10, 11, 15],
+    [6, 10, 11, 16],
     [11, 17, 12, 18],
     [2, 3, 2, 3],
   ] as const)('accepts blocking %i/%i as a subset of aggregate %i/%i',
@@ -47,6 +47,7 @@ describe('guarded launch blocking health', () => {
   it.each([
     ['blocking seats exceed all reviews', 6, 16, 11, 15],
     ['blocking successes exceed all successes', 6, 10, 5, 15],
+    ['blocking failures exceed aggregate failures', 0, 17, 17, 18],
   ] as const)('refuses %s in completion and persisted launch',
     (_label, successfulSeats, seatCount, successfulReviews, totalReviews) => {
       const value = { ...completed, successfulReviews, totalReviews,
