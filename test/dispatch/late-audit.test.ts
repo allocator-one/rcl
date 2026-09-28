@@ -225,7 +225,7 @@ describe('executor late paid-attempt attribution', () => {
       const audit = createCheckpointLateAudit({ commonDir: input.commonDir, journal, ownership, onError: errors });
       const adapter = vi.fn((model: string) => { calls++; if (calls === 2) started.resolve();
         return model === 'fake/model-1' ? late.promise : new Promise<ModelReview>(() => {}); });
-      const running = recoverReviewerAssignments({ ...input, journal, ownership, signal: controller.signal,
+      const running = recoverReviewerAssignments({ ...input, journal, ownership, concurrency: 2, signal: controller.signal,
         auditLateAttempt: async (raw: ModelReview, index: number, paid: PaidAttempt) => { await audit.accept(raw, index, paid); observed.resolve(); },
         auditLateReview: legacy, onLateAuditError: errors,
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: adapter, ask: vi.fn() }) } as ReviewerRecoveryOptions);

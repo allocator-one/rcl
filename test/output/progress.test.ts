@@ -79,6 +79,20 @@ describe('council run planning', () => {
     }
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'rejects non-finite global concurrency %s before wave simulation',
+    concurrency => {
+      expect(() => buildCouncilRunPlan({
+        totalCalls: 1,
+        reviewers: 1,
+        chunks: 1,
+        concurrency,
+        timeoutMs: 1_000,
+        providers: ['openai'],
+      })).toThrow('Invalid review concurrency');
+    },
+  );
+
   it.each(['constructor', 'toString', '__proto__'])(
     'uses the global cap for an uncapped prototype-key provider %s',
     provider => {

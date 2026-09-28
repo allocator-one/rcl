@@ -102,7 +102,7 @@ describe('captured original council execution', () => {
   });
 
   it('retains a late original response under its physical intent without changing sealed health or proof', async () => {
-    const commonDir = await directory(), f = fixture(3, 3);
+    const commonDir = await directory(), f = fixture(3, 2);
     await withNativeTarget(commonDir, target, async ownership => {
       const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
       const onError = vi.fn(), audit = createCheckpointLateAudit({ commonDir, journal, ownership, onError });
