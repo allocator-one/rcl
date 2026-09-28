@@ -52,8 +52,9 @@ export function createCheckpointLateAudit(options: {
   }
   async function drain(): Promise<void> {
     while (pending.size > 0) await Promise.all([...pending]);
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError([...errors], 'late_audit_failed');
+    const retainedErrors = errors.splice(0);
+    if (retainedErrors.length === 1) throw retainedErrors[0];
+    if (retainedErrors.length > 1) throw new AggregateError(retainedErrors, 'late_audit_failed');
     if (buffered.length > 0) throw new Error('late_audit_requires_finalization');
   }
   return Object.freeze({
@@ -84,7 +85,13 @@ export function createCheckpointLateAudit(options: {
       await assertNativeTargetOwnership(ownership, commonDir, plan.target);
       if (!(await journal.read()).finalized) throw new Error('late_audit_requires_finalization');
       active = true;
-      for (const observation of buffered.splice(0)) void write(observation);
+      const batch = buffered.splice(0);
+      let failedAt = -1;
+      for (let index = 0; index < batch.length; index += 1) {
+        try { await write(batch[index]!); }
+        catch { failedAt = index; break; }
+      }
+      if (failedAt >= 0) buffered.unshift(...batch.slice(failedAt));
       await drain();
     },
     drain,

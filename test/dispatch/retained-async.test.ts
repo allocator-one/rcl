@@ -7,7 +7,7 @@ vi.mock('node:child_process', async importOriginal => ({
   spawn,
 }));
 
-import { launchRetainedAsyncWorkers } from '../../src/dispatch/retained-async.js';
+import { launchRetainedAsyncWorkers, MAX_ASYNC_DELEGATE_BYTES } from '../../src/dispatch/retained-async.js';
 import type { AsyncDelegate } from '../../src/dispatch/checkpoint-async-store.js';
 
 function delegate(): AsyncDelegate {
@@ -58,5 +58,16 @@ describe('retained async worker launch accounting', () => {
     failed.emit('spawn');
     failed.stdin.emit('error', new Error('synthetic stdin failure'));
     expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['oversized', () => ({ ...delegate(), token: 'b'.repeat(MAX_ASYNC_DELEGATE_BYTES) })],
+    ['nonserializable', () => { const value = delegate() as AsyncDelegate & { self?: unknown }; value.self = value; return value; }],
+  ])('validates every delegate before spawning any worker when a later one is %s', async (_kind, invalid) => {
+
+    await expect(launchRetainedAsyncWorkers([delegate(), invalid()], vi.fn(), '/tmp/rcl.js'))
+      .rejects.toThrow('retained_async_invalid_delegation');
+
+    expect(spawn).not.toHaveBeenCalled();
   });
 });

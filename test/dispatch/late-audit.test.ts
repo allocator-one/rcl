@@ -105,7 +105,7 @@ describe('owned late-result coordinator', () => {
     })).rejects.toThrow('checkpoint_late_missing_intent');
   });
 
-  it('retains byte-conflict errors after notification, including repeated drains', async () => {
+  it('surfaces a byte-conflict error once after notification', async () => {
     const input = await fixture(), errors = vi.fn();
     await expect(withNativeTarget(input.commonDir, target, async ownership => {
       const journal = await CheckpointJournal.create({ ...input, namespace: 'conflict', ownership });
@@ -114,7 +114,7 @@ describe('owned late-result coordinator', () => {
       const writes = await Promise.allSettled([audit.accept(review(), 0, attempt()), audit.accept(review(0, 'error'), 0, attempt())]);
       expect(writes.map(write => write.status)).toEqual(['fulfilled', 'rejected']);
       await expect(audit.drain()).rejects.toThrow('checkpoint_late_conflict');
-      await expect(audit.drain()).rejects.toThrow('checkpoint_late_conflict');
+      await expect(audit.drain()).resolves.toBeUndefined();
       expect(errors).toHaveBeenCalledTimes(1); expect(errors.mock.calls[0]?.[1]).toBe(0);
       expect((await journal.readLateAudit())[0]?.reviewBytes).toBe(JSON.stringify(review()));
     })).rejects.toThrow('checkpoint_late_conflict');
@@ -131,6 +131,31 @@ describe('owned late-result coordinator', () => {
       await expect(audit.accept(review(), 0, attempt())).rejects.toBe(writeError);
       await expect(audit.drain()).rejects.toMatchObject({ errors: [writeError, sinkError] });
       expect(sink).toHaveBeenCalledWith(writeError, 0);
+    });
+  });
+
+  it('retries failed buffered writes in observation order without loss or duplication', async () => {
+    const input = await fixture(), writeError = new Error('synthetic buffered write failure'), errors = vi.fn();
+    await withNativeTarget(input.commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ ...input, namespace: 'buffered-retry', ownership });
+      await journal.recordIntent('s0:0', attempt('original-0'), ownership);
+      await journal.recordIntent('s1:0', attempt('original-1'), ownership);
+      const audit = createCheckpointLateAudit({ commonDir: input.commonDir, journal, ownership, onError: errors });
+      await audit.accept(review(0), 0, attempt('original-0'));
+      await audit.accept(review(1), 1, attempt('original-1'));
+      await journal.finalize(ownership);
+      const write = vi.spyOn(journal, 'recordLateResult').mockRejectedValueOnce(writeError);
+
+      await expect(audit.flushAfterFinalization()).rejects.toBe(writeError);
+      expect(await journal.readLateAudit()).toEqual([]);
+
+      await audit.flushAfterFinalization();
+      await audit.drain();
+      expect(write).toHaveBeenCalledTimes(3);
+      expect((await journal.readLateAudit()).map(row => row.reviewBytes)).toEqual([
+        JSON.stringify(review(0)), JSON.stringify(review(1)),
+      ]);
+      expect(errors).toHaveBeenCalledExactlyOnceWith(writeError, 0);
     });
   });
 

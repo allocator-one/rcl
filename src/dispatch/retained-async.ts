@@ -21,8 +21,13 @@ export async function readRetainedAsyncInput(stream: AsyncIterable<Uint8Array | 
 /** Launch the existing detached lifecycle with only a restricted same-checkpoint capability. */
 export async function launchRetainedAsyncWorkers(delegates: readonly AsyncDelegate[], onError: () => void,
   cliScript = fileURLToPath(new URL('../index.js', import.meta.url))): Promise<number> {
-  const launches = delegates.map(async delegate => {
-    const bytes = JSON.stringify(delegate); if (Buffer.byteLength(bytes) > MAX_ASYNC_DELEGATE_BYTES) refuse();
+  const payloads = delegates.map(delegate => {
+    let bytes: string | undefined;
+    try { bytes = JSON.stringify(delegate); } catch { refuse(); }
+    if (typeof bytes !== 'string' || Buffer.byteLength(bytes) > MAX_ASYNC_DELEGATE_BYTES) refuse();
+    return bytes;
+  });
+  const launches = payloads.map(async bytes => {
     let errorReported = false;
     const reportErrorOnce = () => { if (!errorReported) { errorReported = true; onError(); } };
     try {
