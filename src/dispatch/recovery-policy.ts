@@ -153,10 +153,13 @@ export function previewReviewerRecovery(
     reachableCallCost += missing.length;
   }
   const potentialSuccessfulSeats = successfulSeats + budgetReachable.length;
+  const recoverableSuccessfulSeats = successfulSeats + recoverable.length;
   const conclusive = hasSuccessfulQuorum(resolved, successfulSeats);
   const nextAction: RecoveryPreview['nextAction'] = conclusive ? 'build_report'
     : limits.remainingMs <= 0 ? 'time_limit'
     : remainingCalls === 0 ? 'call_limit'
+    : potentialSuccessfulSeats < resolved.minimumSuccessful &&
+        recoverableSuccessfulSeats >= resolved.minimumSuccessful ? 'call_limit'
     : potentialSuccessfulSeats < resolved.minimumSuccessful ? 'inspect_blocked_assignments'
     : 'retry_missing_assignments';
   return {

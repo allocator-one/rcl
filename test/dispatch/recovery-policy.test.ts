@@ -63,15 +63,16 @@ describe('missing reviewer recovery policy', () => {
     expect(plan.eligibleCallIndices).toEqual([7]);
   });
 
-  it('fails closed at M-1 when a multichunk seat cannot fit the remaining call budget', () => {
+  it('reports the call limit at M-1 when a multichunk seat cannot fit the remaining budget', () => {
     const matrix = cells(3, 2), history = attempts(matrix, 1);
     const plan = previewReviewerRecovery(matrix, history, resolveQuorumPolicy(3),
       { ...limits, maxAdditionalCalls: 1 });
     expect(plan.successfulSeats).toBe(1);
     expect(plan.successesNeeded).toBe(1);
     expect(plan.potentialSuccessfulSeats).toBe(1);
-    expect(plan.nextAction).toBe('inspect_blocked_assignments');
+    expect(plan.nextAction).toBe('call_limit');
     expect(plan.eligibleCallIndices).toEqual([]);
+    expect(plan.blockedCells).toEqual([]);
   });
 
   it('keeps known permanent and uncertain attempts out of dispatch, without counting either as success', () => {
