@@ -82,6 +82,18 @@ function retainedRedactions(value: unknown, path = ''): Array<{ path: string; co
   return [];
 }
 
+/** The envelope builder supplies `none` for absent labels, so inspect the immutable source first. */
+function assertVerifiedConsensusSource(report: ReviewResult): void {
+  if (report.run?.gating.mode !== 'verified-consensus') return;
+  const findings = [...report.findings, ...(report.belowThresholdFindings ?? [])];
+  if (findings.some(finding => finding.gating?.reason === undefined)) {
+    throw new Error('original_verified_consensus_gating_unavailable');
+  }
+  if (findings.some(finding => finding.gating?.verification !== undefined) && report.stats?.verification == null) {
+    throw new Error('original_verified_consensus_verification_stats_unavailable');
+  }
+}
+
 /** Rebuild only the reviewed transport interpretation; artifact strings remain exact originals. */
 export async function prepareOriginalRun(input: unknown): Promise<{ prepared: PreparedOriginal; artifacts: ArtifactBytes }> {
   const parsed = selectionSchema.safeParse(input);
@@ -107,6 +119,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   const decoded = decodeOriginalReport(json.text, { ...(selection.originalProse ? { originalProse: selection.originalProse as OriginalProseMode } : {}) });
   if (!originalRunReportSchema.safeParse(decoded.value).success) throw new Error('unsupported_original_report');
   const report = decoded.value as ReviewResult & { run: NonNullable<ReviewResult['run']> };
+  assertVerifiedConsensusSource(report);
   if (report.reviews.some(r => r.findings.length > 2000 || r.findings.some(f => !originalRawFindingSchema.safeParse(f).success))) throw new Error('unsupported_original_reviewer_finding');
   if (requiresArtifactRedaction(decoded.value)) throw new Error('original_artifact_requires_redaction');
   const redactions = retainedRedactions(decoded.value);

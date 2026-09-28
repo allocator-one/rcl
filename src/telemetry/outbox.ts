@@ -1,7 +1,8 @@
-import { mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'fs/promises';
 import { join, resolve, sep } from 'path';
 import { resolveDataDir } from '../config/data-dir.js';
-import type { ArtifactKind, RunEnvelope } from './envelope.js';
+import { sha256Hex, type ArtifactKind, type RunEnvelope } from './envelope.js';
+import { MAX_ARTIFACT_BYTES, validateRunEnvelope } from './envelope-validation.js';
 import { buildEvent, type WireEvent } from './events.js';
 import type { HarnessSink, RequestOptions } from './sink.js';
 
@@ -49,6 +50,56 @@ export const INTERRUPTED_SPOOL_MS = 10 * 60 * 1000;
 const ARTIFACT_FILES: Record<ArtifactKind, string> = { report_json: 'report_json.json', report_md: 'report_md.md' };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENTRY_ID = /^(?:events-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GATING_REASONS = new Set(['consensus', 'critical', 'verified', 'none']);
+
+/** 4.4.5 is the first release with the original-report check and this queued replay guard. */
+function hasGuardedProducer(version: unknown): boolean {
+  if (typeof version !== 'string') return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:\+[\w.-]+)?$/.exec(version);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  if (![major, minor, patch].every(Number.isSafeInteger)) return false;
+  return major! > 4 || (major === 4 && (minor! > 4 || (minor === 4 && patch! >= 5)));
+}
+
+/** Check the immutable report; an older builder could turn an absent label into wire `none`. */
+function verifiedConsensusReportProblem(report: unknown, envelope: RunEnvelope): string | undefined {
+  if (!isRecord(report) || !isRecord(report['run']) || !isRecord(report['run']['gating']) ||
+      report['run']['id'] !== envelope.run.id || report['run']['rcl_version'] !== envelope.run.rcl_version ||
+      report['run']['gating']['mode'] !== 'verified-consensus') {
+    return 'report_json does not match the queued verified-consensus run';
+  }
+  if (!Array.isArray(report['findings']) ||
+      (report['belowThresholdFindings'] !== undefined && !Array.isArray(report['belowThresholdFindings']))) {
+    return 'report_json findings are missing or malformed';
+  }
+  const groups = [
+    ['findings', report['findings']],
+    ['belowThresholdFindings', report['belowThresholdFindings'] ?? []],
+  ] as const;
+  const sourceFindings = groups.flatMap(([, findings]) => findings);
+  // `envelope` telemetry omits rows entirely, even when the report has findings.
+  const hasWireFindings = envelope.findings.length > 0;
+  if (hasWireFindings && sourceFindings.length !== envelope.findings.length) return 'report_json finding count differs from the queued envelope';
+  let hasVerification = false;
+  let wireIndex = 0;
+  for (const [group, findings] of groups) {
+    for (const [index, finding] of findings.entries()) {
+      if (!isRecord(finding) || !isRecord(finding['gating']) || !GATING_REASONS.has(finding['gating']['reason'] as string)) {
+        return `${group}.${index}.gating.reason missing or invalid in report_json`;
+      }
+      if (finding['gating']['verification'] !== undefined) hasVerification = true;
+      const wire = envelope.findings[wireIndex++];
+      if (hasWireFindings && (wire?.gating_reason !== finding['gating']['reason'] || wire?.below_threshold !== (group === 'belowThresholdFindings'))) {
+        return `${group}.${index}.gating.reason differs from the queued envelope`;
+      }
+    }
+  }
+  if (hasVerification && (!isRecord(report['stats']) || report['stats']['verification'] == null)) {
+    return 'stats.verification missing for annotated candidates in report_json';
+  }
+  return undefined;
+}
 
 export class OutboxError extends Error {
   constructor(message: string) {
@@ -144,6 +195,36 @@ async function readJson<T>(path: string): Promise<ReadResult<T>> {
     return { kind: 'ok', value: JSON.parse(raw) as T, raw };
   } catch {
     return { kind: 'malformed' };
+  }
+}
+
+/** Read no more than the declared artifact bytes, including if a file grows after stat. */
+async function readBoundedJson<T>(path: string, limit: number): Promise<ReadResult<T> | { kind: 'oversized' }> {
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    file = await open(path, 'r');
+    if ((await file.stat()).size > limit) return { kind: 'oversized' };
+    const chunks: Buffer[] = [];
+    let size = 0;
+    while (true) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, limit - size + 1));
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      if (size > limit) return { kind: 'oversized' };
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    const raw = Buffer.concat(chunks, size).toString('utf8');
+    try {
+      return { kind: 'ok', value: JSON.parse(raw) as T, raw };
+    } catch {
+      return { kind: 'malformed' };
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
+    return { kind: 'error', reason: err instanceof Error ? err.message : String(err) };
+  } finally {
+    await file?.close().catch(() => undefined);
   }
 }
 
@@ -535,6 +616,29 @@ export class Outbox {
       }
       const envelope = read.value;
       envelope.delivery = { mode: 'retried', spooled_at: meta.spooled_at };
+      if (envelope.run.gating?.mode === 'verified-consensus') {
+        const invalid = validateRunEnvelope(envelope);
+        if (invalid.length > 0) return this.markFailed(dir, `queued verified-consensus envelope invalid: ${invalid[0]!.path}`);
+        const declared = envelope.artifacts_declared.find(artifact => artifact.kind === 'report_json')!;
+        const report = await readBoundedJson<unknown>(
+          join(dir, ARTIFACTS_DIR, ARTIFACT_FILES.report_json), Math.min(declared.bytes, MAX_ARTIFACT_BYTES)
+        );
+        if (report.kind === 'error') {
+          await remember(`report_json unreadable: ${report.reason}`);
+          return { kind: 'retry' };
+        }
+        if (report.kind === 'oversized') return this.markFailed(dir, 'report_json exceeds declared or maximum artifact bytes');
+        if (report.kind === 'malformed') return this.markFailed(dir, 'report_json malformed; verified-consensus source cannot be checked');
+        if (report.kind === 'ok') {
+          if (declared.sha256 !== sha256Hex(report.raw) || declared.bytes !== Buffer.byteLength(report.raw, 'utf8')) {
+            return this.markFailed(dir, 'report_json digest or size differs from the queued envelope');
+          }
+          const problem = verifiedConsensusReportProblem(report.value, envelope);
+          if (problem) return this.markFailed(dir, problem);
+        } else if (!hasGuardedProducer(envelope.run.rcl_version)) {
+          return this.markFailed(dir, 'report_json unavailable; queued verified-consensus producer or envelope cannot prove original gating labels');
+        }
+      }
       if (pastDeadline()) return { kind: 'deadline' };
       const outcome = await sink.postRun(envelope, request());
       switch (outcome.kind) {

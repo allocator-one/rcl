@@ -248,7 +248,8 @@ describe('telemetry delivery', () => {
   it('spools when Harness is unreachable and exits 4 under --evidence-required; a later flush delivers it as retried', async () => {
     const down = await runtime(() => new TypeError('fetch failed'));
     const result = sampleResult();
-    const outcome = await deliverRun(down.rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    const artifacts = { report_json: JSON.stringify(result), report_md: ARTIFACTS.report_md };
+    const outcome = await deliverRun(down.rt, { result, artifacts, evidenceRequired: true });
     expect(outcome.status).toBe('spooled');
     expect(outcome.exitCode).toBe(EVIDENCE_REQUIRED_EXIT_CODE);
     expect(outcome.line).toMatch(/^Evidence spooled \(Harness unreachable: TypeError: fetch failed\); run rcl telemetry flush/);
@@ -265,7 +266,9 @@ describe('telemetry delivery', () => {
 
   it('flushes at command start, bounded, and says how many it delivered', async () => {
     const down = await runtime(() => new TypeError('fetch failed'));
-    await deliverRun(down.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result), report_md: ARTIFACTS.report_md };
+    await deliverRun(down.rt, { result, artifacts });
     lines = [];
     const up = await runtime(acceptEverything);
     await flushOutboxAtStart(up.rt, 5_000);
@@ -275,7 +278,9 @@ describe('telemetry delivery', () => {
 
   it('settles a startup flush against an endpoint that never answers, within the deadline', async () => {
     const down = await runtime(() => new TypeError('fetch failed'));
-    await deliverRun(down.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result), report_md: ARTIFACTS.report_md };
+    await deliverRun(down.rt, { result, artifacts });
     const hanging = await runtime(() => 'hang');
     // The 300 ms deadline is what lets this settle at all: a hanging request
     // with no bound would hit the test's own timeout instead.

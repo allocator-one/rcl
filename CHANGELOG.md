@@ -1,14 +1,18 @@
 # Changelog
 
-## 4.4.4 - 2026-09-28
+## Unreleased
+
+## 4.4.5 - 2026-09-28
 
 - Give verified-consensus reviews a ten-minute default verification pass so
   large candidate queues can finish; explicit per-project limits still apply
   (RCL-147).
 - Refuse to publish verified-consensus evidence when the verifier leaves
-  findings without gating annotations. Retain the original report locally so
-  Harness cannot mistake an incomplete review for zero actionable findings
-  (RCL-147).
+  findings without gating annotations. Guard direct delivery, old outbox
+  entries, and explicit recovery while retaining original evidence, so Harness
+  cannot mistake an incomplete review for zero actionable findings (RCL-147).
+
+## 4.4.4 - 2026-09-28
 
 - Sync the `rcl` and `rcl-converge` skills into consumer repositories: after every
   successful Release, the new Sync skills workflow renders vendored copies from the

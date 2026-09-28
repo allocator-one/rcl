@@ -240,6 +240,30 @@ describe('source and receipt binding', () => {
     expect(await f.preview()).toBe(2);
     expect(f.requests).toEqual([]);
   });
+  it('refuses a quarantined verified-consensus report with missing original labels before HTTP', async () => {
+    const f = await fixture(r => { delete r.findings[0]!.gating; });
+    expect(await f.preview()).toBe(2);
+    expect(JSON.parse(f.stdout.at(-1)!)).toMatchObject({
+      status: 'incomplete', error: 'original_verified_consensus_gating_unavailable', stage: 'input', exit_code: 2,
+    });
+    expect(f.requests).toEqual([]);
+    expect(await readFile(f.selection.reportJson, 'utf8')).toBe(f.text);
+    await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readdir(join(f.dir, 'data'))).toEqual([]);
+  });
+  it('accepts zero-candidate verified-consensus and historical all-findings originals', async () => {
+    const empty = await fixture(r => {
+      r.findings = []; r.belowThresholdFindings = [];
+      r.stats.totalDeduped = 0; r.stats.belowThreshold = 0;
+    });
+    expect((await prepareOriginalRun(empty.selection)).prepared.envelope.findings).toEqual([]);
+    const allFindings = await fixture(r => {
+      r.run!.gating.mode = 'all-findings';
+      delete r.findings[0]!.gating;
+      delete r.belowThresholdFindings![0]!.gating;
+    });
+    expect((await prepareOriginalRun(allFindings.selection)).prepared.envelope.findings).toHaveLength(2);
+  });
 });
 
 describe('receipt-aware original delivery', () => {

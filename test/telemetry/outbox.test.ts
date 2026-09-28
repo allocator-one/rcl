@@ -1,12 +1,13 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, truncate, utimes, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildRunEnvelope, type RunEnvelope } from '../../src/telemetry/envelope.js';
+import { MAX_ARTIFACT_BYTES } from '../../src/telemetry/envelope-validation.js';
 import { buildEvent, type WireEvent } from '../../src/telemetry/events.js';
 import { Outbox, OutboxError } from '../../src/telemetry/outbox.js';
 import type { HarnessSink, SinkOutcome } from '../../src/telemetry/sink.js';
-import { sampleResult } from './fixtures.js';
+import { sampleResult, sampleRunHeader } from './fixtures.js';
 
 const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
 const OTHER_RUN = '019921a0-0000-7000-8000-000000000002';
@@ -45,6 +46,9 @@ describe('Outbox', () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'rcl-outbox-'));
     envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
+    // Most outbox tests exercise transport behavior with synthetic artifact
+    // bytes, so keep those fixtures in the compatible all-findings mode.
+    envelope.run.gating.mode = 'all-findings';
   });
 
   afterEach(async () => {
@@ -53,6 +57,7 @@ describe('Outbox', () => {
 
   it('spools a run and delivers it later as a retried delivery with its original id', async () => {
     const result = sampleResult();
+    result.run!.gating.mode = 'all-findings';
     result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The early branch returns.' } };
     envelope = buildRunEnvelope(result, ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });
     const outbox = new Outbox(dir);
@@ -77,6 +82,95 @@ describe('Outbox', () => {
     expect(calls[1]!.args).toEqual([envelope.run.id, 'report_json', ARTIFACTS.report_json]);
     expect((calls[3]!.args[0] as WireEvent[])[0]!.id).toBe(events[0]!.id);
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  it.each([
+    ['4.4.4', 'findings'], ['4.4.4', 'belowThresholdFindings'],
+    ['4.4.5', 'findings'], ['4.4.5', 'belowThresholdFindings'],
+  ] as const)('keeps a %s envelope whose retained %s report label is missing, without HTTP', async (version, group) => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: version }) });
+    report[group]![0]!.gating = undefined;
+    const bytes = JSON.stringify(report);
+    const queued = buildRunEnvelope(report, { report_json: bytes }, { level: 'full', delivery: { mode: 'direct' } });
+    const outbox = new Outbox(dir);
+    const event = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: queued.run.id, payload: {} });
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued, artifacts: { report_json: bytes }, events: [event] });
+
+    const { sink, calls } = fakeSink({});
+    const first = await outbox.flush(sink);
+    expect(first.failed).toEqual([{ id: queued.run.id, reason: expect.stringContaining(`${group}.0.gating.reason`) }]);
+    expect(calls).toEqual([]);
+    expect(await outbox.flush(sink)).toMatchObject({ failed: first.failed });
+    expect(calls).toEqual([]);
+    expect(await readFile(join(dir, queued.run.id, 'artifacts', 'report_json.json'), 'utf8')).toBe(bytes);
+    expect(await readFile(join(dir, queued.run.id, 'envelope.json'), 'utf8')).toContain('"gating_reason": "none"');
+    expect((await outbox.list())[0]).toMatchObject({ events: 1, failed: { reason: expect.stringContaining(`${group}.0.gating.reason`) } });
+  });
+
+  it('accepts an old verified-consensus envelope when retained report labels are complete', async () => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: '4.4.4' }) });
+    const bytes = JSON.stringify(report);
+    const queued = buildRunEnvelope(report, { report_json: bytes }, { level: 'full', delivery: { mode: 'direct' } });
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued, artifacts: { report_json: bytes } });
+
+    const { sink, calls } = fakeSink({});
+    expect((await outbox.flush(sink)).delivered).toEqual([queued.run.id]);
+    expect(calls.map(call => call.method)).toEqual(['postRun', 'putArtifact']);
+  });
+
+  it('retains an oversized queued report and its events without reading or posting the artifact', async () => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: '4.4.4' }) });
+    const bytes = JSON.stringify(report);
+    const queued = buildRunEnvelope(report, { report_json: bytes }, { level: 'full', delivery: { mode: 'direct' } });
+    const event = buildEvent({ kind: 'round_processed', convergeTarget: 't', round: 1, runId: queued.run.id, payload: {} });
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued, artifacts: { report_json: bytes }, events: [event] });
+    const path = join(dir, queued.run.id, 'artifacts', 'report_json.json');
+    await truncate(path, MAX_ARTIFACT_BYTES + 1);
+
+    const { sink, calls } = fakeSink({});
+    const summary = await outbox.flush(sink);
+    expect(summary.failed).toEqual([{ id: queued.run.id, reason: expect.stringContaining('report_json exceeds') }]);
+    expect(calls).toEqual([]);
+    expect((await stat(path)).size).toBe(MAX_ARTIFACT_BYTES + 1);
+    expect((await outbox.list())[0]).toMatchObject({ events: 1, failed: { reason: expect.stringContaining('report_json exceeds') } });
+    expect(await readFile(join(dir, queued.run.id, 'envelope.json'), 'utf8')).toContain(queued.run.id);
+  });
+
+  it.each(['4.4.4', 'unparseable'])('fails closed for a %s verified-consensus entry with no original report bytes', async version => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: version }) });
+    const queued = buildRunEnvelope(report, { report_json: JSON.stringify(report) }, { level: 'envelope', delivery: { mode: 'direct' } });
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued });
+
+    const { sink, calls } = fakeSink({});
+    expect((await outbox.flush(sink)).failed).toEqual([{ id: queued.run.id, reason: expect.stringContaining('report_json unavailable') }]);
+    expect(calls).toEqual([]);
+    expect(await readFile(join(dir, queued.run.id, 'envelope.json'), 'utf8')).toContain('verified-consensus');
+  });
+
+  it('accepts a 4.4.5 verified-consensus entry without retained bytes only when its envelope validates', async () => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: '4.4.5' }) });
+    const queued = buildRunEnvelope(report, { report_json: JSON.stringify(report) }, { level: 'envelope', delivery: { mode: 'direct' } });
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued });
+    const { sink, calls } = fakeSink({});
+    expect((await outbox.flush(sink)).delivered).toEqual([queued.run.id]);
+    expect(calls.map(call => call.method)).toEqual(['postRun']);
+  });
+
+  it('keeps a 4.4.5 entry with an invalid queued envelope instead of trusting its version', async () => {
+    const report = sampleResult({ run: sampleRunHeader({ rcl_version: '4.4.5' }) });
+    const queued = buildRunEnvelope(report, { report_json: JSON.stringify(report) }, { level: 'findings', delivery: { mode: 'direct' } });
+    delete (queued.findings[0] as Partial<typeof queued.findings[number]>).gating_reason;
+    const outbox = new Outbox(dir);
+    await outbox.spoolRun({ runId: queued.run.id, envelope: queued });
+
+    const { sink, calls } = fakeSink({});
+    expect((await outbox.flush(sink)).failed).toEqual([{ id: queued.run.id, reason: expect.stringContaining('findings.0.gating_reason') }]);
+    expect(calls).toEqual([]);
+    expect((await outbox.list())[0]!.failed).toBeDefined();
   });
 
   it('refuses ids that are not run or event entry ids, so no id becomes a path', async () => {
