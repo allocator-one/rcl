@@ -251,6 +251,21 @@ describe('source and receipt binding', () => {
     await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await readdir(join(f.dir, 'data'))).toEqual([]);
   });
+  it.each([
+    ['findings', ''],
+    ['findings', 'arbitrary'],
+    ['belowThresholdFindings', ''],
+    ['belowThresholdFindings', 'arbitrary'],
+  ] as const)('refuses %s with original gating label %j before HTTP', async (group, reason) => {
+    const f = await fixture(r => { r[group]![0]!.gating = { reason: reason as 'consensus' }; });
+    expect(await f.preview()).toBe(2);
+    expect(JSON.parse(f.stdout.at(-1)!)).toMatchObject({
+      status: 'incomplete', error: 'original_verified_consensus_gating_unavailable', stage: 'input', exit_code: 2,
+    });
+    expect(f.requests).toEqual([]);
+    expect(await readFile(f.selection.reportJson, 'utf8')).toBe(f.text);
+    await expect(readFile(f.manifest)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('accepts zero-candidate verified-consensus and historical all-findings originals', async () => {
     const empty = await fixture(r => {
       r.findings = []; r.belowThresholdFindings = [];

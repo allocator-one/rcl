@@ -83,10 +83,16 @@ function retainedRedactions(value: unknown, path = ''): Array<{ path: string; co
 }
 
 /** The envelope builder supplies `none` for absent labels, so inspect the immutable source first. */
-function assertVerifiedConsensusSource(report: ReviewResult): void {
-  if (report.run?.gating.mode !== 'verified-consensus') return;
-  const findings = [...report.findings, ...(report.belowThresholdFindings ?? [])];
-  if (findings.some(finding => finding.gating?.reason === undefined)) {
+function assertVerifiedConsensusSource(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  const report = value as Partial<ReviewResult>;
+  if (report.run?.gating?.mode !== 'verified-consensus') return;
+  const findings = [
+    ...(Array.isArray(report.findings) ? report.findings : []),
+    ...(Array.isArray(report.belowThresholdFindings) ? report.belowThresholdFindings : []),
+  ];
+  const reasons = new Set<unknown>(['consensus', 'critical', 'verified', 'none']);
+  if (findings.some(finding => !reasons.has(finding?.gating?.reason))) {
     throw new Error('original_verified_consensus_gating_unavailable');
   }
   if (findings.some(finding => finding.gating?.verification !== undefined) && report.stats?.verification == null) {
@@ -117,9 +123,9 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   const json = await readStable(selection.reportJson, MAX_ARTIFACT_BYTES);
   if (json.sha256 !== selection.reportSha256 || !Buffer.from(json.text, 'utf8').equals(json.raw)) throw new Error('original_report_digest_mismatch');
   const decoded = decodeOriginalReport(json.text, { ...(selection.originalProse ? { originalProse: selection.originalProse as OriginalProseMode } : {}) });
+  assertVerifiedConsensusSource(decoded.value);
   if (!originalRunReportSchema.safeParse(decoded.value).success) throw new Error('unsupported_original_report');
   const report = decoded.value as ReviewResult & { run: NonNullable<ReviewResult['run']> };
-  assertVerifiedConsensusSource(report);
   if (report.reviews.some(r => r.findings.length > 2000 || r.findings.some(f => !originalRawFindingSchema.safeParse(f).success))) throw new Error('unsupported_original_reviewer_finding');
   if (requiresArtifactRedaction(decoded.value)) throw new Error('original_artifact_requires_redaction');
   const redactions = retainedRedactions(decoded.value);
