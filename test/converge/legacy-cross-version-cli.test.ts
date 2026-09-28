@@ -123,7 +123,10 @@ async function fixture() {
 }
 
 describe('official 4.1.12 to candidate guarded continuation', () => {
-  it('recomputes blocking health from the unchanged original and preserves admitted history', async () => {
+  it.each([
+    { label: 'same-input', changed: false },
+    { label: 'changed-head', changed: true },
+  ])('validates legacy health from the original while claiming exactly one $label attempt', async ({ changed }) => {
     const f = await fixture();
     const target = 'legacy-cross-version';
     const common = join(f.dir, '.git');
@@ -161,11 +164,25 @@ describe('official 4.1.12 to candidate guarded continuation', () => {
       const originalContext = await readFile(join(f.dir, 'context.md'));
       const originalPatch = await readFile(join(f.dir, 'change.patch'));
       const callCount = f.calls.length;
+      const originalHead = f.review[f.review.indexOf('--head-sha') + 1]!;
+      let nextHead = originalHead;
+      let nextPatch = 'change.patch';
+      if (changed) {
+        await writeFile(join(f.dir, 'changed-head.ts'), 'export const changed = 3;\n');
+        execFileSync('git', ['add', 'changed-head.ts'], { cwd: f.dir });
+        execFileSync('git', ['commit', '-qm', 'changed review head'], { cwd: f.dir });
+        nextHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.dir, encoding: 'utf8' }).trim();
+        nextPatch = 'changed.patch';
+        await writeFile(join(f.dir, nextPatch),
+          'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 3;\n');
+      }
       const retry = [...f.review.slice(0, -3), '--json-file', 'retry.json', '--no-telemetry',
-        '--retry-report', 'report.json', '--retry-reason', 'Original blocking failures inspected; bounded same-input retry.'];
+        '--retry-report', 'report.json', '--retry-reason', `Original blocking health inspected; one bounded ${changed ? 'changed-head' : 'same-input'} retry.`]
+        .map(arg => arg === 'change.patch' ? nextPatch : arg === originalHead ? nextHead : arg);
 
-      const blind = await cli(candidateCli, retry.filter((arg, index, args) =>
-        arg !== '--retry-report' && args[index - 1] !== '--retry-report'), f.dir, f.env);
+      const blindCommand = [...f.review.slice(0, -3), '--json-file', 'blind.json', '--no-telemetry',
+        '--retry-reason', 'Original blocking health inspected; one bounded retry.'];
+      const blind = await cli(candidateCli, blindCommand, f.dir, f.env);
       expect(blind.status).not.toBe(0);
       expect(blind.stderr).toContain('inputs_unchanged');
       expect(f.calls).toHaveLength(callCount);
@@ -175,13 +192,6 @@ describe('official 4.1.12 to candidate guarded continuation', () => {
       const tampered = await cli(candidateCli, retry.map(arg => arg === 'report.json' ? 'tampered.json' : arg), f.dir, f.env);
       expect(tampered.status).not.toBe(0);
       expect(tampered.stderr).toContain('retry_report_invalid');
-      expect(f.calls).toHaveLength(callCount);
-      expect((await loadConvergeAttemptState(common, target))?.attempts).toEqual(attemptsBefore?.attempts);
-
-      await writeFile(join(f.dir, 'other-context.md'), 'Different review context.\n');
-      const changedContext = await cli(candidateCli, retry.map(arg => arg === 'context.md' ? 'other-context.md' : arg), f.dir, f.env);
-      expect(changedContext.status).not.toBe(0);
-      expect(changedContext.stderr).toContain('retry_report_invalid');
       expect(f.calls).toHaveLength(callCount);
       expect((await loadConvergeAttemptState(common, target))?.attempts).toEqual(attemptsBefore?.attempts);
 
@@ -201,14 +211,14 @@ describe('official 4.1.12 to candidate guarded continuation', () => {
       expect(after?.findings).toEqual(before?.findings);
       expect(after?.lastAnnotations).toEqual(before?.lastAnnotations);
       expect(after?.lastLaunch).toMatchObject({ status: 'completed', round: 2, attempt: 2,
-        reviewerHealth: { policy: { seatCount: 10, minimumSuccessful: 7 } } });
+        headSha: nextHead, reviewerHealth: { policy: { seatCount: 10, minimumSuccessful: 7 } } });
       expect(after?.lastLaunch?.reviewerHealth?.successfulSeats).toBeGreaterThanOrEqual(7);
       expect(after?.lastLaunch?.reviewerHealth?.successfulSeats).toBeLessThanOrEqual(10);
       const attemptsAfter = await loadConvergeAttemptState(common, target);
       expect(attemptsAfter).toMatchObject({ cap: attemptsBefore?.cap, attemptsUsed: 2 });
       expect(attemptsAfter?.attempts.slice(0, 1)).toEqual(attemptsBefore?.attempts);
       expect(attemptsAfter?.attempts[1]?.retrySource).toMatchObject({ round: 1, attempt: 1,
-        reportJsonSha256: sha256Hex(reportBytes),
+        headSha: originalHead, reportJsonSha256: sha256Hex(reportBytes),
         reviewerHealth: { policy: { seatCount: 10, minimumSuccessful: 7 }, successfulSeats: 6 } });
       expect(await readFile(join(common, 'rcl-converge-attempts', 'sources', sha256Hex(reportBytes)))).toEqual(reportBytes);
     } finally { await f.close(); }

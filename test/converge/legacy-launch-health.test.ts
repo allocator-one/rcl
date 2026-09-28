@@ -166,10 +166,29 @@ describe('bound legacy launch health recovery', () => {
     expect(await f.bytes()).toEqual(before);
   });
 
+  it('uses validated original proof for one changed-input attempt without transferring its findings or approval', async () => {
+    const f = await fixture();
+    const before = await loadConvergeRunState(f.common, f.target);
+    const claims = await loadConvergeAttemptState(f.common, f.target);
+    const changed = { ...f.retry, headSha: 'f'.repeat(40), inputSha256: 'e'.repeat(64) };
+
+    await guardReviewLaunch(changed);
+
+    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 2, attempt: 2 });
+    const after = await loadConvergeRunState(f.common, f.target);
+    expect(after?.rounds).toEqual(before?.rounds);
+    expect(after?.findings).toEqual(before?.findings);
+    expect(after?.lastLaunch).toMatchObject({ headSha: 'f'.repeat(40), inputSha256: 'e'.repeat(64) });
+    const attempts = await loadConvergeAttemptState(f.common, f.target);
+    expect(attempts?.attempts.slice(0, 1)).toEqual(claims?.attempts);
+    expect(attempts?.attempts[1]?.retrySource).toMatchObject({
+      headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64), attempt: 1, round: 2,
+      reviewerHealth: { successfulSeats: 11, policy: { seatCount: 17, minimumSuccessful: 12 } },
+    });
+  });
+
   it.each([
     ['no reason', { retryReason: undefined }],
-    ['changed input', { inputSha256: 'f'.repeat(64) }],
-    ['changed head', { headSha: 'f'.repeat(40) }],
     ['start over', { startOver: true }],
     ['delivery intent', { intent: 'retry-delivery' as const }],
   ])('refuses %s before spending or dispatch', async (_label, override) => {
