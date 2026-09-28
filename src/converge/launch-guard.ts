@@ -1,3 +1,7 @@
+import { inspectLegacyRetry, retainLegacyRetry, type LegacyRetrySelection } from './legacy-launch-health.js';
+import { hasSuccessfulQuorum } from '../dispatch/quorum.js';
+import { completionSchema, launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion } from './launch-record.js';
+export { launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion } from './launch-record.js';
 import { isDeepStrictEqual } from 'node:util';
 import { assertNoPendingFreshReview, freshReviewCompletionPending, freshReviewRequestVersion, prepareFreshReview, finishFreshReview, verifyReviewCycle } from './fresh-review.js';
 import type { ReviewCycleRemote } from './review-cycle.js';
@@ -6,7 +10,6 @@ import { RegistryCleanupError } from '../coordination/registry-lock.js';
 import { convergeAttemptStatePath } from './attempt-budget.js';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { z } from 'zod';
 import {
   claimConvergeAttempt, previewConvergeAttemptState, ConvergeAttemptBudgetExceededError,
   type ConvergeAttemptClaim,
@@ -20,39 +23,6 @@ import { staleManifest, StaleReportAuditError } from './stale-report-schema.js';
 import { verifyStaleReportReceipts } from './stale-report.js';
 import { scrubText } from '../telemetry/scrub.js';
 
-const completionSchema = z.object({
-  runId: z.string().uuid(),
-  reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  successfulReviews: z.number().int().nonnegative().safe(),
-  totalReviews: z.number().int().positive().safe(),
-  deliveryPending: z.boolean(),
-  hardFailure: z.boolean().optional(),
-  exitCode: z.number().int().nonnegative().optional(),
-  reportPath: z.string().min(1).optional(),
-}).refine(value => value.successfulReviews <= value.totalReviews);
-
-export const launchSchema = z.object({
-  status: z.enum(['pending', 'completed', 'failed']),
-  attempt: z.number().int().positive().safe(),
-  round: z.number().int().positive().safe(),
-  headSha: z.string().regex(/^[a-f0-9]{40}$/),
-  inputSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  startedAt: z.string().datetime(),
-  pid: z.number().int().positive().safe(),
-  retryReason: z.string().min(1).max(500).optional(),
-  runId: z.string().uuid().optional(),
-  reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  successfulReviews: z.number().int().nonnegative().safe().optional(),
-  totalReviews: z.number().int().positive().safe().optional(),
-  deliveryPending: z.boolean().optional(),
-  hardFailure: z.boolean().optional(),
-  exitCode: z.number().int().nonnegative().optional(),
-  reportPath: z.string().min(1).optional(),
-}).strict().refine(value => value.status !== 'completed' || completionSchema.safeParse(value).success);
-
-export type GuardedLaunchState = z.infer<typeof launchSchema>;
-export type GuardedLaunchCompletion = z.infer<typeof completionSchema>;
-
 export interface GuardedLaunchOptions {
   gitCommonDir: string;
   target: string;
@@ -63,6 +33,7 @@ export interface GuardedLaunchOptions {
   maxRounds?: number;
   intent?: 'review' | 'stop-upstream' | 'stop-review' | 'retry-delivery';
   retryReason?: string;
+  legacyRetry?: LegacyRetrySelection;
   startOver?: boolean;
   cycleRemote?: ReviewCycleRemote;
   validate: () => Promise<void>;
@@ -89,7 +60,7 @@ function nextRound(state: ConvergeRunState): number {
   return state.rounds.reduce((latest, entry) => Math.max(latest, entry.round), 0) + 1;
 }
 
-async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): Promise<number> {
+async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): Promise<{ round: number; retryProof?: Awaited<ReturnType<typeof inspectLegacyRetry>> }> {
   const intent = options.intent ?? 'review';
   if (!['review', 'stop-upstream', 'stop-review', 'retry-delivery'].includes(intent)) {
     refuse('invalid_intent', 'Choose review, stop-upstream, stop-review, or retry-delivery.');
@@ -112,28 +83,39 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     refuse('triage_required', 'Resolve the existing native gating findings before another launch.');
   }
   const previous = state.lastLaunch === undefined ? undefined : launchSchema.parse(state.lastLaunch);
+  if (options.legacyRetry && (!options.retryReason || options.startOver || intent !== 'review' ||
+    !previous || previous.status !== 'completed' || previous.attempt !== attemptsUsed)) {
+    refuse('retry_report_ineligible_launch', 'Select a completed original legacy launch and provide its explicit bounded retry reason.');
+  }
   if (!previous) {
     if (attemptsUsed > 0 && !options.retryReason) {
       refuse('legacy_dispatch_unknown', 'Existing claims remain spent; supply an explicit retry reason after checking their original outcomes.');
     }
-    return round;
+    return { round };
   }
   if (state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt) && previous.attempt !== attemptsUsed) {
     refuse('stale_report_attempt_mismatch', 'Attempt accounting changed after the inspected stale disposition.');
   }
   if (previous.attempt !== attemptsUsed) {
     if (!options.retryReason) refuse('untracked_claim', 'Native attempt accounting changed outside the guard; reconcile the original claim and provide an explicit retry reason.');
-    return round;
+    return { round };
   }
   if (previous.status !== 'completed') {
     if (!options.retryReason) refuse('dispatch_unknown', 'Previous dispatch is unknown; no automatic retry. Supply a bounded retry reason only after recovery.');
-    return round;
+    return { round };
   }
   if (previous.deliveryPending && ((previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) ||
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
-  const healthy = hasHealthyGuardedLaunch(previous);
+  let retryProof: Awaited<ReturnType<typeof inspectLegacyRetry>> | undefined;
+  if (options.legacyRetry) {
+    try { retryProof = await inspectLegacyRetry(options.legacyRetry, options.gitCommonDir, state, previous,
+      options.headSha, options.inputSha256, attemptsUsed, round); }
+    catch { refuse('retry_report_invalid', 'The original report does not prove an inconclusive same-input launch under its bound policy.'); }
+  }
+  const healthy = retryProof ? hasSuccessfulQuorum(retryProof.binding.reviewerHealth.policy,
+    retryProof.binding.reviewerHealth.successfulSeats) : hasHealthyGuardedLaunch(previous);
   let disposed = false;
   if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
@@ -165,11 +147,17 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   if ((previous.hardFailure || !healthy) && !options.retryReason) {
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
   }
-  return round;
+  if (!healthy && !previous.reviewerHealth && !retryProof) {
+    refuse('legacy_health_unknown', 'Aggregate counts do not prove blocking health. Select the original report with --retry-report and preserve its original inputs.');
+  }
+  return { round, retryProof };
 }
 
 /** Shared launch-health decision; recovery paths must use the guard's policy. */
 export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
+  if (previous.reviewerHealth) {
+    return hasSuccessfulQuorum(previous.reviewerHealth.policy, previous.reviewerHealth.successfulSeats);
+  }
   return previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
 }
 
@@ -178,7 +166,8 @@ export interface GuardedLaunchClaim extends ConvergeAttemptClaim {
 }
 
 export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<GuardedLaunchClaim> {
-  const options = { ...input, target: input.target.trim() };
+  const options = { ...input, target: input.target.trim(),
+    ...(input.legacyRetry ? { legacyRetry: { ...structuredClone(input.legacyRetry), reportPath: resolve(input.legacyRetry.reportPath) } } : {}) };
   options.gitCommonDir = await realpath(resolve(options.gitCommonDir));
   const requestVersion = options.startOver ? await freshReviewRequestVersion(options.gitCommonDir, options.target) : undefined;
   let completed: GuardedLaunchClaim | undefined;
@@ -251,18 +240,20 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         }
         if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
       }
-      const round = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
+      const { round, retryProof } = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
       const cap = options.maxAttempts ?? attempts?.cap;
       if (cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
       }
       if (!options.startOver) await options.validate();
+      if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);
       state.lastLaunch = {
         status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
         startedAt: new Date().toISOString(), pid: process.pid,
         ...(options.retryReason ? { retryReason: scrubText(options.retryReason.trim(), 500) } : {}),
       };
+      return retryProof ? { retrySource: retryProof.binding } : undefined;
     },
     afterClaim: async (claimed, ownership) => {
       state.lastLaunch!.attempt = claimed.attempt;

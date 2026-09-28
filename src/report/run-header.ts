@@ -237,6 +237,7 @@ export const DIGESTED_CONFIG_FIELDS = [
   'quorumFraction',
   'maxRetries',
   'concurrency',
+  'providerConcurrency',
   'reasoningEffort',
   'context',
   'spec',
@@ -251,13 +252,23 @@ type UndecidedConfigField = Exclude<
 const _everyConfigFieldDecided: [UndecidedConfigField] extends [never] ? true : never = true;
 void _everyConfigFieldDecided;
 
-/** Digest of the allow-listed, resolved config fields (never a credential). */
-export function configDigest(config: Config): string {
+/** Canonical allow-listed, resolved config fields (never a credential). */
+export function configIdentity(config: Config): string {
   const projection: Record<string, unknown> = {};
   for (const key of DIGESTED_CONFIG_FIELDS) {
     if (config[key] !== undefined) projection[key] = config[key];
   }
-  return sha256Hex(stableStringify(projection));
+  return stableStringify(projection);
+}
+
+/** Digest shared by report headers, launch identity and original-policy proof. */
+export function configDigest(config: Config): string {
+  return sha256Hex(configIdentity(config));
+}
+
+/** A dispatched seat's lane: the council's own models block, the others are secondary. */
+export function assignmentLane(model: string, coreModels: readonly string[], explicit = false): 'blocking' | 'secondary' {
+  return explicit || coreModels.includes(model) ? 'blocking' : 'secondary';
 }
 
 export function buildRoster(input: {
@@ -269,12 +280,11 @@ export function buildRoster(input: {
   explicit?: boolean;
   gating: ResolvedGatingConfig;
 }): RosterEntry[] {
-  const core = new Set(input.coreModels);
   const roster: RosterEntry[] = input.assignments.map((a) => ({
     model: a.model,
     role: a.role.name,
     provider: a.provider,
-    lane: input.explicit || core.has(a.model) ? 'blocking' : 'secondary',
+    lane: assignmentLane(a.model, input.coreModels, input.explicit),
   }));
   for (const a of input.asyncAssignments) {
     roster.push({ model: a.model, role: a.role.name, provider: a.provider, lane: 'async' });

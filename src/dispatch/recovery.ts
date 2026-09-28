@@ -33,6 +33,7 @@ export interface ReviewerRecoveryOptions {
   remainingMs: number;
   timeoutMs: number;
   concurrency: number;
+  providerConcurrency?: RunnerOptions['providerConcurrency'];
   adapterFactory?: RunnerOptions['adapterFactory'];
   reasoningEffort?: RunnerOptions['reasoningEffort'];
   signal?: AbortSignal;
@@ -61,7 +62,7 @@ export interface ReviewerRecoveryResult {
 
 export type CapturedRecoveryOptions = Omit<ReviewerRecoveryOptions,
   'plan' | 'assignments' | 'prompts' | 'fraction' | 'maxAdditionalCalls' | 'maxAttemptsPerCell' | 'remainingMs' |
-  'timeoutMs' | 'concurrency' | 'reasoningEffort'> & {
+  'timeoutMs' | 'concurrency' | 'providerConcurrency' | 'reasoningEffort'> & {
   /** Exact operation already claimed and bound by the outer source/authority validator. */
   operation: RecoveryOperation;
   runtimeBounds?: RecoveryRuntimeBounds;
@@ -93,6 +94,7 @@ export async function recoverCapturedAssignments(options: CapturedRecoveryOption
       assignments: captured.assignments, prompts: captured.prompts, fraction: captured.policy.fraction,
       timeoutMs: captured.config.timeout ?? DEFAULT_TIMEOUT_MS,
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
+      providerConcurrency: captured.config.providerConcurrency,
       reasoningEffort: captured.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
       remainingMs: budget.remainingMs, maxAdditionalCalls: budget.maxAdditionalCalls,
       maxAttemptsPerCell: budget.maxAttemptsPerCell });
@@ -197,6 +199,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
         const pendingIntentWrites: Promise<unknown>[] = [];
         const returned = await runReviews(assignments, prompts, {
           timeoutMs: input.timeoutMs, concurrency: input.concurrency,
+          providerConcurrency: input.providerConcurrency,
           // Every physical call has a durable intent; SDK/adapter retries cannot
           // happen invisibly inside this accounting boundary.
           maxRetries: 0, reasoningEffort: input.reasoningEffort,

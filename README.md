@@ -108,6 +108,7 @@ Review a PR, a local diff, or uncommitted work.
 | `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
 | `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
+| `--retry-report <path>` | Bind an original legacy report to a same-input inconclusive retry; requires `--retry-reason` |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
@@ -214,6 +215,16 @@ launch. Unknown/failed dispatch requires an explicit `--retry-reason` after
 recovery, even if the head changed. This does not refund attempts or promise
 exactly-once provider billing. Credential presence cannot prove provider availability.
 
+For a 4.1.11 or 4.1.12 aggregate-only completion, retain the original inputs and
+config and add `--retry-report original-report.json` with an explicit bounded
+`--retry-reason` and a fresh `--json-file` destination. RCL binds the exact report,
+config, target, head, round, attempt, cycle and roster before deriving blocking-only
+health with the shared quorum policy. Healthy or ambiguous evidence refuses.
+An unadmitted source retries its pending round; an exact latest admitted source
+whose blocking health was inconclusive continues at the next native round. Its
+original admission, findings, verdicts and spent claims remain unchanged. The
+new claim retains the source bytes and binding; no history or budget is reset.
+
 `--launch-intent stop-upstream` never cancels review. `stop-review` and
 `retry-delivery` refuse new reviewer dispatch; cancel an existing review only
 through its retained host handle. Retry evidence with `rcl telemetry flush --run
@@ -241,10 +252,20 @@ impossible under any flag). The default is a consent boundary, not a stop: at
 15 rounds the workflow asks the user, and an approved continuation supplies a
 higher `--max-rounds`.
 
-Full-fleet reviewer completion is not required. For the generated
-`rcl-converge` skill, let `N = stats.totalReviews`; a round is conclusive only
-when `stats.successfulReviews >= max(2, ceil(2 × N / 3))`. Every timeout or
-error must be disclosed, and a result below that threshold is inconclusive.
+Full-fleet reviewer completion is not required. Reviewer health counts only
+the report roster's blocking seats, and a seat counts only when every one of
+its chunks succeeded. A round is conclusive when at least
+`max(2, ceil(2 × blocking seats / 3))` blocking seats completed, or more under
+a stricter configured `quorumFraction`. Each report records this as
+`stats.blockingHealth` (`seats`, `successful`, `required`, `conclusive`).
+Secondary, async and verification results keep their findings but never count
+toward the quorum, so the aggregate `stats.successfulReviews` /
+`stats.totalReviews` are informational only: 11 of 17 blocking seats plus one
+async success is 12/18 in aggregate yet inconclusive, because 12 blocking
+seats are required. This is the rule Harness applies to delivered evidence.
+Round closure uses the same seats and policy: bonus successes never cancel
+unfinished blocking reviewers. Every timeout or error must be disclosed, and a
+result below the requirement is inconclusive.
 
 Exit code 2 means the configured cap was exhausted and explicit continuation
 approval is required. Exit code 3 means attempt accounting itself failed
@@ -290,6 +311,21 @@ on its evidence and fresh corroboration alone never reopens it), or `regating`
 genuinely new evidence). The same call enforces the evidence-round cap:
 default 15, `--max-rounds` accepts 2–99, and rounds past 99 are impossible. Exit
 code 2 is the cap consent boundary; exit 3 is a state failure.
+
+Before reading or writing native state, `converge-report` derives blocking
+reviewer health from the report's roster and rows. An inconclusive report exits
+4 (`report_health_inconclusive`) and is not admitted: its findings are not
+classified or triaged. The refusal names the completed blocking seats, the
+required count, every missing, failed or canceled seat, and the excluded
+secondary/async successes (with `--json`, as `error.reviewerHealth`). A report
+whose recorded `stats.blockingHealth` disagrees with its rows exits 4 with
+`report_health_unverifiable`. The report, its attempt and all earlier rounds
+stay unchanged. Continue with the same guarded review command plus
+`--retry-reason`: the guard records blocking health for every new launch,
+requires that explicit reason for an inconclusive one, and spends one more
+attempt at the same round without resetting caps or cycle history. Retained
+missing-reviewer recovery remains a separate workflow. Conclusive health does
+not replace triage, and merging still requires matching enforced review and CI.
 
 A report key must identify one canonical identity, status and suppression reason.
 `converge-report` refuses conflicting mappings with exit 3 before writing the
@@ -1099,11 +1135,17 @@ output:
 # Concurrency and reliability
 concurrency: 9        # maximum simultaneous blocking reviewer calls per process
                       # set to 6 to retain the previous limit
+providerConcurrency:  # provider admission caps, applied in addition to concurrency
+  anthropic: 2        # default: bound the observed high-effort Fable burst
 timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 # quorumFraction: 0.75  # round closes once this share of blocking seats succeeds
                         # on every chunk; all stragglers can be canceled, including core models.
-                        # Default: exactly 2/3 — leave unset for that; 1 disables.
+                        # Secondary successes never count; secondary calls still
+                        # running at closure are canceled. Also raises the report's
+                        # blocking-health requirement.
+                        # Default: exactly 2/3 — leave unset for that; 1 disables
+                        # closure and waits for every call.
 maxRetries: 3
 
 # Reasoning budget for providers that support it (currently OpenRouter).
@@ -1125,10 +1167,14 @@ spec: SPEC.md
 # githubToken: ghp_...
 ```
 
-`concurrency` limits blocking reviewer calls within one RCL process. Separate
-RCL processes share provider capacity without sharing this limit; async reviewers
-and verification use their own scheduling. Set `concurrency: 6` in the applicable
-configuration to restore the previous limit for new reviews.
+`concurrency` limits all blocking reviewer calls within one RCL process.
+`providerConcurrency` adds stricter provider admission caps; increasing the global
+limit never bypasses them. The scheduler scans past a saturated provider so calls
+for other providers continue without changing the original result order. Anthropic
+defaults to two concurrent calls to prevent the observed five-seat Fable 5.1 burst;
+the existing 540-second call deadline is unchanged. Providers with no default or
+explicit entry use only the global limit. Separate RCL processes do not share these
+limits; async reviewers and verification use their own scheduling.
 
 `maxRetries` limits additional adapter SDK invocations after the first attempt;
 all attempts share the call's `timeout` and parent cancellation signal. Supported

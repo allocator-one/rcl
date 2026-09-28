@@ -212,7 +212,7 @@ Then tell the user:
 - Which PR was reviewed (if PR mode), or which branch and merge-base range (if diff mode)
 - Which spec was used (if any) and where it came from (Harness issue, file, explicit flag)
 - The evidence status line (recorded with its URL, spooled, or not sent and why)
-- Reviewer completion as `stats.successfulReviews` / `stats.totalReviews`, plus every timeout or error. Full-fleet completion is not required. If `stats.successfulReviews < max(2, ceil(2 × stats.totalReviews / 3))`, warn that coverage is partial; a report used by `rcl-converge` is inconclusive below that threshold.
+- Blocking reviewer health from `stats.blockingHealth`: `successful` of `seats` blocking seats completed every chunk, against `required` (`max(2, ceil(2 × seats / 3))`, or stricter under a configured `quorumFraction`). Also show `stats.successfulReviews` / `stats.totalReviews` and every timeout or error, but never judge health from those aggregate counts: secondary and async opinions keep their findings without counting toward the blocking quorum. Full-fleet completion is not required. If `stats.blockingHealth.conclusive` is false, warn that coverage is partial; `rcl-converge` treats that report as inconclusive and `rcl converge-report` refuses it (exit 4).
 - Which models ran and how many findings each returned
 - Link to the posted review comment (from rcl output) only if `--post` or `--inline` was used in PR mode
 - Brief summary: N critical, N important, N minor

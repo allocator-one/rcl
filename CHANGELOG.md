@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+## 4.4.0 - 2026-09-28
+
+- Add provider-aware blocking-call admission with a default Anthropic limit of
+  two concurrent calls. Saturated providers no longer block later providers in
+  the global queue, and increasing global `concurrency` cannot bypass an explicit
+  `providerConcurrency` cap (RCL-139).
+
+## 4.3.0 - 2026-09-28
+
+- Add `rcl review --retry-report <path> --retry-reason <reason>` for bounded
+  same-input recovery of 4.1.11 and 4.1.12 aggregate-only launches whose
+  original blocking council was inconclusive (RCL-138). The original report,
+  config, run, target, head, round, attempt, roster and policy must match the
+  recorded launch. Healthy, ambiguous, altered and nonlatest sources refuse.
+- Continue from an exact latest admitted legacy source at the next native round,
+  or retry an unadmitted source at its pending round. Preserve earlier reports,
+  findings, verdicts, spent attempts and caps; charge only the authorized new
+  attempt and retain its immutable source binding.
+- Reject contradictory persisted blocking-health counts while allowing the
+  blocking roster to be a subset of aggregate reviews. Ordinary current-version
+  launch health continues to use the configured blocking quorum.
+
+## 4.2.0 - 2026-09-28
+
+Behavior change: `rcl converge-report` now refuses reports whose blocking
+reviewer health is inconclusive or cannot be derived (new exit code 4, error
+codes `report_health_inconclusive` / `report_health_unverifiable`). A report
+must carry its `reviews` rows; reports with a run header must also carry the
+roster those rows belong to. Every report RCL writes already does. There is
+deliberately no flag to admit an inconclusive report.
+
+
+- Align reviewer health with the blocking-reviewer quorum Harness enforces
+  (RCL-136). Round closure now counts only complete blocking seats, so
+  secondary successes no longer cancel unfinished blocking reviewers.
+  Reports record `stats.blockingHealth` (blocking seats, completed seats,
+  required seats, conclusive) under the configured `quorumFraction`;
+  secondary, async and verification results keep their findings but never
+  count. Aggregate `successfulReviews` / `totalReviews` are unchanged and
+  informational. `quorumFraction: 1` still waits for every call, secondary
+  reviewers included.
+- `rcl converge-report` refuses an inconclusive report with exit 4 before it
+  reads or writes native state, naming the completed, required and incomplete
+  blocking seats. Guarded launches record blocking health, so an inconclusive
+  launch continues through the existing bounded `--retry-reason` path at the
+  same round. Earlier reports, rounds, verdicts, attempts and caps are not
+  rewritten. Aggregate-only launch records written by earlier versions keep
+  their original rule.
+- Update the `rcl` and `rcl-converge` skills to read blocking health rather
+  than aggregate review counts.
+
 ## 4.1.12 - 2026-09-27
 
 - Raise default blocking reviewer concurrency from six to nine per process.

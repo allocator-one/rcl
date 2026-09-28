@@ -1,4 +1,5 @@
 import type { ModelReview } from '../consensus/types.js';
+import { MODEL_PROVIDER_SET } from '../config/providers.js';
 
 // The active lossless dogfood review is 18 chunks × 17 reviewers = 306
 // blocking calls. Keep useful headroom while refusing accidental or hostile
@@ -41,14 +42,55 @@ export function buildCouncilRunPlan(options: {
   chunks: number;
   concurrency: number;
   timeoutMs: number;
+  /** One provider per scheduled synchronous call, captured for retained originals. */
+  providers?: readonly string[];
+  providerConcurrency?: Readonly<Record<string, number>>;
 }): CouncilRunPlan {
   const concurrency = Math.max(1, Math.floor(options.concurrency));
-  const waves = options.totalCalls === 0 ? 0 : Math.ceil(options.totalCalls / concurrency);
+  let waves: number;
+  if (options.providers !== undefined) {
+    if (options.providers.length !== options.totalCalls || options.providers.some(provider => !provider.trim())) {
+      throw new Error('Invalid retained provider matrix');
+    }
+    for (const [provider, cap] of Object.entries(options.providerConcurrency ?? {})) {
+      if (!MODEL_PROVIDER_SET.has(provider) || !Number.isSafeInteger(cap) || cap < 1) {
+        throw new Error('Invalid retained provider concurrency');
+      }
+    }
+    let pending = [...options.providers];
+    waves = 0;
+    while (pending.length > 0) {
+      const admittedByProvider = new Map<string, number>();
+      const next: string[] = [];
+      let admitted = 0;
+      for (const provider of pending) {
+        const cap = options.providerConcurrency?.[provider] ?? concurrency;
+        const providerActive = admittedByProvider.get(provider) ?? 0;
+        if (admitted < concurrency && providerActive < cap) {
+          admitted++;
+          admittedByProvider.set(provider, providerActive + 1);
+        } else {
+          next.push(provider);
+        }
+      }
+      pending = next;
+      waves++;
+    }
+  } else {
+    waves = options.totalCalls === 0 ? 0 : Math.ceil(options.totalCalls / concurrency);
+  }
+  // Model the work-conserving runner's earliest-runnable queue with every call
+  // consuming its whole deadline. Shorter calls can only make later work start
+  // sooner. Ordinary and legacy plans without the provider matrix retain the
+  // historical global-only estimate.
   // timeoutMs is the whole adapter-call budget. Provider retry loops share a
   // single AbortController and deadline, so retries do not multiply this
   // timeout-bound queue estimate.
   return {
-    ...options,
+    totalCalls: options.totalCalls,
+    reviewers: options.reviewers,
+    chunks: options.chunks,
+    timeoutMs: options.timeoutMs,
     concurrency,
     waves,
     timeoutBoundMs: waves * options.timeoutMs,

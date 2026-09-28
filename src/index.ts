@@ -22,6 +22,7 @@ import {
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
 } from './config/defaults.js';
+import { resolveProviderConcurrency } from './config/provider-concurrency.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
@@ -47,6 +48,8 @@ import {
   type AsyncResultReference,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
+import { resolveQuorumPolicy } from './dispatch/quorum.js';
+import { assertAdmissibleReportHealth, deriveBlockingHealth, describeBlockingHealth, ReportHealthError, type BlockingHealth } from './report/blocking-health.js';
 import { resolveGatingConfig } from './consensus/gating.js';
 import { printReviewSummary } from './output/terminal.js';
 import { postGitHubReview } from './output/github.js';
@@ -101,6 +104,7 @@ import {
 } from './models/stats-store.js';
 import { buildSeedRecords } from './models/seed.js';
 import {
+  assignmentLane,
   buildRoster,
   configDigest,
   diffDigest,
@@ -319,6 +323,7 @@ program
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
+  .option('--retry-report <path>', 'Original legacy report proving an inconclusive same-input launch; requires --retry-reason')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
@@ -568,10 +573,24 @@ program
     } catch (error) { console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_GAP', message: error instanceof Error ? error.message : String(error) } })); process.exitCode = 3; }
   });
 
+function blockingHealthJson(health: BlockingHealth) {
+  return {
+    conclusive: health.conclusive,
+    blockingSeats: health.policy.seatCount,
+    successfulBlockingSeats: health.successfulSeats.length,
+    requiredSuccessfulSeats: health.policy.minimumSuccessful,
+    quorumFraction: health.policy.fraction,
+    incompleteSeats: health.unsuccessfulSeats,
+    excludedSuccesses: health.excludedSuccesses,
+  };
+}
+
 program
   .command('converge-report')
   .description(
-    'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating'
+    'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating. ' +
+      'Refuses a report whose blocking reviewer health is inconclusive or cannot be derived from its reviews and roster (exit 4). ' +
+      'Exit codes: 0 admitted, 2 round cap, 3 state failure, 4 reviewer health.'
   )
   .option('--target [key]', 'Stable convergence target key (same key as converge-attempt)')
   .option('--report [path]', 'Round report JSON (a --json-file output)')
@@ -624,6 +643,9 @@ program
         if (!Array.isArray(report.findings)) {
           throw new ConvergeRunStateError(`Not an rcl report (no findings array): ${opts.report}`);
         }
+        // Reviewer health gates admission before any native state is read or
+        // written: an inconclusive report is never triaged (RCL-136).
+        const health = assertAdmissibleReportHealth(report);
 
         // The round remembers the report's run id only when it is a UUID and
         // the report was produced for this converge target (a report copied
@@ -697,6 +719,7 @@ program
                 target: opts.target,
                 round,
                 roundCap: result.roundCap,
+                reviewerHealth: blockingHealthJson(health),
                 counts: result.counts,
                 actionableGating: actionable.length,
                 findings: classified,
@@ -708,6 +731,7 @@ program
           return;
         }
 
+        console.log(chalk.dim(describeBlockingHealth(health)));
         console.log(
           `Round ${round}/${result.roundCap} for ${opts.target}: ` +
             `${result.counts.new} new, ${result.counts.repeat} repeat, ` +
@@ -726,16 +750,24 @@ program
         const message = err instanceof Error ? err.message : String(err);
         if (opts.json) {
           const code =
-            err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
-              ? err.code
-              : 'RCL_CONVERGE_REPORT_ERROR';
-          console.error(JSON.stringify({ error: { code, message } }));
+            err instanceof ConvergeRunStateError && err.message === 'report_health_inconclusive'
+              ? 'report_health_inconclusive'
+              : err instanceof ConvergeRoundCapError || err instanceof ConvergeRunStateError
+                ? err.code
+                : err instanceof ReportHealthError
+                  ? err.code
+                  : 'RCL_CONVERGE_REPORT_ERROR';
+          const health = err instanceof ReportHealthError && err.health ? { reviewerHealth: blockingHealthJson(err.health) } : {};
+          console.error(JSON.stringify({ error: { code, message, ...health } }));
         } else {
           console.error(chalk.red(message));
         }
         // Exit 2 = round-cap consent boundary (mirrors converge-attempt);
-        // exit 3 = state/infrastructure failure.
-        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : 3;
+        // exit 3 = state/infrastructure failure; exit 4 = reviewer health
+        // is inconclusive or unverifiable, so nothing was admitted.
+        const healthRefusal = err instanceof ReportHealthError ||
+          (err instanceof ConvergeRunStateError && err.message === 'report_health_inconclusive');
+        process.exitCode = err instanceof ConvergeRoundCapError ? 2 : healthRefusal ? 4 : 3;
       }
     }
   );
@@ -1443,6 +1475,7 @@ interface CouncilCliOpts {
   exclusiveOutputs?: boolean;
   launchIntent?: GuardedLaunchOptions['intent'];
   retryReason?: string;
+  retryReport?: string;
   maxAttempts?: string;
   maxRounds?: string;
   /** commander: `--no-telemetry` sets this false. */
@@ -1719,7 +1752,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         }
       } catch { /* Startup delivery remains best-effort for legacy reviews. */ }
     }
-    if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
+    if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined || opts.retryReport !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
       throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
     }
@@ -1952,6 +1985,7 @@ async function executeCouncil(
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,
+      ...(opts.retryReport ? { legacyRetry: { reportPath: opts.retryReport, config, roster } } : {}),
       maxAttempts: opts.maxAttempts === undefined ? undefined : Number(opts.maxAttempts),
       maxRounds: opts.maxRounds === undefined ? undefined : Number(opts.maxRounds),
       validate: async () => {
@@ -2051,12 +2085,15 @@ async function executeCouncil(
   const totalCalls = chunkAssignments.length;
   const timeoutMs = config.timeout ?? DEFAULT_TIMEOUT_MS;
   const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
+  const providerConcurrency = resolveProviderConcurrency(config.providerConcurrency);
   const runPlan = buildCouncilRunPlan({
     totalCalls,
     reviewers: assignments.length,
     chunks: chunks.length,
     concurrency,
     timeoutMs,
+    providers: chunkAssignments.map(({ assignment }) => assignment.provider),
+    providerConcurrency,
   });
   const planText = formatCouncilRunPlan(runPlan);
   const interactive = process.stderr.isTTY === true;
@@ -2100,13 +2137,19 @@ async function executeCouncil(
         timeoutMs,
         maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
         concurrency,
+        // Keep the default version-owned rather than materializing it into
+        // legacy config digests. Explicit caps remain source-bound inputs.
+        providerConcurrency,
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
-        // Quorum closure (RCL-26): the round stops waiting once the quorum
-        // fraction of calls has completed; the blocking council's own models
-        // are core and never canceled.
+        // Quorum closure (RCL-26, RCL-136): the round stops waiting once the
+        // configured fraction of blocking seats completed every chunk — the
+        // same seats and policy as the report's blocking health and the
+        // server's gate. Secondary seats never count toward that quorum.
         quorum: {
           fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION,
           coreModels: config.models ?? DEFAULT_MODELS,
+          blocking: chunkAssignments.map((ca) =>
+            assignmentLane(ca.assignment.model, prepared.coreModels, prepared.explicit) === 'blocking'),
         },
         onReviewComplete: (review) => progress.complete(review),
       }
@@ -2258,6 +2301,16 @@ async function executeCouncil(
     },
   });
   const { run } = result;
+  // The same derivation converge-report and the server apply to this report.
+  // A report it cannot judge is recorded as inconclusive, never as healthy.
+  let blockingHealth: BlockingHealth | undefined;
+  let blockingHealthError: string | undefined;
+  try {
+    blockingHealth = deriveBlockingHealth({ roster: run.roster, reviews: result.reviews,
+      fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION });
+  } catch (error) {
+    blockingHealthError = error instanceof Error ? error.message : String(error);
+  }
 
   spinner.succeed('Review complete');
   process.stderr.write(
@@ -2282,6 +2335,9 @@ async function executeCouncil(
       ) + '\n'
     );
   }
+  process.stderr.write(blockingHealth
+    ? (blockingHealth.conclusive ? chalk.dim : chalk.yellow)(describeBlockingHealth(blockingHealth)) + '\n'
+    : chalk.yellow(`Blocking reviewer health could not be derived (${blockingHealthError}); the report will not be admitted.`) + '\n');
 
   // Evidence delivery (IO-12475 section 8) is fail-soft: nothing in it may
   // turn a finished review into a failure unless --evidence-required asks.
@@ -2375,6 +2431,10 @@ async function executeCouncil(
     reportJsonSha256: sha256Hex(artifacts.report_json),
     successfulReviews: result.stats.successfulReviews,
     totalReviews: result.stats.totalReviews,
+    // Aggregate counters stay the report's own stats; launch health is blocking-only.
+    reviewerHealth: blockingHealth
+      ? { version: 1, policy: blockingHealth.policy, successfulSeats: blockingHealth.successfulSeats.length }
+      : { version: 1, policy: resolveQuorumPolicy(0), successfulSeats: 0 },
     deliveryPending: delivery.spooled || delivery.exitCode !== 0,
     ...(prepared.converge?.cycleId ? {
       exitCode: opts.ci && run.ci_exit_code !== 0 ? run.ci_exit_code : delivery.exitCode || (outputDiagnostics.length > 0 ? 1 : 0),

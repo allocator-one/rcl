@@ -79,6 +79,7 @@ export async function executeCapturedOriginal(input: OriginalExecutionOptions): 
       maxAdditionalCalls: budget.maxPhysicalCalls, maxAttemptsPerCell: budget.maxAttemptsPerCell,
       timeoutMs: captured.config.timeout ?? DEFAULT_TIMEOUT_MS,
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
+      providerConcurrency: captured.config.providerConcurrency,
       reasoningEffort: captured.config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
       adapterFactory: options.adapterFactory, signal: options.signal,
       onPhysicalReviewComplete: options.onPhysicalReviewComplete,

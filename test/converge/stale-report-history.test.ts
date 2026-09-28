@@ -1,3 +1,4 @@
+import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { originalRunReportSchema } from '../../src/telemetry/recovery/source.js';
 import { randomUUID } from 'node:crypto';
 import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -22,8 +23,11 @@ async function correction(f: Awaited<ReturnType<typeof staleFixture>>, inputSha2
 it('can return to an earlier inspected replacement after a later input was mistaken', async () => {
   const f = await staleFixture(); await f.prepare(); await f.apply();
   await (await correction(f, 'e'.repeat(64))).apply();
+  const before = await loadConvergeRunState(f.dir, f.target);
   await expect(guardReviewLaunch({...f.options,...f.selection})).resolves.toMatchObject({attempt:2});
   expect(f.options.run).toHaveBeenCalledTimes(2);
+  expect((await loadConvergeRunState(f.dir, f.target))?.staleReportAudit).toEqual(before?.staleReportAudit);
+  expect((await loadConvergeAttemptState(f.dir, f.target))?.attempts[1]?.retrySource).toBeUndefined();
 });
 
 it.each(['missing','tampered'] as const)('refuses %s earlier receipts in preview, apply and guarded launch', async kind => {

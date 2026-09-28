@@ -1,5 +1,6 @@
 import type { CapturedAggregationInputs } from '../report/aggregation-inputs.js';
 import type { Config } from '../config/schema.js';
+import { resolveProviderConcurrency } from '../config/provider-concurrency.js';
 import { formatChunkForPrompt, chunkDiff, type Chunk } from '../prepare/chunker.js';
 import type { ContextDoc, BuiltPrompt } from '../prepare/prompt-builder.js';
 import { DIGESTED_CONFIG_FIELDS, configDigest, diffDigest, sha256Hex, stableStringify } from '../report/run-header.js';
@@ -28,6 +29,8 @@ export interface CapturePreparedCouncilInput {
   prompts: readonly BuiltPrompt[];
   /** Resolved config. This factory persists only the existing digest allow-list. */
   config: Config;
+  /** Prior authenticated capture used only to preserve a legacy omitted policy. */
+  comparisonSource?: CapturedReviewerInputs;
   /** Exact bytes already read by the caller; this factory never re-reads it. */
   specBytes: string;
   /** Exact documents already read by the caller; this factory never re-reads them. */
@@ -74,6 +77,10 @@ function canonicalConfigBytes(config: Config): string {
 function sameChunks(left: readonly Chunk[], right: readonly Chunk[]): boolean {
   return left.length === right.length && left.every((chunk, index) => formatChunkForPrompt(chunk) === formatChunkForPrompt(right[index]!));
 }
+function planLineage(plan: FrozenCheckpointPlan): string {
+  const { configSha256: _configSha256, digest: _digest, ...lineage } = plan;
+  return stableStringify(lineage);
+}
 
 /**
  * Captures only already-prepared council inputs. It validates chunk preparation
@@ -87,8 +94,20 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
   if (input.prompts.length !== expectedCalls) throw new Error('capture_council_incomplete_matrix');
   const patchBytes = canonicalPatchBytes(input.diff);
   if (sha256Hex(patchBytes) !== diffDigest(input.diff.files)) throw new Error('capture_council_diff_digest_mismatch');
-  const configBytes = canonicalConfigBytes(input.config);
-  if (sha256Hex(configBytes) !== configDigest(input.config)) throw new Error('capture_council_config_digest_mismatch');
+  // New captures freeze the effective policy for later original/recovery
+  // execution. Legacy captures remain unchanged and therefore keep their
+  // original global-only scheduling semantics.
+  const comparisonSource = input.comparisonSource === undefined ? undefined
+    : decodeCapturedInputs(input.comparisonSource.bytes, input.comparisonSource.plan);
+  const comparisonConfig = comparisonSource?.config;
+  const preserveOmission = comparisonConfig !== undefined && comparisonConfig.providerConcurrency === undefined &&
+    input.config.providerConcurrency === undefined;
+  const capturedConfig = preserveOmission ? input.config : {
+    ...input.config,
+    providerConcurrency: resolveProviderConcurrency(input.config.providerConcurrency),
+  };
+  const configBytes = canonicalConfigBytes(capturedConfig);
+  if (sha256Hex(configBytes) !== configDigest(capturedConfig)) throw new Error('capture_council_config_digest_mismatch');
   const contextBytes = stableStringify(input.contextDocs);
   const toolsBytes = stableStringify(input.compatibility);
   const chunkBytes = input.chunks.map(formatChunkForPrompt);
@@ -115,6 +134,9 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
       return { seat: `assignment:${seat}`, chunk, systemSha256: sha256Hex(prompt.systemPrompt), userSha256: sha256Hex(prompt.userPrompt) };
     })),
   });
+  if (comparisonSource !== undefined && planLineage(comparisonSource.plan) !== planLineage(plan)) {
+    throw new Error('capture_council_comparison_mismatch');
+  }
   const assignments = input.chunks.flatMap(() => input.assignments.map(assignment => ({
     model: assignment.model, provider: assignment.provider, role: assignment.role,
   })));

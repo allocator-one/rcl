@@ -17,11 +17,13 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const target = 'rcl-105';
 const runId = '01a0daa6-b575-759b-942c-e879460be5bf';
-function fixture(maxPhysicalCalls = 3, concurrency = 1) {
-  const assignments = Array.from({ length: 3 }, (_, index) => ({ model: `fake/model-${index}`, provider: 'fake',
+function fixture(maxPhysicalCalls = 3, concurrency = 1, providerConcurrency?: Record<string, number>,
+  quorumFraction = 2 / 3, provider = 'fake') {
+  const assignments = Array.from({ length: 3 }, (_, index) => ({ model: `fake/model-${index}`, provider,
     role: { name: 'general', systemPrompt: 'system', description: 'fixture', focus: [], isSpecialized: false } }));
   const prompts = assignments.map(() => ({ systemPrompt: 'system', userPrompt: 'patch' }));
-  const configBytes = stableStringify({ concurrency, maxRetries: 0, timeout: 1000, quorumFraction: 2 / 3 });
+  const configBytes = stableStringify({ concurrency, maxRetries: 0, timeout: 1000, quorumFraction,
+    ...(providerConcurrency === undefined ? {} : { providerConcurrency }) });
   const toolsBytes = '{"aggregation":{"name":"consensus","version":1},"parser":{"name":"findings-json","version":1}}';
   const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: hash('patch'), configSha256: hash(configBytes), specSha256: hash(''), contextSha256: hash('[]'),
@@ -30,19 +32,55 @@ function fixture(maxPhysicalCalls = 3, concurrency = 1) {
     chunks: [{ index: 0, total: 1, digest: hash('patch') }],
     prompts: assignments.map((_, i) => ({ seat: `s${i}`, chunk: 0, systemSha256: hash('system'), userSha256: hash('patch') })),
   });
-  const captured = captureReviewerInputs({ plan, policy: { version: 1, fraction: 2 / 3 }, assignments, prompts,
+  const captured = captureReviewerInputs({ plan, policy: { version: 1, fraction: quorumFraction }, assignments, prompts,
     patchBytes: 'patch', configBytes, specBytes: '', contextBytes: '[]', toolsBytes, chunkBytes: ['patch'] });
   const launch = createOriginalLaunch({ runId, target, originalNativeClaim: { attempt: 1, round: 1 },
     capturedInputsSha256: captured.digest, planDigest: plan.digest, startedAtMs: 1000, expiresAtMs: 6000,
     maxPhysicalCalls, maxAttemptsPerCell: 1 });
-  const review = (model: string, status: ModelReview['status'] = 'success'): ModelReview => ({ model, role: 'general', provider: 'fake',
+  const review = (model: string, status: ModelReview['status'] = 'success'): ModelReview => ({ model, role: 'general', provider,
     status, findings: [{ id: 'same-id', file: 'x.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', title: model, description: 'Retained finding' }],
     durationMs: 1, ...(status === 'error' ? { error: '503 overloaded' } : {}) });
-  return { captured, launch, plan, review };
+  return { captured, launch, plan, provider, review };
 }
 async function directory() { const root = await mkdtemp(join(tmpdir(), 'rcl-original-execution-')); roots.push(root); return root; }
 
 describe('captured original council execution', () => {
+  it('uses only a policy frozen in the capture and leaves legacy captures globally scheduled', async () => {
+    async function peakFor(providerConcurrency?: Record<string, number>) {
+      const provider = providerConcurrency === undefined ? 'fake' : 'anthropic';
+      const commonDir = await directory(), f = fixture(3, 3, providerConcurrency, 1, provider);
+      let active = 0, peak = 0;
+      await withNativeTarget(commonDir, target, async ownership => {
+        const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
+        await executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan,
+          launch: f.launch, nowMs: () => 1500,
+          adapterFactory: () => ({ name: 'fake', provider: f.provider, ask: vi.fn(), review: async model => {
+            active++; peak = Math.max(peak, active);
+            await new Promise(resolve => setTimeout(resolve, 5));
+            active--;
+            return f.review(model);
+          } }) });
+      });
+      return { peak, providerConcurrency: f.captured.config.providerConcurrency };
+    }
+    expect(await peakFor({ anthropic: 1 })).toEqual({ peak: 1, providerConcurrency: { anthropic: 1 } });
+    expect((await peakFor()).providerConcurrency).toBeUndefined();
+  });
+
+  it('refuses an explicit changed provider policy before replay dispatch', async () => {
+    const commonDir = await directory(), f = fixture(3, 3, { anthropic: 1 }, 1, 'anthropic');
+    const changedPlan = freezeCheckpointPlan({ ...f.plan,
+      configSha256: hash(stableStringify({ ...f.captured.config, providerConcurrency: { anthropic: 2 } })) });
+    const called = vi.fn();
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
+      await executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: changedPlan,
+        launch: f.launch, nowMs: () => 1500,
+        adapterFactory: () => ({ name: 'fake', provider: f.provider, ask: vi.fn(), review: called }) });
+    })).rejects.toThrow('original_execution_launch_mismatch');
+    expect(called).not.toHaveBeenCalled();
+  });
+
   it('retains a late original response under its physical intent without changing sealed health or proof', async () => {
     const commonDir = await directory(), f = fixture(3, 3);
     await withNativeTarget(commonDir, target, async ownership => {

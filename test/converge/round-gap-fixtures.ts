@@ -6,7 +6,7 @@ import { processRoundReport, convergeRunStatePath } from '../../src/converge/run
 import { convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { applyRoundGap, previewRoundGap, type RoundGapManifest } from '../../src/converge/round-gap.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
-import { sampleResult } from '../telemetry/fixtures.js';
+import { sampleResult, sampleReview } from '../telemetry/fixtures.js';
 import { onTestFinished } from 'vitest';
 export async function fixture(git = false) {
   const cwd = await mkdtemp(join(tmpdir(), 'rcl-gap-binding-'));
@@ -19,7 +19,10 @@ export async function fixture(git = false) {
   const attempts = { version: 2, target, cap: 20, migratedAttempts: 0, attemptsUsed: 3,
     attempts: [1, 2, 3].map(attempt => ({ attempt, claimedAt: '2026-01-01T00:00:00.000Z', pid: process.pid, source: 'claim' as const })), updatedAt: '2026-01-01T00:00:00.000Z' };
   await mkdir(dirname(attemptPath)); await writeFile(attemptPath, JSON.stringify(attempts));
-  const report = sampleResult(); report.run!.converge = { target, round: 3, attempt: 3 };
+  // Two complete blocking seats: ordinary admission requires conclusive reviewer health.
+  const report = sampleResult({ reviews: [sampleReview(), sampleReview({ model: 'openai/gpt', role: 'security-auditor', provider: 'openai' })] });
+  report.run!.roster = report.run!.roster.map(seat => ({ ...seat, lane: 'blocking' as const }));
+  report.run!.converge = { target, round: 3, attempt: 3 };
   const reportPath = join(dir, 'report.json'), incompletePath = join(dir, 'incomplete.md');
   await writeFile(reportPath, JSON.stringify(report)); await writeFile(incompletePath, 'Available partial output; controller exit unknown.\n');
   const input = { target, gapRound: 2, admittingRound: 3, attempt: 2, runId: report.run!.id,

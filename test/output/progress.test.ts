@@ -45,6 +45,39 @@ describe('council run planning', () => {
         '10m per-call timeout, 3h timeout-bound queue estimate'
     );
   });
+
+  it('bounds retained original waves by the captured effective provider policy', () => {
+    const options = {
+      totalCalls: 25,
+      reviewers: 25,
+      chunks: 1,
+      concurrency: 9,
+      timeoutMs: 540_000,
+      providers: Array.from({ length: 25 }, () => 'anthropic'),
+      providerConcurrency: { anthropic: 2, openai: 1 },
+    };
+    expect(buildCouncilRunPlan(options)).toMatchObject({
+      concurrency: 9,
+      waves: 13,
+      timeoutBoundMs: 7_020_000,
+    });
+    expect(buildCouncilRunPlan({ ...options, providers: Array(25).fill('google') }))
+      .toMatchObject({ waves: 3, timeoutBoundMs: 1_620_000 });
+    expect(buildCouncilRunPlan({ ...options,
+      providers: [...Array(24).fill('google'), 'openai'],
+      providerConcurrency: { openai: 1 },
+    })).toMatchObject({ waves: 3, timeoutBoundMs: 1_620_000 });
+    expect(buildCouncilRunPlan({ ...options, totalCalls: 9, reviewers: 9, concurrency: 3,
+      providers: ['anthropic', 'anthropic', 'anthropic', 'openai', 'openai', 'openai', 'openai', 'openai', 'openai'],
+      providerConcurrency: { anthropic: 3, openai: 2 },
+    })).toMatchObject({ waves: 4, timeoutBoundMs: 2_160_000 });
+    expect(() => buildCouncilRunPlan({ ...options, providers: options.providers.slice(1) }))
+      .toThrow('Invalid retained provider matrix');
+    for (const cap of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => buildCouncilRunPlan({ ...options, providerConcurrency: { anthropic: cap } }))
+        .toThrow('Invalid retained provider concurrency');
+    }
+  });
 });
 
 describe('CouncilProgressReporter', () => {

@@ -11,6 +11,7 @@ import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/disp
 import type { RecoveryAttempt } from '../../src/dispatch/recovery-policy.js';
 import type { ModelReview } from '../../src/consensus/types.js';
 import type { ReviewAssignment } from '../../src/roles/types.js';
+import { stableStringify } from '../../src/report/run-header.js';
 
 const writeGate = vi.hoisted(() => ({ active: false, started: () => {}, wait: Promise.resolve() }));
 vi.mock('node:fs/promises', async importOriginal => {
@@ -34,49 +35,93 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const target = 'allocator-one/rcl#105';
-function fixture() {
+function fixture(provider = 'fake') {
   const assignments: ReviewAssignment[] = Array.from({ length: 3 }, (_, index) => ({
-    model: `fake/model-${index}`, provider: 'fake',
+    model: `fake/model-${index}`, provider,
     role: { name: 'general', systemPrompt: 'system', focus: [], description: 'fixture', isSpecialized: false },
   }));
   const prompts = assignments.map(() => ({ systemPrompt: 'system', userPrompt: 'patch' }));
   const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: hash('patch'), configSha256: hash('config'), specSha256: hash('spec'),
     contextSha256: hash('context'), toolsSha256: hash('tools'), parser: { name: 'findings-json', version: 1 },
-    roster: assignments.map((assignment, index) => ({ seat: `s${index}`, model: assignment.model, role: 'general', route: 'fake' })),
+    roster: assignments.map((assignment, index) => ({ seat: `s${index}`, model: assignment.model, role: 'general', route: provider })),
     chunks: [{ index: 0, total: 1, digest: hash('patch') }],
     prompts: assignments.map((_, index) => ({ seat: `s${index}`, chunk: 0, systemSha256: hash('system'), userSha256: hash('patch') })),
   });
   const review = (model: string, status: ModelReview['status'] = 'success'): ModelReview => ({ model,
-    role: 'general', provider: 'fake', status, durationMs: 1, findings: [],
+    role: 'general', provider, status, durationMs: 1, findings: [],
     ...(status === 'error' ? { error: '503 overloaded' } : {}) });
   const sourceAttempts: RecoveryAttempt[] = [{ id: 'original-s0', cell: 's0:0', outcome: review(assignments[0]!.model) }];
-  return { assignments, prompts, plan, expectedPlan: plan, sourceAttempts, review };
+  return { assignments, prompts, plan, expectedPlan: plan, provider, sourceAttempts, review };
 }
-async function runFixture(work: (input: ReturnType<typeof fixture>, commonDir: string) => Promise<void>) {
+async function runFixture(work: (input: ReturnType<typeof fixture>, commonDir: string) => Promise<void>, provider = 'fake') {
   const commonDir = await mkdtemp(join(tmpdir(), 'rcl-recovery-executor-')); roots.push(commonDir);
-  await work(fixture(), commonDir);
+  await work(fixture(provider), commonDir);
 }
 
-function capturedFixture(input: ReturnType<typeof fixture>) {
-  const configBytes = JSON.stringify({ concurrency: 1, quorumFraction: 2 / 3, reasoningEffort: 'high', timeout: 1000 });
+function capturedFixture(input: ReturnType<typeof fixture>, overrides: Record<string, unknown> = {}) {
+  const fraction = Number(overrides['quorumFraction'] ?? 2 / 3);
+  const configBytes = stableStringify({ concurrency: 1, quorumFraction: 2 / 3, reasoningEffort: 'high', timeout: 1000,
+    ...overrides });
   const contextBytes = '[]';
   const toolsBytes = '{"aggregation":{"name":"consensus","version":1},"parser":{"name":"findings-json","version":1}}';
   const plan = freezeCheckpointPlan({ ...input.plan, configSha256: hash(configBytes),
     contextSha256: hash(contextBytes), toolsSha256: hash(toolsBytes) });
-  return captureReviewerInputs({ ...input, plan, policy: { version: 1, fraction: 2 / 3 },
+  return captureReviewerInputs({ ...input, plan, policy: { version: 1, fraction },
     patchBytes: 'patch', configBytes, specBytes: 'spec', contextBytes, toolsBytes, chunkBytes: ['patch'] });
 }
 
-function recoveryOperation(planDigest: string, capturedInputsSha256: string) {
+function recoveryOperation(planDigest: string, capturedInputsSha256: string, maxAdditionalCalls = 1) {
   return createRecoveryOperation({ operationId: '11111111-1111-4111-8111-111111111111',
     sourceRunId: '01a0daa6-b575-759b-942c-e879460be5bf', successorRunId: '22222222-2222-4222-8222-222222222222',
     sourceReportSha256: hash('source report'), sourceCheckpointSha256: hash('source checkpoint'),
     capturedInputsSha256, planDigest, target, originalNativeClaim: { attempt: 1, round: 1 },
-    startedAtMs: 1000, expiresAtMs: 3000, maxAdditionalCalls: 1, maxAttemptsPerCell: 3 });
+    startedAtMs: 1000, expiresAtMs: 3000, maxAdditionalCalls, maxAttemptsPerCell: 3 });
 }
 
 describe('owned missing-review executor', () => {
+  it('uses the provider policy persisted in a new capture', async () => runFixture(async (input, commonDir) => {
+    const captured = capturedFixture(input, { concurrency: 3, quorumFraction: 1,
+      providerConcurrency: { anthropic: 1 } });
+    const operation = recoveryOperation(captured.plan.digest, captured.digest, 3);
+    let active = 0, peak = 0;
+    await withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace: 'provider-policy',
+        plan: captured.plan, ownership });
+      await journal.bind('captured-inputs', captured.bytes, ownership);
+      await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
+      const result = await recoverCapturedAssignments({ commonDir, ownership, journal,
+        expectedPlan: captured.plan, sourceAttempts: [], operation, nowMs: () => 1500,
+        adapterFactory: () => ({ name: 'fake', provider: input.provider, ask: vi.fn(), review: async model => {
+          active++; peak = Math.max(peak, active);
+          await new Promise(resolve => setTimeout(resolve, 5));
+          active--;
+          return input.review(model);
+        } }) });
+      expect(result.preview.successfulSeats).toBe(3);
+      expect(peak).toBe(1);
+    });
+  }), 'anthropic');
+
+  it('refuses an explicit changed provider policy before recovery dispatch', async () => runFixture(async (input, commonDir) => {
+    const captured = capturedFixture(input, { concurrency: 3, quorumFraction: 1,
+      providerConcurrency: { anthropic: 1 } });
+    const operation = recoveryOperation(captured.plan.digest, captured.digest, 3);
+    const changedPlan = freezeCheckpointPlan({ ...captured.plan,
+      configSha256: hash(stableStringify({ ...captured.config, providerConcurrency: { anthropic: 2 } })) });
+    const called = vi.fn();
+    await expect(withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace: 'provider-policy-mismatch',
+        plan: captured.plan, ownership });
+      await journal.bind('captured-inputs', captured.bytes, ownership);
+      await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
+      await recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: changedPlan,
+        sourceAttempts: [], operation, nowMs: () => 1500,
+        adapterFactory: () => ({ name: 'fake', provider: input.provider, ask: vi.fn(), review: called }) });
+    })).rejects.toThrow('recovery_operation_mismatch');
+    expect(called).not.toHaveBeenCalled();
+  }), 'anthropic');
+
   it('refuses legacy journals without captured inputs before any paid dispatch', async () => runFixture(async (input, commonDir) => {
     const called = vi.fn();
     await expect(withNativeTarget(commonDir, target, async ownership => {
