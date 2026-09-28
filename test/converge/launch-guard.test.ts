@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
+import { guardReviewLaunch, hasHealthyGuardedLaunch, launchSchema, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
 import { claimConvergeAttempt, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
+import { resolveQuorumPolicy } from '../../src/dispatch/quorum.js';
 
 const directories: string[] = [];
 const target = 'fixture-launch';
@@ -243,6 +244,50 @@ describe('native guarded review launch', () => {
       await first;
     }
   }, 15_000);
+
+  it('uses recorded blocking health, not aggregate counters, for an inconclusive completed launch (RCL-136)', async () => {
+    const options = await fixture();
+    // 11/17 blocking seats plus one async success: aggregate 12/18 looks healthy.
+    const blocking = { version: 1 as const, policy: resolveQuorumPolicy(17), successfulSeats: 11 };
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 12, totalReviews: 18, reviewerHealth: blocking });
+    await guardReviewLaunch(options);
+    const recorded = launchSchema.parse((await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch);
+    expect(recorded).toMatchObject({ successfulReviews: 12, totalReviews: 18, reviewerHealth: blocking });
+    expect(hasHealthyGuardedLaunch(recorded)).toBe(false);
+    expect(hasHealthyGuardedLaunch({ ...recorded, reviewerHealth: undefined })).toBe(true); // legacy aggregate-only rule
+
+    // The report cannot be admitted, and the same inputs need an explicit bounded retry.
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1, findings: [sampleFinding()],
+      runId: completion.runId, reportSha256: completion.reportJsonSha256 })).rejects.toThrow('report_health_inconclusive');
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ rounds: [], findings: {} });
+    // Other bytes or another round for the same run are a launch mismatch, not a health verdict.
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 1, findings: [],
+      runId: completion.runId, reportSha256: 'd'.repeat(64) })).rejects.toThrow('report_launch_mismatch');
+    await expect(processRoundReport({ gitCommonDir: options.gitCommonDir, target, round: 2, findings: [],
+      runId: completion.runId, reportSha256: completion.reportJsonSha256 })).rejects.toThrow('report_launch_mismatch');
+    const fresh = options;
+    await expect(guardReviewLaunch(fresh)).rejects.toThrow('infrastructure_failure');
+    fresh.run = vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000003',
+      successfulReviews: 13, totalReviews: 18, reviewerHealth: { ...blocking, successfulSeats: 12 } });
+    await guardReviewLaunch({ ...fresh, retryReason: 'Blocking quorum 11/17 < 12; same roster, bounded retry.' });
+    expect(fresh.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 });
+    expect(await loadConvergeAttemptState(fresh.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
+    expect(hasHealthyGuardedLaunch(launchSchema.parse((await loadConvergeRunState(fresh.gitCommonDir, target))!.lastLaunch))).toBe(true);
+  });
+
+  it('honors a stricter recorded policy and refuses a forged blocking policy', async () => {
+    const strict = { version: 1 as const, policy: resolveQuorumPolicy(10, 1), successfulSeats: 9 };
+    const base = { status: 'completed' as const, attempt: 1, round: 1, headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64),
+      startedAt: new Date().toISOString(), pid: 1, ...completion, successfulReviews: 13, totalReviews: 14 };
+    expect(hasHealthyGuardedLaunch(launchSchema.parse({ ...base, reviewerHealth: strict }))).toBe(false);
+    expect(hasHealthyGuardedLaunch(launchSchema.parse({ ...base, reviewerHealth: { ...strict, successfulSeats: 10 } }))).toBe(true);
+    for (const forged of [
+      { ...strict, policy: { ...strict.policy, minimumSuccessful: 5 } },
+      { ...strict, policy: { ...strict.policy, fraction: 0.5, minimumSuccessful: 5 } },
+      { ...strict, successfulSeats: 11 },
+    ]) expect(launchSchema.safeParse({ ...base, reviewerHealth: forged }).success).toBe(false);
+    expect(launchSchema.safeParse({ ...base, status: 'pending', reviewerHealth: strict }).success).toBe(false);
+  });
 
   it('cannot use an explicit retry decision to raise or reset the existing cap', async () => {
     const options = await fixture();

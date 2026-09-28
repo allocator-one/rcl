@@ -1,3 +1,4 @@
+import { assertAdmissibleReportHealth } from '../../src/report/blocking-health.js';
 import { describe, expect, it, vi } from 'vitest';
 import { assembleCompletedReview } from '../../src/report/assembly.js';
 import { deriveReviewerHealth } from '../../src/report/reviewer-health.js';
@@ -83,5 +84,8 @@ describe('reviewer identity eligibility at shared report assembly', () => {
     expect(health.policy.minimumSuccessful).toBe(2);
     expect(health.conclusive).toBe(true);
     expect(result.reviews.map(r => [r.model, r.role, r.durationMs])).toEqual([['vendor::alpha', 'general', 2], ['other', 'general', 1]]);
+    // Rows outside the fixture roster: the report completes without a summary, and admission refuses it.
+    expect(result.stats.blockingHealth).toBeUndefined();
+    expect(() => assertAdmissibleReportHealth(result)).toThrow(expect.objectContaining({ code: 'report_health_unverifiable' }));
   });
 });

@@ -19,6 +19,19 @@ import type { ConvergeContext } from '../report/run-header.js';
 import { staleManifest, StaleReportAuditError } from './stale-report-schema.js';
 import { verifyStaleReportReceipts } from './stale-report.js';
 import { scrubText } from '../telemetry/scrub.js';
+import { hasSuccessfulQuorum, resolveQuorumPolicy } from '../dispatch/quorum.js';
+
+const quorumPolicySchema = z.object({
+  version: z.literal(1), fraction: z.number().finite(),
+  seatCount: z.number().int().nonnegative().safe(), minimumSuccessful: z.number().int().nonnegative().safe(),
+}).strict().refine(policy => {
+  try { return isDeepStrictEqual(resolveQuorumPolicy(policy.seatCount, policy.fraction), policy); } catch { return false; }
+}, 'Invalid blocking reviewer quorum policy');
+
+/** Blocking-seat health of the completed report; guard metadata, never admission. */
+const reviewerHealthSchema = z.object({
+  version: z.literal(1), policy: quorumPolicySchema, successfulSeats: z.number().int().nonnegative().safe(),
+}).strict().refine(health => health.successfulSeats <= health.policy.seatCount);
 
 const completionSchema = z.object({
   runId: z.string().uuid(),
@@ -29,6 +42,7 @@ const completionSchema = z.object({
   hardFailure: z.boolean().optional(),
   exitCode: z.number().int().nonnegative().optional(),
   reportPath: z.string().min(1).optional(),
+  reviewerHealth: reviewerHealthSchema.optional(),
 }).refine(value => value.successfulReviews <= value.totalReviews);
 
 export const launchSchema = z.object({
@@ -48,7 +62,8 @@ export const launchSchema = z.object({
   hardFailure: z.boolean().optional(),
   exitCode: z.number().int().nonnegative().optional(),
   reportPath: z.string().min(1).optional(),
-}).strict().refine(value => value.status !== 'completed' || completionSchema.safeParse(value).success);
+  reviewerHealth: reviewerHealthSchema.optional(),
+}).strict().refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined);
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
 export type GuardedLaunchCompletion = z.infer<typeof completionSchema>;
@@ -168,8 +183,15 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   return round;
 }
 
-/** Shared launch-health decision; recovery paths must use the guard's policy. */
+/**
+ * Shared launch-health decision; recovery paths must use the guard's policy.
+ * Launches recorded since RCL-136 carry blocking-seat health under the frozen
+ * policy. Older aggregate-only records keep their original rule (RCL-138).
+ */
 export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
+  if (previous.reviewerHealth) {
+    return hasSuccessfulQuorum(previous.reviewerHealth.policy, previous.reviewerHealth.successfulSeats);
+  }
   return previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
 }
 

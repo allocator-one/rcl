@@ -180,6 +180,12 @@ export interface ReviewResult {
      * running — persistent stragglers stay visible per round (RCL-26).
      */
     canceledCalls?: Array<{ model: string; role: string; elapsedMs: number }>;
+    /**
+     * Blocking reviewer health (RCL-136): complete blocking seats against the
+     * configured quorum. Secondary/async/verification successes are listed
+     * separately and never count. Absent from reports written before 4.2.0.
+     */
+    blockingHealth?: import('../report/blocking-health.js').BlockingHealthSummary;
     /** Outcome of the single-model finding verification pass (RCL-23). */
     verification?: import('./gating.js').VerificationStats;
     /** Trailing-precision weight applied to each of this run's models (RCL-27). */

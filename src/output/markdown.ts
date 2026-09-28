@@ -186,6 +186,10 @@ export function toMarkdown(result: ReviewResult): string {
     `**Completed:** ${stats.successfulReviews}/${stats.totalReviews} reviewers · ` +
       `**${stats.totalDeduped}** unique findings (${stats.totalRawFindings} raw) · ` +
       `${(stats.durationMs / 1000).toFixed(1)}s`,
+    ...(stats.blockingHealth
+      ? ['', `**Blocking reviewers:** ${stats.blockingHealth.successful}/${stats.blockingHealth.seats} complete, ` +
+          `${stats.blockingHealth.required} required — ${stats.blockingHealth.conclusive ? 'conclusive' : '**inconclusive**'}`]
+      : []),
     '',
   ];
 

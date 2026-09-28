@@ -5,6 +5,7 @@ import type { ConsensusFinding, Finding, LocationProvenance, ModelReview, Review
 import { normalizeVerificationEvidence } from './verification.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
+import { reviewLane } from '../report/blocking-health.js';
 import { normalizeGeneratedText, scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
 
 /**
@@ -184,19 +185,13 @@ function callError(review: ModelReview, parseFailures: boolean): string | undefi
   return scrubText(firstLine, MAX_PARSER_ERROR_SUMMARY);
 }
 
-function laneFor(review: ModelReview, run: RunHeader): RosterLane {
-  const seat = run.roster.find((entry) => entry.model === review.model && entry.role === review.role);
-  if (seat) return seat.lane;
-  return review.async ? 'async' : 'blocking';
-}
-
 function wireCall(review: ModelReview, run: RunHeader, parseFailures: boolean): WireCall {
   const error = callError(review, parseFailures);
   return {
     model: scrubIdentifier(review.model),
     role: scrubIdentifier(review.role),
     provider: scrubIdentifier(review.provider),
-    lane: laneFor(review, run),
+    lane: reviewLane(review, run.roster),
     // Chunks are merged before the report is written; one call row stands
     // for a reviewer's work on the whole diff.
     chunk_index: 0,

@@ -74,13 +74,16 @@ export interface RunnerOptions {
   /** Test seam / config-key wiring; defaults to the builtin providers. */
   adapterFactory?: (provider: string) => ReviewAdapter;
   /**
-   * Successful complete-seat quorum over the full supplied blocking matrix.
-   * Seats are provider/model/role tuples; all their expected chunks must
-   * succeed. At quorum cancel every outstanding call, including core models,
-   * without waiting for noncooperative adapters. Omission keeps wait-for-all.
-   * coreModels is accepted for source compatibility but grants no exemption.
+   * Successful complete-seat quorum over the blocking seats of the supplied
+   * matrix. Seats are provider/model/role tuples; all their expected chunks
+   * must succeed. `blocking` marks each call's lane (default: every call);
+   * secondary calls run and keep their results but never count toward, or
+   * close, the quorum. At quorum cancel every outstanding call, including
+   * core models and secondary calls, without waiting for noncooperative
+   * adapters. Omission or a fraction of 1 keeps wait-for-all. coreModels is
+   * accepted for source compatibility but grants no exemption.
    */
-  quorum?: { fraction?: number; coreModels?: readonly string[] };
+  quorum?: { fraction?: number; coreModels?: readonly string[]; blocking?: readonly boolean[] };
 }
 
 type AdapterCall = {
@@ -167,20 +170,35 @@ export async function runReviews(
     throw new Error('Invalid seat ID matrix');
   }
   const seatKeys = calls.map((call, index) => options.seatIds?.[index] ?? JSON.stringify([call.provider, call.model, call.role]));
+  const blocking = options.quorum?.blocking;
+  if (blocking !== undefined && (!Array.isArray(blocking) || blocking.length !== calls.length ||
+    blocking.some(value => typeof value !== 'boolean'))) {
+    throw new Error('Invalid blocking lane matrix');
+  }
+  const isBlocking = (index: number): boolean => blocking?.[index] ?? true;
   const expected = new Map<string, number>();
   const seatIdentities = new Map<string, string>();
+  const seatLanes = new Map<string, boolean>();
   for (const [index, key] of seatKeys.entries()) {
     if (typeof key !== 'string' || key.trim().length === 0) throw new Error('Invalid empty seat ID');
     const call = calls[index]!;
     const identity = JSON.stringify([call.provider, call.model, call.role]);
     if (seatIdentities.has(key) && seatIdentities.get(key) !== identity) throw new Error('Inconsistent original seat identity');
+    if (seatLanes.has(key) && seatLanes.get(key) !== isBlocking(index)) throw new Error('Inconsistent original seat lane');
     seatIdentities.set(key, identity);
-    expected.set(key, (expected.get(key) ?? 0) + 1);
+    seatLanes.set(key, isBlocking(index));
+    if (isBlocking(index)) expected.set(key, (expected.get(key) ?? 0) + 1);
   }
-  const policy = options.quorum ? resolveQuorumPolicy(expected.size, options.quorum.fraction) : undefined;
+  // A fraction of 1 is the documented wait-for-all setting: the whole
+  // blocking roster is required and no call, secondary included, is canceled.
+  const policy = options.quorum && (options.quorum.fraction ?? 2 / 3) < 1
+    ? resolveQuorumPolicy(expected.size, options.quorum.fraction) : undefined;
+  // Validation only: an unsupported fraction must still throw when it disables closure.
+  if (options.quorum && !policy) resolveQuorumPolicy(expected.size, options.quorum.fraction);
   const successfulChunks = new Map<string, number>();
   let successfulSeats = 0;
   function countSuccess(index: number): void {
+    if (!isBlocking(index)) return;
     const key = seatKeys[index]!;
     const count = (successfulChunks.get(key) ?? 0) + 1;
     successfulChunks.set(key, count);

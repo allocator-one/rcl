@@ -1,6 +1,7 @@
 import { assertUnambiguousReviewerIdentities } from '../dispatch/reviewer-identity.js';
 import { evaluateCiGate } from '../ci.js';
-import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import { DEFAULT_QUORUM_FRACTION, DEFAULT_THRESHOLDS } from '../config/defaults.js';
+import { deriveBlockingHealth, summarizeBlockingHealth } from './blocking-health.js';
 import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
@@ -43,6 +44,18 @@ export interface CompletedReviewProjection {
   findings: ConsensusFinding[];
   appendix: ConsensusFinding[];
   verification?: ReviewResult['stats']['verification'];
+}
+
+/**
+ * A report whose rows cannot be matched to its roster still completes: the
+ * summary is omitted, and admission derives health again and refuses it.
+ */
+function blockingHealthStats(roster: RunHeaderInput['roster'], reviews: ModelReview[], fraction: number) {
+  try {
+    return { blockingHealth: summarizeBlockingHealth(deriveBlockingHealth({ roster, reviews, fraction })) };
+  } catch {
+    return {};
+  }
 }
 
 /** Assemble retained reviewer outputs through consensus, bounded gating, and the run header. */
@@ -126,6 +139,7 @@ export async function assembleCompletedReview(
               .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
           }
         : {}),
+      ...blockingHealthStats(input.run.roster, reviews, config.quorumFraction ?? DEFAULT_QUORUM_FRACTION),
       ...(verificationStats ? { verification: verificationStats } : {}),
       // Applied weights for this run's models, so the report shows what
       // scaled the votes (RCL-27).
