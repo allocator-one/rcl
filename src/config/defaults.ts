@@ -74,6 +74,13 @@ export const DEFAULT_MAX_RETRIES = 3;
  */
 export const DEFAULT_REASONING_EFFORT = 'low';
 export const DEFAULT_CONCURRENCY = 9;
+/**
+ * Provider admission limits inside the blocking runner. The default prevents
+ * the observed five-seat Fable 5.1 high-effort burst while preserving the
+ * existing per-call deadline. Providers absent from this map remain bounded
+ * only by the global concurrency limit.
+ */
+export const DEFAULT_PROVIDER_CONCURRENCY = { anthropic: 2 } as const;
 
 export const DEFAULT_SEVERITY_ORDER = [
   'critical',

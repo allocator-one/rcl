@@ -37,6 +37,8 @@ export interface RunnerOptions {
   timeoutMs: number;
   maxRetries: number;
   concurrency: number;
+  /** Per-provider admission caps, enforced alongside global concurrency. */
+  providerConcurrency?: Readonly<Record<string, number>>;
   verbose?: boolean;
   /** Progress notification receives an isolated copy after durable acceptance. */
   onReviewComplete?: (review: ModelReview) => void;
@@ -135,6 +137,12 @@ export async function runReviews(
   if (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1) {
     throw new Error('Runner concurrency must be a positive safe integer');
   }
+  const providerLimits = new Map(Object.entries(options.providerConcurrency ?? {}));
+  for (const [provider, limit] of providerLimits) {
+    if (provider.trim().length === 0 || !Number.isSafeInteger(limit) || limit < 1) {
+      throw new Error('Runner provider concurrency must use non-empty providers and positive safe integers');
+    }
+  }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 2_147_483_647) {
     throw new Error('Runner timeout must be positive and within the supported timer range');
   }
@@ -163,7 +171,6 @@ export async function runReviews(
   const adapters = new Map<string, ReviewAdapter>();
 
   const results: ModelReview[] = new Array(calls.length);
-  let nextIndex = 0;
   if (options.seatIds !== undefined &&
     (!Array.isArray(options.seatIds) || options.seatIds.length !== calls.length ||
       calls.some((_call, index) => typeof options.seatIds![index] !== 'string' || options.seatIds![index]!.trim().length === 0))) {
@@ -374,14 +381,40 @@ export async function runReviews(
   else options.signal?.addEventListener('abort', abort, { once: true });
   try {
     const queue = [...eligible];
-    const width = Math.min(options.concurrency, queue.length);
-    const workers = Array.from({ length: width }, async () => {
-      while (!failure && nextIndex < queue.length) {
-        const index = queue[nextIndex++]!;
-        await runOne(index);
+    const activeByProvider = new Map<string, number>();
+    const active = new Set<Promise<void>>();
+    const providerLimit = (provider: string): number =>
+      Math.min(options.concurrency, providerLimits.get(provider) ?? options.concurrency);
+    const canStart = (index: number): boolean => {
+      const provider = calls[index]!.provider;
+      return (activeByProvider.get(provider) ?? 0) < providerLimit(provider);
+    };
+    const start = (index: number): void => {
+      const provider = calls[index]!.provider;
+      activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + 1);
+      let task!: Promise<void>;
+      task = runOne(index).finally(() => {
+        const remaining = (activeByProvider.get(provider) ?? 1) - 1;
+        if (remaining === 0) activeByProvider.delete(provider);
+        else activeByProvider.set(provider, remaining);
+        active.delete(task);
+      });
+      active.add(task);
+    };
+
+    while (queue.length > 0 && !stopped()) {
+      while (active.size < options.concurrency && !stopped()) {
+        // A saturated provider must not hold the global FIFO head: take the
+        // earliest runnable cell while retaining order within each provider.
+        const position = queue.findIndex(canStart);
+        if (position < 0) break;
+        const [index] = queue.splice(position, 1);
+        start(index!);
       }
-    });
-    await Promise.allSettled(workers);
+      if (active.size === 0) break;
+      await Promise.race(active).catch(() => undefined);
+    }
+    await Promise.allSettled([...active]);
     if (failure) throw failure.error;
     // Ineligible cells still occupy their original matrix positions. These
     // placeholders have no provider invocation and cannot become paid results.

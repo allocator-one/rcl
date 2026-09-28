@@ -146,6 +146,7 @@ function mergeWithDefaults(config: Config, preserveDefaultRoster = false): Confi
     quorumFraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION,
     maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
     concurrency: config.concurrency ?? DEFAULT_CONCURRENCY,
+    providerConcurrency: config.providerConcurrency ? { ...config.providerConcurrency } : undefined,
     reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
     githubToken: config.githubToken ?? process.env['GITHUB_TOKEN'],
     context: config.context,

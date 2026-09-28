@@ -22,6 +22,7 @@ import {
   DEFAULT_CONCURRENCY,
   DEFAULT_REASONING_EFFORT,
 } from './config/defaults.js';
+import { resolveProviderConcurrency } from './config/provider-concurrency.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
@@ -2133,6 +2134,9 @@ async function executeCouncil(
         timeoutMs,
         maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
         concurrency,
+        // Keep the default version-owned rather than materializing it into
+        // legacy config digests. Explicit caps remain source-bound inputs.
+        providerConcurrency: resolveProviderConcurrency(config.providerConcurrency),
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
         // Quorum closure (RCL-26, RCL-136): the round stops waiting once the
         // configured fraction of blocking seats completed every chunk — the

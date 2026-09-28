@@ -3,7 +3,11 @@ import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, ConfigError } from '../../src/config/loader.js';
-import { DEFAULT_MODELS, DEFAULT_SECONDARY_MODELS, DEFAULT_ASYNC_MODELS } from '../../src/config/defaults.js';
+import {
+  DEFAULT_MODELS,
+  DEFAULT_SECONDARY_MODELS,
+  DEFAULT_ASYNC_MODELS,
+} from '../../src/config/defaults.js';
 
 let dir: string;
 let savedOpenRouterKey: string | undefined;
@@ -29,6 +33,7 @@ describe('loadConfig', () => {
     const config = await loadConfig(undefined, dir);
     expect(config.models).toEqual([...DEFAULT_MODELS]);
     expect(config.concurrency).toBe(9);
+    expect(config.providerConcurrency).toBeUndefined();
   });
 
   it('loads a valid yaml config', async () => {
@@ -47,6 +52,33 @@ describe('loadConfig', () => {
     await writeFile(join(dir, '.review-council.yml'), 'concurrency: 6\n');
     const config = await loadConfig(undefined, dir);
     expect(config.concurrency).toBe(6);
+  });
+
+  it('keeps provider caps independent from a high global concurrency override', async () => {
+    await writeFile(
+      join(dir, '.review-council.yml'),
+      'concurrency: 99\nproviderConcurrency:\n  anthropic: 2\n  openai: 4\n'
+    );
+    const config = await loadConfig(undefined, dir);
+    expect(config.concurrency).toBe(99);
+    expect(config.providerConcurrency).toEqual({ anthropic: 2, openai: 4 });
+  });
+
+  it('preserves explicitly configured provider caps without materializing version defaults', async () => {
+    await writeFile(
+      join(dir, '.review-council.yml'),
+      'providerConcurrency:\n  openai: 4\n'
+    );
+    const config = await loadConfig(undefined, dir);
+    expect(config.providerConcurrency).toEqual({ openai: 4 });
+  });
+
+  it.each([0, -1, 1.5])('rejects an invalid provider concurrency of %s', async (value) => {
+    await writeFile(
+      join(dir, '.review-council.json'),
+      JSON.stringify({ providerConcurrency: { anthropic: value } })
+    );
+    await expect(loadConfig(undefined, dir)).rejects.toThrow(ConfigError);
   });
 
   it('ignores executable config files during search', async () => {

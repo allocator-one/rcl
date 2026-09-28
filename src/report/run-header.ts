@@ -237,6 +237,7 @@ export const DIGESTED_CONFIG_FIELDS = [
   'quorumFraction',
   'maxRetries',
   'concurrency',
+  'providerConcurrency',
   'reasoningEffort',
   'context',
   'spec',

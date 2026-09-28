@@ -112,6 +112,11 @@ export const ConfigSchema = z.object({
   quorumFraction: z.number().min(2 / 3).max(1).optional(),
   maxRetries: z.number().int().nonnegative().optional(),
   concurrency: z.number().int().positive().optional(),
+  /** Per-provider admission caps, applied in addition to global concurrency. */
+  providerConcurrency: z.record(
+    z.string().min(1),
+    z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+  ).optional(),
   /** Reasoning budget for providers that support it (currently OpenRouter). */
   reasoningEffort: ReasoningEffortSchema.optional(),
   githubToken: z.string().optional(),
