@@ -25,7 +25,7 @@ function messageStart(): string {
       id: 'msg_local_test',
       type: 'message',
       role: 'assistant',
-      model: 'claude-fable-5-1',
+      model: 'claude-opus-5-5',
       content: [],
       stop_reason: null,
       stop_sequence: null,
@@ -63,7 +63,7 @@ async function withLocalSse(
   }
 }
 
-describe('Anthropic Fable streaming over real SDK SSE', () => {
+describe('Anthropic Opus 5.5 streaming over real SDK SSE', () => {
   it('assembles tool input deltas and parses the final findings', async () => {
     const input = JSON.stringify({ findings: [FINDING] });
     const stream = [
@@ -89,14 +89,14 @@ describe('Anthropic Fable streaming over real SDK SSE', () => {
     ].join('');
 
     await withLocalSse(stream, async (adapter, requests) => {
-      const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 'system', 'diff', {
+      const review = await adapter.review('anthropic/claude-opus-5-5', 'general', 'system', 'diff', {
         timeoutMs: 5000,
         maxRetries: 0,
       });
 
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({
-        model: 'claude-fable-5-1',
+        model: 'claude-opus-5-5',
         stream: true,
         max_tokens: 65536,
         output_config: { effort: 'high' },
@@ -127,7 +127,7 @@ describe('Anthropic Fable streaming over real SDK SSE', () => {
     ].join('');
 
     await withLocalSse(stream, async (adapter, requests) => {
-      const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', {
+      const review = await adapter.review('claude-opus-5-5', 'general', 'system', 'diff', {
         timeoutMs: 5000,
         maxRetries: 0,
       });
@@ -162,7 +162,7 @@ describe('Anthropic Fable streaming over real SDK SSE', () => {
     ].join('');
 
     await withLocalSse([overloaded, recovered], async (adapter, requests) => {
-      const review = await adapter.review('claude-fable-5-1', 'general', 'system', 'diff', {
+      const review = await adapter.review('claude-opus-5-5', 'general', 'system', 'diff', {
         timeoutMs: 5000,
         maxRetries: 1,
       });
