@@ -282,16 +282,17 @@ export function readAsyncLateAudit(input: LocationInput): Promise<readonly Async
 
 async function lateFailuresAt(location: Location, plan: AsyncPlan, state: AsyncState): Promise<AsyncLateFailure[]> {
   const directory = join(location.phasePath, 'failures'); await privateDirectory(directory); const names = (await readdir(directory)).sort();
-  asyncRefuse(names.length <= plan.maxPhysicalCalls, 'late_failure_cap'); const rows: AsyncLateFailure[] = [], seen = new Set<string>();
-  for (const [index, name] of names.entries()) {
-    asyncRefuse(name === filename(index + 1), 'late_failure_sequence'); const bytes = await safeRead(join(directory, name)); let row: unknown;
+  asyncRefuse(names.length <= plan.maxPhysicalCalls, 'late_failure_cap'); const rows: AsyncLateFailure[] = [];
+  for (const name of names) {
+    const bytes = await safeRead(join(directory, name)); let row: unknown;
     try { row = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_late_failure'); }
     asyncRefuse(row && typeof row === 'object' && Object.keys(row).sort().join(',') === 'attemptId,callIndex,digest,kind,sequence', 'invalid_late_failure');
     const candidate = row as AsyncLateFailure, { digest, ...unsigned } = candidate;
-    const intent = state.intents.find(value => value.attemptId === candidate.attemptId);
-    asyncRefuse(stableStringify(candidate) + '\n' === bytes && candidate.sequence === index + 1 && candidate.kind === 'late_audit_failure' &&
-      intent?.callIndex === candidate.callIndex && !seen.has(candidate.attemptId) && sha256Hex(stableStringify(unsigned)) === digest, 'invalid_late_failure');
-    seen.add(candidate.attemptId); rows.push(candidate);
+    const intent = state.intents[candidate.sequence - 1];
+    asyncRefuse(stableStringify(candidate) + '\n' === bytes && candidate.sequence >= 1 && name === filename(candidate.sequence) &&
+      candidate.kind === 'late_audit_failure' && intent?.attemptId === candidate.attemptId && intent.callIndex === candidate.callIndex &&
+      sha256Hex(stableStringify(unsigned)) === digest, 'invalid_late_failure');
+    rows.push(candidate);
   }
   return freezeAsync(rows);
 }
@@ -300,15 +301,14 @@ async function lateFailuresAt(location: Location, plan: AsyncPlan, state: AsyncS
 export async function recordAsyncLateFailure(input: AsyncDelegate, attemptId: string): Promise<void> {
   const { location, delegate } = await delegatedLocation(structuredClone(input));
   await locked(location, async (metadata, state) => {
-    authorize(metadata, delegate); const intent = state.intents.find(value => value.attemptId === attemptId);
+    authorize(metadata, delegate); const intentIndex = state.intents.findIndex(value => value.attemptId === attemptId), intent = state.intents[intentIndex];
     asyncRefuse(intent?.callIndex === delegate.callIndex, 'late_failure_intent');
-    const rows = await lateFailuresAt(location, metadata.plan, state), existing = rows.find(row => row.attemptId === attemptId);
-    if (existing) {
-      await resync(join(location.phasePath, 'failures', filename(existing.sequence)), stableStringify(existing) + '\n'); return;
-    }
-    const unsigned = { sequence: rows.length + 1, kind: 'late_audit_failure' as const, callIndex: delegate.callIndex, attemptId };
+    // Bind the marker path to the immutable physical-intent position. Exact
+    // replay reaches one file directly instead of rereading every prior marker.
+    const sequence = intentIndex + 1;
+    const unsigned = { sequence, kind: 'late_audit_failure' as const, callIndex: delegate.callIndex, attemptId };
     const record = { ...unsigned, digest: sha256Hex(stableStringify(unsigned)) };
-    await publish(location.phasePath, join(location.phasePath, 'failures', filename(record.sequence)), stableStringify(record) + '\n');
+    await publish(location.phasePath, join(location.phasePath, 'failures', filename(sequence)), stableStringify(record) + '\n');
   });
 }
 

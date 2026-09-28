@@ -98,9 +98,10 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
     if (outcome === undefined) {
       // A pending provider response retains only restricted audit authority.
       // Its eventual result cannot reopen the sealed proof or blocking report.
-      void raw.then(async result => {
-        await persist(result);
-      }).catch(async error => { await options.onLateAuditError(error, intent.attemptId); })
+      void raw.then(
+        result => persist(result),
+        error => persist(observedFailure(error)),
+      ).catch(async error => { await options.onLateAuditError(error, intent.attemptId); })
         // The sink is already the final bounded durability attempt. Contain its
         // own failure so a detached worker cannot create an unhandled rejection.
         .catch(() => {});

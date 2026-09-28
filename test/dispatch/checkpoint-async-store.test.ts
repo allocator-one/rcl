@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-const observation = vi.hoisted(() => ({ hashes: 0, serializations: 0, locks: 0 }));
+const observation = vi.hoisted(() => ({ hashes: 0, serializations: 0, locks: 0, failureReads: 0 }));
 vi.mock('../../src/report/run-header.js', async original => {
   const actual = await original<typeof import('../../src/report/run-header.js')>();
   return { ...actual,
@@ -13,6 +13,13 @@ vi.mock('../../src/converge/native-lock.js', async original => {
     observation.locks += 1; return actual.withNativeLock(...args);
   } };
 });
+vi.mock('../../src/telemetry/recovery/files.js', async original => {
+  const actual = await original<typeof import('../../src/telemetry/recovery/files.js')>();
+  return { ...actual, readStable: async (...args: Parameters<typeof actual.readStable>) => {
+    if (String(args[0]).includes('/failures/')) observation.failureReads += 1;
+    return actual.readStable(...args);
+  } };
+});
 import { constants } from 'node:fs';
 import { mkdtemp, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -22,12 +29,12 @@ import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../s
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
-import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit } from '../../src/dispatch/checkpoint-async-store.js';
+import { initializeAsyncPhase, openAsyncDelegate, recordAsyncLateFailure, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit, readAsyncLateFailures } from '../../src/dispatch/checkpoint-async-store.js';
 import { decodeAsyncProof, validateAsyncRecords, validateAsyncResult } from '../../src/dispatch/checkpoint-async.js';
 const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], requireWritableSyncPath:'', afterSync: undefined as undefined | ((path:string)=>void)}));
 vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.requireWritableSyncPath&&!(Number(args[1])&constants.O_RDWR))throw Object.assign(new Error('sync requires write access'),{code:'EACCES'});if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
 const roots: string[] = [];
-afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.requireWritableSyncPath=''; durability.afterSync=undefined; observation.hashes=0; observation.serializations=0; observation.locks=0; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.synced=[]; durability.requireWritableSyncPath=''; durability.afterSync=undefined; observation.hashes=0; observation.serializations=0; observation.locks=0; observation.failureReads=0; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
@@ -94,7 +101,7 @@ describe('restricted original async checkpoint persistence',()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]),intent=await w.claim(prompts);
   observation.hashes=0; observation.serializations=0; observation.locks=0;
   await expect(w.recordResult(intent.attemptId,'x'.repeat(8 * 1024 * 1024 + 1),true)).rejects.toThrow('invalid_bytes');
-  expect(observation).toEqual({ hashes: 0, serializations: 0, locks: 0 });
+  expect(observation).toEqual({ hashes: 0, serializations: 0, locks: 0, failureReads: 0 });
   await w.recordResult(intent.attemptId,review(),true);
   expect(observation.hashes).toBeGreaterThan(0); expect(observation.serializations).toBeGreaterThan(0); expect(observation.locks).toBeGreaterThan(0);
   expect((await seal(f)).state.outcomes).toHaveLength(1);
@@ -202,6 +209,18 @@ describe('async replay append cost',()=>{
   const wrongPlanState=validateAsyncRecords([first],phase.plan);
   expect(()=>appendAsyncRecordToValidatedState(wrongPlanState,event,{...phase.plan,expiresAtMs:phase.plan.expiresAtMs-1})).toThrow('unvalidated_state');
   expect(opened.delegates).toHaveLength(2);
+ });
+ it('records each private late failure without rereading prior marker files',async()=>{
+  const f=await fixture(),opened=await initialize(f),first=await openAsyncDelegate(opened.delegates[0]),second=await openAsyncDelegate(opened.delegates[1]);
+  const a=await first.claim(prompts);await first.recordResult(a!.attemptId,review('error'),true);
+  const b=await first.claim(prompts),c=await second.claim(prompts);
+  const reads:number[]=[];
+  for(const [delegate,intent] of [[opened.delegates[0],a],[opened.delegates[0],b],[opened.delegates[1],c]] as const){
+   observation.failureReads=0;await recordAsyncLateFailure(delegate!,intent!.attemptId);reads.push(observation.failureReads);
+  }
+  expect(reads).toEqual([2,2,2]);
+  observation.failureReads=0;await recordAsyncLateFailure(opened.delegates[0]!,a!.attemptId);expect(observation.failureReads).toBe(2);
+  expect((await readAsyncLateFailures(f.input)).map(row=>row.sequence)).toEqual([1,2,3]);
  });
 });
 

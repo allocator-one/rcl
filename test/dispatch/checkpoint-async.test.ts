@@ -294,6 +294,19 @@ it('does not let an unbounded derived callback stop a durable timeout retry',asy
   resolve(JSON.parse(review()));await vi.waitFor(async()=>expect(await readAsyncLateAudit(f.input)).toHaveLength(1));
   expect((await seal(f)).bytes).toBe(proof.bytes);expect(errors).toEqual([]);
  });
+ it('persists a provider rejection that settles after cancellation as one late error result', async()=>{
+  const f=await fixture(),opened=await initialize(f),controller=new AbortController();let reject!: (error:unknown)=>void,started!:()=>void;
+  const began=new Promise<void>(resolve=>started=resolve),raw=new Promise<any>((_resolve,rejectPromise)=>reject=rejectPromise),sink=vi.fn();
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{started();return raw;})};
+  const running=executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:sink});
+  await began;controller.abort();expect(await running).toEqual({newPhysicalCalls:1});const proof=await seal(f),attempt=proof.state.intents[0]!;
+  reject(new Error('late provider rejection'));
+  await vi.waitFor(async()=>expect(await readAsyncLateAudit(f.input)).toHaveLength(1));
+  const late=(await readAsyncLateAudit(f.input))[0]!;
+  expect(late.result.attemptId).toBe(attempt.attemptId);
+  expect(JSON.parse(late.result.reviewBytes)).toMatchObject({model:'async-model',role:'general',provider:'fake',async:true,status:'error'});
+  expect((await seal(f)).bytes).toBe(proof.bytes);expect(await readAsyncLateFailures(f.input)).toEqual([]);expect(sink).not.toHaveBeenCalled();
+ });
 
  it('checks absolute expiry again after fsync and preserves that unstarted intent as uncertain', async()=>{
   const f=await fixture(),opened=await initialize(f),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
