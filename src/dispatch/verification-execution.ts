@@ -26,6 +26,8 @@ export interface VerificationExecutionOptions {
   monotonicNow?: () => number;
   /** Caller buffers until sealing and retains with its original ownership; never alters the phase proof. */
   auditLateAnswer: (result: VerificationResult) => Promise<void>;
+  /** Register each provider continuation synchronously so caller-owned drain cannot miss a later answer. */
+  registerLateAudit: (operation: Promise<void>, batchIndex: number) => void;
   onLateAuditError: (error: unknown, batchIndex: number) => void;
 }
 
@@ -52,7 +54,8 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
   }
   if (!Number.isSafeInteger(options.otherPhysicalCalls) || options.otherPhysicalCalls < 0 || options.otherPhysicalCalls > 500 ||
     typeof options.beforeLaunch !== 'function' || typeof options.askFactory !== 'function' ||
-    typeof options.auditLateAnswer !== 'function' || typeof options.onLateAuditError !== 'function') {
+    typeof options.auditLateAnswer !== 'function' || typeof options.registerLateAudit !== 'function' ||
+    typeof options.onLateAuditError !== 'function') {
     return Promise.reject(new Error('verification_execution_invalid_options'));
   }
   return withOwnedNativeOperation(options.ownership, options.commonDir, options.journal.getPlan().target, async ownership => {
@@ -93,19 +96,7 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
     let failure: string | undefined;
     const fail = (reason: string): void => { failure ??= reason; controller.abort(); };
     const remaining = (): number => executionExpiresAtMs - now();
-    const pendingAudit = new Set<Promise<void>>(), auditErrors: unknown[] = [];
-    function audit(row: VerificationResult): void {
-      let work: Promise<void>;
-      try { work = options.auditLateAnswer(row); }
-      catch (error) { work = Promise.reject(error); }
-      const tracked = work.catch(error => {
-        auditErrors.push(error);
-        try { options.onLateAuditError(error, row.batchIndex); }
-        catch (sinkError) { auditErrors.push(sinkError); }
-      });
-      pendingAudit.add(tracked);
-      void tracked.then(() => pendingAudit.delete(tracked));
-    }
+    const auditErrors: unknown[] = [];
     const cancel = (): void => fail('verification_execution_cancelled');
     options.signal?.addEventListener('abort', cancel, { once: true });
     if (options.signal?.aborted) cancel();
@@ -144,9 +135,10 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
         const call = new AbortController();
         const observed = await new Promise<VerificationResult | undefined>(resolve => {
           let settled = false;
-          const finish = (row?: VerificationResult): void => {
-            if (settled) { if (row) audit(row); return; }
+          const finish = (row?: VerificationResult): boolean => {
+            if (settled) return false;
             settled = true; clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); resolve(row);
+            return true;
           };
           const onAbort = (): void => { call.abort(); finish(); };
           const timer = setTimeout(() => { fail('verification_execution_request_timeout'); }, timeoutMs);
@@ -156,11 +148,12 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
           try { request = ask!(plan.model, batch.systemPrompt, batch.userPrompt, { timeoutMs, maxRetries: 0, signal: call.signal,
               ...(plan.verificationReasoningEffort ? { reasoningEffort: plan.verificationReasoningEffort } : {}) }); }
           catch { fail('verification_execution_request_failed'); finish(); return; }
-          void request.then(answer => {
+          const continuation = request.then(async answer => {
             // Snapshot the adapter's actual response, never a manufactured timeout.
             const answerBytes = JSON.stringify(answer);
             parseVerificationAnswer(answerBytes, retained);
-            finish({ batchIndex, attemptId: intent.attemptId, finishedAtMs: now(), answerBytes });
+            const row = { batchIndex, attemptId: intent.attemptId, finishedAtMs: now(), answerBytes };
+            if (!finish(row)) await options.auditLateAnswer(row);
           }).catch(error => {
             if (settled) {
               // No answer exists to retain on a rejected request. A late invalid
@@ -168,6 +161,8 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
               try { options.onLateAuditError(error, batchIndex); } catch (sinkError) { auditErrors.push(sinkError); }
             } else { fail('verification_execution_request_failed'); finish(); }
           });
+          try { options.registerLateAudit(continuation, batchIndex); }
+          catch { fail('verification_execution_late_audit_unavailable'); finish(); }
         });
         if (observed) {
           // Keep exact schema fields; the intent timestamp is not part of a result.
@@ -196,7 +191,6 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
       await options.journal.finalizeVerification(failure
         ? { status: 'failed', finishedAtMs, reason: failure }
         : { status: 'complete', finishedAtMs }, ownership);
-      while (pendingAudit.size) await Promise.all([...pendingAudit]);
       if (auditErrors.length) throw new AggregateError(auditErrors, 'verification_execution_late_audit_failed');
       return result((await options.journal.readVerification())!, interpreted);
     } finally {

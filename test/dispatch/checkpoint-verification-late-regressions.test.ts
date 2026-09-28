@@ -51,7 +51,7 @@ describe('late verifier audit regressions', () => {
         const reader = await CheckpointJournal.openRead(checkpointPath(f.dir, target, 'vlate'), f.journal.getPlan());
         await expect(owned(f, owner => reader.recordLateVerificationResult(result(), owner))).rejects.toThrow('checkpoint_read_only');
     });
-    it.each(['noncanonical', 'symlink', 'unknown root'])('rejects %s evidence', async (mode) => {
+    it.each(['noncanonical', 'unknown root'])('rejects %s evidence', async (mode) => {
         const f = await fixture();
         await owned(f, owner => f.journal.recordLateVerificationResult(result(), owner));
         const file = join(events(f), '00000001.json');
@@ -59,12 +59,15 @@ describe('late verifier audit regressions', () => {
             await writeFile(file, (await readFile(file, 'utf8')) + ' ');
         else if (mode === 'unknown root')
             await writeFile(join(events(f), '..', 'unknown'), 'x', { mode: 0o600 });
-        else {
-            const other = join(f.dir, 'other');
-            await writeFile(other, await readFile(file), { mode: 0o600 });
-            await rm(file);
-            await symlink(other, file);
-        }
+        await expect(f.journal.readLateVerificationAudit()).rejects.toThrow();
+    });
+    it.runIf(process.platform !== 'win32')('rejects symlink evidence', async () => {
+        const f = await fixture();
+        await owned(f, owner => f.journal.recordLateVerificationResult(result(), owner));
+        const file = join(events(f), '00000001.json'), other = join(f.dir, 'other');
+        await writeFile(other, await readFile(file), { mode: 0o600 });
+        await rm(file);
+        await symlink(other, file);
         await expect(f.journal.readLateVerificationAudit()).rejects.toThrow();
     });
     it('reflushes a surviving audit event after lost fsync acknowledgment', async () => {

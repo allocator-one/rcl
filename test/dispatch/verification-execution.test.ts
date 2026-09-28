@@ -38,7 +38,7 @@ async function fixture(count = 9, timeout = 1000, pass = 6000) {
   const factory = vi.fn(() => vi.fn(async () => answer()));
   const execute = (overrides: Partial<VerificationExecutionOptions> = {}) => withNativeTarget(commonDir, target, ownership => executeVerification({ commonDir, ownership, journal,
     regeneratedPlan: plan, retainedPlan: saved, otherPhysicalCalls: 0, askFactory: factory, beforeLaunch,
-    nowMs: () => 2000, monotonicNow: () => 0, auditLateAnswer, onLateAuditError, ...overrides }));
+    nowMs: () => 2000, monotonicNow: () => 0, auditLateAnswer, registerLateAudit: operation => { void operation; }, onLateAuditError, ...overrides }));
   return { commonDir, journal, plan, saved, execute, factory, beforeLaunch, auditLateAnswer, onLateAuditError };
 }
 
@@ -210,13 +210,31 @@ describe('bounded durable verifier execution', () => {
       const result = await executeVerification({ commonDir: f.commonDir, ownership, journal: f.journal,
         regeneratedPlan: f.plan, retainedPlan: f.saved, otherPhysicalCalls: 0, beforeLaunch: async () => {},
         askFactory: () => () => new Promise(done => { resolve = done; }), nowMs: () => 2000, monotonicNow: () => 0,
-        auditLateAnswer: audit.accept, onLateAuditError: error => errors.push(error) });
+        auditLateAnswer: audit.accept, registerLateAudit: audit.retain, onLateAuditError: error => errors.push(error) });
       expect(result.ok).toBe(false); await audit.flushAfterFinalization();
       resolve(answer('actual late answer'));
       await vi.waitFor(async () => expect(await f.journal.readLateVerificationAudit()).toHaveLength(1));
       await audit.drain(); expect(errors).toEqual([]);
       expect((await f.journal.readLateVerificationAudit())[0]!.result.answerBytes).toBe(JSON.stringify(answer('actual late answer')));
       expect(await f.journal.exportVerificationProof()).toEqual(result.proof);
+    });
+  });
+
+  it('hands a pending request continuation to the caller-owned audit before execution returns', async () => {
+    const f = await fixture(1, 15), errors: unknown[] = []; let resolve!: (value: ReturnType<typeof answer>) => void;
+    await withNativeTarget(f.commonDir, target, async ownership => {
+      const audit = createVerificationLateAudit({ commonDir: f.commonDir, journal: f.journal, ownership, onError: error => errors.push(error) });
+      const options = { commonDir: f.commonDir, ownership, journal: f.journal,
+        regeneratedPlan: f.plan, retainedPlan: f.saved, otherPhysicalCalls: 0, beforeLaunch: async () => {},
+        askFactory: () => () => new Promise(done => { resolve = done; }), nowMs: () => 2000, monotonicNow: () => 0,
+        auditLateAnswer: audit.accept, onLateAuditError: (error: unknown) => errors.push(error),
+        registerLateAudit: audit.retain };
+      const result = await executeVerification(options);
+      expect(result.ok).toBe(false); await audit.flushAfterFinalization();
+      let drained = false; const draining = audit.drain().then(() => { drained = true; });
+      await new Promise<void>(done => setImmediate(done)); expect(drained).toBe(false);
+      resolve(answer('actual late answer')); await draining;
+      expect((await f.journal.readLateVerificationAudit())).toHaveLength(1); expect(errors).toEqual([]);
     });
   });
 });

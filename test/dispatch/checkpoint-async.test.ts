@@ -189,16 +189,33 @@ describe('restricted original async checkpoint phase',()=>{
 
  it('executes only captured prompts and routes with separate durable attempts and SDK retries disabled', async()=>{
   const f=await fixture(),opened=await initialize(f);let calls=0;
+  const observed:Array<{route:string[];maxRetries:number;timeoutMs:number;intents:number}>=[];
   const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async(model,role,system,user,options)=>{
-   expect([model,role,system,user]).toEqual(['async-model','general',prompts.systemPrompt,prompts.userPrompt]);
-   expect(options.maxRetries).toBe(0);expect(options.timeoutMs).toBeGreaterThan(0);expect(options.timeoutMs).toBeLessThanOrEqual(1000);
-   expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(++calls);
-   return JSON.parse(review(calls===1?'timeout':'success'));
+   observed.push({route:[model,role,system,user],maxRetries:options.maxRetries,timeoutMs:options.timeoutMs,
+    intents:(await readAsyncPhase(f.input)).state.intents.length});
+   return JSON.parse(review(++calls===1?'timeout':'success'));
   })};
   const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:()=>{throw new Error('unexpected late failure');}});
   expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  expect(observed.map(row=>row.route)).toEqual(Array(2).fill(['async-model','general',prompts.systemPrompt,prompts.userPrompt]));
+  expect(observed.map(row=>row.maxRetries)).toEqual([0,0]);
+  expect(observed.map(row=>row.timeoutMs>0&&row.timeoutMs<=1000)).toEqual([true,true]);
+  expect(observed.map(row=>row.intents)).toEqual([1,2]);
   const proof=await seal(f);expect(proof.state.outcomes).toHaveLength(2);expect(proof.state.uncertain).toEqual([]);
   expect(new Set(proof.state.intents.map(row=>row.attemptId)).size).toBe(2);
+ });
+ it.each([
+  ['rejected adapter', async()=>{throw new Error('synthetic adapter rejection');}],
+  ['invalid adapter result', async()=>({model:'wrong'})],
+ ])('durably records an observed %s as an error outcome',async(_kind,reviewCall)=>{
+  const f=await fixture(),opened=await initialize(f);
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(reviewCall)};
+  await expect(executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()}))
+   .resolves.toEqual({newPhysicalCalls:1});
+  const proof=await seal(f);expect(proof.state.uncertain).toEqual([]);expect(proof.state.outcomes).toHaveLength(1);
+  expect(proof.state.outcomes[0]).toMatchObject({possiblyBilled:true});
+  expect(proof.physicalAttempts).toMatchObject([{outcomeCertainty:'observed',possiblyBilled:true}]);
+  expect(JSON.parse(proof.state.outcomes[0]!.reviewBytes)).toMatchObject({model:'async-model',role:'general',provider:'fake',async:true,status:'error'});
  });
  it('cuts the deadline against provider response and still awaits durable result persistence', async()=>{
   const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
@@ -239,7 +256,7 @@ describe('restricted original async checkpoint phase',()=>{
    await expect(running).resolves.toBeUndefined();
    durability.failPaths=[join(f.path,'async','events'),join(f.path,'async','failures')];
    resolve(JSON.parse(review()));
-   await vi.waitFor(()=>expect(durability.failPaths).toEqual([]));await Promise.resolve();
+   await vi.waitFor(()=>expect(durability.failPaths).toEqual([]));await new Promise<void>(resolve=>setImmediate(resolve));
    expect(durability.synced.filter(path=>path===join(f.path,'async','failures'))).toHaveLength(1);
    expect(unhandled).toEqual([]);
   } finally {process.off('unhandledRejection',observe);}

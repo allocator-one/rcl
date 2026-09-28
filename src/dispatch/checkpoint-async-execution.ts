@@ -4,6 +4,7 @@ import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter } from './adapter.js';
 import { asyncRefuse, parseAsyncReview, type AsyncCall } from './checkpoint-async.js';
 import { stableStringify } from '../report/run-header.js';
+import { failedReview } from './utils.js';
 
 export interface CheckpointAsyncExecutionOptions {
   delegate: AsyncDelegate;
@@ -31,6 +32,7 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
   const adapter = options.adapterFactory(call.ref);
   asyncRefuse(adapter.provider === call.ref.provider, 'adapter_route');
   while (!options.signal?.aborted && remaining() > 0) {
+    const startedAt = Date.now();
     const controller = new AbortController();
     let raw: ReturnType<ReviewAdapter['review']> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -63,9 +65,18 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       try { void Promise.resolve(options.onLateAuditError(error, intent.attemptId)).catch(() => {}); }
       catch { /* contained */ }
     };
+    const observedFailure = (error: unknown): ModelReview => failedReview({
+      model: call.ref.model, role: call.ref.role, provider: call.ref.provider, startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    });
     const persist = async (result: Awaited<ReturnType<ReviewAdapter['review']>>) => {
-      const bytes = stableStringify({ ...result, async: true });
-      const review = parseAsyncReview(bytes, call.ref);
+      let review: ModelReview;
+      try {
+        const candidate = stableStringify({ ...result, async: true });
+        review = parseAsyncReview(candidate, call.ref) as ModelReview;
+      } catch (error) { review = observedFailure(error); }
+      const bytes = stableStringify({ ...review, async: true });
+      review = parseAsyncReview(bytes, call.ref) as ModelReview;
       await writer.recordResult(intent.attemptId, bytes, true);
       // Derived publication cannot change exact physical accounting or stop a
       // durable timeout retry. Its private error sink is detached and contained.
@@ -94,7 +105,10 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
         .catch(() => {});
       break;
     }
-    if (outcome.kind === 'error') throw outcome.error;
+    if (outcome.kind === 'error') {
+      await persist(observedFailure(outcome.error));
+      break;
+    }
     // The immutable deadline bounds provider response time. Once a response is
     // observed, validation and durable result publication must finish rather
     // than being abandoned by the same timer.

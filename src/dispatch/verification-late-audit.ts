@@ -4,6 +4,8 @@ import { parseVerificationAnswer, snapshotVerificationEvent, type VerificationRe
 
 export interface VerificationLateAudit {
   accept(result: VerificationResult): Promise<void>;
+  /** Retain a provider continuation before execution returns; drain waits it under the original ownership. */
+  retain(operation: Promise<void>, batchIndex: number): void;
   flushAfterFinalization(): Promise<void>;
   drain(): Promise<void>;
 }
@@ -17,11 +19,11 @@ export function createVerificationLateAudit(options: {
 }): VerificationLateAudit {
   const { commonDir, journal, ownership, onError } = options;
   if (typeof onError !== 'function') throw new Error('Late verification audit requires an error sink');
-  const buffered: VerificationResult[] = [], pending = new Set<Promise<void>>(), errors: unknown[] = [];
+  const buffered: VerificationResult[] = [], pending = new Set<Promise<void>>(), continuations = new Set<Promise<void>>(), errors: unknown[] = [];
   let active = false;
-  const retain = (error: unknown, index: number): void => { errors.push(error); try { onError(error, index); } catch (sink) { errors.push(sink); } };
+  const captureError = (error: unknown, index: number): void => { errors.push(error); try { onError(error, index); } catch (sink) { errors.push(sink); } };
   const track = (operation: Promise<void>, index: number): Promise<void> => {
-    const completion = operation.then(() => {}, error => { retain(error, index); });
+    const completion = operation.then(() => {}, error => { captureError(error, index); });
     pending.add(completion); void completion.then(() => pending.delete(completion)); return operation;
   };
   const write = (result: VerificationResult): Promise<void> => track(journal.recordLateVerificationResult(result, ownership), result.batchIndex);
@@ -35,14 +37,25 @@ export function createVerificationLateAudit(options: {
     if (!intent || result.finishedAtMs < intent.startedAtMs) throw new Error('late_verification_audit_invalid_result');
     return result;
   };
-  async function drain(): Promise<void> {
-    while (pending.size) await Promise.all([...pending]);
+  async function finish(includeContinuations: boolean): Promise<void> {
+    while (pending.size || (includeContinuations && continuations.size)) {
+      await Promise.all([...pending, ...(includeContinuations ? continuations : [])]);
+    }
     const retained = errors.splice(0);
     if (retained.length === 1) throw retained[0];
     if (retained.length > 1) throw new AggregateError(retained, 'late_verification_audit_failed');
     if (buffered.length) throw new Error('late_verification_audit_requires_terminal');
   }
+  const drain = (): Promise<void> => finish(true);
   return Object.freeze({
+    retain(operation: Promise<void>, batchIndex: number): void {
+      if (!(operation instanceof Promise) || !Number.isSafeInteger(batchIndex) || batchIndex < 0) {
+        throw new Error('late_verification_audit_invalid_continuation');
+      }
+      const completion = operation.then(() => {}, error => { captureError(error, batchIndex); });
+      continuations.add(completion);
+      void completion.then(() => continuations.delete(completion));
+    },
     accept(input: VerificationResult): Promise<void> {
       const index = input?.batchIndex;
       try {
@@ -66,7 +79,7 @@ export function createVerificationLateAudit(options: {
         try { await write(result); return true; } catch { return false; }
       }));
       buffered.unshift(...batch.filter((_, index) => !persisted[index]));
-      await drain();
+      await finish(false);
     },
     drain,
   });
