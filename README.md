@@ -55,7 +55,7 @@ are supplied as shared context to the remaining reviewers. Remove the retired
 names from explicit role lists; they follow the usual unknown-role warning and
 skip behavior unless you define a custom role with that name.
 
-The default Fable and Sol general reviewers plus specialist assignments schedule
+The default Opus 5.5 and Sol general reviewers plus specialist assignments schedule
 13 blocking seats, or 14 when a specification enables `spec-compliance`. Gemini
 is eligible for specialist assignments only. The async general reviewer
 and verifier are separate; quorum is calculated from the blocking roster.
@@ -122,7 +122,7 @@ Review a PR, a local diff, or uncommitted work.
 ```bash
 # Use explicit model:role pairs
 rcl review owner/repo#7 \
-  --reviewer claude-fable-5-1:security-auditor \
+  --reviewer claude-opus-5-5:security-auditor \
   --reviewer gpt-6-sol:bug-hunter
 
 # Spec compliance review with context
@@ -164,7 +164,7 @@ rcl discuss --report report.json --finding f003 "Is this exploitable given the s
 
 # Attach code as context, or ask different models
 rcl discuss --report report.json --finding f003 --context src/auth.ts "Does the middleware at line 12 not already cover this?"
-rcl discuss --report report.json --finding f003 --models anthropic/claude-fable-5-1 "Summarize the strongest counterargument."
+rcl discuss --report report.json --finding f003 --models anthropic/claude-opus-5-5 "Summarize the strongest counterargument."
 ```
 
 Model-generated finding ids can collide; when `--finding <id>` is ambiguous the error lists `<id>:<n>` disambiguators. Findings in the below-threshold appendix are addressable too. Answers come back in parallel, respecting the configured `timeout`, `maxRetries`, and `reasoningEffort`. There is no session state: each `discuss` is one independent round built from the report file.
@@ -516,10 +516,18 @@ applying recovery. Retained evidence is not server acknowledgment. Attested
 evidence is never queued for replay with ordinary credentials. Recovery of an
 already-completed historical run remains a separate operation.
 
+If an envelope is slow to acknowledge, use `telemetry flush --envelope-timeout-ms`
+with an integer from 1 to 120000 milliseconds. It changes only the envelope POST
+timeout (default: 10000 ms); artifact transfers keep their 120000 ms ceiling,
+and ordinary reads and events keep their existing timeouts. Shorter caller
+deadlines and known attested credential lifetimes still apply. A timeout leaves
+the evidence queued for a later flush; this option does not rerun reviewers.
+
 ```bash
 rcl telemetry status                # level, credential source, what waits in the outbox
 rcl telemetry flush                 # deliver everything spooled, to completion
 rcl telemetry flush --run <run id>  # one run only
+rcl telemetry flush --run <run id> --envelope-timeout-ms 120000
 rcl telemetry rejected --run <run id> --json  # inspect one retained original
 rcl review owner/repo#7 --no-telemetry   # keep this review on the machine
 ```
@@ -1071,7 +1079,7 @@ Place `.review-council.yml` in your project root and run `rcl` from there. rcl l
 # Shown here: the actual defaults. Keep slow/aggregator-routed models out of
 # this list; give them an async seat instead.
 models:
-  - anthropic/claude-fable-5-1
+  - anthropic/claude-opus-5-5
   - openai/gpt-6-sol
 
 # Specialist assignments only; no additional general reviewer.
@@ -1093,7 +1101,7 @@ roles:
 
 # Or pin explicit model:role pairs
 reviewers:
-  - model: anthropic/claude-fable-5-1
+  - model: anthropic/claude-opus-5-5
     role: security-auditor
   - model: openai/gpt-6-sol
     role: bug-hunter
@@ -1137,7 +1145,7 @@ output:
 concurrency: 9        # maximum simultaneous blocking reviewer calls per process
                       # set to 6 to retain the previous limit
 providerConcurrency:  # provider admission caps, applied in addition to concurrency
-  anthropic: 2        # default: bound the observed high-effort Fable burst
+  anthropic: 2        # default: bound high-effort Anthropic bursts
 timeout: 540000       # ms per blocking model call (matches the current default)
 asyncTimeout: 900000  # ms per async-lane call (slow reasoning models get headroom; nothing waits on them)
 # quorumFraction: 0.75  # round closes once this share of blocking seats succeeds
@@ -1172,7 +1180,7 @@ spec: SPEC.md
 `providerConcurrency` adds stricter provider admission caps; increasing the global
 limit never bypasses them. The scheduler scans past a saturated provider so calls
 for other providers continue without changing the original result order. Anthropic
-defaults to two concurrent calls to prevent the observed five-seat Fable 5.1 burst;
+defaults to two concurrent calls to prevent the observed five-seat high-effort burst;
 the existing 540-second call deadline is unchanged. Providers with no default or
 explicit entry use only the global limit. Separate RCL processes do not share these
 limits; async reviewers and verification use their own scheduling.
@@ -1204,10 +1212,12 @@ retain their provider effort defaults and reject this OpenAI-only setting.
 
 The top-level `reasoningEffort` applies only to OpenRouter reviewers. Direct
 Sol and Gemini reviewers use their provider defaults (currently `medium`).
-Fable 5.1 reviews explicitly use `high`, streaming, and a 65,536-token output
-ceiling so thinking and findings share adequate headroom. This follows
-[Anthropic's recommended starting effort](https://platform.claude.com/docs/en/build-with-claude/effort)
-while preserving RCL's whole-call timeout and rejection of incomplete output.
+Opus 5.5 reviews explicitly use `high`, streaming, and a 65,536-token output
+ceiling so thinking and findings share adequate headroom. Opus 5.5's API default
+is `medium`; RCL sets `high` because a review gate is intelligence-sensitive work
+([Anthropic's effort guidance](https://platform.claude.com/docs/en/build-with-claude/effort)).
+The same profile applies when Fable 5.1 is configured explicitly. RCL's whole-call
+timeout and rejection of incomplete output are unchanged.
 OpenRouter reviewers default to `low`, a supported level for the default Kimi K3;
 explicit `reasoningEffort` overrides are preserved. Kimi K3 advertises `low`,
 `high`, and `max`, so avoid overriding it to `medium`. Effort labels are

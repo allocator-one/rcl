@@ -8,7 +8,7 @@
  * multi-model findings still surface.
  */
 export const DEFAULT_MODELS = [
-  'anthropic/claude-fable-5-1',
+  'anthropic/claude-opus-5-5',
   'openai/gpt-6-sol',
 ] as const;
 
@@ -76,7 +76,7 @@ export const DEFAULT_REASONING_EFFORT = 'low';
 export const DEFAULT_CONCURRENCY = 9;
 /**
  * Provider admission limits inside the blocking runner. The default prevents
- * the observed five-seat Fable 5.1 high-effort burst while preserving the
+ * the observed five-seat high-effort Anthropic burst while preserving the
  * existing per-call deadline. Providers absent from this map remain bounded
  * only by the global concurrency limit.
  */

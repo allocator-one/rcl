@@ -45,7 +45,7 @@ describe('evidence-based verifier contract', () => {
 
   it('preserves custom verifier defaults and rejects effort for a provider that cannot receive it', () => {
     expect(resolveGatingConfig({ verificationModel: 'openai/gpt-4o' })).not.toHaveProperty('verificationReasoningEffort');
-    expect(resolveGatingConfig(undefined, ['anthropic/claude-fable-5-1'])).not.toHaveProperty('verificationReasoningEffort');
+    expect(resolveGatingConfig(undefined, ['anthropic/claude-opus-5-5'])).not.toHaveProperty('verificationReasoningEffort');
     expect(() => resolveGatingConfig({ verificationModel: 'google/gemini-3.8-flash', verificationReasoningEffort: 'high' })).toThrow(/OpenAI/);
   });
 
