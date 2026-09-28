@@ -854,7 +854,7 @@ describe('resolveGatingConfig', () => {
     expect(cfg.minModels).toBe(2);
     expect(cfg.verificationModel).not.toMatch(/^openrouter\//);
     expect(cfg.verificationTimeoutMs).toBe(cfg.verificationPassTimeoutMs);
-    expect(cfg.verificationPassTimeoutMs).toBeLessThanOrEqual(180_000);
+    expect(cfg.verificationPassTimeoutMs).toBe(600_000);
   });
 
   it('accepts an explicit whole-pass verification timeout', () => {
@@ -864,7 +864,7 @@ describe('resolveGatingConfig', () => {
   });
 
   it('uses the whole-pass budget for an implicit verifier call timeout', async () => {
-    const cfg = resolveGatingConfig({ verificationPassTimeout: 180_000 });
+    const cfg = resolveGatingConfig(undefined);
     const ask = vi.fn(async (): Promise<ModelAnswer> => ({
       model: 'google/gemini-3.6-flash',
       provider: 'google',
@@ -882,9 +882,9 @@ describe('resolveGatingConfig', () => {
       ask,
     });
 
-    expect(cfg.verificationTimeoutMs).toBe(180_000);
-    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeGreaterThan(60_000);
-    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeLessThanOrEqual(180_000);
+    expect(cfg.verificationTimeoutMs).toBe(600_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeGreaterThan(595_000);
+    expect(ask.mock.calls[0]![3]!.timeoutMs).toBeLessThanOrEqual(600_000);
   });
 
   it.each([

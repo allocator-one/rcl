@@ -1133,7 +1133,7 @@ gating:
   minModels: 2                    # distinct models for consensus gating
   verificationModel: openai/gpt-6-astra  # direct-API only
   verificationReasoningEffort: high     # OpenAI verifier only; separate from reviewer effort
-  verificationPassTimeout: 180000 # ms for the complete verification queue
+  verificationPassTimeout: 600000 # ms for the complete verification queue
 
 # Output defaults
 output:
@@ -1223,7 +1223,8 @@ explicit `reasoningEffort` overrides are preserved. Kimi K3 advertises `low`,
 `high`, and `max`, so avoid overriding it to `medium`. Effort labels are
 provider-specific and do not imply equal compute or quality across models.
 
-Verifier calls default to the remaining whole-pass budget. Set the optional
+The default whole-pass deadline is 10 minutes across all queued verifier
+batches. Verifier calls default to the remaining whole-pass budget. Set the optional
 `gating.verificationTimeout` in milliseconds to impose a shorter per-call limit;
 every call is still capped by the remaining `verificationPassTimeout` deadline.
 

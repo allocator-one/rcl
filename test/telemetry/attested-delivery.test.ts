@@ -19,7 +19,7 @@ import { fakeFetch, sampleResult, type RecordedRequest } from './fixtures.js';
  */
 
 const RBC: HarnessCredential = { url: 'https://harness.example.test', token: 'rbc_minted', source: 'attest' };
-const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
+const ARTIFACTS = { report_json: JSON.stringify(sampleResult()), report_md: '# r' };
 
 function answer(request: RecordedRequest): { status: number; body?: unknown } | Error {
   if (request.url.endsWith('/api/v1/model-keys')) return { status: 200, body: { data: { keys: { anthropic: 'sk-ant-from-harness' } } } };
@@ -109,8 +109,10 @@ describe('the run-bound credential of --attest', () => {
 
     const result = sampleResult();
     result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The earlier branch returns.' } };
+    result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
+      confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
     // The envelope lands; the artifacts hit a dead connection mid-delivery.
-    const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    const outcome = await deliverRun(runtime, { result, artifacts: { ...ARTIFACTS, report_json: JSON.stringify(result) }, evidenceRequired: true });
     expect(outcome.status).toBe('recorded');
     expect(JSON.parse(requests.find(r => r.url.endsWith('/api/v1/reviews/runs'))!.body!).findings[0]).toMatchObject({ verification_verdict: 'refuted', verification_model: 'google/gemini-3.8-flash', verification_note: 'The earlier branch returns.' });
     expect(outcome.spooled).toBe(false);

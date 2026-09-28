@@ -82,6 +82,48 @@ function retainedRedactions(value: unknown, path = ''): Array<{ path: string; co
   return [];
 }
 
+/** RCL-62 first shipped in 3.6.0; earlier verifier outages could retain a blocking gate. */
+function permitsHistoricalUnavailableGate(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!version) return false;
+  const major = Number(version[1]), minor = Number(version[2]), patch = Number(version[3]);
+  return [major, minor, patch].every(Number.isSafeInteger) && major >= 1 &&
+    (major < 3 || (major === 3 && minor < 6));
+}
+
+/** The envelope builder supplies `none` for absent labels, so inspect the immutable source first. */
+function assertVerifiedConsensusSource(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  const report = value as Partial<ReviewResult>;
+  if (report.run?.gating?.mode !== 'verified-consensus') return;
+  const findings = [
+    ...(Array.isArray(report.findings) ? report.findings : []),
+    ...(Array.isArray(report.belowThresholdFindings) ? report.belowThresholdFindings : []),
+  ];
+  const reasons = new Set<unknown>(['consensus', 'critical', 'verified', 'none']);
+  if (findings.some(finding => !reasons.has(finding?.gating?.reason))) {
+    throw new Error('original_verified_consensus_gating_unavailable');
+  }
+  const historicalUnavailableGate = permitsHistoricalUnavailableGate(report.run.rcl_version);
+  for (const finding of findings) {
+    const { reason, verification } = finding.gating!;
+    if (reason === 'verified' && verification === undefined) {
+      throw new Error('original_verified_consensus_verification_unavailable');
+    }
+    const verdict = verification?.verdict;
+    const consistent = reason === 'verified'
+      ? verdict === 'confirmed' || verdict === 'unrefuted' || (verdict === 'unavailable' && historicalUnavailableGate)
+      : reason === 'none'
+        ? verification === undefined || verdict === 'refuted' || verdict === 'insufficient_evidence' || verdict === 'unavailable'
+        : verification === undefined;
+    if (!consistent) throw new Error('original_verified_consensus_gating_inconsistent');
+  }
+  if (findings.some(finding => finding.gating?.verification !== undefined) && report.stats?.verification == null) {
+    throw new Error('original_verified_consensus_verification_stats_unavailable');
+  }
+}
+
 /** Rebuild only the reviewed transport interpretation; artifact strings remain exact originals. */
 export async function prepareOriginalRun(input: unknown): Promise<{ prepared: PreparedOriginal; artifacts: ArtifactBytes }> {
   const parsed = selectionSchema.safeParse(input);
@@ -105,6 +147,7 @@ export async function prepareOriginalRun(input: unknown): Promise<{ prepared: Pr
   const json = await readStable(selection.reportJson, MAX_ARTIFACT_BYTES);
   if (json.sha256 !== selection.reportSha256 || !Buffer.from(json.text, 'utf8').equals(json.raw)) throw new Error('original_report_digest_mismatch');
   const decoded = decodeOriginalReport(json.text, { ...(selection.originalProse ? { originalProse: selection.originalProse as OriginalProseMode } : {}) });
+  assertVerifiedConsensusSource(decoded.value);
   if (!originalRunReportSchema.safeParse(decoded.value).success) throw new Error('unsupported_original_report');
   const report = decoded.value as ReviewResult & { run: NonNullable<ReviewResult['run']> };
   if (report.reviews.some(r => r.findings.length > 2000 || r.findings.some(f => !originalRawFindingSchema.safeParse(f).success))) throw new Error('unsupported_original_reviewer_finding');

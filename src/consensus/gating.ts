@@ -163,7 +163,7 @@ export const DEFAULT_GATING_CONFIG = {
   // Adjudication needs deliberate reasoning; keep the whole pass bounded.
   verificationModel: 'openai/gpt-6-astra',
   verificationReasoningEffort: 'high',
-  verificationPassTimeoutMs: 180_000,
+  verificationPassTimeoutMs: 600_000,
 } as const;
 
 /**

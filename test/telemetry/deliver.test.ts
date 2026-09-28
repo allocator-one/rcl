@@ -21,7 +21,7 @@ import { buildEvent } from '../../src/telemetry/events.js';
 import { NOTICE_FILE } from '../../src/telemetry/notice.js';
 import { fakeFetch, sampleResult, type RecordedRequest } from './fixtures.js';
 
-const ARTIFACTS = { report_json: '{"r":1}', report_md: '# r' };
+const ARTIFACTS = { report_json: JSON.stringify(sampleResult()), report_md: '# r' };
 
 function acceptEverything(request: RecordedRequest): { status: number; body?: unknown } {
   if (request.url.endsWith('/api/v1/reviews/runs')) {
@@ -110,6 +110,8 @@ describe('telemetry delivery', () => {
       const result = sampleResult();
       result.run!.converge = converge;
       result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The early branch returns.' } };
+      result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
+        confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
       const safe = sanitizeForDelivery(result);
       const artifacts = { report_json: JSON.stringify(safe), report_md: '# Report' };
       expect(await deliverRun(rt, { result: safe, artifacts, evidenceRequired: true })).toMatchObject({ status: 'recorded', exitCode: 0 });
@@ -139,7 +141,9 @@ describe('telemetry delivery', () => {
     const { rt, requests } = await runtime(() => ({ status: 413, body: { error: 'payload_too_large' } }));
     const result = sampleResult();
     result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The original explanation.' } };
-    const outcome = await deliverRun(rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
+      confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
+    const outcome = await deliverRun(rt, { result, artifacts: { ...ARTIFACTS, report_json: JSON.stringify(result) }, evidenceRequired: true });
     expect(outcome).toMatchObject({ status: 'rejected', exitCode: 4, spooled: false });
     expect(requests).toHaveLength(1);
     expect(JSON.parse(requests[0]!.body!).findings[0].verification_note).toBe('The original explanation.');
@@ -210,7 +214,8 @@ describe('telemetry delivery', () => {
     // A finding that quotes the environment, as a careless model might. (The
     // Harness token never reaches a model: it is not in any prompt.)
     result.findings[0]!.description = `Leaked: ${Object.values(poison).join(' ')}`;
-    await deliverRun(rt, { result, artifacts: ARTIFACTS });
+    const safe = sanitizeForDelivery(result);
+    await deliverRun(rt, { result: safe, artifacts: { ...ARTIFACTS, report_json: JSON.stringify(safe) } });
 
     expect(requests.length).toBeGreaterThanOrEqual(3);
     for (const request of requests) {
@@ -244,7 +249,8 @@ describe('telemetry delivery', () => {
   it('spools when Harness is unreachable and exits 4 under --evidence-required; a later flush delivers it as retried', async () => {
     const down = await runtime(() => new TypeError('fetch failed'));
     const result = sampleResult();
-    const outcome = await deliverRun(down.rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
+    const artifacts = { report_json: JSON.stringify(result), report_md: ARTIFACTS.report_md };
+    const outcome = await deliverRun(down.rt, { result, artifacts, evidenceRequired: true });
     expect(outcome.status).toBe('spooled');
     expect(outcome.exitCode).toBe(EVIDENCE_REQUIRED_EXIT_CODE);
     expect(outcome.line).toMatch(/^Evidence spooled \(Harness unreachable: TypeError: fetch failed\); run rcl telemetry flush/);
@@ -261,7 +267,9 @@ describe('telemetry delivery', () => {
 
   it('flushes at command start, bounded, and says how many it delivered', async () => {
     const down = await runtime(() => new TypeError('fetch failed'));
-    await deliverRun(down.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result), report_md: ARTIFACTS.report_md };
+    await deliverRun(down.rt, { result, artifacts });
     lines = [];
     const up = await runtime(acceptEverything);
     await flushOutboxAtStart(up.rt, 5_000);
@@ -271,7 +279,9 @@ describe('telemetry delivery', () => {
 
   it('settles a startup flush against an endpoint that never answers, within the deadline', async () => {
     const down = await runtime(() => new TypeError('fetch failed'));
-    await deliverRun(down.rt, { result: sampleResult(), artifacts: ARTIFACTS });
+    const result = sampleResult();
+    const artifacts = { report_json: JSON.stringify(result), report_md: ARTIFACTS.report_md };
+    await deliverRun(down.rt, { result, artifacts });
     const hanging = await runtime(() => 'hang');
     // The 300 ms deadline is what lets this settle at all: a hanging request
     // with no bound would hit the test's own timeout instead.
