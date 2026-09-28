@@ -24,6 +24,14 @@ import { parseAttestedExpiry, type ReceiptProbe } from './attested-retry.js';
  */
 
 export const REQUEST_TIMEOUT_MS = 10_000;
+/** Explicit envelope retries may wait longer for an idempotent receipt. */
+export const MAX_ENVELOPE_TIMEOUT_MS = 120_000;
+export function validateEnvelopeTimeoutMs(timeoutMs: number): number {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_ENVELOPE_TIMEOUT_MS) {
+    throw new Error(`Envelope timeout must be an integer between 1 and ${MAX_ENVELOPE_TIMEOUT_MS} ms.`);
+  }
+  return timeoutMs;
+}
 /** Bounded transfer headroom for supported 25 MB artifacts, not a throughput guarantee. */
 export const ARTIFACT_TRANSFER_TIMEOUT_MS = 120_000;
 /** A receipt is a few hundred bytes; anything past this is not a Harness answer. */
@@ -96,6 +104,8 @@ export interface SinkOptions {
   fetchImpl?: typeof fetch;
   /** Explicit caller ceiling, including artifact transfers. */
   timeoutMs?: number;
+  /** Envelope POST ceiling only; never extends a shorter caller or credential lifetime. */
+  envelopeTimeoutMs?: number;
   /** Known lifetime of a run-bound credential; omitted legacy credentials keep the 10 s cap. */
   attestedExpiresAt?: string;
 }
@@ -132,11 +142,13 @@ export class HarnessSink {
   private readonly rclVersion: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly envelopeTimeoutMs?: number;
   private readonly artifactTimeoutMs: number;
   private readonly artifactExpiry?: { epoch: number; remainingMs: number; startedAt: number };
   private readonly requestBudget?: RecoveryRequestBudget;
 
   constructor(options: SinkOptions) {
+    if (options.envelopeTimeoutMs !== undefined) validateEnvelopeTimeoutMs(options.envelopeTimeoutMs);
     // The token travels to the host that minted it, over TLS (loopback
     // excepted) — re-checked here so no caller can pair it with another URL.
     // A trailing slash is the same origin and is normalized away.
@@ -148,6 +160,12 @@ export class HarnessSink {
     this.rclVersion = options.rclVersion;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    if (options.envelopeTimeoutMs !== undefined) {
+      this.envelopeTimeoutMs = Math.min(options.envelopeTimeoutMs, options.timeoutMs ?? Infinity);
+      if (this.credentialSource === 'attest' && options.attestedExpiresAt === undefined) {
+        this.envelopeTimeoutMs = Math.min(this.envelopeTimeoutMs, REQUEST_TIMEOUT_MS);
+      }
+    }
     this.artifactTimeoutMs = Math.min(ARTIFACT_TRANSFER_TIMEOUT_MS, options.timeoutMs ?? ARTIFACT_TRANSFER_TIMEOUT_MS);
     if (this.credentialSource === 'attest') {
       if (options.attestedExpiresAt === undefined) {
@@ -428,6 +446,11 @@ export class HarnessSink {
   }
 
   private async postPreparedRun(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions): Promise<SinkOutcome<RunReceipt>> {
+    if (this.envelopeTimeoutMs !== undefined) {
+      // Like artifact transfers, longer POSTs remain within the original
+      // attested lifetime, including preflight and transport admission.
+      options = { ...options, timeoutMs: this.artifactLifetime(options) };
+    }
     const deadline = options.timeoutMs === undefined ? undefined : performance.now() + options.timeoutMs;
     const boundClassification = binding.boundClassification === 'valid';
     if (binding.boundClassification === 'invalid') return {
@@ -442,7 +465,9 @@ export class HarnessSink {
     }
     const remaining = remainingRequestOptions(options, deadline);
     if (remaining === null) return { kind: 'unavailable', reason: 'delivery_deadline_exceeded' };
-    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', remaining);
+    const envelopeTimeoutMs = this.envelopeTimeoutMs;
+    const result = await this.request('POST', '/api/v1/reviews/runs', serializedEnvelope, 'application/json', remaining,
+      envelopeTimeoutMs === undefined ? this.timeoutMs : () => Math.min(envelopeTimeoutMs, this.artifactLifetime(remaining) ?? envelopeTimeoutMs));
     return this.classify(result, (body, status) => {
       const data = (body as { data?: Record<string, unknown> } | null)?.data;
       // A receipt names the run that was posted and says which artifacts the

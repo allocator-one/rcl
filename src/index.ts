@@ -135,6 +135,7 @@ import {
 import { normalizeGeneratedReport, sanitizeForDelivery } from './telemetry/envelope.js';
 import { Quarantine, QUARANTINE_DIR } from './telemetry/quarantine.js';
 import { scrubText } from './telemetry/scrub.js';
+import { validateEnvelopeTimeoutMs } from './telemetry/sink.js';
 import { buildEvent, roundIdentities, type WireEvent } from './telemetry/events.js';
 import { credentialHost, type HarnessCredential } from './telemetry/credentials.js';
 import { attestRun, renewAttestation, type Attestation } from './telemetry/attest.js';
@@ -1053,9 +1054,14 @@ telemetry
   .command('flush')
   .description('Deliver every spooled envelope, artifact and event batch (runs to completion)')
   .option('--run <id>', 'Flush one spooled run only')
+  .option('--envelope-timeout-ms <ms>', 'Envelope POST timeout in milliseconds (1–120000; default: 10000)', value => {
+    try { return validateEnvelopeTimeoutMs(/^\d+$/.test(value) ? Number(value) : NaN); }
+    catch (error) { throw new InvalidArgumentError((error as Error).message); }
+  })
   .option('--json', 'Output JSON')
-  .action(async (opts: { run?: string; json?: boolean }) => {
-    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false });
+  .action(async (opts: { run?: string; json?: boolean; envelopeTimeoutMs?: number }) => {
+    const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, requireRepo: false,
+      ...(opts.envelopeTimeoutMs !== undefined ? { envelopeTimeoutMs: opts.envelopeTimeoutMs } : {}) });
     if (!runtime.sink) {
       const reason = runtime.level === 'off' ? 'telemetry is off' : runtime.note ?? 'no Harness credential';
       console.error(chalk.red(`Cannot flush: ${reason}.`));

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.4.3 - 2026-09-28
+
+- Add `rcl telemetry flush --envelope-timeout-ms` for slow envelope
+  acknowledgements, bounded at 120000 ms. The default stays 10000 ms;
+  artifact, read and event timeouts and shorter operation or credential
+  lifetimes remain unchanged. Delivery retries retain original evidence
+  and do not rerun reviewers (RCL-144).
+
 ## 4.4.2 - 2026-09-28
 
 - Replace Fable 5.1 with Opus 5.5 (`anthropic/claude-opus-5-5`) as the default

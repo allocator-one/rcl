@@ -12,7 +12,7 @@ import { deliverable, type WireEvent } from './events.js';
 import { ensureNoticeShown } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
-import { describeOutcome, HarnessSink, type RunReceipt, type SinkOutcome } from './sink.js';
+import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 
 /**
@@ -62,6 +62,8 @@ export interface RuntimeOptions {
   dataDir?: string;
   credentialsPath?: string;
   fetchImpl?: typeof fetch;
+  /** Explicit envelope-only POST timeout for delivery retries. */
+  envelopeTimeoutMs?: number;
   stderr?: (line: string) => void;
   /** `rcl telemetry` works on the user's outbox from any directory. */
   requireRepo?: boolean;
@@ -145,6 +147,7 @@ export async function loadHarnessSettings(cwd: string, configPath?: string): Pro
 }
 
 export async function createTelemetryRuntime(options: RuntimeOptions): Promise<TelemetryRuntime> {
+  if (options.envelopeTimeoutMs !== undefined) validateEnvelopeTimeoutMs(options.envelopeTimeoutMs);
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
   const dataDir = options.dataDir ?? resolveDataDir(env as NodeJS.ProcessEnv);
@@ -170,6 +173,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     runtime.sink = new HarnessSink({
       credential: options.credential,
       rclVersion: options.rclVersion,
+      ...(options.envelopeTimeoutMs !== undefined ? { envelopeTimeoutMs: options.envelopeTimeoutMs } : {}),
       ...(options.attestedExpiresAt !== undefined ? { attestedExpiresAt: options.attestedExpiresAt } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     });
@@ -193,6 +197,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
     runtime.sink = new HarnessSink({
       credential: resolved.credential,
       rclVersion: options.rclVersion,
+      ...(options.envelopeTimeoutMs !== undefined ? { envelopeTimeoutMs: options.envelopeTimeoutMs } : {}),
       ...(options.attestedExpiresAt !== undefined ? { attestedExpiresAt: options.attestedExpiresAt } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     });

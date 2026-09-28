@@ -516,10 +516,18 @@ applying recovery. Retained evidence is not server acknowledgment. Attested
 evidence is never queued for replay with ordinary credentials. Recovery of an
 already-completed historical run remains a separate operation.
 
+If an envelope is slow to acknowledge, use `telemetry flush --envelope-timeout-ms`
+with an integer from 1 to 120000 milliseconds. It changes only the envelope POST
+timeout (default: 10000 ms); artifact transfers keep their 120000 ms ceiling,
+and ordinary reads and events keep their existing timeouts. Shorter caller
+deadlines and known attested credential lifetimes still apply. A timeout leaves
+the evidence queued for a later flush; this option does not rerun reviewers.
+
 ```bash
 rcl telemetry status                # level, credential source, what waits in the outbox
 rcl telemetry flush                 # deliver everything spooled, to completion
 rcl telemetry flush --run <run id>  # one run only
+rcl telemetry flush --run <run id> --envelope-timeout-ms 120000
 rcl telemetry rejected --run <run id> --json  # inspect one retained original
 rcl review owner/repo#7 --no-telemetry   # keep this review on the machine
 ```
