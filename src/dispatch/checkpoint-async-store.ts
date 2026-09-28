@@ -15,6 +15,7 @@ import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js'
 import { readStable } from '../telemetry/recovery/files.js';
 import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
+import { hasCheckpointIntentCapacity, MAX_ASYNC_PHASE_RECORDS } from './checkpoint-phase-limits.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
 import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
   validateAsyncNotDispatched, validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
@@ -95,7 +96,7 @@ async function metadataAt(location: Location): Promise<Metadata> {
   return { version: 1, plan, grants: parsed.data.grants, ...(parsed.data.opinionCycle ? { opinionCycle: parsed.data.opinionCycle } : {}) };
 }
 async function recordsAt(location: Location, plan: AsyncPlan): Promise<AsyncState> {
-  const directory = join(location.phasePath, 'events'); await privateDirectory(directory); const names = (await readdir(directory)).sort(); asyncRefuse(names.length <= 1001, 'too_many_records');
+  const directory = join(location.phasePath, 'events'); await privateDirectory(directory); const names = (await readdir(directory)).sort(); asyncRefuse(names.length <= MAX_ASYNC_PHASE_RECORDS, 'too_many_records');
   let total = 0; const records: unknown[] = [];
   for (const [index, name] of names.entries()) {
     asyncRefuse(name === filename(index + 1), 'sequence'); const bytes = await safeRead(join(directory, name)); total += Buffer.byteLength(bytes); asyncRefuse(total <= MAX_ARTIFACT_BYTES, 'too_large');
@@ -221,6 +222,7 @@ export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWrit
         const billedIntents = state.intents.filter(row => !state.notDispatched.some(result => result.attemptId === row.attemptId));
         const billedPrior = prior.filter(row => !state.notDispatched.some(result => result.attemptId === row.attemptId));
         if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || billedIntents.length >= metadata.plan.maxPhysicalCalls || billedPrior.length >= metadata.plan.maxAttemptsPerCall ||
+          !hasCheckpointIntentCapacity(state.records.length, state.uncertain.length, state.notDispatched.length, MAX_ASYNC_PHASE_RECORDS) ||
           last && !declined && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
         const intent = { callIndex: delegate.callIndex, attemptId: `async-${randomUUID()}`, startedAtMs: now };
         const intentRecord = await append(location, state, metadata.plan, { type: 'intent', intent });

@@ -86,6 +86,28 @@ describe('verifier event input bounds', () => {
 });
 
 describe('durable verifier phase in the existing checkpoint', () => {
+  it('refuses a verifier intent at the non-dispatch cap before publication or its callback', async () => {
+    const f = await fixture();
+    await runOwned(f, owner => f.journal.beginVerification({ ...planInput(), maxPhysicalCalls: 1 }, owner));
+    const state = (await f.journal.readVerification())!, first = state.records[0]!;
+    const events: import('../../src/dispatch/checkpoint-verification.js').VerificationEvent[] = [];
+    for (let index = 0; index < 500; index++) {
+      const attemptId = `verifier-declined-${index}`;
+      events.push({ type: 'intent', intent: { batchIndex: 0, attemptId, startedAtMs: 210 } },
+        { type: 'not-dispatched', result: { batchIndex: 0, attemptId, finishedAtMs: 210, answerBytes: answer({ status: 'error' }) } });
+    }
+    let previousDigest = first.digest;
+    const records = events.map((event, index) => {
+      const unsigned = { sequence: index + 2, previousDigest, bindings: first.bindings, event };
+      const record = { ...unsigned, digest: hash(stableStringify(unsigned)) }; previousDigest = record.digest; return record;
+    });
+    const directory = join(f.path, 'verification', 'events');
+    await Promise.all(records.map(record => writeFile(join(directory, `${String(record.sequence).padStart(8, '0')}.json`), `${stableStringify(record)}\n`, { mode: 0o600 })));
+    const callback = vi.fn();
+    await expect(runOwned(f, owner => f.journal.recordVerificationIntent(
+      { batchIndex: 0, attemptId: 'verifier-real', startedAtMs: 211 }, owner, callback))).rejects.toThrow('intent_capacity');
+    expect(callback).not.toHaveBeenCalled(); expect(await readdir(directory)).toHaveLength(1001);
+  }, 20_000);
   it('retains exact request and result bytes, reopens without paid callbacks and leaves the reviewer proof unchanged', async () => {
     const f = await fixture(), original = await f.journal.exportProof();
     expect(await f.journal.readVerification()).toBeUndefined();

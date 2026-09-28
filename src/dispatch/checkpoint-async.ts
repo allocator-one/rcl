@@ -3,6 +3,7 @@ import { blockingCheckpointReviewSchema } from './checkpoint.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { MAX_TIMER_DELAY_MS } from '../config/schema.js';
+import { hasCheckpointIntentCapacity, MAX_ASYNC_PHASE_RECORDS, MAX_PHASE_NOT_DISPATCHED } from './checkpoint-phase-limits.js';
 
 const integer = z.number().int().nonnegative().safe();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -26,7 +27,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('seal'), cutoffMs: integer }).strict(),
 ]);
 const recordSchema = z.object({ sequence: integer.min(1), previousDigest: digest, digest, event: eventSchema }).strict();
-const wireSchema = z.object({ version: z.literal(1), plan: planSchema, records: z.array(recordSchema).max(1001) }).strict();
+const wireSchema = z.object({ version: z.literal(1), plan: planSchema, records: z.array(recordSchema).max(MAX_ASYNC_PHASE_RECORDS) }).strict();
 const asyncReviewSchema = blockingCheckpointReviewSchema.extend({ async: z.literal(true) }).strict();
 export type AsyncContext = z.infer<typeof contextSchema>;
 export type AsyncCall = z.infer<typeof callSchema>;
@@ -103,7 +104,7 @@ function validateAsyncResultForIntent(result: AsyncResult, plan: AsyncPlan, inte
 }
 /** Replays exact ordered records. Unknown outcomes consume budget and cannot be retried. */
 export function validateAsyncRecords(input: readonly unknown[], planInput: AsyncPlan): AsyncState {
-  asyncRefuse(Array.isArray(input) && input.length <= 1001, 'too_many_records');
+  asyncRefuse(Array.isArray(input) && input.length <= MAX_ASYNC_PHASE_RECORDS, 'too_many_records');
   let reviewBytes = 0;
   for (const raw of input) {
     const event = (raw as Partial<AsyncRecord> | null)?.event;
@@ -140,6 +141,7 @@ export function validateAsyncRecords(input: readonly unknown[], planInput: Async
     } else if (event.type === 'not-dispatched') {
       const result = validateAsyncNotDispatched(event.result, plan, intents);
       asyncRefuse(!outcomesByAttempt.has(result.attemptId) && !notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
+      asyncRefuse(notDispatched.length < MAX_PHASE_NOT_DISPATCHED, 'not_dispatched_capacity');
       notDispatched.push(result); notDispatchedByAttempt.set(result.attemptId, result);
     } else {
       asyncRefuse(event.cutoffMs >= plan.context.startedAtMs && intents.every(row => row.startedAtMs <= event.cutoffMs) &&
@@ -159,10 +161,12 @@ export function appendAsyncRecordToValidatedState(state: AsyncState, eventInput:
   const metadata = validatedAsyncStates.get(state), plan = validateAsyncPlan(planInput), planDigest = sha256Hex(stableStringify(plan));
   asyncRefuse(metadata && metadata.planDigest === planDigest, 'unvalidated_state');
   validatedAsyncStates.delete(state);
-  asyncRefuse(state.records.length < 1001, 'too_many_records');
+  asyncRefuse(state.records.length < MAX_ASYNC_PHASE_RECORDS, 'too_many_records');
   const parsed = eventSchema.safeParse(eventInput); asyncRefuse(parsed.success, 'invalid_record'); const event = parsed.data;
   asyncRefuse(state.cutoffMs === undefined, 'invalid_record');
   if (event.type === 'intent') {
+    asyncRefuse(hasCheckpointIntentCapacity(state.records.length, state.uncertain.length,
+      state.notDispatched.length, MAX_ASYNC_PHASE_RECORDS), 'intent_capacity');
     const intent = event.intent;
     const billedIntents = state.intents.filter(row => !metadata.notDispatchedByAttempt.has(row.attemptId));
     const prior = billedIntents.filter(row => row.callIndex === intent.callIndex).length;
@@ -179,6 +183,7 @@ export function appendAsyncRecordToValidatedState(state: AsyncState, eventInput:
   } else if (event.type === 'not-dispatched') {
     const result = validateAsyncNotDispatched(event.result, plan, state.intents);
     asyncRefuse(!metadata.outcomesByAttempt.has(result.attemptId) && !metadata.notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
+    asyncRefuse(state.notDispatched.length < MAX_PHASE_NOT_DISPATCHED, 'not_dispatched_capacity');
   } else {
     asyncRefuse(event.cutoffMs >= plan.context.startedAtMs && state.intents.every(row => row.startedAtMs <= event.cutoffMs) &&
       state.outcomes.every(row => row.finishedAtMs <= event.cutoffMs) &&

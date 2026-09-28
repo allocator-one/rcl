@@ -5,6 +5,7 @@ import { join, relative, resolve, basename } from 'node:path';
 import { z } from 'zod';
 import { originalRawFindingSchema } from '../telemetry/recovery/source.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
+import { MAX_VERIFICATION_PHASE_RECORDS } from './checkpoint-phase-limits.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
 import { verificationContextFromValidatedCheckpoint } from './checkpoint-verification-context.js';
 import {
@@ -655,7 +656,7 @@ export class CheckpointJournal {
     if (!entries.length) return { snapshot: validateVerificationRecordsForAppend([], context), bytes: [] };
     const events = join(directory, 'events'); await inspectDirectory(events);
     const names = (await readdir(events)).sort(), bytesBySequence: string[] = [];
-    if (names.length > 1002) throw new Error('checkpoint_verification_too_many_records');
+    if (names.length > MAX_VERIFICATION_PHASE_RECORDS) throw new Error('checkpoint_verification_too_many_records');
     let totalBytes = 0;
     for (const [index, name] of names.entries()) {
       if (name !== eventFile(index + 1)) throw new Error('checkpoint_verification_sequence_gap');

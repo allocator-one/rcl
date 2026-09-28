@@ -4,6 +4,7 @@ import { MAX_TIMER_DELAY_MS, VerificationReasoningEffortSchema } from '../config
 import { stableStringify } from '../report/run-header.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import type { ModelAnswer } from './adapter.js';
+import { hasCheckpointIntentCapacity, MAX_PHASE_NOT_DISPATCHED, MAX_VERIFICATION_PHASE_RECORDS } from './checkpoint-phase-limits.js';
 
 const integer = z.number().int().nonnegative().safe();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -252,7 +253,10 @@ function checkVerificationEvent(event: VerificationEvent, index: number, metadat
       refuse(launch && launch.attemptId === row.attemptId && !metadata.resolvedAttempts.has(row.attemptId), 'missing_or_duplicate_intent');
       refuse(row.finishedAtMs >= launch.startedAtMs, 'invalid_result_time');
       const answer = parseVerificationAnswer(row.answerBytes, plan);
-      if (event.type === 'not-dispatched') refuse(answer.status === 'error', 'invalid_not_dispatched');
+      if (event.type === 'not-dispatched') {
+        refuse(answer.status === 'error', 'invalid_not_dispatched');
+        refuse(metadata.notDispatched.length < MAX_PHASE_NOT_DISPATCHED, 'not_dispatched_capacity');
+      }
     } else {
       const row = event.terminal;
       refuse(row.finishedAtMs >= plan.startedAtMs && metadata.intents.every(x => x.startedAtMs <= row.finishedAtMs) &&
@@ -273,7 +277,7 @@ function retainVerificationEvent(event: VerificationEvent, metadata: Verificatio
   } else metadata.terminal = event.terminal;
 }
 function validateVerificationRecordSet(input: readonly unknown[], context: VerificationContext): { state?: VerificationState; metadata: VerificationValidationMetadata } {
-  refuse(Array.isArray(input) && input.length <= 1002, 'too_many_records');
+  refuse(Array.isArray(input) && input.length <= MAX_VERIFICATION_PHASE_RECORDS, 'too_many_records');
   const budget = { bytes: 0 };
   for (const value of input) {
     const record = rawObject(value);
@@ -321,8 +325,12 @@ export function appendVerificationRecordWithSuccessor(snapshot: ValidatedVerific
   const metadata = validatedVerificationRecords.get(snapshot);
   refuse(metadata && metadata.contextFingerprint === contextFingerprint(context), 'unvalidated_state');
   validatedVerificationRecords.delete(snapshot);
-  refuse(metadata.records.length < 1002, 'too_many_records');
+  refuse(metadata.records.length < MAX_VERIFICATION_PHASE_RECORDS, 'too_many_records');
   const captured = snapshotVerificationEvent(event); checkVerificationEvent(captured, metadata.records.length, metadata, context);
+  if (captured.type === 'intent') {
+    refuse(hasCheckpointIntentCapacity(metadata.records.length, metadata.intents.length - metadata.resolvedAttempts.size,
+      metadata.notDispatched.length, MAX_VERIFICATION_PHASE_RECORDS), 'intent_capacity');
+  }
   const unsigned = { sequence: metadata.records.length + 1, previousDigest: metadata.previousDigest,
     bindings: binding(context), event: captured };
   const record = freeze({ ...unsigned, digest: verificationDigest(stableStringify(unsigned)) });
@@ -354,7 +362,7 @@ export function decodeVerificationProof(bytes: string, context: VerificationCont
     Buffer.from(bytes, 'utf8').toString('utf8') === bytes, 'invalid_proof');
   let value: unknown;
   try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_verification_invalid_proof'); }
-  const parsed = z.object({ version: z.literal(1), records: z.array(z.unknown()).max(1002) }).strict().safeParse(value);
+  const parsed = z.object({ version: z.literal(1), records: z.array(z.unknown()).max(MAX_VERIFICATION_PHASE_RECORDS) }).strict().safeParse(value);
   refuse(parsed.success, 'invalid_proof');
   const state = validateVerificationRecords(parsed.data.records, context);
   refuse(stableStringify(value) === bytes, 'invalid_proof');

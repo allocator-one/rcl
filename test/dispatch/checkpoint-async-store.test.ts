@@ -54,6 +54,21 @@ async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, permutedChu
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
 const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
 describe('restricted original async checkpoint persistence',()=>{
+ it('refuses a claim at the non-dispatch cap before appending an intent or running its callback',async()=>{
+  const f=await fixture(1),opened=await initialize(f),phase=await readAsyncPhase(f.input),writer=await openAsyncDelegate(opened.delegates[0]);
+  const events:import('../../src/dispatch/checkpoint-async.js').AsyncEvent[]=[],bytes=review('error');
+  for(let index=0;index<500;index++){
+   const attemptId=`async-00000000-0000-4000-8000-${String(index).padStart(12,'0')}`;
+   events.push({type:'intent',intent:{callIndex:0,attemptId,startedAtMs:f.launch.startedAtMs+1}},
+    {type:'not-dispatched',result:{callIndex:0,attemptId,finishedAtMs:f.launch.startedAtMs+1,reviewBytes:bytes,reviewSha256:sha256Hex(bytes)}});
+  }
+  let previousDigest=sha256Hex(stableStringify(phase.plan));
+  const records=events.map((event,index)=>{const unsigned={sequence:index+1,previousDigest,event};const record={...unsigned,digest:sha256Hex(stableStringify(unsigned))};previousDigest=record.digest;return record;});
+  const directory=join(f.path,'async','events');
+  await Promise.all(records.map(record=>writeFile(join(directory,`${String(record.sequence).padStart(8,'0')}.json`),`${stableStringify(record)}\n`,{mode:0o600})));
+  const callback=vi.fn();expect(await writer.claim(prompts,callback)).toBeUndefined();expect(callback).not.toHaveBeenCalled();
+  expect(await readdir(directory)).toHaveLength(1000);
+ },20_000);
  it('retains separate duplicate-route calls and exact raw results without changing blocking health/history',async()=>{
   const f=await fixture(), before=await f.journal.read(), opened=await initialize(f);
   const writers=await Promise.all(opened.delegates.map(openAsyncDelegate)); const intents=await Promise.all(writers.map((w:any)=>w.claim(prompts)));
