@@ -100,6 +100,10 @@ export function validateAsyncResult(input: unknown, plan: AsyncPlan, intents: re
 export function validateAsyncNotDispatched(input: unknown, plan: AsyncPlan, intents: readonly AsyncIntent[]): AsyncNotDispatched {
   const parsed = notDispatchedSchema.safeParse(input); asyncRefuse(parsed.success, 'invalid_not_dispatched'); const result = parsed.data;
   const intent = intents.find(row => row.attemptId === result.attemptId);
+  return validateAsyncNotDispatchedForIntent(result, plan, intent);
+}
+function validateAsyncNotDispatchedForIntent(result: AsyncNotDispatched, plan: AsyncPlan,
+  intent: AsyncIntent | undefined): AsyncNotDispatched {
   asyncRefuse(intent && intent.callIndex === result.callIndex && result.finishedAtMs >= intent.startedAtMs, 'not_dispatched_intent');
   assertAsyncReviewBytes(result.reviewBytes);
   asyncRefuse(sha256Hex(result.reviewBytes) === result.reviewSha256, 'not_dispatched_digest');
@@ -152,7 +156,7 @@ export function validateAsyncRecords(input: readonly unknown[], planInput: Async
       asyncRefuse(!outcomesByAttempt.has(result.attemptId) && !notDispatchedByAttempt.has(result.attemptId), 'duplicate_result'); outcomes.push(result); outcomesByAttempt.set(result.attemptId, result);
       outcomeStatusByAttempt.set(result.attemptId, checked.status);
     } else if (event.type === 'not-dispatched') {
-      const result = validateAsyncNotDispatched(event.result, plan, intents);
+      const result = validateAsyncNotDispatchedForIntent(event.result, plan, intentsByAttempt.get(event.result.attemptId));
       asyncRefuse(!outcomesByAttempt.has(result.attemptId) && !notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
       asyncRefuse(notDispatched.length < MAX_PHASE_NOT_DISPATCHED, 'not_dispatched_capacity');
       notDispatched.push(result); notDispatchedByAttempt.set(result.attemptId, result);
@@ -199,7 +203,7 @@ export function appendAsyncRecordToValidatedState(state: AsyncState, eventInput:
     const result = validateAsyncResultForIntent(event.result, plan, metadata.intentsByAttempt.get(event.result.attemptId)).result;
     asyncRefuse(!metadata.outcomesByAttempt.has(result.attemptId) && !metadata.notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
   } else if (event.type === 'not-dispatched') {
-    const result = validateAsyncNotDispatched(event.result, plan, state.intents);
+    const result = validateAsyncNotDispatchedForIntent(event.result, plan, metadata.intentsByAttempt.get(event.result.attemptId));
     asyncRefuse(!metadata.outcomesByAttempt.has(result.attemptId) && !metadata.notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
     asyncRefuse(state.notDispatched.length < MAX_PHASE_NOT_DISPATCHED, 'not_dispatched_capacity');
   } else {
