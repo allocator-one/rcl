@@ -322,6 +322,7 @@ program
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
+  .option('--retry-report <path>', 'Original legacy report proving an inconclusive same-input launch; requires --retry-reason')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
@@ -1473,6 +1474,7 @@ interface CouncilCliOpts {
   exclusiveOutputs?: boolean;
   launchIntent?: GuardedLaunchOptions['intent'];
   retryReason?: string;
+  retryReport?: string;
   maxAttempts?: string;
   maxRounds?: string;
   /** commander: `--no-telemetry` sets this false. */
@@ -1749,7 +1751,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         }
       } catch { /* Startup delivery remains best-effort for legacy reviews. */ }
     }
-    if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined ||
+    if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined || opts.retryReport !== undefined ||
       opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
       throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
     }
@@ -1982,6 +1984,7 @@ async function executeCouncil(
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,
+      ...(opts.retryReport ? { legacyRetry: { reportPath: opts.retryReport, config, roster } } : {}),
       maxAttempts: opts.maxAttempts === undefined ? undefined : Number(opts.maxAttempts),
       maxRounds: opts.maxRounds === undefined ? undefined : Number(opts.maxRounds),
       validate: async () => {

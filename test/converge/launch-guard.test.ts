@@ -136,7 +136,8 @@ describe('native guarded review launch', () => {
 
   it('requires a recovery decision for unhealthy dispatch even when the head changes', async () => {
     const options = await fixture();
-    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1, hardFailure: true });
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1, hardFailure: true,
+      reviewerHealth: { version: 1, policy: { version: 1, fraction: 2 / 3, seatCount: 3, minimumSuccessful: 2 }, successfulSeats: 1 } });
     await guardReviewLaunch(options);
     const changed = { ...options, headSha: 'd'.repeat(40) };
 
@@ -203,7 +204,8 @@ describe('native guarded review launch', () => {
       verdicts: [{ key: report.findings[0]!.identity, verdict: 'fixed', reason: 'Fixture fix validated.' }] });
 
     const fixedHead = { ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64),
-      run: vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000002', successfulReviews: 1 }) };
+      run: vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000002', successfulReviews: 1,
+        reviewerHealth: { version: 1, policy: { version: 1, fraction: 2 / 3, seatCount: 3, minimumSuccessful: 2 }, successfulSeats: 1 } }) };
     await guardReviewLaunch(fixedHead);
     await expect(guardReviewLaunch(fixedHead)).rejects.toThrow(/infrastructure.failure|retry.reason/i);
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });

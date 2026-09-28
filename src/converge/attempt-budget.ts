@@ -1,3 +1,4 @@
+import { retrySourceSchema, type RetrySource } from './retry-source.js';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -36,6 +37,7 @@ export interface ConvergeAttemptRecord {
   claimedAt: string;
   pid: number;
   source: 'claim';
+  retrySource?: RetrySource;
 }
 
 export interface ConvergeAttemptState {
@@ -112,7 +114,8 @@ interface ClaimOptions {
   /** Target ownership has a different contention profile from attempt accounting. */
   targetLockTimeoutMs?: number;
   targetLockRetryMs?: number;
-  beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void>;
+  beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void | { retrySource: RetrySource }>;
+  retrySource?: RetrySource;
   afterClaim?: (claim: ConvergeAttemptClaim, ownership: NativeTargetOwnership) => Promise<void>;
   ownership?: NativeTargetOwnership;
   freshReviewOperation?: string;
@@ -187,7 +190,9 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
         record.attempt !== (state.migratedAttempts ?? 0) + index + 1 ||
         typeof record.claimedAt !== 'string' ||
         !Number.isInteger(record.pid) ||
-        record.source !== 'claim'
+        record.source !== 'claim' ||
+        (record.retrySource !== undefined && (!retrySourceSchema.safeParse(record.retrySource).success ||
+          record.retrySource.attempt !== record.attempt - 1))
     )
   ) {
     throw new ConvergeAttemptStateError(
@@ -609,7 +614,8 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   let committed: ConvergeAttemptClaim | undefined;
   try {
     const work = async (ownership: NativeTargetOwnership) => {
-      await claimOptions.beforeClaim?.(ownership);
+      const source = await claimOptions.beforeClaim?.(ownership);
+      if (source) claimOptions.retrySource = retrySourceSchema.parse(source.retrySource);
       const { assertFreshReviewClaim } = await import('./fresh-review.js');
       await assertFreshReviewClaim(gitCommonDir, target, claimOptions.freshReviewOperation);
       committed = await claimConvergeAttemptOwned(claimOptions);
@@ -704,6 +710,9 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
     }
 
     const attempt = attemptsUsed + 1;
+    if (options.retrySource && options.retrySource.attempt !== attemptsUsed) {
+      throw new ConvergeAttemptStateError('Retry source does not bind the previous spent claim.');
+    }
     const state: ConvergeAttemptState = {
       version: previous?.version ?? STATE_VERSION,
       ...(previous?.cycle ? { cycle: previous.cycle } : {}),
@@ -713,7 +722,8 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
       attemptsUsed: attempt,
       attempts: [
         ...(previous?.attempts ?? []),
-        { attempt, claimedAt: timestamp, pid: recordPid, source: 'claim' },
+        { attempt, claimedAt: timestamp, pid: recordPid, source: 'claim',
+          ...(options.retrySource ? { retrySource: options.retrySource } : {}) },
       ],
       updatedAt: timestamp,
     };

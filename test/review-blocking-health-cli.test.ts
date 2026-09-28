@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { asyncTargetKey, resolveAsyncStoreDir, runAsyncWorker, spoolAsyncCalls } from '../src/dispatch/async-lane.js';
 import type { ReviewAdapter } from '../src/dispatch/adapter.js';
 import { loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
-import { loadConvergeRunState } from '../src/converge/run-state.js';
+import { loadConvergeRunState, convergeRunStatePath, processRoundReport, recordVerdicts } from '../src/converge/run-state.js';
+import { sha256Hex } from '../src/report/run-header.js';
 import { buildRunEnvelope } from '../src/telemetry/envelope.js';
 
 // Global setup builds dist unless an installed package entrypoint is selected.
@@ -126,7 +127,7 @@ async function repository(blocking: number, secondary: number, target: string) {
     name: 'fixture', provider: 'openai-compat',
     review: async (model, role) => ({ model, role, provider: 'openai-compat', durationMs: 1, status: 'success', findings: [{
       file: 'a.ts', startLine: 1, endLine: 1, severity: 'minor', category: 'correctness', confidence: 0.9,
-      title: 'Async opinion', description: 'retained, not counted',
+      id: 'async-fixture', title: 'Async opinion', description: 'retained, not counted',
     }] }),
     ask: async () => { throw new Error('not used'); },
   };
@@ -238,4 +239,57 @@ describe('rcl review and converge-report — blocking reviewer quorum (RCL-136)'
       await provider.close();
     }
   }, 180_000);
+});
+
+describe('legacy mixed-lane continuation through the public CLI (RCL-138)', () => {
+  it('preserves an admitted inconclusive source and charges one next-round attempt', async () => {
+    const target = 'legacy-blocking-ten';
+    const { repo, review } = await repository(10, 4, target);
+    const provider = await syntheticProvider(model => ['b7', 'b8', 'b9', 'b10'].includes(model) ? 'reject-late' : 'success', 10);
+    const env = { OPENAI_COMPAT_BASE_URL: provider.url, OPENAI_BASE_URL: provider.url, RCL_DATA_DIR: join(repo, 'rcl-data') };
+    const common = join(repo, '.git');
+    try {
+      const first = await rcl(review, repo, env);
+      expect(first.status, first.stderr).toBe(0);
+      const report = JSON.parse(readFileSync(join(repo, 'report.json'), 'utf8'));
+      // Reconstruct the old writer/admission behavior only in this local fixture.
+      report.run.rcl_version = '4.1.12';
+      delete report.stats.blockingHealth;
+      const original = JSON.stringify(report);
+      writeFileSync(join(repo, 'report.json'), original);
+      const nativePath = convergeRunStatePath(common, target);
+      const native = JSON.parse(readFileSync(nativePath, 'utf8'));
+      delete native.lastLaunch.reviewerHealth;
+      native.lastLaunch.reportJsonSha256 = sha256Hex(original);
+      writeFileSync(nativePath, JSON.stringify(native));
+      const admitted = await processRoundReport({ gitCommonDir: common, target, round: 1,
+        runId: report.run.id, findings: report.findings });
+      await recordVerdicts({ gitCommonDir: common, target, round: 1,
+        verdicts: admitted.findings.map(finding => ({ key: finding.identity, verdict: 'dismissed' as const,
+          reason: 'Original local fixture disposition retained.' })) });
+      const before = await loadConvergeRunState(common, target);
+      const claims = await loadConvergeAttemptState(common, target);
+      expect(before!.lastLaunch).toMatchObject({ successfulReviews: 11, totalReviews: 15 });
+      const calls = provider.calls.length;
+      const retry = review.map(arg => arg === 'report.json' ? 'retry.json' : arg);
+      const result = await rcl([...retry, '--retry-report', 'report.json', '--retry-reason',
+        'Original 6/10 blocking health inspected; one bounded same-input retry.'], repo, env);
+      expect(result.status, result.stderr).toBe(0);
+      expect(provider.calls.length - calls).toBe(14);
+      expect(readFileSync(join(repo, 'report.json'), 'utf8')).toBe(original);
+      const after = await loadConvergeRunState(common, target);
+      expect(after!.rounds).toEqual(before!.rounds);
+      expect(after!.findings).toEqual(before!.findings);
+      expect(after!.lastAnnotations).toEqual(before!.lastAnnotations);
+      // The earlier async opinion was consumed once; the retry has only 14 fresh results.
+      expect(after!.lastLaunch).toMatchObject({ round: 2, attempt: 2, successfulReviews: 10, totalReviews: 14,
+        reviewerHealth: { successfulSeats: 6, policy: { seatCount: 10, minimumSuccessful: 7 } } });
+      const spent = await loadConvergeAttemptState(common, target);
+      expect(spent!.cap).toBe(claims!.cap);
+      expect(spent!.attempts.slice(0, 1)).toEqual(claims!.attempts);
+      expect(spent!.attempts[1]!.retrySource).toMatchObject({ round: 1, attempt: 1,
+        reportJsonSha256: sha256Hex(original), reviewerHealth: { successfulSeats: 6,
+          policy: { seatCount: 10, minimumSuccessful: 7 } } });
+    } finally { await provider.close(); }
+  });
 });

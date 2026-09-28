@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 4.3.0 - 2026-09-28
+
+- Add `rcl review --retry-report <path> --retry-reason <reason>` for bounded
+  same-input recovery of 4.1.11 and 4.1.12 aggregate-only launches whose
+  original blocking council was inconclusive (RCL-138). The original report,
+  config, run, target, head, round, attempt, roster and policy must match the
+  recorded launch. Healthy, ambiguous, altered and nonlatest sources refuse.
+- Continue from an exact latest admitted legacy source at the next native round,
+  or retry an unadmitted source at its pending round. Preserve earlier reports,
+  findings, verdicts, spent attempts and caps; charge only the authorized new
+  attempt and retain its immutable source binding.
+- Reject contradictory persisted blocking-health counts while allowing the
+  blocking roster to be a subset of aggregate reviews. Ordinary current-version
+  launch health continues to use the configured blocking quorum.
+
 ## 4.2.0 - 2026-09-28
 
 Behavior change: `rcl converge-report` now refuses reports whose blocking
