@@ -35,6 +35,8 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
     const startedAt = Date.now();
     const controller = new AbortController();
     let raw: ReturnType<ReviewAdapter['review']> | undefined;
+    let observed: Promise<{ kind: 'result'; result: Awaited<ReturnType<ReviewAdapter['review']>> } |
+      { kind: 'error'; error: unknown } | undefined> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let expired = false;
     let stop!: () => void;
@@ -51,16 +53,20 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
         newPhysicalCalls++;
         try { raw = adapter.review(call.ref.model, call.ref.role, call.prompt.systemPrompt, call.prompt.userPrompt,
           { timeoutMs: duration, maxRetries: 0, signal: controller.signal }); } catch (error) { raw = Promise.reject(error); }
-        // Attach immediately: a synchronously rejected adapter must not become
-        // unhandled while the durable claim releases its lock.
-        void raw.catch(() => {});
+        const response = raw.then(
+          result => ({ kind: 'result' as const, result }),
+          error => ({ kind: 'error' as const, error }),
+        );
+        // Capture response-vs-deadline ordering while the durable claim still
+        // releases its lock; an earlier provider response must remain earlier.
+        observed = Promise.race([response, stopped]);
       });
     } catch (error) {
       if (timer !== undefined) clearTimeout(timer);
       options.signal?.removeEventListener('abort', stop);
       throw error;
     }
-    if (!intent || !raw) break;
+    if (!intent || !raw || !observed) break;
     const reportDerivedError = (error: unknown): void => {
       try { void Promise.resolve(options.onLateAuditError(error, intent.attemptId)).catch(() => {}); }
       catch { /* contained */ }
@@ -84,21 +90,16 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       catch (error) { reportDerivedError(error); }
       return review.status;
     };
-    const response = raw.then(
-      result => ({ kind: 'result' as const, result }),
-      error => ({ kind: 'error' as const, error }),
-    );
-    let outcome: Awaited<typeof response> | undefined;
-    try { outcome = await Promise.race([response, stopped]); } finally {
+    let outcome: Awaited<typeof observed>;
+    try { outcome = await observed; } finally {
       if (timer !== undefined) clearTimeout(timer);
       options.signal?.removeEventListener('abort', stop);
     }
     if (outcome === undefined) {
       // A pending provider response retains only restricted audit authority.
       // Its eventual result cannot reopen the sealed proof or blocking report.
-      void response.then(async late => {
-        if (late.kind === 'error') throw late.error;
-        await persist(late.result);
+      void raw.then(async result => {
+        await persist(result);
       }).catch(async error => { await options.onLateAuditError(error, intent.attemptId); })
         // The sink is already the final bounded durability attempt. Contain its
         // own failure so a detached worker cannot create an unhandled rejection.

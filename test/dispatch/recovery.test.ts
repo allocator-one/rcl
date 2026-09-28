@@ -130,16 +130,20 @@ describe('owned missing-review executor', () => {
   }, 'anthropic'));
 
   it('refuses legacy journals without captured inputs before any paid dispatch', async () => runFixture(async (input, commonDir) => {
-    const called = vi.fn();
-    await expect(withNativeTarget(commonDir, target, async ownership => {
-      const journal = await CheckpointJournal.create({ commonDir, namespace: 'no-capture', plan: input.plan, ownership });
-      await expect(recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: input.plan,
-        sourceAttempts: input.sourceAttempts, operation: recoveryOperation(input.plan.digest, hash('missing')),
-        nowMs: () => 1500,
-        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) })).rejects.toThrow('recovery_missing_bindings');
-      expect(called).not.toHaveBeenCalled();
-      expect((await journal.read()).records).toEqual([]);
-    })).rejects.toThrow('recovery_missing_bindings');
+    const called = vi.fn(); let journal!: CheckpointJournal, operationError: unknown;
+    const scopeError = await withNativeTarget(commonDir, target, async ownership => {
+      journal = await CheckpointJournal.create({ commonDir, namespace: 'no-capture', plan: input.plan, ownership });
+      try {
+        await recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: input.plan,
+          sourceAttempts: input.sourceAttempts, operation: recoveryOperation(input.plan.digest, hash('missing')),
+          nowMs: () => 1500,
+          adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
+      } catch (error) { operationError = error; }
+    }).then(() => undefined, error => error);
+    expect(operationError).toEqual(expect.objectContaining({ message: 'recovery_missing_bindings' }));
+    expect(scopeError).toBe(operationError);
+    expect(called).not.toHaveBeenCalled();
+    expect((await journal.read()).records).toEqual([]);
   }));
 
   it('uses saved inputs and spends only the saved remaining call budget across reopen', async () => runFixture(async (input, commonDir) => {
@@ -166,20 +170,24 @@ describe('owned missing-review executor', () => {
 
   it('does not renew an expired saved operation or accept a changed source binding', async () => runFixture(async (input, commonDir) => {
     const captured = capturedFixture(input), operation = recoveryOperation(captured.plan.digest, captured.digest);
-    const called = vi.fn();
-    await expect(withNativeTarget(commonDir, target, async ownership => {
-      const journal = await CheckpointJournal.create({ commonDir, namespace: 'expired', plan: captured.plan, ownership });
+    const called = vi.fn(); let journal!: CheckpointJournal, operationError: unknown;
+    const scopeError = await withNativeTarget(commonDir, target, async ownership => {
+      journal = await CheckpointJournal.create({ commonDir, namespace: 'expired', plan: captured.plan, ownership });
       await journal.bind('captured-inputs', captured.bytes, ownership);
       await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
       const options = { commonDir, ownership, journal, expectedPlan: captured.plan,
         sourceAttempts: input.sourceAttempts, operation, nowMs: () => operation.expiresAtMs + 1,
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) };
       expect((await recoverCapturedAssignments(options)).preview.nextAction).toBe('time_limit');
-      await expect(recoverCapturedAssignments({ ...options,
-        operation: { ...operation, sourceReportSha256: hash('substitution') } })).rejects.toThrow('recovery_operation_mismatch');
-      expect(called).not.toHaveBeenCalled();
-      expect((await journal.read()).records.filter(record => record.type === 'intent')).toEqual([]);
-    })).rejects.toThrow('recovery_operation_mismatch');
+      try {
+        await recoverCapturedAssignments({ ...options,
+          operation: { ...operation, sourceReportSha256: hash('substitution') } });
+      } catch (error) { operationError = error; }
+    }).then(() => undefined, error => error);
+    expect(operationError).toEqual(expect.objectContaining({ message: 'recovery_operation_mismatch' }));
+    expect(scopeError).toBe(operationError);
+    expect(called).not.toHaveBeenCalled();
+    expect((await journal.read()).records.filter(record => record.type === 'intent')).toEqual([]);
   }));
 
   it('uses one new call from M-1, retains the original finding and does no work on repeat', async () => runFixture(async (input, commonDir) => {
