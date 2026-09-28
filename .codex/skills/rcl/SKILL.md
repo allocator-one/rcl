@@ -17,7 +17,8 @@ allowed-tools:
   - Bash(env -u GIT_EXTERNAL_DIFF git diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm install -g review-council@latest)
+  - Bash(npm view review-council:*)
+  - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(which rcl)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -152,18 +153,29 @@ The patch and the spec are sent to several external model providers. Before runn
 
 ### 3. Check rcl is available
 
+Always run the latest published release — never pin a version. A pin has to be bumped by hand in every copy of this skill on every release, and in practice it doesn't happen — copies have sat on versions that were several releases stale, or (worse) on a version that was never published at all, which makes review fail outright. For a reproducible run against a specific version, install that version yourself before invoking the skill and say so.
+
+Resolve the latest release, its registry integrity and the installed executable in one command:
+
 ```bash
-which rcl && rcl --version
+RCL_LATEST=$(npm view review-council@latest version) &&
+  RCL_INTEGRITY=$(npm view "review-council@$RCL_LATEST" dist.integrity) &&
+  echo "latest=$RCL_LATEST integrity=$RCL_INTEGRITY" &&
+  RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN") && echo "rcl=$RCL_BIN" && "$RCL_BIN" --version
 ```
 
-If not found, or if the installed version is behind the published one, install the latest:
+`<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop. Before trusting the printed `rcl --version`, check the executable: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be group- or world-writable or owned by anyone other than you or root. A repository can put its own `rcl` early on `PATH`, and that copy must never review it. If a check fails, stop and tell the user rather than running it.
+
+If `rcl` is missing, fails a check, or prints anything other than `<RCL_LATEST>`, install exactly that release without running package lifecycle scripts, and confirm the registry still serves the same artifact:
+
 ```bash
-npm install -g review-council@latest
+npm install -g --ignore-scripts "review-council@<RCL_LATEST>" &&
+  test "$(npm view "review-council@<RCL_LATEST>" dist.integrity)" = "<RCL_INTEGRITY>"
 ```
 
-`@latest` rather than a pinned version, deliberately: a pin has to be bumped by hand in every copy of this skill on every release, and in practice it doesn't happen — copies have sat on versions that were several releases stale, or (worse) on a version that was never published at all, which makes this install step fail outright. For a reproducible run against a specific version, install that version yourself before invoking the skill.
+Then repeat the resolution and checks above, and require `rcl --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.
 
-Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself).
+Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself). A dogfood link is the one exception to the check above that `rcl` must not resolve inside a checkout, and only when the user asked for it.
 
 ### 4. Parse flags
 

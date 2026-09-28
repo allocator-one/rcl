@@ -47,6 +47,12 @@ describe('vendored skills', () => {
         expect(content, path).toContain('step 2a disclosure check');
       } else {
         expect(content, path).toContain('### 2a. Check what leaves the machine');
+        expect(content, path).toContain('never pin a version');
+        expect(content, path).toContain('npm install -g --ignore-scripts "review-council@<RCL_LATEST>"');
+        expect(content, path).toContain('dist.integrity)" = "<RCL_INTEGRITY>"');
+        expect(content, path).toContain('inside the repository under review');
+        expect(content, path).toContain('Never fall back to an older installed release');
+        expect(content, path).not.toContain('npm install -g review-council@latest');
         expect(content, path).toContain('env -i "$@"');
         expect(content, path).toContain('rcl_run GITHUB_TOKEN="$(gh auth token)" rcl review');
         expect(content, path).not.toMatch(/^GITHUB_TOKEN=\$\(gh auth token\) rcl review/m);
