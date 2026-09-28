@@ -26,6 +26,7 @@ allowed-tools:
   - Bash(harness show:*)
   - Bash(harness list:*)
   - Bash(npm view review-council:*)
+  - Bash(npm prefix -g)
   - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(npm test:*)
   - Bash(npm run lint:*)

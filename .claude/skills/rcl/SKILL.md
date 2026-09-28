@@ -18,6 +18,7 @@ allowed-tools:
   - Bash(harness show:*)
   - Bash(harness list:*)
   - Bash(npm view review-council:*)
+  - Bash(npm prefix -g)
   - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(which rcl)
   - Bash(rm -f /tmp/rcl-*)
@@ -158,7 +159,7 @@ RCL_LATEST=$(npm view review-council@latest version) &&
   RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN") && echo "rcl=$RCL_BIN" && "$RCL_BIN" --version
 ```
 
-`<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop. Before trusting the printed `rcl --version`, check the executable: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be group- or world-writable or owned by anyone other than you or root. A repository can put its own `rcl` early on `PATH`, and that copy must never review it. If a check fails, stop and tell the user rather than running it.
+`<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop. Before trusting the printed `rcl --version`, check the executable: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never review it. If a check fails, stop and tell the user rather than running it.
 
 If `rcl` is missing, fails a check, or prints anything other than `<RCL_LATEST>`, install exactly that release without running package lifecycle scripts, and confirm the registry still serves the same artifact:
 
