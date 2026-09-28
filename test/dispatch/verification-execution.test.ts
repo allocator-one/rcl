@@ -151,11 +151,13 @@ describe('bounded durable verifier execution', () => {
   });
 
   it('cancels outstanding requests, seals their uncertainty and does not renew the saved deadline', async () => {
-    const f = await fixture(1), controller = new AbortController();
+    const f = await fixture(1), controller = new AbortController(); let signalAborted = false;
     const result = await f.execute({ signal: controller.signal, askFactory: () => async (_m, _s, _u, options) => {
-      controller.abort(); expect(options.signal?.aborted).toBe(true); return new Promise(() => {});
+      controller.abort(); signalAborted = options.signal?.aborted === true; return new Promise(() => {});
     } });
+    expect(signalAborted).toBe(true);
     expect(result.ok).toBe(false); expect((await f.journal.readVerification())!.plan.expiresAtMs).toBe(f.saved.expiresAtMs);
+    expect((await f.journal.readVerification())!.uncertain).toHaveLength(1);
     await expect(f.execute({ retainedPlan: { ...f.saved, expiresAtMs: f.saved.expiresAtMs + 1 } })).rejects.toThrow();
   });
 

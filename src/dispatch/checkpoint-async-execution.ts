@@ -63,7 +63,12 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       const bytes = stableStringify({ ...result, async: true });
       const review = parseAsyncReview(bytes, call.ref);
       await writer.recordResult(intent.attemptId, bytes, true);
-      await options.onReviewRecorded?.(structuredClone(review) as ModelReview);
+      try { await options.onReviewRecorded?.(structuredClone(review) as ModelReview); }
+      catch (error) {
+        // Derived publication cannot change exact physical accounting or stop a
+        // durable timeout retry. The private sink is best-effort and bounded.
+        try { await options.onLateAuditError(error, intent.attemptId); } catch { /* contained */ }
+      }
       return review.status;
     };
     const response = raw.then(

@@ -5,8 +5,9 @@ import type { ModelReview } from '../consensus/types.js';
 import type { ReviewAdapter } from './adapter.js';
 import { CheckpointJournal } from './checkpoint.js';
 import { decodeCapturedInputs } from './captured-inputs.js';
-import { openCapturedAsyncDelegate, recordAsyncLateFailure, type AsyncDelegate } from './checkpoint-async-store.js';
+import { openCapturedAsyncDelegate, readAsyncPhase, recordAsyncLateFailure, type AsyncDelegate } from './checkpoint-async-store.js';
 import { executeCheckpointAsync } from './checkpoint-async-execution.js';
+import { parseAsyncReview } from './checkpoint-async.js';
 import { defaultAdapterFactory } from './runner.js';
 import { asyncTargetKey, publishAsyncReview, resolveAsyncStoreDir, workerEnv } from './async-lane.js';
 
@@ -64,6 +65,9 @@ export async function runRetainedAsyncWorker(bytes: string, dependencies: {
     adapterFactory: call => (dependencies.adapterFactory ?? (provider => defaultAdapterFactory(provider, captured.config.reasoningEffort)))(call.provider),
     onLateAuditError: (_error, attemptId) => recordAsyncLateFailure(delegate, attemptId), onReviewRecorded: async review => { latest = review; },
   });
+  const durable = (await readAsyncPhase({ commonDir: delegate.commonDir, namespace: delegate.namespace,
+    plan: journal.getPlan() })).state.outcomes.filter(outcome => outcome.callIndex === delegate.callIndex).at(-1);
+  if (durable) latest = structuredClone(parseAsyncReview(durable.reviewBytes, original.call.ref)) as ModelReview;
   if (latest) {
     const publish = dependencies.publish ?? (async review => publishAsyncReview(await resolveAsyncStoreDir(delegate.commonDir), opinionTarget, review));
     await publish(latest);

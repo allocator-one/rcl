@@ -286,6 +286,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
         });
         const after = await capture();
         if (after.preview.nextAction !== 'retry_missing_assignments') return finish(after);
+        if (controller.signal.aborted) return finish(after, 'canceled');
         if (after.own.length === before.own.length) {
           if (JSON.stringify(after.preview.eligibleCallIndices) !== JSON.stringify(before.preview.eligibleCallIndices)) continue;
           const stopped = finish(after, 'no_dispatch');

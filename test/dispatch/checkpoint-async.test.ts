@@ -152,6 +152,16 @@ describe('restricted original async checkpoint phase',()=>{
   }});
   expect(published).toHaveLength(1);expect(published[0]).toMatchObject({async:true,status:'success',findings:[{title:'keep'}]});
  });
+ it('retries publication from the durable outcome without another provider call',async()=>{
+  const f=await fixture(),opened=await initialize(f),adapter=vi.fn(async()=>JSON.parse(review()));
+  const firstPublish=vi.fn(async()=>{throw new Error('synthetic publication failure');});
+  await expect(runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter}),publish:firstPublish}))
+   .rejects.toThrow('synthetic publication failure');
+  expect(adapter).toHaveBeenCalledOnce();expect((await readAsyncPhase(f.input)).state.outcomes).toHaveLength(1);
+  const published:any[]=[];
+  await runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter}),publish:async value=>{published.push(value);}});
+  expect(adapter).toHaveBeenCalledOnce();expect(published).toMatchObject([{status:'success',async:true}]);
+ });
  it('refuses oversized, malformed or forged worker delegation before constructing an adapter',async()=>{
   const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn();
   for(const bytes of ['x'.repeat(16385),'null',JSON.stringify({...opened.delegates[0],token:'0'.repeat(64)})]) {
@@ -233,8 +243,12 @@ describe('restricted original async checkpoint phase',()=>{
   await withNativeTarget(f.commonDir,target,async ownership=>{
    const opened=await initializeAsyncPhase({...f.input,ownership});await writeFile(reference,JSON.stringify(opened.delegates[0]),{mode:0o600});
    const child=spawn(process.execPath,['--import',fileURLToPath(new URL('../../node_modules/tsx/dist/loader.mjs',import.meta.url)),worker,reference,'hold'],{stdio:['ignore','pipe','pipe']});let stderr='';child.stderr.on('data',x=>stderr+=x);const exit=new Promise(resolve=>child.on('exit',(code,signal)=>resolve({code,signal})));
-   const intent=await new Promise<any>((resolve,reject)=>{let data='';child.stdout.on('data',x=>{data+=x;if(data.includes('\n')){try{resolve(JSON.parse(data.trim()));}catch(e){reject(e);}}});child.on('exit',()=>reject(new Error(stderr||'worker exited before durable intent')));});
-   try { expect(intent.attemptId).toMatch(/^async-/); } finally { child.kill('SIGKILL'); } expect(await exit).toEqual({code:null,signal:'SIGKILL'});
+   let intent:any;
+   try {
+    intent=await new Promise<any>((resolve,reject)=>{let data='';child.stdout.on('data',x=>{data+=x;if(data.includes('\n')){try{resolve(JSON.parse(data.trim()));}catch(e){reject(e);}}});child.on('exit',()=>reject(new Error(stderr||'worker exited before durable intent')));});
+    expect(intent.attemptId).toMatch(/^async-/);
+   } finally { child.kill('SIGKILL'); }
+   expect(await exit).toEqual({code:null,signal:'SIGKILL'});
    const reopened=await promisify(execFile)(process.execPath,['--import',fileURLToPath(new URL('../../node_modules/tsx/dist/loader.mjs',import.meta.url)),worker,reference],{encoding:'utf8'});expect(JSON.parse(reopened.stdout)).toBeNull();
    const proof=await sealAsyncPhase({...f.input,ownership});expect(proof.state.uncertain).toEqual([intent]);
   });
@@ -261,11 +275,12 @@ describe('restricted original async checkpoint phase',()=>{
  });
  it('cuts the deadline against provider response and still awaits durable result persistence', async()=>{
   const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
+  vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
   let paused!:()=>void;const persistenceStarted=new Promise<void>(resolve=>{paused=resolve;});durability.paused=paused;
   durability.pausePath=join(f.path,'async','events','00000002.json');
   const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review()))};
   let completed=false;const running=executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()}).then(value=>{completed=true;return value;});
-  await persistenceStarted;await new Promise(resolve=>setTimeout(resolve,40));
+  await persistenceStarted;await vi.advanceTimersByTimeAsync(40);
   expect(completed).toBe(false);
   durability.release?.();
   expect(await running).toEqual({newPhysicalCalls:1});
@@ -273,13 +288,12 @@ describe('restricted original async checkpoint phase',()=>{
  });
  it('durably records one private failure when a timed-out result cannot enter late audit', async()=>{
   const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
-  let resolve!: (value:any)=>void;const raw=new Promise<any>(done=>{resolve=done;});
-  const adapterFactory=()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>raw)});
+  let resolve!: (value:any)=>void,providerStarted!:()=>void;const raw=new Promise<any>(done=>{resolve=done;}),started=new Promise<void>(done=>{providerStarted=done;});
+  const adapterFactory=()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{providerStarted();return raw;})});
   const running=runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory,publish:vi.fn()});
-  await vi.waitFor(async()=>expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(1));
-  await new Promise(done=>setTimeout(done,30));
+  await started;expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(1);await running;
   durability.failPath=join(f.path,'async','events');
-  resolve(JSON.parse(review()));await running;
+  resolve(JSON.parse(review()));
   await vi.waitFor(async()=>expect(await readAsyncLateFailures(f.input)).toHaveLength(1));
   const failures=await readAsyncLateFailures(f.input);
   expect(failures[0]).toMatchObject({callIndex:0,kind:'late_audit_failure'});
@@ -289,16 +303,16 @@ describe('restricted original async checkpoint phase',()=>{
  });
  it('contains a late-failure marker rejection after one durable attempt', async()=>{
   const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
-  let resolve!: (value:any)=>void;const raw=new Promise<any>(done=>{resolve=done;});
-  const adapterFactory=()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>raw)});
+  let resolve!: (value:any)=>void,providerStarted!:()=>void;const raw=new Promise<any>(done=>{resolve=done;}),started=new Promise<void>(done=>{providerStarted=done;});
+  const adapterFactory=()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{providerStarted();return raw;})});
   const unhandled:unknown[]=[];const observe=(error:unknown)=>unhandled.push(error);process.on('unhandledRejection',observe);
   try {
    const running=runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory,publish:vi.fn()});
-   await vi.waitFor(async()=>expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(1));
-   await new Promise(done=>setTimeout(done,30));
+   await started;expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(1);
+   await expect(running).resolves.toBeUndefined();
    durability.failPaths=[join(f.path,'async','events'),join(f.path,'async','failures')];
-   resolve(JSON.parse(review()));await expect(running).resolves.toBeUndefined();
-   await vi.waitFor(()=>expect(durability.failPaths).toEqual([]));await new Promise(done=>setTimeout(done,0));
+   resolve(JSON.parse(review()));
+   await vi.waitFor(()=>expect(durability.failPaths).toEqual([]));await Promise.resolve();
    expect(durability.synced.filter(path=>path===join(f.path,'async','failures'))).toHaveLength(1);
    expect(unhandled).toEqual([]);
   } finally {process.off('unhandledRejection',observe);}
@@ -309,6 +323,15 @@ describe('restricted original async checkpoint phase',()=>{
   const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:vi.fn()});
   expect(adapter.review).not.toHaveBeenCalled();expect(result.newPhysicalCalls).toBe(0);
   const proof=await seal(f);expect(proof.state.uncertain).toHaveLength(1);expect(proof.physicalAttempts[0].possiblyBilled).toBe(true);
+ });
+ it('contains a derived callback failure and continues an observed timeout retry',async()=>{
+  const f=await fixture(),opened=await initialize(f);let calls=0;const errors:unknown[]=[];
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review(++calls===1?'timeout':'success')))};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,
+   onReviewRecorded:async()=>{throw new Error('synthetic derived failure');},onLateAuditError:error=>{errors.push(error);}});
+  expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  expect(errors).toHaveLength(2);expect(errors.every(error=>String(error).includes('synthetic derived failure'))).toBe(true);
+  expect((await seal(f)).state.outcomes).toHaveLength(2);
  });
  it('returns on cancellation without waiting for a noncooperative adapter and audits its late result', async()=>{
   const f=await fixture(),opened=await initialize(f),controller=new AbortController();let resolve!: (value:any)=>void,started!:()=>void;

@@ -13,10 +13,14 @@ import type { ModelReview } from '../../src/consensus/types.js';
 import type { ReviewAssignment } from '../../src/roles/types.js';
 import { stableStringify } from '../../src/report/run-header.js';
 
-const writeGate = vi.hoisted(() => ({ active: false, started: () => {}, wait: Promise.resolve() }));
+const writeGate = vi.hoisted(() => ({ active: false, awaitingRecovery: false, started: () => {}, checked: () => {}, release: () => {}, wait: Promise.resolve() }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+  return { ...actual, realpath: async (...args: Parameters<typeof actual.realpath>) => {
+    const path = await actual.realpath(...args);
+    if (writeGate.awaitingRecovery) { writeGate.awaitingRecovery = false; writeGate.checked(); }
+    return path;
+  }, open: async (...args: Parameters<typeof actual.open>) => {
     const handle = await actual.open(...args);
     const path = String(args[0]);
     if (!writeGate.active || !(path.endsWith('/events/00000001.json') || path.includes('/.staging/')) ||
@@ -32,7 +36,10 @@ vi.mock('node:fs/promises', async importOriginal => {
 });
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => {
+  writeGate.release(); writeGate.active = false; writeGate.awaitingRecovery = false; writeGate.started = () => {}; writeGate.checked = () => {}; writeGate.release = () => {}; writeGate.wait = Promise.resolve();
+  await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })));
+});
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const target = 'allocator-one/rcl#105';
 function fixture(provider = 'fake') {
@@ -101,7 +108,7 @@ describe('owned missing-review executor', () => {
       expect(result.preview.successfulSeats).toBe(3);
       expect(peak).toBe(1);
     });
-  }), 'anthropic');
+  }, 'anthropic'));
 
   it('refuses an explicit changed provider policy before recovery dispatch', async () => runFixture(async (input, commonDir) => {
     const captured = capturedFixture(input, { concurrency: 3, quorumFraction: 1,
@@ -120,7 +127,7 @@ describe('owned missing-review executor', () => {
         adapterFactory: () => ({ name: 'fake', provider: input.provider, ask: vi.fn(), review: called }) });
     })).rejects.toThrow('recovery_operation_mismatch');
     expect(called).not.toHaveBeenCalled();
-  }), 'anthropic');
+  }, 'anthropic'));
 
   it('refuses legacy journals without captured inputs before any paid dispatch', async () => runFixture(async (input, commonDir) => {
     const called = vi.fn();
@@ -318,15 +325,18 @@ it('same-owner recovery does not read an append before its write completes', asy
     const journal = await CheckpointJournal.create({ commonDir, namespace: 'read-race', plan: input.plan, ownership });
     let release!: () => void;
     const started = new Promise<void>(resolve => { writeGate.started = resolve; });
+    const checked = new Promise<void>(resolve => { writeGate.checked = resolve; });
     writeGate.wait = new Promise<void>(resolve => { release = resolve; });
+    writeGate.release = release;
     writeGate.active = true;
     const writing = journal.recordIntent('s1:0', { id: 'prior-owned-intent', kind: 'paid' }, ownership);
     await started;
+    writeGate.awaitingRecovery = true;
     const execution = recoverReviewerAssignments({ ...input, commonDir, ownership, journal, fraction: 2 / 3,
         maxAdditionalCalls: 2, maxAttemptsPerCell: 3, remainingMs: 5000, timeoutMs: 1000, concurrency: 1,
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: vi.fn(async (model: string) => input.review(model)), ask: vi.fn() }) }).then(() => undefined, (error: unknown) => error);
-    await new Promise(resolve => setTimeout(resolve, 30));
-    writeGate.active = false; release(); await writing;
+    await checked; await Promise.resolve();
+    writeGate.active = false; release(); writeGate.release = () => {}; await writing;
     const failure = await execution;
     expect((await journal.read()).records[0]).toMatchObject({ type: 'intent', cell: 's1:0', paidAttempt: { id: 'prior-owned-intent', kind: 'paid' } });
     expect(failure).toBeUndefined();
@@ -361,5 +371,6 @@ it('does not record paid intent when cancellation arrives during adapter setup',
     expect((await journal.read()).records).toEqual([]);
     expect(adapterFactory).toHaveBeenCalledTimes(1);
     expect(called).not.toHaveBeenCalled();
+    expect(result.stoppedBy).toBe('canceled');
   });
 }));

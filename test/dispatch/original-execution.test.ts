@@ -45,7 +45,7 @@ function fixture(maxPhysicalCalls = 3, concurrency = 1, providerConcurrency?: Re
 async function directory() { const root = await mkdtemp(join(tmpdir(), 'rcl-original-execution-')); roots.push(root); return root; }
 
 describe('captured original council execution', () => {
-  it('uses only a policy frozen in the capture and leaves legacy captures globally scheduled', async () => {
+  it('uses only a policy frozen in the capture and leaves legacy provider policy omitted', async () => {
     async function peakFor(providerConcurrency?: Record<string, number>) {
       const provider = providerConcurrency === undefined ? 'fake' : 'anthropic';
       const commonDir = await directory(), f = fixture(3, 3, providerConcurrency, 1, provider);
