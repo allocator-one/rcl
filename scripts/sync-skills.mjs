@@ -13,7 +13,7 @@
  * from it.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,18 +56,43 @@ function run(cmd, args, options = {}) {
   return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...options }).trim();
 }
 
+/**
+ * Reject a symlink anywhere along `root/relPath`'s path components. The clone
+ * is fresh, but its committed tree is the consumer repository's own content;
+ * a symlink at, say, `.claude` would make the writes/removals below follow it
+ * outside the temporary clone. A component that does not exist yet is fine —
+ * `mkdirSync`/`writeFileSync` will create it.
+ */
+function assertNoUnsafeSymlink(root, relPath) {
+  let cur = root;
+  for (const part of relPath.split('/')) {
+    cur = join(cur, part);
+    let stat;
+    try {
+      stat = lstatSync(cur);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) throw new Error(`refusing to sync through symlink: ${cur}`);
+  }
+}
+
 function syncOne({ repo, base }, ref, files, dryRun) {
   const work = mkdtempSync(join(tmpdir(), 'rcl-skill-sync-'));
   try {
     const dir = join(work, 'repo');
     run('gh', ['repo', 'clone', repo, dir, '--', '--depth', '1', '--branch', base, '--quiet']);
     const git = (...args) => run('git', ['-C', dir, ...args]);
-    for (const owned of ownedDirs()) rmSync(join(dir, owned), { recursive: true, force: true });
+    for (const owned of ownedDirs()) {
+      assertNoUnsafeSymlink(dir, owned);
+      rmSync(join(dir, owned), { recursive: true, force: true });
+    }
     for (const [path, content] of files) {
+      assertNoUnsafeSymlink(dir, dirname(path));
       mkdirSync(dirname(join(dir, path)), { recursive: true });
       writeFileSync(join(dir, path), content);
     }
-    git('add', '--all', '--', ...ownedDirs());
+    git('add', '--all', '--force', '--', ...ownedDirs());
     if (git('status', '--porcelain', '--', ...ownedDirs()) === '') return `${repo}: up to date`;
     if (dryRun) return `${repo}: would sync\n${git('status', '--short', '--', ...ownedDirs())}`;
 
@@ -84,7 +109,11 @@ function syncOne({ repo, base }, ref, files, dryRun) {
       '',
       'Opened by rcl\'s **Sync skills** workflow after a release. The skill directories are owned by that sync: edit `skills/src` in allocator-one/rcl instead of these files. Repository-specific review rules belong in this repository\'s `AGENTS.md` or `CLAUDE.md`.',
     ].join('\n');
-    const open = run('gh', ['pr', 'list', '-R', repo, '--head', SYNC_BRANCH, '--state', 'open', '--json', 'number', '--jq', '.[0].number // empty']);
+    // `--head <branch>` alone can match a same-named branch on a fork (a PR opened by an
+    // outside contributor from their own fork's `rcl-skill-sync` branch). Restrict to
+    // same-repository PRs so the sync never adopts and rebrands an attacker's PR as its own.
+    const open = run('gh', ['pr', 'list', '-R', repo, '--head', SYNC_BRANCH, '--state', 'open',
+      '--json', 'number,isCrossRepository', '--jq', '[.[] | select(.isCrossRepository | not)][0].number // empty']);
     if (open) {
       run('gh', ['pr', 'edit', open, '-R', repo, '--title', title, '--body', body]);
       return `${repo}: updated #${open}`;
@@ -97,10 +126,15 @@ function syncOne({ repo, base }, ref, files, dryRun) {
 
 function parseArgs(argv) {
   const args = { ref: null, only: null, dryRun: false };
+  const nextValue = (flag, i) => {
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+    return value;
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--ref') args.ref = argv[++i];
-    else if (arg === '--only') args.only = argv[++i];
+    if (arg === '--ref') args.ref = nextValue(arg, i++);
+    else if (arg === '--only') args.only = nextValue(arg, i++);
     else if (arg === '--dry-run') args.dryRun = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -108,8 +142,20 @@ function parseArgs(argv) {
   return args;
 }
 
+/** The checkout must actually be at `ref`, or the rendered files, the commit
+ * message and the PR body would all misattribute content to a release they
+ * were never built from. */
+function assertCheckoutMatchesRef(ref) {
+  const resolved = run('git', ['-C', ROOT, 'rev-parse', '--verify', `${ref}^{commit}`]);
+  const head = run('git', ['-C', ROOT, 'rev-parse', 'HEAD']);
+  if (resolved !== head) {
+    throw new Error(`checkout HEAD (${head}) does not match --ref ${ref} (${resolved}); run from a checkout of that tag`);
+  }
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const { ref, only, dryRun } = parseArgs(process.argv.slice(2));
+  assertCheckoutMatchesRef(ref);
   const files = renderVendoredFiles(ref);
   const consumers = readConsumers().filter((consumer) => !only || consumer.repo === only);
   if (only && consumers.length === 0) throw new Error(`${only} is not a configured consumer`);

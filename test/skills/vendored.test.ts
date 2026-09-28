@@ -43,13 +43,15 @@ describe('vendored skills', () => {
       expect(content, path).toContain('untrusted data');
       expect(content, path).toContain('--no-ext-diff --no-textconv');
       if (path.includes('rcl-converge')) {
-        expect(content, path).toContain('rcl_run rcl review <target> --guarded-converge');
+        expect(content, path).toContain('rcl_run <TOKEN_ARG> rcl review <target> --guarded-converge');
+        expect(content, path).toContain('`<TOKEN_ARG>` is `GITHUB_TOKEN="$(gh auth token)"`');
         expect(content, path).toContain('step 2a disclosure check');
       } else {
         expect(content, path).toContain('### 2a. Check what leaves the machine');
         expect(content, path).toContain('never pin a version');
         expect(content, path).toContain('npm install -g --ignore-scripts "review-council@<RCL_LATEST>"');
-        expect(content, path).toContain('dist.integrity)" = "<RCL_INTEGRITY>"');
+        expect(content, path).toContain('dist.integrity --registry https://registry.npmjs.org)" = "<RCL_INTEGRITY>"');
+        expect(content, path).toContain('--registry https://registry.npmjs.org');
         expect(content, path).toContain('inside the repository under review');
         expect(content, path).toContain('Never fall back to an older installed release');
         expect(content, path).not.toContain('npm install -g review-council@latest');

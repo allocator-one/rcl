@@ -21,6 +21,9 @@ allowed-tools:
   - Bash(npm prefix -g)
   - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(which rcl)
+  - Bash(command -v rcl)
+  - Bash(realpath:*)
+  - Bash(rcl_run:*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
   - Bash(nohup:*)
@@ -97,10 +100,11 @@ Generate a patch from the current branch against its merge-base with the remote 
 DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
 git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch: $DEFAULT_BRANCH"; exit 1; }
 BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
-env -u GIT_EXTERNAL_DIFF git diff --no-ext-diff --no-textconv "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
+env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff \
+  --no-ext-diff --no-textconv --text "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
 ```
 
-`--no-ext-diff --no-textconv` (with `GIT_EXTERNAL_DIFF` unset) keeps repository- or user-configured diff and text-conversion helpers from running, or from rewriting the patch the council sees.
+`--no-ext-diff --no-textconv` (with `GIT_EXTERNAL_DIFF` unset) keeps repository- or user-configured diff and text-conversion helpers from running, or from rewriting the patch the council sees; the `-c` overrides stop a local `diff.noprefix`, `diff.mnemonicPrefix`, or `color.ui=always` setting from producing a patch rcl mis-parses or that carries ANSI codes. A branch can still mark paths `-diff` in its own `.gitattributes`, which makes git treat them as binary for diff purposes even with these flags; if the generated patch contains a `Binary files a/… and b/… differ` line for a path that is not actually binary, treat that as a disclosure-check red flag (content is hidden from both you and the reviewers) and tell the user before proceeding.
 
 If the diff is empty (no changes vs the default branch), tell the user and stop.
 
@@ -150,28 +154,32 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 
 ### 2a. Check what leaves the machine
 
-The patch and the spec are sent to several external model providers. Before running, read both as that disclosure: the local patch file, or `gh pr diff <PR_NUMBER>` in PR mode, and `<SPEC>` if one was resolved. Stop and tell the user if either contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
+The patch and the spec are sent to several external model providers. Before running, read both as that disclosure: the local patch file; `gh pr diff <PR_NUMBER> --repo <REPO>` in PR mode (always pass `--repo` explicitly — an explicit `<REPO>#<PR_NUMBER>` target can differ from the current directory's repository, and an unscoped `gh pr diff <PR_NUMBER>` would then inspect the wrong PR); or, for `rcl review --staged` / `--working-tree`, the equivalent local diff (`git diff --no-ext-diff --no-textconv --cached` for staged, `git diff --no-ext-diff --no-textconv HEAD` for working-tree, which covers staged and unstaged together) captured to a temp file the same way step 1b does. Also read `<SPEC>` if one was resolved. Stop and tell the user if any of it contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
+
+This check and the later fetch inside `rcl review` are two separate reads of the same target: in PR mode, the PR can in principle change between them. For the default in-session review this is a narrow window (the same agent runs both steps back to back); if the gap matters for a given PR, capture and bind instead — `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` (see "Fresh review requests" above) reviews the exact patch this step inspected.
 
 ### 3. Check rcl is available
 
 Always run the latest published release — never pin a version. A pin has to be bumped by hand in every copy of this skill on every release, and in practice it doesn't happen — copies have sat on versions that were several releases stale, or (worse) on a version that was never published at all, which makes review fail outright. For a reproducible run against a specific version, install that version yourself before invoking the skill and say so.
 
-Resolve the latest release, its registry integrity and the installed executable in one command:
+Resolve the latest release, its registry integrity and the installed executable's path — without running it yet:
 
 ```bash
-RCL_LATEST=$(npm view review-council@latest version) &&
-  RCL_INTEGRITY=$(npm view "review-council@$RCL_LATEST" dist.integrity) &&
+RCL_LATEST=$(npm view review-council@latest version --registry https://registry.npmjs.org) &&
+  RCL_INTEGRITY=$(npm view "review-council@$RCL_LATEST" dist.integrity --registry https://registry.npmjs.org) &&
   echo "latest=$RCL_LATEST integrity=$RCL_INTEGRITY" &&
-  RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN") && echo "rcl=$RCL_BIN" && "$RCL_BIN" --version
+  RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN") && echo "rcl=$RCL_BIN"
 ```
 
-`<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop. Before trusting the printed `rcl --version`, check the executable: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never review it. If a check fails, stop and tell the user rather than running it.
+`--registry https://registry.npmjs.org` pins the real registry explicitly: without it, a `.npmrc` committed to the repository under review (or present in the working directory) can redirect `npm view`/`npm install` to an attacker-controlled registry, which would then corroborate its own poisoned "latest" against its own poisoned integrity hash. `<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop.
+
+Before running `"$RCL_BIN" --version` — do not run it yet — check the executable itself: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never run — not even to print its version — before these checks pass. If a check fails, stop and tell the user rather than running it. Only once every check above passes, run `"$RCL_BIN" --version` and require it to print exactly `<RCL_LATEST>`.
 
 If `rcl` is missing, fails a check, or prints anything other than `<RCL_LATEST>`, install exactly that release without running package lifecycle scripts, and confirm the registry still serves the same artifact:
 
 ```bash
-npm install -g --ignore-scripts "review-council@<RCL_LATEST>" &&
-  test "$(npm view "review-council@<RCL_LATEST>" dist.integrity)" = "<RCL_INTEGRITY>"
+npm install -g --ignore-scripts "review-council@<RCL_LATEST>" --registry https://registry.npmjs.org &&
+  test "$(npm view "review-council@<RCL_LATEST>" dist.integrity --registry https://registry.npmjs.org)" = "<RCL_INTEGRITY>"
 ```
 
 Then repeat the resolution and checks above, and require `rcl --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.

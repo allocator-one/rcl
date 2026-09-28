@@ -30,10 +30,21 @@ jobs:
       - name: Resolve the released tag
         id: ref
         env:
+          GH_TOKEN: ${{ github.token }}
           DISPATCH_REF: ${{ inputs.ref }}
-          RELEASE_REF: ${{ github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          ref=${DISPATCH_REF:-$RELEASE_REF}
+          # workflow_run.head_branch is null for a run triggered by a tag push
+          # (tags aren't branches), so it can never name the released tag here.
+          # Look the tag up by the commit the completed Release run actually
+          # ran on instead: the tags API resolves annotated tags to their
+          # commit, so this works for either tag style.
+          if [ -n "$DISPATCH_REF" ]; then
+            ref=$DISPATCH_REF
+          else
+            ref=$(gh api "repos/${{ github.repository }}/tags" --paginate \
+              --jq ".[] | select(.commit.sha == \"$RUN_SHA\") | .name" | head -n1)
+          fi
           if ! printf '%s\n' "$ref" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
             echo "::error::Only a stable release tag (vX.Y.Z) can be synced, got '$ref'"
             exit 1

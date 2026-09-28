@@ -18,6 +18,7 @@ allowed-tools:
   - Bash(git status:*)
   - Bash(git merge-base:*)
   - Bash(git diff:*)
+  - Bash(env -u GIT_EXTERNAL_DIFF git diff:*)
   - Bash(git log:*)
   - Bash(git rev-parse:*)
   - Bash(git add:*)
@@ -31,6 +32,9 @@ allowed-tools:
   - Bash(npm test:*)
   - Bash(npm run lint:*)
   - Bash(which rcl)
+  - Bash(command -v rcl)
+  - Bash(realpath:*)
+  - Bash(rcl_run:*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
   - Read
@@ -126,9 +130,10 @@ For each launch, let the native guard derive `<R>` from native admitted state. R
    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)
 git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch: $DEFAULT_BRANCH"; exit 1; }
    BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
-   env -u GIT_EXTERNAL_DIFF git diff --no-ext-diff --no-textconv "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
+   env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff \
+     --no-ext-diff --no-textconv --text "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```
-   Every round's patch and spec pass the `rcl` skill's step 2a disclosure check before launch; stop the loop if either contains secrets, customer or personal data, local diagnostics or unrelated files.
+   Every round's patch and spec pass the `rcl` skill's step 2a disclosure check before launch (including its `Binary files … differ` red flag for a `.gitattributes`-marked path); stop the loop if either contains secrets, customer or personal data, local diagnostics or unrelated files.
 2. **Launch once through the native guard.** Use a fresh, unique `<LAUNCH>` suffix for each invocation's reports and log; never delete or overwrite the original artifacts. Confirm `rcl review --help` exposes `--guarded-converge` before starting. Upgrade the installed package if necessary; never fall back to a separate claim plus detached launcher.
 
    The review process acquires native target ownership, validates inputs, selected-provider credentials and output destinations, derives the next round from native admitted state, then durably claims one attempt and dispatches. Do not call `converge-attempt` first or export `RCL_CONVERGE_ATTEMPT`; do not derive a round from attempts or ledger headings. Omit `--round` and `RCL_CONVERGE_ROUND`; the report's `run.converge.round` and `run.converge.attempt` provide the authoritative values after completion.
@@ -138,19 +143,23 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    Launch through the `rcl` skill's allowlisted-environment helper: define `rcl_run` from its step 5 in the same shell.
 
    ```bash
-   rcl_run rcl review <target> --guarded-converge <START_OVER_ARG> \
+   rcl_run <TOKEN_ARG> rcl review <target> --guarded-converge <START_OVER_ARG> \
      --markdown <RCL_TMP>/rcl-report-<TARGET>-<LAUNCH>.md \
      --json-file <RCL_TMP>/rcl-report-<TARGET>-<LAUNCH>.json \
      --converge-target "<TARGET>" <ATTEMPT_CAP_ARG> <ROUND_CAP_ARG> <PR_REF_ARG> \
      <EVIDENCE_ARG> <HEAD_SHA_ARG> [--spec <SPEC>] [--roles <roles>]
-   status=$?; echo "rcl exit=$status"; (exit $status)
+   rcl_exit=$?; echo "rcl exit=$rcl_exit"; (exit $rcl_exit)
    ```
+
+   (`status` is a read-only special parameter in zsh — use a plain variable name like `rcl_exit` so this line works in whichever shell the host's Bash tool runs.)
 
    `<START_OVER_ARG>` is `--start-over` only for the explicit fresh request or its interrupted operation; otherwise it is empty.
 
+   `<TOKEN_ARG>` is `GITHUB_TOKEN="$(gh auth token)"` for a PR-mode target (a bare `<target>`/PR reference, or a patch-file target carrying `<PR_REF_ARG>`) and empty for a bare local-diff patch target — matching the `rcl` skill's own step-5 distinction between its PR-mode and local-diff-mode launch commands. `rcl_run`'s `env -i` deliberately excludes `GH_TOKEN`/`GITHUB_TOKEN` from its allowlist, so a PR-mode round with `<TOKEN_ARG>` empty runs with no GitHub credential — this token is also what `--post-final` needs later to post the summary comment.
+
    Pass `<ATTEMPT_CAP_ARG>` and `<ROUND_CAP_ARG>` only for explicitly user-approved caps. Exit 2 is the configured consent boundary: stop and ask before raising the relevant cap. Exit 3 is an accounting/infrastructure failure: report the error, not a request for a higher cap. Preflight refusal spends nothing. A durably claimed attempt remains spent after a crash, kill, inconclusive result or missing report.
 
-   `<EVIDENCE_ARG>` is `--evidence-required` when step 0a passed and empty otherwise. For a captured patch, `<HEAD_SHA_ARG>` supplies `--head-sha <HEAD_SHA>` and, when captured, `--base-sha <BASE_SHA>`; for direct PR/git targets it is empty because RCL resolves the heads. `<PR_REF_ARG>` is `--for-pr <owner>/<repo>#<N>` only for a patch captured from that PR. RCL resolves GitHub authentication only in PR mode; never inject GitHub credentials into patch review.
+   `<EVIDENCE_ARG>` is `--evidence-required` when step 0a passed and empty otherwise. For a captured patch, `<HEAD_SHA_ARG>` supplies `--head-sha <HEAD_SHA>` and, when captured, `--base-sha <BASE_SHA>`; for direct PR/git targets it is empty because RCL resolves the heads. `<PR_REF_ARG>` is `--for-pr <owner>/<repo>#<N>` only for a patch captured from that PR. RCL resolves GitHub authentication only in PR mode; never inject GitHub credentials into patch review — keep `<TOKEN_ARG>` empty for a bare patch-file target.
 
    Interpret a terminal exit together with the original report. Exit 0 proceeds to step 2a; exit 4 with a nonempty report means review completed and only evidence delivery failed. Any other nonzero exit stops the loop. Preserve the authoritative host handle, report, log and native launch state. A missing handle/report does not prove zero dispatch: inspect the original outcome and refuse blind retries. Only after recovery or an explicit bounded retry decision may `--retry-reason '<concrete reason>'` authorize another attempt within the existing caps. A changed code head is not credential, billing or launcher recovery.
 
