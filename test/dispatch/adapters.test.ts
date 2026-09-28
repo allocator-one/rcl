@@ -65,7 +65,8 @@ describe('SDK client construction', () => {
   it.each([
     ['an earlier model', 'claude-fable-5', anthropicToolResponse()],
     ['Fable 5.1 tool use', 'anthropic/claude-fable-5-1', anthropicToolResponse()],
-    ['Fable 5.1 text JSON', 'anthropic/claude-fable-5-1', { content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' }],
+    ['Opus 5.5 tool use', 'anthropic/claude-opus-5-5', anthropicToolResponse()],
+    ['Opus 5.5 text JSON', 'anthropic/claude-opus-5-5', { content: [{ type: 'text', text: EMPTY_FINDINGS_JSON }], stop_reason: 'end_turn' }],
   ])('anthropic uses automatic tool choice and accepts %s', async (_kind, model, response) => {
     const create = vi.fn().mockResolvedValueOnce(response);
     const stream = vi.fn().mockReturnValueOnce(anthropicStreamResponse(response));
@@ -76,7 +77,7 @@ describe('SDK client construction', () => {
 
     expect(review.status).toBe('success');
     let request: unknown;
-    if (model.includes('claude-fable-5-1')) {
+    if (model.includes('claude-fable-5-1') || model.includes('claude-opus-5-5')) {
       expect(stream).toHaveBeenCalledTimes(1);
       request = stream.mock.calls[0]![0];
     } else {
@@ -111,17 +112,17 @@ describe('SDK client construction', () => {
 });
 
 describe('anthropic automatic tool choice', () => {
-  it('gives Fable 5.1 room to complete a large review with bounded effort', async () => {
+  it.each(['claude-opus-5-5', 'claude-fable-5-1'])('gives %s room to complete a large review with explicit effort', async (modelId) => {
     const stream = vi.fn().mockReturnValue(anthropicStreamResponse(anthropicToolResponse()));
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, { messages: { stream } });
 
-    const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 'system', 'large diff', OPTS);
+    const review = await adapter.review(`anthropic/${modelId}`, 'general', 'system', 'large diff', OPTS);
 
     expect(review.status).toBe('success');
     expect(stream).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
-        model: 'claude-fable-5-1',
+        model: modelId,
         max_tokens: 65536,
         output_config: { effort: 'high' },
         tool_choice: { type: 'auto' },
@@ -142,7 +143,7 @@ describe('anthropic automatic tool choice', () => {
     expect(create.mock.calls[0]?.[0]).not.toHaveProperty('output_config');
   });
 
-  it('reviews with Fable 5.1 without sending unsupported forced tool choice', async () => {
+  it('reviews with Opus 5.5 without sending unsupported forced tool choice', async () => {
     const stream = vi.fn((params: { tool_choice: { type: string } }) => {
       if (params.tool_choice.type !== 'auto') {
         throw new Anthropic.APIError(400, undefined, 'Forced tool choice is not supported', undefined);
@@ -152,12 +153,12 @@ describe('anthropic automatic tool choice', () => {
     const adapter = new AnthropicAdapter('test-key');
     setClient(adapter, { messages: { stream } });
 
-    const review = await adapter.review('anthropic/claude-fable-5-1', 'general', 'system', 'diff', OPTS);
+    const review = await adapter.review('anthropic/claude-opus-5-5', 'general', 'system', 'diff', OPTS);
 
     expect(review.status).toBe('success');
     expect(stream).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
-        model: 'claude-fable-5-1',
+        model: 'claude-opus-5-5',
         tool_choice: { type: 'auto' },
         tools: [expect.objectContaining({ name: 'report_findings' })],
       }),
