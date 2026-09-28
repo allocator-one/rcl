@@ -3,7 +3,6 @@
   "consumers": [
     { "repo": "allocator-one/harness-cli", "base": "main" },
     { "repo": "allocator-one/infra-one-ios", "base": "main" },
-    { "repo": "allocator-one/infra-one-website", "base": "main" },
     { "repo": "allocator-one/browser-extension", "base": "main" },
     { "repo": "allocator-one/infraone-signal-capture", "base": "main" },
     { "repo": "allocator-one/docs-infra-one", "base": "main" }
