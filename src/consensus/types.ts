@@ -183,7 +183,7 @@ export interface ReviewResult {
     /**
      * Blocking reviewer health (RCL-136): complete blocking seats against the
      * configured quorum. Secondary/async/verification successes are listed
-     * separately and never count. Absent from reports written before 4.1.13.
+     * separately and never count. Absent from reports written before 4.2.0.
      */
     blockingHealth?: import('../report/blocking-health.js').BlockingHealthSummary;
     /** Outcome of the single-model finding verification pass (RCL-23). */

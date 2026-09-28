@@ -586,7 +586,9 @@ function blockingHealthJson(health: BlockingHealth) {
 program
   .command('converge-report')
   .description(
-    'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating'
+    'Dedupe a round report against the converge run state, enforce the round cap, and classify findings as new/repeat/suppressed/regating. ' +
+      'Refuses a report whose blocking reviewer health is inconclusive or cannot be derived from its reviews and roster (exit 4). ' +
+      'Exit codes: 0 admitted, 2 round cap, 3 state failure, 4 reviewer health.'
   )
   .option('--target [key]', 'Stable convergence target key (same key as converge-attempt)')
   .option('--report [path]', 'Round report JSON (a --json-file output)')

@@ -2,7 +2,15 @@
 
 ## Unreleased
 
-## 4.1.13 - 2026-09-28
+## 4.2.0 - 2026-09-28
+
+Behavior change: `rcl converge-report` now refuses reports whose blocking
+reviewer health is inconclusive or cannot be derived (new exit code 4, error
+codes `report_health_inconclusive` / `report_health_unverifiable`). A report
+must carry its `reviews` rows; reports with a run header must also carry the
+roster those rows belong to. Every report RCL writes already does. There is
+deliberately no flag to admit an inconclusive report.
+
 
 - Align reviewer health with the blocking-reviewer quorum Harness enforces
   (RCL-136). Round closure now counts only complete blocking seats, so
