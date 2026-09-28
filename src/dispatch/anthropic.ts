@@ -43,15 +43,22 @@ interface ModelProfile {
 }
 
 const DEFAULT_PROFILE: ModelProfile = { maxTokens: 16384, stream: false };
-// Fable's recommended high effort needs headroom for thinking plus findings.
-// Keep streaming and the existing whole-call deadline from RCL-103.
-const FABLE_51_PROFILE: ModelProfile = { maxTokens: 65536, effort: 'high', stream: true };
+// Always-on thinking counts against max_tokens, so high effort needs headroom
+// for thinking plus findings. Keep streaming and the existing whole-call
+// deadline from RCL-103. Opus 5.5 defaults to medium effort; a review is
+// intelligence-sensitive work, so request high explicitly.
+const THINKING_REVIEW_PROFILE: ModelProfile = { maxTokens: 65536, effort: 'high', stream: true };
+
+// Claude 4.6+ uses dateless pinned API IDs; these profiles apply to the
+// documented IDs only, without guessing future model capabilities.
+// https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
+const MODEL_PROFILES: Readonly<Record<string, ModelProfile>> = {
+  'claude-opus-5-5': THINKING_REVIEW_PROFILE,
+  'claude-fable-5-1': THINKING_REVIEW_PROFILE,
+};
 
 function profileFor(modelId: string): ModelProfile {
-  // Claude 4.6+ uses dateless pinned API IDs; this profile applies to the
-  // documented Fable 5.1 ID only, without guessing future model capabilities.
-  // https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
-  return modelId === 'claude-fable-5-1' ? FABLE_51_PROFILE : DEFAULT_PROFILE;
+  return MODEL_PROFILES[modelId] ?? DEFAULT_PROFILE;
 }
 
 export class AnthropicAdapter implements ReviewAdapter {
@@ -79,8 +86,8 @@ export class AnthropicAdapter implements ReviewAdapter {
     const start = Date.now();
     let adapterAttempts = 0;
     const modelId = stripKnownProviderPrefix(model);
-    // Fable 5.1 counts adaptive thinking against max_tokens. Large review
-    // chunks exhausted the old ceiling before any complete findings arrived.
+    // Opus 5.5 and Fable 5.1 count adaptive thinking against max_tokens. Large
+    // review chunks exhausted the old ceiling before any findings arrived.
     const profile = profileFor(modelId);
 
     const outcome = await attemptWithRetries<ModelReview>({
@@ -134,7 +141,7 @@ export class AnthropicAdapter implements ReviewAdapter {
             ],
             tool_choice: { type: 'auto' as const },
           };
-        // Fable's larger output budget requires the SDK's streaming path.
+        // The larger thinking-model output budget requires the SDK's streaming path.
         // finalMessage() keeps the same complete-response parsing and
         // truncation checks used by the nonstreaming path.
         const requestOptions = {

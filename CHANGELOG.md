@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.4.2 - 2026-09-28
+
+- Replace Fable 5.1 with Opus 5.5 (`anthropic/claude-opus-5-5`) as the default
+  Anthropic general reviewer. The roster stays multi-provider. Opus 5.5 reviews
+  stream with explicit `high` effort (its API default is `medium`) and a
+  65,536-token output ceiling. Fable 5.1 keeps that profile only when configured
+  explicitly (RCL-145).
+
 ## 4.4.1 - 2026-09-28
 
 - Let a bounded legacy recovery validate its original inconclusive source against the

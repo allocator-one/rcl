@@ -180,7 +180,7 @@ describe('default roster (RCL-25: core council + async bonus reviewer)', () => {
   it('keeps two primary general reviewers and Gemini only for specialists', async () => {
     const config = await loadConfig(undefined, dir);
     expect(config.models).toEqual([
-      'anthropic/claude-fable-5-1',
+      'anthropic/claude-opus-5-5',
       'openai/gpt-6-sol',
     ]);
     expect(config.secondaryModels).toEqual(['google/gemini-3.8-flash']);

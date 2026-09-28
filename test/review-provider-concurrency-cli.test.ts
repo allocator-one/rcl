@@ -21,7 +21,7 @@ function event(type: string, data: object): string {
 function successfulStream(): string {
   return [
     event('message_start', { message: { id: 'msg_provider_cap', type: 'message', role: 'assistant',
-      model: 'claude-fable-5-1', content: [], stop_reason: null, stop_sequence: null,
+      model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null,
       usage: { input_tokens: 10, output_tokens: 0 } } }),
     event('content_block_start', { index: 0, content_block: {
       type: 'tool_use', id: 'tool_provider_cap', name: 'report_findings', input: {},
@@ -59,7 +59,7 @@ describe('review CLI provider concurrency defaults', () => {
       'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;\n');
     const roles = ['role-one', 'role-two', 'role-three'];
     await writeFile(join(directory, 'config.json'), JSON.stringify({
-      models: ['anthropic/claude-fable-5-1'], secondaryModels: [], asyncModels: [], roles,
+      models: ['anthropic/claude-opus-5-5'], secondaryModels: [], asyncModels: [], roles,
       customRoles: roles.map(name => ({ name, systemPrompt: `Review as ${name}.`, focus: ['correctness'] })),
       concurrency: 9, quorumFraction: 1, timeout: 5_000, maxRetries: 0,
       harness: { telemetry: 'off' },
@@ -84,7 +84,7 @@ describe('review CLI provider concurrency defaults', () => {
 
     try {
       const reviewerArgs = roles.flatMap(role => [
-        '--reviewer', `anthropic/claude-fable-5-1:${role}`,
+        '--reviewer', `anthropic/claude-opus-5-5:${role}`,
       ]);
       const result = await run([
         'review', 'change.patch', '--config', 'config.json', ...reviewerArgs,
