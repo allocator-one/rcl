@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Let a bounded legacy recovery validate its original inconclusive source against the
+  original head and input while claiming a separately recorded changed-input attempt.
+  The original cycle, spending and caps remain preserved; the original source transfers
+  no findings, verdicts or approvals to the new launch (RCL-141).
+
 ## 4.4.0 - 2026-09-28
 
 - Add provider-aware blocking-call admission with a default Anthropic limit of

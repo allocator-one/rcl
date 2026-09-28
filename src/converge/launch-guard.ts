@@ -110,9 +110,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   let retryProof: Awaited<ReturnType<typeof inspectLegacyRetry>> | undefined;
   if (options.legacyRetry) {
-    try { retryProof = await inspectLegacyRetry(options.legacyRetry, options.gitCommonDir, state, previous,
-      options.headSha, options.inputSha256, attemptsUsed, round); }
-    catch { refuse('retry_report_invalid', 'The original report does not prove an inconclusive same-input launch under its bound policy.'); }
+    try { retryProof = await inspectLegacyRetry(options.legacyRetry, options.gitCommonDir, state, previous, attemptsUsed, round); }
+    catch { refuse('retry_report_invalid', 'The original report does not prove an inconclusive launch under its bound policy.'); }
   }
   const healthy = retryProof ? hasSuccessfulQuorum(retryProof.binding.reviewerHealth.policy,
     retryProof.binding.reviewerHealth.successfulSeats) : hasHealthyGuardedLaunch(previous);

@@ -323,7 +323,7 @@ program
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
-  .option('--retry-report <path>', 'Original legacy report proving an inconclusive same-input launch; requires --retry-reason')
+  .option('--retry-report <path>', 'Original legacy report proving an inconclusive launch; the new inputs may differ; requires --retry-reason')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')

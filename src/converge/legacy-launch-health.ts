@@ -54,14 +54,14 @@ export interface LegacyRetrySelection {
 
 /** Read-only proof under native ownership, before either accounting file changes. */
 export async function inspectLegacyRetry(input: LegacyRetrySelection, common: string, state: ConvergeRunState,
-  previous: GuardedLaunchState, headSha: string, inputSha256: string, attemptsUsed: number, nextRound: number) {
+  previous: GuardedLaunchState, attemptsUsed: number, nextRound: number) {
   const admitted = state.rounds.filter(round => round.runId === previous.runId);
   const sourceRoundMatches = admitted.length === 0
     ? previous.round === nextRound
     : admitted.length === 1 && previous.round === nextRound - 1 && admitted[0]!.round === previous.round &&
       state.rounds.filter(round => round.round === previous.round).length === 1;
   if (previous.status !== 'completed' || previous.reviewerHealth !== undefined || previous.deliveryPending ||
-    previous.headSha !== headSha || previous.inputSha256 !== inputSha256 || previous.attempt !== attemptsUsed ||
+    previous.attempt !== attemptsUsed ||
     !sourceRoundMatches || input.config.quorumFraction === undefined) throw new Error('retry_report_ineligible_launch');
   const [reportBytes, nativeBytes, attemptBytes] = await Promise.all([
     readStable(input.reportPath), readStable(convergeRunStatePath(common, state.target)),

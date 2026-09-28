@@ -78,6 +78,8 @@ For an active local review, stop only its recorded host task when the user reque
 
 “Continue” uses the current guarded workflow. “Complete missing reviewers” uses the supported RCL-105 recovery workflow when available, preserving successful reviewer work and the original cycle. “Start over” deliberately reviews the full current inputs again. After the first fresh dispatch, omit `--start-over` on ordinary fix/re-review rounds. Fresh cycles require full Harness evidence; do not drop that requirement when delivery is unavailable. Native admission still requires current-head, conclusive evidence, and merge still requires matching enforced review and CI.
 
+For a 4.1.11 or 4.1.12 aggregate-only legacy completion, `--retry-report` proves only the original launch's inconclusive blocking health. Keep its original report, native state and full config available; RCL binds their original target, head, input, run, round, attempt, cycle, roster and canonical policy before any claim. The current launch may have changed inputs, but it is separately recorded and receives no prior finding, verdict, approval, or refunded budget. Use this only with an explicit bounded `--retry-reason`; ambiguous, healthy, changed-original-state, unbound-policy and malformed sources refuse.
+
 ## Flags
 
 - `PR#N` / `#N` / `N` — converge a specific PR (default: current branch's PR, else local diff mode)
