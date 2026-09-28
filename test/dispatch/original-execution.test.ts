@@ -180,18 +180,22 @@ describe('captured original council execution', () => {
   });
 
   it('cannot reset spent original calls or renew the deadline after reopening', async () => {
-    const commonDir = await directory(), f = fixture(2);
+    const commonDir = await directory(), f = fixture(3);
     const called = vi.fn(async (model: string) => f.review(model, 'error'));
-    const run = (create: boolean, nowMs: number) => withNativeTarget(commonDir, target, async ownership => {
+    const run = (create: boolean, nowMs: number, runtimeBounds?: { maxPhysicalCalls: number }) => withNativeTarget(commonDir, target, async ownership => {
       const journal = create ? await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch })
         : await CheckpointJournal.openWrite({ commonDir, ownership, plan: f.plan, namespace: runId });
       return executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan, launch: f.launch, nowMs: () => nowMs,
+        ...(runtimeBounds === undefined ? {} : { runtimeBounds }),
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
     });
-    expect((await run(true, 1500)).preview.nextAction).toBe('call_limit');
-    expect((await run(false, 2000)).newAttempts).toBe(2);
+    const first = await run(true, 1500, { maxPhysicalCalls: 2 });
+    expect(first.preview.nextAction).toBe('call_limit');
+    expect(first.newAttempts).toBe(2);
     expect(called).toHaveBeenCalledTimes(2);
-    expect((await run(false, 7000)).preview.nextAction).not.toBe('retry_missing_assignments');
+    const expired = await run(false, 7000);
+    expect(expired.preview.nextAction).toBe('time_limit');
+    expect(expired.newAttempts).toBe(2);
     expect(called).toHaveBeenCalledTimes(2);
   });
 

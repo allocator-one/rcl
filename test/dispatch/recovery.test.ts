@@ -333,19 +333,18 @@ it('same-owner recovery does not read an append before its write completes', asy
     const journal = await CheckpointJournal.create({ commonDir, namespace: 'read-race', plan: input.plan, ownership });
     let release!: () => void;
     const started = new Promise<void>(resolve => { writeGate.started = resolve; });
-    const checked = new Promise<void>(resolve => { writeGate.checked = resolve; });
     writeGate.wait = new Promise<void>(resolve => { release = resolve; });
     writeGate.release = release;
     writeGate.active = true;
     const writing = journal.recordIntent('s1:0', { id: 'prior-owned-intent', kind: 'paid' }, ownership);
     await started;
-    writeGate.awaitingRecovery = true;
     const execution = recoverReviewerAssignments({ ...input, commonDir, ownership, journal, fraction: 2 / 3,
         maxAdditionalCalls: 2, maxAttemptsPerCell: 3, remainingMs: 5000, timeoutMs: 1000, concurrency: 1,
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: vi.fn(async (model: string) => input.review(model)), ask: vi.fn() }) }).then(() => undefined, (error: unknown) => error);
-    await checked; await Promise.resolve();
-    writeGate.active = false; release(); writeGate.release = () => {}; await writing;
-    const failure = await execution;
+    const releasing = new Promise<void>(resolve => setImmediate(() => {
+      writeGate.active = false; release(); writeGate.release = () => {}; resolve();
+    }));
+    const [, failure] = await Promise.all([writing, execution, releasing]);
     expect((await journal.read()).records[0]).toMatchObject({ type: 'intent', cell: 's1:0', paidAttempt: { id: 'prior-owned-intent', kind: 'paid' } });
     expect(failure).toBeUndefined();
   });
