@@ -180,23 +180,26 @@ describe('captured original council execution', () => {
   });
 
   it('cannot reset spent original calls or renew the deadline after reopening', async () => {
-    const commonDir = await directory(), f = fixture(3);
-    const called = vi.fn(async (model: string) => f.review(model, 'error'));
-    const run = (create: boolean, nowMs: number, runtimeBounds?: { maxPhysicalCalls: number }) => withNativeTarget(commonDir, target, async ownership => {
-      const journal = create ? await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch })
-        : await CheckpointJournal.openWrite({ commonDir, ownership, plan: f.plan, namespace: runId });
-      return executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan, launch: f.launch, nowMs: () => nowMs,
-        ...(runtimeBounds === undefined ? {} : { runtimeBounds }),
-        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
-    });
-    const first = await run(true, 1500, { maxPhysicalCalls: 2 });
-    expect(first.preview.nextAction).toBe('call_limit');
-    expect(first.newAttempts).toBe(2);
-    expect(called).toHaveBeenCalledTimes(2);
-    const expired = await run(false, 7000);
-    expect(expired.preview.nextAction).toBe('time_limit');
-    expect(expired.newAttempts).toBe(2);
-    expect(called).toHaveBeenCalledTimes(2);
+    async function scenario() {
+      const commonDir = await directory(), f = fixture(3);
+      const called = vi.fn(async (model: string) => f.review(model, called.mock.calls.length === 1 ? 'success' : 'error'));
+      const run = (create: boolean, nowMs: number, runtimeBounds?: { maxPhysicalCalls: number }) => withNativeTarget(commonDir, target, async ownership => {
+        const journal = create ? await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch })
+          : await CheckpointJournal.openWrite({ commonDir, ownership, plan: f.plan, namespace: runId });
+        return executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan, launch: f.launch, nowMs: () => nowMs,
+          ...(runtimeBounds === undefined ? {} : { runtimeBounds }),
+          adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
+      });
+      const first = await run(true, 1500, { maxPhysicalCalls: 2 });
+      expect(first.preview.nextAction).toBe('call_limit'); expect(first.newAttempts).toBe(2);
+      expect(called).toHaveBeenCalledTimes(2);
+      return { called, run };
+    }
+    const carried = await scenario(), resumed = await carried.run(false, 1500);
+    expect(resumed.newAttempts).toBe(3); expect(carried.called).toHaveBeenCalledTimes(3);
+    const cutoff = await scenario(), expired = await cutoff.run(false, 7000);
+    expect(expired.preview.nextAction).toBe('time_limit'); expect(expired.newAttempts).toBe(2);
+    expect(cutoff.called).toHaveBeenCalledTimes(2);
   });
 
   it('refuses a changed run identity, capture or successor binding before dispatch', async () => {
