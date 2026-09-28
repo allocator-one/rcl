@@ -384,7 +384,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   if (diagnostics.length === 0 && envelope.run.gating?.mode === 'verified-consensus') {
     try {
       const report = JSON.parse(input.artifacts.report_json) as unknown;
-      const problem = verifiedConsensusReportProblem(report, envelope, input.artifacts.report_json);
+      const problem = verifiedConsensusReportProblem(report, envelope, input.artifacts.report_json, input.result);
       if (problem) diagnostics.push({ path: 'report_json', message: problem });
     } catch {
       diagnostics.push({ path: 'report_json', message: 'report_json malformed; verified-consensus source cannot be checked' });

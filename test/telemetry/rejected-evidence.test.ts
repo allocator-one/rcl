@@ -80,6 +80,44 @@ describe('retention of refused completed evidence', () => {
     expect(await readFile(join(dataDir, 'quarantine', result.run!.id, 'report.json'), 'utf8')).toBe(artifacts.report_json);
   });
 
+  it.each([
+    ['findings', 'dropped'], ['findings', 'changed'],
+    ['belowThresholdFindings', 'dropped'], ['belowThresholdFindings', 'changed'],
+  ] as const)('rejects an envelope-only original with %s %s versus the completed result', async (group, change) => {
+    const result = sampleResult();
+    const original = structuredClone(result);
+    if (change === 'dropped') original[group] = [];
+    else original[group]![0]!.title = 'Different original title';
+    const artifacts = { report_json: JSON.stringify(original), report_md: '# Original report\n' };
+    const { rt, requests } = await runtime(() => ({ status: 201, body: {} }));
+    rt.level = 'envelope';
+
+    const outcome = await deliverRun(rt, { result, artifacts, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4,
+      retention: { status: 'complete' } });
+    expect(outcome.line).toContain(group);
+    expect(requests).toEqual([]);
+    expect(await rt.outbox.list()).toEqual([]);
+    const dir = join(dataDir, 'quarantine', result.run!.id);
+    expect(await readFile(join(dir, 'report.json'), 'utf8')).toBe(artifacts.report_json);
+    expect(await readFile(join(dir, 'report.md'), 'utf8')).toBe(artifacts.report_md);
+  });
+
+  it('delivers envelope-only evidence when both original finding groups match the completed result', async () => {
+    const result = sampleResult();
+    const { rt, requests } = await runtime(() => ({ status: 201,
+      body: { data: { id: result.run!.id, url: 'https://harness.example.test/run', artifacts_expected: [] } } }));
+    rt.level = 'envelope';
+
+    const outcome = await deliverRun(rt, { result, artifacts: { report_json: JSON.stringify(result) }, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'recorded', spooled: false, exitCode: 0 });
+    expect(requests).toHaveLength(1);
+    expect(JSON.parse(requests[0]!.body!)).toMatchObject({ findings: [], calls: [] });
+    expect(await rt.outbox.list()).toEqual([]);
+  });
+
   it.each(['run', 'stats', 'finding'] as const)('rejects a %s mismatch between the original report and the wire envelope', async part => {
     const { rt, requests } = await runtime(() => ({ status: 201, body: {} }));
     rt.level = 'findings';

@@ -29,7 +29,9 @@ function sameJson(left: unknown, right: unknown): boolean {
  * checked before projecting the report. This check is shared by direct
  * delivery and queued replay.
  */
-export function verifiedConsensusReportProblem(report: unknown, envelope: RunEnvelope, reportJson: string): string | undefined {
+export function verifiedConsensusReportProblem(
+  report: unknown, envelope: RunEnvelope, reportJson: string, directResult?: ReviewResult
+): string | undefined {
   if (!isRecord(report) || !isRecord(report['run']) || !isRecord(report['run']['gating']) ||
       report['run']['id'] !== envelope.run.id || report['run']['rcl_version'] !== envelope.run.rcl_version ||
       report['run']['gating']['mode'] !== 'verified-consensus') {
@@ -75,6 +77,17 @@ export function verifiedConsensusReportProblem(report: unknown, envelope: RunEnv
   }
   if (hasVerification && (!isRecord(report['stats']) || report['stats']['verification'] == null)) {
     return 'stats.verification missing for annotated candidates in report_json';
+  }
+
+  // Envelope-level telemetry intentionally has no finding rows. A direct
+  // delivery still has the completed result, so bind both original groups
+  // before projecting the report into that empty wire view.
+  if (directResult !== undefined) {
+    for (const group of ['findings', 'belowThresholdFindings'] as const) {
+      if (!sameJson(report[group] ?? [], directResult[group] ?? [])) {
+        return `report_json ${group} differ from the completed result`;
+      }
+    }
   }
 
   // No reviewer rows are present at envelope level. Otherwise the optional
