@@ -7,10 +7,11 @@ import { createTelemetryRuntime, flushOutbox } from '../../src/telemetry/deliver
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { buildEvent } from '../../src/telemetry/events.js';
 import { HarnessSink, type SinkOptions } from '../../src/telemetry/sink.js';
-import { sampleResult } from './fixtures.js';
+import { sampleResult, sampleRunHeader } from './fixtures.js';
 
 const credential = { url: 'https://synthetic.invalid', token: 'fixture-token', source: 'login' as const };
-const report = sampleResult({ findings: [], belowThresholdFindings: [] });
+const report = sampleResult({ findings: [], belowThresholdFindings: [],
+  run: sampleRunHeader({ converge: { target: 'fixture', round: 8, attempt: 8 } }) });
 const artifacts = { report_json: JSON.stringify(report), report_md: '# Original report\n' };
 const envelope = buildRunEnvelope(report, artifacts, { level: 'full', delivery: { mode: 'direct' } });
 const dirs: string[] = [];
@@ -206,7 +207,7 @@ it.each(['supplied', 'resolved'] as const)('threads the override through %s runt
   expect(posted.artifacts_declared).toEqual(envelope.artifacts_declared);
 });
 
-it('retains the original envelope, artifacts and native accounting when the extended request times out', async () => {
+it('retains the original envelope, artifacts and review accounting when the extended request times out', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'rcl-envelope-timeout-'));
   dirs.push(dataDir);
   const t = transport(31_000);
@@ -222,5 +223,6 @@ it('retains the original envelope, artifacts and native accounting when the exte
   await vi.advanceTimersByTimeAsync(30_000);
   expect(await pending).toMatchObject({ delivered: [], remaining: [envelope.run.id], failed: [] });
   expect(await snapshot()).toEqual(original);
+  expect(await runtime.outbox.list()).toMatchObject([{ id: envelope.run.id, meta: { attempts: 1 } }]);
   expect(t.requests).toHaveLength(1);
 });

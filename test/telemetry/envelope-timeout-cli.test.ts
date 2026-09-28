@@ -23,7 +23,8 @@ async function fixture() {
   const requests: Array<{ method: string; body: string }> = [];
   const server = createServer(async (request, response) => {
     let body = '';
-    for await (const chunk of request) body += chunk;
+    try { for await (const chunk of request) body += chunk; }
+    catch { return; } // A one-millisecond deadline may abort during upload.
     requests.push({ method: request.method!, body });
     const data = request.method === 'POST'
       ? { id: JSON.parse(body).run.id, url: 'http://localhost/run', artifacts_expected: ['report_json', 'report_md'] }
