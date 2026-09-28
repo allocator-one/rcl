@@ -220,7 +220,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
               // when deciding whether another missing cell could complete quorum.
               const activeIds = new Set([...inFlight.values()].map(attempt => attempt.id));
               const planning = current.attempts.filter(attempt => attempt.outcome !== undefined || !activeIds.has(attempt.id));
-              const now = preview(planning, current.own.length);
+              const now = preview(planning, current.own.length - activeIds.size);
               if (now.nextAction !== 'retry_missing_assignments' || controller.signal.aborted ||
                 !now.eligibleCallIndices.includes(index)) return false;
               // Prepare only an eligible cell, before its durable paid intent.
@@ -284,6 +284,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
         const after = await capture();
         if (after.preview.nextAction !== 'retry_missing_assignments') return finish(after);
         if (after.own.length === before.own.length) {
+          if (JSON.stringify(after.preview.eligibleCallIndices) !== JSON.stringify(before.preview.eligibleCallIndices)) continue;
           const stopped = finish(after, 'no_dispatch');
           return { ...stopped,
             preview: { ...stopped.preview, nextAction: 'inspect_blocked_assignments', eligibleCallIndices: [] },

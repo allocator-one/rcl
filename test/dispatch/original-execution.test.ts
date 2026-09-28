@@ -48,17 +48,22 @@ describe('captured original council execution', () => {
     await withNativeTarget(commonDir, target, async ownership => {
       const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
       const onError = vi.fn(), audit = createCheckpointLateAudit({ commonDir, journal, ownership, onError });
+      const controller = new AbortController();
       let completeLate!: (review: ModelReview) => void, observed!: () => void;
       const late = new Promise<ModelReview>(resolve => { completeLate = resolve; });
       const observation = new Promise<void>(resolve => { observed = resolve; });
       const result = await executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan,
-        launch: f.launch, nowMs: () => 1500,
+        launch: f.launch, nowMs: () => 1500, signal: controller.signal,
         adapterFactory: () => ({ name: 'fake', provider: 'fake', ask: vi.fn(),
-          review: async model => model.endsWith('0') ? late : f.review(model) }),
+          review: async model => {
+            if (model.endsWith('0')) return late;
+            setTimeout(() => controller.abort(), 0);
+            return f.review(model);
+          } }),
         auditLateAttempt: async (review, index, attempt) => { await audit.accept(review, index, attempt); observed(); },
         onLateAuditError: onError });
-      expect(result.preview.successfulSeats).toBe(2);
-      expect(result.newAttempts).toBe(3);
+      expect(result.preview.successfulSeats).toBe(1);
+      expect(result.newAttempts).toBe(2);
       await journal.finalize(ownership);
       const proof = await exportCheckpointProof(journal), state = await journal.read();
       await audit.flushAfterFinalization();
@@ -70,7 +75,7 @@ describe('captured original council execution', () => {
       expect(rows[0]!.paidAttempt.id).toBe(state.uncertain[0]!.paidAttempt.id);
       expect(JSON.parse(rows[0]!.reviewBytes).findings).toEqual(f.review('fake/model-0').findings);
       expect((await exportCheckpointProof(journal)).bytes).toBe(proof.bytes);
-      expect((await journal.read()).successes).toHaveLength(2);
+      expect((await journal.read()).successes).toHaveLength(1);
       expect(onError).not.toHaveBeenCalled();
     });
   });
@@ -117,7 +122,7 @@ describe('captured original council execution', () => {
   });
 
   it('cannot reset spent original calls or renew the deadline after reopening', async () => {
-    const commonDir = await directory(), f = fixture(1);
+    const commonDir = await directory(), f = fixture(2);
     const called = vi.fn(async (model: string) => f.review(model, 'error'));
     const run = (create: boolean, nowMs: number) => withNativeTarget(commonDir, target, async ownership => {
       const journal = create ? await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch })
@@ -126,10 +131,10 @@ describe('captured original council execution', () => {
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
     });
     expect((await run(true, 1500)).preview.nextAction).toBe('call_limit');
-    expect((await run(false, 2000)).newAttempts).toBe(1);
-    expect(called).toHaveBeenCalledTimes(1);
+    expect((await run(false, 2000)).newAttempts).toBe(2);
+    expect(called).toHaveBeenCalledTimes(2);
     expect((await run(false, 7000)).preview.nextAction).not.toBe('retry_missing_assignments');
-    expect(called).toHaveBeenCalledTimes(1);
+    expect(called).toHaveBeenCalledTimes(2);
   });
 
   it('refuses a changed run identity, capture or successor binding before dispatch', async () => {

@@ -143,7 +143,16 @@ export function previewReviewerRecovery(
   }
   recoverable.sort((left, right) => left.length - right.length || left[0]! - right[0]!);
   const remainingCalls = Math.max(0, limits.maxAdditionalCalls - limits.additionalCallsUsed);
-  const potentialSuccessfulSeats = successfulSeats + recoverable.length;
+  const successesNeeded = Math.max(0, resolved.minimumSuccessful - successfulSeats);
+  const budgetReachable: number[][] = [];
+  let reachableCallCost = 0;
+  for (const missing of recoverable) {
+    if (budgetReachable.length >= successesNeeded) break;
+    if (reachableCallCost + missing.length > remainingCalls) break;
+    budgetReachable.push(missing);
+    reachableCallCost += missing.length;
+  }
+  const potentialSuccessfulSeats = successfulSeats + budgetReachable.length;
   const conclusive = hasSuccessfulQuorum(resolved, successfulSeats);
   const nextAction: RecoveryPreview['nextAction'] = conclusive ? 'build_report'
     : limits.remainingMs <= 0 ? 'time_limit'
@@ -151,9 +160,9 @@ export function previewReviewerRecovery(
     : potentialSuccessfulSeats < resolved.minimumSuccessful ? 'inspect_blocked_assignments'
     : 'retry_missing_assignments';
   return {
-    policy: resolved, successfulSeats, successesNeeded: Math.max(0, resolved.minimumSuccessful - successfulSeats),
+    policy: resolved, successfulSeats, successesNeeded,
     potentialSuccessfulSeats, retainedCallIndices,
-    eligibleCallIndices: nextAction === 'retry_missing_assignments' ? recoverable.flat() : [],
+    eligibleCallIndices: nextAction === 'retry_missing_assignments' ? budgetReachable.flat() : [],
     blockedCells, recordedAttempts: attempts.length, additionalCallsUsed: limits.additionalCallsUsed,
     remainingCalls, nextAction,
   };

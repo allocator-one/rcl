@@ -198,21 +198,21 @@ describe('executor late paid-attempt attribution', () => {
     await withNativeTarget(input.commonDir, target, async ownership => {
       const journal = await CheckpointJournal.create({ ...input, namespace: 'hanging', ownership });
       const audit = createCheckpointLateAudit({ commonDir: input.commonDir, journal, ownership, onError: errors });
-      const adapter = vi.fn((model: string) => { calls++; if (calls === 3) started.resolve();
+      const adapter = vi.fn((model: string) => { calls++; if (calls === 2) started.resolve();
         return model === 'fake/model-1' ? late.promise : new Promise<ModelReview>(() => {}); });
       const running = recoverReviewerAssignments({ ...input, journal, ownership, signal: controller.signal,
         auditLateAttempt: async (raw: ModelReview, index: number, paid: PaidAttempt) => { await audit.accept(raw, index, paid); observed.resolve(); },
         auditLateReview: legacy, onLateAuditError: errors,
         adapterFactory: () => ({ name: 'fake', provider: 'fake', review: adapter, ask: vi.fn() }) } as ReviewerRecoveryOptions);
       await started.promise; controller.abort(); const result = await running;
-      expect(result.newAttempts).toBe(3); expect(result.reviews.every(row => row.status === 'canceled')).toBe(true);
+      expect(result.newAttempts).toBe(2); expect(result.reviews.every(row => row.status === 'canceled')).toBe(true);
       await journal.finalize(ownership); const proof = await exportCheckpointProof(journal);
       await audit.flushAfterFinalization(); await audit.drain(); // Two providers never resolve.
       late.resolve(review(1)); await observed.promise; await audit.drain();
       const rows = await journal.readLateAudit(), intent = proof.state.records.find(row => row.type === 'intent' && row.cell === 's1:0');
       expect(rows).toHaveLength(1); expect(rows[0]?.paidAttempt).toEqual(intent?.paidAttempt);
       expect(rows[0]?.reviewBytes).toBe(JSON.stringify(review(1))); expect(legacy).toHaveBeenCalledWith(review(1), 1);
-      expect(await exportCheckpointProof(journal)).toEqual(proof); expect(result.newAttempts).toBe(3); expect(errors).not.toHaveBeenCalled();
+      expect(await exportCheckpointProof(journal)).toEqual(proof); expect(result.newAttempts).toBe(2); expect(errors).not.toHaveBeenCalled();
     });
   });
 
@@ -222,13 +222,14 @@ describe('executor late paid-attempt attribution', () => {
     await withNativeTarget(input.commonDir, target, async ownership => {
       const journal = await CheckpointJournal.create({ ...input, namespace: 'retry-wave', ownership });
       const audit = createCheckpointLateAudit({ commonDir: input.commonDir, journal, ownership, onError: errors });
-      const run = recoverReviewerAssignments({ ...input, journal, ownership, concurrency: 1, signal: controller.signal,
+      const run = recoverReviewerAssignments({ ...input, journal, ownership, concurrency: 1,
+        maxAdditionalCalls: 4, signal: controller.signal,
         sourceAttempts: [{ id: 'retained', cell: 's0:0', outcome: review() }],
         auditLateAttempt: async (raw: ModelReview, index: number, paid: PaidAttempt) => { await audit.accept(raw, index, paid); observed.resolve(); },
         onLateAuditError: errors, adapterFactory: () => ({ name: 'fake', provider: 'fake', ask: vi.fn(),
           review: async model => { calls++; if (calls === 3) { thirdStarted.resolve(); return late.promise; }
             return { ...review(Number(model.at(-1)), 'error'), error: '503 overloaded' }; } }) } as ReviewerRecoveryOptions);
-      await Promise.race([thirdStarted.promise, run.then(() => { throw new Error('Retry fixture stopped before third dispatch'); })]); controller.abort(); const result = await run;
+      await Promise.race([thirdStarted.promise, run.then(result => { throw new Error(`Retry fixture stopped before third dispatch: ${JSON.stringify(result.preview)} calls=${calls}`); })]); controller.abort(); const result = await run;
       late.resolve(review(1)); await observed.promise; // Buffered before sealing.
       await journal.finalize(ownership); const proof = await exportCheckpointProof(journal);
       await audit.flushAfterFinalization();

@@ -42,13 +42,36 @@ describe('missing reviewer recovery policy', () => {
       expect(final.successfulSeats).toBe(policy.minimumSuccessful);
     });
 
-  it('retries only missing chunks and prioritizes the seat closest to completion', () => {
+  it('retries only the cheapest whole seat group needed to reach quorum', () => {
     const matrix = cells(3, 3), history = attempts(matrix, 1);
     for (const index of [1, 4]) history.push({ id: `extra-${index}`, cell: matrix[index]!.id, outcome: review(matrix[index]!) });
     const plan = previewReviewerRecovery(matrix, history, resolveQuorumPolicy(3), limits);
     expect(plan.successfulSeats).toBe(1);
-    expect(plan.eligibleCallIndices).toEqual([7, 2, 5, 8]);
+    expect(plan.potentialSuccessfulSeats).toBe(2);
+    expect(plan.eligibleCallIndices).toEqual([7]);
     expect(plan.retainedCallIndices).toEqual([0, 1, 3, 4, 6]);
+  });
+
+  it('exposes only whole sorted seat groups reachable within the remaining call budget', () => {
+    const matrix = cells(3, 3), history = attempts(matrix, 1);
+    for (const index of [1, 4]) history.push({ id: `extra-${index}`, cell: matrix[index]!.id, outcome: review(matrix[index]!) });
+    const plan = previewReviewerRecovery(matrix, history, resolveQuorumPolicy(3),
+      { ...limits, maxAdditionalCalls: 1 });
+    expect(plan.successfulSeats).toBe(1);
+    expect(plan.potentialSuccessfulSeats).toBe(2);
+    expect(plan.nextAction).toBe('retry_missing_assignments');
+    expect(plan.eligibleCallIndices).toEqual([7]);
+  });
+
+  it('fails closed at M-1 when a multichunk seat cannot fit the remaining call budget', () => {
+    const matrix = cells(3, 2), history = attempts(matrix, 1);
+    const plan = previewReviewerRecovery(matrix, history, resolveQuorumPolicy(3),
+      { ...limits, maxAdditionalCalls: 1 });
+    expect(plan.successfulSeats).toBe(1);
+    expect(plan.successesNeeded).toBe(1);
+    expect(plan.potentialSuccessfulSeats).toBe(1);
+    expect(plan.nextAction).toBe('inspect_blocked_assignments');
+    expect(plan.eligibleCallIndices).toEqual([]);
   });
 
   it('keeps known permanent and uncertain attempts out of dispatch, without counting either as success', () => {

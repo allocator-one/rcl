@@ -19,19 +19,26 @@ export async function readRetainedAsyncInput(stream: AsyncIterable<Uint8Array | 
 }
 
 /** Launch the existing detached lifecycle with only a restricted same-checkpoint capability. */
-export function launchRetainedAsyncWorkers(delegates: readonly AsyncDelegate[], onError: () => void,
-  cliScript = fileURLToPath(new URL('../index.js', import.meta.url))): number {
-  let launched = 0;
-  for (const delegate of delegates) {
+export async function launchRetainedAsyncWorkers(delegates: readonly AsyncDelegate[], onError: () => void,
+  cliScript = fileURLToPath(new URL('../index.js', import.meta.url))): Promise<number> {
+  const launches = delegates.map(async delegate => {
     const bytes = JSON.stringify(delegate); if (Buffer.byteLength(bytes) > MAX_ASYNC_DELEGATE_BYTES) refuse();
+    let errorReported = false;
+    const reportErrorOnce = () => { if (!errorReported) { errorReported = true; onError(); } };
     try {
       const child = spawn(process.execPath, [...(/\.[cm]?ts$/.test(cliScript) ? ['--import', import.meta.resolve('tsx')] : []), cliScript, 'retained-async-worker'], {
         detached: true, stdio: ['pipe', 'ignore', 'ignore'], env: workerEnv(),
       });
-      child.on('error', onError); child.stdin.on('error', onError); child.stdin.end(bytes); child.unref(); launched++;
-    } catch { onError(); }
-  }
-  return launched;
+      const spawned = new Promise<boolean>(resolve => {
+        let settled = false;
+        child.once('spawn', () => { if (!settled) { settled = true; resolve(true); } });
+        child.on('error', () => { reportErrorOnce(); if (!settled) { settled = true; resolve(false); } });
+      });
+      child.stdin.on('error', reportErrorOnce); child.stdin.end(bytes); child.unref();
+      return await spawned ? 1 : 0;
+    } catch { reportErrorOnce(); return 0; }
+  });
+  return (await Promise.all(launches)).reduce<number>((total, value) => total + value, 0);
 }
 
 /** Run one delegated async call; ordinary opinions remain derivative of durable original accounting. */
