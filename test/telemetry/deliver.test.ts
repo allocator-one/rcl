@@ -110,6 +110,8 @@ describe('telemetry delivery', () => {
       const result = sampleResult();
       result.run!.converge = converge;
       result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The early branch returns.' } };
+      result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
+        confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
       const safe = sanitizeForDelivery(result);
       const artifacts = { report_json: JSON.stringify(safe), report_md: '# Report' };
       expect(await deliverRun(rt, { result: safe, artifacts, evidenceRequired: true })).toMatchObject({ status: 'recorded', exitCode: 0 });
@@ -139,6 +141,8 @@ describe('telemetry delivery', () => {
     const { rt, requests } = await runtime(() => ({ status: 413, body: { error: 'payload_too_large' } }));
     const result = sampleResult();
     result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The original explanation.' } };
+    result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
+      confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
     const outcome = await deliverRun(rt, { result, artifacts: ARTIFACTS, evidenceRequired: true });
     expect(outcome).toMatchObject({ status: 'rejected', exitCode: 4, spooled: false });
     expect(requests).toHaveLength(1);

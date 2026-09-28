@@ -21,6 +21,78 @@ describe('retention of refused completed evidence', () => {
     return { rt, requests };
   }
 
+  it.each([true, false])('quarantines annotated verification without stats, without a request or spool (evidence required=%s)', async evidenceRequired => {
+    const { rt, requests } = await runtime(() => ({ status: 201, body: {} }));
+    const result = sampleResult();
+    result.findings[0]!.gating = { reason: 'verified', verification: { model: 'openai/gpt', verdict: 'confirmed' } };
+    const artifacts = { report_json: JSON.stringify(result, null, 2) + '\n', report_md: '# Original report\n' };
+
+    const outcome = await deliverRun(rt, { result, artifacts, evidenceRequired });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: evidenceRequired ? 4 : 0,
+      retention: { status: 'complete' } });
+    expect(outcome.line).toContain('stats.verification');
+    expect(requests).toEqual([]);
+    expect(await rt.outbox.list()).toEqual([]);
+    const dir = join(dataDir, 'quarantine', result.run!.id);
+    expect(await readFile(join(dir, 'report.json'), 'utf8')).toBe(artifacts.report_json);
+    expect(await readFile(join(dir, 'report.md'), 'utf8')).toBe(artifacts.report_md);
+    expect(JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'))).toMatchObject({
+      acknowledged: false, diagnostics: [{ path: 'stats.verification' }],
+      artifacts: { report_json: { sha256: sha256Hex(artifacts.report_json) } },
+    });
+  });
+
+  it.each(['findings', 'belowThresholdFindings'] as const)('quarantines missing %s gating labels even at envelope telemetry level', async group => {
+    const { rt, requests } = await runtime(() => ({ status: 201, body: {} }));
+    rt.level = 'envelope';
+    const result = sampleResult();
+    result[group]![0]!.gating = undefined;
+    const artifacts = { report_json: JSON.stringify(result), report_md: '# Original report\n' };
+
+    const outcome = await deliverRun(rt, { result, artifacts, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4,
+      retention: { status: 'complete' } });
+    expect(outcome.line).toContain(`${group}.0.gating.reason`);
+    expect(requests).toEqual([]);
+    expect(await rt.outbox.list()).toEqual([]);
+    const dir = join(dataDir, 'quarantine', result.run!.id);
+    expect(await readFile(join(dir, 'report.json'), 'utf8')).toBe(artifacts.report_json);
+    expect(await readFile(join(dir, 'report.md'), 'utf8')).toBe(artifacts.report_md);
+  });
+
+  it.each(['all-findings', 'legacy'] as const)('keeps %s delivery compatible without verification stats or labels', async mode => {
+    const result = sampleResult();
+    result.stats.verification = undefined;
+    result.findings[0]!.gating = undefined;
+    result.belowThresholdFindings![0]!.gating = undefined;
+    if (mode === 'all-findings') result.run!.gating.mode = 'all-findings';
+    else (result.run as unknown as { gating?: unknown }).gating = undefined;
+    const { rt, requests } = await runtime(() => ({ status: 201,
+      body: { data: { id: result.run!.id, url: 'https://harness.example.test/run', artifacts_expected: [] } } }));
+    rt.level = 'findings';
+
+    const outcome = await deliverRun(rt, { result, artifacts: { report_json: JSON.stringify(result) }, evidenceRequired: true });
+
+    expect(outcome).toMatchObject({ status: 'recorded', exitCode: 0, spooled: false });
+    expect(requests.some(request => request.method === 'POST')).toBe(true);
+    expect(await rt.outbox.list()).toEqual([]);
+  });
+
+  it('delivers verified-consensus with complete labels and no verification candidates', async () => {
+    const result = sampleResult();
+    const { rt, requests } = await runtime(() => ({ status: 201,
+      body: { data: { id: result.run!.id, url: 'https://harness.example.test/run', artifacts_expected: [] } } }));
+    rt.level = 'findings';
+
+    const outcome = await deliverRun(rt, { result, artifacts: { report_json: JSON.stringify(result) }, evidenceRequired: true });
+
+    expect(result.stats.verification).toBeUndefined();
+    expect(outcome).toMatchObject({ status: 'recorded', exitCode: 0, spooled: false });
+    expect(requests.some(request => request.method === 'POST')).toBe(true);
+  });
+
   it.each(['kept', 'appendix', 'header', 'overflow'] as const)('refuses an invalid %s envelope locally and retains both original artifacts', async (part) => {
     const { rt, requests } = await runtime(() => ({ status: 422, body: { error: 'validation_error' } }));
     const result = sampleResult();

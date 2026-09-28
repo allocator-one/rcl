@@ -109,6 +109,8 @@ describe('the run-bound credential of --attest', () => {
 
     const result = sampleResult();
     result.findings[0]!.gating = { reason: 'none', verification: { verdict: 'refuted', model: 'google/gemini-3.8-flash', note: 'The earlier branch returns.' } };
+    result.stats.verification = { model: 'google/gemini-3.8-flash', candidates: 1, refuted: 1, unrefuted: 0,
+      confirmed: 0, insufficientEvidence: 0, unavailable: 0, durationMs: 10 };
     // The envelope lands; the artifacts hit a dead connection mid-delivery.
     const outcome = await deliverRun(runtime, { result, artifacts: ARTIFACTS, evidenceRequired: true });
     expect(outcome.status).toBe('recorded');

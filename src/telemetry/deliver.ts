@@ -288,6 +288,29 @@ function localFailure(err: unknown): string {
   return scrubText(err instanceof Error ? err.message : String(err), 300);
 }
 
+/** The wire builder defaults an absent finding label to `none`; inspect the immutable report first. */
+function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[] {
+  if (result.run?.gating?.mode !== 'verified-consensus') return [];
+  const diagnostics: EvidenceDiagnostic[] = [];
+  const reasons = new Set(['consensus', 'critical', 'verified', 'none']);
+  let hasVerificationEvidence = false;
+  for (const [group, findings] of [
+    ['findings', result.findings],
+    ['belowThresholdFindings', result.belowThresholdFindings ?? []],
+  ] as const) {
+    findings.forEach((finding, index) => {
+      if (finding.gating?.verification !== undefined) hasVerificationEvidence = true;
+      if (!reasons.has(finding.gating?.reason ?? '')) {
+        diagnostics.push({ path: `${group}.${index}.gating.reason`, message: 'Verified-consensus finding is missing a valid gating label' });
+      }
+    });
+  }
+  if (hasVerificationEvidence && result.stats?.verification == null) {
+    diagnostics.unshift({ path: 'stats.verification', message: 'Verified-consensus report is missing verification stats for annotated candidates' });
+  }
+  return diagnostics.slice(0, 20);
+}
+
 async function retainRun(
   runtime: TelemetryRuntime, input: DeliverRunInput, envelope: RunEnvelope | undefined,
   diagnostics: EvidenceDiagnostic[], acknowledged = false
@@ -356,6 +379,7 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
       line: `Evidence refused locally: invalid envelope; ${retentionLine(retention, runId)}` };
   }
   const diagnostics = validateRunEnvelope(envelope, input.artifacts);
+  diagnostics.push(...verifiedConsensusDiagnostics(input.result));
   if (diagnostics.length > 0) {
     const retention = await retainRun(runtime, input, envelope, diagnostics);
     return { status: 'rejected', runId, spooled: false, retention, exitCode: exitFor('rejected', evidenceRequired),
