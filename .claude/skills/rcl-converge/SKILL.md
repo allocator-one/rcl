@@ -9,7 +9,6 @@ allowed-tools:
   - Bash(gh pr merge:*)  # disarming only — see hard rules; the command is `gh pr merge <PR> --disable-auto`
   - Bash(gh auth token:*)
   - Bash(gh repo view:*)
-  - Bash(rcl review:*)
   - Bash(rcl converge-report:*)
   - Bash(rcl converge-verdict:*)
   - Bash(rcl roles:*)
@@ -72,7 +71,7 @@ Authorization: invoking this skill IS the explicit request for the loop's fix co
 
 ## Continue, complete missing reviewers, or start over
 
-Treat “start a completely fresh review” as explicit authorization for one new review cycle. Use `rcl review <owner>/<repo>#<PR> --start-over` with the resolved spec/context/roster; for a captured PR patch, use `rcl review <patch-path> --start-over --for-pr <owner>/<repo>#<PR> --head-sha <captured-head>` and retain its base/spec binding. This enables guarded launch, chooses private report paths when omitted, and assigns ordinals itself. Do not ask again for the same authorization or make the user provide bookkeeping flags. Check `rcl review --help` for support and upgrade if needed; never emulate this with standalone claims, target renaming, or state deletion.
+Treat “start a completely fresh review” as explicit authorization for one new review cycle. Use `"$RCL_BIN" review <owner>/<repo>#<PR> --start-over` (resolved and checked per the rcl skill's step 3, same as any other launch) with the resolved spec/context/roster; for a captured PR patch, use `"$RCL_BIN" review <patch-path> --start-over --for-pr <owner>/<repo>#<PR> --head-sha <captured-head>` and retain its base/spec binding. This enables guarded launch, chooses private report paths when omitted, and assigns ordinals itself. Do not ask again for the same authorization or make the user provide bookkeeping flags. Check `"$RCL_BIN" review --help` for support and upgrade if needed; never emulate this with standalone claims, target renaming, or state deletion.
 
 A fresh cycle receives 20 attempts and 15 evidence rounds unless the user explicitly selects different caps. It retains previous spending, original reports, findings and dispositions as history; it inherits no approval or dismissal. Round and attempt numbers restart within the new cycle UUID. Record that UUID in the ledger beside each run. Ordinary continuation retains the current cycle and budget. Never add `--start-over` automatically to escape a refusal or exhausted budget. A later intentional fresh request is another cycle; a retry of an interrupted fresh operation resumes its existing cycle and keeps every spent claim. The durable terminal dispatch record is the completion boundary, including a recorded failure. If command output or its acknowledgement is lost or uncertain, inspect the native current operation and retained launch/report first; reuse a completed result rather than blindly replaying `--start-over`. A new invocation after that boundary expresses a new request; the CLI cannot infer whether an identical command was intended as a retry. No new user-supplied operation ID or second confirmation is required.
 

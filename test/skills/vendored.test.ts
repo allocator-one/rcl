@@ -44,6 +44,14 @@ describe('vendored skills', () => {
       // after its fixed prefix, since rcl_run ends in `env -i "$@"` — the review
       // launch must always prompt, never be silently auto-approved.
       expect(content, path).not.toMatch(/Bash\(rcl_run/);
+      // Same reasoning for the bare, unwrapped forms: a leftover
+      // Bash(rcl review:*) or Bash(rcl --version) entry would auto-approve the
+      // exact unverified launch step 3's checks exist to prevent, and
+      // Bash(nohup:*) would let any command bypass a prompt merely by being
+      // wrapped in nohup (the Claude Code launch convention).
+      expect(content, path).not.toMatch(/Bash\(rcl review/);
+      expect(content, path).not.toContain('Bash(rcl --version)');
+      expect(content, path).not.toMatch(/Bash\(nohup/);
       expect(content, path).toContain('untrusted data');
       expect(content, path).toContain('--no-ext-diff --no-textconv');
       if (path.includes('rcl-converge')) {

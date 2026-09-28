@@ -77,12 +77,39 @@ function assertNoUnsafeSymlink(root, relPath) {
   }
 }
 
+/** Parse a `vX.Y.Z` tag into a comparable tuple, or null if it doesn't match. */
+function parseVersion(ref) {
+  const m = /^v(\d+)\.(\d+)\.(\d+)$/.exec(ref);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** True only if both parse and `a` is strictly older than `b`; unparseable input never blocks. */
+function isOlderVersion(a, b) {
+  const va = parseVersion(a), vb = parseVersion(b);
+  if (!va || !vb) return false;
+  for (let i = 0; i < 3; i++) if (va[i] !== vb[i]) return va[i] < vb[i];
+  return false;
+}
+
 function syncOne({ repo, base }, ref, files, dryRun) {
   const work = mkdtempSync(join(tmpdir(), 'rcl-skill-sync-'));
   try {
     const dir = join(work, 'repo');
     run('gh', ['repo', 'clone', repo, dir, '--', '--depth', '1', '--branch', base, '--quiet']);
     const git = (...args) => run('git', ['-C', dir, ...args]);
+
+    // `--head <branch>` alone can match a same-named branch on a fork (a PR opened by an
+    // outside contributor from their own fork's `rcl-skill-sync` branch). Restrict to
+    // same-repository PRs so the sync never adopts and rebrands an attacker's PR as its own.
+    // Look this up before pushing anything: workflow concurrency serializes runs but does not
+    // enforce release order, so a rerun of an older release (or one that finishes out of order)
+    // must not force-push over — and relabel — a PR that already proposes a newer version.
+    const openJson = run('gh', ['pr', 'list', '-R', repo, '--head', SYNC_BRANCH, '--state', 'open',
+      '--json', 'number,title,isCrossRepository', '--jq', '[.[] | select(.isCrossRepository | not)][0] // empty']);
+    const openPr = openJson ? JSON.parse(openJson) : null;
+    const openRef = openPr && /rcl (v\d+\.\d+\.\d+)/.exec(openPr.title ?? '')?.[1];
+    if (openRef && isOlderVersion(ref, openRef)) return `${repo}: skipped (open PR #${openPr.number} already proposes ${openRef}, newer than ${ref})`;
+
     for (const owned of ownedDirs()) {
       assertNoUnsafeSymlink(dir, owned);
       rmSync(join(dir, owned), { recursive: true, force: true });
@@ -109,14 +136,9 @@ function syncOne({ repo, base }, ref, files, dryRun) {
       '',
       'Opened by rcl\'s **Sync skills** workflow after a release. The skill directories are owned by that sync: edit `skills/src` in allocator-one/rcl instead of these files. Repository-specific review rules belong in this repository\'s `AGENTS.md` or `CLAUDE.md`.',
     ].join('\n');
-    // `--head <branch>` alone can match a same-named branch on a fork (a PR opened by an
-    // outside contributor from their own fork's `rcl-skill-sync` branch). Restrict to
-    // same-repository PRs so the sync never adopts and rebrands an attacker's PR as its own.
-    const open = run('gh', ['pr', 'list', '-R', repo, '--head', SYNC_BRANCH, '--state', 'open',
-      '--json', 'number,isCrossRepository', '--jq', '[.[] | select(.isCrossRepository | not)][0].number // empty']);
-    if (open) {
-      run('gh', ['pr', 'edit', open, '-R', repo, '--title', title, '--body', body]);
-      return `${repo}: updated #${open}`;
+    if (openPr) {
+      run('gh', ['pr', 'edit', String(openPr.number), '-R', repo, '--title', title, '--body', body]);
+      return `${repo}: updated #${openPr.number}`;
     }
     return `${repo}: opened ${run('gh', ['pr', 'create', '-R', repo, '--base', base, '--head', SYNC_BRANCH, '--title', title, '--body', body])}`;
   } finally {

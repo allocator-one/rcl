@@ -7,12 +7,10 @@ allowed-tools:
   - Bash(gh pr diff:*)
   - Bash(gh auth token:*)
   - Bash(gh repo view:*)
-  - Bash(rcl review:*)
   - Bash(rcl roles:*)
   - Bash(git merge-base:*)
   - Bash(git status:*)
   - Bash(git rev-parse:*)
-  - Bash(rcl --version)
   - Bash(git diff:*)
   - Bash(env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff:*)
   - Bash(harness show:*)
@@ -28,7 +26,6 @@ allowed-tools:
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
 {{#codex}}
-  - Bash(nohup:*)
   - Bash(kill:*)
   - Bash(cat /tmp/rcl-*)
   - Read(/tmp/rcl-*.log)
@@ -55,7 +52,7 @@ Run a multi-model AI code review on the current branch's PR. By default, keep th
 
 ## Fresh review requests
 
-When the user says “start a completely fresh review,” run `rcl review <REPO>#<PR_NUMBER> --start-over` with the resolved current spec/context/roster. Natural-language authorization is enough; do not ask for a second confirmation. The flag enables guarded launch, assigns its own target/ordinals and retains reports in private paths when no outputs were supplied. For a captured PR patch, use `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` and retain its base/spec binding. Unbound local diffs cannot create a PR cycle.
+When the user says “start a completely fresh review,” run `"$RCL_BIN" review <REPO>#<PR_NUMBER> --start-over` (resolve and check `$RCL_BIN` per step 3 first, same as any other launch) with the resolved current spec/context/roster. Natural-language authorization is enough; do not ask for a second confirmation. The flag enables guarded launch, assigns its own target/ordinals and retains reports in private paths when no outputs were supplied. For a captured PR patch, use `"$RCL_BIN" review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` and retain its base/spec binding. Unbound local diffs cannot create a PR cycle.
 
 This creates a normal 20-attempt/15-round cycle and retains every prior cycle's spending and evidence. It inherits no findings, dismissals, reviewer responses or approval. Ordinary continuation preserves the current budget; completing missing reviewers uses the supported RCL-105 recovery path when available. Never add `--start-over` merely because continuation is refused or a budget is exhausted, and never substitute standalone claims or delete state. Resume an interrupted explicit start with the same flag; the CLI reuses its durable operation and budget. The durable terminal dispatch record marks completion, including a recorded failure. If output or acknowledgement is lost or uncertain, inspect the current native operation and retained launch/report before retrying; reuse its completed result. Do not blindly repeat `--start-over`: after terminal completion another invocation means a new request, and identical command text cannot identify an acknowledgement retry. No additional confirmation or user-supplied operation ID is needed. A later deliberate fresh request is a new cycle.
 
@@ -218,7 +215,7 @@ If this fails (nothing found), skip straight past the rest of this step's checks
 RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN") && echo "rcl=$RCL_BIN"
 ```
 
-Before running `"$RCL_BIN" --version` — do not run it yet — check the executable itself: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never run — not even to print its version — before these checks pass.
+Before running `"$RCL_BIN" --version` — do not run it yet — check the executable itself: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`), and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Being inside *some* git checkout other than the reviewed one is not on its own disqualifying — a package manager's own install directory is routinely one (this machine's Homebrew installation has a `.git` at its root; Homebrew-installed Node and any npm global package under that prefix would otherwise always fail this check) — so apply the checkout exclusion only to the repository under review specifically, not to every git-managed directory the resolved path happens to sit in. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never run — not even to print its version — before these checks pass.
 
 Checking `$RCL_BIN` alone is not enough: it is a `#!/usr/bin/env node` script, and an `env`-style shebang resolves its interpreter through `PATH` all over again at exec time — independently of the path you just verified. A repository that puts its own `node` earlier on `PATH` runs through that shebang with every credential this step and step 5 later hand to the process, even though `$RCL_BIN` itself resolved to a trusted install. Read the shebang and check the interpreter it names the same way:
 
@@ -243,7 +240,7 @@ npm install -g --ignore-scripts "review-council@<RCL_LATEST>" --registry https:/
 
 This install is not in `allowed-tools` and is expected to prompt: `<RCL_LATEST>` is already required to be a plain `X.Y.Z` above, but a prefix-matched allowlist entry here (`npm install -g --ignore-scripts review-council@:*`) would also auto-approve `review-council@npm:evil-pkg`, `review-council@github:attacker/repo`, or a trailing `--registry <attacker-url>` — an install command whose package spec was built from this session's own variables, not a fixed literal, is exactly the case an allowlist entry shouldn't rubber-stamp. Confirm the command matches what's shown here — package spec, `--ignore-scripts`, and the trust flags — before approving it.
 
-Then repeat the resolution and checks above, and require `rcl --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.
+Then repeat the resolution and checks above, and require `"$RCL_BIN" --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.
 
 {{#source}}
 Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself). A dogfood link is the one exception to the check above that `rcl` must not resolve inside a checkout, and only when the user asked for it.
@@ -326,7 +323,7 @@ Only include `--spec` if a spec was resolved in step 2 (`<SPEC>` is the exact pa
 **Always launch the run in the background** (`run_in_background: true`) after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs, and continue when the task-completion notification arrives — never block on a foreground wait or sleep loop. Then confirm the JSON report file exists and is non-empty before parsing it. RCL prints a run-specific call/wave estimate; multi-chunk councils can take much longer than one provider timeout. A plain foreground Bash call can be killed at the tool cap with no report files written and the whole model spend wasted.
 {{/claude}}
 {{#codex}}
-**Always launch the run detached** — wrap the command blocks above in `nohup sh -c '…' > <RCL_TMP>/rcl-run-<TARGET>.log 2>&1 &` (the blocks show the review arguments, not the launch mode) and record the PID with `echo $! > <RCL_TMP>/rcl-run-<TARGET>.pid`, after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs. Poll `kill -0 $(cat <RCL_TMP>/rcl-run-<TARGET>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop, which hits the same tool timeout (the nohup'd review survives a killed poll; just poll again) — and only then confirm the JSON report file exists and is non-empty — a stale or half-written file must never be parsed, and the report file (not the unrecoverable exit status of a backgrounded process) is the success signal. RCL prints a run-specific call/wave estimate; multi-chunk councils can take much longer than one provider timeout. A plain foreground shell call can be killed at the tool timeout with no report files written and the whole model spend wasted.
+**Always launch the run detached** — wrap the command blocks above in `nohup sh -c '…' > <RCL_TMP>/rcl-run-<TARGET>.log 2>&1 &` (the blocks show the review arguments, not the launch mode) and record the PID with `echo $! > <RCL_TMP>/rcl-run-<TARGET>.pid`, after deleting any leftover `<RCL_TMP>/rcl-report-<TARGET>.*` files from earlier runs. `nohup` is not in `allowed-tools` and this is expected to prompt: a wildcard entry for it would auto-approve *any* command merely for being wrapped in `nohup`, including the exact launch this skill deliberately keeps out of the allowlist. Confirm the wrapped command is the one shown here before approving it. Poll `kill -0 $(cat <RCL_TMP>/rcl-run-<TARGET>.pid)` until the process is gone — in short, repeated tool calls, never one blocking loop, which hits the same tool timeout (the nohup'd review survives a killed poll; just poll again) — and only then confirm the JSON report file exists and is non-empty — a stale or half-written file must never be parsed, and the report file (not the unrecoverable exit status of a backgrounded process) is the success signal. RCL prints a run-specific call/wave estimate; multi-chunk councils can take much longer than one provider timeout. A plain foreground shell call can be killed at the tool timeout with no report files written and the whole model spend wasted.
 {{/codex}}
 
 ### 5a. Evidence (rcl ≥ 3.0)
