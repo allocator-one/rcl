@@ -162,6 +162,18 @@ describe('restricted original async checkpoint phase',()=>{
   await runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter}),publish:async value=>{published.push(value);}});
   expect(adapter).toHaveBeenCalledOnce();expect(published).toMatchObject([{status:'success',async:true}]);
  });
+ it('does not publish an ordinary opinion when the response is durable only as late audit',async()=>{
+  const f=await fixture(),opened=await initialize(f),published:any[]=[];let resolve!: (value:any)=>void,started!:()=>void;
+  const began=new Promise<void>(done=>started=done),response=new Promise<any>(done=>resolve=done);
+  const running=runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{
+   adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{started();return response;})}),
+   publish:async value=>{published.push(value);},
+  });
+  await began;await seal(f);resolve(JSON.parse(review()));await running;
+  expect((await readAsyncPhase(f.input)).state.outcomes).toEqual([]);
+  expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
+  expect(published).toEqual([]);
+ });
  it('refuses oversized, malformed or forged worker delegation before constructing an adapter',async()=>{
   const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn();
   for(const bytes of ['x'.repeat(16385),'null',JSON.stringify({...opened.delegates[0],token:'0'.repeat(64)})]) {

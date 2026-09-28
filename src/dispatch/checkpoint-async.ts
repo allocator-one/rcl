@@ -51,10 +51,22 @@ interface AsyncValidationMetadata {
   notDispatchedByAttempt: ReadonlyMap<string, AsyncNotDispatched>;
   outcomeStatusByAttempt: ReadonlyMap<string, string>;
   lastIntentByCall: ReadonlyMap<number, AsyncIntent>;
+  billedIntentCount: number;
+  billedIntentsByCall: ReadonlyMap<number, number>;
 }
 const validatedAsyncStates = new WeakMap<AsyncState, AsyncValidationMetadata>();
 export function asyncRefuse(condition: unknown, reason: string): asserts condition { if (!condition) throw new Error(`checkpoint_async_${reason}`); }
 export function freezeAsync<T>(value: T): T { if (value && typeof value === 'object' && !Object.isFrozen(value)) { for (const v of Object.values(value)) freezeAsync(v); Object.freeze(value); } return value; }
+/** Constant-time admission facts from a state returned by the full validator. */
+export function asyncCallAdmission(state: AsyncState, callIndex: number) {
+  const metadata = validatedAsyncStates.get(state);
+  asyncRefuse(metadata && Number.isSafeInteger(callIndex) && callIndex >= 0, 'unvalidated_state');
+  const last = metadata.lastIntentByCall.get(callIndex);
+  return freezeAsync({ billedTotal: metadata.billedIntentCount,
+    billedForCall: metadata.billedIntentsByCall.get(callIndex) ?? 0,
+    last, outcome: last && metadata.outcomesByAttempt.get(last.attemptId),
+    declined: last && metadata.notDispatchedByAttempt.get(last.attemptId) });
+}
 function bound(bytes: string, limit = MAX_ARTIFACT_BYTES): void {
   asyncRefuse(typeof bytes === 'string' && Buffer.byteLength(bytes, 'utf8') <= limit && Buffer.from(bytes, 'utf8').toString('utf8') === bytes, 'invalid_bytes');
 }
@@ -117,7 +129,8 @@ export function validateAsyncRecords(input: readonly unknown[], planInput: Async
   const records: AsyncRecord[] = [], intents: AsyncIntent[] = [], outcomes: AsyncResult[] = [], notDispatched: AsyncNotDispatched[] = [];
   const intentsByAttempt = new Map<string, AsyncIntent>(), outcomesByAttempt = new Map<string, AsyncResult>(),
     notDispatchedByAttempt = new Map<string, AsyncNotDispatched>(), outcomeStatusByAttempt = new Map<string, string>();
-  const lastIntentByCall = new Map<number, AsyncIntent>();
+  const lastIntentByCall = new Map<number, AsyncIntent>(), billedIntentsByCall = new Map<number, number>();
+  let billedIntentCount = 0;
   const planDigest = sha256Hex(stableStringify(plan)); let cutoffMs: number | undefined, previous = planDigest;
   for (const [index, raw] of input.entries()) {
     const parsed = recordSchema.safeParse(raw); asyncRefuse(parsed.success, 'invalid_record'); const record = parsed.data, { digest: hash, ...unsigned } = record;
@@ -126,14 +139,14 @@ export function validateAsyncRecords(input: readonly unknown[], planInput: Async
     if (event.type === 'intent') {
       const intent = event.intent, last = lastIntentByCall.get(intent.callIndex), result = last && outcomesByAttempt.get(last.attemptId),
         declined = last && notDispatchedByAttempt.get(last.attemptId);
-      const billedIntents = intents.filter(row => !notDispatchedByAttempt.has(row.attemptId));
-      const prior = billedIntents.filter(row => row.callIndex === intent.callIndex).length;
+      const prior = billedIntentsByCall.get(intent.callIndex) ?? 0;
       asyncRefuse(intent.callIndex < plan.calls.length && !intentsByAttempt.has(intent.attemptId), 'duplicate_or_unknown_intent');
       asyncRefuse(!last || declined || result && outcomeStatusByAttempt.get(result.attemptId) !== 'success', 'retry_unresolved_or_success');
       asyncRefuse(intent.startedAtMs >= plan.context.startedAtMs && intent.startedAtMs < plan.expiresAtMs &&
         intent.startedAtMs >= (intents.at(-1)?.startedAtMs ?? 0) && intent.startedAtMs >= (result?.finishedAtMs ?? declined?.finishedAtMs ?? 0), 'intent_time');
-      asyncRefuse(billedIntents.length < plan.maxPhysicalCalls && prior < plan.maxAttemptsPerCall, 'budget');
+      asyncRefuse(billedIntentCount < plan.maxPhysicalCalls && prior < plan.maxAttemptsPerCall, 'budget');
       intents.push(intent); intentsByAttempt.set(intent.attemptId, intent); lastIntentByCall.set(intent.callIndex, intent);
+      billedIntentCount += 1; billedIntentsByCall.set(intent.callIndex, prior + 1);
     } else if (event.type === 'result') {
       const checked = validateAsyncResultForIntent(event.result, plan, intentsByAttempt.get(event.result.attemptId)), result = checked.result;
       asyncRefuse(!outcomesByAttempt.has(result.attemptId) && !notDispatchedByAttempt.has(result.attemptId), 'duplicate_result'); outcomes.push(result); outcomesByAttempt.set(result.attemptId, result);
@@ -143,6 +156,11 @@ export function validateAsyncRecords(input: readonly unknown[], planInput: Async
       asyncRefuse(!outcomesByAttempt.has(result.attemptId) && !notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
       asyncRefuse(notDispatched.length < MAX_PHASE_NOT_DISPATCHED, 'not_dispatched_capacity');
       notDispatched.push(result); notDispatchedByAttempt.set(result.attemptId, result);
+      const prior = billedIntentsByCall.get(result.callIndex) ?? 0;
+      asyncRefuse(prior > 0 && billedIntentCount > 0, 'not_dispatched_intent');
+      billedIntentCount -= 1;
+      if (prior === 1) billedIntentsByCall.delete(result.callIndex);
+      else billedIntentsByCall.set(result.callIndex, prior - 1);
     } else {
       asyncRefuse(event.cutoffMs >= plan.context.startedAtMs && intents.every(row => row.startedAtMs <= event.cutoffMs) &&
         outcomes.every(row => row.finishedAtMs <= event.cutoffMs) && notDispatched.every(row => row.finishedAtMs <= event.cutoffMs), 'cutoff_time'); cutoffMs = event.cutoffMs;
@@ -153,7 +171,8 @@ export function validateAsyncRecords(input: readonly unknown[], planInput: Async
   const state = freezeAsync({ records, intents, outcomes, notDispatched,
     uncertain: intents.filter(row => !outcomesByAttempt.has(row.attemptId) && !notDispatchedByAttempt.has(row.attemptId)), ...(cutoffMs === undefined ? {} : { cutoffMs }) });
   validatedAsyncStates.set(state, { planDigest, retainedBytes: Buffer.byteLength(wireBytes, 'utf8'), previousDigest: previous,
-    intentsByAttempt, outcomesByAttempt, notDispatchedByAttempt, outcomeStatusByAttempt, lastIntentByCall });
+    intentsByAttempt, outcomesByAttempt, notDispatchedByAttempt, outcomeStatusByAttempt, lastIntentByCall,
+    billedIntentCount, billedIntentsByCall });
   return state;
 }
 /** Append only to state returned by this module's full validator in the same operation. */
@@ -168,15 +187,14 @@ export function appendAsyncRecordToValidatedState(state: AsyncState, eventInput:
     asyncRefuse(hasCheckpointIntentCapacity(state.records.length, state.uncertain.length,
       state.notDispatched.length, MAX_ASYNC_PHASE_RECORDS), 'intent_capacity');
     const intent = event.intent;
-    const billedIntents = state.intents.filter(row => !metadata.notDispatchedByAttempt.has(row.attemptId));
-    const prior = billedIntents.filter(row => row.callIndex === intent.callIndex).length;
+    const prior = metadata.billedIntentsByCall.get(intent.callIndex) ?? 0;
     const last = metadata.lastIntentByCall.get(intent.callIndex), result = last && metadata.outcomesByAttempt.get(last.attemptId),
       declined = last && metadata.notDispatchedByAttempt.get(last.attemptId);
     asyncRefuse(intent.callIndex < plan.calls.length && !metadata.intentsByAttempt.has(intent.attemptId), 'duplicate_or_unknown_intent');
     asyncRefuse(!last || declined || result && metadata.outcomeStatusByAttempt.get(result.attemptId) !== 'success', 'retry_unresolved_or_success');
     asyncRefuse(intent.startedAtMs >= plan.context.startedAtMs && intent.startedAtMs < plan.expiresAtMs &&
       intent.startedAtMs >= (state.intents.at(-1)?.startedAtMs ?? 0) && intent.startedAtMs >= (result?.finishedAtMs ?? declined?.finishedAtMs ?? 0), 'intent_time');
-    asyncRefuse(billedIntents.length < plan.maxPhysicalCalls && prior < plan.maxAttemptsPerCall, 'budget');
+    asyncRefuse(metadata.billedIntentCount < plan.maxPhysicalCalls && prior < plan.maxAttemptsPerCall, 'budget');
   } else if (event.type === 'result') {
     const result = validateAsyncResultForIntent(event.result, plan, metadata.intentsByAttempt.get(event.result.attemptId)).result;
     asyncRefuse(!metadata.outcomesByAttempt.has(result.attemptId) && !metadata.notDispatchedByAttempt.has(result.attemptId), 'duplicate_result');
@@ -203,13 +221,16 @@ export function decodeAsyncProof(bytes: string, expectedContext: AsyncContext): 
   const parsed = wireSchema.safeParse(value); asyncRefuse(parsed.success && stableStringify(parsed.data) === bytes, 'noncanonical_proof');
   const plan = validateAsyncPlan(parsed.data.plan); asyncRefuse(stableStringify(contextSchema.parse(expectedContext)) === stableStringify(plan.context), 'context');
   const state = validateAsyncRecords(parsed.data.records, plan); asyncRefuse(state.cutoffMs !== undefined, 'unsealed');
-  const physicalAttempts: AsyncProof['physicalAttempts'] = state.intents.filter(intent =>
-    !state.notDispatched.some(result => result.attemptId === intent.attemptId)).map(intent => {
-    const result = state.outcomes.find(row => row.attemptId === intent.attemptId), call = plan.calls[intent.callIndex]!, review = result && parseAsyncReview(result.reviewBytes, call);
-    return { runId: plan.context.runId, attemptId: intent.attemptId, callIndex: intent.callIndex, call,
+  const notDispatched = new Set(state.notDispatched.map(result => result.attemptId));
+  const outcomes = new Map(state.outcomes.map(result => [result.attemptId, result]));
+  const physicalAttempts: AsyncProof['physicalAttempts'] = [];
+  for (const intent of state.intents) {
+    if (notDispatched.has(intent.attemptId)) continue;
+    const result = outcomes.get(intent.attemptId), call = plan.calls[intent.callIndex]!, review = result && parseAsyncReview(result.reviewBytes, call);
+    physicalAttempts.push({ runId: plan.context.runId, attemptId: intent.attemptId, callIndex: intent.callIndex, call,
       outcomeCertainty: result ? 'observed' : 'uncertain', possiblyBilled: result?.possiblyBilled ?? true, reviewBytes: result?.reviewBytes ?? null,
-      reviewSha256: result?.reviewSha256 ?? null, durationMs: review?.durationMs ?? null, usage: review?.usage ?? null };
-  });
+      reviewSha256: result?.reviewSha256 ?? null, durationMs: review?.durationMs ?? null, usage: review?.usage ?? null });
+  }
   return freezeAsync({ version: 1, bytes, digest: sha256Hex(bytes), context: plan.context, plan, state, physicalAttempts });
 }
 export function encodeAsyncProof(plan: AsyncPlan, records: readonly AsyncRecord[]): AsyncProof {

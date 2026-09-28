@@ -13,6 +13,10 @@ import { asyncTargetKey, publishAsyncReview, resolveAsyncStoreDir, workerEnv } f
 
 export const MAX_ASYNC_DELEGATE_BYTES = 16_384;
 function refuse(): never { throw new Error('retained_async_invalid_delegation'); }
+function defaultCliScript(): string {
+  const extension = /\.[cm]?ts$/.test(fileURLToPath(import.meta.url)) ? 'ts' : 'js';
+  return fileURLToPath(new URL(`../index.${extension}`, import.meta.url));
+}
 
 /** Bounded transient stdin; delegation secrets never appear in argv or a credential file. */
 export async function readRetainedAsyncInput(stream: AsyncIterable<Uint8Array | string>): Promise<string> {
@@ -21,7 +25,7 @@ export async function readRetainedAsyncInput(stream: AsyncIterable<Uint8Array | 
 
 /** Launch the existing detached lifecycle with only a restricted same-checkpoint capability. */
 export async function launchRetainedAsyncWorkers(delegates: readonly AsyncDelegate[], onError: () => void,
-  cliScript = fileURLToPath(new URL('../index.js', import.meta.url))): Promise<number> {
+  cliScript = defaultCliScript()): Promise<number> {
   const payloads = delegates.map(delegate => {
     let bytes: string | undefined;
     try { bytes = JSON.stringify(delegate); } catch { refuse(); }
@@ -60,17 +64,18 @@ export async function runRetainedAsyncWorker(bytes: string, dependencies: {
   // This immutable private phase binding was proven under original native ownership.
   // A pending launch need not have a runId, and later rounds cannot redirect it.
   const opinionTarget = asyncTargetKey('', delegate.target, original.opinionCycle.cycleId ?? undefined);
-  let latest: ModelReview | undefined;
   await executeCheckpointAsync({ delegate,
     adapterFactory: call => (dependencies.adapterFactory ?? (provider => defaultAdapterFactory(provider, captured.config.reasoningEffort)))(call.provider),
-    onLateAuditError: (_error, attemptId) => recordAsyncLateFailure(delegate, attemptId), onReviewRecorded: async review => { latest = review; },
+    onLateAuditError: (_error, attemptId) => recordAsyncLateFailure(delegate, attemptId),
   });
-  const durable = (await readAsyncPhase({ commonDir: delegate.commonDir, namespace: delegate.namespace,
-    plan: journal.getPlan() })).state.outcomes.filter(outcome => outcome.callIndex === delegate.callIndex).at(-1);
-  if (durable) latest = structuredClone(parseAsyncReview(durable.reviewBytes, original.call.ref)) as ModelReview;
-  if (latest) {
+  const state = (await readAsyncPhase({ commonDir: delegate.commonDir, namespace: delegate.namespace,
+    plan: journal.getPlan() })).state;
+  const latestIntent = state.intents.filter(intent => intent.callIndex === delegate.callIndex).at(-1);
+  const durable = latestIntent && state.outcomes.find(outcome => outcome.attemptId === latestIntent.attemptId);
+  if (durable) {
+    const review = structuredClone(parseAsyncReview(durable.reviewBytes, original.call.ref)) as ModelReview;
     const publish = dependencies.publish ?? (async review => publishAsyncReview(await resolveAsyncStoreDir(delegate.commonDir), opinionTarget, review));
-    await publish(latest);
+    await publish(review);
   }
   // The hidden command exits here even if an adapter ignored abort. Unknown
   // intents remain possibly billed; no provider retry or fabricated opinion.

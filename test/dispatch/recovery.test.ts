@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
@@ -23,7 +23,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   }, open: async (...args: Parameters<typeof actual.open>) => {
     const handle = await actual.open(...args);
     const path = String(args[0]);
-    if (!writeGate.active || !(path.endsWith('/events/00000001.json') || path.includes('/.staging/')) ||
+    if (!writeGate.active || !(path.endsWith(`${sep}events${sep}00000001.json`) || path.includes(`${sep}.staging${sep}`)) ||
       (Number(args[1]) & 1) !== 1) return handle;
     return new Proxy(handle, { get(target, key) {
       if (key === 'writeFile') return async (...writeArgs: Parameters<typeof handle.writeFile>) => {
@@ -271,6 +271,37 @@ describe('owned missing-review executor', () => {
       expect(called).toHaveBeenCalledTimes(2);
       expect(result.preview.successfulSeats).toBe(3);
       expect(result.preview.nextAction).toBe('build_report');
+    });
+  }));
+
+  it('does not dispatch a sibling chunk after the first chunk becomes uncertain', async () => runFixture(async (input, commonDir) => {
+    const chunks = [{ index: 0, total: 2, digest: hash('chunk-0') }, { index: 1, total: 2, digest: hash('chunk-1') }];
+    const plan = freezeCheckpointPlan({
+      target, headSha: input.plan.headSha, mergeBaseSha: input.plan.mergeBaseSha,
+      patchSha256: input.plan.patchSha256, configSha256: input.plan.configSha256,
+      specSha256: input.plan.specSha256, contextSha256: input.plan.contextSha256,
+      toolsSha256: input.plan.toolsSha256, parser: input.plan.parser, roster: input.plan.roster, chunks,
+      prompts: chunks.flatMap(chunk => input.plan.roster.map(seat => ({ seat: seat.seat, chunk: chunk.index,
+        systemSha256: hash('system'), userSha256: hash('patch') }))),
+    });
+    const assignmentsBySeat = new Map(input.plan.cells.map((cell, index) => [cell.seat, input.assignments[index]!]));
+    const assignments = plan.cells.map(cell => assignmentsBySeat.get(cell.seat)!);
+    const prompts = plan.cells.map(() => ({ systemPrompt: 'system', userPrompt: 'patch' }));
+    const sourceAttempts: RecoveryAttempt[] = plan.cells.filter(cell => cell.seat === 's0').map(cell => ({
+      id: `original-${cell.id}`, cell: cell.id, outcome: input.review(cell.model),
+    }));
+    const called = vi.fn(async (model: string) => input.review(model, 'canceled'));
+
+    await withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace: 'uncertain-chunk', plan, ownership });
+      const result = await recoverReviewerAssignments({ ...input, assignments, prompts, plan, expectedPlan: plan,
+        sourceAttempts, commonDir, ownership, journal, fraction: 2 / 3,
+        maxAdditionalCalls: 2, maxAttemptsPerCell: 3, remainingMs: 5_000, timeoutMs: 1_000, concurrency: 1,
+        adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }) });
+
+      expect(called).toHaveBeenCalledOnce();
+      expect((await journal.read()).uncertain).toHaveLength(1);
+      expect(result.preview.nextAction).not.toBe('retry_missing_assignments');
     });
   }));
 

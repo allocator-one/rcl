@@ -45,6 +45,17 @@ describe('retained async worker launch accounting', () => {
     expect(onError).toHaveBeenCalledOnce();
   });
 
+  it('uses the TypeScript CLI entry when launched from the source runtime', async () => {
+    const spawned = child('spawn');
+    spawn.mockReturnValueOnce(spawned);
+
+    await expect(launchRetainedAsyncWorkers([delegate()], vi.fn())).resolves.toBe(1);
+
+    expect(spawn).toHaveBeenCalledWith(process.execPath, [
+      '--import', expect.stringContaining('tsx'), expect.stringMatching(/src[/\\]index\.ts$/), 'retained-async-worker',
+    ], expect.any(Object));
+  });
+
   it('reports an asynchronous spawn error without counting the worker', async () => {
     const failed = child('error');
     spawn.mockReturnValueOnce(failed);

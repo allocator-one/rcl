@@ -218,6 +218,35 @@ describe('async replay append cost',()=>{
   expect(proof.physicalAttempts[0]).toMatchObject({attemptId,possiblyBilled:false,outcomeCertainty:'observed'});
   expect(proof.physicalAttempts[1]).toMatchObject({attemptId:retryId,possiblyBilled:true,outcomeCertainty:'uncertain'});
  });
+ it('keeps 500 declined attempts to one linear accounting scan during proof replay',async()=>{
+  const f=await fixture(498);await initialize(f);const phase=await readAsyncPhase(f.input),plan={...phase.plan,maxAttemptsPerCall:500};
+  const reviewBytes=review('error'),reviewSha256=sha256Hex(reviewBytes),records:any[]=[];
+  let previousDigest=sha256Hex(stableStringify(plan));
+  const append=(event:any)=>{const unsigned={sequence:records.length+1,previousDigest,event};
+   const record={...unsigned,digest:sha256Hex(stableStringify(unsigned))};records.push(record);previousDigest=record.digest;};
+  for(let index=0;index<500;index++){
+   const attemptId=`async-${index.toString(16).padStart(8,'0')}-0000-4000-8000-000000000000`,at=f.launch.startedAtMs+index+1;
+   append({type:'intent',intent:{callIndex:0,attemptId,startedAtMs:at}});
+   append({type:'not-dispatched',result:{callIndex:0,attemptId,finishedAtMs:at,reviewBytes,reviewSha256}});
+  }
+  append({type:'seal',cutoffMs:f.launch.startedAtMs+501});
+  const originalFilter=Array.prototype.filter,originalFind=Array.prototype.find;let scanned=0;
+  const countIntentScan=(rows:unknown[])=>{const first=rows[0] as Record<string,unknown>|undefined;
+   if(first&&typeof first==='object'&&'attemptId'in first&&'callIndex'in first)scanned+=rows.length;};
+  const filter=vi.spyOn(Array.prototype,'filter').mockImplementation(function(this:unknown[],...args:Parameters<typeof originalFilter>){
+   countIntentScan(this);
+   return originalFilter.apply(this,args);
+  } as typeof Array.prototype.filter);
+  const find=vi.spyOn(Array.prototype,'find').mockImplementation(function(this:unknown[],...args:Parameters<typeof originalFind>){
+   countIntentScan(this);
+   return originalFind.apply(this,args);
+  } as typeof Array.prototype.find);
+  try{
+   const proof=decodeAsyncProof(stableStringify({version:1,plan,records}),plan.context);
+   expect(proof.state.notDispatched).toHaveLength(500);expect(proof.physicalAttempts).toEqual([]);
+  }finally{filter.mockRestore();find.mockRestore();}
+  expect(scanned).toBeLessThanOrEqual(500);
+ });
  it('reuses the same-operation validated prefix when appending an async retry intent',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);const bytes=review('error');await w.recordResult(first.attemptId,bytes);
   const parse=JSON.parse;let reviewParses=0;const spy=vi.spyOn(JSON,'parse').mockImplementation((...args:Parameters<typeof JSON.parse>)=>{if(args[0]===bytes)reviewParses+=1;return parse(...args);});

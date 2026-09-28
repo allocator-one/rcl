@@ -17,7 +17,7 @@ import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { hasCheckpointIntentCapacity, MAX_ASYNC_PHASE_RECORDS } from './checkpoint-phase-limits.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
-import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
+import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncCallAdmission, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
   validateAsyncNotDispatched, validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
   type AsyncPlan, type AsyncProof, type AsyncRecord, type AsyncResult, type AsyncState } from './checkpoint-async.js';
 
@@ -216,12 +216,10 @@ export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWrit
         asyncRefuse([system, user].every(value => typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= CAPTURED_INPUT_LIMITS.bytes &&
           Buffer.from(value, 'utf8').toString('utf8') === value) && sha256Hex(system) === call.systemPromptSha256 && sha256Hex(user) === call.userPromptSha256, 'prompt_mismatch');
         const now = Date.now(); asyncRefuse(Number.isSafeInteger(now) && now >= metadata.plan.context.startedAtMs, 'clock');
-        const prior = state.intents.filter(row => row.callIndex === delegate.callIndex), last = prior.at(-1),
-          outcome = last && state.outcomes.find(row => row.attemptId === last.attemptId),
-          declined = last && state.notDispatched.find(row => row.attemptId === last.attemptId);
-        const billedIntents = state.intents.filter(row => !state.notDispatched.some(result => result.attemptId === row.attemptId));
-        const billedPrior = prior.filter(row => !state.notDispatched.some(result => result.attemptId === row.attemptId));
-        if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || billedIntents.length >= metadata.plan.maxPhysicalCalls || billedPrior.length >= metadata.plan.maxAttemptsPerCall ||
+        const admission = asyncCallAdmission(state, delegate.callIndex);
+        const { last, outcome, declined } = admission;
+        if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || admission.billedTotal >= metadata.plan.maxPhysicalCalls ||
+          admission.billedForCall >= metadata.plan.maxAttemptsPerCall ||
           !hasCheckpointIntentCapacity(state.records.length, state.uncertain.length, state.notDispatched.length, MAX_ASYNC_PHASE_RECORDS) ||
           last && !declined && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
         const intent = { callIndex: delegate.callIndex, attemptId: `async-${randomUUID()}`, startedAtMs: now };

@@ -195,6 +195,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
         const selected = new Map(before.attempts.filter(attempt => attempt.outcome?.status === 'success')
           .map(attempt => [attempt.cell, attempt.outcome!]));
         const inFlight = new Map<number, PaidAttempt>();
+        const running = new Set<number>();
         const adapters = new Map<string, ReviewAdapter>();
         const pendingIntentWrites: Promise<unknown>[] = [];
         const returned = await runReviews(assignments, prompts, {
@@ -221,7 +222,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
               // Our own running calls still have a chance to succeed. Treat their
               // pending intents as reserved work, not uncertain previous invocations,
               // when deciding whether another missing cell could complete quorum.
-              const activeIds = new Set([...inFlight.values()].map(attempt => attempt.id));
+              const activeIds = new Set([...running].map(index => inFlight.get(index)!.id));
               const planning = current.attempts.filter(attempt => attempt.outcome !== undefined || !activeIds.has(attempt.id));
               const now = preview(planning, current.own.length - activeIds.size);
               if (now.nextAction !== 'retry_missing_assignments' || controller.signal.aborted ||
@@ -245,11 +246,13 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
               const attempt: PaidAttempt = { id: randomUUID(), kind: 'paid' };
               await input.journal.recordIntent(plan.cells[index]!.id, attempt, ownership);
               inFlight.set(index, attempt);
+              running.add(index);
             });
             pendingIntentWrites.push(operation);
             return operation;
           },
           acceptReview: async (review, index) => {
+            running.delete(index);
             const attempt = inFlight.get(index);
             if (!attempt) throw new Error('recovery_missing_paid_intent');
             const cell = plan.cells[index]!;
