@@ -1,9 +1,11 @@
 import { z } from 'zod';
+import { MODEL_PROVIDERS } from './providers.js';
 
 /** Node clamps longer timer delays to 1 ms. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 const TimerDelaySchema = z.number().finite().positive().max(MAX_TIMER_DELAY_MS);
+const ProviderConcurrencyKeySchema = z.enum(MODEL_PROVIDERS);
 
 export const SeveritySchema = z.enum(['critical', 'important', 'minor', 'nitpick']);
 export const CategorySchema = z.enum([
@@ -113,8 +115,8 @@ export const ConfigSchema = z.object({
   maxRetries: z.number().int().nonnegative().optional(),
   concurrency: z.number().int().positive().optional(),
   /** Per-provider admission caps, applied in addition to global concurrency. */
-  providerConcurrency: z.record(
-    z.string().min(1),
+  providerConcurrency: z.partialRecord(
+    ProviderConcurrencyKeySchema,
     z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
   ).optional(),
   /** Reasoning budget for providers that support it (currently OpenRouter). */

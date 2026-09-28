@@ -81,6 +81,29 @@ describe('loadConfig', () => {
     await expect(loadConfig(undefined, dir)).rejects.toThrow(ConfigError);
   });
 
+  it.each(['   ', 'Anthropic', 'anthorpic'])(
+    'rejects noncanonical provider key %j before review preparation',
+    async (provider) => {
+      await writeFile(
+        join(dir, '.review-council.json'),
+        JSON.stringify({ providerConcurrency: { [provider]: 2 } })
+      );
+      await expect(loadConfig(undefined, dir)).rejects.toThrow(ConfigError);
+    }
+  );
+
+  it('accepts every canonical provider key', async () => {
+    await writeFile(
+      join(dir, '.review-council.json'),
+      JSON.stringify({ providerConcurrency: {
+        anthropic: 1, openai: 2, google: 3, openrouter: 4, 'openai-compat': 5,
+      } })
+    );
+    expect((await loadConfig(undefined, dir)).providerConcurrency).toEqual({
+      anthropic: 1, openai: 2, google: 3, openrouter: 4, 'openai-compat': 5,
+    });
+  });
+
   it('ignores executable config files during search', async () => {
     await writeFile(
       join(dir, '.review-council.cjs'),

@@ -193,6 +193,72 @@ describe('runReviews provider-aware scheduling', () => {
     }
   });
 
+  it('completes a large single-provider queue under a smaller provider bound', async () => {
+    const adapter: ReviewAdapter = {
+      name: 'anthropic',
+      provider: 'anthropic',
+      review: async (model, reviewerRole) => success(model, reviewerRole, 'anthropic'),
+    };
+    const calls = Array.from({ length: 10_000 }, (_, index) => assignment(`fable-${index}`, 'anthropic'));
+    const reviews = await runReviews(calls, calls.map(prompt), {
+      timeoutMs: 540_000,
+      maxRetries: 0,
+      concurrency: 3,
+      providerConcurrency: { anthropic: 2 },
+      adapterFactory: () => adapter,
+    });
+    expect(reviews).toHaveLength(calls.length);
+    expect(reviews.every(review => review.status === 'success')).toBe(true);
+  });
+
+  it('preserves each provider FIFO across a large interleaved queue', async () => {
+    const started: string[] = [];
+    const adapterFactory = (provider: string): ReviewAdapter => ({
+      name: provider,
+      provider,
+      review: async (model, reviewerRole) => {
+        started.push(model);
+        return success(model, reviewerRole, provider);
+      },
+    });
+    const calls = Array.from({ length: 1_000 }, (_, index) => index % 2 === 0
+      ? assignment(`fable-${index / 2}`, 'anthropic')
+      : assignment(`sol-${(index - 1) / 2}`, 'openai'));
+    await runReviews(calls, calls.map(prompt), {
+      timeoutMs: 540_000,
+      maxRetries: 0,
+      concurrency: 3,
+      providerConcurrency: { anthropic: 2, openai: 1 },
+      adapterFactory,
+    });
+    expect(started.filter(model => model.startsWith('fable-')))
+      .toEqual(Array.from({ length: 500 }, (_, index) => `fable-${index}`));
+    expect(started.filter(model => model.startsWith('sol-')))
+      .toEqual(Array.from({ length: 500 }, (_, index) => `sol-${index}`));
+  });
+
+  it('preserves a nonmonotonic caller priority across provider queues', async () => {
+    const started: string[] = [];
+    const providers = ['anthropic', 'anthropic', 'openai', 'openai', 'google', 'google'];
+    const calls = providers.map((provider, index) => assignment(`model-${index}`, provider));
+    await runReviews(calls, calls.map(prompt), {
+      timeoutMs: 540_000,
+      maxRetries: 0,
+      concurrency: 1,
+      providerConcurrency: { anthropic: 1, openai: 1, google: 1 },
+      eligibleCallIndices: [5, 1, 3],
+      adapterFactory: provider => ({
+        name: provider,
+        provider,
+        review: async (model, reviewerRole) => {
+          started.push(model);
+          return success(model, reviewerRole, provider);
+        },
+      }),
+    });
+    expect(started).toEqual(['model-5', 'model-1', 'model-3']);
+  });
+
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
     'rejects an invalid direct runner provider cap of %s',
     async (limit) => {
