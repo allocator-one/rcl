@@ -189,7 +189,7 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
         if (remaining() <= 0) fail('verification_execution_deadline');
       }
       const finishedAtMs = now();
-      if (finishedAtMs >= retained.expiresAtMs) fail('verification_execution_deadline');
+      if (finishedAtMs >= executionExpiresAtMs) fail('verification_execution_deadline');
       await options.journal.finalizeVerification(failure
         ? { status: 'failed', finishedAtMs, reason: failure }
         : { status: 'complete', finishedAtMs }, ownership);

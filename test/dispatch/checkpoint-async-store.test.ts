@@ -16,7 +16,7 @@ vi.mock('../../src/converge/native-lock.js', async original => {
 vi.mock('../../src/telemetry/recovery/files.js', async original => {
   const actual = await original<typeof import('../../src/telemetry/recovery/files.js')>();
   return { ...actual, readStable: async (...args: Parameters<typeof actual.readStable>) => {
-    if (String(args[0]).includes('/failures/')) observation.failureReads += 1;
+    if (String(args[0]).split(/[/\\]/).includes('failures')) observation.failureReads += 1;
     return actual.readStable(...args);
   } };
 });

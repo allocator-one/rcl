@@ -121,6 +121,24 @@ describe('bounded durable verifier execution', () => {
     expect(phase.plan.expiresAtMs).toBe(f.saved.expiresAtMs); expect(phase.uncertain).toHaveLength(1);
   });
 
+  it('refuses completion when the stricter runtime cutoff is crossed after interpretation', async () => {
+    const f = await fixture(1, 1000, 60_000); let stepping = false, now = 9997;
+    const record = f.journal.recordVerificationResult.bind(f.journal);
+    vi.spyOn(f.journal, 'recordVerificationResult').mockImplementation(async (...args) => {
+      await record(...args); stepping = true;
+    });
+    const result = await f.execute({
+      executionExpiresAtMs: 10_000,
+      nowMs: () => stepping ? now++ : 2000,
+    });
+    expect(result.ok).toBe(false);
+    expect((await f.journal.readVerification())!.terminal).toMatchObject({
+      status: 'failed',
+      finishedAtMs: 10_000,
+      reason: 'verification_execution_deadline',
+    });
+  });
+
   it('bounds an adapter that ignores abort and audits its later response without changing the sealed proof', async () => {
     const f = await fixture(1, 15); let resolve!: (value: ReturnType<typeof answer>) => void;
     const ask = vi.fn(() => new Promise<ReturnType<typeof answer>>(done => { resolve = done; }));
