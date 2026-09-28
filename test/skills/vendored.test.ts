@@ -43,7 +43,7 @@ describe('vendored skills', () => {
       expect(content, path).toContain('untrusted data');
       expect(content, path).toContain('--no-ext-diff --no-textconv');
       if (path.includes('rcl-converge')) {
-        expect(content, path).toContain('rcl_run <TOKEN_ARG> rcl review <target> --guarded-converge');
+        expect(content, path).toContain('rcl_run <TOKEN_ARG> "$RCL_BIN" review <target> --guarded-converge');
         expect(content, path).toContain('`<TOKEN_ARG>` is `GITHUB_TOKEN="$(gh auth token)"`');
         expect(content, path).toContain('step 2a disclosure check');
       } else {
@@ -58,7 +58,8 @@ describe('vendored skills', () => {
         expect(content, path).toContain('Never fall back to an older installed release');
         expect(content, path).not.toContain('npm install -g review-council@latest');
         expect(content, path).toContain('env -i "$@"');
-        expect(content, path).toContain('rcl_run GITHUB_TOKEN="$(gh auth token)" rcl review');
+        expect(content, path).toContain('rcl_run GITHUB_TOKEN="$(gh auth token)" "$RCL_BIN" review');
+        expect(content, path).not.toContain('rcl_run rcl review');
         expect(content, path).not.toMatch(/^GITHUB_TOKEN=\$\(gh auth token\) rcl review/m);
         const helperStart = content.indexOf('rcl_run() {');
         const helperEnd = content.indexOf('env -i "$@"');

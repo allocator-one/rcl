@@ -14,19 +14,19 @@ allowed-tools:
   - Bash(git rev-parse:*)
   - Bash(rcl --version)
   - Bash(git diff:*)
-  - Bash(env -u GIT_EXTERNAL_DIFF git:*)
+  - Bash(env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
   - Bash(npm view review-council:*)
   - Bash(npm prefix -g)
-  - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(which rcl)
   - Bash(command -v rcl)
   - Bash(command -v node)
   - Bash(realpath:*)
   - Bash(head -1:*)
   - Bash(tr:*)
-  - Bash(rcl_run:*)
+  - Bash(rcl_run GITHUB_TOKEN=:*)
+  - Bash(rcl_run "$RCL_BIN":*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
   - Read
@@ -151,7 +151,7 @@ If a spec was resolved (sources 1–3), inform the user which source was used.
 
 ### 2a. Check what leaves the machine
 
-The patch and the spec are sent to several external model providers. In PR mode, capture the head **before** reading anything else: `gh pr view <PR_NUMBER> --repo <REPO> --json headRefOid -q .headRefOid`. Capturing it after the diff would only prove the head matched once the diff had already been fetched — not that the diff itself came from that head. Then read the disclosure material: the local patch file; `gh pr diff <PR_NUMBER> --repo <REPO>` in PR mode (always pass `--repo` explicitly — an explicit `<REPO>#<PR_NUMBER>` target can differ from the current directory's repository, and an unscoped `gh pr diff <PR_NUMBER>` would then inspect the wrong PR); or, for `rcl review --staged` / `--working-tree`, the equivalent local diff (`git diff --no-ext-diff --no-textconv --cached` for staged, `git diff --no-ext-diff --no-textconv HEAD` for working-tree, which covers staged and unstaged together) captured to a temp file the same way step 1b does. Also read `<SPEC>` if one was resolved. Stop and tell the user if any of it contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
+The patch and the spec are sent to several external model providers. In PR mode, capture the head **before** reading anything else: `gh pr view <PR_NUMBER> --repo <REPO> --json headRefOid -q .headRefOid`. Capturing it after the diff would only prove the head matched once the diff had already been fetched — not that the diff itself came from that head. Then read the disclosure material: the local patch file; in PR mode, `gh pr diff <PR_NUMBER> --repo <REPO> > <RCL_TMP>/rcl-disclosure-<TARGET>.diff` (always pass `--repo` explicitly — an explicit `<REPO>#<PR_NUMBER>` target can differ from the current directory's repository, and an unscoped `gh pr diff <PR_NUMBER>` would then inspect the wrong PR), then read that file with the Read tool rather than the command's own console output — a large PR's diff can be long enough that console output truncates before you see all of it, and a check that silently stops partway through isn't a check; or, for `rcl review --staged` / `--working-tree`, the equivalent local diff (`git diff --no-ext-diff --no-textconv --cached` for staged, `git diff --no-ext-diff --no-textconv HEAD` for working-tree, which covers staged and unstaged together) captured to a temp file the same way step 1b does. Also read `<SPEC>` if one was resolved. Stop and tell the user if any of it contains credentials or other secrets, customer or personal data, local diagnostics (logs, dumps, environment output), or files unrelated to the change. Never trim the patch silently to get past this check.
 
 In PR mode, re-run that same `gh pr view ... -q .headRefOid` command a second time right after fetching the diff. If it now differs from the head you captured before reading anything, the PR moved while the diff was being fetched — the diff you just inspected may not even be from the head you captured, so start this step over from the head capture rather than trusting either read. This check and the later fetch inside `rcl review` are two separate reads of the same target, and step 3's registry lookups (and a possible install) run between them, so the gap is not always as narrow as "the same agent runs both back to back" — a PR can pick up a genuine push in that window. Immediately before launching step 5, re-run `gh pr view ... -q .headRefOid` a third time; if the result differs from the head this step settled on, the PR moved again — repeat this step against the new head before reviewing it, rather than reviewing on the strength of a disclosure check for code that is no longer what will be sent. If even that residual gap is unacceptable for a given PR, capture and bind instead — `rcl review <patch-path> --start-over --for-pr <REPO>#<PR_NUMBER> --head-sha <captured-head>` (see "Fresh review requests" above) reviews the exact patch this step inspected. The same read-modify race applies to `--staged`/`--working-tree` reviews (the working tree can change while the temp-file diff is being captured, or afterward, before `rcl review` reads it again) — diff it a second time immediately before launch and restart this step if it differs.
 
@@ -221,6 +221,8 @@ npm install -g --ignore-scripts "review-council@<RCL_LATEST>" --registry https:/
   test "$(npm view "review-council@<RCL_LATEST>" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"
 ```
 
+This install is not in `allowed-tools` and is expected to prompt: `<RCL_LATEST>` is already required to be a plain `X.Y.Z` above, but a prefix-matched allowlist entry here (`npm install -g --ignore-scripts review-council@:*`) would also auto-approve `review-council@npm:evil-pkg`, `review-council@github:attacker/repo`, or a trailing `--registry <attacker-url>` — an install command whose package spec was built from this session's own variables, not a fixed literal, is exactly the case an allowlist entry shouldn't rubber-stamp. Confirm the command matches what's shown here — package spec, `--ignore-scripts`, and the trust flags — before approving it.
+
 Then repeat the resolution and checks above, and require `rcl --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.
 
 Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself). A dogfood link is the one exception to the check above that `rcl` must not resolve inside a checkout, and only when the user asked for it.
@@ -267,20 +269,22 @@ EOF
 
 `rcl_run` recomputes its own safe `PATH` (identically to step 3's, above) rather than forwarding the ambient one verbatim — the reviewer process it launches must not resolve `git`, `npm`, or anything else it shells out to through a repository-controlled directory either, and this function can run in a fresh shell that never saw step 3's `export`. Values otherwise pass through as separate arguments, so no value is ever re-split or re-parsed by the shell. Add a variable to the list only when a configured reviewer needs it, and never add `GH_TOKEN`, `SSH_AUTH_SOCK` or cloud credentials. In PR mode pass the GitHub token as an explicit assignment after `rcl_run`, as below; a patch captured and bound to a PR with `--for-pr` (see "Fresh review requests" above) still needs one, since RCL fetches PR/GitHub state for that binding — never pass one to a bare, unbound patch-file review.
 
+Launch `"$RCL_BIN"` — the exact absolute path step 3 already resolved and checked — never the bare `rcl` name: re-resolving `rcl` by name here would search `PATH` again and could return a different install than the one whose path, ownership, and interpreter step 3 verified, making that verification moot. If `$RCL_BIN` is unset (a fresh shell that skipped step 3), resolve it the same way step 3 does before proceeding: `RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN")` — and, ideally, run step 3's checks against it rather than trusting it unchecked.
+
 **Always write the full report to files** with `--markdown` and `--json-file`. The console output is long and the critical/important findings print at the top, so reading it off stdout — especially piped through `head`/`tail` — silently drops the most important findings. The files are the source of truth; the console is throwaway.
 
 Scope the report filenames to the review target so parallel runs (multiple worktrees or parallel agent sessions reviewing different PRs at once) never clobber each other's report. Let `<TARGET>` be `<REPO>-<PR number>` in PR mode, or `<REPO>-<BRANCH>` in local diff mode (components sanitized as in step 1b — identical PR numbers or branch names in different repositories must not collide) — e.g. `<RCL_TMP>/rcl-report-rcl-7.md` or `<RCL_TMP>/rcl-report-rcl-feat-openrouter-kimi-k3.md`.
 
 For PR-based review:
 ```bash
-rcl_run GITHUB_TOKEN="$(gh auth token)" rcl review <REPO>#<PR_NUMBER> \
+rcl_run GITHUB_TOKEN="$(gh auth token)" "$RCL_BIN" review <REPO>#<PR_NUMBER> \
   --markdown <RCL_TMP>/rcl-report-<TARGET>.md --json-file <RCL_TMP>/rcl-report-<TARGET>.json \
   [--post] [--spec <SPEC>] [--roles <roles>]
 ```
 
 For local diff review:
 ```bash
-rcl_run rcl review <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch \
+rcl_run "$RCL_BIN" review <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch \
   --markdown <RCL_TMP>/rcl-report-<TARGET>.md --json-file <RCL_TMP>/rcl-report-<TARGET>.json \
   [--spec <SPEC>] [--roles <roles>]
 ```

@@ -50,13 +50,14 @@ describe('generated skill files', () => {
         expect(content, path).toContain(isClaudeTarget(path) ? 'run_in_background' : 'nohup');
         continue;
       }
-      expect(content, path).toContain('rcl review <target> --guarded-converge');
+      expect(content, path).toContain('"$RCL_BIN" review <target> --guarded-converge');
       expect(content, path).not.toContain("rcl converge-attempt --target");
       expect(content, path).not.toContain('nohup');
       // Assert the actual launch command's shape, not just that the token string
       // appears somewhere (which the explanatory prose alone would also satisfy).
-      expect(content, path).toMatch(/rcl_run <TOKEN_ARG> rcl review <target> --guarded-converge/);
-      expect(content, path).not.toMatch(/rcl_run GITHUB_TOKEN="\$\(gh auth token\)" rcl review <target> --guarded-converge/);
+      expect(content, path).toMatch(/rcl_run <TOKEN_ARG> "\$RCL_BIN" review <target> --guarded-converge/);
+      expect(content, path).not.toMatch(/rcl_run GITHUB_TOKEN="\$\(gh auth token\)" "\$RCL_BIN" review <target> --guarded-converge/);
+      expect(content, path).not.toContain('rcl_run rcl review <target>');
       expect(content, path).toContain('`<TOKEN_ARG>` is `GITHUB_TOKEN="$(gh auth token)"`');
       expect(content, path).not.toContain('--round <R> --attempt <ATTEMPT>');
       expect(content, path).toContain(isClaudeTarget(path) ? 'run_in_background: true' : 'persistent exec session');

@@ -18,7 +18,7 @@ allowed-tools:
   - Bash(git status:*)
   - Bash(git merge-base:*)
   - Bash(git diff:*)
-  - Bash(env -u GIT_EXTERNAL_DIFF git:*)
+  - Bash(env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff:*)
   - Bash(git log:*)
   - Bash(git rev-parse:*)
   - Bash(git add:*)
@@ -28,7 +28,6 @@ allowed-tools:
   - Bash(harness list:*)
   - Bash(npm view review-council:*)
   - Bash(npm prefix -g)
-  - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(npm test:*)
   - Bash(npm run lint:*)
   - Bash(which rcl)
@@ -37,7 +36,8 @@ allowed-tools:
   - Bash(realpath:*)
   - Bash(head -1:*)
   - Bash(tr:*)
-  - Bash(rcl_run:*)
+  - Bash(rcl_run GITHUB_TOKEN=:*)
+  - Bash(rcl_run "$RCL_BIN":*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
   - Read
@@ -138,10 +138,10 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
 
    Start the command with the host's `run_in_background: true` and retain its task handle. Let the command remain foreground inside that task. Continue from the task-completion notification, never from an unrelated PID or a report appearing early.
 
-   Launch through the `rcl` skill's allowlisted-environment helper: define `rcl_run` from its step 5 in the same shell.
+   Launch through the `rcl` skill's allowlisted-environment helper: define `rcl_run` from its step 5 in the same shell. Use `"$RCL_BIN"` (from its step 3), not the bare `rcl` name, for the same reason as the `rcl` skill's own step 5 — re-resolve it first if this shell never ran step 3.
 
    ```bash
-   rcl_run <TOKEN_ARG> rcl review <target> --guarded-converge <START_OVER_ARG> \
+   rcl_run <TOKEN_ARG> "$RCL_BIN" review <target> --guarded-converge <START_OVER_ARG> \
      --markdown <RCL_TMP>/rcl-report-<TARGET>-<LAUNCH>.md \
      --json-file <RCL_TMP>/rcl-report-<TARGET>-<LAUNCH>.json \
      --converge-target "<TARGET>" <ATTEMPT_CAP_ARG> <ROUND_CAP_ARG> <PR_REF_ARG> \

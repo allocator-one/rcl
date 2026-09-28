@@ -144,12 +144,19 @@ function parseArgs(argv) {
 
 /** The checkout must actually be at `ref`, or the rendered files, the commit
  * message and the PR body would all misattribute content to a release they
- * were never built from. */
+ * were never built from. Checking HEAD alone isn't enough: `renderVendoredFiles`
+ * reads skill sources from the working tree, not from git objects, so an
+ * uncommitted or untracked edit at the right HEAD would still be rendered and
+ * attributed to `ref`. Require a clean tree (tracked and untracked) too. */
 function assertCheckoutMatchesRef(ref) {
   const resolved = run('git', ['-C', ROOT, 'rev-parse', '--verify', `${ref}^{commit}`]);
   const head = run('git', ['-C', ROOT, 'rev-parse', 'HEAD']);
   if (resolved !== head) {
     throw new Error(`checkout HEAD (${head}) does not match --ref ${ref} (${resolved}); run from a checkout of that tag`);
+  }
+  const dirty = run('git', ['-C', ROOT, 'status', '--porcelain']);
+  if (dirty !== '') {
+    throw new Error(`checkout has uncommitted or untracked changes; refusing to attribute them to ${ref}:\n${dirty}`);
   }
 }
 
