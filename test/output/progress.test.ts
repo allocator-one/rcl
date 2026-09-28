@@ -78,6 +78,21 @@ describe('council run planning', () => {
         .toThrow('Invalid retained provider concurrency');
     }
   });
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'uses the global cap for an uncapped prototype-key provider %s',
+    provider => {
+      expect(buildCouncilRunPlan({
+        totalCalls: 1,
+        reviewers: 1,
+        chunks: 1,
+        concurrency: 1,
+        timeoutMs: 1_000,
+        providers: [provider],
+        providerConcurrency: {},
+      })).toMatchObject({ waves: 1, timeoutBoundMs: 1_000 });
+    },
+  );
 });
 
 describe('CouncilProgressReporter', () => {

@@ -49,12 +49,13 @@ export function classifyMissingReview(review?: ModelReview): { eligible: boolean
   if (!review) return { eligible: true, reason: 'unstarted' };
   if (review.status === 'success') return { eligible: false, reason: 'retained_success' };
   const error = review.error ?? '';
-  if (/\b(?:400|401|403|404|413)\b|invalid[ _-]?(?:api[ _-]?)?key|api[ _-]?key.*(?:missing|not set)|authentication|unauthori[sz]ed|forbidden|insufficient[_ -]quota|quota.*(?:exceed|exhaust)|(?:exceed|exhaust).*quota|billing[_ -]hard[_ -]limit|credits?.*(?:exhaust|insufficient)|(?:unknown|unsupported|not found).*model|model.*(?:not found|unsupported)|context.{0,20}(?:length|window|exceed)|prompt too (?:long|large)|invalid request/i.test(error)) {
-    return { eligible: false, reason: 'permanent_failure' };
-  }
   if (review.status === 'parse_failed') return { eligible: true, reason: 'parse_failure' };
   if (review.status === 'canceled') return { eligible: true, reason: 'canceled' };
-  if (review.status === 'timeout' || /\b(?:429|5\d\d)\b|rate.?limit|temporar|overload|timed? ?out|timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|connection|network|socket|fetch failed/i.test(error)) {
+  if (review.status === 'timeout') return { eligible: true, reason: 'transient_failure' };
+  if (/\b(?:http(?: status)?|status|code)[ _:=.-]*(?:400|401|403|404|413)\b|invalid[ _-]?(?:api[ _-]?)?key|api[ _-]?key.*(?:missing|not set)|authentication|unauthori[sz]ed|forbidden|insufficient[_ -]quota|quota.*(?:exceed|exhaust)|(?:exceed|exhaust).*quota|billing[_ -]hard[_ -]limit|credits?.*(?:exhaust|insufficient)|(?:unknown|unsupported|not found).*model|model.*(?:not found|unsupported)|context.{0,20}(?:length|window)|prompt too (?:long|large)|invalid request/i.test(error)) {
+    return { eligible: false, reason: 'permanent_failure' };
+  }
+  if (/\b(?:429|5\d\d)\b|rate.?limit|temporar|overload|timed? ?out|timeout|retry(?:ing)?\s+after|ECONNRESET|ECONNREFUSED|ETIMEDOUT|connection|network|socket|fetch failed/i.test(error)) {
     return { eligible: true, reason: 'transient_failure' };
   }
   return { eligible: false, reason: 'unclassified_failure' };

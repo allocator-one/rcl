@@ -141,12 +141,16 @@ describe('missing reviewer recovery policy', () => {
 
   it.each([
     ['timeout', undefined, 'transient_failure'],
+    ['timeout', 'context deadline exceeded', 'transient_failure'],
     ['parse_failed', 'Malformed output', 'parse_failure'],
     ['canceled', 'Canceled at quorum', 'canceled'],
     ['error', '503 service overloaded', 'transient_failure'],
     ['error', '429 rate limit', 'transient_failure'],
     ['error', '429 insufficient_quota', 'permanent_failure'],
     ['error', '400 context length exceeded', 'permanent_failure'],
+    ['error', 'HTTP status 413', 'permanent_failure'],
+    ['error', 'retry after 400 ms', 'transient_failure'],
+    ['error', '413 tokens remaining', 'unclassified_failure'],
     ['error', 'unknown adapter failure', 'unclassified_failure'],
   ] as const)('classifies %s (%s) conservatively as %s', (status, error, reason) => {
     expect(classifyMissingReview(review(cells(1)[0]!, status, error)).reason).toBe(reason);

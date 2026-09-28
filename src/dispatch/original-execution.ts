@@ -1,7 +1,8 @@
+import { lstat } from 'node:fs/promises';
 import { DEFAULT_CONCURRENCY, DEFAULT_MAX_RETRIES, DEFAULT_REASONING_EFFORT, DEFAULT_TIMEOUT_MS } from '../config/defaults.js';
 import { withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import { decodeCapturedInputs, type CapturedReviewerInputs } from './captured-inputs.js';
-import { CheckpointJournal, freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
+import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
 import { decodeOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalRuntimeBounds } from './original-launch.js';
 import { recoverReviewerAssignments, type ReviewerRecoveryOptions, type ReviewerRecoveryResult } from './recovery.js';
@@ -34,8 +35,16 @@ export async function bindOriginalCouncil(input: BindOriginalCouncilOptions): Pr
     launch.capturedInputsSha256 !== captured.digest) throw new Error('original_execution_capture_mismatch');
   assertOriginalRetryBounds(launch, captured);
   return withOwnedNativeOperation(input.ownership, input.commonDir, launch.target, async ownership => {
-    const journal = await CheckpointJournal.create({ commonDir: input.commonDir, ownership,
-      namespace: launch.runId, plan: captured.plan });
+    const path = checkpointPath(input.commonDir, launch.target, launch.runId);
+    let exists = true;
+    try { await lstat(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      exists = false;
+    }
+    const journal = await (exists ? CheckpointJournal.openWrite : CheckpointJournal.create)({
+      commonDir: input.commonDir, ownership, namespace: launch.runId, plan: captured.plan,
+    });
     await journal.bind('captured-inputs', captured.bytes, ownership);
     await journal.bind('launch', launchBytes, ownership);
     return journal;

@@ -324,15 +324,23 @@ describe('restricted original async checkpoint phase',()=>{
   expect(adapter.review).not.toHaveBeenCalled();expect(result.newPhysicalCalls).toBe(0);
   const proof=await seal(f);expect(proof.state.uncertain).toHaveLength(1);expect(proof.physicalAttempts[0].possiblyBilled).toBe(true);
  });
- it('contains a derived callback failure and continues an observed timeout retry',async()=>{
+it('contains a derived callback failure and continues an observed timeout retry',async()=>{
   const f=await fixture(),opened=await initialize(f);let calls=0;const errors:unknown[]=[];
   const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review(++calls===1?'timeout':'success')))};
   const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,
    onReviewRecorded:async()=>{throw new Error('synthetic derived failure');},onLateAuditError:error=>{errors.push(error);}});
   expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
-  expect(errors).toHaveLength(2);expect(errors.every(error=>String(error).includes('synthetic derived failure'))).toBe(true);
+  await vi.waitFor(()=>expect(errors).toHaveLength(2));expect(errors.every(error=>String(error).includes('synthetic derived failure'))).toBe(true);
   expect((await seal(f)).state.outcomes).toHaveLength(2);
- });
+});
+it('does not let an unbounded derived callback stop a durable timeout retry',async()=>{
+  const f=await fixture(),opened=await initialize(f);let calls=0;
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review(++calls===1?'timeout':'success')))};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,
+   onReviewRecorded:()=>new Promise(()=>{}),onLateAuditError:vi.fn()});
+  expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  expect((await seal(f)).state.outcomes).toHaveLength(2);
+});
  it('returns on cancellation without waiting for a noncooperative adapter and audits its late result', async()=>{
   const f=await fixture(),opened=await initialize(f),controller=new AbortController();let resolve!: (value:any)=>void,started!:()=>void;
   const began=new Promise<void>(r=>started=r),raw=new Promise<any>(r=>resolve=r),errors:unknown[]=[];

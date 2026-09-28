@@ -64,7 +64,8 @@ export function buildCouncilRunPlan(options: {
       const next: string[] = [];
       let admitted = 0;
       for (const provider of pending) {
-        const cap = options.providerConcurrency?.[provider] ?? concurrency;
+        const configured = options.providerConcurrency;
+        const cap = configured && Object.hasOwn(configured, provider) ? configured[provider]! : concurrency;
         const providerActive = admittedByProvider.get(provider) ?? 0;
         if (admitted < concurrency && providerActive < cap) {
           admitted++;

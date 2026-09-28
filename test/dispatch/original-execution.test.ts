@@ -45,6 +45,26 @@ function fixture(maxPhysicalCalls = 3, concurrency = 1, providerConcurrency?: Re
 async function directory() { const root = await mkdtemp(join(tmpdir(), 'rcl-original-execution-')); roots.push(root); return root; }
 
 describe('captured original council execution', () => {
+  it('resumes an interrupted binding publication without changing the original run', async () => {
+    const commonDir = await directory(), f = fixture();
+    await withNativeTarget(commonDir, target, async ownership => {
+      const interrupted = await CheckpointJournal.create({
+        commonDir, namespace: runId, plan: f.plan, ownership,
+      });
+      await interrupted.bind('captured-inputs', f.captured.bytes, ownership);
+
+      const resumed = await bindOriginalCouncil({
+        commonDir, ownership, captured: f.captured, launch: f.launch,
+      });
+
+      expect(await resumed.readBindings()).toMatchObject({
+        'captured-inputs': f.captured.bytes,
+        launch: expect.any(String),
+      });
+      expect((await resumed.read()).records.filter(record => record.type === 'binding')).toHaveLength(2);
+    });
+  });
+
   it('uses only a policy frozen in the capture and leaves legacy provider policy omitted', async () => {
     async function peakFor(providerConcurrency?: Record<string, number>) {
       const provider = providerConcurrency === undefined ? 'fake' : 'anthropic';
@@ -95,9 +115,9 @@ describe('captured original council execution', () => {
         adapterFactory: () => ({ name: 'fake', provider: 'fake', ask: vi.fn(),
           review: async model => {
             if (model.endsWith('0')) return late;
-            setTimeout(() => controller.abort(), 0);
             return f.review(model);
           } }),
+        onPhysicalReviewComplete: async (_review, index) => { if (index === 1) controller.abort(); },
         auditLateAttempt: async (review, index, attempt) => { await audit.accept(review, index, attempt); observed(); },
         onLateAuditError: onError });
       expect(result.preview.successfulSeats).toBe(1);

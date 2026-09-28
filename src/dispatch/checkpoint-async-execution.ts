@@ -59,16 +59,18 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       throw error;
     }
     if (!intent || !raw) break;
+    const reportDerivedError = (error: unknown): void => {
+      try { void Promise.resolve(options.onLateAuditError(error, intent.attemptId)).catch(() => {}); }
+      catch { /* contained */ }
+    };
     const persist = async (result: Awaited<ReturnType<ReviewAdapter['review']>>) => {
       const bytes = stableStringify({ ...result, async: true });
       const review = parseAsyncReview(bytes, call.ref);
       await writer.recordResult(intent.attemptId, bytes, true);
-      try { await options.onReviewRecorded?.(structuredClone(review) as ModelReview); }
-      catch (error) {
-        // Derived publication cannot change exact physical accounting or stop a
-        // durable timeout retry. The private sink is best-effort and bounded.
-        try { await options.onLateAuditError(error, intent.attemptId); } catch { /* contained */ }
-      }
+      // Derived publication cannot change exact physical accounting or stop a
+      // durable timeout retry. Its private error sink is detached and contained.
+      try { void options.onReviewRecorded?.(structuredClone(review) as ModelReview).catch(reportDerivedError); }
+      catch (error) { reportDerivedError(error); }
       return review.status;
     };
     const response = raw.then(
