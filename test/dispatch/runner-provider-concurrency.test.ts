@@ -259,6 +259,42 @@ describe('runReviews provider-aware scheduling', () => {
     expect(started).toEqual(['model-5', 'model-1', 'model-3']);
   });
 
+  it('registers one provider race per call while a slow call spans many fast completions', async () => {
+    let releaseSlow!: () => void;
+    const slow = new Promise<void>(resolve => { releaseSlow = resolve; });
+    let finishFast!: () => void;
+    const allFastFinished = new Promise<void>(resolve => { finishFast = resolve; });
+    let fastFinished = 0;
+    const calls = [
+      assignment('fable-slow', 'anthropic'),
+      ...Array.from({ length: 100 }, (_, index) => assignment(`sol-${index}`, 'openai')),
+    ];
+    const race = vi.spyOn(Promise, 'race');
+    try {
+      const running = runReviews(calls, calls.map(prompt), {
+        timeoutMs: 540_000,
+        maxRetries: 0,
+        concurrency: 2,
+        providerConcurrency: { anthropic: 1, openai: 1 },
+        adapterFactory: provider => ({
+          name: provider,
+          provider,
+          review: async (model, reviewerRole) => {
+            if (provider === 'anthropic') await slow;
+            else if (++fastFinished === 100) finishFast();
+            return success(model, reviewerRole, provider);
+          },
+        }),
+      });
+      await allFastFinished;
+      releaseSlow();
+      await running;
+      expect(race).toHaveBeenCalledTimes(calls.length);
+    } finally {
+      race.mockRestore();
+    }
+  });
+
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
     'rejects an invalid direct runner provider cap of %s',
     async (limit) => {

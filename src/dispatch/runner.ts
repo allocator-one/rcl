@@ -396,6 +396,17 @@ export async function runReviews(
     let queued = eligible.size;
     const activeByProvider = new Map<string, number>();
     const active = new Set<Promise<void>>();
+    let completed = 0;
+    let completionWaiter: (() => void) | undefined;
+    const signalCompletion = (): void => {
+      completed++;
+      completionWaiter?.();
+      completionWaiter = undefined;
+    };
+    const waitForCompletion = async (): Promise<void> => {
+      if (completed === 0) await new Promise<void>(resolve => { completionWaiter = resolve; });
+      completed--;
+    };
     const providerLimit = (provider: string): number =>
       Math.min(options.concurrency, providerLimits.get(provider) ?? options.concurrency);
     const nextRunnable = (): number | undefined => {
@@ -420,11 +431,12 @@ export async function runReviews(
       const provider = calls[index]!.provider;
       activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + 1);
       let task!: Promise<void>;
-      task = runOne(index).finally(() => {
+      task = runOne(index).catch(fail).finally(() => {
         const remaining = (activeByProvider.get(provider) ?? 1) - 1;
         if (remaining === 0) activeByProvider.delete(provider);
         else activeByProvider.set(provider, remaining);
         active.delete(task);
+        signalCompletion();
       });
       active.add(task);
     };
@@ -439,7 +451,7 @@ export async function runReviews(
         start(index);
       }
       if (active.size === 0) break;
-      await Promise.race(active).catch(() => undefined);
+      await waitForCompletion();
     }
     await Promise.allSettled([...active]);
     if (failure) throw failure.error;
