@@ -11,7 +11,7 @@ import {
   appendVerificationRecordWithSuccessor, cloneValidatedVerificationRecords, encodeVerificationProof, parseVerificationAnswer, snapshotVerificationEvent,
   validateVerificationRecords, validateVerificationRecordsForAppend, verificationDigest,
   type ValidatedVerificationRecords,
-  type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationPlanInput,
+  type VerificationContext, type VerificationEvent, type VerificationIntent, type VerificationNotDispatched, type VerificationPlanInput,
   type VerificationResult, type VerificationState, type VerificationTerminal,
 } from './checkpoint-verification.js';
 import {
@@ -529,8 +529,9 @@ export class CheckpointJournal {
    * must NEVER be launched again, even when its first fsync acknowledgment failed.
    * A true result is a storage claim, not independent provider launch authority.
    */
-  async recordVerificationIntent(input: VerificationIntent, ownership: NativeTargetOwnership): Promise<boolean> {
-    return this.appendVerification({ type: 'intent', intent: input }, ownership);
+  async recordVerificationIntent(input: VerificationIntent, ownership: NativeTargetOwnership,
+    afterIntent?: (intent: VerificationIntent) => VerificationNotDispatched | void): Promise<boolean> {
+    return this.appendVerification({ type: 'intent', intent: input }, ownership, afterIntent);
   }
 
   /** Late verifier answers are audit-only and never change the sealed verifier proof. */
@@ -551,7 +552,8 @@ export class CheckpointJournal {
       if (!verification?.terminal) throw new Error('checkpoint_verification_late_requires_terminal');
       parseVerificationAnswer(result.answerBytes, verification.plan);
       const intent = verification.intents.find(item => item.batchIndex === result.batchIndex && item.attemptId === result.attemptId);
-      if (!intent || result.finishedAtMs < intent.startedAtMs) throw new Error('checkpoint_verification_late_invalid_result');
+      if (!intent || result.finishedAtMs < intent.startedAtMs ||
+        verification.notDispatched.some(item => item.attemptId === result.attemptId)) throw new Error('checkpoint_verification_late_invalid_result');
       const prior = await recoverPublications(pending => this.readLateVerificationAuditValidated(verification, pending));
       const existing = prior.find(item => item.result.attemptId === result.attemptId);
       if (existing) {
@@ -560,7 +562,7 @@ export class CheckpointJournal {
         for (const record of prior) await syncExisting(join(events, eventFile(record.sequence)), `${canonical(record as unknown as Json)}\n`, true, { maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
         return;
       }
-      if (prior.length >= verification.intents.length) throw new Error('checkpoint_verification_late_call_cap');
+      if (prior.length >= verification.intents.length - verification.notDispatched.length) throw new Error('checkpoint_verification_late_call_cap');
       const directory = await ensurePrivateChild(this.path, 'verification-late-audit');
       await ensurePrivateChild(directory, 'events');
       const terminalDigest = verification.records.at(-1)!.digest;
@@ -588,7 +590,7 @@ export class CheckpointJournal {
     try { await lstat(events); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Object.freeze([]); throw error; }
     await inspectDirectory(events);
     const names = (await readdir(events)).sort();
-    if (names.length > verification.intents.length) throw new Error('checkpoint_verification_late_call_cap');
+    if (names.length > verification.intents.length - verification.notDispatched.length) throw new Error('checkpoint_verification_late_call_cap');
     const records: CheckpointLateVerificationRecord[] = []; const attempts = new Set<string>(); let previous = terminalDigest; let total = 0;
     for (const [index, name] of names.entries()) {
       if (name !== eventFile(index + 1)) throw new Error('checkpoint_verification_late_unknown_entry');
@@ -600,7 +602,8 @@ export class CheckpointJournal {
       if (record.sequence !== index + 1 || record.previousDigest !== previous || record.verificationTerminalDigest !== terminalDigest ||
         hash !== verificationDigest(canonical(unsigned as unknown as Json)) || bytes !== `${canonical(record as unknown as Json)}\n` || attempts.has(record.result.attemptId)) throw new Error('checkpoint_verification_late_invalid_record');
       const intent = verification.intents.find(item => item.batchIndex === record.result.batchIndex && item.attemptId === record.result.attemptId);
-      if (!intent || record.result.finishedAtMs < intent.startedAtMs) throw new Error('checkpoint_verification_late_invalid_record');
+      if (!intent || record.result.finishedAtMs < intent.startedAtMs ||
+        verification.notDispatched.some(item => item.attemptId === record.result.attemptId)) throw new Error('checkpoint_verification_late_invalid_record');
       parseVerificationAnswer(record.result.answerBytes, verification.plan);
       attempts.add(record.result.attemptId); records.push(deepFreeze(record)); previous = hash;
     }
@@ -674,14 +677,16 @@ export class CheckpointJournal {
     return { snapshot: validateVerificationRecordsForAppend(values, context), bytes: bytesBySequence };
   }
 
-  private async appendVerification(input: VerificationEvent, ownership: NativeTargetOwnership): Promise<boolean> {
+  private async appendVerification(input: VerificationEvent, ownership: NativeTargetOwnership,
+    afterIntent?: (intent: VerificationIntent) => VerificationNotDispatched | void): Promise<boolean> {
     const event = snapshotVerificationEvent(input);
     return this.write(ownership, async () => {
       const context = this.verificationContext(await this.readValidated());
       const read = await recoverPublications(pending => this.readVerificationValidatedForAppend(context, pending, ownership)), snapshot = read.snapshot, state = snapshot.state, records = state?.records ?? [];
       const prior = records.find(row => row.event.type === event.type &&
         (event.type === 'intent' ? row.event.type === 'intent' && row.event.intent.attemptId === event.intent.attemptId
-          : event.type === 'result' ? row.event.type === 'result' && row.event.result.attemptId === event.result.attemptId : true));
+          : event.type === 'result' || event.type === 'not-dispatched'
+            ? row.event.type === event.type && row.event.result.attemptId === event.result.attemptId : true));
       if (prior && canonical(prior.event as unknown as Json) !== canonical(event as unknown as Json)) throw new Error('checkpoint_verification_conflict');
       // An immutable report, including a surviving partial publication, closes
       // this run to new paid work. Only identical records of a sealed phase can
@@ -704,9 +709,21 @@ export class CheckpointJournal {
           }
         }
         if (!record) return false;
-        await publishEventExclusive(directory, eventFile(record.sequence), `${canonical(record as unknown as Json)}\n`, MAX_ARTIFACT_BYTES);
-        this.verificationAcknowledgment = { ownership, sequence: record.sequence, digest: record.digest };
-        this.verificationPrefixCache = { ownership, context, bytes: [...read.bytes, `${canonical(record as unknown as Json)}\n`], snapshot: appended!.successor };
+        const recordBytes = `${canonical(record as unknown as Json)}\n`;
+        await publishEventExclusive(directory, eventFile(record.sequence), recordBytes, MAX_ARTIFACT_BYTES);
+        let finalRecord = record, finalSnapshot = appended!.successor, finalBytes = [...read.bytes, recordBytes];
+        if (event.type === 'intent' && afterIntent) {
+          const result = afterIntent(event.intent);
+          if (result) {
+            const resultEvent = snapshotVerificationEvent({ type: 'not-dispatched', result });
+            const successor = appendVerificationRecordWithSuccessor(finalSnapshot, resultEvent, context);
+            const resultBytes = `${canonical(successor.record as unknown as Json)}\n`;
+            await publishEventExclusive(directory, eventFile(successor.record.sequence), resultBytes, MAX_ARTIFACT_BYTES);
+            finalRecord = successor.record; finalSnapshot = successor.successor; finalBytes = [...finalBytes, resultBytes];
+          }
+        }
+        this.verificationAcknowledgment = { ownership, sequence: finalRecord.sequence, digest: finalRecord.digest };
+        this.verificationPrefixCache = { ownership, context, bytes: finalBytes, snapshot: finalSnapshot };
         return true;
       } catch (error) {
         this.verificationAcknowledgment = undefined; this.verificationPrefixCache = undefined;

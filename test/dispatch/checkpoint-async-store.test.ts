@@ -58,7 +58,7 @@ describe('restricted original async checkpoint persistence',()=>{
   const f=await fixture(), before=await f.journal.read(), opened=await initialize(f);
   const writers=await Promise.all(opened.delegates.map(openAsyncDelegate)); const intents=await Promise.all(writers.map((w:any)=>w.claim(prompts)));
   expect(new Set(intents.map((x:any)=>x.attemptId)).size).toBe(2);
-  await writers[1].recordResult(intents[1].attemptId,review(),true); await writers[0].recordResult(intents[0].attemptId,review('error'),true);
+  await writers[1].recordResult(intents[1].attemptId,review()); await writers[0].recordResult(intents[0].attemptId,review('error'));
   const proof=await seal(f);expect(proof.state.intents).toHaveLength(2);expect(proof.state.outcomes.map((x:any)=>x.callIndex)).toEqual([1,0]);expect(proof.state.outcomes[0].reviewBytes).toBe(review());
   expect(proof.state.uncertain).toEqual([]);expect(await f.journal.read()).toEqual(before);expect(proof.bytes).not.toContain(opened.delegates[0].token);
   expect(decodeAsyncProof(proof.bytes,proof.context)).toEqual(proof);
@@ -72,21 +72,22 @@ describe('restricted original async checkpoint persistence',()=>{
   const f=await fixture(),opened=await initialize(f),a=await openAsyncDelegate(opened.delegates[0]),b=await openAsyncDelegate(opened.delegates[1]);
   vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.startedAtMs+20);const observed=await a.claim(prompts);
   vi.setSystemTime(f.launch.startedAtMs+21);const pending=await b.claim(prompts);
-  vi.setSystemTime(f.launch.startedAtMs+30);await a.recordResult(observed!.attemptId,review(),true);
+  vi.setSystemTime(f.launch.startedAtMs+30);await a.recordResult(observed!.attemptId,review('error'));
+  vi.setSystemTime(f.launch.startedAtMs+40);await a.claim(prompts,()=>({reviewBytes:review('error')}));
   vi.setSystemTime(f.launch.startedAtMs+25);await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
-  expect((await readAsyncPhase(f.input)).state.cutoffMs).toBe(f.launch.startedAtMs+30);expect((await f.journal.read()).finalized).toBe(true);
+  expect((await readAsyncPhase(f.input)).state.cutoffMs).toBe(f.launch.startedAtMs+40);expect((await f.journal.read()).finalized).toBe(true);
   await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
-  expect(await b.recordResult(pending!.attemptId,review(),true)).toBe('late');expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
+  expect(await b.recordResult(pending!.attemptId,review())).toBe('late');expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
  });
  it('admits only durable failed-outcome retries and honors one atomic global cap',async()=>{
-  const f=await fixture(2),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);await w.recordResult(first.attemptId,review('timeout'),true);
+  const f=await fixture(2),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);await w.recordResult(first.attemptId,review('timeout'));
   const other=await openAsyncDelegate(opened.delegates[1]);const next=await Promise.all([w.claim(prompts),other.claim(prompts)]);expect(next.filter(Boolean)).toHaveLength(1);expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(2);
  });
  it('fences concurrent new intents and retries at immutable seal and preserves late audit only',async()=>{
   const f=await fixture(),opened=await initialize(f),a=await openAsyncDelegate(opened.delegates[0]),b=await openAsyncDelegate(opened.delegates[1]);const first=await a.claim(prompts);
   const [proof]=await Promise.all([seal(f),b.claim(prompts)]);const before=proof.bytes;expect(await a.claim(prompts)).toBeUndefined();expect(await b.claim(prompts)).toBeUndefined();
-  expect(await a.recordResult(first.attemptId,review(),true)).toBe('late');expect((await seal(f)).bytes).toBe(before);const audit=await readAsyncLateAudit(f.input);expect(audit).toHaveLength(1);expect(audit[0].result.reviewBytes).toBe(review());
-  await a.recordResult(first.attemptId,review(),true);expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
+  expect(await a.recordResult(first.attemptId,review())).toBe('late');expect((await seal(f)).bytes).toBe(before);const audit=await readAsyncLateAudit(f.input);expect(audit).toHaveLength(1);expect(audit[0].result.reviewBytes).toBe(review());
+  await a.recordResult(first.attemptId,review());expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
  });
  it('checks expired immutable deadline before intent and never obtains provider work',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.expiresAtMs);
@@ -100,9 +101,9 @@ describe('restricted original async checkpoint persistence',()=>{
  it('refuses oversized result bytes before lock, hash, or serialization work while valid bytes reach each control',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]),intent=await w.claim(prompts);
   observation.hashes=0; observation.serializations=0; observation.locks=0;
-  await expect(w.recordResult(intent.attemptId,'x'.repeat(8 * 1024 * 1024 + 1),true)).rejects.toThrow('invalid_bytes');
+  await expect(w.recordResult(intent.attemptId,'x'.repeat(8 * 1024 * 1024 + 1))).rejects.toThrow('invalid_bytes');
   expect(observation).toEqual({ hashes: 0, serializations: 0, locks: 0, failureReads: 0 });
-  await w.recordResult(intent.attemptId,review(),true);
+  await w.recordResult(intent.attemptId,review());
   expect(observation.hashes).toBeGreaterThan(0); expect(observation.serializations).toBeGreaterThan(0); expect(observation.locks).toBeGreaterThan(0);
   expect((await seal(f)).state.outcomes).toHaveLength(1);
  });
@@ -132,13 +133,13 @@ describe('restricted original async checkpoint persistence',()=>{
  });
  it('refuses wrong route and duplicate conflicting results but exact replay is idempotent',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const intent=await w.claim(prompts);
-  await expect(w.recordResult(intent.attemptId,review('success',{provider:'other'}),true)).rejects.toThrow('review');await w.recordResult(intent.attemptId,review(),true);await w.recordResult(intent.attemptId,review(),true);
-  await expect(w.recordResult(intent.attemptId,review('error'),true)).rejects.toThrow('conflict');expect((await seal(f)).state.outcomes).toHaveLength(1);
+  await expect(w.recordResult(intent.attemptId,review('success',{provider:'other'}))).rejects.toThrow('review');await w.recordResult(intent.attemptId,review());await w.recordResult(intent.attemptId,review());
+  await expect(w.recordResult(intent.attemptId,review('error'))).rejects.toThrow('conflict');expect((await seal(f)).state.outcomes).toHaveLength(1);
  });
  it('resyncs an existing immutable event with a writable non-truncating handle',async()=>{
-  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]),intent=await w.claim(prompts);await w.recordResult(intent.attemptId,review(),true);
+  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]),intent=await w.claim(prompts);await w.recordResult(intent.attemptId,review());
   const path=join(f.path,'async','events','00000002.json'),before=await readFile(path,'utf8');durability.requireWritableSyncPath=path;
-  await w.recordResult(intent.attemptId,review(),true);expect(await readFile(path,'utf8')).toBe(before);
+  await w.recordResult(intent.attemptId,review());expect(await readFile(path,'utf8')).toBe(before);
  });
  it('rejects changed context and noncanonical or tampered event bytes on reopen',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);await w.claim(prompts);const proof=await seal(f);
@@ -162,7 +163,7 @@ describe('restricted original async checkpoint persistence',()=>{
  it('atomically fences delegates when the owning main checkpoint finalizes',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);
   await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));expect((await readAsyncPhase(f.input)).state.cutoffMs).toBeDefined();expect(await (await openAsyncDelegate(opened.delegates[1])).claim(prompts)).toBeUndefined();
-  const main=await f.journal.exportProof();await w.recordResult(first.attemptId,review(),true);expect(await f.journal.exportProof()).toEqual(main);expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
+  const main=await f.journal.exportProof();await w.recordResult(first.attemptId,review());expect(await f.journal.exportProof()).toEqual(main);expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
  });
  it('keeps a published intent uncertain when its durability acknowledgement fails',async()=>{
   const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);durability.failPath=join(f.path,'async','events');const adapter=vi.fn();
@@ -186,8 +187,24 @@ describe('restricted original async checkpoint persistence',()=>{
 });
 
 describe('async replay append cost',()=>{
+ it('reopens a canonical legacy non-billed result and still exports its physical attempt',async()=>{
+  const {appendAsyncRecord}=await import('../../src/dispatch/checkpoint-async.js');
+  const f=await fixture();await initialize(f);const phase=await readAsyncPhase(f.input),attemptId='async-00000000-0000-4000-8000-000000000009',
+   retryId='async-00000000-0000-4000-8000-000000000010';
+  const intent={callIndex:0,attemptId,startedAtMs:f.launch.startedAtMs+1},bytes=review('error');
+  const first=appendAsyncRecord([], {type:'intent',intent}, phase.plan);
+  const second=appendAsyncRecord([first],{type:'result',result:{callIndex:0,attemptId,finishedAtMs:f.launch.startedAtMs+2,
+   reviewBytes:bytes,reviewSha256:sha256Hex(bytes),possiblyBilled:false}},phase.plan);
+  const retry=appendAsyncRecord([first,second],{type:'intent',intent:{callIndex:0,attemptId:retryId,
+   startedAtMs:f.launch.startedAtMs+3}},phase.plan);
+  const seal=appendAsyncRecord([first,second,retry],{type:'seal',cutoffMs:f.launch.startedAtMs+4},phase.plan);
+  const proof=decodeAsyncProof(stableStringify({version:1,plan:phase.plan,records:[first,second,retry,seal]}),phase.plan.context);
+  expect(proof.state.notDispatched).toEqual([]);expect(proof.physicalAttempts).toHaveLength(2);
+  expect(proof.physicalAttempts[0]).toMatchObject({attemptId,possiblyBilled:false,outcomeCertainty:'observed'});
+  expect(proof.physicalAttempts[1]).toMatchObject({attemptId:retryId,possiblyBilled:true,outcomeCertainty:'uncertain'});
+ });
  it('reuses the same-operation validated prefix when appending an async retry intent',async()=>{
-  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);const bytes=review('error');await w.recordResult(first.attemptId,bytes,true);
+  const f=await fixture(),opened=await initialize(f),w=await openAsyncDelegate(opened.delegates[0]);const first=await w.claim(prompts);const bytes=review('error');await w.recordResult(first.attemptId,bytes);
   const parse=JSON.parse;let reviewParses=0;const spy=vi.spyOn(JSON,'parse').mockImplementation((...args:Parameters<typeof JSON.parse>)=>{if(args[0]===bytes)reviewParses+=1;return parse(...args);});
   let retry;
   try{retry=await w.claim(prompts);}finally{spy.mockRestore();}
@@ -212,7 +229,7 @@ describe('async replay append cost',()=>{
  });
  it('records each private late failure without rereading prior marker files',async()=>{
   const f=await fixture(),opened=await initialize(f),first=await openAsyncDelegate(opened.delegates[0]),second=await openAsyncDelegate(opened.delegates[1]);
-  const a=await first.claim(prompts);await first.recordResult(a!.attemptId,review('error'),true);
+  const a=await first.claim(prompts);await first.recordResult(a!.attemptId,review('error'));
   const b=await first.claim(prompts),c=await second.claim(prompts);
   const reads:number[]=[];
   for(const [delegate,intent] of [[opened.delegates[0],a],[opened.delegates[0],b],[opened.delegates[1],c]] as const){
@@ -227,7 +244,7 @@ describe('async replay append cost',()=>{
 
 it('initializes, reopens and seals a phase against a declared chunk index stored out of array order', async()=>{
  const f=await fixture(2,prompts.systemPrompt,true),opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]!);
- const intent=await writer.claim(prompts);expect(intent).toBeDefined();await writer.recordResult(intent!.attemptId,review(),true);
+ const intent=await writer.claim(prompts);expect(intent).toBeDefined();await writer.recordResult(intent!.attemptId,review());
  const sealed=await seal(f),reopened=await readAsyncPhase(f.input);
  expect(reopened.plan.calls[0]!.chunkSha256).toBe(sha256Hex('chunk'));expect(reopened.state.outcomes[0]!.reviewBytes).toBe(review());expect(sealed.physicalAttempts).toHaveLength(1);
 });

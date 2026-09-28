@@ -104,21 +104,26 @@ describe('bounded durable verifier execution', () => {
   it('does not launch when the durable intent acknowledgment uses the remaining pass budget', async () => {
     const f = await fixture(1); let now = 2000;
     const original = f.journal.recordVerificationIntent.bind(f.journal);
-    vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (...args) => { const value = await original(...args); now = f.saved.expiresAtMs; return value; });
+    vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (intent, ownership, afterIntent) =>
+      original(intent, ownership, claimed => { now = f.saved.expiresAtMs; return afterIntent?.(claimed); }));
     const ask = vi.fn(async () => answer()), result = await f.execute({ nowMs: () => now, askFactory: () => ask });
-    expect(result.ok).toBe(false); expect(ask).not.toHaveBeenCalled(); expect(result.newPhysicalCalls).toBe(1);
-    expect((await f.journal.readVerification())!.uncertain).toHaveLength(1);
+    expect(result.ok).toBe(false); expect(ask).not.toHaveBeenCalled(); expect(result.newPhysicalCalls).toBe(0);
+    const phase = (await f.journal.readVerification())!;expect(phase.uncertain).toEqual([]);
+    expect(phase.outcomes).toEqual([]);expect(phase.notDispatched).toHaveLength(1);
+    expect(JSON.parse(phase.notDispatched[0]!.answerBytes)).toMatchObject({status:'error'});
   });
 
   it('rechecks a stricter runtime cutoff after durable intent without changing the saved verifier deadline', async () => {
     const f = await fixture(1); let now = 2000;
     const original = f.journal.recordVerificationIntent.bind(f.journal);
-    vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (...args) => { const value = await original(...args); now = 2100; return value; });
+    vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (intent, ownership, afterIntent) =>
+      original(intent, ownership, claimed => { now = 2100; return afterIntent?.(claimed); }));
     const ask = vi.fn(async () => answer());
     const result = await f.execute({ nowMs: () => now, askFactory: () => ask, executionExpiresAtMs: 2100 });
-    expect(result.ok).toBe(false); expect(ask).not.toHaveBeenCalled(); expect(result.newPhysicalCalls).toBe(1);
+    expect(result.ok).toBe(false); expect(ask).not.toHaveBeenCalled(); expect(result.newPhysicalCalls).toBe(0);
     const phase = (await f.journal.readVerification())!;
-    expect(phase.plan.expiresAtMs).toBe(f.saved.expiresAtMs); expect(phase.uncertain).toHaveLength(1);
+    expect(phase.plan.expiresAtMs).toBe(f.saved.expiresAtMs); expect(phase.uncertain).toEqual([]);
+    expect(phase.outcomes).toEqual([]);expect(phase.notDispatched).toHaveLength(1);
   });
 
   it('refuses completion when the stricter runtime cutoff is crossed after interpretation', async () => {
@@ -200,7 +205,9 @@ describe('bounded durable verifier execution', () => {
 
   it('does not spend after a lost intent acknowledgment', async () => {
     const f = await fixture(1), original = f.journal.recordVerificationIntent.bind(f.journal), ask = vi.fn(async () => answer());
-    const spy = vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (...args) => { await original(...args); throw new Error('lost ack'); });
+    const spy = vi.spyOn(f.journal, 'recordVerificationIntent').mockImplementation(async (intent, ownership) => {
+      await original(intent, ownership); throw new Error('lost ack');
+    });
     await expect(f.execute({ askFactory: () => ask })).rejects.toThrow(); expect(ask).not.toHaveBeenCalled(); spy.mockRestore();
     const resumed = await f.execute(); expect(resumed.ok).toBe(false); expect(resumed.newPhysicalCalls).toBe(0);
     expect((await f.journal.readVerification())!.uncertain).toHaveLength(1); expect(f.factory).not.toHaveBeenCalled();
@@ -213,9 +220,16 @@ describe('bounded durable verifier execution', () => {
       registerLateAudit: () => { throw new Error('audit owner unavailable'); },
     });
     expect(result.ok).toBe(false);
-    expect(result.newPhysicalCalls).toBe(1);
+    expect(result.newPhysicalCalls).toBe(0);
     expect(ask).not.toHaveBeenCalled();
-    expect((await f.journal.readVerification())!.terminal?.reason).toBe('verification_execution_late_audit_unavailable');
+    const phase=(await f.journal.readVerification())!;
+    expect(phase.terminal?.reason).toBe('verification_execution_late_audit_unavailable');
+    expect(phase.uncertain).toEqual([]);expect(phase.outcomes).toEqual([]);expect(phase.notDispatched).toHaveLength(1);
+    const declined=phase.notDispatched[0]!;
+    await expect(withNativeTarget(f.commonDir,target,ownership=>f.journal.recordLateVerificationResult({
+      batchIndex:declined.batchIndex,attemptId:declined.attemptId,finishedAtMs:declined.finishedAtMs+1,
+      answerBytes:JSON.stringify(answer()),
+    },ownership))).rejects.toThrow('checkpoint_verification_late_invalid_result');
   });
 
   it('does not reinterpret a completed phase when cancellation arrives during its final persistence', async () => {

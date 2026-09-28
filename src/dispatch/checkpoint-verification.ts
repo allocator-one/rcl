@@ -23,6 +23,7 @@ const planSchema = z.object({
 }).strict();
 const intentSchema = z.object({ batchIndex: integer, attemptId, startedAtMs: integer }).strict();
 const resultSchema = z.object({ batchIndex: integer, attemptId, finishedAtMs: integer, answerBytes: z.string().min(1) }).strict();
+const notDispatchedSchema = resultSchema;
 const terminalSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('complete'), finishedAtMs: integer }).strict(),
   z.object({ status: z.literal('failed'), finishedAtMs: integer, reason: text }).strict(),
@@ -32,6 +33,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('plan'), plan: planSchema }).strict(),
   z.object({ type: z.literal('intent'), intent: intentSchema }).strict(),
   z.object({ type: z.literal('result'), result: resultSchema }).strict(),
+  z.object({ type: z.literal('not-dispatched'), result: notDispatchedSchema }).strict(),
   z.object({ type: z.literal('terminal'), terminal: terminalSchema }).strict(),
 ]);
 const recordSchema = z.object({ sequence: integer.min(1), previousDigest: digest, digest,
@@ -54,6 +56,7 @@ const requestPlanSchema = z.object({ version: z.union([z.literal(1), z.literal(2
 export type VerificationPlanInput = z.infer<typeof planSchema>;
 export type VerificationIntent = z.infer<typeof intentSchema>;
 export type VerificationResult = z.infer<typeof resultSchema>;
+export type VerificationNotDispatched = z.infer<typeof notDispatchedSchema>;
 export type VerificationTerminal = z.infer<typeof terminalSchema>;
 export type VerificationEvent = z.infer<typeof eventSchema>;
 export type VerificationRecord = z.infer<typeof recordSchema>;
@@ -68,6 +71,7 @@ export interface VerificationState {
   records: VerificationRecord[];
   intents: VerificationIntent[];
   outcomes: VerificationResult[];
+  notDispatched: VerificationNotDispatched[];
   uncertain: VerificationIntent[];
   terminal?: VerificationTerminal;
 }
@@ -80,8 +84,10 @@ interface VerificationValidationMetadata {
   records: VerificationRecord[];
   intents: VerificationIntent[];
   outcomes: VerificationResult[];
+  notDispatched: VerificationNotDispatched[];
   byBatch: Map<number, VerificationIntent>;
   ids: Set<string>;
+  resolvedAttempts: Set<string>;
   results: Set<number>;
   plan?: VerificationPlanInput;
   terminal?: VerificationTerminal;
@@ -90,14 +96,16 @@ const validatedVerificationRecords = new WeakMap<ValidatedVerificationRecords, V
 
 function snapshotFromMetadata(metadata: VerificationValidationMetadata): ValidatedVerificationRecords {
   const state = metadata.plan === undefined ? undefined : freeze({ plan: metadata.plan, records: [...metadata.records], intents: [...metadata.intents],
-    outcomes: [...metadata.outcomes], uncertain: metadata.intents.filter(row => !metadata.results.has(row.batchIndex)), ...(metadata.terminal ? { terminal: metadata.terminal } : {}) });
+    outcomes: [...metadata.outcomes], notDispatched: [...metadata.notDispatched],
+    uncertain: metadata.intents.filter(row => !metadata.resolvedAttempts.has(row.attemptId)), ...(metadata.terminal ? { terminal: metadata.terminal } : {}) });
   const snapshot = freeze(state ? { state } : {});
   validatedVerificationRecords.set(snapshot, metadata);
   return snapshot;
 }
 function cloneMetadata(metadata: VerificationValidationMetadata): VerificationValidationMetadata {
   return { ...metadata, records: [...metadata.records], intents: [...metadata.intents], outcomes: [...metadata.outcomes],
-    byBatch: new Map(metadata.byBatch), ids: new Set(metadata.ids), results: new Set(metadata.results) };
+    notDispatched: [...metadata.notDispatched],
+    byBatch: new Map(metadata.byBatch), ids: new Set(metadata.ids), resolvedAttempts: new Set(metadata.resolvedAttempts), results: new Set(metadata.results) };
 }
 /** Internal checkpoint-only continuation after exact disk-byte comparison. */
 export function cloneValidatedVerificationRecords(snapshot: ValidatedVerificationRecords, context: VerificationContext): ValidatedVerificationRecords {
@@ -184,7 +192,7 @@ function preflightRawVerificationEvent(value: unknown, budget = { bytes: 0 }): v
       refuse(plan.batches.length <= 500, 'invalid_event');
       for (const batch of plan.batches) boundRawStrings(batch, ['systemPrompt', 'userPrompt'], budget, 8 * 1024 * 1024);
     }
-  } else if (event.type === 'result') {
+  } else if (event.type === 'result' || event.type === 'not-dispatched') {
     boundRawStrings(event.result, ['attemptId'], budget);
     boundRawStrings(event.result, ['answerBytes'], budget, 8 * 1024 * 1024);
   } else if (event.type === 'intent') boundRawStrings(event.intent, ['attemptId'], budget);
@@ -218,7 +226,7 @@ export function snapshotVerificationEvent(input: VerificationEvent): Verificatio
     refuse(plan.model === event.plan.model && plan.verificationTimeoutMs === event.plan.verificationTimeoutMs &&
       plan.verificationPassTimeoutMs === event.plan.verificationPassTimeoutMs &&
       stableStringify(plan.batches.map(({ systemPrompt, userPrompt }) => ({ systemPrompt, userPrompt }))) === stableStringify(event.plan.batches), 'request_plan_mismatch');
-  } else if (event.type === 'result') opaque(event.result.answerBytes);
+  } else if (event.type === 'result' || event.type === 'not-dispatched') opaque(event.result.answerBytes);
   refuse(Buffer.byteLength(stableStringify(event), 'utf8') <= MAX_ARTIFACT_BYTES, 'too_large');
   return freeze(event);
 }
@@ -238,16 +246,18 @@ function checkVerificationEvent(event: VerificationEvent, index: number, metadat
       refuse(row.batchIndex < plan.batches.length && !metadata.byBatch.has(row.batchIndex) && !metadata.ids.has(row.attemptId), 'duplicate_or_unknown_intent');
       refuse(row.startedAtMs >= plan.startedAtMs && row.startedAtMs < plan.expiresAtMs &&
         row.startedAtMs >= (metadata.intents.at(-1)?.startedAtMs ?? plan.startedAtMs), 'invalid_intent_time');
-      refuse(metadata.intents.length < plan.maxPhysicalCalls, 'call_cap');
-    } else if (event.type === 'result') {
+      refuse(metadata.intents.length - metadata.notDispatched.length < plan.maxPhysicalCalls, 'call_cap');
+    } else if (event.type === 'result' || event.type === 'not-dispatched') {
       const row = event.result, launch = metadata.byBatch.get(row.batchIndex);
-      refuse(launch && launch.attemptId === row.attemptId && !metadata.results.has(row.batchIndex), 'missing_or_duplicate_intent');
+      refuse(launch && launch.attemptId === row.attemptId && !metadata.resolvedAttempts.has(row.attemptId), 'missing_or_duplicate_intent');
       refuse(row.finishedAtMs >= launch.startedAtMs, 'invalid_result_time');
-      parseVerificationAnswer(row.answerBytes, plan);
+      const answer = parseVerificationAnswer(row.answerBytes, plan);
+      if (event.type === 'not-dispatched') refuse(answer.status === 'error', 'invalid_not_dispatched');
     } else {
       const row = event.terminal;
       refuse(row.finishedAtMs >= plan.startedAtMs && metadata.intents.every(x => x.startedAtMs <= row.finishedAtMs) &&
-        metadata.outcomes.every(x => x.finishedAtMs <= row.finishedAtMs), 'invalid_terminal_time');
+        metadata.outcomes.every(x => x.finishedAtMs <= row.finishedAtMs) &&
+        metadata.notDispatched.every(x => x.finishedAtMs <= row.finishedAtMs), 'invalid_terminal_time');
       if (row.status === 'complete') refuse(metadata.results.size === plan.batches.length && row.finishedAtMs < plan.expiresAtMs, 'incomplete');
     }
   }
@@ -257,7 +267,9 @@ function retainVerificationEvent(event: VerificationEvent, metadata: Verificatio
   else if (event.type === 'intent') {
     metadata.byBatch.set(event.intent.batchIndex, event.intent); metadata.ids.add(event.intent.attemptId); metadata.intents.push(event.intent);
   } else if (event.type === 'result') {
-    metadata.results.add(event.result.batchIndex); metadata.outcomes.push(event.result);
+    metadata.resolvedAttempts.add(event.result.attemptId); metadata.outcomes.push(event.result); metadata.results.add(event.result.batchIndex);
+  } else if (event.type === 'not-dispatched') {
+    metadata.resolvedAttempts.add(event.result.attemptId); metadata.notDispatched.push(event.result); metadata.byBatch.delete(event.result.batchIndex);
   } else metadata.terminal = event.terminal;
 }
 function validateVerificationRecordSet(input: readonly unknown[], context: VerificationContext): { state?: VerificationState; metadata: VerificationValidationMetadata } {
@@ -272,7 +284,7 @@ function validateVerificationRecordSet(input: readonly unknown[], context: Verif
   const expected = stableStringify(binding(context));
   const metadata: VerificationValidationMetadata = { contextFingerprint: contextFingerprint(context), expectedBinding: expected,
     retainedBytes: Buffer.byteLength('{"records":[],"version":1}', 'utf8'), previousDigest: context.finalizationDigest,
-    records: [], intents: [], outcomes: [], byBatch: new Map(), ids: new Set(context.reviewerAttemptIds), results: new Set() };
+    records: [], intents: [], outcomes: [], notDispatched: [], byBatch: new Map(), ids: new Set(context.reviewerAttemptIds), resolvedAttempts: new Set(), results: new Set() };
   if (!input.length) return { metadata };
   for (const [index, value] of input.entries()) {
     const parsed = recordSchema.safeParse(value);
@@ -288,7 +300,8 @@ function validateVerificationRecordSet(input: readonly unknown[], context: Verif
   }
   refuse(metadata.plan, 'missing_plan');
   const state = freeze({ plan: metadata.plan, records: metadata.records, intents: metadata.intents, outcomes: metadata.outcomes,
-    uncertain: metadata.intents.filter(row => !metadata.results.has(row.batchIndex)), ...(metadata.terminal ? { terminal: metadata.terminal } : {}) });
+    notDispatched: metadata.notDispatched,
+    uncertain: metadata.intents.filter(row => !metadata.resolvedAttempts.has(row.attemptId)), ...(metadata.terminal ? { terminal: metadata.terminal } : {}) });
   return { state, metadata };
 }
 

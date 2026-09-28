@@ -107,7 +107,10 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
       if (reviewerCalls + options.otherPhysicalCalls + retained.maxPhysicalCalls > 500) fail('verification_execution_total_call_cap');
       if (remaining() <= 0) fail('verification_execution_deadline');
       if (!failure) passTimer = setTimeout(() => fail('verification_execution_deadline'), remaining());
-      const todo = plan.batches.map((_, index) => index).filter(index => !state.intents.some(row => row.batchIndex === index));
+      const todo = plan.batches.map((_, index) => index).filter(index => !state.intents.some(intent => {
+        if (intent.batchIndex !== index) return false;
+        return !state.notDispatched.some(outcome => outcome.attemptId === intent.attemptId);
+      }));
       let ask: AskFn | undefined;
       if (!failure && todo.length) {
         await options.beforeLaunch();
@@ -123,32 +126,42 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
         if (failure) return;
         if (remaining() <= 0) { fail('verification_execution_deadline'); return; }
         const intent = { batchIndex, attemptId: `verifier-${randomUUID()}`, startedAtMs: now() };
-        const claimed = await options.journal.recordVerificationIntent(intent, ownership);
-        if (!claimed) { fail('verification_execution_uncertain_intent'); return; }
-        // Counts include a durable intent whose acknowledgment outlived expiry;
-        // it cannot safely be refunded or used to launch after the deadline.
-        newPhysicalCalls++;
-        if (remaining() <= 0) fail('verification_execution_deadline');
-        if (failure) return;
-        const batch = plan.batches[batchIndex]!;
-        const timeoutMs = Math.max(1, Math.floor(Math.min(retained.verificationTimeoutMs, remaining())));
-        const call = new AbortController();
-        const observed = await new Promise<VerificationResult | undefined>(resolve => {
-          let settled = false;
+        let observed: Promise<VerificationResult | undefined> | undefined;
+        const nonBilled = (reason: string): VerificationResult => ({ batchIndex, attemptId: intent.attemptId,
+          finishedAtMs: now(), answerBytes: JSON.stringify({ model: retained.model,
+            provider: retained.provider, text: '', durationMs: Math.max(0, now() - intent.startedAtMs),
+            status: 'error', error: reason }) });
+        const claimed = await options.journal.recordVerificationIntent(intent, ownership, () => {
+          if (remaining() <= 0) {
+            fail('verification_execution_deadline');
+            return nonBilled('Verifier deadline expired before provider dispatch.');
+          }
+          const batch = plan.batches[batchIndex]!;
+          const timeoutMs = Math.max(1, Math.floor(Math.min(retained.verificationTimeoutMs, remaining())));
+          const call = new AbortController();
+          let settleContinuation!: () => void;
+          const retainedContinuation = new Promise<void>(resolve => { settleContinuation = resolve; });
+          try { options.registerLateAudit(retainedContinuation, batchIndex); }
+          catch {
+            fail('verification_execution_late_audit_unavailable'); settleContinuation();
+            return nonBilled('Verifier late-audit owner was unavailable before provider dispatch.');
+          }
+          let resolveObserved!: (row?: VerificationResult) => void, settled = false;
+          observed = new Promise<VerificationResult | undefined>(resolve => { resolveObserved = resolve; });
           const finish = (row?: VerificationResult): boolean => {
             if (settled) return false;
-            settled = true; clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); resolve(row);
+            settled = true; clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); resolveObserved(row);
             return true;
           };
           const onAbort = (): void => { call.abort(); finish(); };
           const timer = setTimeout(() => { fail('verification_execution_request_timeout'); }, timeoutMs);
           controller.signal.addEventListener('abort', onAbort, { once: true });
-          if (controller.signal.aborted) { onAbort(); return; }
-          let settleContinuation!: () => void;
-          const retainedContinuation = new Promise<void>(resolve => { settleContinuation = resolve; });
-          try { options.registerLateAudit(retainedContinuation, batchIndex); }
-          catch { fail('verification_execution_late_audit_unavailable'); finish(); settleContinuation(); return; }
+          if (controller.signal.aborted) {
+            onAbort(); settleContinuation();
+            return nonBilled('Verifier execution was canceled before provider dispatch.');
+          }
           let request: ReturnType<AskFn>;
+          newPhysicalCalls++;
           try { request = ask!(plan.model, batch.systemPrompt, batch.userPrompt, { timeoutMs, maxRetries: 0, signal: call.signal,
               ...(plan.verificationReasoningEffort ? { reasoningEffort: plan.verificationReasoningEffort } : {}) }); }
           catch { fail('verification_execution_request_failed'); finish(); settleContinuation(); return; }
@@ -165,10 +178,14 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
               try { options.onLateAuditError(error, batchIndex); } catch (sinkError) { auditErrors.push(sinkError); }
             } else { fail('verification_execution_request_failed'); finish(); }
           }).finally(settleContinuation);
+          return;
         });
-        if (observed) {
+        if (!claimed) { fail('verification_execution_uncertain_intent'); return; }
+        if (!observed) return;
+        const outcome = await observed;
+        if (outcome) {
           // Keep exact schema fields; the intent timestamp is not part of a result.
-          const { batchIndex, attemptId, finishedAtMs, answerBytes } = observed;
+          const { batchIndex, attemptId, finishedAtMs, answerBytes } = outcome;
           await options.journal.recordVerificationResult({ batchIndex, attemptId, finishedAtMs, answerBytes }, ownership);
         }
         if (remaining() <= 0) fail('verification_execution_deadline');
@@ -185,7 +202,8 @@ export function executeVerification(input: VerificationExecutionOptions): Promis
       if (!failure) {
         // Complete interpretation before sealing. First completion returns this
         // exact result; a later resume replays the identical retained transcript.
-        interpreted = replayGating(plan, state.outcomes.map(row => ({ batchIndex: row.batchIndex, kind: 'answer', answer: parseVerificationAnswer(row.answerBytes, retained) })), now() - retained.startedAtMs);
+        interpreted = replayGating(plan, state.outcomes
+          .map(row => ({ batchIndex: row.batchIndex, kind: 'answer', answer: parseVerificationAnswer(row.answerBytes, retained) })), now() - retained.startedAtMs);
         if (remaining() <= 0) fail('verification_execution_deadline');
       }
       const finishedAtMs = now();

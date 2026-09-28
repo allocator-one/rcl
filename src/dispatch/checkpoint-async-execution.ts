@@ -41,12 +41,21 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
     let expired = false;
     let stop!: () => void;
     const stopped = new Promise<undefined>(resolve => { stop = () => { expired = true; controller.abort(); resolve(undefined); }; });
+    const observedFailure = (error: unknown): ModelReview => failedReview({
+      model: call.ref.model, role: call.ref.role, provider: call.ref.provider, startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    });
     let intent;
     try {
       intent = await writer.claim(call.prompt, () => {
         // This is synchronous under the phase's cutoff lock, AFTER fsync. No
         // seal, cancellation, or deadline renewal can slip between check/start.
-        if (options.signal?.aborted || remaining() <= 0) return;
+        if (options.signal?.aborted || remaining() <= 0) {
+          const review = observedFailure(options.signal?.aborted
+            ? 'Async call canceled before provider dispatch.'
+            : 'Async call deadline expired before provider dispatch.');
+          return { reviewBytes: stableStringify({ ...review, async: true }) };
+        }
         const duration = Math.min(timeoutMs, Math.max(1, Math.floor(remaining())));
         options.signal?.addEventListener('abort', stop, { once: true });
         timer = setTimeout(stop, duration);
@@ -66,15 +75,12 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       options.signal?.removeEventListener('abort', stop);
       throw error;
     }
-    if (!intent || !raw || !observed) break;
+    if (!intent) break;
+    if (!raw || !observed) break;
     const reportDerivedError = (error: unknown): void => {
       try { void Promise.resolve(options.onLateAuditError(error, intent.attemptId)).catch(() => {}); }
       catch { /* contained */ }
     };
-    const observedFailure = (error: unknown): ModelReview => failedReview({
-      model: call.ref.model, role: call.ref.role, provider: call.ref.provider, startedAt,
-      error: error instanceof Error ? error.message : String(error),
-    });
     const persist = async (result: Awaited<ReturnType<ReviewAdapter['review']>>) => {
       let review: ModelReview;
       try {
@@ -83,7 +89,7 @@ export async function executeCheckpointAsync(input: CheckpointAsyncExecutionOpti
       } catch (error) { review = observedFailure(error); }
       const bytes = stableStringify({ ...review, async: true });
       review = parseAsyncReview(bytes, call.ref) as ModelReview;
-      await writer.recordResult(intent.attemptId, bytes, true);
+      await writer.recordResult(intent.attemptId, bytes);
       // Derived publication cannot change exact physical accounting or stop a
       // durable timeout retry. Its private error sink is detached and contained.
       try { void options.onReviewRecorded?.(structuredClone(review) as ModelReview).catch(reportDerivedError); }

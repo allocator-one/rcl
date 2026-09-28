@@ -17,14 +17,18 @@ import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
 import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
-  validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
+  validateAsyncNotDispatched, validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
   type AsyncPlan, type AsyncProof, type AsyncRecord, type AsyncResult, type AsyncState } from './checkpoint-async.js';
 
 interface LocationInput { commonDir: string; namespace: string; plan: FrozenCheckpointPlan }
 interface Location { commonDir: string; namespace: string; checkpointPath: string; phasePath: string; plan: FrozenCheckpointPlan }
 export interface InitializeAsyncInput extends LocationInput { ownership: NativeTargetOwnership; calls: readonly AsyncCall[]; maxPhysicalCalls: number; maxAttemptsPerCall: number; expiresAtMs: number }
 export interface AsyncDelegate { version: 1; commonDir: string; namespace: string; target: string; checkpointPath: string; planDigest: string; callIndex: number; token: string }
-export interface AsyncWriter { claim(prompts: { systemPrompt: string; userPrompt: string }, afterIntent?: (intent: AsyncIntent) => void): Promise<AsyncIntent | undefined>; recordResult(attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> }
+export interface AsyncWriter {
+  claim(prompts: { systemPrompt: string; userPrompt: string },
+    afterIntent?: (intent: AsyncIntent) => { reviewBytes: string } | void): Promise<AsyncIntent | undefined>;
+  recordResult(attemptId: string, reviewBytes: string): Promise<'observed' | 'late'>;
+}
 interface OpinionCycle { version: 1; cycleId: string | null }
 interface Metadata { version: 1; plan: AsyncPlan; grants: string[]; opinionCycle?: OpinionCycle }
 interface Phase { plan: AsyncPlan; state: AsyncState }
@@ -114,6 +118,7 @@ function logicalCutoffMs(plan: AsyncPlan, state: AsyncState): number {
   let cutoffMs = Math.max(Date.now(), plan.context.startedAtMs);
   for (const intent of state.intents) cutoffMs = Math.max(cutoffMs, intent.startedAtMs);
   for (const outcome of state.outcomes) cutoffMs = Math.max(cutoffMs, outcome.finishedAtMs);
+  for (const result of state.notDispatched) cutoffMs = Math.max(cutoffMs, result.finishedAtMs);
   asyncRefuse(Number.isSafeInteger(cutoffMs), 'clock'); return cutoffMs;
 }
 /** Freeze derivative opinion routing while the original native claim is still owned. */
@@ -202,29 +207,42 @@ export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWrit
   const snapshot = structuredClone(input), { location, delegate } = await delegatedLocation(snapshot);
   await locked(location, async metadata => authorize(metadata, delegate));
   return Object.freeze({
-    claim: async (prompts: { systemPrompt: string; userPrompt: string }, afterIntent?: (intent: AsyncIntent) => void): Promise<AsyncIntent | undefined> => {
+    claim: async (prompts: { systemPrompt: string; userPrompt: string },
+      afterIntent?: (intent: AsyncIntent) => { reviewBytes: string } | void): Promise<AsyncIntent | undefined> => {
       const system = prompts.systemPrompt, user = prompts.userPrompt;
       return locked(location, async (metadata, state) => {
         authorize(metadata, delegate); const call = metadata.plan.calls[delegate.callIndex]!;
         asyncRefuse([system, user].every(value => typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= CAPTURED_INPUT_LIMITS.bytes &&
           Buffer.from(value, 'utf8').toString('utf8') === value) && sha256Hex(system) === call.systemPromptSha256 && sha256Hex(user) === call.userPromptSha256, 'prompt_mismatch');
         const now = Date.now(); asyncRefuse(Number.isSafeInteger(now) && now >= metadata.plan.context.startedAtMs, 'clock');
-        const prior = state.intents.filter(row => row.callIndex === delegate.callIndex), last = prior.at(-1), outcome = last && state.outcomes.find(row => row.attemptId === last.attemptId);
-        if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || state.intents.length >= metadata.plan.maxPhysicalCalls || prior.length >= metadata.plan.maxAttemptsPerCall ||
-          last && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
+        const prior = state.intents.filter(row => row.callIndex === delegate.callIndex), last = prior.at(-1),
+          outcome = last && state.outcomes.find(row => row.attemptId === last.attemptId),
+          declined = last && state.notDispatched.find(row => row.attemptId === last.attemptId);
+        const billedIntents = state.intents.filter(row => !state.notDispatched.some(result => result.attemptId === row.attemptId));
+        const billedPrior = prior.filter(row => !state.notDispatched.some(result => result.attemptId === row.attemptId));
+        if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || billedIntents.length >= metadata.plan.maxPhysicalCalls || billedPrior.length >= metadata.plan.maxAttemptsPerCall ||
+          last && !declined && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
         const intent = { callIndex: delegate.callIndex, attemptId: `async-${randomUUID()}`, startedAtMs: now };
-        await append(location, state, metadata.plan, { type: 'intent', intent });
+        const intentRecord = await append(location, state, metadata.plan, { type: 'intent', intent });
         // A retained executor may synchronously start dispatch after fsync while
         // this same cutoff lock is held. Never await provider work under the lock.
-        const frozen = freezeAsync(intent); afterIntent?.(frozen); return frozen;
+        const frozen = freezeAsync(intent), undispatched = afterIntent?.(frozen);
+        if (undispatched) {
+          const claimed = validateAsyncRecords([...state.records, intentRecord], metadata.plan);
+          const result = validateAsyncNotDispatched({ callIndex: delegate.callIndex, attemptId: intent.attemptId,
+            reviewBytes: undispatched.reviewBytes, reviewSha256: sha256Hex(undispatched.reviewBytes),
+            finishedAtMs: Date.now() }, metadata.plan, claimed.intents);
+          await append(location, claimed, metadata.plan, { type: 'not-dispatched', result });
+        }
+        return frozen;
       });
     },
-    recordResult: async (attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> => {
+    recordResult: async (attemptId: string, reviewBytes: string): Promise<'observed' | 'late'> => {
       assertAsyncReviewBytes(reviewBytes);
       const finishedAtMs = Date.now();
       return locked(location, async (metadata, state) => {
         authorize(metadata, delegate); const existing = state.outcomes.find(row => row.attemptId === attemptId);
-        const result = validateAsyncResult({ callIndex: delegate.callIndex, attemptId, reviewBytes, reviewSha256: sha256Hex(reviewBytes), possiblyBilled,
+        const result = validateAsyncResult({ callIndex: delegate.callIndex, attemptId, reviewBytes, reviewSha256: sha256Hex(reviewBytes), possiblyBilled: true,
           finishedAtMs: existing?.finishedAtMs ?? finishedAtMs }, metadata.plan, state.intents);
         if (existing) {
           asyncRefuse(stableStringify(existing) === stableStringify(result), 'result_conflict');
