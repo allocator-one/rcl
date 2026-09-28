@@ -108,6 +108,7 @@ Review a PR, a local diff, or uncommitted work.
 | `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
 | `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
+| `--retry-report <path>` | Bind an original legacy report to a same-input inconclusive retry; requires `--retry-reason` |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
@@ -213,6 +214,16 @@ A real fix needs a fresh resulting head; unresolved native blockers refuse anoth
 launch. Unknown/failed dispatch requires an explicit `--retry-reason` after
 recovery, even if the head changed. This does not refund attempts or promise
 exactly-once provider billing. Credential presence cannot prove provider availability.
+
+For a 4.1.11 or 4.1.12 aggregate-only completion, retain the original inputs and
+config and add `--retry-report original-report.json` with an explicit bounded
+`--retry-reason` and a fresh `--json-file` destination. RCL binds the exact report,
+config, target, head, round, attempt, cycle and roster before deriving blocking-only
+health with the shared quorum policy. Healthy or ambiguous evidence refuses.
+An unadmitted source retries its pending round; an exact latest admitted source
+whose blocking health was inconclusive continues at the next native round. Its
+original admission, findings, verdicts and spent claims remain unchanged. The
+new claim retains the source bytes and binding; no history or budget is reset.
 
 `--launch-intent stop-upstream` never cancels review. `stop-review` and
 `retry-delivery` refuse new reviewer dispatch; cancel an existing review only
