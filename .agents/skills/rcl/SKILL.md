@@ -22,7 +22,9 @@ allowed-tools:
   - Bash(npm install -g --ignore-scripts review-council@:*)
   - Bash(which rcl)
   - Bash(command -v rcl)
+  - Bash(command -v node)
   - Bash(realpath:*)
+  - Bash(head -1:*)
   - Bash(rcl_run:*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -101,7 +103,7 @@ DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo orig
 git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch: $DEFAULT_BRANCH"; exit 1; }
 BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
 env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff \
-  --no-ext-diff --no-textconv --text "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
+  --no-ext-diff --no-textconv "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<REPO>-<BRANCH>.patch
 ```
 
 `--no-ext-diff --no-textconv` (with `GIT_EXTERNAL_DIFF` unset) keeps repository- or user-configured diff and text-conversion helpers from running, or from rewriting the patch the council sees; the `-c` overrides stop a local `diff.noprefix`, `diff.mnemonicPrefix`, or `color.ui=always` setting from producing a patch rcl mis-parses or that carries ANSI codes. A branch can still mark paths `-diff` in its own `.gitattributes`, which makes git treat them as binary for diff purposes even with these flags; if the generated patch contains a `Binary files a/… and b/… differ` line for a path that is not actually binary, treat that as a disclosure-check red flag (content is hidden from both you and the reviewers) and tell the user before proceeding.
@@ -165,21 +167,37 @@ Always run the latest published release — never pin a version. A pin has to be
 Resolve the latest release, its registry integrity and the installed executable's path — without running it yet:
 
 ```bash
-RCL_LATEST=$(npm view review-council@latest version --registry https://registry.npmjs.org) &&
-  RCL_INTEGRITY=$(npm view "review-council@$RCL_LATEST" dist.integrity --registry https://registry.npmjs.org) &&
+RCL_LATEST=$(npm view review-council@latest version --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null) &&
+  RCL_INTEGRITY=$(npm view "review-council@$RCL_LATEST" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null) &&
   echo "latest=$RCL_LATEST integrity=$RCL_INTEGRITY" &&
   RCL_BIN=$(command -v rcl) && RCL_BIN=$(realpath "$RCL_BIN") && echo "rcl=$RCL_BIN"
 ```
 
-`--registry https://registry.npmjs.org` pins the real registry explicitly: without it, a `.npmrc` committed to the repository under review (or present in the working directory) can redirect `npm view`/`npm install` to an attacker-controlled registry, which would then corroborate its own poisoned "latest" against its own poisoned integrity hash. `<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop.
+(Write out every flag in each command rather than collecting them in a shell variable: zsh does not word-split an unquoted `$var` the way bash/sh does, so a multi-flag variable silently collapses into one bad argument there.)
 
-Before running `"$RCL_BIN" --version` — do not run it yet — check the executable itself: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never run — not even to print its version — before these checks pass. If a check fails, stop and tell the user rather than running it. Only once every check above passes, run `"$RCL_BIN" --version` and require it to print exactly `<RCL_LATEST>`.
+`--registry` alone only overrides the registry URL — a `.npmrc` committed to the repository under review (found from the current working directory) can still set `proxy`/`https-proxy`, `strict-ssl=false`, or `ca`/`cafile`, and answer these "pinned-registry" requests itself. The rest of the flags close that: npm's config precedence puts CLI flags above project `.npmrc`, so `--proxy=null --https-proxy=null` disables a project-supplied proxy, `--strict-ssl=true` overrides a project `strict-ssl=false`, and `--ca=null --cafile=null` discards a project-supplied CA so only the system trust store is used. `<RCL_LATEST>` below is the printed version and must be a plain `X.Y.Z`; `<RCL_INTEGRITY>` must start with `sha512-`. Otherwise stop.
+
+Before running `"$RCL_BIN" --version` — do not run it yet — check the executable itself: its real path must not be inside the repository under review (`git rev-parse --show-toplevel`) or any other checkout, and neither the file nor any directory above it may be world-writable or owned by anyone other than you or root. Group-writable directories are acceptable only at or below npm's own global prefix (`npm prefix -g`), where Homebrew on Apple Silicon makes them group-writable for its admin group by design; above that prefix, reject them too. A repository can put its own `rcl` early on `PATH`, and that copy must never run — not even to print its version — before these checks pass.
+
+Checking `$RCL_BIN` alone is not enough: it is a `#!/usr/bin/env node` script, and an `env`-style shebang resolves its interpreter through `PATH` all over again at exec time — independently of the path you just verified. A repository that puts its own `node` earlier on `PATH` runs through that shebang with every credential this step and step 5 later hand to the process, even though `$RCL_BIN` itself resolved to a trusted install. Read the shebang and check the interpreter it names the same way:
+
+```bash
+head -1 "$RCL_BIN"
+```
+
+If it reads `#!/usr/bin/env node` (or `#!/usr/bin/env -S node ...`), resolve and check that interpreter too, before running anything:
+
+```bash
+RCL_INTERP=$(command -v node) && RCL_INTERP=$(realpath "$RCL_INTERP") && echo "interpreter=$RCL_INTERP"
+```
+
+and apply the exact same path/ownership rules above to `$RCL_INTERP`. If the shebang names something other than `node`, resolve and check that name instead. If either check fails, stop and tell the user rather than running it. Only once every check above passes — for both `$RCL_BIN` and its interpreter — run `"$RCL_BIN" --version` and require it to print exactly `<RCL_LATEST>`.
 
 If `rcl` is missing, fails a check, or prints anything other than `<RCL_LATEST>`, install exactly that release without running package lifecycle scripts, and confirm the registry still serves the same artifact:
 
 ```bash
-npm install -g --ignore-scripts "review-council@<RCL_LATEST>" --registry https://registry.npmjs.org &&
-  test "$(npm view "review-council@<RCL_LATEST>" dist.integrity --registry https://registry.npmjs.org)" = "<RCL_INTEGRITY>"
+npm install -g --ignore-scripts "review-council@<RCL_LATEST>" --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null &&
+  test "$(npm view "review-council@<RCL_LATEST>" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"
 ```
 
 Then repeat the resolution and checks above, and require `rcl --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.
@@ -209,7 +227,7 @@ rcl_run() {
 }
 ```
 
-Values pass through as separate arguments, so no value is ever re-split or re-parsed by the shell. Add a variable to the list only when a configured reviewer needs it, and never add `GH_TOKEN`, `SSH_AUTH_SOCK` or cloud credentials. In PR mode pass the GitHub token as an explicit assignment after `rcl_run`, as below; never pass one to a patch-file review.
+Values pass through as separate arguments, so no value is ever re-split or re-parsed by the shell. Add a variable to the list only when a configured reviewer needs it, and never add `GH_TOKEN`, `SSH_AUTH_SOCK` or cloud credentials. In PR mode pass the GitHub token as an explicit assignment after `rcl_run`, as below; a patch captured and bound to a PR with `--for-pr` (see "Fresh review requests" above) still needs one, since RCL fetches PR/GitHub state for that binding — never pass one to a bare, unbound patch-file review.
 
 **Always write the full report to files** with `--markdown` and `--json-file`. The console output is long and the critical/important findings print at the top, so reading it off stdout — especially piped through `head`/`tail` — silently drops the most important findings. The files are the source of truth; the console is throwaway.
 

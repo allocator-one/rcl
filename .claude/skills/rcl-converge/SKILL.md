@@ -33,7 +33,9 @@ allowed-tools:
   - Bash(npm run lint:*)
   - Bash(which rcl)
   - Bash(command -v rcl)
+  - Bash(command -v node)
   - Bash(realpath:*)
+  - Bash(head -1:*)
   - Bash(rcl_run:*)
   - Bash(rm -f /tmp/rcl-*)
   - Write(/tmp/rcl-spec-*.md)
@@ -126,7 +128,7 @@ For each launch, let the native guard derive `<R>` from native admitted state. R
 git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch: $DEFAULT_BRANCH"; exit 1; }
    BASE=$(git merge-base HEAD "$DEFAULT_BRANCH")
    env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff \
-     --no-ext-diff --no-textconv --text "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
+     --no-ext-diff --no-textconv "$BASE"..HEAD > <RCL_TMP>/rcl-branch-review-<TARGET>.patch
    ```
    Every round's patch and spec pass the `rcl` skill's step 2a disclosure check before launch (including its `Binary files … differ` red flag for a `.gitattributes`-marked path); stop the loop if either contains secrets, customer or personal data, local diagnostics or unrelated files.
 2. **Launch once through the native guard.** Use a fresh, unique `<LAUNCH>` suffix for each invocation's reports and log; never delete or overwrite the original artifacts. Confirm `rcl review --help` exposes `--guarded-converge` before starting. Upgrade the installed package if necessary; never fall back to a separate claim plus detached launcher.

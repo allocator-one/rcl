@@ -50,15 +50,22 @@ describe('vendored skills', () => {
         expect(content, path).toContain('### 2a. Check what leaves the machine');
         expect(content, path).toContain('never pin a version');
         expect(content, path).toContain('npm install -g --ignore-scripts "review-council@<RCL_LATEST>"');
-        expect(content, path).toContain('dist.integrity --registry https://registry.npmjs.org)" = "<RCL_INTEGRITY>"');
+        expect(content, path).toContain('dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"');
         expect(content, path).toContain('--registry https://registry.npmjs.org');
+        expect(content, path).toContain('--proxy=null');
+        expect(content, path).not.toContain('NPM_TRUST_FLAGS');
         expect(content, path).toContain('inside the repository under review');
         expect(content, path).toContain('Never fall back to an older installed release');
         expect(content, path).not.toContain('npm install -g review-council@latest');
         expect(content, path).toContain('env -i "$@"');
         expect(content, path).toContain('rcl_run GITHUB_TOKEN="$(gh auth token)" rcl review');
         expect(content, path).not.toMatch(/^GITHUB_TOKEN=\$\(gh auth token\) rcl review/m);
-        const helper = content.slice(content.indexOf('rcl_run() {'), content.indexOf('env -i "$@"'));
+        const helperStart = content.indexOf('rcl_run() {');
+        const helperEnd = content.indexOf('env -i "$@"');
+        expect(helperStart, `${path} has an rcl_run() { definition`).toBeGreaterThanOrEqual(0);
+        expect(helperEnd, `${path} has an env -i "$@" body`).toBeGreaterThan(helperStart);
+        const helper = content.slice(helperStart, helperEnd);
+        expect(helper, `${path} helper slice contains the real body`).toContain('ANTHROPIC_API_KEY');
         for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'BASH_ENV', 'AWS_', 'GOOGLE_APPLICATION_CREDENTIALS']) {
           expect(helper, `${path} keeps ${name}`).not.toContain(name);
         }
