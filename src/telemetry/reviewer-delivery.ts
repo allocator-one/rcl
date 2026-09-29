@@ -99,7 +99,11 @@ export class ReviewerDeliveryQueue {
   }
 
   /** Explicit/current-credential retry; no provider calls or changed run identity. */
-  async flush(sink: HarnessSink, options: FlushOptions = {}): Promise<FlushSummary> {
+  async flush(
+    sink: HarnessSink,
+    options: FlushOptions = {},
+    authorizeTransfer?: () => Promise<void>,
+  ): Promise<FlushSummary> {
     const summary: FlushSummary = { delivered: [], remaining: [], failed: [], dropped: [] };
     const request = budget({ deadlineMs: options.deadlineMs });
     let names: string[];
@@ -113,6 +117,7 @@ export class ReviewerDeliveryQueue {
         await this.lock(id, async () => {
           const entry = await this.load(id);
           if (await this.acknowledged(entry)) return;
+          await authorizeTransfer?.();
           request(); await this.transfer(entry, sink, request, false); summary.delivered.push(entry.manifest.runId);
         });
       } catch (error) {

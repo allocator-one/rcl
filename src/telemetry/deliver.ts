@@ -1,6 +1,5 @@
 import { cosmiconfig } from 'cosmiconfig';
 import { join } from 'path';
-import { readdir } from 'node:fs/promises';
 import { SEARCH_PLACES } from '../config/loader.js';
 import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
@@ -15,7 +14,7 @@ import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outb
 import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
 import type { ReviewerArtifact } from '../report/reviewer-artifact.js';
-import { ReviewerDeliveryQueue, REVIEWER_OUTBOX_DIR } from './reviewer-delivery.js';
+import { ReviewerDeliveryQueue } from './reviewer-delivery.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 import { verifiedConsensusReportProblem } from './report-consistency.js';
 import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
@@ -231,10 +230,12 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
   const started = performance.now();
   const ordinary = await runtime.outbox.flush(runtime.sink, options);
   if (runtime.level !== 'full' || runtime.attested) return ordinary;
-  const privateEntries = await readdir(join(runtime.dataDir, REVIEWER_OUTBOX_DIR)).catch(() => [] as string[]);
-  if (privateEntries.some(name => name !== 'locks')) await noticeBefore(runtime, 'private-reviewers');
   const remaining = options.deadlineMs === undefined ? undefined : Math.max(0, options.deadlineMs - (performance.now() - started));
-  const privateResult = await new ReviewerDeliveryQueue(runtime.dataDir).flush(runtime.sink, { ...options, deadlineMs: remaining });
+  const privateResult = await new ReviewerDeliveryQueue(runtime.dataDir).flush(
+    runtime.sink,
+    { ...options, deadlineMs: remaining },
+    () => noticeBefore(runtime, 'private-reviewers'),
+  );
   return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...ordinary.remaining, ...privateResult.remaining],
     failed: [...ordinary.failed, ...privateResult.failed], dropped: [...ordinary.dropped, ...privateResult.dropped],
     ...(ordinary.stopped || privateResult.stopped ? { stopped: ordinary.stopped ?? privateResult.stopped } : {}) };

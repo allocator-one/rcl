@@ -111,6 +111,29 @@ describe('private immutable reviewer delivery', () => {
     expect(remote.requests.filter(row => row.method === 'PUT' && row.body === f.artifact.bytes).every(row => row.url.endsWith('/reviewer-artifact'))).toBe(true);
   });
 
+  it('authorizes each private flush entry immediately before transport and fails closed', async () => {
+    const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
+    await queue.retain({ sink: remote.sink(), envelope: f.envelope, artifacts: f.artifacts, artifact: f.artifact });
+    remote.posted();
+    let authorized = false;
+    const checked = new HarnessSink({
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+      rclVersion: 'test',
+      fetchImpl: async (url, options) => {
+        expect(authorized).toBe(true);
+        return remote.fetchImpl(url, options);
+      },
+    });
+    expect(await queue.flush(checked, {}, async () => { authorized = true; })).toMatchObject({ delivered: [f.runId] });
+
+    const next = await fixture(), refused = server(next), pending = new ReviewerDeliveryQueue(next.root);
+    await pending.retain({ sink: refused.sink(), envelope: next.envelope, artifacts: next.artifacts, artifact: next.artifact });
+    expect(await pending.flush(refused.sink(), {}, async () => { throw new Error('notice unavailable'); })).toMatchObject({
+      delivered: [], remaining: [next.runId],
+    });
+    expect(refused.requests).toEqual([]);
+  });
+
   it('rejects a verified-consensus result/report mismatch before private queue or transport writes', async () => {
     const f = await fixture(), remote = server(f);
     const result = structuredClone(f.result);
