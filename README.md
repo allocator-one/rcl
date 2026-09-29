@@ -216,12 +216,14 @@ launch. Unknown/failed dispatch requires an explicit `--retry-reason` after
 recovery, even if the head changed. This does not refund attempts or promise
 exactly-once provider billing. Credential presence cannot prove provider availability.
 
-For a 4.1.11 or 4.1.12 aggregate-only completion, retain the original report and
+For a 4.1.10, 4.1.11 or 4.1.12 aggregate-only completion, retain the original report and
 config and add `--retry-report original-report.json` with an explicit bounded
 `--retry-reason` and a fresh `--json-file` destination. RCL binds the exact original
 report, config, target, head, input, round, attempt, cycle and roster before deriving
 blocking-only health with the shared quorum policy. The new launch may review changed
 current inputs, but its original proof stays bound to those original identities. Healthy or ambiguous evidence refuses.
+The 4.1.10 producer predates review cycles and is accepted only when the retained
+report, native state and attempt state all remain cycle-free.
 An unadmitted source retries its pending round; an exact latest admitted source
 whose blocking health was inconclusive continues at the next native round. Its
 original admission, findings, verdicts and spent claims remain unchanged. The
