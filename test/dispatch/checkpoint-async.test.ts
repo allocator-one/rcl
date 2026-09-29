@@ -1,7 +1,5 @@
-import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
+import { loadConvergeRunState, processRoundReport } from '../../src/converge/run-state.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
-import { claimConvergeAttempt } from '../../src/converge/attempt-budget.js';
-import { finishFreshReview, prepareFreshReview } from '../../src/converge/fresh-review.js';
 import { randomUUID } from 'node:crypto';
 import * as asyncLane from '../../src/dispatch/async-lane.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -42,36 +40,6 @@ async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, originalNat
 }
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
 const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
-const completion = {runId,reportJsonSha256:'c'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false};
-async function launchOriginal(f:Awaited<ReturnType<typeof fixture>>,
- remote:Parameters<typeof prepareFreshReview>[0]['remote'],
- pending?: (delegates:Awaited<ReturnType<typeof initialize>>['delegates'])=>Promise<void>) {
- let delegates!:Awaited<ReturnType<typeof initialize>>['delegates'], cycleId='';
- await withNativeTarget(f.commonDir,target,async ownership=>{
-  const fresh=await prepareFreshReview({gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,remote,ownership});
-  const state=(await loadConvergeRunState(f.commonDir,target))!;
-  await claimConvergeAttempt({gitCommonDir:f.commonDir,target,ownership,freshReviewOperation:fresh.operationId,
-   beforeClaim:async claimOwnership=>{
-    state.lastLaunch={status:'pending',attempt:1,round:1,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),startedAt:new Date().toISOString(),pid:process.pid};
-    await writeState(f.commonDir,state,claimOwnership);
-   },
-   afterClaim:async(claim,claimOwnership)=>{
-    state.lastLaunch!.attempt=claim.attempt;await writeState(f.commonDir,state,claimOwnership);
-    cycleId=state.cycle!.id;delegates=(await initializeAsyncPhase({...f.input,ownership:claimOwnership})).delegates;
-    await pending?.(delegates);
-    state.lastLaunch={...state.lastLaunch!,...completion,status:'completed'};state.updatedAt=new Date().toISOString();
-    await writeState(f.commonDir,state,claimOwnership);
-    await finishFreshReview(f.commonDir,target,fresh.operationId,claimOwnership);
-   }
-  });
- });
- return {delegates,cycleId};
-}
-function causalMessages(error:unknown):string {
- if(error instanceof AggregateError)return [error.message,...error.errors.map(causalMessages)].join(' ');
- if(error instanceof Error)return [error.message,error.cause?causalMessages(error.cause):''].join(' ');
- return String(error);
-}
 describe('restricted original async checkpoint phase',()=>{
 
  it.each(['pending', 'same-cycle-before', 'fresh-cycle-before', 'same-cycle-during', 'fresh-cycle-during'] as const)(
@@ -83,6 +51,7 @@ describe('restricted original async checkpoint phase',()=>{
    const remote={repo:'allocator-one/rcl',prNumber:105,url:'https://harness.example',
     current:async()=>active,start:async(request:import('../../src/converge/review-cycle.js').ReviewCycleRequest)=>
      (active={...request,id:randomUUID(),inserted_at:new Date().toISOString()})};
+   const completion={runId,reportJsonSha256:'c'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false};
    const guard={gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),cycleRemote:remote,validate:async()=>{}};
    let originalCycle='',delegates:Awaited<ReturnType<typeof initialize>>['delegates'];
    const adapter=vi.fn(async()=>JSON.parse(review()));
@@ -93,8 +62,13 @@ describe('restricted original async checkpoint phase',()=>{
      run:async()=>({...completion,runId:randomUUID()})});
    };
    try {
-    const launched=await launchOriginal(f,remote,timing==='pending'?async current=>{delegates=current;await worker();}:undefined);
-    originalCycle=launched.cycleId;delegates=launched.delegates;
+    await guardReviewLaunch({...guard,startOver:true,run:async(_context,ownership)=>{
+     const native=await loadConvergeRunState(f.commonDir,target);
+     expect(native?.lastLaunch?.status).toBe('pending');expect(native?.lastLaunch?.runId).toBeUndefined();
+     originalCycle=native!.cycle!.id;delegates=(await initializeAsyncPhase({...f.input,ownership})).delegates;
+     if(timing==='pending')await worker();
+     return completion;
+    }});
     if(timing.endsWith('-before')){await advance(timing.startsWith('fresh'));await worker();}
     if(timing.endsWith('-during')){adapter.mockImplementationOnce(async()=>{await advance(timing.startsWith('fresh'));return JSON.parse(review());});await worker();}
     expect(adapter).toHaveBeenCalledOnce();
@@ -124,11 +98,10 @@ describe('restricted original async checkpoint phase',()=>{
   expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
  });
  it('refuses async initialization for a different original native claim',async()=>{
-  const f=await fixture();let active:import('../../src/converge/review-cycle.js').ReviewCycleReceipt|null=null;
-  const remote={repo:'allocator-one/rcl',prNumber:105,url:'https://harness.example',current:async()=>active,
-   start:async(request:import('../../src/converge/review-cycle.js').ReviewCycleRequest)=>(active={...request,id:randomUUID(),inserted_at:new Date().toISOString()})};
-  let failure:unknown;try{await launchOriginal(f,remote);}catch(error){failure=error;}
-  expect(causalMessages(failure)).toContain('native_claim');
+  const f=await fixture();
+  await expect(guardReviewLaunch({gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),validate:async()=>{},
+   run:async(_context,ownership)=>{await initializeAsyncPhase({...f.input,ownership});return {runId,reportJsonSha256:'c'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false};}
+  })).rejects.toThrow('native_claim');
   await expect(readFile(join(f.path,'async','phase.json'))).rejects.toMatchObject({code:'ENOENT'});
  });
 

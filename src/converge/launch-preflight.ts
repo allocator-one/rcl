@@ -17,8 +17,8 @@ export function validateLaunchProviders(providers: readonly string[], env = proc
   }
 }
 
-export async function validateLaunchOutputs(paths: { jsonFile?: string; markdown?: string }): Promise<void> {
-  if (!paths.jsonFile) throw new ReviewLaunchRefused('report_required', 'Guarded convergence requires --json-file to retain the original report.');
+export async function validateLaunchOutputs(paths: { jsonFile?: string; markdown?: string }, requireJson = true): Promise<void> {
+  if (requireJson && !paths.jsonFile) throw new ReviewLaunchRefused('report_required', 'Guarded convergence requires --json-file to retain the original report.');
   const outputs = await Promise.all(
     [paths.jsonFile, paths.markdown].filter((path): path is string => path !== undefined).map(async path => {
       const parent = dirname(path);

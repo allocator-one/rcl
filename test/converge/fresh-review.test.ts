@@ -44,7 +44,7 @@ it('starts unchanged inputs with a normal budget while retaining the original 17
     cycle: { id: active!.id, history: { attempts: 17, rounds: 13 } } });
   expect(await loadConvergeAttemptState(gitCommonDir, target)).toMatchObject({ version: 3, cap: 20, attemptsUsed: 1,
     cycle: state!.cycle });
-  expect(run).toHaveBeenCalledWith({ target, round: 1, attempt: 1, cycleId: active!.id });
+  expect(run).toHaveBeenCalledWith({ target, round: 1, attempt: 1, cycleId: active!.id }, expect.objectContaining({ target }));
   expect(cycleRemote.start).toHaveBeenCalledTimes(1);
   const archive = JSON.parse(await readFile(state!.cycle!.archivePath, 'utf8'));
   expect(Buffer.from(archive.files.attempts.bytes, 'base64')).toEqual(oldAttempts);

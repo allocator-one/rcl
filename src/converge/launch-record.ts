@@ -50,6 +50,9 @@ export const launchSchema = z.object({
   exitCode: z.number().int().nonnegative().optional(),
   reportPath: z.string().min(1).optional(),
   reviewerHealth: reviewerHealthSchema.optional(),
+  retainedOriginal: z.object({ version: z.literal(1), runId: z.string().uuid(),
+    planDigest: z.string().regex(/^[a-f0-9]{64}$/), capturedInputsSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),
 }).strict().refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined);
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;

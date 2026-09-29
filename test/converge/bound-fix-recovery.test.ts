@@ -120,7 +120,10 @@ describe('bound fix-obligation recovery (RCL-148)', () => {
       `https://harness.example.test/api/v1/reviews/prs/${repo}/${prNumber}`,
       `https://harness.example.test/api/v1/reviews/runs/${runId}`,
     ]);
-    expect(f.run).toHaveBeenCalledExactlyOnceWith({ target, round: 3, attempt: 3 });
+    expect(f.run).toHaveBeenCalledExactlyOnceWith(
+      { target, round: 3, attempt: 3 },
+      expect.objectContaining({ target }),
+    );
     expect(await loadConvergeAttemptState(f.options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 3 });
   });
 
@@ -162,7 +165,10 @@ describe('bound fix-obligation recovery (RCL-148)', () => {
     await guardReviewLaunch({ ...f.options, boundFixRecovery: f.recovery });
 
     expect(f.read).toHaveBeenCalledOnce();
-    expect(f.run).toHaveBeenCalledExactlyOnceWith({ target, round: 3, attempt: 3 });
+    expect(f.run).toHaveBeenCalledExactlyOnceWith(
+      { target, round: 3, attempt: 3 },
+      expect.objectContaining({ target }),
+    );
     const launched = (await loadConvergeRunState(f.options.gitCommonDir, target))!;
     expect(launched.rounds).toEqual(before.rounds);
     expect(launched.findings).toEqual(before.findings);
@@ -327,5 +333,24 @@ describe('bound fix-obligation recovery (RCL-148)', () => {
     await expect(guardReviewLaunch({ ...f.options, ...mode, boundFixRecovery: f.recovery })).rejects.toThrow();
     expect(f.run).not.toHaveBeenCalled();
     expect(await loadConvergeAttemptState(f.options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
+  });
+
+  it('refuses retained-original preflight with bound-fix recovery before reading evidence or spending', async () => {
+    const f = await fixture();
+    const before = await loadConvergeRunState(f.options.gitCommonDir, target);
+    const attempts = await loadConvergeAttemptState(f.options.gitCommonDir, target);
+    const beforeClaim = vi.fn();
+
+    await expect(guardReviewLaunch({
+      ...f.options,
+      boundFixRecovery: f.recovery,
+      originalLaunch: { input: {} as never, beforeClaim },
+    })).rejects.toMatchObject({ code: 'bound_fix_recovery_incompatible' });
+
+    expect(f.read).not.toHaveBeenCalled();
+    expect(beforeClaim).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await loadConvergeRunState(f.options.gitCommonDir, target)).toEqual(before);
+    expect(await loadConvergeAttemptState(f.options.gitCommonDir, target)).toEqual(attempts);
   });
 });

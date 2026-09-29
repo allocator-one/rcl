@@ -9,6 +9,7 @@ import { join } from 'path';
  */
 
 export const NOTICE_FILE = 'telemetry-notice';
+export type NoticeScope = 'ordinary' | 'private-reviewers';
 
 interface NoticeRecord {
   shown: Record<string, string>;
@@ -31,7 +32,14 @@ async function readRecord(path: string): Promise<NoticeRecord> {
   return { shown: {} };
 }
 
-export function noticeText(host: string): string {
+export function noticeText(host: string, scope: NoticeScope = 'ordinary'): string {
+  if (scope === 'private-reviewers') return [
+    `Private reviewer evidence will be sent to ${host}, separately from ordinary review reports.`,
+    'It includes exact captured prompts and raw reviewer results. Access is limited to the',
+    'original owner or an explicitly authorized recovery run. These private bytes are not',
+    'ordinary public artifacts. Disable transmission with --no-telemetry or harness.telemetry: off.',
+    'This private evidence notice shows once per host, separately from ordinary telemetry.',
+  ].join('\n');
   return [
     `Review Council now records evidence of this review on ${host}: the run header (commit, roster,`,
     'settings digests), consensus findings and reviewer call statistics, plus the JSON and Markdown',
@@ -49,13 +57,15 @@ export function noticeText(host: string): string {
 export async function ensureNoticeShown(
   host: string,
   dataDir: string,
-  write: (text: string) => void
+  write: (text: string) => void,
+  scope: NoticeScope = 'ordinary'
 ): Promise<boolean> {
   const path = join(dataDir, NOTICE_FILE);
   const record = await readRecord(path);
-  if (record.shown[host] !== undefined) return false;
-  write(noticeText(host));
-  record.shown[host] = new Date().toISOString();
+  const key = scope === 'ordinary' ? host : `private-reviewers:${host}`;
+  if (record.shown[key] !== undefined) return false;
+  write(noticeText(host, scope));
+  record.shown[key] = new Date().toISOString();
   try {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
     await writeFile(path, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
