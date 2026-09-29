@@ -1,4 +1,5 @@
 import { retrySourceSchema, type RetrySource } from './retry-source.js';
+import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -38,6 +39,7 @@ export interface ConvergeAttemptRecord {
   pid: number;
   source: 'claim';
   retrySource?: RetrySource;
+  boundFixRecoverySource?: BoundFixRecoverySource;
 }
 
 export interface ConvergeAttemptState {
@@ -114,8 +116,12 @@ interface ClaimOptions {
   /** Target ownership has a different contention profile from attempt accounting. */
   targetLockTimeoutMs?: number;
   targetLockRetryMs?: number;
-  beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void | { retrySource: RetrySource }>;
+  beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void | {
+    retrySource?: RetrySource;
+    boundFixRecoverySource?: BoundFixRecoverySource;
+  }>;
   retrySource?: RetrySource;
+  boundFixRecoverySource?: BoundFixRecoverySource;
   afterClaim?: (claim: ConvergeAttemptClaim, ownership: NativeTargetOwnership) => Promise<void>;
   ownership?: NativeTargetOwnership;
   freshReviewOperation?: string;
@@ -192,7 +198,11 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
         !Number.isInteger(record.pid) ||
         record.source !== 'claim' ||
         (record.retrySource !== undefined && (!retrySourceSchema.safeParse(record.retrySource).success ||
-          record.retrySource.attempt !== record.attempt - 1))
+          record.retrySource.attempt !== record.attempt - 1)) ||
+        (record.boundFixRecoverySource !== undefined &&
+          (!boundFixRecoverySourceSchema.safeParse(record.boundFixRecoverySource).success ||
+            record.boundFixRecoverySource.attempt !== record.attempt - 1 ||
+            record.boundFixRecoverySource.target !== expectedTarget || record.retrySource !== undefined))
     )
   ) {
     throw new ConvergeAttemptStateError(
@@ -615,7 +625,10 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   try {
     const work = async (ownership: NativeTargetOwnership) => {
       const source = await claimOptions.beforeClaim?.(ownership);
-      if (source) claimOptions.retrySource = retrySourceSchema.parse(source.retrySource);
+      if (source?.retrySource !== undefined) claimOptions.retrySource = retrySourceSchema.parse(source.retrySource);
+      if (source?.boundFixRecoverySource !== undefined) {
+        claimOptions.boundFixRecoverySource = boundFixRecoverySourceSchema.parse(source.boundFixRecoverySource);
+      }
       const { assertFreshReviewClaim } = await import('./fresh-review.js');
       await assertFreshReviewClaim(gitCommonDir, target, claimOptions.freshReviewOperation);
       committed = await claimConvergeAttemptOwned(claimOptions);
@@ -713,6 +726,10 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
     if (options.retrySource && options.retrySource.attempt !== attemptsUsed) {
       throw new ConvergeAttemptStateError('Retry source does not bind the previous spent claim.');
     }
+    if (options.boundFixRecoverySource && (options.boundFixRecoverySource.attempt !== attemptsUsed ||
+      options.boundFixRecoverySource.target !== target || options.retrySource !== undefined)) {
+      throw new ConvergeAttemptStateError('Bound fix recovery source does not bind this target and the previous spent claim.');
+    }
     const state: ConvergeAttemptState = {
       version: previous?.version ?? STATE_VERSION,
       ...(previous?.cycle ? { cycle: previous.cycle } : {}),
@@ -723,7 +740,8 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
       attempts: [
         ...(previous?.attempts ?? []),
         { attempt, claimedAt: timestamp, pid: recordPid, source: 'claim',
-          ...(options.retrySource ? { retrySource: options.retrySource } : {}) },
+          ...(options.retrySource ? { retrySource: options.retrySource } : {}),
+          ...(options.boundFixRecoverySource ? { boundFixRecoverySource: options.boundFixRecoverySource } : {}) },
       ],
       updatedAt: timestamp,
     };

@@ -90,6 +90,8 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
+import { createBoundFixRecovery } from './converge/bound-fix-recovery.js';
+import { openReadSink } from './telemetry/read-sink.js';
 import { reconcileFlushedRun } from './converge/delivery-reconciliation.js';
 import { validateLaunchOutputs, validateLaunchProviders } from './converge/launch-preflight.js';
 import { writeExclusive, serializeRecoveryDocument } from './evidence/original-run/journal.js';
@@ -323,6 +325,7 @@ program
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
   .option('--guarded-converge', 'Validate and claim inside this review process; derive the round from native state')
+  .option('--bound-fix-recovery <run-id>', 'Review unchanged inputs once live Harness evidence proves a retained bound fix obligation after this native dismissal-only run')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-report <path>', 'Original legacy report proving an inconclusive launch; the new inputs may differ; requires --retry-reason')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
@@ -1475,6 +1478,7 @@ interface CouncilCliOpts {
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
+  boundFixRecovery?: string;
   startOver?: boolean;
   cycleReview?: boolean;
   /** Retain guarded output creation semantics inside the post-claim execution. */
@@ -1750,6 +1754,17 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   const spinner = ora('Loading configuration...').start();
 
   try {
+    if (opts.boundFixRecovery !== undefined) {
+      if (!opts.guardedConverge || !opts.evidenceRequired || opts.telemetry === false ||
+        opts.startOver || opts.attest || opts.retryReport !== undefined || opts.retryReason !== undefined ||
+        (opts.launchIntent !== undefined && opts.launchIntent !== 'review') ||
+        opts.staged || opts.workingTree || !(opts.forPr || (target && isGitHubTarget(target)))) {
+        throw new ReviewLaunchRefused('bound_fix_recovery_incompatible', '--bound-fix-recovery requires --guarded-converge, --evidence-required and a PR target or explicit --for-pr; do not combine it with start-over, attestation or another retry mode.');
+      }
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(opts.boundFixRecovery)) {
+        throw new ReviewLaunchRefused('bound_fix_recovery_invalid', '--bound-fix-recovery must name an exact native run UUID.');
+      }
+    }
     opts = { ...opts, ...await discoverCycleReview(target, opts) };
     if (!opts.cycleReview && opts.telemetry !== false && (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
       try {
@@ -1972,6 +1987,15 @@ async function executeCouncil(
     const common = await resolveGitCommonDir();
     const native = opts.startOver ? undefined : await loadConvergeRunState(common, prepared.converge!.target);
     let cycleRemote: GuardedLaunchOptions['cycleRemote'];
+    let boundFixRecovery: GuardedLaunchOptions['boundFixRecovery'];
+    if (opts.boundFixRecovery !== undefined) {
+      if (!extra.target.repo || !extra.target.prNumber) {
+        throw new ReviewLaunchRefused('bound_fix_recovery_requires_pr', 'Bound fix recovery requires evidence bound to a pull request.');
+      }
+      const opened = await openReadSink({ rclVersion: RCL_VERSION });
+      if (!opened.sink) throw new ReviewLaunchRefused('bound_fix_recovery_unanswered', 'Cannot read live Harness recovery evidence without an authenticated evidence credential.');
+      boundFixRecovery = createBoundFixRecovery(opened.sink, extra.target.repo, extra.target.prNumber, opts.boundFixRecovery);
+    }
     if (opts.startOver || native?.cycle) {
       if (!extra.target.repo || !extra.target.prNumber) throw new Error('fresh_review_requires_pr');
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
@@ -1982,6 +2006,7 @@ async function executeCouncil(
       gitCommonDir: await resolveGitCommonDir(),
       target: prepared.converge!.target,
       startOver: opts.startOver, cycleRemote,
+      boundFixRecovery,
       headSha: extra.target.headSha ?? '',
       inputSha256: sha256Hex(stableStringify({
         head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
@@ -2004,10 +2029,13 @@ async function executeCouncil(
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
           kind: 'attempt_claimed', convergeTarget: claim.target, attempt: claim.attempt,
-          payload: { attempt: claim.attempt, cap: claim.cap, ...(claim.cycle ? { cycle_id: claim.cycle.id } : {}) },
+          payload: { attempt: claim.attempt, cap: claim.cap, ...(claim.cycle ? { cycle_id: claim.cycle.id } : {}),
+            ...(boundFixRecovery ? { bound_fix_recovery: { run_id: boundFixRecovery.runId,
+              repo: boundFixRecovery.repo, pr_number: boundFixRecovery.prNumber, head_sha: extra.target.headSha } } : {}) },
         })]);
         if (claim.cycle) process.stderr.write(`Review cycle ${claim.cycle.id}. Prior local history: ${claim.cycle.history.attempts} attempts, ${claim.cycle.history.rounds} admitted rounds${claim.cycle.history.incomplete ? ' (known history only)' : ''}.\n`);
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
+        if (boundFixRecovery) process.stderr.write(`Bound fix recovery verified from run ${boundFixRecovery.runId}; attempt ${claim.attempt} retains the existing review history.\n`);
       },
       run: async converge => {
         completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
