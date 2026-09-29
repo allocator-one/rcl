@@ -6,10 +6,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
-import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { claimConvergeAttempt, convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { configDigest, sha256Hex, type RosterEntry } from '../../src/report/run-header.js';
 import { assertNativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { sampleFinding, sampleResult, sampleReview } from '../telemetry/fixtures.js';
+import { resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
+import { pendingRecoverySourceSchema } from '../../src/converge/pending-recovery-source.js';
+import { legacyPendingClaimRoles } from '../../src/converge/legacy-roster.js';
+import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
+import { chunkDiff } from '../../src/prepare/chunker.js';
 
 async function fixture(cap = 35) {
   const common = await realpath(await mkdtemp(join(tmpdir(), 'rcl-legacy-health-')));
@@ -57,6 +62,8 @@ describe('bound legacy launch health recovery', () => {
       new URL('../fixtures/legacy-4.1.10-a33-roster.json', import.meta.url), 'utf8')) as any;
     const f = await fixture();
     f.retry.legacyRetry!.config = snapshot.config;
+    f.retry.legacyRetry!.roster = structuredClone(snapshot.run.roster);
+    f.retry.legacyRetry!.historicalPlan = true;
     await f.mutate((report, native) => {
       report.run!.rcl_version = snapshot.run.rcl_version;
       report.run!.roster = snapshot.run.roster;
@@ -79,8 +86,13 @@ describe('bound legacy launch health recovery', () => {
 
   it('accepts the immutable A33 roster after current roles and verifier defaults changed', async () => {
     const { f, snapshot } = await a33Fixture();
-    const selectedCurrentRoster = f.retry.legacyRetry!.roster;
-    expect(selectedCurrentRoster).not.toEqual(snapshot.run.roster);
+    const currentRoleNames = legacyPendingClaimRoles(snapshot.config, 'current spec')!
+      .map(role => role.name);
+    const historicalRoleNames = snapshot.run.roster
+      .filter((seat: RosterEntry) => seat.lane !== 'verification' && seat.lane !== 'async')
+      .map((seat: RosterEntry) => seat.role);
+    expect(currentRoleNames).not.toEqual(historicalRoleNames);
+    expect(f.retry.legacyRetry!.roster).toEqual(snapshot.run.roster);
 
     await guardReviewLaunch(f.retry);
 
@@ -93,6 +105,131 @@ describe('bound legacy launch health recovery', () => {
         policy: { fraction: 2 / 3, seatCount: 17, minimumSuccessful: 12 },
       },
     });
+  });
+
+  it('finalizes unknown A34 and uses one fresh checkpointed A35 idempotently', async () => {
+    const { f, snapshot } = await a33Fixture();
+    await guardReviewLaunch(f.retry);
+    const native = JSON.parse(await readFile(f.nativePath, 'utf8'));
+    native.lastLaunch.status = 'pending';
+    delete native.lastLaunch.reviewerHealth;
+    await writeFile(f.nativePath, JSON.stringify(native));
+    const roundsBefore = structuredClone(native.rounds);
+    const blocking = snapshot.run.roster.filter((seat: RosterEntry) => seat.lane === 'blocking');
+    const roles = new Map(blocking.map((seat: RosterEntry) => [seat.role, {
+      name: seat.role, systemPrompt: `system:${seat.role}`, description: seat.role,
+      focus: ['correctness'], isSpecialized: seat.role !== 'general',
+    }]));
+    const assignments = blocking.map((seat: RosterEntry) => ({ model: seat.model,
+      provider: seat.provider as any, role: roles.get(seat.role)! }));
+    const diff = { files: [{ filename: 'a.ts', status: 'modified' as const,
+      patch: '@@ -1 +1 @@\n-a\n+b', additions: 1, deletions: 1 }] };
+    const chunks = chunkDiff(diff.files);
+    const prompts = chunks.flatMap(() => assignments.map(assignment => ({
+      systemPrompt: assignment.role.systemPrompt, userPrompt: 'exact patch',
+    })));
+    const captured = capturePreparedCouncil({ target: f.target, headSha: 'a'.repeat(40),
+      mergeBaseSha: 'b'.repeat(40), diff, assignments, chunks, prompts,
+      config: f.retry.legacyRetry!.config, specBytes: 'spec', contextDocs: [],
+      lanes: assignments.map(() => 'blocking' as const),
+      compatibility: { parser: { name: 'findings-json', version: 1 },
+        aggregation: { name: 'consensus', version: 2 } } });
+    const attemptsBefore = JSON.parse(await readFile(f.attemptsPath, 'utf8'));
+    let failOnce = true;
+    const run = vi.fn(async ({ launch, skipAsyncLaunch }: any) => {
+      expect(skipAsyncLaunch).toBe(true);
+      if (failOnce) { failOnce = false; throw new Error('fixture interrupted after checkpoint binding'); }
+      return { runId: launch.runId, reportJsonSha256: 'e'.repeat(64),
+        successfulReviews: 12, totalReviews: 17, deliveryPending: false,
+        reviewerHealth: { version: 1, policy: { version: 1, fraction: 2 / 3,
+          seatCount: 17, minimumSuccessful: 12 }, successfulSeats: 12 } };
+    });
+    const asyncBytes = Buffer.from(JSON.stringify({ ...sampleReview({
+      model: 'moonshotai/kimi-k2-0905', role: 'general', provider: 'openrouter',
+    }), async: true }));
+    const asyncSha256 = sha256Hex(asyncBytes);
+    const loadRetainedAsync = vi.fn(async () => [{
+      path: join(f.common, 'async-result.json'), sha256: asyncSha256,
+      bytesBase64: asyncBytes.toString('base64'),
+    }]);
+    const options = { gitCommonDir: f.common, target: f.target, headSha: 'a'.repeat(40),
+      pendingInputSha256: 'b'.repeat(64), recoveryInputSha256: 'c'.repeat(64),
+      retryReason: 'Fresh retry after unknown legacy dispatch.',
+      legacyRetry: f.retry.legacyRetry!, captured, retainedAsyncSha256: [asyncSha256],
+      maxAttempts: 3,
+      maxPhysicalCalls: 68, maxAttemptsPerCell: 4, maxDurationMs: 10_000,
+      validate: vi.fn(async () => {}), ownerAlive: () => false,
+      loadRetainedAsync, run };
+
+    await expect(resumePendingLegacyLaunch({ ...options, ownerAlive: () => true }))
+      .rejects.toThrow('pending_legacy_resume_owner_alive');
+    expect(run).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(f.attemptsPath, 'utf8'))).toEqual(attemptsBefore);
+
+    await expect(resumePendingLegacyLaunch({ ...options, maxAttempts: 2 }))
+      .rejects.toThrow('Convergence attempt budget exhausted');
+    expect(run).not.toHaveBeenCalled();
+    expect((await loadConvergeAttemptState(f.common, f.target))?.attemptsUsed).toBe(2);
+    expect((await loadConvergeRunState(f.common, f.target))?.lastLaunch)
+      .toMatchObject({ status: 'failed', attempt: 2, pendingRecovery: {
+        pendingAttempt: 2, blockingOutcome: 'unknown',
+      } });
+    const finalizedNativeBytes = await readFile(f.nativePath);
+    const finalizedAttemptBytes = await readFile(f.attemptsPath);
+
+    await expect(resumePendingLegacyLaunch(options)).rejects.toThrow('fixture interrupted');
+    expect((await loadConvergeRunState(f.common, f.target))?.lastLaunch)
+      .toMatchObject({ status: 'failed', attempt: 3, pendingRecovery: {
+        pendingAttempt: 2, blockingOutcome: 'unknown',
+      }, pendingResume: { phase: 'finished' } });
+    const first = await resumePendingLegacyLaunch(options);
+    const second = await resumePendingLegacyLaunch(options);
+    const changed = structuredClone(captured);
+    changed.plan.digest = 'f'.repeat(64);
+    await expect(resumePendingLegacyLaunch({ ...options, captured: changed }))
+      .rejects.toThrow('pending_legacy_resume_capture_mismatch');
+    expect(first).toMatchObject({ claim: { attempt: 3, attemptsUsed: 3 }, reusedCompletion: false });
+    expect(second).toMatchObject({ claim: { attempt: 3, attemptsUsed: 3 }, reusedCompletion: true });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(loadRetainedAsync).toHaveBeenCalledTimes(3);
+    const attemptsAfter = (await loadConvergeAttemptState(f.common, f.target))!;
+    expect(attemptsAfter.attemptsUsed).toBe(3);
+    expect(attemptsAfter.attempts.slice(0, 2)).toEqual(attemptsBefore.attempts);
+    expect(attemptsAfter.attempts[2]?.pendingRecoverySource).toMatchObject({
+      pendingAttempt: 2, blockingOutcome: 'unknown',
+      retainedAsyncSha256: [asyncSha256],
+    });
+    expect((await loadConvergeRunState(f.common, f.target))?.lastLaunch)
+      .toMatchObject({ status: 'completed', attempt: 3, round: 2,
+        pendingRecovery: { pendingAttempt: 2, blockingOutcome: 'unknown' },
+        pendingResume: { phase: 'finished' } });
+    expect((await loadConvergeRunState(f.common, f.target))?.rounds).toEqual(roundsBefore);
+
+    // Recreate the exact crash boundary after A35 accounting but before its
+    // native launch publication. The spent A35 must resume, never become A36.
+    await writeFile(f.nativePath, finalizedNativeBytes);
+    await writeFile(f.attemptsPath, finalizedAttemptBytes);
+    const finalizedNative = JSON.parse(finalizedNativeBytes.toString('utf8'));
+    const finalizedAttempts = JSON.parse(finalizedAttemptBytes.toString('utf8'));
+    const recovery = finalizedNative.lastLaunch.pendingRecovery;
+    const source = pendingRecoverySourceSchema.parse({
+      version: 1, target: f.target, headSha: finalizedNative.lastLaunch.headSha,
+      inputSha256: finalizedNative.lastLaunch.inputSha256,
+      pendingAttempt: finalizedNative.lastLaunch.attempt, round: finalizedNative.lastLaunch.round,
+      originalPid: finalizedNative.lastLaunch.pid, startedAt: finalizedNative.lastLaunch.startedAt,
+      blockingOutcome: recovery.blockingOutcome, reason: recovery.reason,
+      nativeStateSha256: recovery.nativeStateSha256,
+      attemptStateSha256: recovery.attemptStateSha256,
+      retainedAsyncSha256: recovery.retainedAsyncSha256,
+      retrySource: finalizedAttempts.attempts[1].retrySource, digest: recovery.sourceDigest,
+    });
+    await claimConvergeAttempt({ gitCommonDir: f.common, target: f.target,
+      maxAttempts: 3, pendingRecoverySource: source });
+    const gap = await resumePendingLegacyLaunch(options);
+    expect(gap).toMatchObject({ claim: { attempt: 3, attemptsUsed: 3 }, reusedCompletion: false });
+    expect((await loadConvergeAttemptState(f.common, f.target))?.attemptsUsed).toBe(3);
+    expect((await loadConvergeRunState(f.common, f.target))?.lastLaunch)
+      .toMatchObject({ status: 'completed', attempt: 3 });
   });
 
   it.each([

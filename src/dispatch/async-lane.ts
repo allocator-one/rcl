@@ -317,6 +317,91 @@ export interface AsyncResultReference {
   bytesBase64: string;
 }
 
+/** Immutable read-only snapshot for a target-locked interrupted-launch resume. */
+export async function snapshotAsyncResults(
+  storeDir: string,
+  targetKey: string,
+  blockingReviews: readonly ReviewerIdentity[] = [],
+  expectedSha256?: readonly string[],
+): Promise<{ reviews: ModelReview[]; reviewBytes: string[]; artifacts: AsyncResultReference[] }> {
+  await assertSafeAsyncOpinionDirectory(storeDir);
+  const directoryNames = await readdir(storeDir);
+  if (directoryNames.some(name => name.startsWith(`pending-${targetKey}-`) && name.endsWith('.json'))) {
+    throw new Error('async_resume_worker_pending');
+  }
+  const resultPrefix = `result-${targetKey}-`;
+  const names = directoryNames.filter(name =>
+    name.startsWith(resultPrefix) &&
+    (name.endsWith('.json') || /\.json(?:\.consumed-[A-Za-z0-9-]+)+$/.test(name))).sort();
+  if (names.length > MAX_ASYNC_CALLS_PER_ROUND) throw new Error('async_resume_result_limit');
+  const reviews: ModelReview[] = [], reviewBytes: string[] = [], artifacts: AsyncResultReference[] = [];
+  for (const name of names) {
+    const path = join(storeDir, name);
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 8 * 1024 * 1024) {
+      throw new Error('async_resume_result_invalid');
+    }
+    const bytes = await readFile(path);
+    const after = await lstat(path);
+    if (before.ino !== after.ino || before.dev !== after.dev || before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      throw new Error('async_resume_result_changed');
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('async_resume_result_invalid'); }
+    if (!isReviewShape(parsed) || parsed.async !== true) throw new Error('async_resume_result_invalid');
+    const review = structuredClone(parsed);
+    reviews.push(review);
+    reviewBytes.push(bytes.toString('utf8'));
+    artifacts.push({ path, sha256: createHash('sha256').update(bytes).digest('hex'), bytesBase64: bytes.toString('base64') });
+  }
+  assertUnambiguousReviewerIdentities([...blockingReviews, ...reviews]);
+  if (expectedSha256 !== undefined) {
+    const expected = [...expectedSha256].sort();
+    const actual = artifacts.map(artifact => artifact.sha256).sort();
+    if (expected.length !== new Set(expected).size ||
+      expected.some(digest => !/^[a-f0-9]{64}$/.test(digest)) ||
+      expected.length !== actual.length || expected.some((digest, index) => digest !== actual[index])) {
+      throw new Error('async_resume_result_binding_mismatch');
+    }
+  }
+  return { reviews, reviewBytes, artifacts };
+}
+
+/** Consume only the exact reviewed async artifacts after terminal recovery. */
+export async function consumeBoundAsyncResults(
+  storeDir: string,
+  targetKey: string,
+  expectedSha256: readonly string[],
+  options: { allowAlreadyConsumed?: boolean } = {},
+): Promise<void> {
+  const snapshot = await snapshotAsyncResults(storeDir, targetKey);
+  if (options.allowAlreadyConsumed && snapshot.artifacts.length === 0) return;
+  const expected = [...expectedSha256].sort();
+  const actual = snapshot.artifacts.map(artifact => artifact.sha256).sort();
+  const valid = options.allowAlreadyConsumed
+    ? actual.every(digest => expected.includes(digest))
+    : expected.length === actual.length && expected.every((digest, index) => digest === actual[index]);
+  if (!valid) {
+    throw new Error('async_resume_result_binding_mismatch');
+  }
+  for (const artifact of snapshot.artifacts) {
+    const retained = `${artifact.path}.consumed-${randomUUID()}`;
+    await rename(artifact.path, retained);
+    try {
+      const bytes = await readFile(retained);
+      if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) {
+        await rename(retained, artifact.path);
+        throw new Error('async_resume_result_changed');
+      }
+      await rm(retained, { force: true });
+    } catch (error) {
+      try { await rename(retained, artifact.path); } catch { /* preserve the original error */ }
+      throw error;
+    }
+  }
+}
+
 interface ObservedAsyncResult {
   path: string;
   bytes: Buffer;

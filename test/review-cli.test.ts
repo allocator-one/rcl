@@ -229,6 +229,28 @@ describe('rcl review — bound fix-obligation recovery (RCL-148)', () => {
   });
 });
 
+describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
+  it('advertises unknown finalization, fresh recovery and immutable async bindings', () => {
+    const result = runRcl(['review', '--help'], tempRepository());
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--resume-pending');
+    expect(result.stdout).toContain('--resume-async-sha256 <hashes>');
+  });
+
+  it.each([
+    ['missing reviewed async bindings', ['--resume-pending', '--retry-report', 'prior.json', '--retry-reason', 'Resume exact claim.']],
+    ['async bindings without recovery', ['--resume-async-sha256', 'f'.repeat(64)]],
+  ])('refuses %s before attempt or provider spend', async (_label, extra) => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync([...fixture.args, ...extra], fixture.repo, fixture.env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('pending_resume_incompatible');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  });
+});
+
 describe('rcl review — guarded native launch', () => {
   it.each([false, true])('shares repository rules once without a dedicated seat (explicit context: %s)', async (explicitContext) => {
     await withGuardedFixture(async fixture => {

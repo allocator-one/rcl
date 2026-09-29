@@ -2,6 +2,10 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Config } from '../config/schema.js';
 import type { ModelProvider } from '../config/providers.js';
 import type { RosterEntry } from '../report/run-header.js';
+import { LEGACY_BUILTIN_ROLES_4_1_10 } from '../roles/legacy-4.1.10.js';
+import { LEGACY_BUILTIN_ROLES_4_4_9 } from '../roles/legacy-4.4.9.js';
+import type { Role } from '../roles/types.js';
+import type { ResolvedGatingConfig } from '../consensus/gating.js';
 
 interface LegacyCatalog {
   roles: readonly string[];
@@ -52,6 +56,88 @@ interface LegacyRunIdentity {
     verification_pass_timeout_ms?: number;
   };
   spec?: unknown;
+}
+
+function legacyRoleCatalog(catalog: LegacyCatalog): Map<string, Role> {
+  const available = new Map(LEGACY_BUILTIN_ROLES_4_1_10.map(role => [role.name, role]));
+  const roles = new Map<string, Role>();
+  for (const name of catalog.roles) {
+    const role = available.get(name);
+    if (!role) return new Map();
+    roles.set(name, role);
+  }
+  return roles;
+}
+
+export interface HistoricalExecutionPlan {
+  roles: Role[];
+  gating: ResolvedGatingConfig;
+  embedsProjectRules: boolean;
+}
+
+/** Rebuild the flawed 4.4.9 dispatch plan whose digest is stored on the pending claim. */
+export function legacyPendingClaimRoles(config: Config, specContent?: string): Role[] | undefined {
+  if ((config.customRoles?.length ?? 0) > 0 || (config.reviewers?.length ?? 0) > 0) return undefined;
+  const available = new Map(LEGACY_BUILTIN_ROLES_4_4_9.map(role => [role.name, role]));
+  const requested = config.roles;
+  let roles: Role[];
+  if (requested?.length) {
+    const all = requested.some(name => name.toLowerCase() === 'all');
+    if (all && requested.length !== 1) return undefined;
+    roles = all ? [...available.values()] : requested.flatMap(name => {
+      const role = available.get(name) ?? available.get(name.toLowerCase());
+      return role ? [role] : [];
+    });
+    if ((!all && roles.length !== requested.length) || roles.length === 0) return undefined;
+  } else {
+    roles = [...available.values()];
+  }
+  if (!specContent) roles = roles.filter(role => role.name !== 'spec-compliance');
+  return roles.map(role => role.name === 'spec-compliance' && specContent
+    ? { ...role, systemPrompt: `${role.systemPrompt}\n\n## Specification Content\n\n${specContent}` }
+    : role);
+}
+
+/** Rebuild dispatch-bearing role prompts and verifier settings from a supported producer. */
+export function historicalExecutionPlan(run: LegacyRunIdentity, config: Config,
+  projectRulesContent?: string, specContent?: string): HistoricalExecutionPlan | undefined {
+  if (!Object.hasOwn(CATALOGS, run.rcl_version)) return undefined;
+  const catalog = CATALOGS[run.rcl_version];
+  if (!catalog || (config.customRoles?.length ?? 0) > 0 || (config.reviewers?.length ?? 0) > 0 ||
+    !authenticHistoricalRoster(run, config)) return undefined;
+  const authenticatedRoleNames = new Set(run.roster.map(seat => seat.role));
+  if (authenticatedRoleNames.has('project-rules') && projectRulesContent === undefined) return undefined;
+  if (authenticatedRoleNames.has('spec-compliance') && specContent === undefined) return undefined;
+  const definitions = legacyRoleCatalog(catalog);
+  if (definitions.size !== catalog.roles.length) return undefined;
+  const selected = resolveRequestedRoles(config, catalog, run.spec !== undefined, projectRulesContent !== undefined);
+  if (!selected) return undefined;
+  const roles = selected.flatMap(identity => {
+    const base = definitions.get(identity.name);
+    if (!base) return [];
+    if (base.name === 'project-rules' && projectRulesContent !== undefined) {
+      return [{ ...base, systemPrompt: `${base.systemPrompt}\n\n## Project Rules File Content\n\n${projectRulesContent}` }];
+    }
+    if (base.name === 'spec-compliance' && specContent !== undefined) {
+      return [{ ...base, systemPrompt: `${base.systemPrompt}\n\n## Specification Content\n\n${specContent}` }];
+    }
+    return [base];
+  });
+  if (roles.length !== selected.length) return undefined;
+  const gating = run.gating;
+  return {
+    roles,
+    gating: {
+      mode: gating.mode,
+      minModels: gating.min_models,
+      verificationModel: gating.verification_model,
+      ...(gating.verification_reasoning_effort
+        ? { verificationReasoningEffort: gating.verification_reasoning_effort } : {}),
+      verificationTimeoutMs: gating.verification_timeout_ms,
+      verificationPassTimeoutMs: gating.verification_pass_timeout_ms ?? gating.verification_timeout_ms,
+    },
+    embedsProjectRules: roles.some(role => role.name === 'project-rules'),
+  };
 }
 
 function historicalProvider(model: string): ModelProvider {

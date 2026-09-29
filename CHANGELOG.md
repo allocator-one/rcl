@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.4.10 - 2026-09-29
+
+- Fail closed when an interrupted legacy retry has no durable blocking-call
+  receipts: finalize the spent attempt as unknown, archive its exact async
+  artifacts, and use one explicitly authorized fresh claim with the
+  authenticated historical blocking roster, verifier and per-call
+  checkpoints. Recovery is idempotent and never infers that an unrecorded
+  provider call did not run (RCL-152).
+
 ## 4.4.9 - 2026-09-29
 
 - Reconstruct 4.1.10–4.1.12 legacy retry rosters from the exact bound config
