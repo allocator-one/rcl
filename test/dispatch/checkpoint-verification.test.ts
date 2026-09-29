@@ -382,6 +382,18 @@ describe('durable verifier phase in the existing checkpoint', () => {
     expect(await runOwned(f, owner => f.journal.recordVerificationIntent(intent(), owner))).toBe(false);
   });
 
+  it('preserves adapter invocation diagnostics without hiding verifier retries', async () => {
+    const f = await fixture();
+    await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));
+    await runOwned(f, owner => f.journal.recordVerificationIntent(intent(), owner));
+    const before = await f.journal.readVerification();
+    await expect(runOwned(f, owner => f.journal.recordVerificationResult({ ...outcome(), answerBytes: answer({ adapterAttempts: 2 }) }, owner))).rejects.toThrow();
+    expect(await f.journal.readVerification()).toEqual(before);
+    const bytes = answer({ adapterAttempts: 1 });
+    await runOwned(f, owner => f.journal.recordVerificationResult({ ...outcome(), answerBytes: bytes }, owner));
+    expect((await f.journal.readVerification())!.outcomes[0]!.answerBytes).toBe(bytes);
+  });
+
   it('accepts results only for the exact launched batch, model, route and immutable bytes', async () => {
     const f = await fixture();
     await runOwned(f, owner => f.journal.beginVerification(planInput(), owner));

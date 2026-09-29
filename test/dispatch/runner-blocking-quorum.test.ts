@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ModelReview } from '../../src/consensus/types.js';
 import type { AdapterOptions, ReviewAdapter } from '../../src/dispatch/adapter.js';
 import { mergeChunkReviews } from '../../src/dispatch/merge.js';
-import { runReviews } from '../../src/dispatch/runner.js';
+import { reviewCallIdentity, runReviews } from '../../src/dispatch/runner.js';
 import type { BuiltPrompt } from '../../src/prepare/prompt-builder.js';
 import { deriveBlockingHealth } from '../../src/report/blocking-health.js';
 import type { RosterEntry } from '../../src/report/run-header.js';
@@ -198,4 +198,55 @@ describe('runner closes quorum on blocking seats only (RCL-136)', () => {
     await expect(runReviews(assignments, prompts, { ...options, quorum: { blocking: [true, true, false, true] } }))
       .rejects.toThrow(/Inconsistent original seat lane/);
   });
+
+  it('retained fraction 1 closes at the original blocking minimum without waiting for secondary work', async () => {
+    const { assignments, prompts } = council(['b1', 'b2'], ['s1']);
+    const fake = scriptedAdapter(model => model === 'b2' || model === 's1' ? 'held' : 'success');
+    const run = runReviews(assignments, prompts, {
+      timeoutMs: 60_000, maxRetries: 0, concurrency: 3, adapterFactory: () => fake.adapter,
+      seatIds: ['original-b1', 'original-b2', 'original-s1'],
+      quorum: { fraction: 1, blockingSeatIds: ['original-b1', 'original-b2'] },
+    });
+    await fake.whenHeld(2);
+    fake.release('b2', 'success');
+    const reviews = await run;
+    expect(reviews.map(review => review.status)).toEqual(['success', 'success', 'canceled']);
+    expect(fake.aborted).toEqual(['s1']);
+  });
+
+  it('retained fraction 1 starts no calls when the original blocking minimum is already complete', async () => {
+    const { assignments, prompts } = council(['b1', 'b2'], ['s1']);
+    const seatIds = ['original-b1', 'original-b2', 'original-s1'];
+    const retainedReviews = [0, 1].map(callIndex => ({ callIndex,
+      callIdentity: reviewCallIdentity(assignments[callIndex]!, prompts[callIndex]!, callIndex, seatIds[callIndex]),
+      review: { model: assignments[callIndex]!.model, role: 'general', provider: 'fake', findings: [],
+        durationMs: 1, status: 'success' as const },
+    }));
+    let providers = 0;
+    const reviews = await runReviews(assignments, prompts, {
+      timeoutMs: 1_000, maxRetries: 0, concurrency: 3,
+      adapterFactory: () => { providers++; return scriptedAdapter(() => 'success').adapter; },
+      seatIds, retainedReviews, quorum: { fraction: 1, blockingSeatIds: seatIds.slice(0, 2) },
+    });
+    expect(providers).toBe(0);
+    expect(reviews.slice(0, 2)).toEqual(retainedReviews.map(entry => entry.review));
+    expect(reviews[2]!.status).toBe('canceled');
+  });
+
+  it('refuses ambiguous lane authorities and non-boolean lanes before constructing a provider', async () => {
+    const { assignments, prompts } = council(['b1', 'b2'], []);
+    let providers = 0;
+    const options = { timeoutMs: 1_000, maxRetries: 0, concurrency: 2,
+      adapterFactory: () => { providers++; return scriptedAdapter(() => 'success').adapter; },
+      seatIds: ['original-b1', 'original-b2'],
+    };
+    await expect(runReviews(assignments, prompts, { ...options,
+      quorum: { blocking: [true, true], blockingSeatIds: options.seatIds },
+    })).rejects.toThrow(/Ambiguous blocking lane authority/);
+    await expect(runReviews(assignments, prompts, { ...options,
+      quorum: { blocking: [true, 'secondary' as unknown as boolean] },
+    })).rejects.toThrow(/Invalid blocking lane matrix/);
+    expect(providers).toBe(0);
+  });
+
 });

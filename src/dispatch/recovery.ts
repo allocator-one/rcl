@@ -4,7 +4,7 @@ import type { ModelReview } from '../consensus/types.js';
 import { assertNativeTargetOwnership, withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import type { BuiltPrompt } from '../prepare/prompt-builder.js';
 import type { ReviewAssignment } from '../roles/types.js';
-import { CheckpointJournal, freezeCheckpointPlan, type CheckpointState, type FrozenCheckpointPlan, type PaidAttempt } from './checkpoint.js';
+import { CheckpointJournal, freezeCheckpointPlan, blockingCheckpointSeatIds, checkpointRecoveryCells, requireReviewerLaneBinding, type CheckpointState, type FrozenCheckpointPlan, type PaidAttempt } from './checkpoint.js';
 import { previewReviewerRecovery, type RecoveryAttempt, type RecoveryPreview } from './recovery-policy.js';
 import { resolveQuorumPolicy } from './quorum.js';
 import { defaultAdapterFactory, reviewCallIdentity, runReviews, type RunnerOptions } from './runner.js';
@@ -26,6 +26,8 @@ export interface ReviewerRecoveryOptions {
   prompts: BuiltPrompt[];
   /** Validated immutable source history, excluding the successor's own attempts. */
   sourceAttempts: readonly RecoveryAttempt[];
+  /** Original dispatch retains prepared secondary work; successors only top up blocking seats. */
+  includeSecondary?: boolean;
   fraction: number;
   maxAdditionalCalls: number;
   maxAttemptsPerCell: number;
@@ -62,7 +64,7 @@ export interface ReviewerRecoveryResult {
 
 export type CapturedRecoveryOptions = Omit<ReviewerRecoveryOptions,
   'plan' | 'assignments' | 'prompts' | 'fraction' | 'maxAdditionalCalls' | 'maxAttemptsPerCell' | 'remainingMs' |
-  'timeoutMs' | 'concurrency' | 'providerConcurrency' | 'reasoningEffort'> & {
+  'timeoutMs' | 'concurrency' | 'providerConcurrency' | 'reasoningEffort' | 'includeSecondary'> & {
   /** Exact operation already claimed and bound by the outer source/authority validator. */
   operation: RecoveryOperation;
   runtimeBounds?: RecoveryRuntimeBounds;
@@ -78,6 +80,7 @@ export type CapturedRecoveryOptions = Omit<ReviewerRecoveryOptions,
 export async function recoverCapturedAssignments(options: CapturedRecoveryOptions): Promise<ReviewerRecoveryResult> {
   const expectedOperation = encodeRecoveryOperation(options.operation);
   const expectedPlan = freezeCheckpointPlan(options.expectedPlan);
+  requireReviewerLaneBinding(expectedPlan);
   const sourceAttempts = structuredClone(options.sourceAttempts);
   const runtimeBounds = options.runtimeBounds === undefined ? undefined : structuredClone(options.runtimeBounds);
   const capturedOptions = { ...options, expectedPlan, sourceAttempts, runtimeBounds };
@@ -90,7 +93,7 @@ export async function recoverCapturedAssignments(options: CapturedRecoveryOption
     const captured = decodeCapturedInputs(bindings['captured-inputs'], expectedPlan);
     if (captured.digest !== operation.capturedInputsSha256) throw new Error('recovery_captured_inputs_mismatch');
     const budget = remainingRecoveryBudget(operation, (capturedOptions.nowMs ?? Date.now)(), runtimeBounds);
-    return recoverReviewerAssignments({ ...capturedOptions, ownership, plan: captured.plan,
+    return recoverReviewerAssignments({ ...capturedOptions, ownership, plan: captured.plan, includeSecondary: false,
       assignments: captured.assignments, prompts: captured.prompts, fraction: captured.policy.fraction,
       timeoutMs: captured.config.timeout ?? DEFAULT_TIMEOUT_MS,
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,
@@ -152,7 +155,8 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
   // record. Child operations below remain reentrant without another target lock.
   return withOwnedNativeOperation(input.ownership, input.commonDir, plan.target, async ownership => {
     input = { ...input, ownership };
-    const policy = resolveQuorumPolicy(plan.roster.length, input.fraction);
+    const blockingSeatIds = blockingCheckpointSeatIds(plan);
+    const policy = resolveQuorumPolicy(blockingSeatIds.length, input.fraction);
     const controller = new AbortController();
     const abort = () => controller.abort();
     if (input.signal?.aborted) abort();
@@ -162,12 +166,12 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
     const setupFailuresByIndex = new Map<number, ModelReview>();
 
     function preview(attempts: RecoveryAttempt[], newAttempts: number): RecoveryPreview {
-      return previewReviewerRecovery(plan.cells, attempts, policy, {
+      return previewReviewerRecovery(checkpointRecoveryCells(plan), attempts, policy, {
         maxAttemptsPerCell: input.maxAttemptsPerCell,
         maxAdditionalCalls: input.maxAdditionalCalls,
         additionalCallsUsed: newAttempts,
         remainingMs: Math.max(0, deadline - performance.now()),
-      }, [...setupFailuresByIndex.keys()].map(index => plan.cells[index]!.id));
+      }, [...setupFailuresByIndex.keys()].map(index => plan.cells[index]!.id), input.includeSecondary === true);
     }
     async function capture() {
       const state = await input.journal.read();
@@ -187,6 +191,20 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
         ...(stoppedBy ? { stoppedBy } : {}) };
     }
     try {
+      const prior = await capture();
+      if (prior.preview.nextAction === 'retry_missing_assignments' &&
+        !controller.signal.aborted && !prior.state.finalized) {
+        // Exclusive invocation ownership means these intents belong to an earlier
+        // executor. Retain their uncertain cost before replaying a new selection.
+        const recorded = new Set(prior.state.records.filter(record => record.type === 'uncertain')
+          .map(record => record.paidAttempt!.id));
+        for (const pending of prior.state.uncertain) {
+          if (!recorded.has(pending.paidAttempt.id)) {
+            await input.journal.recordUncertain(pending.cell, pending.paidAttempt,
+              'Previous executor ended without a recorded outcome; call remains possibly billed.', ownership);
+          }
+        }
+      }
       while (true) {
         const before = await capture();
         if (before.preview.nextAction !== 'retry_missing_assignments') return finish(before);
@@ -208,7 +226,7 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
             const adapter = adapters.get(provider);
             if (!adapter) throw new Error('recovery_missing_prepared_adapter');
             return adapter;
-          }, quorum: { fraction: policy.fraction },
+          }, quorum: { fraction: policy.fraction, blockingSeatIds },
           seatIds: plan.cells.map(cell => cell.seat), signal: controller.signal,
           retainedReviews: before.preview.retainedCallIndices.map(callIndex => ({ callIndex,
             callIdentity: reviewCallIdentity(assignments[callIndex]!, prompts[callIndex]!, callIndex, plan.cells[callIndex]!.seat),
@@ -219,6 +237,9 @@ export async function recoverReviewerAssignments(input: ReviewerRecoveryOptions)
             const operation = withOwnedNativeOperation(input.ownership, input.commonDir, plan.target, async ownership => {
               if (signal.aborted) return false;
               const current = await capture();
+              // The preview reserves work; every durable paid intent must still
+              // respect this invocation's possibly tighter runtime call bound.
+              if (current.own.length >= input.maxAdditionalCalls) return false;
               // Our own running calls still have a chance to succeed. Treat their
               // pending intents as reserved work, not uncertain previous invocations,
               // when deciding whether another missing cell could complete quorum.

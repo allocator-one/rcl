@@ -25,12 +25,12 @@ const roleEntrySchema = z.object({ name: z.string().min(1), role: roleSchema }).
 // loadMergedWeights applies the supported voter's inclusive [0.5, 1.5] range.
 const weightEntrySchema = z.object({ model: z.string().min(1).refine(model => !/[\u0000-\u001f\u007f-\u009f]/.test(model)), weight: z.number().finite().min(0.5).max(1.5) }).strict();
 const wireSchema = z.object({
-  version: z.literal(1), algorithm: algorithmSchema, diffSha256: digestSchema,
+  version: z.literal(1), verifierContractVersion: z.literal(2).optional(), algorithm: algorithmSchema, diffSha256: digestSchema,
   roles: z.array(roleEntrySchema).refine(rows => rows.every((row, index) => index === 0 || rows[index - 1]!.name < row.name)),
   thresholds: thresholdsSchema, gating: gatingSchema,
   modelWeights: z.array(weightEntrySchema).refine(rows => rows.every((row, index) => index === 0 || rows[index - 1]!.model < row.model)).optional(),
   belowThresholdAppendix: z.boolean(),
-}).strict();
+}).strict().refine(wire => wire.verifierContractVersion === 2 || wire.gating.verificationReasoningEffort === undefined);
 const inputSchema = z.object({
   algorithm: algorithmSchema, diffSha256: digestSchema, roleMap: z.instanceof(Map), thresholds: thresholdsSchema,
   gating: gatingSchema.extend({ verificationModel: verifierSchema.optional() }), modelWeights: z.instanceof(Map).optional(),
@@ -51,7 +51,7 @@ export interface CaptureAggregationInput {
 }
 type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
 export type CapturedAggregationInputs = DeepReadonly<{
-  version: 1; bytes: string; digest: string; algorithm: typeof AGGREGATION_ALGORITHM; diffSha256: string;
+  version: 1; verifierContractVersion?: 2; bytes: string; digest: string; algorithm: typeof AGGREGATION_ALGORITHM; diffSha256: string;
   roles: Array<{ name: string; role: Role }>; thresholds: ResolvedThresholds; gating: ResolvedGatingConfig;
   modelWeights?: Array<{ model: string; weight: number }>; belowThresholdAppendix: boolean;
 }>;
@@ -98,7 +98,7 @@ export function captureAggregationInputs(input: CaptureAggregationInput): Captur
     if (!entry.success) throw new Error('aggregation_invalid_input');
     return retain(entry.data);
   }).sort((left, right) => compareKeys(left.model, right.model));
-  const bytes = stableStringify({ version: 1, algorithm: actual.algorithm, diffSha256: actual.diffSha256, roles,
+  const bytes = stableStringify({ version: 1, verifierContractVersion: 2, algorithm: actual.algorithm, diffSha256: actual.diffSha256, roles,
     thresholds: actual.thresholds, gating: { ...actual.gating, verificationModel: actual.gating.verificationModel ?? null },
     ...(modelWeights !== undefined ? { modelWeights } : {}), belowThresholdAppendix: actual.belowThresholdAppendix });
   return decodeAggregationInputs(bytes, actual.diffSha256);

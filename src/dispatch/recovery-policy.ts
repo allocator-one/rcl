@@ -2,7 +2,7 @@ import type { ModelReview } from '../consensus/types.js';
 import type { CheckpointCell } from './checkpoint.js';
 import { hasSuccessfulQuorum, resolveQuorumPolicy, type QuorumPolicy } from './quorum.js';
 
-export type RecoveryCell = Pick<CheckpointCell, 'id' | 'seat' | 'model' | 'role' | 'route'>;
+export type RecoveryCell = Pick<CheckpointCell, 'id' | 'seat' | 'model' | 'role' | 'route'> & { lane?: 'blocking' | 'secondary' };
 
 /** An owned, durably recorded call intent; no outcome means possibly billed. */
 export interface RecoveryAttempt {
@@ -73,6 +73,7 @@ export function previewReviewerRecovery(
   policy: QuorumPolicy,
   limits: RecoveryLimits,
   unavailableCells: readonly string[] = [],
+  includeSecondary = false,
 ): RecoveryPreview {
   if (![limits.maxAttemptsPerCell, limits.maxAdditionalCalls, limits.additionalCallsUsed]
     .every(value => Number.isSafeInteger(value) && value >= 0) || limits.maxAttemptsPerCell < 1 ||
@@ -80,18 +81,20 @@ export function previewReviewerRecovery(
   const byId = new Map<string, { cell: RecoveryCell; index: number; attempts: RecoveryAttempt[] }>();
   const seats = new Map<string, number[]>();
   for (const [index, cell] of cells.entries()) {
+    if (cell.lane !== undefined && cell.lane !== 'blocking' && cell.lane !== 'secondary') throw new Error('recovery_invalid_lane');
     if (!cell.id || !cell.seat || byId.has(cell.id)) throw new Error('recovery_invalid_matrix');
     byId.set(cell.id, { cell, index, attempts: [] });
     const indices = seats.get(cell.seat) ?? [];
     const first = indices.length ? cells[indices[0]!] : undefined;
-    if (first && (first.model !== cell.model || first.route !== cell.route || first.role !== cell.role)) {
+    if (first && (first.model !== cell.model || first.route !== cell.route || first.role !== cell.role || (first.lane ?? 'blocking') !== (cell.lane ?? 'blocking'))) {
       throw new Error('recovery_invalid_matrix');
     }
     indices.push(index);
     seats.set(cell.seat, indices);
   }
-  if (seats.size !== policy.seatCount) throw new Error('recovery_roster_mismatch');
-  const resolved = resolveQuorumPolicy(seats.size, policy.fraction);
+  const blockingSeats = [...seats.values()].filter(indices => cells[indices[0]!]!.lane !== 'secondary');
+  if (blockingSeats.length !== policy.seatCount) throw new Error('recovery_roster_mismatch');
+  const resolved = resolveQuorumPolicy(blockingSeats.length, policy.fraction);
   if (policy.version !== resolved.version || policy.minimumSuccessful !== resolved.minimumSuccessful) {
     throw new Error('recovery_policy_mismatch');
   }
@@ -137,7 +140,7 @@ export function previewReviewerRecovery(
   const retained = new Set(retainedCallIndices);
   let successfulSeats = 0;
   const recoverable: number[][] = [];
-  for (const indices of seats.values()) {
+  for (const indices of blockingSeats) {
     const missing = indices.filter(index => !retained.has(index));
     if (!missing.length) successfulSeats++;
     else if (missing.every(index => eligible.has(index))) recoverable.push(missing);
@@ -166,7 +169,9 @@ export function previewReviewerRecovery(
   return {
     policy: resolved, successfulSeats, successesNeeded,
     potentialSuccessfulSeats, retainedCallIndices,
-    eligibleCallIndices: nextAction === 'retry_missing_assignments' ? budgetReachable.flat() : [],
+    eligibleCallIndices: nextAction === 'retry_missing_assignments' ? [...budgetReachable.flat(),
+      ...(includeSecondary ? [...eligible].filter(index => cells[index]!.lane === 'secondary')
+        .slice(0, Math.max(0, remainingCalls - reachableCallCost)) : [])] : [],
     blockedCells, recordedAttempts: attempts.length, additionalCallsUsed: limits.additionalCallsUsed,
     remainingCalls, nextAction,
   };

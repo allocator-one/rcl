@@ -1,10 +1,10 @@
 import type { ModelReview } from '../consensus/types.js';
 import { hasSuccessfulQuorum, resolveQuorumPolicy, type QuorumPolicy } from '../dispatch/quorum.js';
 
-/** Structural view of the checkpoint's original blocking-only matrix. */
+/** Structural view of every original synchronous assignment and its frozen lane. */
 export interface ReviewerHealthPlan {
-  version: 1;
-  roster: Array<{ seat: string; model: string; role: string; route: string }>;
+  version: 1 | 2;
+  roster: Array<{ seat: string; model: string; role: string; route: string; lane?: 'blocking' | 'secondary' }>;
   chunks: Array<{ index: number; total: number; digest: string }>;
   cells: Array<{ id: string; seat: string; chunk: number; model: string; role: string; route: string; chunkDigest: string }>;
 }
@@ -49,18 +49,18 @@ export function assertReviewerHealth(value: unknown): asserts value is ReviewerH
  * The caller first verifies checkpoint provenance, original plan identity and
  * selected outcome bytes. This pure projection checks matrix completeness and
  * outcome attribution; it cannot establish provider truth or source authority.
- * Async/verifier rows are outside this blocking-only plan and must not be passed.
+ * Async/verifier rows remain outside this synchronous plan and must not be passed.
  * Policy version/fraction are explicit; legacy waiting configuration is not used.
  */
-export function deriveReviewerHealth(
+export function deriveReviewerCoverage(
   plan: ReviewerHealthPlan,
   selectedResults: readonly SelectedReviewerResult[],
   policy: Pick<QuorumPolicy, 'version' | 'fraction'>,
-): ReviewerHealth {
+): { health: ReviewerHealth; completeSeats: readonly string[] } {
   if (policy?.version !== 1 || typeof policy.fraction !== 'number') {
     throw new Error('Invalid reviewer health policy version or fraction');
   }
-  if (plan?.version !== 1 || !Array.isArray(plan.roster) || !Array.isArray(plan.chunks) ||
+  if ((plan?.version !== 1 && plan?.version !== 2) || !Array.isArray(plan.roster) || !Array.isArray(plan.chunks) ||
     !Array.isArray(plan.cells) || !Array.isArray(selectedResults) || plan.chunks.length === 0) {
     throw new Error('Invalid frozen reviewer matrix');
   }
@@ -70,10 +70,14 @@ export function deriveReviewerHealth(
     if (!seat || !text(seat.seat) || !text(seat.model) || !text(seat.role) || !text(seat.route)) {
       throw new Error('Invalid frozen reviewer seat');
     }
+    if (plan.version === 2 ? seat.lane !== 'blocking' && seat.lane !== 'secondary' : seat.lane !== undefined) {
+      throw new Error('Invalid frozen reviewer lane binding');
+    }
     if (roster.has(seat.seat)) throw new Error('Duplicate frozen reviewer seat');
     roster.set(seat.seat, seat);
   }
-  const resolved = resolveQuorumPolicy(roster.size, policy.fraction);
+  const blocking = [...roster.values()].filter(seat => plan.version === 1 || seat.lane === 'blocking');
+  const resolved = resolveQuorumPolicy(blocking.length, policy.fraction);
   const chunks = new Map<number, string>();
   for (const chunk of plan.chunks) {
     if (!chunk || !Number.isSafeInteger(chunk.index) || chunk.index < 0 || chunk.index >= plan.chunks.length ||
@@ -116,7 +120,8 @@ export function deriveReviewerHealth(
   }
   const successfulSeats: string[] = [];
   const incompleteSeats: string[] = [];
-  for (const seat of roster.keys()) {
+  const completeSeats = [...roster.keys()].filter(seat => successes.get(seat) === chunks.size);
+  for (const { seat } of blocking) {
     (successes.get(seat) === chunks.size ? successfulSeats : incompleteSeats).push(seat);
   }
   const health = Object.freeze({
@@ -127,5 +132,11 @@ export function deriveReviewerHealth(
     conclusive: hasSuccessfulQuorum(resolved, successfulSeats.length),
   }) as ReviewerHealth;
   validated.add(health);
-  return health;
+  return Object.freeze({ health, completeSeats: Object.freeze(completeSeats) });
+}
+
+/** Blocking quorum is separate from the complete synchronous contribution set. */
+export function deriveReviewerHealth(plan: ReviewerHealthPlan, selectedResults: readonly SelectedReviewerResult[],
+  policy: Pick<QuorumPolicy, 'version' | 'fraction'>): ReviewerHealth {
+  return deriveReviewerCoverage(plan, selectedResults, policy).health;
 }

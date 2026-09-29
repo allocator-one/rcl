@@ -4,8 +4,8 @@ import { chunkDiff, formatChunkForPrompt } from '../../src/prepare/chunker.js';
 import { configDigest, configIdentity, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
-import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
 import { freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
 import type { Config } from '../../src/config/schema.js';
 import type { Diff, FileChange } from '../../src/resolver/types.js';
 import type { ReviewAssignment } from '../../src/roles/types.js';
@@ -58,6 +58,28 @@ describe('capture prepared council', () => {
     }));
     expect(result.configBytes).not.toContain('never-captured');
     expect(result.configBytes).not.toContain('harness');
+  });
+
+  it('provider-policy preserves legacy omission only for matching old captured inputs and never masks explicit drift', async () => {
+    const input = { ...await fixture(), lanes: ['blocking', 'blocking'] as const };
+    const fresh = capturePreparedCouncil(input);
+    // A genuine canonical pre-policy capture: all original material inputs,
+    // with its original omitted map and matching immutable plan identity.
+    const configBytes = configIdentity(input.config);
+    const oldPlan = freezeCheckpointPlan({ ...fresh.plan, configSha256: sha256Hex(configBytes) });
+    const old = captureReviewerInputs({ ...fresh.captured, plan: oldPlan, configBytes,
+      policy: { version: 1, fraction: fresh.captured.policy.fraction } });
+    const bytes = old.bytes;
+    const comparison = { ...input, comparisonSource: old };
+    expect(capturePreparedCouncil(comparison).captured.bytes).toBe(bytes);
+    expect(decodeCapturedInputs(bytes, oldPlan).config.providerConcurrency).toBeUndefined();
+    const explicit = capturePreparedCouncil({ ...comparison, config: { ...input.config, providerConcurrency: { anthropic: 2 } } });
+    expect(explicit.captured.digest).not.toBe(old.digest);
+    expect(explicit.captured.config.providerConcurrency).toEqual({ anthropic: 2 });
+    const currentDefault = capturePreparedCouncil({ ...input, comparisonSource: fresh.captured });
+    expect(currentDefault.captured.bytes).toBe(fresh.captured.bytes);
+    expect(capturePreparedCouncil(input).captured.config.providerConcurrency).toEqual({ anthropic: 2 });
+    expect(old.bytes).toBe(bytes);
   });
 
   it('preserves an authenticated legacy policy omission but treats an explicit current cap as changed input', async () => {

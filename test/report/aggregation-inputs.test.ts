@@ -136,3 +136,22 @@ describe('captured aggregation inputs', () => {
     expect(() => captureAggregationInputs(oversized)).toThrow('aggregation_invalid_bytes');
   });
 });
+
+
+describe('captured verifier protocol discriminator', () => {
+  it('writes explicit v2 for fresh capture without permitting a legacy request', () => {
+    const captured = captureAggregationInputs(input());
+    expect(JSON.parse(captured.bytes).verifierContractVersion).toBe(2);
+    expect(() => captureAggregationInputs({ ...input(), verifierContractVersion: 1 } as any)).toThrow('aggregation_invalid_input');
+  });
+  it('preserves canonical legacy bytes and refuses legacy effort or unsupported markers', () => {
+    const wire = JSON.parse(captureAggregationInputs(input()).bytes);
+    delete wire.verifierContractVersion; delete wire.gating.verificationReasoningEffort;
+    const oldBytes = stableStringify(wire);
+    expect(decodeAggregationInputs(oldBytes, diffSha256).bytes).toBe(oldBytes);
+    expect(() => decodeAggregationInputs(stableStringify({ ...wire, gating: { ...wire.gating, verificationReasoningEffort: 'high' } }), diffSha256)).toThrow('aggregation_invalid_document');
+    for (const marker of [1, 3, '2', null]) {
+      expect(() => decodeAggregationInputs(stableStringify({ ...wire, verifierContractVersion: marker }), diffSha256)).toThrow('aggregation_invalid_document');
+    }
+  });
+});

@@ -44,6 +44,7 @@ export interface CompletedReviewProjection {
   findings: ConsensusFinding[];
   appendix: ConsensusFinding[];
   verification?: ReviewResult['stats']['verification'];
+  blockingHealth: NonNullable<ReviewResult['stats']['blockingHealth']>;
 }
 
 /**
@@ -139,7 +140,8 @@ export async function assembleCompletedReview(
               .map((r) => ({ model: r.model, role: r.role, elapsedMs: r.durationMs })),
           }
         : {}),
-      ...blockingHealthStats(input.run.roster, reviews, config.quorumFraction ?? DEFAULT_QUORUM_FRACTION),
+      ...(retained ? { blockingHealth: retained.blockingHealth }
+        : blockingHealthStats(input.run.roster, reviews, config.quorumFraction ?? DEFAULT_QUORUM_FRACTION)),
       ...(verificationStats ? { verification: verificationStats } : {}),
       // Applied weights for this run's models, so the report shows what
       // scaled the votes (RCL-27).

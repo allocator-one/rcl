@@ -6,6 +6,7 @@ import { normalizeVerificationEvidence } from './verification.js';
 import { stableFindingKey } from '../consensus/finding-identity.js';
 import type { RosterLane, RunHeader } from '../report/run-header.js';
 import { reviewLane } from '../report/blocking-health.js';
+import type { ReviewerEvidenceDescriptor } from '../report/reviewer-evidence-schema.js';
 import { normalizeGeneratedText, scrubDeep, scrubIdentifier, scrubOptional, scrubSecrets, scrubText, stripFencedCode } from './scrub.js';
 
 /**
@@ -42,6 +43,57 @@ export interface ArtifactDeclaration {
 export interface DeliveryInfo {
   mode: 'direct' | 'retried';
   spooled_at?: string;
+}
+
+/** Source tuple held by a supplemented run; private bytes remain off this ordinary envelope. */
+export interface ReviewerRecoverySource {
+  run_id: string;
+  report_sha256: string;
+  reviewer_artifact_sha256: string;
+}
+
+/** Immutable declaration for the separate private reviewer-artifact route. */
+export interface ReviewerRecoveryDeclaration {
+  version: 1;
+  artifact_schema: 1;
+  sha256: string;
+  bytes: number;
+  descriptor: ReviewerEvidenceDescriptor;
+  source?: ReviewerRecoverySource;
+}
+
+export interface ReviewerRecoveryArtifactInput {
+  artifact: { bytes: string; digest: string };
+  descriptor: ReviewerEvidenceDescriptor;
+  source?: ReviewerRecoverySource;
+}
+
+const REVIEWER_ARTIFACT_MAX_BYTES = 25_000_000;
+const sha256Pattern = /^[0-9a-f]{64}$/;
+const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+/**
+ * Builds the declaration for an already sealed private artifact. This never
+ * embeds its bytes in the ordinary run envelope or generic artifact list.
+ */
+export function declareReviewerRecovery(input: ReviewerRecoveryArtifactInput): ReviewerRecoveryDeclaration {
+  if (typeof input.artifact?.bytes !== 'string') throw new Error('reviewer_recovery_invalid_bytes');
+  const bytes = Buffer.byteLength(input.artifact.bytes, 'utf8');
+  if (bytes > REVIEWER_ARTIFACT_MAX_BYTES || !sha256Pattern.test(input.artifact.digest) || sha256Hex(input.artifact.bytes) !== input.artifact.digest) {
+    throw new Error('reviewer_recovery_invalid_artifact');
+  }
+  const descriptor = input.descriptor;
+  if (descriptor.kind === 'original') {
+    if (input.source !== undefined) throw new Error('reviewer_recovery_original_source');
+    return { version: 1, artifact_schema: 1, sha256: input.artifact.digest, bytes, descriptor };
+  }
+  const source = input.source;
+  if (!source || !uuidPattern.test(source.run_id) || !sha256Pattern.test(source.report_sha256) ||
+    !sha256Pattern.test(source.reviewer_artifact_sha256) || source.run_id !== descriptor.source.run_id ||
+    source.report_sha256 !== descriptor.source.report_sha256) {
+    throw new Error('reviewer_recovery_source_mismatch');
+  }
+  return { version: 1, artifact_schema: 1, sha256: input.artifact.digest, bytes, descriptor, source: { ...source } };
 }
 
 export interface WireFinding {
@@ -95,6 +147,8 @@ export interface RunEnvelope {
   calls: WireCall[];
   stats: ReviewResult['stats'];
   artifacts_declared: ArtifactDeclaration[];
+  /** Separate private-artifact declaration; never a generic artifact kind. */
+  reviewer_recovery?: ReviewerRecoveryDeclaration;
   delivery: DeliveryInfo;
 }
 
@@ -107,6 +161,7 @@ export interface EnvelopeOptions {
    * the prompt, and the prompt contains the diff.
    */
   parseFailures?: boolean;
+  reviewerRecovery?: ReviewerRecoveryDeclaration;
 }
 
 /** Wire limits mirrored from the server (section 7 "Limits"). */
@@ -210,8 +265,10 @@ function wireCall(review: ModelReview, run: RunHeader, parseFailures: boolean): 
 /**
  * Build the envelope for a finished review. Requires the self-describing
  * header (`result.run`, rcl ≥ 3.0). `envelope` level sends the header,
- * stats and declarations only; `findings` and `full` add findings and calls
- * (artifacts are uploaded separately, only at `full`).
+ * stats and declarations only; `findings` and `full` add findings and legacy
+ * calls (artifacts are uploaded separately, only at `full`). Private reviewer
+ * recovery calls are derived server-side from the validated private artifact,
+ * never from merged report reviews or their inherited usage.
  */
 export function buildRunEnvelope(
   result: ReviewResult,
@@ -231,9 +288,11 @@ export function buildRunEnvelope(
   return {
     run,
     findings: includeRows ? [...kept, ...below] : [],
-    calls: includeRows ? result.reviews.map((review) => wireCall(review, run, parseFailures)) : [],
+    calls: includeRows && options.reviewerRecovery === undefined
+      ? result.reviews.map((review) => wireCall(review, run, parseFailures)) : [],
     stats: result.stats,
     artifacts_declared: declareArtifacts(artifacts),
+    ...(options.reviewerRecovery === undefined ? {} : { reviewer_recovery: structuredClone(options.reviewerRecovery) }),
     delivery: options.delivery,
   };
 }
@@ -281,6 +340,10 @@ export function normalizeGeneratedReport(result: ReviewResult): ReviewResult {
  */
 export function sanitizeForDelivery(result: ReviewResult, options: { parseFailures?: boolean } = {}): ReviewResult {
   const parseFailures = options.parseFailures === true;
+  // Checkpoint proofs contain exact prompts and raw outcomes. They belong only
+  // in the explicitly private evidence artifact: scrubbing would break their
+  // hashes, while the ordinary top-level spread would disclose them unchanged.
+  const { reviewerEvidence: _privateEvidence, ...ordinaryResult } = result as ReviewResult & { reviewerEvidence?: unknown };
   const finding = (f: ConsensusFinding): ConsensusFinding => ({
     ...f,
     ...(f.locationProvenance !== undefined ? { locationProvenance: scrubLocationProvenance(f.locationProvenance) } : {}),
@@ -322,7 +385,7 @@ export function sanitizeForDelivery(result: ReviewResult, options: { parseFailur
     };
   };
   return {
-    ...result,
+    ...ordinaryResult,
     ...(result.run ? { run: scrubRunHeader(result.run) } : {}),
     reviews: result.reviews.map(review),
     findings: result.findings.map(finding),

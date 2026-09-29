@@ -42,6 +42,7 @@ const recordSchema = z.object({ sequence: integer.min(1), previousDigest: digest
 }).strict();
 const answerSchema = z.object({ model: text, provider: text, text: z.string(),
   durationMs: z.number().finite().nonnegative(), status: z.enum(['success', 'timeout', 'error']), error: z.string().optional(),
+  adapterAttempts: integer.max(1).optional(),
 }).strict();
 // Validate request-bearing fields here. Finding semantics are independently
 // regenerated from captured source before replay; arbitrary annotations are not
@@ -224,6 +225,9 @@ export function snapshotVerificationEvent(input: VerificationEvent): Verificatio
     preflightGatingPlanDepth(value);
     refuse(stableStringify(value) === event.plan.gatingPlanBytes, 'invalid_gating_plan');
     const plan = saved.data;
+    refuse(plan.version === 1
+      ? plan.verificationReasoningEffort === undefined && plan.batches.every(batch => batch.sourcePatches === undefined)
+      : plan.batches.every(batch => batch.sourcePatches !== undefined), 'invalid_gating_plan');
     refuse(plan.model === event.plan.model && plan.verificationTimeoutMs === event.plan.verificationTimeoutMs &&
       plan.verificationPassTimeoutMs === event.plan.verificationPassTimeoutMs &&
       stableStringify(plan.batches.map(({ systemPrompt, userPrompt }) => ({ systemPrompt, userPrompt }))) === stableStringify(event.plan.batches), 'request_plan_mismatch');

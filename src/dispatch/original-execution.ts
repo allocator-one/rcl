@@ -2,7 +2,7 @@ import { lstat } from 'node:fs/promises';
 import { DEFAULT_CONCURRENCY, DEFAULT_MAX_RETRIES, DEFAULT_REASONING_EFFORT, DEFAULT_TIMEOUT_MS } from '../config/defaults.js';
 import { withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import { decodeCapturedInputs, type CapturedReviewerInputs } from './captured-inputs.js';
-import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
+import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, requireReviewerLaneBinding, type FrozenCheckpointPlan } from './checkpoint.js';
 import { decodeOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalRuntimeBounds } from './original-launch.js';
 import { recoverReviewerAssignments, type ReviewerRecoveryOptions, type ReviewerRecoveryResult } from './recovery.js';
@@ -31,6 +31,7 @@ export async function bindOriginalCouncil(input: BindOriginalCouncilOptions): Pr
   input = { ...input };
   const launchBytes = encodeOriginalLaunch(input.launch), launch = decodeOriginalLaunch(launchBytes);
   const captured = decodeCapturedInputs(input.captured.bytes, input.captured.plan);
+  requireReviewerLaneBinding(captured.plan);
   if (launch.target !== captured.plan.target || launch.planDigest !== captured.plan.digest ||
     launch.capturedInputsSha256 !== captured.digest) throw new Error('original_execution_capture_mismatch');
   assertOriginalRetryBounds(launch, captured);
@@ -68,6 +69,7 @@ export interface OriginalExecutionOptions extends Pick<ReviewerRecoveryOptions,
 export async function executeCapturedOriginal(input: OriginalExecutionOptions): Promise<ReviewerRecoveryResult> {
   const launchBytes = encodeOriginalLaunch(input.launch);
   const expectedPlan: FrozenCheckpointPlan = freezeCheckpointPlan(input.expectedPlan);
+  requireReviewerLaneBinding(expectedPlan);
   const runtimeBounds = input.runtimeBounds === undefined ? undefined : structuredClone(input.runtimeBounds);
   const options = { ...input };
   return withOwnedNativeOperation(options.ownership, options.commonDir, expectedPlan.target, async ownership => {
@@ -84,7 +86,7 @@ export async function executeCapturedOriginal(input: OriginalExecutionOptions): 
     const budget = remainingOriginalBudget(launch, (options.nowMs ?? Date.now)(), runtimeBounds);
     return recoverReviewerAssignments({ commonDir: options.commonDir, ownership, journal: options.journal,
       expectedPlan, plan: captured.plan, assignments: captured.assignments, prompts: captured.prompts,
-      sourceAttempts: [], fraction: captured.policy.fraction, remainingMs: budget.remainingMs,
+      sourceAttempts: [], includeSecondary: true, fraction: captured.policy.fraction, remainingMs: budget.remainingMs,
       maxAdditionalCalls: budget.maxPhysicalCalls, maxAttemptsPerCell: budget.maxAttemptsPerCell,
       timeoutMs: captured.config.timeout ?? DEFAULT_TIMEOUT_MS,
       concurrency: captured.config.concurrency ?? DEFAULT_CONCURRENCY,

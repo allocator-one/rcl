@@ -1,17 +1,21 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
-import { CheckpointJournal, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
-import { recoverCapturedAssignments, recoverReviewerAssignments } from '../../src/dispatch/recovery.js';
+import { CheckpointJournal, freezeCheckpointPlan, checkpointPath, exportCheckpointProof, decodeCheckpointProof } from '../../src/dispatch/checkpoint.js';
+import { recoverCapturedAssignments, recoverReviewerAssignments, recoveryAttemptsFromCheckpoint } from '../../src/dispatch/recovery.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
 import type { RecoveryAttempt } from '../../src/dispatch/recovery-policy.js';
 import type { ModelReview } from '../../src/consensus/types.js';
 import type { ReviewAssignment } from '../../src/roles/types.js';
 import { stableStringify } from '../../src/report/run-header.js';
+import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const writeGate = vi.hoisted(() => ({ active: false, awaitingRecovery: false, started: () => {}, checked: () => {}, release: () => {}, wait: Promise.resolve() }));
 vi.mock('node:fs/promises', async importOriginal => {
@@ -44,14 +48,14 @@ const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const target = 'allocator-one/rcl#105';
 function fixture(provider = 'fake') {
   const assignments: ReviewAssignment[] = Array.from({ length: 3 }, (_, index) => ({
-    model: `fake/model-${index}`, provider,
+    model: `${provider}/model-${index}`, provider,
     role: { name: 'general', systemPrompt: 'system', focus: [], description: 'fixture', isSpecialized: false },
   }));
   const prompts = assignments.map(() => ({ systemPrompt: 'system', userPrompt: 'patch' }));
-  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+  const plan = freezeCheckpointPlan({ version: 2, target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: hash('patch'), configSha256: hash('config'), specSha256: hash('spec'),
     contextSha256: hash('context'), toolsSha256: hash('tools'), parser: { name: 'findings-json', version: 1 },
-    roster: assignments.map((assignment, index) => ({ seat: `s${index}`, model: assignment.model, role: 'general', route: provider })),
+    roster: assignments.map((assignment, index) => ({ seat: `s${index}`, model: assignment.model, role: 'general', route: provider, lane: 'blocking' as const })),
     chunks: [{ index: 0, total: 1, digest: hash('patch') }],
     prompts: assignments.map((_, index) => ({ seat: `s${index}`, chunk: 0, systemSha256: hash('system'), userSha256: hash('patch') })),
   });
@@ -59,7 +63,7 @@ function fixture(provider = 'fake') {
     role: 'general', provider, status, durationMs: 1, findings: [],
     ...(status === 'error' ? { error: '503 overloaded' } : {}) });
   const sourceAttempts: RecoveryAttempt[] = [{ id: 'original-s0', cell: 's0:0', outcome: review(assignments[0]!.model) }];
-  return { assignments, prompts, plan, expectedPlan: plan, provider, sourceAttempts, review };
+  return { assignments, prompts, plan, expectedPlan: plan, sourceAttempts, review };
 }
 async function runFixture(work: (input: ReturnType<typeof fixture>, commonDir: string) => Promise<void>, provider = 'fake') {
   const commonDir = await mkdtemp(join(tmpdir(), 'rcl-recovery-executor-')); roots.push(commonDir);
@@ -99,7 +103,7 @@ describe('owned missing-review executor', () => {
       await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
       const result = await recoverCapturedAssignments({ commonDir, ownership, journal,
         expectedPlan: captured.plan, sourceAttempts: [], operation, nowMs: () => 1500,
-        adapterFactory: () => ({ name: 'fake', provider: input.provider, ask: vi.fn(), review: async model => {
+        adapterFactory: () => ({ name: 'fake', provider: 'anthropic', ask: vi.fn(), review: async model => {
           active++; peak = Math.max(peak, active);
           await new Promise(resolve => setTimeout(resolve, 5));
           active--;
@@ -124,7 +128,7 @@ describe('owned missing-review executor', () => {
       await journal.bind('operation', encodeRecoveryOperation(operation), ownership);
       await recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: changedPlan,
         sourceAttempts: [], operation, nowMs: () => 1500,
-        adapterFactory: () => ({ name: 'fake', provider: input.provider, ask: vi.fn(), review: called }) });
+        adapterFactory: () => ({ name: 'fake', provider: 'anthropic', ask: vi.fn(), review: called }) });
     })).rejects.toThrow('recovery_operation_mismatch');
     expect(called).not.toHaveBeenCalled();
   }, 'anthropic'));
@@ -277,7 +281,7 @@ describe('owned missing-review executor', () => {
   it('does not dispatch a sibling chunk after the first chunk becomes uncertain', async () => runFixture(async (input, commonDir) => {
     const chunks = [{ index: 0, total: 2, digest: hash('chunk-0') }, { index: 1, total: 2, digest: hash('chunk-1') }];
     const plan = freezeCheckpointPlan({
-      target, headSha: input.plan.headSha, mergeBaseSha: input.plan.mergeBaseSha,
+      version: input.plan.version, target, headSha: input.plan.headSha, mergeBaseSha: input.plan.mergeBaseSha,
       patchSha256: input.plan.patchSha256, configSha256: input.plan.configSha256,
       specSha256: input.plan.specSha256, contextSha256: input.plan.contextSha256,
       toolsSha256: input.plan.toolsSha256, parser: input.plan.parser, roster: input.plan.roster, chunks,
@@ -416,4 +420,100 @@ it('does not record paid intent when cancellation arrives during adapter setup',
     expect(called).not.toHaveBeenCalled();
     expect(result.stoppedBy).toBe('canceled');
   });
+}));
+
+it('orders a crashed prior intent as uncertain before alternate-seat dispatch and preserves replay accounting', async () => runFixture(async (input, commonDir) => {
+  const captured = capturedFixture(input);
+  const original = input.sourceAttempts[0]!;
+  original.outcome!.findings.push({ id: 'retained', file: 'x.ts', startLine: 1, endLine: 1,
+    severity: 'important', category: 'correctness', title: 'Retained finding', description: 'Preserve exact source evidence.' });
+  const originalBytes = JSON.stringify(original.outcome);
+  const initialOperation = recoveryOperation(captured.plan.digest, captured.digest, 2);
+  const source = await withNativeTarget(commonDir, target, async ownership => {
+    const journal = await CheckpointJournal.create({ commonDir, namespace: initialOperation.sourceRunId,
+      plan: captured.plan, ownership });
+    await journal.recordIntent(original.cell, { id: original.id, kind: 'paid' }, ownership);
+    await journal.recordResult(original.cell, { id: original.id, kind: 'paid' },
+      { kind: 'success', chunk: 0, reviewBytes: originalBytes }, ownership);
+    await journal.finalize(ownership);
+    return exportCheckpointProof(journal);
+  });
+  const { version: _version, ...operationInput } = initialOperation;
+  const operation = createRecoveryOperation({ ...operationInput, sourceCheckpointSha256: source.digest });
+  const inputPath = join(commonDir, 'child-input.json'), observedPath = join(commonDir, 'child-observed.json');
+  await writeFile(inputPath, JSON.stringify({ commonDir, sourceProofBytes: source.bytes,
+    captureBytes: captured.bytes, operation }));
+  const child = fileURLToPath(new URL('../fixtures/retained-orphan-intent-child.ts', import.meta.url));
+  let childExit: unknown;
+  try { await promisify(execFile)(process.execPath, ['--import', 'tsx', child, inputPath, observedPath],
+    { cwd: process.cwd(), timeout: 4000, env: { ...process.env, NODE_OPTIONS: '' } }); }
+  catch (error) { childExit = (error as { code: unknown }).code; }
+  expect(childExit).toBe(73);
+  const childObserved = JSON.parse(await readFile(observedPath, 'utf8'));
+  expect(childObserved.model).toBe('fake/model-1');
+  const cli = process.env.RCL_TEST_PACKAGED_CLI;
+  const runtimeRoot = cli ? dirname(await realpath(cli)) : fileURLToPath(new URL('../../src/', import.meta.url));
+  for (const module of ['converge/target-ownership', 'dispatch/checkpoint', 'dispatch/recovery', 'dispatch/recovery-operation']) {
+    const file = await realpath(join(runtimeRoot, `${module}.${cli ? 'js' : 'ts'}`));
+    expect(childObserved.modules[module]).toEqual({ url: pathToFileURL(file).href,
+      sha256: createHash('sha256').update(await readFile(file)).digest('hex') });
+  }
+  const path = checkpointPath(await realpath(commonDir), target, operation.successorRunId);
+  const crashed = await CheckpointJournal.inspectRead(path);
+  const prior = await crashed.read(), bindings = await crashed.readBindings();
+  expect(prior.records.filter(record => record.type === 'intent').map(record => record.cell)).toEqual(['s1:0']);
+  expect(prior.records.filter(record => record.type === 'uncertain')).toHaveLength(0);
+  const orphan = prior.uncertain[0]!;
+  const calls: string[] = [];
+  let uncertaintyAtDispatch: Array<{ sequence: number; attemptId: string }> = [];
+  let alternateIntentSequence = -1;
+  const run = () => withNativeTarget(commonDir, target, async ownership => {
+    const journal = await CheckpointJournal.openWrite({ commonDir, namespace: operation.successorRunId,
+      plan: captured.plan, ownership });
+    return recoverCapturedAssignments({ commonDir, ownership, journal, expectedPlan: captured.plan,
+      sourceAttempts: recoveryAttemptsFromCheckpoint(source.state), operation, nowMs: () => 1500,
+      adapterFactory: () => ({ name: 'synthetic-resume', provider: 'fake', ask: vi.fn(), review: async model => {
+        calls.push(model);
+        const observed = await journal.read();
+        uncertaintyAtDispatch = observed.records.filter(record => record.type === 'uncertain')
+          .map(record => ({ sequence: record.sequence, attemptId: record.paidAttempt!.id }));
+        alternateIntentSequence = observed.records.find(record => record.type === 'intent' && record.cell === 's2:0')!.sequence;
+        return input.review(model);
+      } }),
+    });
+  });
+  const recovered = await run();
+  expect(calls).toEqual(['fake/model-2']);
+  expect(recovered.newAttempts).toBe(2);
+  expect(recovered.preview.successfulSeats).toBe(2);
+  expect(recovered.reviews[0]!.findings).toEqual(original.outcome!.findings);
+  // Check at the actual replacement adapter boundary, not only after finalization.
+  expect(uncertaintyAtDispatch).toEqual([{ sequence: alternateIntentSequence - 1, attemptId: orphan.paidAttempt.id }]);
+  const beforeRepeat = await crashed.read();
+  expect(beforeRepeat.records.filter(record => record.type === 'uncertain').map(record => record.paidAttempt)).toEqual([orphan.paidAttempt]);
+  const repeated = await run();
+  expect(repeated.newAttempts).toBe(2);
+  expect(calls).toEqual(['fake/model-2']);
+  expect(await crashed.read()).toEqual(beforeRepeat);
+  expect(await crashed.readBindings()).toEqual(bindings);
+  const successor = await withNativeTarget(commonDir, target, async ownership => {
+    const journal = await CheckpointJournal.openWrite({ commonDir, namespace: operation.successorRunId,
+      plan: captured.plan, ownership });
+    await journal.finalize(ownership);
+    return exportCheckpointProof(journal);
+  });
+  const decoded = decodeCheckpointProof(successor.bytes, captured.plan);
+  expect(decoded.bytes).toBe(successor.bytes);
+  expect(decoded.state.records).toEqual(successor.state.records);
+  const projection = projectCheckpointReport({ sources: [{ runId: operation.sourceRunId, proof: source }],
+    successor: { runId: operation.successorRunId, proof: decoded }, policy: captured.policy });
+  expect(projection.newPhysicalAttempts.map(attempt => ({ cell: attempt.cell, certainty: attempt.certainty })))
+    .toEqual([{ cell: 's1:0', certainty: 'uncertain' }, { cell: 's2:0', certainty: 'observed' }]);
+  expect(projection.allPhysicalAttempts).toHaveLength(3);
+  expect(projection.health.conclusive).toBe(true);
+  expect(projection.contributions.map(item => item.finding)).toEqual(original.outcome!.findings);
+  const sourceAfter = await exportCheckpointProof(await CheckpointJournal.inspectRead(
+    checkpointPath(await realpath(commonDir), target, operation.sourceRunId)));
+  expect(sourceAfter.bytes).toBe(source.bytes);
+  expect(sourceAfter.state.successes[0]!.reviewBytes).toBe(originalBytes);
 }));

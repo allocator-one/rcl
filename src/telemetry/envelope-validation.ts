@@ -2,6 +2,8 @@ import { recoverySourceSchema } from '../report/recovery-source.js';
 import { claimDescriptorSchema } from '../consensus/claim-identity.js';
 import { z } from 'zod';
 import type { ArtifactBytes } from './envelope.js';
+import { stableStringify } from '../report/run-header.js';
+import { reviewerEvidenceDescriptorSchema } from '../report/reviewer-evidence-schema.js';
 import { declareArtifacts } from './envelope.js';
 
 /** Limits of the compatible Harness evidence protocol; validation never rewrites an envelope. */
@@ -84,6 +86,24 @@ const finding = z.object({
   }
 });
 
+const reviewerRecoverySource = z.object({
+  run_id: uuid, report_sha256: digest, reviewer_artifact_sha256: digest,
+}).strict();
+const reviewerRecovery = z.object({
+  version: z.literal(1), artifact_schema: z.literal(1), sha256: digest,
+  bytes: integer.max(MAX_ARTIFACT_BYTES), descriptor: reviewerEvidenceDescriptorSchema,
+  source: reviewerRecoverySource.optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.descriptor.kind === 'original' && value.source !== undefined) {
+    ctx.addIssue({ code: 'custom', path: ['source'], message: 'Original reviewer recovery has no source' });
+  }
+  if (value.descriptor.kind === 'supplemented' && (value.source === undefined ||
+    value.source.run_id !== value.descriptor.source.run_id ||
+    value.source.report_sha256 !== value.descriptor.source.report_sha256)) {
+    ctx.addIssue({ code: 'custom', path: ['source'], message: 'Supplemented reviewer recovery source differs from descriptor' });
+  }
+});
+
 const call = z.object({
   model: short, role: short, provider: short, lane,
   chunk_index: optional(integer), status: z.enum(['success', 'timeout', 'error', 'parse_failed', 'canceled']),
@@ -94,6 +114,7 @@ const call = z.object({
 const envelopeSchema = z.object({
   run, findings: z.array(finding).max(2_000), calls: z.array(call).max(500), stats: optional(map),
   artifacts_declared: z.array(z.object({ kind: z.enum(['report_json', 'report_md']), sha256: digest, bytes: integer.max(MAX_ARTIFACT_BYTES) })).min(1).max(2),
+  reviewer_recovery: reviewerRecovery.optional(),
   delivery: z.object({ mode: z.enum(['direct', 'retried']), spooled_at: optional(text(500)) }),
 }).passthrough().superRefine((v, ctx) => {
   if (new Set(v.findings.map((f) => f.ref)).size !== v.findings.length) ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Duplicate finding reference' });
@@ -113,6 +134,19 @@ const envelopeSchema = z.object({
   }
   if (v.findings.some(f => f.location_provenance?.source === 'report_projection' && f.location_provenance.report_json_sha256 !== v.artifacts_declared.find(a => a.kind === 'report_json')?.sha256)) {
     ctx.addIssue({ code: 'custom', path: ['findings'], message: 'Historical location projection must bind the original report digest' });
+  }
+  if (v.reviewer_recovery !== undefined) {
+    if (v.calls.length !== 0) {
+      ctx.addIssue({ code: 'custom', path: ['calls'], message: 'Reviewer recovery calls are derived from the private artifact' });
+    }
+    const source = v.reviewer_recovery.source;
+    if (source !== undefined && source.run_id.toLowerCase() === v.run.id.toLowerCase()) {
+      ctx.addIssue({ code: 'custom', path: ['reviewer_recovery', 'source', 'run_id'], message: 'Reviewer recovery cannot source its own run' });
+    }
+    const descriptor = (v.run as Record<string, unknown>).reviewer_evidence;
+    if (descriptor === undefined || stableStringify(descriptor) !== stableStringify(v.reviewer_recovery.descriptor)) {
+      ctx.addIssue({ code: 'custom', path: ['reviewer_recovery', 'descriptor'], message: 'Reviewer recovery descriptor differs from the ordinary report header' });
+    }
   }
 });
 
