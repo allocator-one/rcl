@@ -308,11 +308,15 @@ describe('private reviewer artifact', () => {
     const item = await sealedVerificationArtifact();
     expect(() => serializeReviewerArtifact({ assembly: item.args, representation, reportBytes: item.reportBytes })).toThrow('checkpoint_gating_missing_phase');
     const changed = rewrite(item.artifact.bytes, wire => { wire.verification.bytes = wire.verification.bytes.replace('refuted', 'unrefuted'); wire.verification.sha256 = sha256Hex(wire.verification.bytes); });
-    expect(() => validateReviewerArtifact(changed, { assembly: item.args, representation })).toThrow();
+    expect(() => validateReviewerArtifact(changed, {
+      assembly: item.args, representation, verificationProof: item.verificationProof,
+    })).toThrow();
     const other = await sealedVerificationArtifact(false, runId(8));
     expect(() => serializeReviewerArtifact({ assembly: item.args, representation, reportBytes: item.reportBytes, verificationProof: other.verificationProof })).toThrow();
     const claimed = rewrite(item.artifact.bytes, wire => { const report = JSON.parse(wire.report.bytes); report.stats.verification.unrefuted++; wire.report.bytes = JSON.stringify(report); wire.report.sha256 = sha256Hex(wire.report.bytes); });
-    expect(() => validateReviewerArtifact(claimed, { assembly: item.args, representation })).toThrow('reviewer_artifact_body_mismatch');
+    expect(() => validateReviewerArtifact(claimed, {
+      assembly: item.args, representation, verificationProof: item.verificationProof,
+    })).toThrow('reviewer_artifact_body_mismatch');
   });
 
   it('refuses unsupported provider refutations without a sealed verifier proof', async () => {
@@ -414,6 +418,22 @@ describe('captured async physical artifact inheritance', () => {
     expect(() => serializeReviewerArtifact({ assembly: { ...original.args, asyncExecution: undefined } as any,
       representation, reportBytes: original.expected.expectedReportBytes })).toThrow('missing_proof');
     expect(() => inspectReviewerArtifact(rewrite(original.artifact.bytes, w => { delete w.asyncExecution; }), original.expected)).toThrow();
+  });
+  it('does not let a serialized async proof supply authority missing from the validation context', async () => {
+    const original = await originalArtifact(true);
+    const assembly = { ...original.args };
+    delete assembly.asyncExecution;
+    expect(() => validateReviewerArtifact(original.artifact.bytes, {
+      assembly,
+      representation,
+    })).toThrow('reviewer_artifact_async_execution_mismatch');
+  });
+  it('does not let a serialized verifier proof supply authority missing from the validation context', async () => {
+    const verified = await sealedVerificationArtifact();
+    expect(() => validateReviewerArtifact(verified.artifact.bytes, {
+      assembly: verified.args,
+      representation,
+    })).toThrow('reviewer_artifact_verification_mismatch');
   });
   it('inherits the exact original async proof but charges zero source calls to a successor', async () => {
     const original = await originalArtifact(true), { f } = original;

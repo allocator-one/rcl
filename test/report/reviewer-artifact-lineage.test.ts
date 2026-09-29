@@ -67,7 +67,8 @@ describe('separate ordinary artifact lineage', () => {
       bytes: artifacts.serializeReviewerArtifact({ ...context(entry), lineage: originals.slice(0, index + 1) }).bytes,
       options: fixture.rows[index].expectations,
     }));
-    const script = `      import { inspectReviewerArtifact, isInspectedReviewerArtifact } from './src/report/reviewer-artifact.ts';
+    const script = `      import fs from 'node:fs';
+      import { inspectReviewerArtifact, isInspectedReviewerArtifact } from './src/report/reviewer-artifact.ts';
       const rows = JSON.parse(fs.readFileSync(0, 'utf8')), ancestors = [], output = [];
       for (const row of rows) {
         const current = inspectReviewerArtifact(row.bytes, { ...row.options, ancestors });

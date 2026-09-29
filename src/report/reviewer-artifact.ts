@@ -259,17 +259,20 @@ export function validateReviewerArtifact(bytes: string, context: ReviewerArtifac
   const report = (raw as { report?: { bytes?: unknown } }).report;
   if (typeof report?.bytes !== 'string') throw new Error('reviewer_artifact_invalid_document');
   const verification = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse((raw as Record<string, unknown>).verification);
-  if (verification !== undefined && sha256Hex(verification.bytes) !== verification.sha256) throw new Error('reviewer_artifact_verification_mismatch');
-  if (context.verificationProof !== undefined && (verification === undefined || !equal(context.verificationProof, { bytes: verification.bytes, digest: verification.sha256 }))) {
+  const expectedVerification = context.verificationProof;
+  if ((verification === undefined) !== (expectedVerification === undefined) || verification !== undefined &&
+    (sha256Hex(verification.bytes) !== verification.sha256 ||
+      !equal(expectedVerification, { bytes: verification.bytes, digest: verification.sha256 }))) {
     throw new Error('reviewer_artifact_verification_mismatch');
   }
   const asyncExecution = z.object({ bytes: z.string(), sha256: hashSchema }).strict().optional().parse((raw as Record<string, unknown>).asyncExecution);
-  if (asyncExecution !== undefined && sha256Hex(asyncExecution.bytes) !== asyncExecution.sha256 ||
-    context.assembly.asyncExecution !== undefined && (asyncExecution === undefined ||
-      !equal(context.assembly.asyncExecution, { bytes: asyncExecution.bytes, digest: asyncExecution.sha256 }))) throw new Error('reviewer_artifact_async_execution_mismatch');
-  const expected = serializeReviewerArtifact({ ...context, assembly: { ...context.assembly,
-    ...(asyncExecution === undefined ? {} : { asyncExecution: { bytes: asyncExecution.bytes, digest: asyncExecution.sha256 } }) }, reportBytes: report.bytes,
-    ...(verification === undefined ? {} : { verificationProof: { bytes: verification.bytes, digest: verification.sha256 } }) });
+  const expectedAsyncExecution = context.assembly.asyncExecution;
+  if ((asyncExecution === undefined) !== (expectedAsyncExecution === undefined) || asyncExecution !== undefined &&
+    (sha256Hex(asyncExecution.bytes) !== asyncExecution.sha256 ||
+      !equal(expectedAsyncExecution, { bytes: asyncExecution.bytes, digest: asyncExecution.sha256 }))) {
+    throw new Error('reviewer_artifact_async_execution_mismatch');
+  }
+  const expected = serializeReviewerArtifact({ ...context, reportBytes: report.bytes });
   if (expected.bytes !== bytes) throw new Error('reviewer_artifact_mismatch');
   return expected;
 }
