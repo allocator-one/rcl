@@ -17,18 +17,18 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const target = 'rcl-105';
 const runId = '01a0daa6-b575-759b-942c-e879460be5bf';
-function fixture(maxPhysicalCalls = 3, concurrency = 1, providerConcurrency?: Record<string, number>,
+function fixture(maxPhysicalCalls = 3, concurrency = 1, secondarySeats = 0, providerConcurrency?: Record<string, number>,
   quorumFraction = 2 / 3, provider = 'fake') {
-  const assignments = Array.from({ length: 3 }, (_, index) => ({ model: `fake/model-${index}`, provider,
+  const assignments = Array.from({ length: 3 + secondarySeats }, (_, index) => ({ model: `${provider}/model-${index}`, provider,
     role: { name: 'general', systemPrompt: 'system', description: 'fixture', focus: [], isSpecialized: false } }));
   const prompts = assignments.map(() => ({ systemPrompt: 'system', userPrompt: 'patch' }));
   const configBytes = stableStringify({ concurrency, maxRetries: 0, timeout: 1000, quorumFraction,
     ...(providerConcurrency === undefined ? {} : { providerConcurrency }) });
   const toolsBytes = '{"aggregation":{"name":"consensus","version":1},"parser":{"name":"findings-json","version":1}}';
-  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+  const plan = freezeCheckpointPlan({ version: 2, target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: hash('patch'), configSha256: hash(configBytes), specSha256: hash(''), contextSha256: hash('[]'),
     toolsSha256: hash(toolsBytes), parser: { name: 'findings-json', version: 1 },
-    roster: assignments.map((a, i) => ({ seat: `s${i}`, model: a.model, role: a.role.name, route: a.provider })),
+    roster: assignments.map((a, i) => ({ seat: `s${i}`, model: a.model, role: a.role.name, route: a.provider, lane: i < 3 ? 'blocking' as const : 'secondary' as const })),
     chunks: [{ index: 0, total: 1, digest: hash('patch') }],
     prompts: assignments.map((_, i) => ({ seat: `s${i}`, chunk: 0, systemSha256: hash('system'), userSha256: hash('patch') })),
   });
@@ -40,11 +40,54 @@ function fixture(maxPhysicalCalls = 3, concurrency = 1, providerConcurrency?: Re
   const review = (model: string, status: ModelReview['status'] = 'success'): ModelReview => ({ model, role: 'general', provider,
     status, findings: [{ id: 'same-id', file: 'x.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', title: model, description: 'Retained finding' }],
     durationMs: 1, ...(status === 'error' ? { error: '503 overloaded' } : {}) });
-  return { captured, launch, plan, provider, review };
+  return { captured, launch, plan, review };
 }
 async function directory() { const root = await mkdtemp(join(tmpdir(), 'rcl-original-execution-')); roots.push(root); return root; }
 
 describe('captured original council execution', () => {
+  it('reserves a tightened original call cap for pending blocking work before secondary dispatch', async () => {
+    const commonDir = await directory(), f = fixture(5, 5, 2), called: string[] = [];
+    await withNativeTarget(commonDir, target, async ownership => {
+      const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
+      let release!: () => void, started!: () => void;
+      const pending = new Promise<void>(resolve => { release = resolve; });
+      const twoStarted = new Promise<void>(resolve => { started = resolve; });
+      const running = executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan,
+        launch: f.launch, nowMs: () => 1500, runtimeBounds: { maxPhysicalCalls: 2 },
+        adapterFactory: () => ({ name: 'fake', provider: 'fake', ask: vi.fn(), review: async model => {
+          called.push(model); if (called.length === 2) started();
+          if (model.endsWith('0') || model.endsWith('1')) await pending;
+          return f.review(model);
+        } }) });
+      try {
+        await Promise.race([twoStarted, running.then(() => { throw new Error('Original stopped before two reserved blocking calls'); })]);
+        await new Promise(resolve => setTimeout(resolve, 150));
+      } finally { release(); }
+      const result = await running;
+      expect(called).toEqual(['fake/model-0', 'fake/model-1']);
+      expect(result.newAttempts).toBe(2);
+      expect(result.preview.successfulSeats).toBe(2);
+      expect((await journal.read()).records.filter(record => record.type === 'intent')).toHaveLength(2);
+    });
+  });
+
+  it('keeps settled attempt cost and reserves remaining capacity for reachable blocking quorum', async () => {
+    const commonDir = await directory(), f = fixture(5, 1, 2), called: string[] = [];
+    await withNativeTarget(commonDir, target, async ownership => {
+      const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
+      const result = await executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan,
+        launch: f.launch, nowMs: () => 1500, runtimeBounds: { maxPhysicalCalls: 3 },
+        adapterFactory: () => ({ name: 'fake', provider: 'fake', ask: vi.fn(), review: async model => {
+          called.push(model);
+          return model.endsWith('0') ? { ...f.review(model, 'error'), error: '401 invalid API key' } : f.review(model);
+        } }) });
+      expect(called).toEqual(['fake/model-0', 'fake/model-1', 'fake/model-2']);
+      expect(result.newAttempts).toBe(3);
+      expect(result.preview.successfulSeats).toBe(2);
+      expect(result.preview.nextAction).toBe('build_report');
+    });
+  });
+
   it('resumes an interrupted binding publication without changing the original run', async () => {
     const commonDir = await directory(), f = fixture();
     await withNativeTarget(commonDir, target, async ownership => {
@@ -67,28 +110,38 @@ describe('captured original council execution', () => {
 
   it('uses only a policy frozen in the capture and leaves legacy provider policy omitted', async () => {
     async function peakFor(providerConcurrency?: Record<string, number>) {
-      const provider = providerConcurrency === undefined ? 'fake' : 'anthropic';
-      const commonDir = await directory(), f = fixture(3, 3, providerConcurrency, 1, provider);
+      const commonDir = await directory(), f = fixture(3, 3, 0, providerConcurrency, 1, 'anthropic');
       let active = 0, peak = 0;
+      const releases: Array<() => void> = [];
       await withNativeTarget(commonDir, target, async ownership => {
         const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
-        await executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan,
+        const running = executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: f.plan,
           launch: f.launch, nowMs: () => 1500,
-          adapterFactory: () => ({ name: 'fake', provider: f.provider, ask: vi.fn(), review: async model => {
+          adapterFactory: () => ({ name: 'fake', provider: 'anthropic', ask: vi.fn(), review: async model => {
             active++; peak = Math.max(peak, active);
-            await new Promise(resolve => setTimeout(resolve, 5));
+            await new Promise<void>(resolve => { releases.push(resolve); });
             active--;
             return f.review(model);
           } }) });
+        const width = providerConcurrency?.anthropic ?? 3;
+        try {
+          for (let completed = 0; completed < 3; completed += width) {
+            // Durable intent writes may take longer than a fast provider call.
+            // Hold actual calls until the intended concurrent batch is visible.
+            await vi.waitFor(() => expect(releases).toHaveLength(Math.min(width, 3 - completed)));
+            releases.splice(0).forEach(release => release());
+          }
+        } finally { releases.splice(0).forEach(release => release()); }
+        await running;
       });
       return { peak, providerConcurrency: f.captured.config.providerConcurrency };
     }
     expect(await peakFor({ anthropic: 1 })).toEqual({ peak: 1, providerConcurrency: { anthropic: 1 } });
-    expect((await peakFor()).providerConcurrency).toBeUndefined();
+    expect(await peakFor()).toEqual({ peak: 3, providerConcurrency: undefined });
   });
 
   it('refuses an explicit changed provider policy before replay dispatch', async () => {
-    const commonDir = await directory(), f = fixture(3, 3, { anthropic: 1 }, 1, 'anthropic');
+    const commonDir = await directory(), f = fixture(3, 3, 0, { anthropic: 1 }, 1, 'anthropic');
     const changedPlan = freezeCheckpointPlan({ ...f.plan,
       configSha256: hash(stableStringify({ ...f.captured.config, providerConcurrency: { anthropic: 2 } })) });
     const called = vi.fn();
@@ -96,7 +149,7 @@ describe('captured original council execution', () => {
       const journal = await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch });
       await executeCapturedOriginal({ commonDir, ownership, journal, expectedPlan: changedPlan,
         launch: f.launch, nowMs: () => 1500,
-        adapterFactory: () => ({ name: 'fake', provider: f.provider, ask: vi.fn(), review: called }) });
+        adapterFactory: () => ({ name: 'fake', provider: 'anthropic', ask: vi.fn(), review: called }) });
     })).rejects.toThrow('original_execution_launch_mismatch');
     expect(called).not.toHaveBeenCalled();
   });
@@ -181,8 +234,15 @@ describe('captured original council execution', () => {
 
   it('cannot reset spent original calls or renew the deadline after reopening', async () => {
     async function scenario() {
-      const commonDir = await directory(), f = fixture(3);
-      const called = vi.fn(async (model: string) => f.review(model, called.mock.calls.length === 1 ? 'success' : 'error'));
+      const commonDir = await directory(), f = fixture(3, 2);
+      let dispatched = 0, release!: () => void;
+      const bothStarted = new Promise<void>(resolve => { release = resolve; });
+      const called = vi.fn(async (model: string) => {
+        const ordinal = ++dispatched;
+        if (ordinal === 2) release();
+        await bothStarted;
+        return f.review(model, ordinal === 1 ? 'success' : 'error');
+      });
       const run = (create: boolean, nowMs: number, runtimeBounds?: { maxPhysicalCalls: number }) => withNativeTarget(commonDir, target, async ownership => {
         const journal = create ? await bindOriginalCouncil({ commonDir, ownership, captured: f.captured, launch: f.launch })
           : await CheckpointJournal.openWrite({ commonDir, ownership, plan: f.plan, namespace: runId });

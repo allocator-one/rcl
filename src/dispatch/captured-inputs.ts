@@ -5,7 +5,7 @@ import { ConfigSchema, type Config } from '../config/schema.js';
 import type { BuiltPrompt } from '../prepare/prompt-builder.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
 import type { ReviewAssignment } from '../roles/types.js';
-import { freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
+import { freezeCheckpointPlan, blockingCheckpointSeatIds, type FrozenCheckpointPlan } from './checkpoint.js';
 import { resolveQuorumPolicy, type QuorumPolicy } from './quorum.js';
 
 /** Shared local/server protocol bounds; never truncate captured inputs to fit. */
@@ -19,7 +19,7 @@ const roleSchema = z.object({ name: text, systemPrompt: z.string(), focus: z.arr
   severityBias: z.record(z.string(), z.number().finite()).optional(), description: z.string(), isSpecialized: z.boolean() }).strict();
 const contextSchema = z.array(z.object({ label: text, content: z.string(), sha256: digest }).strict());
 const captureSchema = z.object({
-  version: z.literal(1),
+  version: z.union([z.literal(1), z.literal(2)]),
   plan: z.unknown(),
   policy: z.object({ version: z.literal(1), fraction: z.number().finite() }).strict(),
   blobs: z.record(digest, z.string()),
@@ -46,7 +46,7 @@ export interface CaptureReviewerInputs {
 }
 
 export interface CapturedReviewerInputs extends Omit<CaptureReviewerInputs, 'policy' | 'async'> {
-  version: 1;
+  version: 1 | 2;
   bytes: string;
   digest: string;
   policy: QuorumPolicy;
@@ -124,7 +124,7 @@ export function captureReviewerInputs(input: CaptureReviewerInputs): CapturedRev
     aggregationSha256 = add(aggregation.bytes, aggregation.digest);
   }
   const async = input.async === undefined ? undefined : captureAsyncInputs(input.async, plan, add);
-  const bytes = stableStringify({ version: 1, plan, policy: input.policy, blobs, roles,
+  const bytes = stableStringify({ version: plan.version, plan, policy: input.policy, blobs, roles,
     ...(async === undefined ? {} : { async }),
     ...(aggregationSha256 !== undefined ? { aggregationSha256 } : {}) });
   return decodeCapturedInputs(bytes, plan);
@@ -140,7 +140,8 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
   if (!parsed.success) throw new Error('capture_invalid_document');
   const captured = parsed.data, plan = validatedPlan(captured.plan), expected = validatedPlan(expectedPlan);
   if (stableStringify(plan) !== stableStringify(expected)) throw new Error('capture_plan_mismatch');
-  const policy = resolveQuorumPolicy(plan.roster.length, captured.policy.fraction);
+  if (captured.version !== plan.version) throw new Error('capture_plan_version_mismatch');
+  const policy = resolveQuorumPolicy(blockingCheckpointSeatIds(plan).length, captured.policy.fraction);
   const referenced = new Set<string>();
   function get(hash: string): string {
     const value = captured.blobs[hash];
@@ -182,7 +183,7 @@ export function decodeCapturedInputs(bytes: string, expectedPlan: unknown): Capt
   }
   const async = captured.async === undefined ? undefined : decodeCapturedAsync(captured.async, plan, get, bytes => roleSchema.parse(decodeCanonical(bytes)));
   if (Object.keys(captured.blobs).length !== referenced.size) throw new Error('capture_unreferenced_blob');
-  return freeze({ version: 1, bytes, digest: sha256Hex(bytes), plan, policy, config: config.data,
+  return freeze({ version: captured.version, bytes, digest: sha256Hex(bytes), plan, policy, config: config.data,
     patchBytes, configBytes, specBytes, contextBytes, toolsBytes, chunkBytes, assignments, prompts,
     ...(async === undefined ? {} : { async }),
     ...(aggregation !== undefined ? { aggregation } : {}) });

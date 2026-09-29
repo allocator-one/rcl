@@ -25,11 +25,13 @@ export interface CapturePreparedCouncilInput {
   baseTip?: string;
   diff: Diff;
   assignments: readonly ReviewAssignment[];
+  /** Exact resolved original assignment lanes; omission creates historical version1 only. */
+  lanes?: readonly ('blocking' | 'secondary')[];
   chunks: readonly Chunk[];
   prompts: readonly BuiltPrompt[];
   /** Resolved config. This factory persists only the existing digest allow-list. */
   config: Config;
-  /** Prior authenticated capture used only to preserve a legacy omitted policy. */
+  /** Comparison only, supplied after authenticated lineage loading; never a launch grant. */
   comparisonSource?: CapturedReviewerInputs;
   /** Exact bytes already read by the caller; this factory never re-reads it. */
   specBytes: string;
@@ -111,13 +113,17 @@ export function capturePreparedCouncil(input: CapturePreparedCouncilInput): Capt
   const contextBytes = stableStringify(input.contextDocs);
   const toolsBytes = stableStringify(input.compatibility);
   const chunkBytes = input.chunks.map(formatChunkForPrompt);
+  if (input.lanes !== undefined && (input.lanes.length !== input.assignments.length ||
+    input.lanes.some(lane => lane !== 'blocking' && lane !== 'secondary'))) throw new Error('capture_council_invalid_lanes');
   const roster = input.assignments.map((assignment, index) => ({
     seat: `assignment:${index}`,
     model: assignment.model,
     role: assignment.role.name,
     route: assignment.provider,
+    ...(input.lanes === undefined ? {} : { lane: input.lanes[index]! }),
   }));
   const plan = freezeCheckpointPlan({
+    version: input.lanes === undefined ? 1 : 2,
     target: input.target,
     headSha: input.headSha,
     mergeBaseSha: input.mergeBaseSha,

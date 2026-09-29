@@ -93,20 +93,23 @@ const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), sour
 const proofWireSchema = z.object({ version: z.literal(1), plan: z.unknown(), records: z.array(z.unknown()),
   outcomes: z.array(z.object({ resultFile: z.string(), reviewBytes: z.string() }).strict()), bindings: bindingsSchema }).strict();
 const frozenPlanSchema = z.object({
-  version: z.literal(1), digest: digestSchema, target: z.string(), headSha: z.string(), mergeBaseSha: z.string(),
+  version: z.union([z.literal(1), z.literal(2)]), digest: digestSchema, target: z.string(), headSha: z.string(), mergeBaseSha: z.string(),
   patchSha256: digestSchema, configSha256: digestSchema, specSha256: digestSchema, contextSha256: digestSchema, toolsSha256: digestSchema,
   parser: z.object({ name: z.string(), version: integer.min(1) }).strict(),
-  roster: z.array(z.object({ seat: z.string(), model: z.string(), role: z.string(), route: z.string() }).strict()),
+  roster: z.array(z.object({ seat: z.string(), model: z.string(), role: z.string(), route: z.string(), lane: z.enum(['blocking', 'secondary']).optional() }).strict()),
   chunks: z.array(z.object({ index: integer, total: integer.min(1), digest: digestSchema }).strict()),
   prompts: z.array(z.object({ seat: z.string(), chunk: integer, systemSha256: digestSchema, userSha256: digestSchema }).strict()),
   cells: z.array(z.object({ id: z.string(), seat: z.string(), chunk: integer, route: z.string(), model: z.string(), role: z.string(), chunkDigest: digestSchema, systemPromptSha256: digestSchema, userPromptSha256: digestSchema }).strict()),
 }).strict();
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export type CheckpointLane = 'blocking' | 'secondary';
 export interface CheckpointPlanInput {
+  /** Version1 is historical lane-less evidence; version2 binds every original lane. */
+  version?: 1 | 2;
   target: string; headSha: string; mergeBaseSha: string; patchSha256: string; configSha256: string; specSha256: string;
   contextSha256: string; toolsSha256: string; parser: { name: string; version: number };
-  roster: Array<{ seat: string; model: string; role: string; route: string }>;
+  roster: Array<{ seat: string; model: string; role: string; route: string; lane?: CheckpointLane }>;
   chunks: Array<{ index: number; total: number; digest: string }>;
   prompts: Array<{ seat: string; chunk: number; systemSha256: string; userSha256: string }>;
 }
@@ -114,7 +117,7 @@ export interface CheckpointCell {
   id: string; seat: string; chunk: number; route: string; model: string; role: string;
   chunkDigest: string; systemPromptSha256: string; userPromptSha256: string;
 }
-export interface FrozenCheckpointPlan extends CheckpointPlanInput { version: 1; cells: CheckpointCell[]; digest: string }
+export interface FrozenCheckpointPlan extends CheckpointPlanInput { version: 1 | 2; cells: CheckpointCell[]; digest: string }
 export interface PaidAttempt { id: string; kind: 'paid' | 'unknown' }
 export type CheckpointBindingName = z.infer<typeof bindingNameSchema>;
 export type CheckpointBindings = Partial<Record<CheckpointBindingName, string>>;
@@ -147,7 +150,7 @@ export function checkpointPath(commonDir: string, target: string, namespace: str
   return join(resolve(commonDir), 'rcl-checkpoints', directoryKey(target), namespace);
 }
 function planPayload(plan: CheckpointPlanInput, cells: CheckpointCell[]): Omit<FrozenCheckpointPlan, 'digest'> {
-  return { version: VERSION, target: plan.target, headSha: plan.headSha, mergeBaseSha: plan.mergeBaseSha, patchSha256: plan.patchSha256, configSha256: plan.configSha256, specSha256: plan.specSha256, contextSha256: plan.contextSha256, toolsSha256: plan.toolsSha256, parser: { ...plan.parser }, roster: plan.roster.map(item => ({ ...item })), chunks: plan.chunks.map(item => ({ ...item })), prompts: plan.prompts.map(item => ({ ...item })), cells };
+  return { version: plan.version ?? VERSION, target: plan.target, headSha: plan.headSha, mergeBaseSha: plan.mergeBaseSha, patchSha256: plan.patchSha256, configSha256: plan.configSha256, specSha256: plan.specSha256, contextSha256: plan.contextSha256, toolsSha256: plan.toolsSha256, parser: { ...plan.parser }, roster: plan.roster.map(item => ({ ...item })), chunks: plan.chunks.map(item => ({ ...item })), prompts: plan.prompts.map(item => ({ ...item })), cells };
 }
 function deepFreeze<T>(value: T): T { if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const child of Object.values(value as object)) deepFreeze(child); } return value; }
 
@@ -158,6 +161,9 @@ export function freezeCheckpointPlan(input: CheckpointPlanInput): FrozenCheckpoi
   if (!Number.isSafeInteger(input.parser.version) || input.parser.version < 1) throw new Error('checkpoint_invalid_parser');
   requireText(input.parser.name, 'parser');
   if (!input.roster.length) throw new Error('checkpoint_missing_roster');
+  const version = input.version ?? 1;
+  if (version !== 1 && version !== 2 || input.roster.some(seat => version === 2
+    ? seat.lane !== 'blocking' && seat.lane !== 'secondary' : seat.lane !== undefined)) throw new Error('checkpoint_invalid_lane_binding');
   const seats = new Set<string>();
   for (const item of input.roster) { requireText(item.seat, 'seat'); requireText(item.model, 'model'); requireText(item.role, 'role'); requireText(item.route, 'route'); if (seats.has(item.seat)) throw new Error('checkpoint_duplicate_cell'); seats.add(item.seat); }
   const chunks = [...input.chunks].sort((a, b) => a.index - b.index); if (!chunks.length) throw new Error('checkpoint_missing_chunks');
@@ -171,6 +177,22 @@ export function freezeCheckpointPlan(input: CheckpointPlanInput): FrozenCheckpoi
   const payload = planPayload(input, cells), plan = { ...payload, digest: sha256(canonical(payload as unknown as Json)) };
   if (!frozenPlanSchema.safeParse(plan).success) throw new Error('checkpoint_invalid_plan');
   return deepFreeze(plan);
+}
+
+/** Original seat IDs, never merged model-role opinions, define retained quorum. */
+export function blockingCheckpointSeatIds(plan: FrozenCheckpointPlan): string[] {
+  return plan.roster.filter(seat => plan.version === 1 || seat.lane === 'blocking').map(seat => seat.seat);
+}
+
+/** Keep wire cells unchanged; bind internal eligibility to their immutable roster lane. */
+export function checkpointRecoveryCells(plan: FrozenCheckpointPlan): Array<CheckpointCell & { lane: CheckpointLane }> {
+  const lanes = new Map(plan.roster.map(seat => [seat.seat, plan.version === 1 ? 'blocking' as const : seat.lane!]));
+  return plan.cells.map(cell => ({ ...cell, lane: lanes.get(cell.seat)! }));
+}
+
+/** Old bytes remain inspectable, but cannot authorize a new retained operation. */
+export function requireReviewerLaneBinding(plan: FrozenCheckpointPlan): void {
+  if (plan.version !== 2) throw new Error('reviewer_lane_binding_required');
 }
 
 async function inspectDirectory(path: string): Promise<void> {
@@ -290,7 +312,7 @@ function decodePlan(text: string): FrozenCheckpointPlan {
   boundedBytes(text);
   let plan: FrozenCheckpointPlan; try { plan = frozenPlanSchema.parse(JSON.parse(text)); } catch { throw new Error('checkpoint_invalid_plan'); }
   const recalculated = freezeCheckpointPlan(plan);
-  if (plan.version !== VERSION || plan.digest !== recalculated.digest || canonical(plan as unknown as Json) !== canonical(recalculated as unknown as Json)) throw new Error('checkpoint_invalid_plan');
+  if (plan.digest !== recalculated.digest || canonical(plan as unknown as Json) !== canonical(recalculated as unknown as Json)) throw new Error('checkpoint_invalid_plan');
   return recalculated;
 }
 function matchingPlan(actual: FrozenCheckpointPlan, expected: FrozenCheckpointPlan): boolean { return actual.digest === expected.digest && canonical(actual as unknown as Json) === canonical(expected as unknown as Json); }

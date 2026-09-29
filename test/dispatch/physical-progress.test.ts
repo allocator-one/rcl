@@ -25,9 +25,9 @@ async function fixture() {
   const prompts = assignments.map(() => ({ systemPrompt: 'system', userPrompt: 'patch' }));
   const configBytes = stableStringify({ concurrency: 1, maxRetries: 1, timeout: 1000, quorumFraction: 1 });
   const toolsBytes = '{"aggregation":{"name":"consensus","version":1},"parser":{"name":"findings-json","version":1}}';
-  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+  const plan = freezeCheckpointPlan({ version: 2, target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
     patchSha256: hash('patch'), configSha256: hash(configBytes), specSha256: hash(''), contextSha256: hash('[]'), toolsSha256: hash(toolsBytes),
-    parser: { name: 'findings-json', version: 1 }, roster: assignments.map((a, index) => ({ seat: `s${index}`, model: a.model, role: 'general', route: 'fake' })),
+    parser: { name: 'findings-json', version: 1 }, roster: assignments.map((a, index) => ({ seat: `s${index}`, model: a.model, role: 'general', route: 'fake', lane: 'blocking' as const })),
     chunks: [{ index: 0, total: 1, digest: hash('patch') }], prompts: assignments.map((_, index) => ({ seat: `s${index}`, chunk: 0, systemSha256: hash('system'), userSha256: hash('patch') })) });
   const captured = captureReviewerInputs({ plan, policy: { version: 1, fraction: 1 }, assignments, prompts,
     patchBytes: 'patch', configBytes, specBytes: '', contextBytes: '[]', toolsBytes, chunkBytes: ['patch'] });
