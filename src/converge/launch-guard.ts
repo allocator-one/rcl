@@ -24,6 +24,19 @@ import { verifyStaleReportReceipts } from './stale-report.js';
 import { scrubText } from '../telemetry/scrub.js';
 import { verifyBoundFixRecovery, type BoundFixRecoverySelection } from './bound-fix-recovery.js';
 import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
+import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
+  type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
+
+/** Canonical original descriptor prepared under target ownership, before its claim is spent. */
+export interface PreparedOriginalLaunch {
+  readonly launch: OriginalLaunch;
+  readonly launchBytes: string;
+}
+export interface OriginalLaunchPreflight {
+  input: Omit<OriginalLaunchInput, 'target' | 'originalNativeClaim'>;
+  beforeClaim: (value: PreparedOriginalLaunch) => Promise<void>;
+  nowMs?: () => number;
+}
 
 export interface GuardedLaunchOptions {
   gitCommonDir: string;
@@ -40,8 +53,11 @@ export interface GuardedLaunchOptions {
   startOver?: boolean;
   cycleRemote?: ReviewCycleRemote;
   validate: () => Promise<void>;
+  /** Optional retained execution only; ordinary launch behavior is unchanged. */
+  originalLaunch?: OriginalLaunchPreflight;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
-  run: (context: ConvergeContext) => Promise<GuardedLaunchCompletion>;
+  /** Reuse this ownership for durable reviewer checkpoints; never take a second target lock. */
+  run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch) => Promise<GuardedLaunchCompletion>;
 }
 
 export class ReviewLaunchRefused extends Error {
@@ -93,7 +109,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   let boundFixRecoverySource: BoundFixRecoverySource | undefined;
   if (options.boundFixRecovery) {
     const recovery = options.boundFixRecovery;
-    if (options.startOver || options.legacyRetry || options.retryReason !== undefined || intent !== 'review') {
+    if (options.startOver || options.legacyRetry || options.originalLaunch ||
+      options.retryReason !== undefined || intent !== 'review') {
       refuse('bound_fix_recovery_incompatible', 'Bound fix recovery cannot be combined with a fresh review or another retry mode.');
     }
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(recovery.runId) ||
@@ -187,10 +204,9 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
 
 /** Shared launch-health decision; recovery paths must use the guard's policy. */
 export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
-  if (previous.reviewerHealth) {
-    return hasSuccessfulQuorum(previous.reviewerHealth.policy, previous.reviewerHealth.successfulSeats);
-  }
-  return previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
+  return previous.reviewerHealth
+    ? hasSuccessfulQuorum(previous.reviewerHealth.policy, previous.reviewerHealth.successfulSeats)
+    : previous.successfulReviews! >= Math.max(2, Math.ceil(2 * previous.totalReviews! / 3));
 }
 
 export interface GuardedLaunchClaim extends ConvergeAttemptClaim {
@@ -198,7 +214,14 @@ export interface GuardedLaunchClaim extends ConvergeAttemptClaim {
 }
 
 export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<GuardedLaunchClaim> {
-  const options = { ...input, target: input.target.trim(),
+  const original = input.originalLaunch;
+  if (original !== undefined && (!original || typeof original.beforeClaim !== 'function' ||
+    original.nowMs !== undefined && typeof original.nowMs !== 'function')) {
+    refuse('invalid_original_preflight', 'Original launch preflight must be callable.');
+  }
+  const options = { ...input, target: input.target.trim(), originalLaunch: original === undefined ? undefined : {
+    input: structuredClone(original.input), beforeClaim: original.beforeClaim, nowMs: original.nowMs,
+  },
     ...(input.legacyRetry ? { legacyRetry: { ...structuredClone(input.legacyRetry), reportPath: resolve(input.legacyRetry.reportPath) } } : {}) };
   options.gitCommonDir = await realpath(resolve(options.gitCommonDir));
   const requestVersion = options.startOver ? await freshReviewRequestVersion(options.gitCommonDir, options.target) : undefined;
@@ -219,6 +242,13 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
 }
 
 async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: NativeTargetOwnership): Promise<GuardedLaunchClaim> {
+  let preparedOriginal: PreparedOriginalLaunch | undefined;
+  const assertOriginalLive = () => {
+    if (preparedOriginal && remainingOriginalBudget(preparedOriginal.launch,
+      (options.originalLaunch?.nowMs ?? Date.now)()).remainingMs === 0) {
+      refuse('original_launch_expired', 'The original launch deadline expired before its claim was spent.');
+    }
+  };
   let state: ConvergeRunState;
   let failure: { error: unknown } | undefined;
   let freshOperation: string | undefined;
@@ -284,11 +314,22 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
       }
       if (!options.startOver) await options.validate();
+      if (options.originalLaunch) {
+        const launch = createOriginalLaunch({ ...options.originalLaunch.input, target: options.target,
+          originalNativeClaim: { attempt: (attempts?.attemptsUsed ?? 0) + 1, round } });
+        preparedOriginal = Object.freeze({ launch, launchBytes: encodeOriginalLaunch(launch) });
+        assertOriginalLive();
+        await options.originalLaunch.beforeClaim(preparedOriginal);
+        assertOriginalLive();
+      }
       if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);
+      assertOriginalLive();
       state.lastLaunch = {
         status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
         startedAt: new Date().toISOString(), pid: process.pid,
+        ...(preparedOriginal ? { retainedOriginal: { version: 1 as const, runId: preparedOriginal.launch.runId,
+          planDigest: preparedOriginal.launch.planDigest, capturedInputsSha256: preparedOriginal.launch.capturedInputsSha256 } } : {}),
         ...(options.retryReason ? { retryReason: scrubText(options.retryReason.trim(), 500) } : {}),
         ...(options.boundFixRecovery ? { retryReason: `Bound fix recovery from conclusive dismissal-only run ${options.boundFixRecovery.runId} for ${options.boundFixRecovery.repo}#${options.boundFixRecovery.prNumber}.` } : {}),
       };
@@ -296,14 +337,21 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         : boundFixRecoverySource ? { boundFixRecoverySource } : undefined;
     },
     afterClaim: async (claimed, ownership) => {
+      if (preparedOriginal && (preparedOriginal.launch.originalNativeClaim.attempt !== claimed.attempt ||
+        preparedOriginal.launch.originalNativeClaim.round !== state.lastLaunch!.round)) {
+        refuse('original_launch_claim_mismatch', 'The spent claim differs from the prepared original launch.');
+      }
       state.lastLaunch!.attempt = claimed.attempt;
       await writeState(options.gitCommonDir, state, ownership);
       try {
         await options.onClaim?.(claimed);
-        const completion = completionSchema.parse(await options.run({
-          target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
-          ...(state.cycle ? { cycleId: state.cycle.id } : {}),
-        }));
+        const context = { target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
+          ...(state.cycle ? { cycleId: state.cycle.id } : {}) };
+        const completion = completionSchema.parse(await (preparedOriginal
+          ? options.run(context, ownership, preparedOriginal) : options.run(context, ownership)));
+        if (preparedOriginal && completion.runId !== preparedOriginal.launch.runId) {
+          refuse('original_launch_run_mismatch', 'The completion differs from the prepared original run.');
+        }
         state.lastLaunch = { ...state.lastLaunch!, ...completion, status: 'completed' };
       } catch (error) {
         state.lastLaunch!.status = 'failed';

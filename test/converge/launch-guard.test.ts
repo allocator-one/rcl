@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch, hasHealthyGuardedLaunch, launchSchema, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
 import { claimConvergeAttempt, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
-import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
+import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
+import { assertNativeTargetOwnership, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
+import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { decodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { resolveQuorumPolicy } from '../../src/dispatch/quorum.js';
 
 const directories: string[] = [];
@@ -33,6 +36,140 @@ afterEach(async () => {
 });
 
 describe('native guarded review launch', () => {
+
+  it('rejects completion whose blocking failures exceed aggregate failures while retaining the spent claim', async () => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 17, totalReviews: 18,
+      reviewerHealth: { version: 1, policy: resolveQuorumPolicy(17), successfulSeats: 0 } });
+    await expect(guardReviewLaunch({ ...options, maxAttempts: 2, maxRounds: 4 }))
+      .rejects.toThrow('Blocking reviewer health must be a subset of aggregate review counts');
+    expect(options.run).toHaveBeenCalledTimes(1);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1, cap: 2 });
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ roundCap: 4, rounds: [], lastLaunch: { status: 'failed' } });
+  });
+
+  it('rejects persisted excess blocking failures before validation or another claim', async () => {
+    const options = await fixture();
+    await guardReviewLaunch(options);
+    const path = convergeRunStatePath(options.gitCommonDir, target);
+    const state = JSON.parse(await readFile(path, 'utf8'));
+    state.lastLaunch = { ...state.lastLaunch, successfulReviews: 17, totalReviews: 18,
+      reviewerHealth: { version: 1, policy: resolveQuorumPolicy(17), successfulSeats: 0 } };
+    await writeFile(path, JSON.stringify(state));
+    const before = await readFile(path), claims = await loadConvergeAttemptState(options.gitCommonDir, target);
+    await expect(guardReviewLaunch({ ...options, retryReason: 'A reason cannot authorize contradictory health.' }))
+      .rejects.toMatchObject({ name: 'ZodError', issues: [{ code: 'custom', path: [] }] });
+    expect(await readFile(path)).toEqual(before);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toEqual(claims);
+    expect(options.validate).toHaveBeenCalledTimes(1);
+    expect(options.run).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { label: 'ordinary mixed lanes', successful: 6, aggregateSuccessful: 11, aggregateTotal: 15, marker: {} },
+    { label: 'retained original', successful: 7, aggregateSuccessful: 7, aggregateTotal: 10,
+      marker: { retainedOriginal: { version: 1, runId: completion.runId,
+        planDigest: 'd'.repeat(64), capturedInputsSha256: 'e'.repeat(64) } } },
+    { label: 'retained successor', successful: 7, aggregateSuccessful: 7, aggregateTotal: 10,
+      marker: { recovery: { operationId: '019921a0-0000-7000-8000-000000000002', sourceRunId: completion.runId,
+        originalNativeClaim: { attempt: 1, round: 1 }, sourceNativeClaim: { attempt: 1, round: 1 } } } },
+  ])('preserves truthful failure counts and launch bindings for $label', ({ successful, aggregateSuccessful, aggregateTotal, marker }) => {
+    const value = { status: 'completed', attempt: 2, round: 1, headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64),
+      startedAt: '2026-09-28T02:00:00.000Z', pid: 123, ...completion,
+      successfulReviews: aggregateSuccessful, totalReviews: aggregateTotal,
+      reviewerHealth: { version: 1, policy: resolveQuorumPolicy(10), successfulSeats: successful }, ...marker };
+    expect(launchSchema.parse(value)).toEqual(value);
+    expect(hasHealthyGuardedLaunch(launchSchema.parse(value))).toBe(successful >= 7);
+  });
+
+  it('requires infrastructure recovery when two of three seats fail a frozen all-seat policy', async () => {
+    const options = await fixture(), reviewerHealth = { version: 1, policy: resolveQuorumPolicy(3, 1), successfulSeats: 2 };
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 2, reviewerHealth });
+    await guardReviewLaunch({ ...options, maxAttempts: 2, maxRounds: 4 });
+    const priorState = await readFile(convergeRunStatePath(options.gitCommonDir, target));
+
+    await expect(guardReviewLaunch(options)).rejects.toThrow('infrastructure_failure');
+    expect(await readFile(convergeRunStatePath(options.gitCommonDir, target))).toEqual(priorState);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1, cap: 2 });
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ roundCap: 4, rounds: [], lastLaunch: { reviewerHealth } });
+
+    await guardReviewLaunch({ ...options, retryReason: 'Original reviewer outage diagnosed; bounded infrastructure recovery.' });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2, cap: 2 });
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ roundCap: 4, rounds: [] });
+  });
+
+  it('retains a two-thirds health summary and requires original report admission instead of another review', async () => {
+    const options = await fixture(), reviewerHealth = { version: 1, policy: resolveQuorumPolicy(3, 2 / 3), successfulSeats: 2 };
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 2, reviewerHealth });
+    await guardReviewLaunch(options);
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ rounds: [], lastLaunch: { reviewerHealth } });
+    await expect(guardReviewLaunch(options)).rejects.toThrow('report_not_admitted');
+    await expect(guardReviewLaunch({ ...options, retryReason: 'A reason cannot replace original admission.' })).rejects.toThrow('report_not_admitted');
+    expect(options.run).toHaveBeenCalledTimes(1); expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('keeps the legacy two-thirds health rule when no versioned summary was recorded', async () => {
+    const options = await fixture(); options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 2 });
+    await guardReviewLaunch(options);
+    await expect(guardReviewLaunch(options)).rejects.toThrow('report_not_admitted');
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  const corruptHealth = (kind: string): any => {
+    const summary: any = { version: 1, policy: resolveQuorumPolicy(3, 2 / 3), successfulSeats: 2 };
+    if (kind === 'summary version') summary.version = 2;
+    else if (kind === 'policy version') summary.policy.version = 2;
+    else if (kind === 'fraction below floor') summary.policy.fraction = 0.5;
+    else if (kind === 'fraction above one') summary.policy.fraction = 1.1;
+    else if (kind === 'non-finite fraction') summary.policy.fraction = Number.NaN;
+    else if (kind === 'forged minimum') summary.policy.minimumSuccessful = 1;
+    else if (kind === 'fractional seat count') summary.policy.seatCount = 3.5;
+    else if (kind === 'denominator mismatch') summary.policy = resolveQuorumPolicy(4, 2 / 3);
+    else if (kind === 'success mismatch') summary.successfulSeats = 3;
+    else if (kind === 'fractional successes') summary.successfulSeats = 2.5;
+    else if (kind === 'unknown policy key') summary.policy.authority = 'attested';
+    else summary.authority = 'attested';
+    return summary;
+  };
+  const corruptions = ['summary version', 'policy version', 'fraction below floor', 'fraction above one', 'non-finite fraction',
+    'forged minimum', 'fractional seat count', 'denominator mismatch', 'success mismatch', 'fractional successes', 'unknown policy key', 'unknown summary key'];
+
+  it.each(corruptions)('rejects completion with %s without refunding the actual attempt or admitting a round', async kind => {
+    const options = await fixture();
+    options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 2, reviewerHealth: corruptHealth(kind) });
+    await expect(guardReviewLaunch({ ...options, maxAttempts: 2, maxRounds: 4 })).rejects.toThrow();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1, cap: 2 });
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({ roundCap: 4, rounds: [], lastLaunch: { status: 'failed' } });
+  });
+
+  it.each(corruptions)('rejects persisted %s before validation or another attempt claim', async kind => {
+    const options = await fixture(); await guardReviewLaunch(options);
+    const path = convergeRunStatePath(options.gitCommonDir, target), state = JSON.parse(await readFile(path, 'utf8'));
+    state.lastLaunch.successfulReviews = 2; state.lastLaunch.reviewerHealth = corruptHealth(kind);
+    await writeFile(path, JSON.stringify(state)); const original = await readFile(path);
+    await expect(guardReviewLaunch({ ...options, retryReason: 'Cannot bypass invalid persisted metadata.' })).rejects.toThrow();
+    expect(await readFile(path)).toEqual(original); expect(options.validate).toHaveBeenCalledTimes(1); expect(options.run).toHaveBeenCalledTimes(1);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('passes existing target ownership to checkpoint work and expires it after launch', async () => {
+    const options = await fixture();
+    let retainedOwnership!: NativeTargetOwnership;
+    options.run = async (context, ownership) => {
+      expect(context.attempt).toBe(1);
+      await assertNativeTargetOwnership(ownership, options.gitCommonDir, target);
+      retainedOwnership = ownership;
+      return completion;
+    };
+
+    await guardReviewLaunch(options);
+
+    await expect(assertNativeTargetOwnership(retainedOwnership, options.gitCommonDir, target))
+      .rejects.toThrow('native_target_not_owned');
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
   it('validates before claiming and derives the first round without admitting it', async () => {
     const options = await fixture();
     options.validate = vi.fn(async () => {
@@ -41,7 +178,7 @@ describe('native guarded review launch', () => {
 
     await guardReviewLaunch(options);
 
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 1 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 1 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
     expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({
       rounds: [], lastLaunch: { status: 'completed', attempt: 1, round: 1, runId: completion.runId },
@@ -87,7 +224,7 @@ describe('native guarded review launch', () => {
 
     await guardReviewLaunch({ ...options, inputSha256: 'd'.repeat(64) });
 
-    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('refuses a round-cap override beyond the existing hard maximum before claiming', async () => {
@@ -117,7 +254,7 @@ describe('native guarded review launch', () => {
     await expect(guardReviewLaunch(options)).rejects.toThrow(/legacy|unknown|retry/i);
     await guardReviewLaunch({ ...options, retryReason: 'Original process is terminal; corrected launcher fixture passed.' });
 
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
   });
 
@@ -129,7 +266,7 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
     await guardReviewLaunch({ ...options, retryReason: 'Legacy launch audited; no native round was admitted.' });
 
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 8 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 8 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target))
       .toMatchObject({ attemptsUsed: 8, migratedAttempts: 7 });
   });
@@ -144,7 +281,7 @@ describe('native guarded review launch', () => {
     await expect(guardReviewLaunch(changed)).rejects.toThrow('infrastructure_failure');
     await guardReviewLaunch({ ...changed, retryReason: 'Credentials repaired and independently checked.' });
 
-    expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('allows explicit cap consent without an extra preclaim or reset', async () => {
@@ -156,7 +293,7 @@ describe('native guarded review launch', () => {
     await guardReviewLaunch({ ...options, retryReason: 'Launcher repaired.', maxAttempts: 2 });
 
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ cap: 2, attemptsUsed: 2 });
-    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 });
+    expect(options.run).toHaveBeenCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('does not turn stop-upstream into stop-review, while explicit stop-review prevents launch', async () => {
@@ -192,7 +329,7 @@ describe('native guarded review launch', () => {
     await expect(guardReviewLaunch({ ...options, inputSha256: 'f'.repeat(64) })).rejects.toThrow(/fix.*head|head.*fix/i);
     await guardReviewLaunch({ ...options, headSha: 'd'.repeat(40), inputSha256: 'e'.repeat(64) });
 
-    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 });
+    expect(options.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 2 }, expect.objectContaining({ target }));
   });
 
   it('permits a bounded same-head retry when the review after a real fix is inconclusive', async () => {
@@ -211,7 +348,7 @@ describe('native guarded review launch', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
 
     await guardReviewLaunch({ ...fixedHead, retryReason: 'Inconclusive reviewer quorum; provider health checked.' });
-    expect(fixedHead.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 3 });
+    expect(fixedHead.run).toHaveBeenLastCalledWith({ target, round: 2, attempt: 3 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 3 });
   });
 
@@ -272,7 +409,7 @@ describe('native guarded review launch', () => {
     fresh.run = vi.fn().mockResolvedValue({ ...completion, runId: '019921a0-0000-7000-8000-000000000003',
       successfulReviews: 13, totalReviews: 18, reviewerHealth: { ...blocking, successfulSeats: 12 } });
     await guardReviewLaunch({ ...fresh, retryReason: 'Blocking quorum 11/17 < 12; same roster, bounded retry.' });
-    expect(fresh.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 });
+    expect(fresh.run).toHaveBeenLastCalledWith({ target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
     expect(await loadConvergeAttemptState(fresh.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2 });
     expect(hasHealthyGuardedLaunch(launchSchema.parse((await loadConvergeRunState(fresh.gitCommonDir, target))!.lastLaunch))).toBe(true);
   });
@@ -299,5 +436,81 @@ describe('native guarded review launch', () => {
 
     expect(options.run).not.toHaveBeenCalled();
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ cap: 1, attemptsUsed: 1 });
+  });
+});
+
+function retainedOriginal() {
+  const digest = 'd'.repeat(64);
+  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40),
+    patchSha256: digest, configSha256: digest, specSha256: digest, contextSha256: digest, toolsSha256: digest,
+    parser: { name: 'findings-json', version: 1 },
+    roster: [{ seat: 's0', model: 'm0', role: 'general', route: 'fake' }],
+    chunks: [{ index: 0, total: 1, digest }],
+    prompts: [{ seat: 's0', chunk: 0, systemSha256: digest, userSha256: digest }] });
+  return { plan, input: { runId: completion.runId, capturedInputsSha256: digest, planDigest: plan.digest,
+    startedAtMs: 1000, expiresAtMs: 6000, maxPhysicalCalls: 2, maxAttemptsPerCell: 2 } };
+}
+
+describe('operation-bound original preflight', () => {
+  it('refuses capability before a native claim, checkpoint or provider callback', async () => {
+    const options = await fixture(), original = retainedOriginal();
+    const beforeClaim = vi.fn(async (bound: any) => {
+      expect(decodeOriginalLaunch(bound.launchBytes)).toEqual(bound.launch);
+      expect(bound.launch.originalNativeClaim).toEqual({ attempt: 1, round: 1 });
+      expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+      throw new Error('server_private_recovery_unsupported');
+    });
+    await expect(guardReviewLaunch({ ...options, originalLaunch: { input: original.input, beforeClaim, nowMs: () => 1500 } } as any))
+      .rejects.toThrow('server_private_recovery_unsupported');
+    expect(beforeClaim).toHaveBeenCalledTimes(1); expect(options.run).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toBeUndefined();
+    await expect(CheckpointJournal.inspectRead(checkpointPath(options.gitCommonDir, target, completion.runId))).rejects.toThrow();
+  });
+
+  it('passes the same canonical bytes to owned persistence and snapshots caller input before preflight', async () => {
+    const options = await fixture(), original = retainedOriginal();
+    let checked = '';
+    const beforeClaim = vi.fn(async (bound: any) => {
+      checked = bound.launchBytes;
+      original.input.expiresAtMs = 9000; original.input.maxPhysicalCalls = 99;
+      expect(Object.isFrozen(bound.launch.originalNativeClaim)).toBe(true);
+    });
+    options.run = async (context, ownership, bound: any) => {
+      expect(bound.launchBytes).toBe(checked);
+      expect(bound.launch).toEqual(decodeOriginalLaunch(checked));
+      expect(bound.launch).toMatchObject({ expiresAtMs: 6000, maxPhysicalCalls: 2,
+        originalNativeClaim: { attempt: context.attempt, round: context.round } });
+      const journal = await CheckpointJournal.create({ commonDir: options.gitCommonDir, ownership,
+        namespace: bound.launch.runId, plan: original.plan });
+      await journal.bind('launch', bound.launchBytes, ownership);
+      expect((await journal.readBindings()).launch).toBe(checked);
+      expect((await journal.read()).records.filter(row => row.type === 'intent')).toHaveLength(0);
+      return completion;
+    };
+    await guardReviewLaunch({ ...options, originalLaunch: { input: original.input, beforeClaim, nowMs: () => 1500 } } as any);
+    expect(beforeClaim).toHaveBeenCalledTimes(1);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+    expect((await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch!.runId).toBe(completion.runId);
+  });
+
+  it('does not spend when the frozen original deadline expires during awaited preflight', async () => {
+    const options = await fixture(), original = retainedOriginal(); let now = 1500;
+    const beforeClaim = vi.fn(async () => { now = 6000; });
+    await expect(guardReviewLaunch({ ...options, originalLaunch: { input: original.input, beforeClaim, nowMs: () => now } } as any))
+      .rejects.toThrow('original_launch_expired');
+    expect(beforeClaim).toHaveBeenCalledTimes(1); expect(options.run).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toBeUndefined();
+  });
+
+  it('serializes concurrent original preflights and refuses the second already completed council', async () => {
+    const options = await fixture(), original = retainedOriginal();
+    const beforeClaim = vi.fn(async () => {});
+    const input = { ...options, originalLaunch: { input: original.input, beforeClaim, nowMs: () => 1500 } };
+    const results = await Promise.allSettled([guardReviewLaunch(input as any), guardReviewLaunch(input as any)]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(beforeClaim).toHaveBeenCalledTimes(1); expect(options.run).toHaveBeenCalledTimes(1);
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 });

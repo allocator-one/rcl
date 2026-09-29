@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { decodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,6 +8,7 @@ import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { configDigest, sha256Hex, type RosterEntry } from '../../src/report/run-header.js';
+import { assertNativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { sampleFinding, sampleResult, sampleReview } from '../telemetry/fixtures.js';
 
 async function fixture(cap = 35) {
@@ -49,6 +52,55 @@ async function fixture(cap = 35) {
 }
 
 describe('bound legacy launch health recovery', () => {
+  it.each([false, true])('rechecks a retained-original deadline after real legacy source retention: expires=%s', async expires => {
+    const f = await fixture();
+    const before = await f.bytes();
+    const originalReport = await readFile(f.retry.legacyRetry!.reportPath);
+    const sourcePath = join(f.common, 'rcl-converge-attempts', 'sources', configDigest(f.retry.legacyRetry!.config));
+    expect(existsSync(sourcePath)).toBe(false);
+    const runId = '22222222-2222-4222-8222-222222222222';
+    let preparedBytes = '';
+    const beforeClaim = vi.fn(async (bound: any) => {
+      preparedBytes = bound.launchBytes;
+      expect(decodeOriginalLaunch(preparedBytes)).toEqual(bound.launch);
+      expect(bound.launch.originalNativeClaim).toEqual({ attempt: 2, round: 2 });
+      expect((await loadConvergeAttemptState(f.common, f.target))!.attemptsUsed).toBe(1);
+      expect(existsSync(sourcePath)).toBe(false);
+    });
+    f.run.mockImplementationOnce(async (context, ownership, original) => {
+      await assertNativeTargetOwnership(ownership, f.common, f.target);
+      expect(context).toEqual({ target: f.target, round: 2, attempt: 2 });
+      expect(original.launchBytes).toBe(preparedBytes);
+      return { runId, reportJsonSha256: 'e'.repeat(64), successfulReviews: 12, totalReviews: 18,
+        deliveryPending: false };
+    });
+    const [outcome] = await Promise.allSettled([guardReviewLaunch({ ...f.retry, originalLaunch: {
+      input: { runId, capturedInputsSha256: 'c'.repeat(64), planDigest: 'd'.repeat(64),
+        startedAtMs: 1000, expiresAtMs: 6000, maxPhysicalCalls: 17, maxAttemptsPerCell: 1 },
+      beforeClaim,
+      // Real immutable retention creates this object after both old deadline checks.
+      nowMs: () => expires && existsSync(sourcePath) ? 6000 : 1500,
+    } })]);
+    expect(beforeClaim).toHaveBeenCalledOnce();
+    expect(sha256Hex(await readFile(sourcePath))).toBe(configDigest(f.retry.legacyRetry!.config));
+    expect(await readFile(f.retry.legacyRetry!.reportPath)).toEqual(originalReport);
+    const attempts = (await loadConvergeAttemptState(f.common, f.target))!;
+    expect(attempts.attemptsUsed).toBe(expires ? 1 : 2);
+    if (expires) {
+      expect(outcome).toMatchObject({ status: 'rejected', reason: { code: 'original_launch_expired' } });
+      expect(f.run).not.toHaveBeenCalled();
+      expect(await f.bytes()).toEqual(before);
+    } else {
+      expect(outcome).toMatchObject({ status: 'fulfilled', value: { attempt: 2 } });
+      expect(f.run).toHaveBeenCalledOnce();
+      expect(attempts.attempts[1]!.retrySource).toMatchObject({ attempt: 1, round: 2,
+        reportJsonSha256: sha256Hex(originalReport) });
+      expect((await loadConvergeRunState(f.common, f.target))!.lastLaunch).toMatchObject({
+        status: 'completed', runId, retainedOriginal: { version: 1, runId,
+          capturedInputsSha256: 'c'.repeat(64), planDigest: 'd'.repeat(64) } });
+    }
+  });
+
   async function mixedFixture(admitted = false) {
     const f = await fixture();
     await f.mutate((report, native) => {
@@ -73,8 +125,13 @@ describe('bound legacy launch health recovery', () => {
     const f = await mixedFixture(admitted);
     const before = await loadConvergeRunState(f.common, f.target);
     const claims = await loadConvergeAttemptState(f.common, f.target);
+    f.run.mockImplementationOnce(async (_context, ownership) => {
+      await assertNativeTargetOwnership(ownership, f.common, f.target);
+      return { runId: f.report.run!.id, reportJsonSha256: sha256Hex(JSON.stringify(f.report)),
+        successfulReviews: f.report.stats.successfulReviews, totalReviews: f.report.stats.totalReviews, deliveryPending: false };
+    });
     await guardReviewLaunch(f.retry);
-    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: admitted ? 3 : 2, attempt: 2 });
+    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: admitted ? 3 : 2, attempt: 2 }, expect.objectContaining({ target: f.target }));
     const after = await loadConvergeRunState(f.common, f.target);
     expect(after?.rounds).toEqual(before?.rounds);
     expect(after?.findings).toEqual(before?.findings);
@@ -110,7 +167,7 @@ describe('bound legacy launch health recovery', () => {
     const claims = await loadConvergeAttemptState(f.common, f.target);
     await guardReviewLaunch({ ...f.retry, legacyRetry: undefined,
       headSha: 'e'.repeat(40), inputSha256: 'f'.repeat(64) });
-    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 3, attempt: 2 });
+    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 3, attempt: 2 }, expect.objectContaining({ target: f.target }));
     const after = await loadConvergeRunState(f.common, f.target);
     expect(after?.rounds).toEqual(before?.rounds);
     expect(after?.findings).toEqual(before?.findings);
@@ -127,7 +184,7 @@ describe('bound legacy launch health recovery', () => {
     const after = await loadConvergeRunState(f.common, f.target);
     const attempts = await loadConvergeAttemptState(f.common, f.target);
     expect(f.run).toHaveBeenCalledOnce();
-    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 2, attempt: 2 });
+    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 2, attempt: 2 }, expect.objectContaining({ target: f.target }));
     expect(after?.rounds).toEqual(before?.rounds);
     expect(after?.findings).toEqual(before?.findings);
     expect(after?.roundCap).toBe(30);
@@ -174,7 +231,7 @@ describe('bound legacy launch health recovery', () => {
 
     await guardReviewLaunch(changed);
 
-    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 2, attempt: 2 });
+    expect(f.run).toHaveBeenCalledWith({ target: f.target, round: 2, attempt: 2 }, expect.objectContaining({ target: f.target }));
     const after = await loadConvergeRunState(f.common, f.target);
     expect(after?.rounds).toEqual(before?.rounds);
     expect(after?.findings).toEqual(before?.findings);

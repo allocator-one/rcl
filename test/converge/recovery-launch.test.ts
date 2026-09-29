@@ -1,0 +1,1251 @@
+import { mkdtemp, rm, readFile, writeFile, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { guardReviewerRecoveryLaunch, guardReviewerRecoveryResume } from "../../src/converge/recovery-launch.js";
+import { loadConvergeAttemptState } from "../../src/converge/attempt-budget.js";
+import { guardReviewLaunch } from "../../src/converge/launch-guard.js";
+import { withNativeTarget } from "../../src/converge/target-ownership.js";
+import { loadConvergeRunState, convergeRunStatePath } from "../../src/converge/run-state.js";
+import { recoverCapturedAssignments, recoveryAttemptsFromCheckpoint } from "../../src/dispatch/recovery.js";
+import {
+  CheckpointJournal,
+  checkpointPath,
+  exportCheckpointProof,
+  freezeCheckpointPlan,
+} from "../../src/dispatch/checkpoint.js";
+import { captureReviewerInputs } from "../../src/dispatch/captured-inputs.js";
+import {
+  createOriginalLaunch,
+  encodeOriginalLaunch,
+} from "../../src/dispatch/original-launch.js";
+import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase } from "../../src/dispatch/checkpoint-async-store.js";
+import { inspectReviewerStatus } from "../../src/evidence/reviewer-status.js";
+import { executeCheckpointGating } from "../../src/dispatch/checkpoint-gating-execution.js";
+import { captureAggregationInputs } from "../../src/report/aggregation-inputs.js";
+import { captureSupplementalAsync } from "../../src/report/supplemental-async.js";
+import { projectCheckpointReport } from "../../src/report/checkpoint-projection.js";
+import { assembleCheckpointReview } from "../../src/report/checkpoint-assembly.js";
+import {
+  inspectReviewerArtifact,
+  serializeReviewerArtifact,
+} from "../../src/report/reviewer-artifact.js";
+import { retainedLaunchInputSha256 } from "../../src/converge/retained-report.js";
+import {
+  configDigest,
+  diffDigest,
+  sha256Hex,
+  stableStringify,
+} from "../../src/report/run-header.js";
+import { sanitizeForDelivery } from "../../src/telemetry/envelope.js";
+import { applyReviewerRecovery, resumeReviewerRecovery, type ReviewerRecoveryPreflight } from "../../src/evidence/reviewer-recovery.js";
+import { processReviewerRoundReport } from "../../src/converge/retained-report.js";
+import { loadReviewerLineage } from "../../src/evidence/reviewer-lineage.js";
+
+const roots: string[] = [];
+afterEach(async () => {
+  vi.useRealTimers();
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
+
+const target = "allocator-one/rcl#105";
+const head = "a".repeat(40);
+const role = {
+  name: "general",
+  systemPrompt: "s",
+  focus: [],
+  description: "d",
+  isSpecialized: false,
+};
+const clock = 1_800_000_000_000;
+
+type SourceFailure = "timeout" | "permanent" | "unclassified" | "uncertain";
+type Fixture = Awaited<ReturnType<typeof sealed>>;
+type Action = { cell: string; status?: "success" | "error"; error?: string };
+
+function review(
+  index: number,
+  status: "success" | "timeout" | "error",
+  error?: string,
+): object {
+  return {
+    model: `m${index}`,
+    role: "general",
+    provider: "fake",
+    status,
+    durationMs: 1,
+    ...(error ? { error } : {}),
+    findings:
+      index === 0
+        ? [
+            {
+              id: "f",
+              file: "a.ts",
+              startLine: 1,
+              endLine: 1,
+              severity: "important",
+              category: "correctness",
+              title: "t",
+              description: "d",
+            },
+          ]
+        : [],
+  };
+}
+
+async function sealed(successes: number, failure: SourceFailure = "timeout", seats = 17,
+  extra: { async?: boolean; gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "rcl-recovery-")));
+  roots.push(dir);
+  const diff: any = {
+    source: "local",
+    files: [
+      {
+        filename: "a.ts",
+        status: "modified",
+        patch: "@@ -0,0 +1 @@\n+x",
+        additions: 1,
+        deletions: 0,
+        language: "typescript",
+      },
+    ],
+  };
+  const config: any = {
+    quorumFraction: 2 / 3,
+    thresholds: {
+      minConsensusScore: 0,
+      minConfidence: 0,
+      dedupeLineWindow: 5,
+      jaccardThreshold: 0.3,
+    },
+    output: { belowThresholdAppendix: true },
+  };
+  const patch = stableStringify(
+    diff.files.map((file: any) => ({
+      filename: file.filename,
+      status: file.status,
+      previousFilename: null,
+      patch: file.patch,
+      additions: file.additions,
+      deletions: file.deletions,
+      blobSha: null,
+    })),
+  );
+  const tools = stableStringify({
+    parser: { name: "findings-json", version: 1 },
+    aggregation: { name: "consensus", version: 2 },
+  });
+  const roster = Array.from({ length: seats }, (_, index) => ({
+    seat: `s${index}`,
+    model: `m${index}`,
+    role: "general",
+    route: "fake",
+    lane: "blocking" as const,
+  }));
+  const plan = freezeCheckpointPlan({
+    version: 2,
+    target,
+    headSha: head,
+    mergeBaseSha: "b".repeat(40),
+    patchSha256: diffDigest(diff.files),
+    configSha256: configDigest(config),
+    specSha256: sha256Hex("s"),
+    contextSha256: sha256Hex("[]"),
+    toolsSha256: sha256Hex(tools),
+    parser: { name: "findings-json", version: 1 },
+    roster,
+    chunks: [{ index: 0, total: 1, digest: sha256Hex("chunk") }],
+    prompts: roster.map((seat) => ({
+      seat: seat.seat,
+      chunk: 0,
+      systemSha256: sha256Hex("sys"),
+      userSha256: sha256Hex("u"),
+    })),
+  });
+  const aggregation = captureAggregationInputs({
+    algorithm: { name: "consensus", version: 2 },
+    diffSha256: plan.patchSha256,
+    roleMap: new Map([["general", role]]),
+    thresholds: config.thresholds,
+    gating: {
+      mode: extra.gatingMode ?? "all-findings",
+      minModels: 2,
+      verificationModel: extra.verificationModel,
+      verificationTimeoutMs: extra.verificationModel ? 3000 : 100,
+      verificationPassTimeoutMs: extra.verificationModel ? 5000 : 100,
+    },
+    belowThresholdAppendix: true,
+  });
+  const captured = captureReviewerInputs({
+    plan,
+    policy: { version: 1, fraction: 2 / 3 },
+    patchBytes: patch,
+    configBytes: stableStringify(config),
+    specBytes: "s",
+    contextBytes: "[]",
+    toolsBytes: tools,
+    chunkBytes: ["chunk"],
+    assignments: plan.cells.map((cell) => ({
+      model: cell.model,
+      provider: cell.route,
+      role,
+    })),
+    prompts: plan.cells.map(() => ({ systemPrompt: "sys", userPrompt: "u" })),
+    aggregation,
+    ...(extra.async ? { async: { timeoutMs: 1000, maxPhysicalCalls: 2, maxAttemptsPerCall: 1,
+      calls: [0, 1].map(index => ({ assignmentId: `async:${index}`, chunk: 0,
+        assignment: { model: 'bonus', provider: 'fake', role }, prompt: { systemPrompt: 'async-sys', userPrompt: 'async-user' } })) } } : {}),
+  });
+  const id = "11111111-1111-4111-8111-111111111111";
+  const run: any = {
+    id,
+    rclVersion: "x",
+    command: "review",
+    target: {
+      kind: "patch",
+      repo: "allocator-one/rcl",
+      prNumber: 105,
+      headSha: head,
+      baseSha: plan.mergeBaseSha,
+    },
+    roster: roster.map((seat) => ({
+      model: seat.model,
+      role: seat.role,
+      provider: seat.route,
+      lane: "blocking",
+    })),
+    spec: { source: "flag", sha256: plan.specSha256 },
+    contextFiles: [],
+    runner: { kind: "agent" },
+    startedAt: new Date(1000),
+    converge: { target, round: 1, attempt: 1 },
+  };
+  let sourceProof: any;
+  let sourceTerminal: any;
+  if (extra.async) {
+    run.roster.push(...[0, 1].map(() => ({ model: 'bonus', role: 'general', provider: 'fake', lane: 'async' })));
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(clock);
+  }
+  await guardReviewLaunch({
+    gitCommonDir: dir,
+    target,
+    headSha: head,
+    inputSha256: retainedLaunchInputSha256(captured.digest, run),
+    maxAttempts: 3,
+    validate: async () => {},
+    run: async (_, ownership) => {
+      const journal = await CheckpointJournal.create({
+        commonDir: dir,
+        namespace: id,
+        plan,
+        ownership,
+      });
+      await journal.bind("captured-inputs", captured.bytes, ownership);
+      await journal.bind(
+        "launch",
+        encodeOriginalLaunch(
+          createOriginalLaunch({
+            runId: id,
+            target,
+            originalNativeClaim: { attempt: 1, round: 1 },
+            capturedInputsSha256: captured.digest,
+            planDigest: plan.digest,
+            startedAtMs: clock,
+            expiresAtMs: clock + 60_000,
+            maxPhysicalCalls: seats,
+            maxAttemptsPerCell: 1,
+          }),
+        ),
+        ownership,
+      );
+      if (extra.async) {
+        const phase = await initializeAsyncPhase({ commonDir: dir, namespace: id, plan, ownership,
+          calls: captured.async!.calls.map(call => call.ref), maxPhysicalCalls: 2, maxAttemptsPerCall: 1, expiresAtMs: clock + 60_000 });
+        const writers = await Promise.all(phase.delegates.map(openAsyncDelegate));
+        const intent = await writers[0]!.claim({ systemPrompt: 'async-sys', userPrompt: 'async-user' });
+        await writers[0]!.recordResult(intent!.attemptId, JSON.stringify({ model: 'bonus', role: 'general', provider: 'fake', async: true, status: 'success', durationMs: 1, findings: [] }), true);
+        await writers[1]!.claim({ systemPrompt: 'async-sys', userPrompt: 'async-user' });
+      }
+      for (let index = 0; index < seats; index++) {
+        const attempt = { id: `a${index}`, kind: "paid" as const };
+        await journal.recordIntent(`s${index}:0`, attempt, ownership);
+        if (index < successes) {
+          await journal.recordResult(
+            `s${index}:0`,
+            attempt,
+            {
+              kind: "success",
+              chunk: 0,
+              reviewBytes: JSON.stringify(review(index, "success")),
+            },
+            ownership,
+          );
+        } else if (failure !== "uncertain") {
+          const outcome =
+            failure === "timeout"
+              ? review(index, "timeout", "timeout")
+              : failure === "permanent"
+                ? review(index, "error", "401 authentication")
+                : review(index, "error", "opaque");
+          await journal.recordResult(
+            `s${index}:0`,
+            attempt,
+            {
+              kind: "failure",
+              chunk: 0,
+              reviewBytes: JSON.stringify(outcome),
+              possiblyBilled: true,
+            },
+            ownership,
+          );
+        }
+      }
+      await journal.finalize(ownership);
+      const proof = await exportCheckpointProof(journal);
+      const assembly: any = {
+        projection: projectCheckpointReport({
+          sources: [],
+          successor: { runId: id, proof },
+          policy: captured.policy,
+        }),
+        supplementalAsync: extra.supplementalAsync ?? captureSupplementalAsync([], extra.async ? 2 : 0),
+        ...(extra.async ? { asyncExecution: await sealAsyncPhase({ commonDir: dir, namespace: id, plan, ownership }) } : {}),
+        diff,
+        startTime: 1,
+        run,
+      };
+      const report = await assembleCheckpointReview(assembly);
+      const reportBytes = JSON.stringify(sanitizeForDelivery(report.report));
+      await journal.retainTerminalReport(
+        {
+          reportBytes,
+          reviewerArtifactBytes: serializeReviewerArtifact({
+            assembly,
+            reportBytes,
+            representation: { version: 1, parseFailures: false },
+          }).bytes,
+        },
+        ownership,
+      );
+      sourceProof = proof;
+      sourceTerminal = await journal.readTerminalReport();
+      return {
+        runId: id,
+        reportJsonSha256: sha256Hex(reportBytes),
+        successfulReviews: successes,
+        totalReviews: seats,
+        deliveryPending: false,
+        hardFailure: true,
+        reviewerHealth: {
+          version: 1,
+          policy: assembly.projection.health.policy,
+          successfulSeats: successes,
+        },
+      };
+    },
+  });
+  if (extra.async) vi.useRealTimers();
+  return { dir, plan, captured, id, sourceProof, sourceTerminal, run };
+}
+
+function opts(fixture: Fixture, overrides: Record<string, unknown> = {}) {
+  return {
+    gitCommonDir: fixture.dir,
+    target,
+    sourceRunId: fixture.id,
+    successorRunId: "22222222-2222-4222-8222-222222222222",
+    operationId: "33333333-3333-4333-8333-333333333333",
+    headSha: head,
+    inputSha256: retainedLaunchInputSha256(
+      fixture.captured.digest,
+      fixture.run,
+    ),
+    startedAtMs: clock + 1,
+    expiresAtMs: clock + 60_000,
+    maxAdditionalCalls: 1,
+    maxAttemptsPerCell: 2,
+    nowMs: () => clock + 2,
+    run: vi.fn(),
+    ...overrides,
+  };
+}
+
+async function sealSuccessor(
+  fixture: Fixture,
+  value: any,
+  actions: readonly Action[],
+  options: { intentsFirst?: boolean; verify?: (assembly: any) => Promise<{ bytes: string; digest: string } | undefined> } = {},
+) {
+  const source = inspectReviewerArtifact(
+    fixture.sourceTerminal.reviewerArtifactBytes,
+    {
+      expectedReportBytes: fixture.sourceTerminal.reportBytes,
+      expectedRunId: fixture.id,
+      expectedTarget: target,
+      expectedPlan: fixture.plan,
+    },
+  );
+  const prepared = actions.map((action, index) => ({
+    action,
+    index: Number(action.cell.slice(1, action.cell.indexOf(":"))),
+    attempt: { id: `new-${index}`, kind: "paid" as const },
+  }));
+  for (const item of prepared) {
+    await value.journal.recordIntent(
+      item.action.cell,
+      item.attempt,
+      value.ownership,
+    );
+    if (!options.intentsFirst) await recordResult(item);
+  }
+  if (options.intentsFirst) {
+    for (const item of prepared) await recordResult(item);
+  }
+
+  async function recordResult(item: (typeof prepared)[number]) {
+    const { action, attempt, index } = item;
+    const outcome = review(index, action.status ?? "success", action.error);
+    await value.journal.recordResult(
+      action.cell,
+      attempt,
+      action.status === "success" || action.status === undefined
+        ? { kind: "success", chunk: 0, reviewBytes: JSON.stringify(outcome) }
+        : {
+            kind: "failure",
+            chunk: 0,
+            reviewBytes: JSON.stringify(outcome),
+            possiblyBilled: true,
+          },
+      value.ownership,
+    );
+  }
+  await value.journal.finalize(value.ownership);
+  const proof = await exportCheckpointProof(value.journal);
+  const run = {
+    ...source.assembly.run,
+    id: value.operation.successorRunId,
+    converge: { target, round: 1, attempt: value.claim.attempt },
+  };
+  const assembly: any = {
+    ...source.assembly,
+    projection: projectCheckpointReport({
+      sources: source.assembly.projection.proofs.map((item: any) => ({ runId: item.runId, proof: item.proof })),
+      successor: { runId: value.operation.successorRunId, proof },
+      policy: fixture.captured.policy,
+    }),
+    run,
+  };
+  const verificationProof = await options.verify?.(assembly);
+  const report = await assembleCheckpointReview(assembly, { verificationProof });
+  const reportBytes = JSON.stringify(sanitizeForDelivery(report.report));
+  await value.journal.retainTerminalReport(
+    {
+      reportBytes,
+      reviewerArtifactBytes: serializeReviewerArtifact({
+        assembly,
+        reportBytes,
+        representation: { version: 1, parseFailures: false },
+        ...(verificationProof ? { verificationProof } : {}),
+      }).bytes,
+    },
+    value.ownership,
+  );
+  return {
+    health: assembly.projection.health,
+    findings: report.report.findings,
+  };
+}
+
+async function state(fixture: Fixture) {
+  return loadConvergeAttemptState(fixture.dir, target);
+}
+
+async function runState(fixture: Fixture) {
+  return loadConvergeRunState(fixture.dir, target);
+}
+
+function coordinator(fixture: Fixture) {
+  const startedAtMs = Date.now();
+  const called = vi.fn(async (model: string, role: string) => ({
+    model, role, provider: 'fake', status: 'success' as const, durationMs: 1, findings: [],
+  }));
+  const preflight = vi.fn(async (_request: ReviewerRecoveryPreflight, _operationBytes: string) => {});
+  return { called, preflight, input: {
+    commonDir: fixture.dir, target, sourceRunId: fixture.id,
+    successorRunId: '22222222-2222-4222-8222-222222222222',
+    operationId: '33333333-3333-4333-8333-333333333333',
+    currentHeadSha: head, freshCaptureBytes: fixture.captured.bytes,
+    currentRunBindings: { target: fixture.run.target, roster: fixture.run.roster, spec: fixture.run.spec },
+    rclVersion: 'test-successor', runner: { kind: 'agent' as const },
+    startedAtMs, expiresAtMs: startedAtMs + 60_000, maxAdditionalCalls: 1, maxAttemptsPerCell: 2,
+    preflight, adapterFactory: () => ({ name: 'fake', provider: 'fake', review: called, ask: vi.fn() }),
+    onLateAuditError: vi.fn(),
+  } };
+}
+
+describe('retained reviewer recovery coordinator', () => {
+  it('inherits exact observed and uncertain original async proof across actual recovery without rebilling', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { async: true }), options = coordinator(fixture);
+    const sourceBytes = JSON.parse(fixture.sourceTerminal!.reviewerArtifactBytes).asyncExecution.bytes;
+    const result = await applyReviewerRecovery(options.input); expect(result.kind).toBe('completed');
+    const lineage = await loadReviewerLineage({ commonDir: fixture.dir, target, runId: options.input.successorRunId });
+    expect(lineage.latest.inspected.asyncExecution!.bytes).toBe(sourceBytes);
+    expect(lineage.latest.inspected.artifact.newAsyncPhysicalAttempts).toEqual([]);
+    const status = await inspectReviewerStatus({ commonDir: fixture.dir, target, runId: options.input.successorRunId, nowMs: 1_800_000_000_100 });
+    expect(status.attempts.async).toMatchObject({ current: { intents: 0, uncertain: 0 }, inherited: { intents: 2, uncertain: 1 } });
+    expect(status.attempts.combined.newOnly).toBe(1); expect(options.called).toHaveBeenCalledTimes(1);
+    await resumeReviewerRecovery(options.input); expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('composes one missing call into immutable terminal evidence before separate native intake', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const onClaim = vi.fn(async (claim: any) => {
+      expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+      expect(claim.attempt).toBe(2);
+      expect(options.called).not.toHaveBeenCalled();
+    });
+    const result = await applyReviewerRecovery({ ...options.input, onClaim });
+    expect(result.kind).toBe('completed');
+    if (result.kind !== 'completed') throw new Error('Expected completed recovery');
+    expect(options.called).toHaveBeenCalledTimes(1);
+    expect(options.called.mock.calls[0]![0]).toBe('m1');
+    expect(options.preflight).toHaveBeenCalledTimes(1);
+    expect(options.preflight.mock.invocationCallOrder[0]).toBeLessThan(options.called.mock.invocationCallOrder[0]!);
+    expect(result.health).toMatchObject({ conclusive: true, successfulSeats: ['s0', 's1'] });
+    const combined = await loadReviewerLineage({ commonDir: await realpath(fixture.dir), target, runId: options.input.successorRunId });
+    expect(combined.runs[0]!.terminal).toEqual(fixture.sourceTerminal);
+    expect(combined.latest.terminal.reportBytes).toBe(result.terminal.reportBytes);
+    expect(combined.latest.inspected.artifact.newPhysicalAttempts).toHaveLength(1);
+    expect(JSON.parse(result.terminal.reportBytes)).toMatchObject({
+      run: { id: options.input.successorRunId, rcl_version: 'test-successor', reviewer_evidence: { kind: 'supplemented' } },
+      findings: [expect.objectContaining({ id: 'f' })],
+    });
+    expect((await runState(fixture))!.rounds).toEqual([]);
+    const admitted = await processReviewerRoundReport({ gitCommonDir: fixture.dir, target, round: 1,
+      currentHeadSha: head, reportBytes: result.terminal.reportBytes });
+    expect(admitted).toMatchObject({ counts: { new: 1 }, findings: [{ status: 'new', finding: { id: 'f' } }] });
+    expect((await runState(fixture))!.rounds).toMatchObject([{ runId: options.input.successorRunId }]);
+    await resumeReviewerRecovery({ ...options.input, onClaim });
+    expect(onClaim).toHaveBeenCalledTimes(1);
+    expect(onClaim.mock.invocationCallOrder[0]).toBeLessThan(options.called.mock.invocationCallOrder[0]!);
+    expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses unsupported server or owner preflight without spending a native attempt', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    options.preflight.mockRejectedValueOnce(new Error('server_recovery_unsupported'));
+    await expect(applyReviewerRecovery(options.input)).rejects.toThrow('server_recovery_unsupported');
+    expect(options.called).not.toHaveBeenCalled();
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it.each(['head', 'roster', 'spec'])('refuses fresh %s drift before preflight or calls', async field => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const input = structuredClone({ currentRunBindings: options.input.currentRunBindings });
+    if (field === 'roster') input.currentRunBindings.roster[0].model = 'changed';
+    if (field === 'spec') input.currentRunBindings.spec.sha256 = 'f'.repeat(64);
+    await expect(applyReviewerRecovery({ ...options.input, ...input,
+      currentHeadSha: field === 'head' ? 'c'.repeat(40) : head })).rejects.toThrow('reviewer_recovery_input_mismatch');
+    expect(options.preflight).not.toHaveBeenCalled();
+    expect(options.called).not.toHaveBeenCalled();
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('resumes a durable result after expiry without another call or budget renewal', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    await expect(applyReviewerRecovery({ ...options.input,
+      onPhysicalReviewComplete: () => { throw new Error('crash_after_durable_result'); },
+    })).rejects.toThrow('crash_after_durable_result');
+    const spent = await state(fixture), prior = await runState(fixture);
+    options.called.mockClear();
+    options.preflight.mockClear(); options.preflight.mockRejectedValue(new Error('expired_credential_no_remote_access'));
+    const resumed = await resumeReviewerRecovery({ ...options.input, nowMs: () => options.input.expiresAtMs + 1 });
+    expect(options.preflight).not.toHaveBeenCalled();
+    expect(resumed.health.conclusive).toBe(true);
+    expect(options.called).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent);
+    expect((await runState(fixture))!.lastLaunch!.pid).toBe(prior!.lastLaunch!.pid);
+    expect(resumed.operation.expiresAtMs).toBe(options.input.expiresAtMs);
+    expect(resumed.operation.maxAdditionalCalls).toBe(1);
+  });
+
+  it('finishes a sealed checkpoint after aggregation interruption with zero provider calls', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    await expect(applyReviewerRecovery({ ...options.input, onStage: (stage: string) => {
+      if (stage === 'assembling the terminal report') throw new Error('aggregation_interrupted');
+    } })).rejects.toThrow('aggregation_interrupted');
+    options.called.mockClear();
+    const resumed = await resumeReviewerRecovery(options.input);
+    expect(resumed.health.conclusive).toBe(true);
+    expect(options.called).not.toHaveBeenCalled();
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+  });
+
+  it('replays completed recovery byte-for-byte with no native writes or provider calls', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const first = await applyReviewerRecovery(options.input);
+    if (first.kind !== 'completed') throw new Error('Expected completed recovery');
+    const native = await runState(fixture), spent = await state(fixture);
+    options.called.mockClear();
+    const replay = await resumeReviewerRecovery(options.input);
+    expect(replay.reusedTerminal).toBe(true);
+    expect(replay.terminal).toEqual(first.terminal);
+    expect(options.called).not.toHaveBeenCalled();
+    expect(await runState(fixture)).toEqual(native);
+    expect(await state(fixture)).toEqual(spent);
+  });
+
+  it('regenerates and seals a successor verifier phase and resumes without paying again', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' });
+    const options = coordinator(fixture), ask = vi.fn(async () => ({model:'openai/verifier', provider:'openai',
+      status:'success' as const, durationMs:1, text:'[{"id":"F1","verdict":"confirmed","reason":"The supplied changed operation reaches the reported path.","failureMechanism":"The changed operation executes without the required guard.","evidence":[{"file":"a.ts","quote":"x"}]}]'}));
+    const input = {...options.input, adapterFactory: () => ({name:'fake',provider:'fake',review:options.called,ask})};
+    const result = await applyReviewerRecovery(input);
+    if (result.kind !== 'completed') throw new Error('Expected completed recovery');
+    expect(options.called).toHaveBeenCalledTimes(1);expect(ask).toHaveBeenCalledTimes(1);
+    expect(options.preflight.mock.calls.length).toBeGreaterThan(1);
+    const report = JSON.parse(result.terminal.reportBytes);
+    expect(report.findings[0].gating.reason).toBe('verified');
+    const lineage = await loadReviewerLineage({commonDir:await realpath(fixture.dir),target,runId:input.successorRunId});
+    expect(lineage.runs[0]!.terminal).toEqual(fixture.sourceTerminal);
+    expect(lineage.latest.inspected.verificationProof).toBeDefined();
+    expect(await state(fixture)).toMatchObject({attemptsUsed:2});
+    const replay = await resumeReviewerRecovery({...input,nowMs:()=>input.expiresAtMs+1});
+    expect(replay.terminal).toEqual(result.terminal);expect(replay.reusedTerminal).toBe(true);
+    expect(options.called).toHaveBeenCalledTimes(1);expect(ask).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses deterministic no-verifier gating after recovery when no verifier was captured',async()=>{
+    const fixture=await sealed(1,'timeout',3,{gatingMode:'verified-consensus'}),options=coordinator(fixture);
+    const result=await applyReviewerRecovery(options.input);
+    if(result.kind!=='completed')throw new Error('Expected completed recovery');
+    expect(JSON.parse(result.terminal.reportBytes).findings[0].gating.verification.verdict).toBe('unavailable');
+    expect(JSON.parse(result.terminal.reviewerArtifactBytes).verification).toBeUndefined();
+    expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the frozen async snapshot and never counts it as a blocking seat', async () => {
+    const bonus = { model: 'bonus', role: 'general', provider: 'fake', status: 'success', durationMs: 1, async: true,
+      findings: [{ id: 'async-f', file: 'bonus.ts', startLine: 2, endLine: 2, severity: 'critical',
+        category: 'correctness', title: 'Retained async observation', description: 'original async result' }] };
+    // This is an imported prior-round opinion, not an unjournaled current launch.
+    const supplementalAsync = captureSupplementalAsync([JSON.stringify(bonus)], 0);
+    const fixture = await sealed(1, 'timeout', 3, { supplementalAsync }), options = coordinator(fixture);
+    const result = await applyReviewerRecovery(options.input);
+    if (result.kind !== 'completed') throw new Error('Expected completed recovery');
+    const lineage = await loadReviewerLineage({ commonDir: await realpath(fixture.dir), target, runId: options.input.successorRunId });
+    expect(lineage.latest.inspected.supplementalAsync.bytes).toBe(supplementalAsync.bytes);
+    expect(result.health.successfulSeats).toEqual(['s0', 's1']);
+    expect(options.called).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(result.terminal.reportBytes).findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'f' }), expect.objectContaining({ id: 'async-f', severity: 'critical' }),
+    ]));
+  });
+
+  it('makes no calls or native changes when the source already meets quorum', async () => {
+    const fixture = await sealed(2, 'timeout', 3), options = coordinator(fixture);
+    const before = await state(fixture), native = await runState(fixture);
+    expect(await applyReviewerRecovery(options.input)).toEqual({ kind: 'already_quorate', sourceRunId: fixture.id });
+    expect(options.called).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(before);
+    expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('snapshots operation bounds and fresh inputs before awaiting owner preflight', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const expiry = options.input.expiresAtMs;
+    options.preflight.mockImplementationOnce(async () => {
+      options.input.maxAdditionalCalls = 99;
+      options.input.expiresAtMs += 99_000;
+      options.input.sourceRunId = '44444444-4444-4444-8444-444444444444';
+      options.input.currentRunBindings.roster[0].model = 'changed during preflight';
+    });
+    const result = await applyReviewerRecovery(options.input);
+    if (result.kind !== 'completed') throw new Error('Expected completed recovery');
+    expect(result.operation).toMatchObject({ maxAdditionalCalls: 1, expiresAtMs: expiry, sourceRunId: fixture.id });
+    expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps an unknown paid outcome spent and inconclusive instead of reissuing the call', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const guardOptions = opts(fixture, {
+      startedAtMs: options.input.startedAtMs, expiresAtMs: options.input.expiresAtMs,
+      nowMs: () => options.input.startedAtMs + 1,
+      run: async ({ journal, ownership }: any) => {
+        await journal.recordIntent('s1:0', { id: 'unknown-outcome', kind: 'paid' }, ownership);
+        throw new Error('interrupted after paid intent');
+      },
+    });
+    await expect(guardReviewerRecoveryLaunch(guardOptions)).rejects.toThrow('interrupted after paid intent');
+    const result = await resumeReviewerRecovery(options.input);
+    expect(options.called).not.toHaveBeenCalled();
+    expect(result.health).toMatchObject({ conclusive: false, successfulSeats: ['s0'] });
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+    await expect(processReviewerRoundReport({ gitCommonDir: fixture.dir, target, round: 1,
+      currentHeadSha: head, reportBytes: result.terminal.reportBytes })).rejects.toThrow('supplemented_report_inconclusive_health');
+    expect((await runState(fixture))!.rounds).toEqual([]);
+  });
+});
+
+describe("proof-bearing reviewer recovery launch", () => {
+  it("refuses missing legacy capture before a new native attempt or callback", async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "rcl-recovery-")));
+    roots.push(dir);
+    const value: any = {
+      gitCommonDir: dir,
+      target,
+      sourceRunId: "11111111-1111-4111-8111-111111111111",
+      successorRunId: "22222222-2222-4222-8222-222222222222",
+      operationId: "33333333-3333-4333-8333-333333333333",
+      headSha: head,
+      inputSha256: "b".repeat(64),
+      startedAtMs: clock,
+      expiresAtMs: clock + 1,
+      maxAdditionalCalls: 1,
+      maxAttemptsPerCell: 1,
+      run: vi.fn(),
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow();
+    expect(value.run).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(dir, target)).toBeUndefined();
+  });
+
+  it("claims and seals one 12/17 successor at the same unadmitted round", async () => {
+    const fixture = await sealed(11);
+    const value: any = opts(fixture);
+    let combined: any;
+    value.run = vi.fn(async (context: any) => {
+      combined = await sealSuccessor(fixture, context, [{ cell: "s11:0" }]);
+    });
+    const result: any = await guardReviewerRecoveryLaunch(value);
+    expect(result).toMatchObject({ kind: "claimed", claim: { attempt: 2 } });
+    expect(result.operation.successorNativeClaim).toEqual({
+      attempt: 2,
+      round: 1,
+    });
+    expect(combined.health.successfulSeats).toHaveLength(12);
+    expect(combined.health.policy).toMatchObject({ seatCount: 17 });
+    expect(combined.findings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "f" })]),
+    );
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow(
+      "recovery_launch_source_not_current",
+    );
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+    expect(value.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an expired persisted operation before a new native claim or callback", async () => {
+    const fixture = await sealed(11);
+    const value: any = opts(fixture, { nowMs: () => clock + 60_000 });
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow(
+      "recovery_launch_operation_expired",
+    );
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+    expect(value.run).not.toHaveBeenCalled();
+  });
+
+  it("does not complete when the sealed successor exceeds maxAdditionalCalls", async () => {
+    const fixture = await sealed(11);
+    const value: any = opts(fixture);
+    value.run = async (context: any) => {
+      await sealSuccessor(fixture, context, [
+        { cell: "s11:0" },
+        { cell: "s12:0" },
+      ]);
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow(
+      "recovery_launch_successor_additional_call_limit",
+    );
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+    expect(await runState(fixture)).toMatchObject({
+      lastLaunch: { status: "failed" },
+    });
+  });
+
+  it("refuses an exhausted cumulative per-cell cap before a new attempt", async () => {
+    const fixture = await sealed(11);
+    const value: any = opts(fixture, { maxAttemptsPerCell: 1 });
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow(
+      "recovery_launch_source_not_actionable",
+    );
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+    expect(value.run).not.toHaveBeenCalled();
+  });
+
+  it("does not complete when callback retries a retained success", async () => {
+    const fixture = await sealed(11);
+    const value: any = opts(fixture);
+    value.run = async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: "s0:0" }]);
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow(
+      "checkpoint_projection_success_resampled",
+    );
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+    expect(await runState(fixture)).toMatchObject({
+      lastLaunch: { status: "failed" },
+    });
+  });
+
+  it.each(["permanent", "unclassified", "uncertain"] as const)(
+    "refuses a %s-only source before a new native claim",
+    async (failure) => {
+      const fixture = await sealed(11, failure);
+      const value: any = opts(fixture);
+      await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow(
+        "recovery_launch_source_not_actionable",
+      );
+      expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+      expect(value.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses an extra pending intent outside the minimal blocking prefix at M-1", async () => {
+    const fixture = await sealed(11);
+    const value: any = opts(fixture, { maxAdditionalCalls: 2 });
+    value.run = async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: "s11:0" }, { cell: "s12:0" }], { intentsFirst: true });
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow("successor_ineligible_attempt");
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+  });
+
+  it("accepts two required pending intents at M-2 without double-counting reserved capacity", async () => {
+    const fixture = await sealed(10);
+    const value: any = opts(fixture, { maxAdditionalCalls: 2 });
+    let combined: any;
+    value.run = async (context: any) => {
+      combined = await sealSuccessor(
+        fixture, context, [{ cell: "s10:0" }, { cell: "s11:0" }], { intentsFirst: true },
+      );
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).resolves.toMatchObject({
+      kind: "claimed", claim: { attempt: 2 },
+    });
+    expect(combined.health.successfulSeats).toHaveLength(12);
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2 });
+  });
+
+  it("does not relabel on-time sealed work as expired after callback readback", async () => {
+    const fixture = await sealed(11);
+    let now = clock + 2;
+    const value: any = opts(fixture, { nowMs: () => now });
+    value.run = async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: "s11:0" }]);
+      now = clock + 60_000;
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).resolves.toMatchObject({
+      kind: "claimed",
+      claim: { attempt: 2 },
+    });
+    expect(await runState(fixture)).toMatchObject({
+      lastLaunch: { status: "completed" },
+    });
+  });
+
+
+
+  it("already-quorate source spends nothing", async () => {
+    const fixture = await sealed(12);
+    const value: any = opts(fixture);
+    await expect(guardReviewerRecoveryLaunch(value)).resolves.toMatchObject({
+      kind: "already_quorate",
+    });
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+  });
+});
+
+
+function resumeOptions(value: ReturnType<typeof opts>) {
+  return { gitCommonDir: value.gitCommonDir, target: value.target, successorRunId: value.successorRunId,
+    headSha: value.headSha, inputSha256: value.inputSha256, nowMs: value.nowMs, run: value.run };
+}
+
+describe('same-operation guarded reviewer recovery resume', () => {
+  it('refuses a readable lane-less saved journal before resume preflight or native mutation', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted before dispatch'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted before dispatch');
+    const legacyPlan = freezeCheckpointPlan({ ...fixture.plan, version: 1,
+      roster: fixture.plan.roster.map(({ lane: _lane, ...seat }) => seat) });
+    const planPath = join(checkpointPath(fixture.dir, target, value.successorRunId), 'plan.json');
+    await rm(checkpointPath(fixture.dir, target, value.successorRunId), { recursive: true });
+    await withNativeTarget(fixture.dir, target, async ownership => {
+      await CheckpointJournal.create({ commonDir: fixture.dir, namespace: value.successorRunId, plan: legacyPlan, ownership });
+    });
+    expect((await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId))).getPlan().version).toBe(1);
+    const attempts = await state(fixture), native = await runState(fixture);
+    const planBytes = await readFile(planPath, 'utf8');
+    const run = vi.fn(), beforeResume = vi.fn();
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run, beforeResume }))
+      .rejects.toThrow('reviewer_lane_binding_required');
+    expect(run).not.toHaveBeenCalled(); expect(beforeResume).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts); expect(await runState(fixture)).toEqual(native);
+    expect(await readFile(planPath, 'utf8')).toBe(planBytes);
+  });
+  it('revalidates a completed terminal and returns without a new claim or callback', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => { await sealSuccessor(fixture, context, [{ cell: 's1:0' }]); };
+    await guardReviewerRecoveryLaunch(value);
+    const attempts = await state(fixture), native = await runState(fixture);
+    const resume = { ...resumeOptions(value), run: vi.fn() };
+    const result = await guardReviewerRecoveryResume(resume);
+    expect(result).toMatchObject({ kind: 'resumed', reusedTerminal: true, claim: { attempt: 2, cap: 3 } });
+    expect(resume.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('resumes failure before dispatch with the same claim and immutable original PID', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted before dispatch'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted before dispatch');
+    const attempts = await state(fixture), before = await runState(fixture);
+    const resume = { ...resumeOptions(value), run: vi.fn(async (context: any) => {
+      expect(context.claim).toMatchObject({ attempt: 2, cap: 3 });
+      expect(context.claim.stateFile).not.toBe('');
+      expect((await runState(fixture))!.lastLaunch).toMatchObject({ status: 'pending', pid: before!.lastLaunch!.pid });
+      expect((await runState(fixture))!.lastLaunch).not.toHaveProperty('reviewerHealth');
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+    }) };
+    await expect(guardReviewerRecoveryResume(resume)).resolves.toMatchObject({ kind: 'resumed', reusedTerminal: false });
+    expect(resume.run).toHaveBeenCalledTimes(1);
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed',
+      pid: before!.lastLaunch!.pid, successfulReviews: 2, totalReviews: 3,
+      reviewerHealth: { version: 1, successfulSeats: 2, policy: { seatCount: 3, minimumSuccessful: 2 } },
+      recovery: { resume: { pid: process.pid, phase: 'finished' } } } });
+  });
+
+  it('repairs completion after terminal retention without calling the callback again', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+      throw new Error('interrupted after terminal');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted after terminal');
+    const attempts = await state(fixture);
+    const resume = { ...resumeOptions(value), nowMs: () => clock + 600_000, run: vi.fn() };
+    await expect(guardReviewerRecoveryResume(resume)).resolves.toMatchObject({ kind: 'resumed', reusedTerminal: true });
+    expect(resume.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed', successfulReviews: 2 } });
+  });
+
+  it('serializes two resumes and completes one callback without double spending', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const resume = { ...resumeOptions(value), run: vi.fn(async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+    }) };
+    const results = await Promise.allSettled([guardReviewerRecoveryResume(resume), guardReviewerRecoveryResume(resume)]);
+    expect(results.map(result => result.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(resume.run).toHaveBeenCalledTimes(1);
+    expect(await state(fixture)).toMatchObject({ attemptsUsed: 2, cap: 3 });
+  });
+
+  it('refuses head or full input drift before reopening a spent operation', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const attempts = await state(fixture), native = await runState(fixture), run = vi.fn();
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), headSha: 'c'.repeat(40), run })).rejects.toThrow('recovery_launch_resume_input_mismatch');
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), inputSha256: 'c'.repeat(64), run })).rejects.toThrow('recovery_launch_resume_input_mismatch');
+    expect(run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('retains a durable success across interruption and finishes after expiry without another provider call', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => {
+      const attempt = { id: 'durable-before-crash', kind: 'paid' as const };
+      await context.journal.recordIntent('s1:0', attempt, context.ownership);
+      await context.journal.recordResult('s1:0', attempt, { kind: 'success', chunk: 0,
+        reviewBytes: JSON.stringify(review(1, 'success')) }, context.ownership);
+      throw new Error('interrupted after durable result');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted after durable result');
+    const attempts = await state(fixture), provider = vi.fn();
+    const resume = { ...resumeOptions(value), nowMs: () => clock + 600_000, run: async (context: any) => {
+      const result = await recoverCapturedAssignments({ commonDir: fixture.dir, ownership: context.ownership,
+        journal: context.journal, operation: context.operation, expectedPlan: fixture.plan,
+        sourceAttempts: recoveryAttemptsFromCheckpoint(fixture.sourceProof.state), nowMs: () => clock + 600_000,
+        adapterFactory: provider });
+      expect(result.preview.successfulSeats).toBe(2);
+      expect(result.newAttempts).toBe(1);
+      await sealSuccessor(fixture, context, []);
+    } };
+    await expect(guardReviewerRecoveryResume(resume)).resolves.toMatchObject({ kind: 'resumed' });
+    expect(provider).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed', successfulReviews: 2 } });
+  });
+
+  it('keeps an interrupted provider intent uncertain and spent instead of issuing it again', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async (context: any) => {
+      await context.journal.recordIntent('s1:0', { id: 'unknown-before-crash', kind: 'paid' }, context.ownership);
+      throw new Error('interrupted with unknown outcome');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted with unknown outcome');
+    const attempts = await state(fixture), provider = vi.fn();
+    await guardReviewerRecoveryResume({ ...resumeOptions(value), run: async (context: any) => {
+      const result = await recoverCapturedAssignments({ commonDir: fixture.dir, ownership: context.ownership,
+        journal: context.journal, operation: context.operation, expectedPlan: fixture.plan,
+        sourceAttempts: recoveryAttemptsFromCheckpoint(fixture.sourceProof.state), nowMs: value.nowMs, adapterFactory: provider });
+      expect(result.newAttempts).toBe(1);
+      expect(result.preview.successfulSeats).toBe(1);
+      expect((await context.journal.read()).uncertain).toHaveLength(1);
+      await sealSuccessor(fixture, context, []);
+    } });
+    expect(provider).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(attempts);
+    expect(await runState(fixture)).toMatchObject({ lastLaunch: { status: 'completed', successfulReviews: 1 } });
+  });
+
+  it.each(['alive', 'unverifiable', 'dead'] as const)('handles a pending %s owner conservatively', async kind => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const path = convergeRunStatePath(fixture.dir, target), native = JSON.parse(await readFile(path, 'utf8'));
+    native.lastLaunch.status = 'pending';
+    await writeFile(path, JSON.stringify(native));
+    const before = await state(fixture), run = vi.fn(async (context: any) => { await sealSuccessor(fixture, context, [{ cell: 's1:0' }]); });
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      if (kind === 'alive') return true;
+      throw Object.assign(new Error('pid probe'), { code: kind === 'dead' ? 'ESRCH' : 'EPERM' });
+    });
+    try {
+      if (kind === 'dead') {
+        await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run })).resolves.toMatchObject({ kind: 'resumed' });
+        expect(run).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run })).rejects.toThrow(
+          kind === 'alive' ? 'recovery_launch_resume_owner_alive' : 'recovery_launch_resume_owner_unverifiable');
+        expect(run).not.toHaveBeenCalled();
+        expect(await runState(fixture)).toEqual(native);
+      }
+      expect(await state(fixture)).toEqual(before);
+    } finally { kill.mockRestore(); }
+  });
+});
+
+
+describe('operation-bound successor preflight', () => {
+  it('supplies the exact later-persisted operation to source preflight before spending', async () => {
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    let checked = '';
+    options.preflight.mockImplementationOnce(async (request, operationBytes) => {
+      expect(request.source.runId).toBe(fixture.id);
+      expect(typeof operationBytes).toBe('string');
+      checked = operationBytes;
+      expect(JSON.parse(operationBytes)).toMatchObject({ successorRunId: options.input.successorRunId,
+        successorNativeClaim: { attempt: 2, round: 1 }, expiresAtMs: options.input.expiresAtMs });
+      expect(await state(fixture)).toMatchObject({ attemptsUsed: 1 });
+    });
+    const result = await applyReviewerRecovery(options.input);
+    if (result.kind !== 'completed') throw new Error('Expected completed');
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, options.input.successorRunId));
+    expect((await journal.readBindings()).operation).toBe(checked);
+    expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses direct successor preflight without native, checkpoint or provider changes', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    const spent = await state(fixture), native = await runState(fixture);
+    value.beforeClaim = vi.fn(async () => { throw new Error('source_owner_refused'); }); value.run = vi.fn();
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('source_owner_refused');
+    expect(value.beforeClaim).toHaveBeenCalledTimes(1); expect(value.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+    await expect(CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId))).rejects.toThrow();
+  });
+
+  it('rechecks the same successor deadline after preflight before spending', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture); let now = value.startedAtMs + 1;
+    value.nowMs = () => now; value.beforeClaim = vi.fn(async () => { now = value.expiresAtMs; }); value.run = vi.fn();
+    const spent = await state(fixture), native = await runState(fixture);
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('operation_expired');
+    expect(value.beforeClaim).toHaveBeenCalledTimes(1); expect(value.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+  });
+
+  it('validates saved resume bindings then refuses preflight before changing native or journal state', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const spent = await state(fixture), native = await runState(fixture);
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
+    const bindings = await journal.readBindings(), journalState = await journal.read();
+    const beforeResume = vi.fn(async (bound: any) => { expect(bound.operationBytes).toBe(bindings.operation); throw new Error('resume_source_refused'); });
+    const resume = { ...resumeOptions(value), beforeResume, run: vi.fn() };
+    await expect(guardReviewerRecoveryResume({ ...resume, headSha: 'c'.repeat(40) } as any)).rejects.toThrow('resume_input_mismatch');
+    expect(beforeResume).not.toHaveBeenCalled();
+    await expect(guardReviewerRecoveryResume(resume as any)).rejects.toThrow('resume_source_refused');
+    expect(beforeResume).toHaveBeenCalledTimes(1); expect(resume.run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+    expect(await journal.read()).toEqual(journalState); expect(await journal.readBindings()).toEqual(bindings);
+  });
+
+  it('rechecks the saved deadline after resume preflight before dispatch or mutation', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const spent = await state(fixture), native = await runState(fixture);
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
+    const bindings = await journal.readBindings(), journalState = await journal.read();
+    let now = value.expiresAtMs - 1;
+    const beforeResume = vi.fn(async () => { now = value.expiresAtMs; });
+    const run = vi.fn();
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), nowMs: () => now, beforeResume, run }))
+      .rejects.toThrow('resume_expired_dispatch');
+    expect(beforeResume).toHaveBeenCalledTimes(1); expect(run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+    expect(await journal.read()).toEqual(journalState); expect(await journal.readBindings()).toEqual(bindings);
+  });
+
+  it('skips source preflight when already quorate or replaying an exact completed terminal', async () => {
+    const quorate = await sealed(2, 'timeout', 3), noWork = coordinator(quorate);
+    noWork.preflight.mockRejectedValue(new Error('no paid invocation to authorize'));
+    await expect(applyReviewerRecovery(noWork.input)).resolves.toEqual({ kind: 'already_quorate', sourceRunId: quorate.id });
+    expect(noWork.preflight).not.toHaveBeenCalled(); expect(noWork.called).not.toHaveBeenCalled();
+    const fixture = await sealed(1, 'timeout', 3), options = coordinator(fixture);
+    const first = await applyReviewerRecovery(options.input);
+    if (first.kind !== 'completed') throw new Error('Expected completed');
+    const native = await runState(fixture), spent = await state(fixture);
+    options.preflight.mockClear(); options.preflight.mockRejectedValue(new Error('no new provider authority')); options.called.mockClear();
+    const replay = await resumeReviewerRecovery(options.input);
+    expect(replay.terminal).toEqual(first.terminal); expect(replay.reusedTerminal).toBe(true);
+    expect(options.preflight).not.toHaveBeenCalled(); expect(options.called).not.toHaveBeenCalled();
+    expect(await runState(fixture)).toEqual(native); expect(await state(fixture)).toEqual(spent);
+  });
+});
+
+
+describe('expired local-only retained finalization', () => {
+  it.each(['uncertain reviewer', 'sealed reviewers missing verifier', 'reserved headroom before expiry'] as const)('finishes %s without credential renewal, calls or budget changes', async kind => {
+    const fixture = await sealed(1, 'timeout', 3, kind === 'sealed reviewers missing verifier'
+      ? { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' } : {});
+    const options = coordinator(fixture);
+    const value: any = opts(fixture, { startedAtMs: options.input.startedAtMs, expiresAtMs: options.input.expiresAtMs, nowMs: () => options.input.startedAtMs + 1 });
+    const headroom = kind === 'reserved headroom before expiry';
+    if (headroom) value.maxAdditionalCalls = 2;
+    value.run = async (context: any) => {
+      const attempt = { id: 'spent-before-interruption', kind: 'paid' as const };
+      await context.journal.recordIntent('s1:0', attempt, context.ownership);
+      if (kind === 'sealed reviewers missing verifier') {
+        await context.journal.recordResult('s1:0', attempt, { kind: 'success', chunk: 0,
+          reviewBytes: JSON.stringify(review(1, 'success')) }, context.ownership);
+        await context.journal.finalize(context.ownership);
+      }
+      throw new Error('interrupted_before_terminal');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted_before_terminal');
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
+    const bindings = await journal.readBindings(), before = await journal.read(), spent = await state(fixture), native = await runState(fixture);
+    const factory = vi.fn(() => { throw new Error('local_finalize_must_not_create_adapter'); });
+    if (!headroom) options.preflight.mockRejectedValue(new Error('expired_credential_no_remote_access'));
+    const input = { ...options.input, nowMs: () => headroom ? value.expiresAtMs - Math.min(120000, Math.floor((value.expiresAtMs - value.startedAtMs) / 4)) + 1 : value.expiresAtMs + 1, adapterFactory: factory };
+    // Expiry must not bypass exact saved source/head authority checks.
+    await expect(resumeReviewerRecovery({ ...input, currentHeadSha: 'd'.repeat(40) })).rejects.toThrow('input_mismatch');
+    const resumed = await resumeReviewerRecovery(input);
+    expect(options.preflight).toHaveBeenCalledTimes(headroom ? 1 : 0); expect(factory).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent);
+    expect((await runState(fixture))!.lastLaunch).toMatchObject({ pid: native!.lastLaunch!.pid, attempt: 2, round: 1, status: 'completed' });
+    expect(resumed.operation).toMatchObject({ startedAtMs: value.startedAtMs, expiresAtMs: value.expiresAtMs, maxAdditionalCalls: headroom ? 2 : 1, maxAttemptsPerCell: 2 });
+    expect(await journal.readBindings()).toEqual(bindings);
+    expect((await journal.read()).records.filter(record => record.type === 'intent')).toEqual(before.records.filter(record => record.type === 'intent'));
+    expect(JSON.parse(resumed.terminal.reportBytes).findings[0]).toMatchObject({ id: 'f' });
+    expect(resumed.gate.reportedCiExitCode).toBe(1);
+    if (kind === 'sealed reviewers missing verifier') {
+      expect(await journal.readVerification()).toMatchObject({ intents: [], terminal: { status: 'failed', reason: 'verification_execution_deadline' } });
+      expect(resumed.health.conclusive).toBe(true);
+    } else {
+      expect(await journal.readVerification()).toBeUndefined(); expect((await journal.read()).uncertain).toHaveLength(1);
+      expect(resumed.health.conclusive).toBe(false);
+    }
+    const terminal = await journal.readTerminalReport(), afterNative = await runState(fixture);
+    const replay = await resumeReviewerRecovery(input);
+    expect(replay.reusedTerminal).toBe(true); expect(replay.terminal).toEqual(terminal);
+    expect(await runState(fixture)).toEqual(afterNative); expect(await state(fixture)).toEqual(spent);
+    expect(options.preflight).toHaveBeenCalledTimes(headroom ? 1 : 0); expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('refuses a callback adding a genuine verifier intent after the saved deadline', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { gatingMode: 'verified-consensus', verificationModel: 'openai/verifier' });
+    const value: any = opts(fixture);
+    value.run = async (context: any) => {
+      const attempt = { id: 'reviewer-before-crash', kind: 'paid' as const };
+      await context.journal.recordIntent('s1:0', attempt, context.ownership);
+      await context.journal.recordResult('s1:0', attempt, { kind: 'success', chunk: 0, reviewBytes: JSON.stringify(review(1, 'success')) }, context.ownership);
+      throw new Error('interrupted');
+    };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const spent = await state(fixture), ask = vi.fn(async () => ({ model: 'openai/verifier', provider: 'openai', status: 'success' as const,
+      durationMs: 1, text: '[{"id":"F1","verdict":"confirmed","reason":"The supplied changed operation reaches the reported path.","failureMechanism":"The changed operation executes without the required guard.","evidence":[{"file":"a.ts","quote":"x"}]}]' }));
+    // The callback deliberately lies about its clock. Genuine structural phase
+    // bytes must not override the outer guard's observed expired operation.
+    const run = async (context: any) => {
+      await sealSuccessor(fixture, context, [], { verify: async assembly => {
+        const gated = await executeCheckpointGating({ assembly, commonDir: fixture.dir, ownership: context.ownership,
+          journal: context.journal, askFactory: () => ask, beforeLaunch: async () => {}, onLateAuditError: () => {}, nowMs: () => clock + 3 });
+        return gated.verificationProof;
+      } });
+    };
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), nowMs: () => clock + 600_000, run })).rejects.toThrow('resume_expired_dispatch');
+    expect(ask).toHaveBeenCalledOnce(); expect(await state(fixture)).toEqual(spent);
+    expect((await runState(fixture))!.lastLaunch!.status).toBe('failed');
+  });
+});
+
+it('cold resume preserves an interrupted intent before dispatching the alternate quorum seat', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { fileURLToPath, pathToFileURL } = await import('node:url');
+  const { createHash } = await import('node:crypto');
+  const fixture = await sealed(1, 'timeout', 3);
+  const options = coordinator(fixture);
+  const input = { ...options.input, maxAdditionalCalls: 2 };
+  const inputPath = join(fixture.dir, 'child-input.json');
+  const observedPath = join(fixture.dir, 'child-call.json');
+  await writeFile(inputPath, JSON.stringify(input));
+  const child = fileURLToPath(new URL('../fixtures/current105-cold-resume-child.ts', import.meta.url));
+  let childExit: unknown;
+  try { await promisify(execFile)(process.execPath, ['--import', 'tsx', child, inputPath, observedPath],
+    { cwd: process.cwd(), timeout: 4000, env: { ...process.env, NODE_OPTIONS: '' } }); }
+  catch (error) { childExit = (error as { code: unknown }).code; }
+  expect(childExit).toBe(73);
+  const observed = JSON.parse(await readFile(observedPath, 'utf8'));
+  expect(observed.model).toBe('m1');
+  const runtimeUrl = process.env.RCL_TEST_PACKAGED_CLI
+    ? new URL('./evidence/reviewer-recovery.js', pathToFileURL(process.env.RCL_TEST_PACKAGED_CLI))
+    : new URL('../../src/evidence/reviewer-recovery.ts', import.meta.url);
+  expect(observed.runtimeUrl).toBe(runtimeUrl.href);
+  expect(observed.runtimeMode).toBe(process.env.RCL_TEST_PACKAGED_CLI ? 'installed' : 'source');
+  expect(observed.runtimeSha256).toBe(createHash('sha256').update(await readFile(runtimeUrl)).digest('hex'));
+  const beforeAttempts = await state(fixture);
+  expect(beforeAttempts?.attemptsUsed).toBe(2);
+  const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, input.successorRunId));
+  const before = await journal.read();
+  expect(before.records.filter(row => row.type === 'intent').map(row => row.cell)).toEqual(['s1:0']);
+  expect(before.records.filter(row => row.type === 'uncertain')).toHaveLength(0);
+  const sourceBefore = fixture.sourceTerminal.reportBytes;
+  let error: unknown, completion: Awaited<ReturnType<typeof resumeReviewerRecovery>> | undefined;
+  try { completion = await resumeReviewerRecovery(input); } catch (caught) { error = caught; }
+  const after = await journal.read();
+  const afterAttempts = await state(fixture);
+  expect((await loadReviewerLineage({ commonDir: fixture.dir, target, runId: fixture.id })).latest.terminal.reportBytes).toBe(sourceBefore);
+  expect(options.called.mock.calls.map(call => call[0])).toEqual(['m2']);
+  expect(afterAttempts).toEqual(beforeAttempts);
+  if (error) throw error;
+  expect(completion!.health.conclusive).toBe(true);
+  const lineage = await loadReviewerLineage({ commonDir: fixture.dir, target, runId: input.successorRunId });
+  expect(lineage.latest.inspected.nativeClaim).toEqual({ target, attempt: 2, round: 1 });
+  expect(after.records.filter(row => row.type === 'uncertain').map(row => row.cell)).toEqual(['s1:0']);
+  expect(lineage.runs[0]!.terminal.reportBytes).toBe(sourceBefore);
+});
