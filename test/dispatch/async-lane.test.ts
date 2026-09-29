@@ -14,6 +14,8 @@ import {
   spoolAsyncCalls,
   runAsyncWorker,
   collectAsyncResults,
+  snapshotAsyncResults,
+  consumeBoundAsyncResults,
   publishAsyncReview,
   workerEnv,
 } from '../../src/dispatch/async-lane.js';
@@ -228,6 +230,61 @@ describe('spool → worker → collect round trip', () => {
 
     // Collect consumes: a second collect returns nothing.
     expect(await collectAsyncResults(dir, targetKey)).toHaveLength(0);
+  });
+
+  it('snapshots completed results without consuming them for same-attempt recovery', async () => {
+    const targetKey = asyncTargetKey('repo#resume');
+    await publishAsyncReview(dir, targetKey, {
+      model: spec.model, role: spec.role, provider: spec.provider, findings: [],
+      durationMs: 5, status: 'success', async: true,
+    });
+
+    const snapshot = await snapshotAsyncResults(dir, targetKey);
+
+    expect(snapshot.reviews).toMatchObject([{ model: spec.model, role: spec.role, async: true }]);
+    expect(snapshot.reviewBytes).toHaveLength(1);
+    expect(snapshot.artifacts).toMatchObject([{ sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
+    expect(await collectAsyncResults(dir, targetKey)).toHaveLength(1);
+  });
+
+  it('refuses recovery while a matching async worker spool remains pending', async () => {
+    const targetKey = asyncTargetKey('repo#pending-resume');
+    const [spool] = await spoolAsyncCalls([spec], {
+      storeDir: dir, targetKey, timeoutMs: 1000, maxRetries: 0,
+    });
+    const before = await readFile(spool!);
+
+    await expect(snapshotAsyncResults(dir, targetKey)).rejects.toThrow('async_resume_worker_pending');
+
+    expect(await readFile(spool!)).toEqual(before);
+  });
+
+  it('fails closed when retained async bytes do not match the reviewed bindings', async () => {
+    const targetKey = asyncTargetKey('repo#bound-resume');
+    await publishAsyncReview(dir, targetKey, {
+      model: spec.model, role: spec.role, provider: spec.provider, findings: [],
+      durationMs: 5, status: 'success', async: true,
+    });
+
+    await expect(snapshotAsyncResults(dir, targetKey, [], ['f'.repeat(64)]))
+      .rejects.toThrow('async_resume_result_binding_mismatch');
+
+    expect(await collectAsyncResults(dir, targetKey)).toHaveLength(1);
+  });
+
+  it('consumes only the exact reviewed async result set after terminal recovery', async () => {
+    const targetKey = asyncTargetKey('repo#consume-bound-resume');
+    await publishAsyncReview(dir, targetKey, {
+      model: spec.model, role: spec.role, provider: spec.provider, findings: [],
+      durationMs: 5, status: 'success', async: true,
+    });
+    const snapshot = await snapshotAsyncResults(dir, targetKey);
+
+    await consumeBoundAsyncResults(dir, targetKey, snapshot.artifacts.map(artifact => artifact.sha256));
+    await consumeBoundAsyncResults(dir, targetKey,
+      snapshot.artifacts.map(artifact => artifact.sha256), { allowAlreadyConsumed: true });
+
+    expect(await snapshotAsyncResults(dir, targetKey)).toMatchObject({ reviews: [], artifacts: [] });
   });
 
   it('collects a late result across distinct patch captures of the same convergence target', async () => {

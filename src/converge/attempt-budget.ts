@@ -1,5 +1,6 @@
 import { retrySourceSchema, type RetrySource } from './retry-source.js';
 import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
+import { pendingRecoverySourceSchema, type PendingRecoverySource } from './pending-recovery-source.js';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -40,6 +41,7 @@ export interface ConvergeAttemptRecord {
   source: 'claim';
   retrySource?: RetrySource;
   boundFixRecoverySource?: BoundFixRecoverySource;
+  pendingRecoverySource?: PendingRecoverySource;
 }
 
 export interface ConvergeAttemptState {
@@ -119,9 +121,11 @@ interface ClaimOptions {
   beforeClaim?: (ownership: NativeTargetOwnership) => Promise<void | {
     retrySource?: RetrySource;
     boundFixRecoverySource?: BoundFixRecoverySource;
+    pendingRecoverySource?: PendingRecoverySource;
   }>;
   retrySource?: RetrySource;
   boundFixRecoverySource?: BoundFixRecoverySource;
+  pendingRecoverySource?: PendingRecoverySource;
   afterClaim?: (claim: ConvergeAttemptClaim, ownership: NativeTargetOwnership) => Promise<void>;
   ownership?: NativeTargetOwnership;
   freshReviewOperation?: string;
@@ -202,7 +206,13 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
         (record.boundFixRecoverySource !== undefined &&
           (!boundFixRecoverySourceSchema.safeParse(record.boundFixRecoverySource).success ||
             record.boundFixRecoverySource.attempt !== record.attempt - 1 ||
-            record.boundFixRecoverySource.target !== expectedTarget || record.retrySource !== undefined))
+            record.boundFixRecoverySource.target !== expectedTarget || record.retrySource !== undefined ||
+            record.pendingRecoverySource !== undefined)) ||
+        (record.pendingRecoverySource !== undefined &&
+          (!pendingRecoverySourceSchema.safeParse(record.pendingRecoverySource).success ||
+            record.pendingRecoverySource.pendingAttempt !== record.attempt - 1 ||
+            record.pendingRecoverySource.target !== expectedTarget ||
+            record.retrySource !== undefined || record.boundFixRecoverySource !== undefined))
     )
   ) {
     throw new ConvergeAttemptStateError(
@@ -613,6 +623,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     afterClaim: options.afterClaim,
     ownership: options.ownership,
     freshReviewOperation: options.freshReviewOperation,
+    pendingRecoverySource: options.pendingRecoverySource,
   };
   if (claimOptions.freshReviewOperation && !claimOptions.ownership) throw new Error('fresh_review_owner_required');
   // Use one canonical directory for both target ownership and state paths.
@@ -628,6 +639,9 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
       if (source?.retrySource !== undefined) claimOptions.retrySource = retrySourceSchema.parse(source.retrySource);
       if (source?.boundFixRecoverySource !== undefined) {
         claimOptions.boundFixRecoverySource = boundFixRecoverySourceSchema.parse(source.boundFixRecoverySource);
+      }
+      if (source?.pendingRecoverySource !== undefined) {
+        claimOptions.pendingRecoverySource = pendingRecoverySourceSchema.parse(source.pendingRecoverySource);
       }
       const { assertFreshReviewClaim } = await import('./fresh-review.js');
       await assertFreshReviewClaim(gitCommonDir, target, claimOptions.freshReviewOperation);
@@ -730,6 +744,11 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
       options.boundFixRecoverySource.target !== target || options.retrySource !== undefined)) {
       throw new ConvergeAttemptStateError('Bound fix recovery source does not bind this target and the previous spent claim.');
     }
+    if (options.pendingRecoverySource && (options.pendingRecoverySource.pendingAttempt !== attemptsUsed ||
+      options.pendingRecoverySource.target !== target || options.retrySource !== undefined ||
+      options.boundFixRecoverySource !== undefined)) {
+      throw new ConvergeAttemptStateError('Pending recovery source does not bind this target and the previous spent claim.');
+    }
     const state: ConvergeAttemptState = {
       version: previous?.version ?? STATE_VERSION,
       ...(previous?.cycle ? { cycle: previous.cycle } : {}),
@@ -741,7 +760,8 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
         ...(previous?.attempts ?? []),
         { attempt, claimedAt: timestamp, pid: recordPid, source: 'claim',
           ...(options.retrySource ? { retrySource: options.retrySource } : {}),
-          ...(options.boundFixRecoverySource ? { boundFixRecoverySource: options.boundFixRecoverySource } : {}) },
+          ...(options.boundFixRecoverySource ? { boundFixRecoverySource: options.boundFixRecoverySource } : {}),
+          ...(options.pendingRecoverySource ? { pendingRecoverySource: options.pendingRecoverySource } : {}) },
       ],
       updatedAt: timestamp,
     };

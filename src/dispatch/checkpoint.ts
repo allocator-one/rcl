@@ -30,7 +30,7 @@ export const MAX_CHECKPOINT_PROOF_BYTES = 25 * 1024 * 1024;
 const MAX_CHECKPOINT_READ_BYTES = 64 * 1024 * 1024;
 const integer = z.number().int().nonnegative().safe();
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
-const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation', 'launch']);
+const bindingNameSchema = z.enum(['captured-inputs', 'source', 'operation', 'launch', 'supplemental-async']);
 const bindingReferenceSchema = z.object({ name: bindingNameSchema, file: z.string(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
   .refine(binding => binding.file === bindingFile(binding.name));
 const attemptSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9._:-]{1,160}$/), kind: z.enum(['paid', 'unknown']) }).strict();
@@ -89,7 +89,8 @@ const terminalManifestSchema = z.object({ version: z.literal(1), planDigest: dig
 const terminalPayloadOptions = Object.freeze({ maxBytes: MAX_ARTIFACT_BYTES, singleLink: true });
 const terminalManifestOptions = Object.freeze({ singleLink: true });
 const terminalFileNames = ['manifest.json', 'report.json', 'reviewer-artifact.json'];
-const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), source: z.string().optional(), operation: z.string().optional(), launch: z.string().optional() }).strict();
+const bindingsSchema = z.object({ 'captured-inputs': z.string().optional(), source: z.string().optional(),
+  operation: z.string().optional(), launch: z.string().optional(), 'supplemental-async': z.string().optional() }).strict();
 const proofWireSchema = z.object({ version: z.literal(1), plan: z.unknown(), records: z.array(z.unknown()),
   outcomes: z.array(z.object({ resultFile: z.string(), reviewBytes: z.string() }).strict()), bindings: bindingsSchema }).strict();
 const frozenPlanSchema = z.object({

@@ -10,7 +10,7 @@ import { prepareLockRoot } from '../evidence/original-run/lock-path.js';
 import { retainStaleFile } from './stale-report-storage.js';
 import { convergeRunStatePath, type ConvergeRunState } from './run-state.js';
 import { convergeAttemptStatePath, validateConvergeAttemptState } from './attempt-budget.js';
-import { type GuardedLaunchState, type GuardedReviewerHealth } from './launch-record.js';
+import { launchSchema, type GuardedLaunchState, type GuardedReviewerHealth } from './launch-record.js';
 import { retrySourceSchema, type RetrySource } from './retry-source.js';
 import { authenticHistoricalRoster } from './legacy-roster.js';
 
@@ -64,6 +64,52 @@ export interface LegacyRetrySelection {
   reportPath: string;
   config: Config;
   roster: RosterEntry[];
+  historicalPlan?: boolean;
+}
+
+/** Re-authenticate the immutable legacy source retained on an already-spent retry claim. */
+export async function inspectPendingLegacyRetry(input: LegacyRetrySelection, common: string,
+  state: ConvergeRunState, pending: GuardedLaunchState,
+  attempts: ReturnType<typeof validateConvergeAttemptState>) {
+  if (pending.status !== 'pending' || attempts.attemptsUsed !== pending.attempt) {
+    throw new Error('retry_pending_ineligible_launch');
+  }
+  const claim = attempts.attempts.find(item => item.attempt === pending.attempt);
+  const binding = claim?.retrySource;
+  if (!claim || claim.pid !== pending.pid || !binding || pending.round !== binding.round) {
+    throw new Error('retry_pending_binding_mismatch');
+  }
+  const sourceDir = join(common, 'rcl-converge-attempts', 'sources');
+  const [reportBytes, configBytes, nativeBytes, attemptBytes] = await Promise.all([
+    readStable(join(sourceDir, binding.reportJsonSha256)),
+    readStable(join(sourceDir, binding.configSha256)),
+    readStable(join(sourceDir, binding.nativeStateSha256)),
+    readStable(join(sourceDir, binding.attemptStateSha256)),
+  ]);
+  const report = originalRunReportSchema.parse(decodeOriginalReport(reportBytes.text).value);
+  const sourceNative = decodeOriginalReport(nativeBytes.text).value as ConvergeRunState;
+  const sourceAttempts = validateConvergeAttemptState(
+    decodeOriginalReport(attemptBytes.text).value, state.target, 'pending retry source'
+  );
+  const sourceLaunch = launchSchema.parse(sourceNative.lastLaunch);
+  if (reportBytes.sha256 !== binding.reportJsonSha256 || configBytes.sha256 !== binding.configSha256 ||
+    nativeBytes.sha256 !== binding.nativeStateSha256 || attemptBytes.sha256 !== binding.attemptStateSha256 ||
+    configBytes.text !== configIdentity(input.config) ||
+    report.run.id !== binding.runId || report.run.target.head_sha !== binding.headSha ||
+    report.run.converge?.target !== state.target || report.run.converge?.attempt !== binding.attempt ||
+    report.run.converge?.round !== binding.round || report.run.config_sha256 !== binding.configSha256 ||
+    !isDeepStrictEqual(report.run.roster, input.roster) ||
+    (input.historicalPlan === true && !authenticHistoricalRoster(report.run, input.config)) ||
+    sourceLaunch.status !== 'completed' || sourceLaunch.runId !== binding.runId ||
+    sourceLaunch.reportJsonSha256 !== binding.reportJsonSha256 || sourceLaunch.attempt !== binding.attempt ||
+    sourceLaunch.round !== binding.round || sourceLaunch.headSha !== binding.headSha ||
+    sourceLaunch.inputSha256 !== binding.inputSha256 || sourceAttempts.attemptsUsed !== binding.attempt ||
+    !sourceAttempts.attempts.some(item => item.attempt === binding.attempt && item.pid === sourceLaunch.pid) ||
+    !isDeepStrictEqual(mergedBlockingHealth(report, input.config.quorumFraction!), binding.reviewerHealth) ||
+    pending.headSha !== binding.headSha || !supportedLegacyRetryProducer(report, sourceNative, sourceAttempts)) {
+    throw new Error('retry_pending_binding_mismatch');
+  }
+  return { binding, report, sourceLaunch };
 }
 
 /** Read-only proof under native ownership, before either accounting file changes. */
@@ -93,7 +139,8 @@ export async function inspectLegacyRetry(input: LegacyRetrySelection, common: st
     report.run.target.head_sha !== previous.headSha || report.run.converge?.target !== state.target ||
     report.run.converge?.round !== previous.round || report.run.converge?.attempt !== previous.attempt ||
     report.run.cycle_id !== state.cycle?.id || report.run.config_sha256 !== sha256Hex(configBytes) ||
-    (!isDeepStrictEqual(report.run.roster, input.roster) && !authenticHistoricalRoster(report.run, input.config)) ||
+    !isDeepStrictEqual(report.run.roster, input.roster) ||
+    (input.historicalPlan === true && !authenticHistoricalRoster(report.run, input.config)) ||
     report.run.provenance === 'backfill' ||
     !supportedLegacyRetryProducer(report, state, attempts) ||
     report.stats.totalReviews !== previous.totalReviews || report.stats.successfulReviews !== previous.successfulReviews ||
