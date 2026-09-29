@@ -221,7 +221,10 @@ config and add `--retry-report original-report.json` with an explicit bounded
 `--retry-reason` and a fresh `--json-file` destination. RCL binds the exact original
 report, config, target, head, input, round, attempt, cycle and roster before deriving
 blocking-only health with the shared quorum policy. The new launch may review changed
-current inputs, but its original proof stays bound to those original identities. Healthy or ambiguous evidence refuses.
+current inputs, but its original proof stays bound to those original identities. When
+roles or verifier defaults have since changed, RCL reconstructs the producer version's
+deterministic roster from that bound config; unknown, substituted or ambiguous identities
+still refuse before a claim. Healthy or ambiguous evidence refuses.
 The 4.1.10 producer predates review cycles and is accepted only when the retained
 report, native state and attempt state all remain cycle-free.
 An unadmitted source retries its pending round; an exact latest admitted source

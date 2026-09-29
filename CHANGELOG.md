@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 4.4.9 - 2026-09-29
+
+- Reconstruct 4.1.10–4.1.12 legacy retry rosters from the exact bound config
+  and producer-version role/verifier catalog, so removed roles and changed
+  defaults cannot strand truthful inconclusive evidence. Unknown, substituted,
+  malformed or ambiguous identities still refuse before a claim (RCL-151).
+
 ## 4.4.8 - 2026-09-29
 
 - Accept an exact, pre-cycle 4.1.10 guarded report as a bounded legacy-retry

@@ -12,6 +12,7 @@ import { convergeRunStatePath, type ConvergeRunState } from './run-state.js';
 import { convergeAttemptStatePath, validateConvergeAttemptState } from './attempt-budget.js';
 import { type GuardedLaunchState, type GuardedReviewerHealth } from './launch-record.js';
 import { retrySourceSchema, type RetrySource } from './retry-source.js';
+import { authenticHistoricalRoster } from './legacy-roster.js';
 
 type OriginalReport = ReturnType<typeof originalRunReportSchema.parse>;
 
@@ -92,7 +93,8 @@ export async function inspectLegacyRetry(input: LegacyRetrySelection, common: st
     report.run.target.head_sha !== previous.headSha || report.run.converge?.target !== state.target ||
     report.run.converge?.round !== previous.round || report.run.converge?.attempt !== previous.attempt ||
     report.run.cycle_id !== state.cycle?.id || report.run.config_sha256 !== sha256Hex(configBytes) ||
-    !isDeepStrictEqual(report.run.roster, input.roster) || report.run.provenance === 'backfill' ||
+    (!isDeepStrictEqual(report.run.roster, input.roster) && !authenticHistoricalRoster(report.run, input.config)) ||
+    report.run.provenance === 'backfill' ||
     !supportedLegacyRetryProducer(report, state, attempts) ||
     report.stats.totalReviews !== previous.totalReviews || report.stats.successfulReviews !== previous.successfulReviews ||
     report.reviews.length !== previous.totalReviews ||

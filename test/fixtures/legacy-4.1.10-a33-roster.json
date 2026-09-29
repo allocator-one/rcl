@@ -1,0 +1,157 @@
+{
+  "sourceReportSha256": "0d2435baf8a948d6249ce6c30372dbc06716a49cc19aecbd2b31dcb12a6216c7",
+  "config": {
+    "models": [
+      "anthropic/claude-fable-5-1",
+      "openai/gpt-6-sol",
+      "google/gemini-3.8-flash"
+    ],
+    "secondaryModels": [],
+    "asyncModels": [
+      "openrouter/moonshotai/kimi-k3"
+    ],
+    "thresholds": {
+      "minConsensusScore": 0.4,
+      "minConfidence": 0.2,
+      "dedupeLineWindow": 5,
+      "jaccardThreshold": 0.3
+    },
+    "timeout": 540000,
+    "asyncTimeout": 900000,
+    "quorumFraction": 0.6666666666666666,
+    "maxRetries": 3,
+    "concurrency": 6,
+    "reasoningEffort": "medium"
+  },
+  "run": {
+    "rcl_version": "4.1.10",
+    "roster": [
+      {
+        "model": "anthropic/claude-fable-5-1",
+        "role": "general",
+        "provider": "anthropic",
+        "lane": "blocking"
+      },
+      {
+        "model": "openai/gpt-6-sol",
+        "role": "general",
+        "provider": "openai",
+        "lane": "blocking"
+      },
+      {
+        "model": "google/gemini-3.8-flash",
+        "role": "general",
+        "provider": "google",
+        "lane": "blocking"
+      },
+      {
+        "model": "anthropic/claude-fable-5-1",
+        "role": "security-auditor",
+        "provider": "anthropic",
+        "lane": "blocking"
+      },
+      {
+        "model": "openai/gpt-6-sol",
+        "role": "performance-engineer",
+        "provider": "openai",
+        "lane": "blocking"
+      },
+      {
+        "model": "google/gemini-3.8-flash",
+        "role": "api-design",
+        "provider": "google",
+        "lane": "blocking"
+      },
+      {
+        "model": "anthropic/claude-fable-5-1",
+        "role": "test-coverage",
+        "provider": "anthropic",
+        "lane": "blocking"
+      },
+      {
+        "model": "openai/gpt-6-sol",
+        "role": "dx-critic",
+        "provider": "openai",
+        "lane": "blocking"
+      },
+      {
+        "model": "google/gemini-3.8-flash",
+        "role": "architecture",
+        "provider": "google",
+        "lane": "blocking"
+      },
+      {
+        "model": "anthropic/claude-fable-5-1",
+        "role": "bug-hunter",
+        "provider": "anthropic",
+        "lane": "blocking"
+      },
+      {
+        "model": "openai/gpt-6-sol",
+        "role": "accessibility-auditor",
+        "provider": "openai",
+        "lane": "blocking"
+      },
+      {
+        "model": "google/gemini-3.8-flash",
+        "role": "project-rules",
+        "provider": "google",
+        "lane": "blocking"
+      },
+      {
+        "model": "anthropic/claude-fable-5-1",
+        "role": "spec-compliance",
+        "provider": "anthropic",
+        "lane": "blocking"
+      },
+      {
+        "model": "openai/gpt-6-sol",
+        "role": "regression-hunter",
+        "provider": "openai",
+        "lane": "blocking"
+      },
+      {
+        "model": "google/gemini-3.8-flash",
+        "role": "dead-code",
+        "provider": "google",
+        "lane": "blocking"
+      },
+      {
+        "model": "anthropic/claude-fable-5-1",
+        "role": "dependency-hygiene",
+        "provider": "anthropic",
+        "lane": "blocking"
+      },
+      {
+        "model": "openai/gpt-6-sol",
+        "role": "edge-case-hunter",
+        "provider": "openai",
+        "lane": "blocking"
+      },
+      {
+        "model": "openrouter/moonshotai/kimi-k3",
+        "role": "general",
+        "provider": "openrouter",
+        "lane": "async"
+      },
+      {
+        "model": "google/gemini-3.8-flash",
+        "role": "verification",
+        "provider": "google",
+        "lane": "verification"
+      }
+    ],
+    "gating": {
+      "mode": "verified-consensus",
+      "min_models": 2,
+      "verification_model": "google/gemini-3.8-flash",
+      "verification_timeout_ms": 180000,
+      "verification_pass_timeout_ms": 180000
+    },
+    "config_sha256": "739f0ab278e18a30547a200100e6f77171f787b2edf938738f00b4c42d82a844",
+    "spec": {
+      "source": "harness_issue:RCL-76",
+      "sha256": "4cb51bcc80cfe06049390f0450ce813826716d2fe63d19e3f06358c5b770b0fc"
+    }
+  }
+}
