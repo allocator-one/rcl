@@ -172,6 +172,7 @@ function buildRoster(config: Config, roles: Array<{ name: string; specialized: b
 
 /** Authenticate a removed producer's deterministic roster without consulting today's role/default registry. */
 export function authenticHistoricalRoster(run: LegacyRunIdentity, config: Config): boolean {
+  if (!Object.hasOwn(CATALOGS, run.rcl_version)) return false;
   const catalog = CATALOGS[run.rcl_version];
   if (!catalog || !Array.isArray(run.roster) || run.roster.length === 0) return false;
   // A retained report has no authenticated source for either custom prompts or

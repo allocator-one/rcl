@@ -163,6 +163,17 @@ describe('bound legacy launch health recovery', () => {
     expect(await f.bytes()).toEqual(before);
   });
 
+  it('refuses a prototype-chain producer version before claim', async () => {
+    const { f } = await a33Fixture();
+    await f.mutate(report => {
+      report.run!.rcl_version = 'toString';
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
   it('accepts a bound 4.1.10 pre-cycle report with A33 mixed-lane health', async () => {
     const f = await fixture();
     await f.mutate((report, native) => {
