@@ -194,6 +194,41 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
   }
 }
 
+describe('rcl review — bound fix-obligation recovery (RCL-148)', () => {
+  const recoveryRunId = '019921a0-0000-7000-8000-000000000002';
+
+  it('advertises the explicit run selection in review help', () => {
+    const result = runRcl(['review', '--help'], tempRepository());
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--bound-fix-recovery <run-id>');
+  });
+
+  it.each([
+    { label: 'unguarded review', remove: ['--guarded-converge'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required'], expected: /guarded-converge/ },
+    { label: 'optional evidence delivery', remove: [], extra: ['--for-pr', 'owner/repo#42'], expected: /evidence-required/ },
+    { label: 'review without PR binding', remove: ['--no-telemetry'], extra: ['--evidence-required'], expected: /PR|pull request|for-pr/i },
+    { label: 'fresh review', remove: ['--no-telemetry'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required', '--start-over'], expected: /start-over|fresh|incompatible/i },
+    { label: 'infrastructure retry reason', remove: ['--no-telemetry'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required', '--retry-reason', 'Provider repaired'], expected: /retry|incompatible/i },
+    { label: 'legacy retry report', remove: ['--no-telemetry'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required', '--retry-report', 'prior.json'], expected: /retry|incompatible/i },
+    { label: 'attested review', remove: ['--no-telemetry'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required', '--attest'], expected: /attest|incompatible/i },
+    { label: 'stop-upstream intent', remove: ['--no-telemetry'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required', '--launch-intent', 'stop-upstream'], expected: /intent|incompatible/i },
+    { label: 'delivery retry intent', remove: ['--no-telemetry'], extra: ['--for-pr', 'owner/repo#42', '--evidence-required', '--launch-intent', 'retry-delivery'], expected: /intent|incompatible/i },
+  ])('refuses $label before attempt or provider spend', async ({ remove, extra, expected }) => {
+    await withGuardedFixture(async fixture => {
+      const args = [...fixture.args.filter(arg => !remove.includes(arg)), '--bound-fix-recovery', recoveryRunId, ...extra];
+      const result = await runRclAsync(args, fixture.repo, {
+        ...fixture.env, RCL_FOR_PR: '', RCL_CONVERGE_TARGET: '', RCL_CONVERGE_ROUND: '', RCL_CONVERGE_ATTEMPT: '',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toMatch(/unknown option/i);
+      expect(result.stderr).toMatch(expected);
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+      expect(existsSync(join(fixture.repo, 'report.json'))).toBe(false);
+    });
+  });
+});
+
 describe('rcl review — guarded native launch', () => {
   it.each([false, true])('shares repository rules once without a dedicated seat (explicit context: %s)', async (explicitContext) => {
     await withGuardedFixture(async fixture => {

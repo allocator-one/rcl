@@ -22,6 +22,8 @@ import type { ConvergeContext } from '../report/run-header.js';
 import { staleManifest, StaleReportAuditError } from './stale-report-schema.js';
 import { verifyStaleReportReceipts } from './stale-report.js';
 import { scrubText } from '../telemetry/scrub.js';
+import { verifyBoundFixRecovery, type BoundFixRecoverySelection } from './bound-fix-recovery.js';
+import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
 
 export interface GuardedLaunchOptions {
   gitCommonDir: string;
@@ -34,6 +36,7 @@ export interface GuardedLaunchOptions {
   intent?: 'review' | 'stop-upstream' | 'stop-review' | 'retry-delivery';
   retryReason?: string;
   legacyRetry?: LegacyRetrySelection;
+  boundFixRecovery?: BoundFixRecoverySelection;
   startOver?: boolean;
   cycleRemote?: ReviewCycleRemote;
   validate: () => Promise<void>;
@@ -60,7 +63,11 @@ function nextRound(state: ConvergeRunState): number {
   return state.rounds.reduce((latest, entry) => Math.max(latest, entry.round), 0) + 1;
 }
 
-async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): Promise<{ round: number; retryProof?: Awaited<ReturnType<typeof inspectLegacyRetry>> }> {
+async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): Promise<{
+  round: number;
+  retryProof?: Awaited<ReturnType<typeof inspectLegacyRetry>>;
+  boundFixRecoverySource?: BoundFixRecoverySource;
+}> {
   const intent = options.intent ?? 'review';
   if (!['review', 'stop-upstream', 'stop-review', 'retry-delivery'].includes(intent)) {
     refuse('invalid_intent', 'Choose review, stop-upstream, stop-review, or retry-delivery.');
@@ -83,6 +90,32 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     refuse('triage_required', 'Resolve the existing native gating findings before another launch.');
   }
   const previous = state.lastLaunch === undefined ? undefined : launchSchema.parse(state.lastLaunch);
+  let boundFixRecoverySource: BoundFixRecoverySource | undefined;
+  if (options.boundFixRecovery) {
+    const recovery = options.boundFixRecovery;
+    if (options.startOver || options.legacyRetry || options.retryReason !== undefined || intent !== 'review') {
+      refuse('bound_fix_recovery_incompatible', 'Bound fix recovery cannot be combined with a fresh review or another retry mode.');
+    }
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(recovery.runId) ||
+      !/^[^/\s]{1,100}\/[^/\s]{1,100}$/.test(recovery.repo) || !Number.isSafeInteger(recovery.prNumber) || recovery.prNumber < 1 ||
+      !previous || previous.status !== 'completed' || previous.attempt !== attemptsUsed ||
+      previous.round !== round - 1 || previous.runId !== recovery.runId || previous.headSha !== options.headSha ||
+      previous.inputSha256 !== options.inputSha256 || previous.deliveryPending || previous.hardFailure ||
+      !hasHealthyGuardedLaunch(previous) ||
+      !state.rounds.some(entry => entry.round === previous.round && entry.runId === recovery.runId) ||
+      resolution?.status !== 'converged-dismissal-only' || resolution.fixedThisRound !== 0) {
+      refuse('bound_fix_recovery_ineligible', 'Recovery requires the latest completed, healthy, delivered and admitted native dismissal-only round on these exact inputs.');
+    }
+    try {
+      const proof = await verifyBoundFixRecovery(recovery, options.target, options.headSha, previous.round);
+      boundFixRecoverySource = boundFixRecoverySourceSchema.parse({
+        version: 1, runId: recovery.runId, target: options.target, repo: recovery.repo,
+        prNumber: recovery.prNumber, headSha: options.headSha, inputSha256: options.inputSha256,
+        round: previous.round, attempt: previous.attempt, ...proof,
+      });
+    }
+    catch { refuse('bound_fix_recovery_invalid', 'Live Harness evidence did not prove the selected exact-head bound fix obligation; no attempt was claimed.'); }
+  }
   if (options.legacyRetry && (!options.retryReason || options.startOver || intent !== 'review' ||
     !previous || previous.status !== 'completed' || previous.attempt !== attemptsUsed)) {
     refuse('retry_report_ineligible_launch', 'Select a completed original legacy launch and provide its explicit bounded retry reason.');
@@ -134,7 +167,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     }
 
   }
-  if (healthy && !disposed && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
+  if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
     refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');
@@ -149,7 +182,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   if (!healthy && !previous.reviewerHealth && !retryProof) {
     refuse('legacy_health_unknown', 'Aggregate counts do not prove blocking health. Select the original report with --retry-report and preserve its original inputs.');
   }
-  return { round, retryProof };
+  return { round, retryProof, boundFixRecoverySource };
 }
 
 /** Shared launch-health decision; recovery paths must use the guard's policy. */
@@ -230,6 +263,12 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       }
       if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
       const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
+      const recovery = options.boundFixRecovery;
+      if (recovery && attempts?.attempts.some(({ boundFixRecoverySource: source }) =>
+        source && source.target === options.target && source.repo.toLowerCase() === recovery.repo.toLowerCase() &&
+        source.prNumber === recovery.prNumber && source.headSha === options.headSha)) {
+        refuse('bound_fix_recovery_already_claimed', 'A bound fix recovery attempt was already claimed for this target, PR and head; inspect the server obligation before requesting further review.');
+      }
       if (!isDeepStrictEqual(state.cycle, attempts?.cycle)) refuse('fresh_review_state_pair_mismatch', 'The native cycle files disagree.');
       if (state.cycle) {
         await verifyReviewCycle(options.gitCommonDir, options.target, state.cycle);
@@ -239,7 +278,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         }
         if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
       }
-      const { round, retryProof } = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
+      const { round, retryProof, boundFixRecoverySource } = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
       const cap = options.maxAttempts ?? attempts?.cap;
       if (cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
@@ -251,8 +290,10 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         headSha: options.headSha, inputSha256: options.inputSha256,
         startedAt: new Date().toISOString(), pid: process.pid,
         ...(options.retryReason ? { retryReason: scrubText(options.retryReason.trim(), 500) } : {}),
+        ...(options.boundFixRecovery ? { retryReason: `Bound fix recovery from conclusive dismissal-only run ${options.boundFixRecovery.runId} for ${options.boundFixRecovery.repo}#${options.boundFixRecovery.prNumber}.` } : {}),
       };
-      return retryProof ? { retrySource: retryProof.binding } : undefined;
+      return retryProof ? { retrySource: retryProof.binding }
+        : boundFixRecoverySource ? { boundFixRecoverySource } : undefined;
     },
     afterClaim: async (claimed, ownership) => {
       state.lastLaunch!.attempt = claimed.attempt;

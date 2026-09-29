@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.4.6 - 2026-09-29
+
+- Add guarded `--bound-fix-recovery <run-id>` for a native dismissal-only round
+  whose exact-head Harness advisory status remains conclusive `fixes_pending`
+  with no actionable findings. Verify live evidence before claiming, retain
+  recovery provenance in the attempt ledger, and allow only one recovery claim
+  per target, PR and head. Harness exposes this status for the whole PR, so the
+  opt-in permits an additional review without promising to clear a particular
+  target's obligation; existing caps and merge gates still apply (RCL-148).
+
 ## 4.4.5 - 2026-09-28
 
 - Give verified-consensus reviews a ten-minute default verification pass so

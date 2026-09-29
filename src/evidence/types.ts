@@ -40,6 +40,8 @@ export interface ProjectionRound {
 
 export interface Projection {
   status: ProjectionStatus | string;
+  classification_pending?: boolean;
+  legacy_pending_identities?: string[];
   head_sha: string | null;
   /** `null` until a current-head run has been judged (status `none`, `stale`, `unverified`). */
   conclusive: boolean | null;
@@ -154,6 +156,9 @@ export interface RunConverge {
 
 export interface RunDetail {
   id: string;
+  /** Optional on older Harness serializers; recovery validates it when exposed. */
+  gating?: Record<string, unknown> | null;
+  bound_classification_protocol?: unknown;
   command?: string;
   url?: string | null;
   target: RunTarget;

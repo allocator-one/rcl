@@ -106,6 +106,7 @@ Review a PR, a local diff, or uncommitted work.
 | `--converge-target <key>` / `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_TARGET` / `_ROUND` / `_ATTEMPT`) |
 | `--start-over` | Explicitly start a fresh PR review with a new normal budget; preserve all prior spending and evidence |
 | `--guarded-converge` | Validate and claim inside this process; derive the next round from native admitted state |
+| `--bound-fix-recovery <run-id>` | Allow one additional review of unchanged inputs after verifying the selected native dismissal-only run against live Harness evidence; requires guarded convergence and required PR evidence |
 | `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
 | `--retry-report <path>` | Bind an original legacy report to an inconclusive retry; new inputs may differ; requires `--retry-reason` |
@@ -225,6 +226,44 @@ An unadmitted source retries its pending round; an exact latest admitted source
 whose blocking health was inconclusive continues at the next native round. Its
 original admission, findings, verdicts and spent claims remain unchanged. The
 new claim retains the source bytes and binding; no history or budget is reset.
+
+When native triage reports `converged-dismissal-only` but Harness still reports
+`fixes_pending` with no actionable findings, an explicit recovery can authorize
+one additional review of the same inputs:
+
+```bash
+rcl review change.patch --guarded-converge --converge-target repo-123 \
+  --for-pr owner/repo#123 --head-sha <captured-head> --base-sha <captured-base> \
+  --evidence-required --bound-fix-recovery <latest-admitted-run-id> \
+  --json-file fresh-recovery-report.json
+```
+
+Reuse the original review inputs and configuration, including the specification
+and reviewer roster; both the head and effective input digest must match the
+latest completed, healthy, delivered and admitted native launch. Its resolution
+must be `converged-dismissal-only` with `fixedThisRound: 0`. Use a PR target or
+an explicit `--for-pr` binding, and explicitly supply `--guarded-converge` and
+`--evidence-required`. This mode rejects `--start-over`, `--attest`,
+`--retry-report`, `--retry-reason`, git working-tree/staged reviews, and launch
+intents other than `review`.
+
+Before claiming or dispatching reviewers, RCL reads authenticated live Harness
+status and the selected run. The PR must be unmerged at the exact reviewed head;
+its advisory projection must be conclusive, `fixes_pending`, have zero actionable
+findings, and name that same run. The recorded run must match the repository, PR,
+head, convergence target and native round. Exposed classification and legacy
+pending fields must be clear, and an exposed bound classification protocol must
+be version 1. Unanswered, malformed or mismatched evidence refuses recovery.
+
+Harness currently exposes `fixes_pending` for the whole PR and does not provide
+proof identifying which convergence target owns a retained fix obligation.
+These checks establish the native/server mismatch; they cannot establish that
+another round on the selected target will clear it. Recovery therefore allows
+only one claimed attempt per target, PR and head in the current native attempt
+ledger, even if that attempt fails or a later run remains `fixes_pending`.
+The claim durably retains its source run, binding, server status and response
+hashes. Existing attempt and round caps still apply. Process and deliver the new
+report normally; matching enforced evidence and CI remain required for merging.
 
 `--launch-intent stop-upstream` never cancels review. `stop-review` and
 `retry-delivery` refuse new reviewer dispatch; cancel an existing review only
