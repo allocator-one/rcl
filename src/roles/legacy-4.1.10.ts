@@ -319,4 +319,3 @@ Be specific about the exact input that triggers the bug and what incorrect behav
 Severity: bugs that cause data corruption or duplication are "critical". Bugs that cause incorrect UI state or wasted backend work are "important". Cosmetic or unlikely edge cases are "minor".`,
   },
 ];
-
