@@ -52,6 +52,128 @@ async function fixture(cap = 35) {
 }
 
 describe('bound legacy launch health recovery', () => {
+  async function a33Fixture() {
+    const snapshot = JSON.parse(await readFile(
+      new URL('../fixtures/legacy-4.1.10-a33-roster.json', import.meta.url), 'utf8')) as any;
+    const f = await fixture();
+    f.retry.legacyRetry!.config = snapshot.config;
+    await f.mutate((report, native) => {
+      report.run!.rcl_version = snapshot.run.rcl_version;
+      report.run!.roster = snapshot.run.roster;
+      report.run!.gating = snapshot.run.gating;
+      report.run!.config_sha256 = snapshot.run.config_sha256;
+      report.run!.spec = snapshot.run.spec;
+      delete report.run!.cycle_id;
+      report.reviews = snapshot.run.roster
+        .filter((seat: RosterEntry) => seat.lane !== 'verification')
+        .map((seat: RosterEntry, index: number) => sampleReview({
+          ...seat,
+          status: seat.lane === 'async' || index < 10 ? 'success' : 'timeout',
+        }));
+      report.stats.totalReviews = native.lastLaunch.totalReviews = 18;
+      report.stats.successfulReviews = native.lastLaunch.successfulReviews = 11;
+      native.lastLaunch.hardFailure = true;
+    });
+    return { f, snapshot };
+  }
+
+  it('accepts the immutable A33 roster after current roles and verifier defaults changed', async () => {
+    const { f, snapshot } = await a33Fixture();
+    const selectedCurrentRoster = f.retry.legacyRetry!.roster;
+    expect(selectedCurrentRoster).not.toEqual(snapshot.run.roster);
+
+    await guardReviewLaunch(f.retry);
+
+    expect(f.run).toHaveBeenCalledOnce();
+    const attempts = await loadConvergeAttemptState(f.common, f.target);
+    expect(attempts?.attempts[1]?.retrySource).toMatchObject({
+      runId: f.report.run!.id,
+      reviewerHealth: {
+        successfulSeats: 10,
+        policy: { fraction: 2 / 3, seatCount: 17, minimumSuccessful: 12 },
+      },
+    });
+  });
+
+  it.each([
+    ['unknown role', (f: any) => { f.report.run.roster[3].role = 'retired-but-unrecorded'; }],
+    ['wrong lane', (f: any) => { f.report.run.roster[3].lane = 'secondary'; }],
+    ['wrong provider', (f: any) => { f.report.run.roster[3].provider = 'openai'; }],
+    ['substituted verifier', (f: any) => {
+      const verifier = f.report.run.roster.at(-1);
+      verifier.model = 'openai/gpt-6-astra'; verifier.provider = 'openai';
+      f.report.run.gating.verification_model = 'openai/gpt-6-astra';
+    }],
+    ['changed verifier policy', (f: any) => { f.report.run.gating.min_models = 3; }],
+  ])('refuses the A33 fallback with %s before claim', async (_label, mutate) => {
+    const { f } = await a33Fixture();
+    await f.mutate(report => mutate({ report }), true);
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
+  it('refuses an A33 roster reconstructed from a different bound config before claim', async () => {
+    const { f } = await a33Fixture();
+    f.retry.legacyRetry!.config = {
+      ...f.retry.legacyRetry!.config,
+      models: ['anthropic/claude-fable-5-1', 'openai/gpt-6-sol'],
+      secondaryModels: ['google/gemini-3.8-flash'],
+    };
+    await f.mutate(report => {
+      report.run!.config_sha256 = configDigest(f.retry.legacyRetry!.config);
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
+  it('refuses a bound config that mixes an unknown requested role with known historical roles', async () => {
+    const { f, snapshot } = await a33Fixture();
+    f.retry.legacyRetry!.config = {
+      ...f.retry.legacyRetry!.config,
+      roles: [...snapshot.run.roster.filter((seat: RosterEntry) => seat.role !== 'verification')
+        .filter((seat: RosterEntry, index: number, seats: RosterEntry[]) =>
+          seats.findIndex(candidate => candidate.role === seat.role) === index)
+        .map((seat: RosterEntry) => seat.role), 'unrecorded-historical-role'],
+    };
+    await f.mutate(report => {
+      report.run!.config_sha256 = configDigest(f.retry.legacyRetry!.config);
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
+  it('refuses a bound custom role even when its name shadows a historical role', async () => {
+    const { f } = await a33Fixture();
+    f.retry.legacyRetry!.config = {
+      ...f.retry.legacyRetry!.config,
+      customRoles: [{ name: 'general', focus: ['unbound prompt content'] }],
+    };
+    await f.mutate(report => {
+      report.run!.config_sha256 = configDigest(f.retry.legacyRetry!.config);
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
+  it('refuses a prototype-chain producer version before claim', async () => {
+    const { f } = await a33Fixture();
+    await f.mutate(report => {
+      report.run!.rcl_version = 'toString';
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
   it('accepts a bound 4.1.10 pre-cycle report with A33 mixed-lane health', async () => {
     const f = await fixture();
     await f.mutate((report, native) => {
