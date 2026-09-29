@@ -1,6 +1,7 @@
 import type { ModelReview } from '../consensus/types.js';
 import { assertNativeTargetOwnership, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import { blockingCheckpointReviewSchema, type CheckpointJournal, type PaidAttempt } from './checkpoint.js';
+import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 
 export interface CheckpointLateAudit {
   /** Snapshot an observed response; buffering does not mean it is durable yet. */
@@ -26,12 +27,13 @@ export function createCheckpointLateAudit(options: {
   const { commonDir, journal, ownership, onError } = options;
   if (typeof onError !== 'function') throw new Error('Late review audit requires an error sink');
   const plan = journal.getPlan();
-  type Observation = { cell: string; index: number; attempt: PaidAttempt; bytes: string };
+  type Observation = { cell: string; index: number; attempt: PaidAttempt; bytes: string; byteLength: number };
   const buffered: Observation[] = [];
   const pending = new Set<Promise<void>>();
   const errors: unknown[] = [];
   let active = false;
   let activation: Promise<void> | undefined;
+  let bufferedBytes = 0;
 
   function retain(error: unknown, index: number): void {
     errors.push(error);
@@ -66,8 +68,9 @@ export function createCheckpointLateAudit(options: {
     if (active) { await drain(); return; }
     while (buffered.length > 0) {
       const observation = buffered.shift()!;
+      bufferedBytes -= observation.byteLength;
       try { await write(observation); }
-      catch { buffered.unshift(observation); break; }
+      catch { buffered.unshift(observation); bufferedBytes += observation.byteLength; break; }
     }
     if (buffered.length === 0) active = true;
     await drain();
@@ -84,13 +87,22 @@ export function createCheckpointLateAudit(options: {
           throw new Error('late_audit_review_identity_mismatch');
         }
         const bytes = JSON.stringify(raw);
-        if (Buffer.byteLength(bytes, 'utf8') > 8 * 1024 * 1024) throw new Error('checkpoint_file_too_large');
-        const observation = { cell: cell.id, index: callIndex, attempt, bytes };
+        const byteLength = Buffer.byteLength(bytes, 'utf8');
+        if (byteLength > 8 * 1024 * 1024) throw new Error('checkpoint_file_too_large');
+        const observation = { cell: cell.id, index: callIndex, attempt, bytes, byteLength };
         if (active) return write(observation);
+        if (bufferedBytes + byteLength > MAX_ARTIFACT_BYTES) throw new Error('late_audit_buffer_too_large');
+        bufferedBytes += byteLength;
         return track(assertNativeTargetOwnership(ownership, commonDir, plan.target).then(() => {
           // Activation may have completed while ownership was being checked.
-          if (active) return journal.recordLateResult(observation.cell, attempt, bytes, ownership);
+          if (active) {
+            bufferedBytes -= byteLength;
+            return journal.recordLateResult(observation.cell, attempt, bytes, ownership);
+          }
           buffered.push(observation);
+        }, error => {
+          bufferedBytes -= byteLength;
+          throw error;
         }), callIndex);
       } catch (error) { return track(Promise.reject(error), callIndex); }
     },

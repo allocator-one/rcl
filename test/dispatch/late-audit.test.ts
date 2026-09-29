@@ -74,6 +74,21 @@ describe('owned late-result coordinator', () => {
     });
   });
 
+  it('bounds observations retained before finalization by the durable artifact budget', async () => {
+    const input = await fixture(), errors = vi.fn();
+    await withNativeTarget(input.commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ ...input, namespace: 'buffer-budget', ownership });
+      const audit = createCheckpointLateAudit({ commonDir: input.commonDir, journal, ownership, onError: errors });
+      const large = review(0, 'error');
+      large.error = 'x'.repeat(6_300_000);
+      for (let index = 0; index < 3; index++) {
+        await audit.accept(large, 0, attempt(`buffered-${index}`));
+      }
+      await expect(audit.accept(large, 0, attempt('over-budget'))).rejects.toThrow('late_audit_buffer_too_large');
+      expect(errors).toHaveBeenCalledOnce();
+    });
+  });
+
   it.each(['success', 'error', 'timeout', 'parse_failed', 'canceled'] as const)(
     'writes an observed post-activation %s with all original findings and usage', async status => {
       const input = await fixture();
