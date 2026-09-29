@@ -62,7 +62,8 @@ describe('private immutable reviewer delivery', () => {
     expect(replay[0]!.url).toMatch(/model-stats$/);
     expect(replay.find(row => !row.url.endsWith('/model-stats'))).toMatchObject({ method: 'GET', url: expect.stringContaining('/reviewer-artifact') });
     expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))).toHaveLength(1);
-    expect(remote.requests.filter(row => row.url.endsWith('/runs')).map(row => row.body)).toEqual([JSON.stringify(f.envelope), JSON.stringify(f.envelope)]);
+    expect(remote.requests.filter(row => row.url.endsWith('/runs')).map(row => row.body)).toEqual([JSON.stringify(f.envelope)]);
+    expect(replay.some(row => row.method === 'PUT' && /\/artifacts\/(report_json|report_md)$/.test(row.url))).toBe(false);
     expect(replay.every(row => row.token === 'Bearer renewed-login')).toBe(true);
     const directory = join(f.root, 'reviewer-outbox', f.runId.toLowerCase());
     expect((await stat(directory)).mode & 0o777).toBe(0o700);

@@ -180,6 +180,14 @@ export class ReviewerDeliveryQueue {
     accepted(await sink.checkReviewerRecovery(request()));
     let read = initial ? undefined : await sink.getReviewerArtifact(m.runId, m.reviewer, request());
     if (read && read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
+    // A matching private read is the server's completed admission proof: it
+    // validates the retained ordinary/private pair, so replaying the ordinary
+    // uploads would only repeat already acknowledged work after a lost local ACK.
+    if (read?.kind === 'ok') {
+      if (!read.value.bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
+      await publish(join(entry.directory, 'acknowledged.json'), this.ack(entry));
+      return;
+    }
     accepted(await sink.postRun(entry.envelope, request(), entry.envelopeBytes));
     read ??= await sink.getReviewerArtifact(m.runId, m.reviewer, request());
     if (read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
