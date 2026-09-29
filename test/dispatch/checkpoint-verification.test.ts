@@ -207,6 +207,24 @@ describe('durable verifier phase in the existing checkpoint', () => {
     await expect(f.journal.exportVerificationProof()).rejects.toThrow('checkpoint_verification_unsealed');
   });
 
+  it('binds same-lock non-dispatch accounting to the just-persisted verifier intent', async () => {
+    const f = await fixture();
+    await expect(runOwned(f, async owner => {
+      await f.journal.beginVerification(planInput(), owner);
+      expect(await f.journal.recordVerificationIntent(intent(0), owner)).toBe(true);
+      return f.journal.recordVerificationIntent(intent(1), owner, () => ({
+        batchIndex: 0,
+        attemptId: 'verifier-0',
+        finishedAtMs: 220,
+        answerBytes: answer({ status: 'error', text: '', error: 'not dispatched' }),
+      }));
+    })).rejects.toThrow('checkpoint_verification_not_dispatched_mismatch');
+    const phase = (await f.journal.readVerification())!;
+    expect(phase.intents).toEqual([intent(0), intent(1)]);
+    expect(phase.notDispatched).toEqual([]);
+    expect(phase.uncertain).toEqual([intent(0), intent(1)]);
+  });
+
   it('snapshots arguments before waiting for ownership and serializes simultaneous launch claims', async () => {
     const f = await fixture();
     await runOwned(f, async owner => {

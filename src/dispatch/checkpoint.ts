@@ -716,6 +716,9 @@ export class CheckpointJournal {
         if (event.type === 'intent' && afterIntent) {
           const result = afterIntent(event.intent);
           if (result) {
+            if (result.batchIndex !== event.intent.batchIndex || result.attemptId !== event.intent.attemptId) {
+              throw new Error('checkpoint_verification_not_dispatched_mismatch');
+            }
             const resultEvent = snapshotVerificationEvent({ type: 'not-dispatched', result });
             const successor = appendVerificationRecordWithSuccessor(finalSnapshot, resultEvent, context);
             const resultBytes = `${canonical(successor.record as unknown as Json)}\n`;
