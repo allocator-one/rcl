@@ -1,4 +1,8 @@
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { loadConvergeRunState } from '../converge/run-state.js';
+import { loadConvergeAttemptState } from '../converge/attempt-budget.js';
+import { assertReviewCyclePair } from '../converge/fresh-review.js';
+import { decodeOriginalLaunch } from './original-launch.js';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -11,22 +15,30 @@ import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js'
 import { readStable } from '../telemetry/recovery/files.js';
 import { writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
+import { hasCheckpointIntentCapacity, MAX_ASYNC_PHASE_RECORDS } from './checkpoint-phase-limits.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
-import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
-  validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
+import { appendAsyncRecordToValidatedState, assertAsyncReviewBytes, asyncCallAdmission, asyncRefuse, decodeAsyncProof, encodeAsyncProof, freezeAsync, parseAsyncReview,
+  validateAsyncNotDispatched, validateAsyncPlan, validateAsyncRecords, validateAsyncResult, type AsyncCall, type AsyncEvent, type AsyncIntent,
   type AsyncPlan, type AsyncProof, type AsyncRecord, type AsyncResult, type AsyncState } from './checkpoint-async.js';
 
 interface LocationInput { commonDir: string; namespace: string; plan: FrozenCheckpointPlan }
 interface Location { commonDir: string; namespace: string; checkpointPath: string; phasePath: string; plan: FrozenCheckpointPlan }
 export interface InitializeAsyncInput extends LocationInput { ownership: NativeTargetOwnership; calls: readonly AsyncCall[]; maxPhysicalCalls: number; maxAttemptsPerCall: number; expiresAtMs: number }
 export interface AsyncDelegate { version: 1; commonDir: string; namespace: string; target: string; checkpointPath: string; planDigest: string; callIndex: number; token: string }
-export interface AsyncWriter { claim(prompts: { systemPrompt: string; userPrompt: string }, afterIntent?: (intent: AsyncIntent) => void): Promise<AsyncIntent | undefined>; recordResult(attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> }
-interface Metadata { version: 1; plan: AsyncPlan; grants: string[] }
+export interface AsyncWriter {
+  claim(prompts: { systemPrompt: string; userPrompt: string },
+    afterIntent?: (intent: AsyncIntent) => { reviewBytes: string } | void): Promise<AsyncIntent | undefined>;
+  recordResult(attemptId: string, reviewBytes: string): Promise<'observed' | 'late'>;
+}
+interface OpinionCycle { version: 1; cycleId: string | null }
+interface Metadata { version: 1; plan: AsyncPlan; grants: string[]; opinionCycle?: OpinionCycle }
 interface Phase { plan: AsyncPlan; state: AsyncState }
 export interface AsyncLateRecord { sequence: number; previousDigest: string; digest: string; sealedProofSha256: string; result: AsyncResult }
+export interface AsyncLateFailure { sequence: number; kind: 'late_audit_failure'; callIndex: number; attemptId: string; digest: string }
 const delegateSchema = z.object({ version: z.literal(1), commonDir: z.string().min(1), namespace: z.string().min(1), target: z.string().min(1),
   checkpointPath: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/), callIndex: z.number().int().nonnegative().safe(), token: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
-const metadataSchema = z.object({ version: z.literal(1), plan: z.unknown(), grants: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(8) }).strict();
+const metadataSchema = z.object({ version: z.literal(1), plan: z.unknown(), grants: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(8),
+  opinionCycle: z.object({ version: z.literal(1), cycleId: z.string().uuid().nullable() }).strict().optional() }).strict();
 const filename = (index: number) => `${String(index).padStart(8, '0')}.json`;
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 async function privateDirectory(path: string): Promise<void> {
@@ -81,10 +93,10 @@ async function metadataAt(location: Location): Promise<Metadata> {
   assertCapturedAsyncPlan(plan, captured);
   asyncRefuse(stableStringify(plan.context) === stableStringify(context) && parsed.data.grants.length === plan.calls.length && new Set(parsed.data.grants).size === plan.calls.length, 'parent_binding');
   for (const call of plan.calls) asyncRefuse(location.plan.chunks.find(chunk => chunk.index === call.chunk)?.digest === call.chunkSha256, 'call');
-  return { version: 1, plan, grants: parsed.data.grants };
+  return { version: 1, plan, grants: parsed.data.grants, ...(parsed.data.opinionCycle ? { opinionCycle: parsed.data.opinionCycle } : {}) };
 }
 async function recordsAt(location: Location, plan: AsyncPlan): Promise<AsyncState> {
-  const directory = join(location.phasePath, 'events'); await privateDirectory(directory); const names = (await readdir(directory)).sort(); asyncRefuse(names.length <= 1001, 'too_many_records');
+  const directory = join(location.phasePath, 'events'); await privateDirectory(directory); const names = (await readdir(directory)).sort(); asyncRefuse(names.length <= MAX_ASYNC_PHASE_RECORDS, 'too_many_records');
   let total = 0; const records: unknown[] = [];
   for (const [index, name] of names.entries()) {
     asyncRefuse(name === filename(index + 1), 'sequence'); const bytes = await safeRead(join(directory, name)); total += Buffer.byteLength(bytes); asyncRefuse(total <= MAX_ARTIFACT_BYTES, 'too_large');
@@ -107,8 +119,27 @@ function logicalCutoffMs(plan: AsyncPlan, state: AsyncState): number {
   let cutoffMs = Math.max(Date.now(), plan.context.startedAtMs);
   for (const intent of state.intents) cutoffMs = Math.max(cutoffMs, intent.startedAtMs);
   for (const outcome of state.outcomes) cutoffMs = Math.max(cutoffMs, outcome.finishedAtMs);
+  for (const result of state.notDispatched) cutoffMs = Math.max(cutoffMs, result.finishedAtMs);
   asyncRefuse(Number.isSafeInteger(cutoffMs), 'clock'); return cutoffMs;
 }
+/** Freeze derivative opinion routing while the original native claim is still owned. */
+async function originalOpinionCycle(location: Location, journal: CheckpointJournal): Promise<OpinionCycle> {
+  const native = await loadConvergeRunState(location.commonDir, location.plan.target);
+  const attempts = await loadConvergeAttemptState(location.commonDir, location.plan.target);
+  if (native || attempts) {
+    const launch = decodeOriginalLaunch((await journal.readBindings()).launch!);
+    const claim = launch.originalNativeClaim, pending = native?.lastLaunch;
+    asyncRefuse(native && attempts && pending?.status === 'pending' &&
+      pending.attempt === claim.attempt && pending.round === claim.round &&
+      pending.headSha === location.plan.headSha && attempts.attemptsUsed === claim.attempt &&
+      attempts.attempts.some(attempt => attempt.attempt === claim.attempt) &&
+      (pending.runId === undefined || pending.runId === location.namespace), 'native_claim');
+    await assertReviewCyclePair(location.commonDir, location.plan.target, native.cycle);
+  }
+  // Owned local/legacy initialization has no cycle. Never infer a cycle later.
+  return { version: 1, cycleId: native?.cycle?.id ?? null };
+}
+
 /** Only initialization under live native ownership may create restricted per-call delegations. */
 export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ delegates: readonly AsyncDelegate[]; plan: AsyncPlan }> {
   const location = snapshotLocation(input), calls = structuredClone(input.calls), { ownership, maxPhysicalCalls, maxAttemptsPerCall, expiresAtMs } = input;
@@ -121,14 +152,17 @@ export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ del
     asyncRefuse(Date.now() >= context.startedAtMs && Date.now() < plan.expiresAtMs, 'deadline');
     for (const call of plan.calls) asyncRefuse(location.plan.chunks.find(chunk => chunk.index === call.chunk)?.digest === call.chunkSha256, 'call');
     try { await lstat(location.phasePath); throw new Error('checkpoint_async_already_initialized'); } catch (error) { if (!isMissing(error)) throw error; }
-    const tokens = calls.map(() => randomBytes(32).toString('hex')); const metadata: Metadata = { version: 1, plan, grants: tokens.map(sha256Hex) };
+    const opinionCycle = await originalOpinionCycle(location, journal);
+    const bindingDigest = privateDelegateDigest({ plan, opinionCycle });
+    const tokens = calls.map(() => randomBytes(32).toString('hex'));
+    const metadata: Metadata = { version: 1, plan, grants: tokens.map(token => delegateGrant(token, bindingDigest)), opinionCycle };
     // The visible async directory is the initialization commit point. Preparing
     // elsewhere cannot make main finalization depend on missing metadata.
     const staging = await child(location.checkpointPath, '.staging');
     const prepared = await child(staging, `async-${randomUUID()}.pending`), identity = await lstat(prepared);
     let published = false;
     try {
-      await child(prepared, 'events'); await child(prepared, 'late');
+      await child(prepared, 'events'); await child(prepared, 'late'); await child(prepared, 'failures');
       await publish(prepared, join(prepared, 'phase.json'), stableStringify(metadata) + '\n');
       await syncNativeDirectory(prepared);
       // Native ownership serializes initializers. Never replace an existing
@@ -146,7 +180,7 @@ export function initializeAsyncPhase(input: InitializeAsyncInput): Promise<{ del
       }
     }
     const delegates = tokens.map((token, callIndex): AsyncDelegate => ({ version: 1, commonDir: location.commonDir, namespace: location.namespace,
-      target: location.plan.target, checkpointPath: location.checkpointPath, planDigest: sha256Hex(stableStringify(plan)), callIndex, token }));
+      target: location.plan.target, checkpointPath: location.checkpointPath, planDigest: bindingDigest, callIndex, token }));
     return freezeAsync({ delegates, plan });
   });
 }
@@ -157,39 +191,58 @@ async function delegatedLocation(input: AsyncDelegate): Promise<{ location: Loca
   asyncRefuse(journal.getPlan().target === delegate.target, 'delegate_target');
   return { location: snapshotLocation({ commonDir: delegate.commonDir, namespace: delegate.namespace, plan: journal.getPlan() }), delegate };
 }
+function privateDelegateDigest(metadata: Pick<Metadata, 'plan' | 'opinionCycle'>): string {
+  asyncRefuse(metadata.opinionCycle, 'opinion_cycle_missing');
+  return sha256Hex(stableStringify({ plan: metadata.plan, opinionCycle: metadata.opinionCycle }));
+}
+function delegateGrant(token: string, bindingDigest: string): string {
+  return createHmac('sha256', Buffer.from(token, 'hex')).update(bindingDigest).digest('hex');
+}
 function authorize(metadata: Metadata, delegate: AsyncDelegate): void {
-  const expected = metadata.grants[delegate.callIndex];
-  asyncRefuse(expected && sha256Hex(stableStringify(metadata.plan)) === delegate.planDigest &&
-    timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(sha256Hex(delegate.token), 'hex')), 'invalid_delegate');
+  const expected = metadata.grants[delegate.callIndex], bindingDigest = privateDelegateDigest(metadata);
+  asyncRefuse(expected && bindingDigest === delegate.planDigest &&
+    timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(delegateGrant(delegate.token, bindingDigest), 'hex')), 'invalid_delegate');
 }
 /** Delegates cannot mutate native state, reviewer history, phase plan, cutoff or another call. */
 export async function openAsyncDelegate(input: AsyncDelegate): Promise<AsyncWriter> {
   const snapshot = structuredClone(input), { location, delegate } = await delegatedLocation(snapshot);
   await locked(location, async metadata => authorize(metadata, delegate));
   return Object.freeze({
-    claim: async (prompts: { systemPrompt: string; userPrompt: string }, afterIntent?: (intent: AsyncIntent) => void): Promise<AsyncIntent | undefined> => {
+    claim: async (prompts: { systemPrompt: string; userPrompt: string },
+      afterIntent?: (intent: AsyncIntent) => { reviewBytes: string } | void): Promise<AsyncIntent | undefined> => {
       const system = prompts.systemPrompt, user = prompts.userPrompt;
       return locked(location, async (metadata, state) => {
         authorize(metadata, delegate); const call = metadata.plan.calls[delegate.callIndex]!;
         asyncRefuse([system, user].every(value => typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= CAPTURED_INPUT_LIMITS.bytes &&
           Buffer.from(value, 'utf8').toString('utf8') === value) && sha256Hex(system) === call.systemPromptSha256 && sha256Hex(user) === call.userPromptSha256, 'prompt_mismatch');
         const now = Date.now(); asyncRefuse(Number.isSafeInteger(now) && now >= metadata.plan.context.startedAtMs, 'clock');
-        const prior = state.intents.filter(row => row.callIndex === delegate.callIndex), last = prior.at(-1), outcome = last && state.outcomes.find(row => row.attemptId === last.attemptId);
-        if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || state.intents.length >= metadata.plan.maxPhysicalCalls || prior.length >= metadata.plan.maxAttemptsPerCall ||
-          last && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
+        const admission = asyncCallAdmission(state, delegate.callIndex);
+        const { last, outcome, declined } = admission;
+        if (state.cutoffMs !== undefined || now >= metadata.plan.expiresAtMs || admission.billedTotal >= metadata.plan.maxPhysicalCalls ||
+          admission.billedForCall >= metadata.plan.maxAttemptsPerCall ||
+          !hasCheckpointIntentCapacity(state.records.length, state.uncertain.length, state.notDispatched.length, MAX_ASYNC_PHASE_RECORDS) ||
+          last && !declined && (!outcome || parseAsyncReview(outcome.reviewBytes, call).status === 'success')) return undefined;
         const intent = { callIndex: delegate.callIndex, attemptId: `async-${randomUUID()}`, startedAtMs: now };
-        await append(location, state, metadata.plan, { type: 'intent', intent });
+        const intentRecord = await append(location, state, metadata.plan, { type: 'intent', intent });
         // A retained executor may synchronously start dispatch after fsync while
         // this same cutoff lock is held. Never await provider work under the lock.
-        const frozen = freezeAsync(intent); afterIntent?.(frozen); return frozen;
+        const frozen = freezeAsync(intent), undispatched = afterIntent?.(frozen);
+        if (undispatched) {
+          const claimed = validateAsyncRecords([...state.records, intentRecord], metadata.plan);
+          const result = validateAsyncNotDispatched({ callIndex: delegate.callIndex, attemptId: intent.attemptId,
+            reviewBytes: undispatched.reviewBytes, reviewSha256: sha256Hex(undispatched.reviewBytes),
+            finishedAtMs: Date.now() }, metadata.plan, claimed.intents);
+          await append(location, claimed, metadata.plan, { type: 'not-dispatched', result });
+        }
+        return frozen;
       });
     },
-    recordResult: async (attemptId: string, reviewBytes: string, possiblyBilled: boolean): Promise<'observed' | 'late'> => {
+    recordResult: async (attemptId: string, reviewBytes: string): Promise<'observed' | 'late'> => {
       assertAsyncReviewBytes(reviewBytes);
       const finishedAtMs = Date.now();
       return locked(location, async (metadata, state) => {
         authorize(metadata, delegate); const existing = state.outcomes.find(row => row.attemptId === attemptId);
-        const result = validateAsyncResult({ callIndex: delegate.callIndex, attemptId, reviewBytes, reviewSha256: sha256Hex(reviewBytes), possiblyBilled,
+        const result = validateAsyncResult({ callIndex: delegate.callIndex, attemptId, reviewBytes, reviewSha256: sha256Hex(reviewBytes), possiblyBilled: true,
           finishedAtMs: existing?.finishedAtMs ?? finishedAtMs }, metadata.plan, state.intents);
         if (existing) {
           asyncRefuse(stableStringify(existing) === stableStringify(result), 'result_conflict');
@@ -245,13 +298,52 @@ export function readAsyncLateAudit(input: LocationInput): Promise<readonly Async
   const location = snapshotLocation(input); return locked(location, (metadata, state) => lateAt(location, encodeAsyncProof(metadata.plan, state.records)));
 }
 
+async function lateFailuresAt(location: Location, plan: AsyncPlan, state: AsyncState): Promise<AsyncLateFailure[]> {
+  const directory = join(location.phasePath, 'failures'); await privateDirectory(directory); const names = (await readdir(directory)).sort();
+  asyncRefuse(names.length <= plan.maxPhysicalCalls, 'late_failure_cap'); const rows: AsyncLateFailure[] = [];
+  for (const name of names) {
+    const bytes = await safeRead(join(directory, name)); let row: unknown;
+    try { row = JSON.parse(bytes); } catch { throw new Error('checkpoint_async_invalid_late_failure'); }
+    asyncRefuse(row && typeof row === 'object' && Object.keys(row).sort().join(',') === 'attemptId,callIndex,digest,kind,sequence', 'invalid_late_failure');
+    const candidate = row as AsyncLateFailure, { digest, ...unsigned } = candidate;
+    const intent = state.intents[candidate.sequence - 1];
+    asyncRefuse(stableStringify(candidate) + '\n' === bytes && candidate.sequence >= 1 && name === filename(candidate.sequence) &&
+      candidate.kind === 'late_audit_failure' && intent?.attemptId === candidate.attemptId && intent.callIndex === candidate.callIndex &&
+      sha256Hex(stableStringify(unsigned)) === digest, 'invalid_late_failure');
+    rows.push(candidate);
+  }
+  return freezeAsync(rows);
+}
+
+/** Record a bounded private diagnostic when a late result cannot be audited. */
+export async function recordAsyncLateFailure(input: AsyncDelegate, attemptId: string): Promise<void> {
+  const { location, delegate } = await delegatedLocation(structuredClone(input));
+  await locked(location, async (metadata, state) => {
+    authorize(metadata, delegate); const intentIndex = state.intents.findIndex(value => value.attemptId === attemptId), intent = state.intents[intentIndex];
+    asyncRefuse(intent?.callIndex === delegate.callIndex, 'late_failure_intent');
+    // Bind the marker path to the immutable physical-intent position. Exact
+    // replay reaches one file directly instead of rereading every prior marker.
+    const sequence = intentIndex + 1;
+    const unsigned = { sequence, kind: 'late_audit_failure' as const, callIndex: delegate.callIndex, attemptId };
+    const record = { ...unsigned, digest: sha256Hex(stableStringify(unsigned)) };
+    await publish(location.phasePath, join(location.phasePath, 'failures', filename(sequence)), stableStringify(record) + '\n');
+  });
+}
+
+/** Structural private diagnostic read; entries contain no provider error bytes. */
+export function readAsyncLateFailures(input: LocationInput): Promise<readonly AsyncLateFailure[]> {
+  const location = snapshotLocation(input); return locked(location, (metadata, state) => lateFailuresAt(location, metadata.plan, state));
+}
+
 /** Authenticated restricted executor input, read only from the same journal and captured matrix. */
 export async function openCapturedAsyncDelegate(input: AsyncDelegate) {
   const { location, delegate } = await delegatedLocation(structuredClone(input));
   const execution = await locked(location, async metadata => {
     authorize(metadata, delegate);
     const { captured } = await contextAt(location);
-    return freezeAsync({ plan: metadata.plan, call: captured.async!.calls[delegate.callIndex]!, timeoutMs: captured.async!.timeoutMs });
+    // Historical phases remain readable as evidence, but cannot guess routing authority.
+    asyncRefuse(metadata.opinionCycle, 'opinion_cycle_missing');
+    return freezeAsync({ plan: metadata.plan, call: captured.async!.calls[delegate.callIndex]!, timeoutMs: captured.async!.timeoutMs, opinionCycle: metadata.opinionCycle });
   });
   return { ...execution, writer: await openAsyncDelegate(delegate) };
 }

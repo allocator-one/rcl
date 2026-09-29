@@ -86,6 +86,28 @@ describe('verifier event input bounds', () => {
 });
 
 describe('durable verifier phase in the existing checkpoint', () => {
+  it('refuses a verifier intent at the non-dispatch cap before publication or its callback', async () => {
+    const f = await fixture();
+    await runOwned(f, owner => f.journal.beginVerification({ ...planInput(), maxPhysicalCalls: 1 }, owner));
+    const state = (await f.journal.readVerification())!, first = state.records[0]!;
+    const events: import('../../src/dispatch/checkpoint-verification.js').VerificationEvent[] = [];
+    for (let index = 0; index < 500; index++) {
+      const attemptId = `verifier-declined-${index}`;
+      events.push({ type: 'intent', intent: { batchIndex: 0, attemptId, startedAtMs: 210 } },
+        { type: 'not-dispatched', result: { batchIndex: 0, attemptId, finishedAtMs: 210, answerBytes: answer({ status: 'error' }) } });
+    }
+    let previousDigest = first.digest;
+    const records = events.map((event, index) => {
+      const unsigned = { sequence: index + 2, previousDigest, bindings: first.bindings, event };
+      const record = { ...unsigned, digest: hash(stableStringify(unsigned)) }; previousDigest = record.digest; return record;
+    });
+    const directory = join(f.path, 'verification', 'events');
+    await Promise.all(records.map(record => writeFile(join(directory, `${String(record.sequence).padStart(8, '0')}.json`), `${stableStringify(record)}\n`, { mode: 0o600 })));
+    const callback = vi.fn();
+    await expect(runOwned(f, owner => f.journal.recordVerificationIntent(
+      { batchIndex: 0, attemptId: 'verifier-real', startedAtMs: 211 }, owner, callback))).rejects.toThrow('intent_capacity');
+    expect(callback).not.toHaveBeenCalled(); expect(await readdir(directory)).toHaveLength(1001);
+  }, 20_000);
   it('retains exact request and result bytes, reopens without paid callbacks and leaves the reviewer proof unchanged', async () => {
     const f = await fixture(), original = await f.journal.exportProof();
     expect(await f.journal.readVerification()).toBeUndefined();
@@ -183,6 +205,24 @@ describe('durable verifier phase in the existing checkpoint', () => {
     await expect(runOwned(f, owner => f.journal.recordVerificationIntent({ ...intent(), attemptId: 'resample' }, owner))).rejects.toThrow();
     const phase = (await f.journal.readVerification())!; expect(phase.intents).toHaveLength(1); expect(phase.uncertain).toHaveLength(1);
     await expect(f.journal.exportVerificationProof()).rejects.toThrow('checkpoint_verification_unsealed');
+  });
+
+  it('binds same-lock non-dispatch accounting to the just-persisted verifier intent', async () => {
+    const f = await fixture();
+    await expect(runOwned(f, async owner => {
+      await f.journal.beginVerification(planInput(), owner);
+      expect(await f.journal.recordVerificationIntent(intent(0), owner)).toBe(true);
+      return f.journal.recordVerificationIntent(intent(1), owner, () => ({
+        batchIndex: 0,
+        attemptId: 'verifier-0',
+        finishedAtMs: 220,
+        answerBytes: answer({ status: 'error', text: '', error: 'not dispatched' }),
+      }));
+    })).rejects.toThrow('checkpoint_verification_not_dispatched_mismatch');
+    const phase = (await f.journal.readVerification())!;
+    expect(phase.intents).toEqual([intent(0), intent(1)]);
+    expect(phase.notDispatched).toEqual([]);
+    expect(phase.uncertain).toEqual([intent(0), intent(1)]);
   });
 
   it('snapshots arguments before waiting for ownership and serializes simultaneous launch claims', async () => {

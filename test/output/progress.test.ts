@@ -45,6 +45,80 @@ describe('council run planning', () => {
         '10m per-call timeout, 3h timeout-bound queue estimate'
     );
   });
+
+  it('bounds retained original waves by the captured effective provider policy', () => {
+    const options = {
+      totalCalls: 25,
+      reviewers: 25,
+      chunks: 1,
+      concurrency: 9,
+      timeoutMs: 540_000,
+      providers: Array.from({ length: 25 }, () => 'anthropic'),
+      providerConcurrency: { anthropic: 2, openai: 1 },
+    };
+    expect(buildCouncilRunPlan(options)).toMatchObject({
+      concurrency: 9,
+      waves: 13,
+      timeoutBoundMs: 7_020_000,
+    });
+    expect(buildCouncilRunPlan({ ...options, providers: Array(25).fill('google') }))
+      .toMatchObject({ waves: 3, timeoutBoundMs: 1_620_000 });
+    expect(buildCouncilRunPlan({ ...options,
+      providers: [...Array(24).fill('google'), 'openai'],
+      providerConcurrency: { openai: 1 },
+    })).toMatchObject({ waves: 3, timeoutBoundMs: 1_620_000 });
+    expect(buildCouncilRunPlan({ ...options, totalCalls: 9, reviewers: 9, concurrency: 3,
+      providers: ['anthropic', 'anthropic', 'anthropic', 'openai', 'openai', 'openai', 'openai', 'openai', 'openai'],
+      providerConcurrency: { anthropic: 3, openai: 2 },
+    })).toMatchObject({ waves: 4, timeoutBoundMs: 2_160_000 });
+    expect(() => buildCouncilRunPlan({ ...options, providers: options.providers.slice(1) }))
+      .toThrow('Invalid retained provider matrix');
+    for (const cap of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => buildCouncilRunPlan({ ...options, providerConcurrency: { anthropic: cap } }))
+        .toThrow('Invalid retained provider concurrency');
+    }
+  });
+
+  it('refuses retained wave simulation beyond the paid-work safety limit', () => {
+    expect(() => buildCouncilRunPlan({
+      totalCalls: 513,
+      reviewers: 513,
+      chunks: 1,
+      concurrency: 1,
+      timeoutMs: 1_000,
+      providers: Array(513).fill('openai'),
+      providerConcurrency: { openai: 1 },
+    })).toThrow(/513 blocking calls.*safety limit of 512/i);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'rejects non-finite global concurrency %s before wave simulation',
+    concurrency => {
+      expect(() => buildCouncilRunPlan({
+        totalCalls: 1,
+        reviewers: 1,
+        chunks: 1,
+        concurrency,
+        timeoutMs: 1_000,
+        providers: ['openai'],
+      })).toThrow('Invalid review concurrency');
+    },
+  );
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'uses the global cap for an uncapped prototype-key provider %s',
+    provider => {
+      expect(buildCouncilRunPlan({
+        totalCalls: 1,
+        reviewers: 1,
+        chunks: 1,
+        concurrency: 1,
+        timeoutMs: 1_000,
+        providers: [provider],
+        providerConcurrency: {},
+      })).toMatchObject({ waves: 1, timeoutBoundMs: 1_000 });
+    },
+  );
 });
 
 describe('CouncilProgressReporter', () => {

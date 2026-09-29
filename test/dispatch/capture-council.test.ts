@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { buildPrompt, type ContextDoc } from '../../src/prepare/prompt-builder.js';
 import { chunkDiff, formatChunkForPrompt } from '../../src/prepare/chunker.js';
-import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
+import { configDigest, configIdentity, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
-import { decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
+import { captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
+import { freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
 import type { Config } from '../../src/config/schema.js';
 import type { Diff, FileChange } from '../../src/resolver/types.js';
 import type { ReviewAssignment } from '../../src/roles/types.js';
@@ -50,9 +51,38 @@ describe('capture prepared council', () => {
     expect(result.patchBytes).toBe(stableStringify([...input.diff.files].sort((a, b) => a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0).map(f => ({ filename: f.filename, status: f.status, previousFilename: f.previousFilename ?? null, patch: f.patch, additions: f.additions, deletions: f.deletions, blobSha: f.blobSha ?? null }))));
     expect(sha256Hex(result.patchBytes)).toBe(diffDigest(input.diff.files));
     expect(diffDigest(reversed.diff.files)).toBe(diffDigest(input.diff.files));
-    expect(result.plan.configSha256).toBe(configDigest(input.config));
+    expect(result.captured.config.providerConcurrency).toEqual({ anthropic: 2 });
+    expect(result.plan.configSha256).toBe(configDigest({
+      ...input.config,
+      providerConcurrency: { anthropic: 2 },
+    }));
     expect(result.configBytes).not.toContain('never-captured');
     expect(result.configBytes).not.toContain('harness');
+  });
+
+  it('preserves an authenticated legacy policy omission but treats an explicit current cap as changed input', async () => {
+    const input = await fixture();
+    const fresh = capturePreparedCouncil(input);
+    const configBytes = configIdentity(input.config);
+    const legacyPlan = freezeCheckpointPlan({ ...fresh.plan, configSha256: sha256Hex(configBytes) });
+    const legacy = captureReviewerInputs({ ...fresh.captured, plan: legacyPlan, configBytes,
+      policy: { version: 1, fraction: fresh.captured.policy.fraction } });
+
+    const unchanged = capturePreparedCouncil({ ...input, comparisonSource: legacy });
+    expect(unchanged.captured.bytes).toBe(legacy.bytes);
+    expect(unchanged.captured.config.providerConcurrency).toBeUndefined();
+
+    const explicit = capturePreparedCouncil({ ...input, comparisonSource: legacy,
+      config: { ...input.config, providerConcurrency: { anthropic: 1 } } });
+    expect(explicit.captured.digest).not.toBe(legacy.digest);
+    expect(explicit.captured.config.providerConcurrency).toEqual({ anthropic: 1 });
+    expect(legacy.config.providerConcurrency).toBeUndefined();
+
+    const unrelatedPlan = freezeCheckpointPlan({ ...legacy.plan, headSha: 'c'.repeat(40) });
+    const unrelated = captureReviewerInputs({ ...legacy, plan: unrelatedPlan,
+      policy: { version: 1, fraction: legacy.policy.fraction } });
+    expect(() => capturePreparedCouncil({ ...input, comparisonSource: unrelated }))
+      .toThrow('capture_council_comparison_mismatch');
   });
 
   it('refuses regenerated/misaligned material inputs instead of recapturing them', async () => {

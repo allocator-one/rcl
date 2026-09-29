@@ -2119,12 +2119,15 @@ async function executeCouncil(
   const totalCalls = chunkAssignments.length;
   const timeoutMs = config.timeout ?? DEFAULT_TIMEOUT_MS;
   const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
+  const providerConcurrency = resolveProviderConcurrency(config.providerConcurrency);
   const runPlan = buildCouncilRunPlan({
     totalCalls,
     reviewers: assignments.length,
     chunks: chunks.length,
     concurrency,
     timeoutMs,
+    providers: chunkAssignments.map(({ assignment }) => assignment.provider),
+    providerConcurrency,
   });
   const planText = formatCouncilRunPlan(runPlan);
   const interactive = process.stderr.isTTY === true;
@@ -2170,7 +2173,7 @@ async function executeCouncil(
         concurrency,
         // Keep the default version-owned rather than materializing it into
         // legacy config digests. Explicit caps remain source-bound inputs.
-        providerConcurrency: resolveProviderConcurrency(config.providerConcurrency),
+        providerConcurrency,
         reasoningEffort: config.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
         // Quorum closure (RCL-26, RCL-136): the round stops waiting once the
         // configured fraction of blocking seats completed every chunk — the

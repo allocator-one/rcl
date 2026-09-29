@@ -1,0 +1,351 @@
+import { loadConvergeRunState, processRoundReport, writeState } from '../../src/converge/run-state.js';
+import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
+import { claimConvergeAttempt } from '../../src/converge/attempt-budget.js';
+import { finishFreshReview, prepareFreshReview } from '../../src/converge/fresh-review.js';
+import { randomUUID } from 'node:crypto';
+import * as asyncLane from '../../src/dispatch/async-lane.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, mkdir, rm, realpath, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { withNativeTarget } from '../../src/converge/target-ownership.js';
+import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
+import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
+import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
+import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit, readAsyncLateFailures } from '../../src/dispatch/checkpoint-async-store.js';
+import { runRetainedAsyncWorker } from '../../src/dispatch/retained-async.js';
+import { executeCheckpointAsync } from '../../src/dispatch/checkpoint-async-execution.js';
+const durability = vi.hoisted(() => ({failPath:'',failPaths:[] as string[],pausePath:'',release:undefined as undefined | (()=>void), paused:undefined as undefined | (()=>void),synced:[] as string[], afterSync: undefined as undefined | ((path:string)=>void)}));
+vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.pausePath){durability.pausePath='';durability.paused?.();await new Promise<void>(resolve=>{durability.release=resolve;});}if(path===durability.failPath||path===durability.failPaths[0]){if(path===durability.failPath)durability.failPath='';if(path===durability.failPaths[0])durability.failPaths.shift();throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
+const roots: string[] = [];
+afterEach(async () => { vi.useRealTimers(); durability.release?.(); durability.failPath=''; durability.failPaths=[]; durability.pausePath=''; durability.release=undefined; durability.paused=undefined; durability.synced=[]; durability.afterSync=undefined; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
+const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
+const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
+async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, originalNativeClaim = {attempt:3,round:2}, timeoutMs = 1000,
+ maxAttemptsPerCall = 2) {
+ const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'async-phase-'))); roots.push(commonDir);
+ const configBytes = '{}', toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
+ const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: sha256Hex('[]'), configSha256: sha256Hex(configBytes), specSha256: sha256Hex(''), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 }, roster: ['a','b'].map(seat => ({seat, model: seat, role: 'general', route: 'fake'})), chunks: [{index:0,total:1,digest:sha256Hex('chunk')}], prompts: ['a','b'].map(seat=>({seat,chunk:0,systemSha256:sha256Hex('s'),userSha256:sha256Hex('u')})) });
+ const role = { name:'general',systemPrompt:'s',focus:[],description:'d',isSpecialized:false };
+ const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})), async: { timeoutMs, maxPhysicalCalls: cap, maxAttemptsPerCall, calls: ['assignment-a','assignment-b'].map(assignmentId=>({assignmentId,chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{...prompts,systemPrompt}})) } });
+ const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim,startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:2,maxAttemptsPerCell:1});
+ let journal!: CheckpointJournal;
+ await withNativeTarget(commonDir,target,async ownership=>{journal=await CheckpointJournal.create({commonDir,namespace:runId,plan,ownership});await journal.bind('captured-inputs',captured.bytes,ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);});
+ const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks[0]!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
+ const input = {commonDir,namespace:runId,plan,calls,maxPhysicalCalls:cap,maxAttemptsPerCall,expiresAtMs:launch.expiresAtMs};
+ return {commonDir,plan,journal,launch,captured,input,path:checkpointPath(commonDir,target,runId)};
+}
+const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
+const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
+const completion = {runId,reportJsonSha256:'c'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false};
+async function launchOriginal(f:Awaited<ReturnType<typeof fixture>>,
+ remote:Parameters<typeof prepareFreshReview>[0]['remote'],
+ pending?: (delegates:Awaited<ReturnType<typeof initialize>>['delegates'])=>Promise<void>) {
+ let delegates!:Awaited<ReturnType<typeof initialize>>['delegates'], cycleId='';
+ await withNativeTarget(f.commonDir,target,async ownership=>{
+  const fresh=await prepareFreshReview({gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,remote,ownership});
+  const state=(await loadConvergeRunState(f.commonDir,target))!;
+  await claimConvergeAttempt({gitCommonDir:f.commonDir,target,ownership,freshReviewOperation:fresh.operationId,
+   beforeClaim:async claimOwnership=>{
+    state.lastLaunch={status:'pending',attempt:1,round:1,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),startedAt:new Date().toISOString(),pid:process.pid};
+    await writeState(f.commonDir,state,claimOwnership);
+   },
+   afterClaim:async(claim,claimOwnership)=>{
+    state.lastLaunch!.attempt=claim.attempt;await writeState(f.commonDir,state,claimOwnership);
+    cycleId=state.cycle!.id;delegates=(await initializeAsyncPhase({...f.input,ownership:claimOwnership})).delegates;
+    await pending?.(delegates);
+    state.lastLaunch={...state.lastLaunch!,...completion,status:'completed'};state.updatedAt=new Date().toISOString();
+    await writeState(f.commonDir,state,claimOwnership);
+    await finishFreshReview(f.commonDir,target,fresh.operationId,claimOwnership);
+   }
+  });
+ });
+ return {delegates,cycleId};
+}
+function causalMessages(error:unknown):string {
+ if(error instanceof AggregateError)return [error.message,...error.errors.map(causalMessages)].join(' ');
+ if(error instanceof Error)return [error.message,error.cause?causalMessages(error.cause):''].join(' ');
+ return String(error);
+}
+describe('restricted original async checkpoint phase',()=>{
+
+ it.each(['pending', 'same-cycle-before', 'fresh-cycle-before', 'same-cycle-during', 'fresh-cycle-during'] as const)(
+  'binds async output to the actual original cycle with %s advancement', async timing => {
+   const f=await fixture(3,prompts.systemPrompt,{attempt:1,round:1});
+   const store=join(f.commonDir,'async-opinions');await mkdir(store,{mode:0o700});
+   const directory=vi.spyOn(asyncLane,'resolveAsyncStoreDir').mockResolvedValue(store);
+   let active:import('../../src/converge/review-cycle.js').ReviewCycleReceipt|null=null;
+   const remote={repo:'allocator-one/rcl',prNumber:105,url:'https://harness.example',
+    current:async()=>active,start:async(request:import('../../src/converge/review-cycle.js').ReviewCycleRequest)=>
+     (active={...request,id:randomUUID(),inserted_at:new Date().toISOString()})};
+   const guard={gitCommonDir:f.commonDir,target,headSha:f.plan.headSha,inputSha256:'d'.repeat(64),cycleRemote:remote,validate:async()=>{}};
+   let originalCycle='',delegates:Awaited<ReturnType<typeof initialize>>['delegates'];
+   const adapter=vi.fn(async()=>JSON.parse(review()));
+   const worker=()=>runRetainedAsyncWorker(JSON.stringify(delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter})});
+   const advance=async(fresh:boolean)=>{
+    if(!fresh)await processRoundReport({gitCommonDir:f.commonDir,target,round:1,findings:[],runId,reportSha256:completion.reportJsonSha256,cycleId:originalCycle});
+    await guardReviewLaunch({...guard,inputSha256:'e'.repeat(64),startOver:fresh,
+     run:async()=>({...completion,runId:randomUUID()})});
+   };
+   try {
+    const launched=await launchOriginal(f,remote,timing==='pending'?async current=>{delegates=current;await worker();}:undefined);
+    originalCycle=launched.cycleId;delegates=launched.delegates;
+    if(timing.endsWith('-before')){await advance(timing.startsWith('fresh'));await worker();}
+    if(timing.endsWith('-during')){adapter.mockImplementationOnce(async()=>{await advance(timing.startsWith('fresh'));return JSON.parse(review());});await worker();}
+    expect(adapter).toHaveBeenCalledOnce();
+    expect(await asyncLane.collectAsyncResults(store,asyncLane.asyncTargetKey('',target))).toEqual([]);
+    const current=(await loadConvergeRunState(f.commonDir,target))!.cycle!.id;
+    if(current!==originalCycle)expect(await asyncLane.collectAsyncResults(store,asyncLane.asyncTargetKey('',target,current))).toEqual([]);
+    expect(await asyncLane.collectAsyncResults(store,asyncLane.asyncTargetKey('',target,originalCycle))).toMatchObject([{status:'success',async:true}]);
+    expect((await seal(f)).state.intents).toHaveLength(1);
+   } finally {directory.mockRestore();}
+ });
+
+ it.each([false,true])('refuses changed opinion-cycle metadata even if the public delegate digest is recomputed (%s)',async recompute=>{
+  const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn(()=>({provider:'fake',name:'fake',ask:vi.fn(),review:async()=>JSON.parse(review())}));
+  const path=join(f.path,'async','phase.json'),metadata=JSON.parse(await readFile(path,'utf8'));
+  metadata.opinionCycle.cycleId=randomUUID();await writeFile(path,stableStringify(metadata)+'\n',{mode:0o600});
+  const delegate={...opened.delegates[0]!};
+  if(recompute)delegate.planDigest=sha256Hex(stableStringify({plan:metadata.plan,opinionCycle:metadata.opinionCycle}));
+  await expect(runRetainedAsyncWorker(JSON.stringify(delegate),{adapterFactory,publish:vi.fn()})).rejects.toThrow('invalid_delegate');
+  expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
+ });
+
+ it('refuses async execution without an immutable opinion-cycle binding before paid intent',async()=>{
+  const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn(()=>({provider:'fake',name:'fake',ask:vi.fn(),review:async()=>JSON.parse(review())}));
+  const path=join(f.path,'async','phase.json'),metadata=JSON.parse(await readFile(path,'utf8'));delete metadata.opinionCycle;
+  await writeFile(path,stableStringify(metadata)+'\n',{mode:0o600});
+  await expect(runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory,publish:vi.fn()})).rejects.toThrow('opinion_cycle');
+  expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
+ });
+ it('refuses async initialization for a different original native claim',async()=>{
+  const f=await fixture();let active:import('../../src/converge/review-cycle.js').ReviewCycleReceipt|null=null;
+  const remote={repo:'allocator-one/rcl',prNumber:105,url:'https://harness.example',current:async()=>active,
+   start:async(request:import('../../src/converge/review-cycle.js').ReviewCycleRequest)=>(active={...request,id:randomUUID(),inserted_at:new Date().toISOString()})};
+  let failure:unknown;try{await launchOriginal(f,remote);}catch(error){failure=error;}
+  expect(causalMessages(failure)).toContain('native_claim');
+  await expect(readFile(join(f.path,'async','phase.json'))).rejects.toMatchObject({code:'ENOENT'});
+ });
+
+ it('preserves adapter invocation diagnostics without accepting hidden async retries', async()=>{
+  const f=await fixture(),opened=await initialize(f),writer=await openAsyncDelegate(opened.delegates[0]);
+  const intent=await writer.claim(prompts);
+  await expect(writer.recordResult(intent.attemptId,review('success',{adapterAttempts:2}))).rejects.toThrow('invalid_review');
+  expect((await readAsyncPhase(f.input)).state.outcomes).toEqual([]);
+  const bytes=review('success',{adapterAttempts:1});await writer.recordResult(intent.attemptId,bytes);
+  expect((await seal(f)).state.outcomes[0].reviewBytes).toBe(bytes);
+ });
+
+ it('publishes opportunistic opinions only after same-journal durable outcomes, including late audit', async()=>{
+  const f=await fixture(),opened=await initialize(f);const published:any[]=[];
+  await seal(f);
+  await runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]), {adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()}),publish:async(value:any)=>published.push(value)});
+  expect(published).toEqual([]);expect((await readAsyncPhase(f.input)).state.intents).toEqual([]);
+  const g=await fixture(),active=await initialize(g);
+  await runRetainedAsyncWorker(JSON.stringify(active.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:async()=>JSON.parse(review())}),publish:async(value:any)=>{
+    expect((await readAsyncPhase(g.input)).state.outcomes).toHaveLength(1);published.push(value);
+  }});
+  expect(published).toHaveLength(1);expect(published[0]).toMatchObject({async:true,status:'success',findings:[{title:'keep'}]});
+ });
+ it('retries publication from the durable outcome without another provider call',async()=>{
+  const f=await fixture(),opened=await initialize(f),adapter=vi.fn(async()=>JSON.parse(review()));
+  const firstPublish=vi.fn(async()=>{throw new Error('synthetic publication failure');});
+  await expect(runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter}),publish:firstPublish}))
+   .rejects.toThrow('synthetic publication failure');
+  expect(adapter).toHaveBeenCalledOnce();expect((await readAsyncPhase(f.input)).state.outcomes).toHaveLength(1);
+  const published:any[]=[];
+  await runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:adapter}),publish:async value=>{published.push(value);}});
+  expect(adapter).toHaveBeenCalledOnce();expect(published).toMatchObject([{status:'success',async:true}]);
+ });
+ it('does not publish an ordinary opinion when the response is durable only as late audit',async()=>{
+  const f=await fixture(),opened=await initialize(f),published:any[]=[];let resolve!: (value:any)=>void,started!:()=>void;
+  const began=new Promise<void>(done=>started=done),response=new Promise<any>(done=>resolve=done);
+  const running=runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{
+   adapterFactory:()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{started();return response;})}),
+   publish:async value=>{published.push(value);},
+  });
+  await began;await seal(f);resolve(JSON.parse(review()));await running;
+  expect((await readAsyncPhase(f.input)).state.outcomes).toEqual([]);
+  expect(await readAsyncLateAudit(f.input)).toHaveLength(1);
+  expect(published).toEqual([]);
+ });
+ it('refuses oversized, malformed or forged worker delegation before constructing an adapter',async()=>{
+  const f=await fixture(),opened=await initialize(f),adapterFactory=vi.fn();
+  for(const bytes of ['x'.repeat(16385),'null',JSON.stringify({...opened.delegates[0],token:'0'.repeat(64)})]) {
+   await expect(runRetainedAsyncWorker(bytes,{adapterFactory,publish:vi.fn()})).rejects.toThrow();
+  }
+  expect(adapterFactory).not.toHaveBeenCalled();expect((await seal(f)).state.intents).toEqual([]);
+ });
+
+ it.runIf(process.platform !== 'win32')('delegates across a real process while native ownership is held and never redispatches a killed worker intent',async()=>{
+  const f=await fixture();const worker=join(f.commonDir,'worker.mjs'),reference=join(f.commonDir,'delegate.json');
+  const source=fileURLToPath(new URL('../../src/dispatch/checkpoint-async-store.ts',import.meta.url));
+  await writeFile(worker,`import {readFile} from 'node:fs/promises'; import {openAsyncDelegate} from ${JSON.stringify(source)}; const w=await openAsyncDelegate(JSON.parse(await readFile(process.argv[2],'utf8'))); const i=await w.claim(${JSON.stringify(prompts)}); console.log(JSON.stringify(i??null)); if(process.argv[3]==='hold')setInterval(()=>{},1000);`,{mode:0o600});
+  await withNativeTarget(f.commonDir,target,async ownership=>{
+   const opened=await initializeAsyncPhase({...f.input,ownership});await writeFile(reference,JSON.stringify(opened.delegates[0]),{mode:0o600});
+   const child=spawn(process.execPath,['--import',fileURLToPath(new URL('../../node_modules/tsx/dist/loader.mjs',import.meta.url)),worker,reference,'hold'],{stdio:['ignore','pipe','pipe']});let stderr='';child.stderr.on('data',x=>stderr+=x);const exit=new Promise(resolve=>child.on('exit',(code,signal)=>resolve({code,signal})));
+   let intent:any;
+   try {
+    intent=await new Promise<any>((resolve,reject)=>{let data='';child.stdout.on('data',x=>{data+=x;if(data.includes('\n')){try{resolve(JSON.parse(data.trim()));}catch(e){reject(e);}}});child.on('exit',()=>reject(new Error(stderr||'worker exited before durable intent')));});
+    expect(intent.attemptId).toMatch(/^async-/);
+   } finally { child.kill('SIGKILL'); }
+   expect(await exit).toEqual({code:null,signal:'SIGKILL'});
+   const reopened=await promisify(execFile)(process.execPath,['--import',fileURLToPath(new URL('../../node_modules/tsx/dist/loader.mjs',import.meta.url)),worker,reference],{encoding:'utf8'});expect(JSON.parse(reopened.stdout)).toBeNull();
+   const proof=await sealAsyncPhase({...f.input,ownership});expect(proof.state.uncertain).toEqual([intent]);
+  });
+ });
+
+ it('executes only captured prompts and routes with separate durable attempts and SDK retries disabled', async()=>{
+  const f=await fixture(),opened=await initialize(f);let calls=0;
+  const observed:Array<{route:string[];maxRetries:number;timeoutMs:number;intents:number}>=[];
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async(model,role,system,user,options)=>{
+   observed.push({route:[model,role,system,user],maxRetries:options.maxRetries,timeoutMs:options.timeoutMs,
+    intents:(await readAsyncPhase(f.input)).state.intents.length});
+   return JSON.parse(review(++calls===1?'timeout':'success'));
+  })};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:()=>{throw new Error('unexpected late failure');}});
+  expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  expect(observed.map(row=>row.route)).toEqual(Array(2).fill(['async-model','general',prompts.systemPrompt,prompts.userPrompt]));
+  expect(observed.map(row=>row.maxRetries)).toEqual([0,0]);
+  expect(observed.map(row=>row.timeoutMs>0&&row.timeoutMs<=1000)).toEqual([true,true]);
+  expect(observed.map(row=>row.intents)).toEqual([1,2]);
+  const proof=await seal(f);expect(proof.state.outcomes).toHaveLength(2);expect(proof.state.uncertain).toEqual([]);
+  expect(new Set(proof.state.intents.map(row=>row.attemptId)).size).toBe(2);
+ });
+ it.each([
+  ['rejected adapter', async()=>{throw new Error('synthetic adapter rejection');}],
+  ['invalid adapter result', async()=>({model:'wrong'})],
+ ])('durably records an observed %s as an error outcome',async(_kind,reviewCall)=>{
+  const f=await fixture(),opened=await initialize(f);
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(reviewCall)};
+  await expect(executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()}))
+   .resolves.toEqual({newPhysicalCalls:1});
+  const proof=await seal(f);expect(proof.state.uncertain).toEqual([]);expect(proof.state.outcomes).toHaveLength(1);
+  expect(proof.state.outcomes[0]).toMatchObject({possiblyBilled:true});
+  expect(proof.physicalAttempts).toMatchObject([{outcomeCertainty:'observed',possiblyBilled:true}]);
+  expect(JSON.parse(proof.state.outcomes[0]!.reviewBytes)).toMatchObject({model:'async-model',role:'general',provider:'fake',async:true,status:'error'});
+ });
+ it('cuts the deadline against provider response and still awaits durable result persistence', async()=>{
+  const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
+  vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
+  let paused!:()=>void;const persistenceStarted=new Promise<void>(resolve=>{paused=resolve;});durability.paused=paused;
+  durability.pausePath=join(f.path,'async','events','00000002.json');
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review()))};
+  let completed=false;const running=executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()}).then(value=>{completed=true;return value;});
+  await persistenceStarted;await vi.advanceTimersByTimeAsync(40);
+  expect(completed).toBe(false);
+  durability.release?.();
+  expect(await running).toEqual({newPhysicalCalls:1});
+  expect((await seal(f)).state.outcomes).toHaveLength(1);
+ });
+ it('durably records one private failure when a timed-out result cannot enter late audit', async()=>{
+  const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
+  let resolve!: (value:any)=>void,providerStarted!:()=>void;const raw=new Promise<any>(done=>{resolve=done;}),started=new Promise<void>(done=>{providerStarted=done;});
+  const adapterFactory=()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{providerStarted();return raw;})});
+  const running=runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory,publish:vi.fn()});
+  await started;expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(1);await running;
+  durability.failPath=join(f.path,'async','events');
+  resolve(JSON.parse(review()));
+  await vi.waitFor(async()=>expect(await readAsyncLateFailures(f.input)).toHaveLength(1));
+  const failures=await readAsyncLateFailures(f.input);
+  expect(failures[0]).toMatchObject({callIndex:0,kind:'late_audit_failure'});
+  expect(failures[0]?.attemptId).toBe((await readAsyncPhase(f.input)).state.intents[0]?.attemptId);
+  expect(JSON.stringify(failures)).not.toContain('synthetic fsync failure');
+  await seal(f);expect(await readAsyncLateAudit(f.input)).toEqual([]);
+ });
+ it('contains a late-failure marker rejection after one durable attempt', async()=>{
+  const f=await fixture(3,prompts.systemPrompt,{attempt:3,round:2},20),opened=await initialize(f);
+  let resolve!: (value:any)=>void,providerStarted!:()=>void;const raw=new Promise<any>(done=>{resolve=done;}),started=new Promise<void>(done=>{providerStarted=done;});
+  const adapterFactory=()=>({provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{providerStarted();return raw;})});
+  const unhandled:unknown[]=[];const observe=(error:unknown)=>unhandled.push(error);process.on('unhandledRejection',observe);
+  try {
+   const running=runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory,publish:vi.fn()});
+   await started;expect((await readAsyncPhase(f.input)).state.intents).toHaveLength(1);
+   await expect(running).resolves.toBeUndefined();
+   durability.failPaths=[join(f.path,'async','events'),join(f.path,'async','failures')];
+   resolve(JSON.parse(review()));
+   await vi.waitFor(()=>expect(durability.failPaths).toEqual([]));await new Promise<void>(resolve=>setImmediate(resolve));
+   expect(durability.synced.filter(path=>path===join(f.path,'async','failures'))).toHaveLength(1);
+   expect(unhandled).toEqual([]);
+  } finally {process.off('unhandledRejection',observe);}
+ });
+ it('does not dispatch when cancellation arrives after durable intent acknowledgement', async()=>{
+  const f=await fixture(1,prompts.systemPrompt,{attempt:3,round:2},1000,1);
+  const opened=await initialize(f),controller=new AbortController(),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
+  durability.afterSync=path=>{if(path===join(f.path,'async','events','00000001.json'))controller.abort();};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:vi.fn()});
+  expect(adapter.review).not.toHaveBeenCalled();expect(result.newPhysicalCalls).toBe(0);
+  const phase=await readAsyncPhase(f.input);expect(phase.state.uncertain).toEqual([]);expect(phase.state.outcomes).toEqual([]);
+  expect(phase.state.notDispatched).toHaveLength(1);
+  const retry={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review()))};
+  expect(await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>retry,onLateAuditError:vi.fn()})).toEqual({newPhysicalCalls:1});
+  expect(retry.review).toHaveBeenCalledTimes(1);
+  const proof=await seal(f);expect(proof.physicalAttempts).toHaveLength(1);
+  expect(proof.physicalAttempts[0]).toMatchObject({outcomeCertainty:'observed',possiblyBilled:true});
+  expect(JSON.parse(proof.state.notDispatched[0]!.reviewBytes)).toMatchObject({status:'error',async:true});
+ });
+it('contains a derived callback failure and continues an observed timeout retry',async()=>{
+  const f=await fixture(),opened=await initialize(f);let calls=0;const errors:unknown[]=[];
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review(++calls===1?'timeout':'success')))};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,
+   onReviewRecorded:async()=>{throw new Error('synthetic derived failure');},onLateAuditError:error=>{errors.push(error);}});
+  expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  await vi.waitFor(()=>expect(errors).toHaveLength(2));expect(errors.every(error=>String(error).includes('synthetic derived failure'))).toBe(true);
+  expect((await seal(f)).state.outcomes).toHaveLength(2);
+});
+it('does not let an unbounded derived callback stop a durable timeout retry',async()=>{
+  const f=await fixture(),opened=await initialize(f);let calls=0;
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(async()=>JSON.parse(review(++calls===1?'timeout':'success')))};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,
+   onReviewRecorded:()=>new Promise(()=>{}),onLateAuditError:vi.fn()});
+  expect(result.newPhysicalCalls).toBe(2);expect(adapter.review).toHaveBeenCalledTimes(2);
+  expect((await seal(f)).state.outcomes).toHaveLength(2);
+});
+ it('returns on cancellation without waiting for a noncooperative adapter and audits its late result', async()=>{
+  const f=await fixture(),opened=await initialize(f),controller=new AbortController();let resolve!: (value:any)=>void,started!:()=>void;
+  const began=new Promise<void>(r=>started=r),raw=new Promise<any>(r=>resolve=r),errors:unknown[]=[];
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{started();return raw;})};
+  const running=executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:error=>errors.push(error)});
+  await began;controller.abort();expect((await running).newPhysicalCalls).toBe(1);const proof=await seal(f);
+  resolve(JSON.parse(review()));await vi.waitFor(async()=>expect(await readAsyncLateAudit(f.input)).toHaveLength(1));
+  expect((await seal(f)).bytes).toBe(proof.bytes);expect(errors).toEqual([]);
+ });
+ it('persists a provider rejection that settles after cancellation as one late error result', async()=>{
+  const f=await fixture(),opened=await initialize(f),controller=new AbortController();let reject!: (error:unknown)=>void,started!:()=>void;
+  const began=new Promise<void>(resolve=>started=resolve),raw=new Promise<any>((_resolve,rejectPromise)=>reject=rejectPromise),sink=vi.fn();
+  const adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn(()=>{started();return raw;})};
+  const running=executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,signal:controller.signal,onLateAuditError:sink});
+  await began;controller.abort();expect(await running).toEqual({newPhysicalCalls:1});const proof=await seal(f),attempt=proof.state.intents[0]!;
+  reject(new Error('late provider rejection'));
+  await vi.waitFor(async()=>expect(await readAsyncLateAudit(f.input)).toHaveLength(1));
+  const late=(await readAsyncLateAudit(f.input))[0]!;
+  expect(late.result.attemptId).toBe(attempt.attemptId);
+  expect(JSON.parse(late.result.reviewBytes)).toMatchObject({model:'async-model',role:'general',provider:'fake',async:true,status:'error'});
+  expect((await seal(f)).bytes).toBe(proof.bytes);expect(await readAsyncLateFailures(f.input)).toEqual([]);expect(sink).not.toHaveBeenCalled();
+ });
+
+ it('checks absolute expiry again after fsync and records that the intent never dispatched', async()=>{
+  const f=await fixture(),opened=await initialize(f),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
+  durability.afterSync=path=>{if(path===join(f.path,'async','events','00000001.json')){vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.expiresAtMs);}};
+  const result=await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()});
+  expect(result.newPhysicalCalls).toBe(0);expect(adapter.review).not.toHaveBeenCalled();
+  const publish=vi.fn();await runRetainedAsyncWorker(JSON.stringify(opened.delegates[0]),{adapterFactory:()=>adapter,publish});
+  expect(publish).not.toHaveBeenCalled();
+  const proof=await seal(f);expect(proof.state.uncertain).toEqual([]);expect(proof.state.outcomes).toEqual([]);
+  expect(proof.state.notDispatched).toHaveLength(1);
+  expect(proof.physicalAttempts).toEqual([]);
+  expect(JSON.parse(proof.state.notDispatched[0]!.reviewBytes)).toMatchObject({status:'error',async:true});
+ });
+ it('never starts a new adapter request after main finalization cuts off pending claims', async()=>{
+  const f=await fixture(),opened=await initialize(f),adapter={provider:'fake',name:'fake',ask:vi.fn(),review:vi.fn()};
+  await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
+  expect(await executeCheckpointAsync({delegate:opened.delegates[0],adapterFactory:()=>adapter,onLateAuditError:vi.fn()})).toEqual({newPhysicalCalls:0});
+  expect(adapter.review).not.toHaveBeenCalled();
+ });
+
+});

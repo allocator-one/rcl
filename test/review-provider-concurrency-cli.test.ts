@@ -96,6 +96,7 @@ describe('review CLI provider concurrency defaults', () => {
       });
 
       expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toContain('concurrency 9 → 2 wave(s)');
       expect(calls).toBe(3);
       expect(peak).toBe(2);
       const report = JSON.parse(await readFile(join(directory, 'report.json'), 'utf8')) as {
