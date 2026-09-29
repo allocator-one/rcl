@@ -34,7 +34,10 @@ function accepted<T>(outcome: SinkOutcome<T>): T {
   return outcome.value;
 }
 async function privateRead(path: string, limit: number): Promise<string> {
-  const check = async () => { const stat = await lstat(path); if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.geteuid?.() || (stat.mode & 0o777) !== 0o600) fail('unsafe_file'); };
+  const check = async () => {
+    const stat = await lstat(path), effectiveUid = process.geteuid?.();
+    if (!stat.isFile() || stat.nlink !== 1 || (effectiveUid !== undefined && stat.uid !== effectiveUid) || (stat.mode & 0o777) !== 0o600) fail('unsafe_file');
+  };
   await check(); const raw = await readStable(path, limit); await check();
   // readStable's UTF-8 decoder may normalize BOM; private payload bytes may not.
   if (!Buffer.from(raw.text).equals(raw.raw)) fail('nonexact_bytes');
