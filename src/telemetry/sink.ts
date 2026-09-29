@@ -46,8 +46,8 @@ export interface RequestOptions {
   timeoutMs?: number;
   /** The most the response body may hold (default: a receipt's worth). */
   maxResponseBytes?: number;
-  /** Recovery reads require HTTP 200 and a complete data/meta envelope, never a partial/error answer. */
-  requireCompleteRead?: boolean;
+  /** Recovery reads require HTTP 200 and a strict envelope; 'data' permits endpoints without meta. */
+  requireCompleteRead?: boolean | 'data';
   /** Cancellation/deadline for an attested same-workflow retry operation. */
   signal?: AbortSignal;
 }
@@ -667,16 +667,16 @@ export class HarnessSink {
   async getJson<T>(path: string, validate: (data: unknown, meta?: unknown) => T | null, options: RequestOptions = {}): Promise<SinkOutcome<T>> {
     const result = await this.request('GET', path, undefined, 'application/json', { maxResponseBytes: MAX_READ_RESPONSE_BYTES, ...options });
     return this.classify(result, (body, status) => {
-      if (options.requireCompleteRead && (status !== 200 || !completeReadBody(body))) return null;
+      if (options.requireCompleteRead && (status !== 200 || !completeReadBody(body, options.requireCompleteRead !== 'data'))) return null;
       const response = body as { data?: unknown; meta?: unknown } | null;
       return validate(response?.data, response?.meta);
     });
   }
 }
 
-function completeReadBody(body: unknown): boolean {
+function completeReadBody(body: unknown, requireMeta = true): boolean {
   return body !== null && typeof body === 'object' && !Array.isArray(body) &&
-    Object.hasOwn(body, 'data') && Object.hasOwn(body, 'meta') &&
+    Object.hasOwn(body, 'data') && (!requireMeta || Object.hasOwn(body, 'meta')) &&
     Object.keys(body).every(key => key === 'data' || key === 'meta');
 }
 

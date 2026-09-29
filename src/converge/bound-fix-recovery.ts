@@ -19,7 +19,7 @@ export function createBoundFixRecovery(
     repo, prNumber, runId,
     read: async () => {
       const [owner, name] = repo.split('/');
-      const status = await getGateStatus(sink, owner, name, prNumber, { requireCompleteRead: true });
+      const status = await getGateStatus(sink, owner, name, prNumber, { requireCompleteRead: 'data' });
       if (status.kind !== 'ok') throw new Error('The live Harness PR status could not be read.');
       const run = await sink.getJson(`/api/v1/reviews/runs/${encodeURIComponent(runId)}`, (data, meta) => {
         if (!isRunDetail(data, runId)) return null;

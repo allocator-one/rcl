@@ -3,12 +3,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch, type GuardedLaunchOptions } from '../../src/converge/launch-guard.js';
+import { createBoundFixRecovery } from '../../src/converge/bound-fix-recovery.js';
 import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunState, processRoundReport, recordVerdicts, resolveRoundResolution, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import type { GateStatus, RunDetail } from '../../src/evidence/types.js';
 import { sha256Hex } from '../../src/report/run-header.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
+import { HarnessSink } from '../../src/telemetry/sink.js';
 
 const directories: string[] = [];
 const target = 'bound-recovery-fixture';
@@ -85,6 +87,67 @@ afterEach(async () => {
 });
 
 describe('bound fix-obligation recovery (RCL-148)', () => {
+  function transportRecovery(evidence: ReturnType<typeof serverEvidence>, overrides: {
+    statusBody?: string; runBody?: string; statusCode?: number; runCode?: number;
+  } = {}) {
+    const fetchImpl = vi.fn<typeof fetch>(async input => {
+      const url = String(input);
+      if (url.endsWith(`/api/v1/reviews/prs/${repo}/${prNumber}`)) {
+        return new Response(overrides.statusBody ?? JSON.stringify({ data: evidence.status }),
+          { status: overrides.statusCode ?? 200 });
+      }
+      if (url.endsWith(`/api/v1/reviews/runs/${runId}`)) {
+        return new Response(overrides.runBody ?? JSON.stringify({
+          data: evidence.run, meta: { bound_classification_protocol: 1 },
+        }), { status: overrides.runCode ?? 200 });
+      }
+      throw new Error(`Unexpected recovery request: ${url}`);
+    });
+    const sink = new HarnessSink({
+      credential: { url: 'https://harness.example.test', token: 'aone_TESTTOKEN0123456789', source: 'login' },
+      rclVersion: 'test', fetchImpl,
+    });
+    return { recovery: createBoundFixRecovery(sink, repo, prNumber, runId), fetchImpl };
+  }
+
+  it('admits recovery through the production data-only PR status and data/meta run envelopes', async () => {
+    const f = await fixture();
+    const { recovery, fetchImpl } = transportRecovery(f.evidence);
+
+    await guardReviewLaunch({ ...f.options, boundFixRecovery: recovery });
+
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      `https://harness.example.test/api/v1/reviews/prs/${repo}/${prNumber}`,
+      `https://harness.example.test/api/v1/reviews/runs/${runId}`,
+    ]);
+    expect(f.run).toHaveBeenCalledExactlyOnceWith({ target, round: 3, attempt: 3 });
+    expect(await loadConvergeAttemptState(f.options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 3 });
+  });
+
+  it.each([
+    ['missing status data', (_e: ReturnType<typeof serverEvidence>) => ({ statusBody: JSON.stringify({ meta: {} }) })],
+    ['status error envelope', (e: ReturnType<typeof serverEvidence>) => ({ statusBody: JSON.stringify({ data: e.status, error: 'partial' }) })],
+    ['extra status envelope key', (e: ReturnType<typeof serverEvidence>) => ({ statusBody: JSON.stringify({ data: e.status, partial: true }) })],
+    ['duplicate status data', (e: ReturnType<typeof serverEvidence>) => ({ statusBody: `{"data":null,"data":${JSON.stringify(e.status)}}` })],
+    ['partial status HTTP response', (_e: ReturnType<typeof serverEvidence>) => ({ statusCode: 206 })],
+    ['missing run metadata', (e: ReturnType<typeof serverEvidence>) => ({ runBody: JSON.stringify({ data: e.run }) })],
+    ['run error envelope', (e: ReturnType<typeof serverEvidence>) => ({ runBody: JSON.stringify({ data: e.run, meta: {}, error: 'partial' }) })],
+    ['duplicate run metadata', (e: ReturnType<typeof serverEvidence>) => ({ runBody: `{"data":${JSON.stringify(e.run)},"meta":{},"meta":{}}` })],
+    ['partial run HTTP response', (_e: ReturnType<typeof serverEvidence>) => ({ runCode: 206 })],
+  ] as const)('rejects %s over transport without spending or changing native history', async (_label, override) => {
+    const f = await fixture();
+    const { recovery } = transportRecovery(f.evidence, override(f.evidence));
+    const before = await loadConvergeRunState(f.options.gitCommonDir, target);
+    const attempts = await loadConvergeAttemptState(f.options.gitCommonDir, target);
+
+    await expect(guardReviewLaunch({ ...f.options, boundFixRecovery: recovery }))
+      .rejects.toMatchObject({ code: 'bound_fix_recovery_invalid' });
+
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await loadConvergeRunState(f.options.gitCommonDir, target)).toEqual(before);
+    expect(await loadConvergeAttemptState(f.options.gitCommonDir, target)).toEqual(attempts);
+  });
+
   it('recovers a fixed verdict corrected to dismissed in the latest round while preserving history and caps', async () => {
     const f = await fixture('dismissed', { maxAttempts: 7, maxRounds: 5 });
     const before = (await loadConvergeRunState(f.options.gitCommonDir, target))!;

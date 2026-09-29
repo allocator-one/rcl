@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.4.7 - 2026-09-29
+
+- Accept the Harness PR-status endpoint's strict data-only envelope when
+  checking guarded bound-fix recovery. Keep the run-detail metadata and all
+  exact-head, one-shot, and evidence checks intact (RCL-148).
+
 ## 4.4.6 - 2026-09-29
 
 - Add guarded `--bound-fix-recovery <run-id>` for a native dismissal-only round
