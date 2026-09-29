@@ -333,6 +333,7 @@ export async function snapshotAsyncResults(
   const names = directoryNames.filter(name =>
     name.startsWith(resultPrefix) &&
     (name.endsWith('.json') || /\.json(?:\.consumed-[A-Za-z0-9-]+)+$/.test(name))).sort();
+  if (names.length > MAX_ASYNC_CALLS_PER_ROUND) throw new Error('async_resume_result_limit');
   const reviews: ModelReview[] = [], reviewBytes: string[] = [], artifacts: AsyncResultReference[] = [];
   for (const name of names) {
     const path = join(storeDir, name);

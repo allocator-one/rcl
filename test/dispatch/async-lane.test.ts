@@ -272,6 +272,18 @@ describe('spool → worker → collect round trip', () => {
     expect(await collectAsyncResults(dir, targetKey)).toHaveLength(1);
   });
 
+  it('refuses more retained results than one async round can create', async () => {
+    const targetKey = asyncTargetKey('repo#bounded-resume');
+    for (let index = 0; index < 9; index += 1) {
+      await publishAsyncReview(dir, targetKey, {
+        model: `${spec.model}-${index}`, role: spec.role, provider: spec.provider, findings: [],
+        durationMs: 5, status: 'success', async: true,
+      });
+    }
+
+    await expect(snapshotAsyncResults(dir, targetKey)).rejects.toThrow('async_resume_result_limit');
+  });
+
   it('consumes only the exact reviewed async result set after terminal recovery', async () => {
     const targetKey = asyncTargetKey('repo#consume-bound-resume');
     await publishAsyncReview(dir, targetKey, {
@@ -280,9 +292,20 @@ describe('spool → worker → collect round trip', () => {
     });
     const snapshot = await snapshotAsyncResults(dir, targetKey);
 
-    await consumeBoundAsyncResults(dir, targetKey, snapshot.artifacts.map(artifact => artifact.sha256));
+    await publishAsyncReview(dir, targetKey, {
+      model: `${spec.model}-late`, role: spec.role, provider: spec.provider, findings: [],
+      durationMs: 5, status: 'success', async: true,
+    });
+    await expect(consumeBoundAsyncResults(dir, targetKey,
+      snapshot.artifacts.map(artifact => artifact.sha256))).rejects
+      .toThrow('async_resume_result_binding_mismatch');
+    expect((await snapshotAsyncResults(dir, targetKey)).artifacts).toHaveLength(2);
+
+    const complete = await snapshotAsyncResults(dir, targetKey);
+
+    await consumeBoundAsyncResults(dir, targetKey, complete.artifacts.map(artifact => artifact.sha256));
     await consumeBoundAsyncResults(dir, targetKey,
-      snapshot.artifacts.map(artifact => artifact.sha256), { allowAlreadyConsumed: true });
+      complete.artifacts.map(artifact => artifact.sha256), { allowAlreadyConsumed: true });
 
     expect(await snapshotAsyncResults(dir, targetKey)).toMatchObject({ reviews: [], artifacts: [] });
   });
