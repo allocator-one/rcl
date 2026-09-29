@@ -119,6 +119,8 @@ function validatePhysicalHistory(runs: readonly ReviewerLineageRun[], rootClaim:
     let ownIntents = 0;
     const active = new Map<string, RecoveryAttempt>();
     const attempts = new Map(recoveryAttemptsFromCheckpoint(run.state).map(attempt => [attempt.id, attempt]));
+    const cellIndexById = root ? undefined : new Map(run.plan.cells.map((cell, cellIndex) => [cell.id, cellIndex]));
+    const recoveryCells = root ? undefined : checkpointRecoveryCells(run.plan);
 
     if (!root) {
       const claim = run.inspected.nativeClaim;
@@ -148,8 +150,8 @@ function validatePhysicalHistory(runs: readonly ReviewerLineageRun[], rootClaim:
         const count = (attemptsByCell.get(cell) ?? 0) + 1;
         if (count > perCellLimit) fail(root ? 'root_attempts_per_cell_limit' : 'successor_attempts_per_cell_limit');
         if (!root) {
-          const cellIndex = run.plan.cells.findIndex(candidate => candidate.id === cell);
-          const preview = previewReviewerRecovery(checkpointRecoveryCells(run.plan), settled, run.captured.policy, {
+          const cellIndex = cellIndexById!.get(cell);
+          const preview = previewReviewerRecovery(recoveryCells!, settled, run.captured.policy, {
             maxAttemptsPerCell: perCellLimit,
             maxAdditionalCalls: ownLimit,
             additionalCallsUsed: ownIntents - active.size,
@@ -158,7 +160,7 @@ function validatePhysicalHistory(runs: readonly ReviewerLineageRun[], rootClaim:
           // Version comes from the validated immutable plan. This exception is
           // historical inspection only; new paid launches require plan 2.
           const eligible = run.plan.version === 1 ? historicalEligibleCalls(run.plan, preview) : preview.eligibleCallIndices;
-          if (cellIndex < 0 || !eligible.includes(cellIndex)) fail('successor_ineligible_attempt');
+          if (cellIndex === undefined || !eligible.includes(cellIndex)) fail('successor_ineligible_attempt');
         }
         attemptIds.add(attempt.id);
         attemptsByCell.set(cell, count);

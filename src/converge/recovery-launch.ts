@@ -621,6 +621,9 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     // credential. It cannot authorize new reviewer or verifier dispatch.
     if (!priorTerminal && budget.remainingMs > 0) {
       await options.beforeResume?.(Object.freeze({ operation, operationBytes: bindings.operation! }));
+      if (remainingRecoveryBudget(operation, (options.nowMs ?? Date.now)()).remainingMs === 0) {
+        fail("resume_expired_dispatch");
+      }
     }
     // Health describes completed evidence only; the immutable report and claims
     // remain bound above, and finish derives health again from the saved lineage.

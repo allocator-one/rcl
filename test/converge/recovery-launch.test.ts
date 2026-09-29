@@ -1092,6 +1092,23 @@ describe('operation-bound successor preflight', () => {
     expect(await journal.read()).toEqual(journalState); expect(await journal.readBindings()).toEqual(bindings);
   });
 
+  it('rechecks the saved deadline after resume preflight before dispatch or mutation', async () => {
+    const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+    value.run = async () => { throw new Error('interrupted'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
+    const spent = await state(fixture), native = await runState(fixture);
+    const journal = await CheckpointJournal.inspectRead(checkpointPath(fixture.dir, target, value.successorRunId));
+    const bindings = await journal.readBindings(), journalState = await journal.read();
+    let now = value.expiresAtMs - 1;
+    const beforeResume = vi.fn(async () => { now = value.expiresAtMs; });
+    const run = vi.fn();
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), nowMs: () => now, beforeResume, run }))
+      .rejects.toThrow('resume_expired_dispatch');
+    expect(beforeResume).toHaveBeenCalledTimes(1); expect(run).not.toHaveBeenCalled();
+    expect(await state(fixture)).toEqual(spent); expect(await runState(fixture)).toEqual(native);
+    expect(await journal.read()).toEqual(journalState); expect(await journal.readBindings()).toEqual(bindings);
+  });
+
   it('skips source preflight when already quorate or replaying an exact completed terminal', async () => {
     const quorate = await sealed(2, 'timeout', 3), noWork = coordinator(quorate);
     noWork.preflight.mockRejectedValue(new Error('no paid invocation to authorize'));

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { processSupplementedRoundReport, retainedLaunchInputSha256 } from '../../src/converge/retained-report.js';
 import { loadConvergeRunState } from '../../src/converge/run-state.js';
@@ -178,6 +178,23 @@ describe('sealed reviewer lineage limits', () => {
   it('accepts a bounded successor chain whose failures are recoverable', async () => {
     const value = await fixture({ successorCalls: 2 });
     await expect(loadReviewerLineage({ commonDir: value.commonDir, target, runId: successorId })).resolves.toMatchObject({ latest: { runId: successorId } });
+  });
+
+  it('indexes immutable plan cells once instead of scanning them per successor intent', async () => {
+    const value = await fixture({ concurrentSuccessor: true });
+    const original = Array.prototype.findIndex;
+    let planCellScans = 0;
+    const findIndex = vi.spyOn(Array.prototype, 'findIndex').mockImplementation(function (predicate, thisArg) {
+      if (this.length > 0 && this.every(item => item && typeof item === 'object' &&
+        typeof (item as { id?: unknown }).id === 'string' && typeof (item as { seat?: unknown }).seat === 'string' &&
+        typeof (item as { chunk?: unknown }).chunk === 'number')) planCellScans++;
+      return original.call(this, predicate, thisArg);
+    });
+    try {
+      await expect(loadReviewerLineage({ commonDir: value.commonDir, target, runId: successorId }))
+        .resolves.toMatchObject({ latest: { runId: successorId } });
+    } finally { findIndex.mockRestore(); }
+    expect(planCellScans).toBe(0);
   });
 
   it('accepts distinct concurrent intents recorded before quorum completes', async () => {
