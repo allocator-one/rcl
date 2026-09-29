@@ -105,6 +105,9 @@ export function historicalExecutionPlan(run: LegacyRunIdentity, config: Config,
   const catalog = CATALOGS[run.rcl_version];
   if (!catalog || (config.customRoles?.length ?? 0) > 0 || (config.reviewers?.length ?? 0) > 0 ||
     !authenticHistoricalRoster(run, config)) return undefined;
+  const authenticatedRoleNames = new Set(run.roster.map(seat => seat.role));
+  if (authenticatedRoleNames.has('project-rules') && projectRulesContent === undefined) return undefined;
+  if (authenticatedRoleNames.has('spec-compliance') && specContent === undefined) return undefined;
   const definitions = legacyRoleCatalog(catalog);
   if (definitions.size !== catalog.roles.length) return undefined;
   const selected = resolveRequestedRoles(config, catalog, run.spec !== undefined, projectRulesContent !== undefined);

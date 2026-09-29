@@ -329,8 +329,10 @@ export async function snapshotAsyncResults(
   if (directoryNames.some(name => name.startsWith(`pending-${targetKey}-`) && name.endsWith('.json'))) {
     throw new Error('async_resume_worker_pending');
   }
+  const resultPrefix = `result-${targetKey}-`;
   const names = directoryNames.filter(name =>
-    name.startsWith(`result-${targetKey}-`) && name.endsWith('.json')).sort();
+    name.startsWith(resultPrefix) &&
+    (name.endsWith('.json') || /\.json(?:\.consumed-[A-Za-z0-9-]+)+$/.test(name))).sort();
   const reviews: ModelReview[] = [], reviewBytes: string[] = [], artifacts: AsyncResultReference[] = [];
   for (const name of names) {
     const path = join(storeDir, name);

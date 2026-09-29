@@ -55,6 +55,15 @@ describe('historical retry execution planning', () => {
     }, 'rules', 'spec')).toBeUndefined();
   });
 
+  it('fails closed when an authenticated historical role is missing its bound content', async () => {
+    const fixture = JSON.parse(await readFile(
+      new URL('../fixtures/legacy-4.1.10-a33-roster.json', import.meta.url), 'utf8'
+    )) as any;
+
+    expect(historicalExecutionPlan(fixture.run, fixture.config, undefined, 'spec')).toBeUndefined();
+    expect(historicalExecutionPlan(fixture.run, fixture.config, 'rules', undefined)).toBeUndefined();
+  });
+
   it('reconstructs the exact flawed 4.4.9 role plan separately from corrected execution', async () => {
     const fixture = JSON.parse(await readFile(
       new URL('../fixtures/legacy-4.1.10-a33-roster.json', import.meta.url), 'utf8'

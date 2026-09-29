@@ -12,6 +12,7 @@ import { assertNativeTargetOwnership } from '../../src/converge/target-ownership
 import { sampleFinding, sampleResult, sampleReview } from '../telemetry/fixtures.js';
 import { resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
 import { pendingRecoverySourceSchema } from '../../src/converge/pending-recovery-source.js';
+import { legacyPendingClaimRoles } from '../../src/converge/legacy-roster.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
 import { chunkDiff } from '../../src/prepare/chunker.js';
 
@@ -85,6 +86,12 @@ describe('bound legacy launch health recovery', () => {
 
   it('accepts the immutable A33 roster after current roles and verifier defaults changed', async () => {
     const { f, snapshot } = await a33Fixture();
+    const currentRoleNames = legacyPendingClaimRoles(snapshot.config, 'current spec')!
+      .map(role => role.name);
+    const historicalRoleNames = snapshot.run.roster
+      .filter((seat: RosterEntry) => seat.lane !== 'verification' && seat.lane !== 'async')
+      .map((seat: RosterEntry) => seat.role);
+    expect(currentRoleNames).not.toEqual(historicalRoleNames);
     expect(f.retry.legacyRetry!.roster).toEqual(snapshot.run.roster);
 
     await guardReviewLaunch(f.retry);

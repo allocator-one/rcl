@@ -2166,7 +2166,9 @@ async function executeCouncil(
         validate: async () => { validateLaunchProviders(roster.map(entry => entry.provider)); await validateLaunchOutputs(opts); },
         loadRetainedAsync: async () => {
           const snapshot = await snapshotAsyncResults(asyncStoreDir, asyncKey,
-            assignments.map(assignment => ({ model: assignment.model, role: assignment.role.name })),
+            pendingClaimPlan.assignments.map(assignment => ({
+              model: assignment.model, role: assignment.role.name,
+            })),
             expectedAsyncSha256);
           if (snapshot.reviews.length !== pendingClaimAsyncChunks.length) {
             throw new ReviewLaunchRefused('pending_async_incomplete', `Expected ${pendingClaimAsyncChunks.length} retained async results, found ${snapshot.reviews.length}.`);
@@ -2366,7 +2368,9 @@ async function executeCouncil(
           ownership: extra.pendingResume.ownership, journal: extra.pendingResume.journal,
           expectedPlan: extra.pendingResume.journal.getPlan(), launch: extra.pendingResume.launch,
           onPhysicalReviewComplete: review => { progress.complete(review); },
-          onLateAuditError: error => { console.warn(`Late reviewer result could not be retained: ${String(error)}`); } });
+          onLateAuditError: error => {
+            console.warn(`Late reviewer result could not be retained: ${scrubText(String(error), 300)}`);
+          } });
         await extra.pendingResume.journal.finalize(extra.pendingResume.ownership);
       }
       const proof = await exportCheckpointProof(extra.pendingResume.journal);
@@ -2571,7 +2575,9 @@ async function executeCouncil(
         const adapter = defaultAdapterFactory(detectProvider(model));
         return (selected, system, user, request) => adapter.ask(selected, system, user, request);
       },
-      onLateAuditError: error => { console.warn(`Late verifier result could not be retained: ${String(error)}`); },
+      onLateAuditError: error => {
+        console.warn(`Late verifier result could not be retained: ${scrubText(String(error), 300)}`);
+      },
     });
     result = (await assembleCheckpointReview(checkpointAssembly, {
       ...assemblyDependencies, verificationProof: gated.verificationProof,

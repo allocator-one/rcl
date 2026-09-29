@@ -4,7 +4,7 @@ vi.mock('node:crypto', { spy: true });
 
 import * as crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -285,6 +285,25 @@ describe('spool → worker → collect round trip', () => {
       snapshot.artifacts.map(artifact => artifact.sha256), { allowAlreadyConsumed: true });
 
     expect(await snapshotAsyncResults(dir, targetKey)).toMatchObject({ reviews: [], artifacts: [] });
+  });
+
+  it('recovers a result stranded after the terminal cleanup rename', async () => {
+    const targetKey = asyncTargetKey('repo#consume-crash-resume');
+    await publishAsyncReview(dir, targetKey, {
+      model: spec.model, role: spec.role, provider: spec.provider, findings: [],
+      durationMs: 5, status: 'success', async: true,
+    });
+    const original = await snapshotAsyncResults(dir, targetKey);
+    const strandedPath = `${original.artifacts[0]!.path}.consumed-fixed`;
+    await rename(original.artifacts[0]!.path, strandedPath);
+
+    const resumed = await snapshotAsyncResults(dir, targetKey, [],
+      original.artifacts.map(artifact => artifact.sha256));
+    expect(resumed.artifacts).toMatchObject([{ path: strandedPath }]);
+
+    await consumeBoundAsyncResults(dir, targetKey,
+      original.artifacts.map(artifact => artifact.sha256), { allowAlreadyConsumed: true });
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it('collects a late result across distinct patch captures of the same convergence target', async () => {
