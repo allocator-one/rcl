@@ -130,6 +130,39 @@ describe('bound legacy launch health recovery', () => {
     expect(await f.bytes()).toEqual(before);
   });
 
+  it('refuses a bound config that mixes an unknown requested role with known historical roles', async () => {
+    const { f, snapshot } = await a33Fixture();
+    f.retry.legacyRetry!.config = {
+      ...f.retry.legacyRetry!.config,
+      roles: [...snapshot.run.roster.filter((seat: RosterEntry) => seat.role !== 'verification')
+        .filter((seat: RosterEntry, index: number, seats: RosterEntry[]) =>
+          seats.findIndex(candidate => candidate.role === seat.role) === index)
+        .map((seat: RosterEntry) => seat.role), 'unrecorded-historical-role'],
+    };
+    await f.mutate(report => {
+      report.run!.config_sha256 = configDigest(f.retry.legacyRetry!.config);
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
+  it('refuses a bound custom role even when its name shadows a historical role', async () => {
+    const { f } = await a33Fixture();
+    f.retry.legacyRetry!.config = {
+      ...f.retry.legacyRetry!.config,
+      customRoles: [{ name: 'general', focus: ['unbound prompt content'] }],
+    };
+    await f.mutate(report => {
+      report.run!.config_sha256 = configDigest(f.retry.legacyRetry!.config);
+    });
+    const before = await f.bytes();
+    await expect(guardReviewLaunch(f.retry)).rejects.toThrow('retry_report_invalid');
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.bytes()).toEqual(before);
+  });
+
   it('accepts a bound 4.1.10 pre-cycle report with A33 mixed-lane health', async () => {
     const f = await fixture();
     await f.mutate((report, native) => {

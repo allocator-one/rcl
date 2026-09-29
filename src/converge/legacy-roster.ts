@@ -91,7 +91,8 @@ function resolveRequestedRoles(config: Config, catalog: LegacyCatalog, hasSpec: 
     const resolved: Array<{ name: string; specialized: boolean }> = [];
     for (const name of requested) {
       const role = definitions.get(name) ?? definitions.get(name.toLowerCase());
-      if (role) resolved.push(role);
+      if (!role) return undefined;
+      resolved.push(role);
     }
     return resolved.length > 0 ? resolved : undefined;
   }
@@ -173,6 +174,10 @@ function buildRoster(config: Config, roles: Array<{ name: string; specialized: b
 export function authenticHistoricalRoster(run: LegacyRunIdentity, config: Config): boolean {
   const catalog = CATALOGS[run.rcl_version];
   if (!catalog || !Array.isArray(run.roster) || run.roster.length === 0) return false;
+  // A retained report has no authenticated source for either custom prompts or
+  // explicit reviewer selection. Preserve the current-roster path for those
+  // configurations, but never infer them from a historical default catalog.
+  if ((config.customRoles?.length ?? 0) > 0 || (config.reviewers?.length ?? 0) > 0) return false;
   const rosterModels = [...(config.models ?? []), ...(config.secondaryModels ?? []), ...(config.asyncModels ?? [])];
   const gating = historicalGating(config, catalog, rosterModels);
   if (!gating || !isDeepStrictEqual(run.gating, gating)) return false;
