@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.4.8 - 2026-09-29
+
+- Accept an exact, pre-cycle 4.1.10 guarded report as a bounded legacy-retry
+  source when its immutable report, config, roster, native state and attempt
+  state prove inconclusive blocking health. Reports claiming cycle state and
+  every unsupported, altered, ambiguous or healthy source still refuse before
+  a new claim (RCL-150).
+
 ## 4.4.7 - 2026-09-29
 
 - Accept the Harness PR-status endpoint's strict data-only envelope when
@@ -73,7 +81,7 @@
 ## 4.3.0 - 2026-09-28
 
 - Add `rcl review --retry-report <path> --retry-reason <reason>` for bounded
-  same-input recovery of 4.1.11 and 4.1.12 aggregate-only launches whose
+  same-input recovery of supported aggregate-only launches whose
   original blocking council was inconclusive (RCL-138). The original report,
   config, run, target, head, round, attempt, roster and policy must match the
   recorded launch. Healthy, ambiguous, altered and nonlatest sources refuse.

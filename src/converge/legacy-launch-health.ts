@@ -15,6 +15,19 @@ import { retrySourceSchema, type RetrySource } from './retry-source.js';
 
 type OriginalReport = ReturnType<typeof originalRunReportSchema.parse>;
 
+/**
+ * 4.1.10 is the last guarded-launch producer before review cycles were added.
+ * It already bound the exact roster, config digest, converge ordinals and
+ * per-seat outcomes used below, but it cannot truthfully carry cycle state.
+ */
+function supportedLegacyRetryProducer(report: OriginalReport, state: ConvergeRunState,
+  attempts: ReturnType<typeof validateConvergeAttemptState>): boolean {
+  if (report.run.rcl_version === '4.1.10') {
+    return report.run.cycle_id === undefined && state.cycle === undefined && attempts.cycle === undefined;
+  }
+  return ['4.1.11', '4.1.12'].includes(report.run.rcl_version);
+}
+
 /** Known original producers merge a blocking seat successfully only when all chunks succeed. */
 export function mergedBlockingHealth(report: OriginalReport, fraction: number): GuardedReviewerHealth {
   const roster = report.run.roster.filter(seat => seat.lane === 'blocking');
@@ -80,7 +93,7 @@ export async function inspectLegacyRetry(input: LegacyRetrySelection, common: st
     report.run.converge?.round !== previous.round || report.run.converge?.attempt !== previous.attempt ||
     report.run.cycle_id !== state.cycle?.id || report.run.config_sha256 !== sha256Hex(configBytes) ||
     !isDeepStrictEqual(report.run.roster, input.roster) || report.run.provenance === 'backfill' ||
-    !['4.1.11', '4.1.12'].includes(report.run.rcl_version) ||
+    !supportedLegacyRetryProducer(report, state, attempts) ||
     report.stats.totalReviews !== previous.totalReviews || report.stats.successfulReviews !== previous.successfulReviews ||
     report.reviews.length !== previous.totalReviews ||
     report.reviews.filter(review => review.status === 'success').length !== previous.successfulReviews) {

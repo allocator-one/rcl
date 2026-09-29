@@ -52,6 +52,32 @@ async function fixture(cap = 35) {
 }
 
 describe('bound legacy launch health recovery', () => {
+  it('accepts a bound 4.1.10 pre-cycle report with A33 mixed-lane health', async () => {
+    const f = await fixture();
+    await f.mutate((report, native) => {
+      report.run!.rcl_version = '4.1.10';
+      delete report.run!.cycle_id;
+      // A33 had ten successful blocking seats plus one successful async seat.
+      report.reviews[10]!.status = 'timeout';
+      report.stats.successfulReviews = native.lastLaunch.successfulReviews = 11;
+      native.lastLaunch.hardFailure = true;
+    });
+    const original = await readFile(f.retry.legacyRetry!.reportPath);
+
+    await guardReviewLaunch(f.retry);
+
+    expect(f.run).toHaveBeenCalledOnce();
+    expect(await readFile(f.retry.legacyRetry!.reportPath)).toEqual(original);
+    const attempts = await loadConvergeAttemptState(f.common, f.target);
+    expect(attempts?.attempts[1]?.retrySource).toMatchObject({
+      runId: f.report.run!.id,
+      reviewerHealth: {
+        successfulSeats: 10,
+        policy: { fraction: 2 / 3, seatCount: 17, minimumSuccessful: 12 },
+      },
+    });
+  });
+
   it.each([false, true])('rechecks a retained-original deadline after real legacy source retention: expires=%s', async expires => {
     const f = await fixture();
     const before = await f.bytes();
@@ -212,6 +238,11 @@ describe('bound legacy launch health recovery', () => {
     ['duplicate seat', (r: any) => { r.reviews[1] = r.reviews[0]; }],
     ['foreign seat', (r: any) => { r.reviews[1].role = 'foreign'; }],
     ['unknown producer', (r: any) => { r.run.rcl_version = '1.0.0'; }],
+    ['unaudited pre-cycle producer', (r: any) => { r.run.rcl_version = '4.1.9'; }],
+    ['4.1.10 report claiming a review cycle', (r: any) => {
+      r.run.rcl_version = '4.1.10';
+      r.run.cycle_id = '01a0e4ac-58d9-7cc5-a722-0b50ed087b7a';
+    }],
     ['backfill', (r: any) => { r.run.provenance = 'backfill'; }],
     ['healthy', (r: any, n: any) => { r.reviews[11].status = 'success'; r.stats.successfulReviews++; n.lastLaunch.successfulReviews++; }],
   ] as const)('refuses %s even when other recorded digests are rebound', async (_label, mutate, rebind) => {
