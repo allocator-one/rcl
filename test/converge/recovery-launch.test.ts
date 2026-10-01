@@ -20,8 +20,8 @@ import {
   createOriginalLaunch,
   encodeOriginalLaunch,
 } from "../../src/dispatch/original-launch.js";
-import { initializeAsyncPhase, openAsyncDelegate, sealAsyncPhase } from "../../src/dispatch/checkpoint-async-store.js";
-import { inspectReviewerStatus } from "../../src/evidence/reviewer-status.js";
+import { initializeAsyncPhase, openAsyncDelegate, resolveFinalizedAsyncExecution, sealAsyncPhase } from "../../src/dispatch/checkpoint-async-store.js";
+import { formatReviewerStatus, inspectReviewerStatus } from "../../src/evidence/reviewer-status.js";
 import { executeCheckpointGating } from "../../src/dispatch/checkpoint-gating-execution.js";
 import { captureAggregationInputs } from "../../src/report/aggregation-inputs.js";
 import { captureSupplementalAsync } from "../../src/report/supplemental-async.js";
@@ -97,7 +97,7 @@ function review(
 }
 
 async function sealed(successes: number, failure: SourceFailure = "timeout", seats = 17,
-  extra: { async?: boolean; gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
+  extra: { async?: boolean; asyncUnknown?: boolean; gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "rcl-recovery-")));
   roots.push(dir);
   const diff: any = {
@@ -195,7 +195,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     })),
     prompts: plan.cells.map(() => ({ systemPrompt: "sys", userPrompt: "u" })),
     aggregation,
-    ...(extra.async ? { async: { timeoutMs: 1000, maxPhysicalCalls: 2, maxAttemptsPerCall: 1,
+    ...(extra.async || extra.asyncUnknown ? { async: { timeoutMs: 1000, maxPhysicalCalls: 2, maxAttemptsPerCall: 1,
       calls: [0, 1].map(index => ({ assignmentId: `async:${index}`, chunk: 0,
         assignment: { model: 'bonus', provider: 'fake', role }, prompt: { systemPrompt: 'async-sys', userPrompt: 'async-user' } })) } } : {}),
   });
@@ -225,7 +225,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
   };
   let sourceProof: any;
   let sourceTerminal: any;
-  if (extra.async) {
+  if (extra.async || extra.asyncUnknown) {
     run.roster.push(...[0, 1].map(() => ({ model: 'bonus', role: 'general', provider: 'fake', lane: 'async' })));
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(clock);
   }
@@ -305,6 +305,9 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
       }
       await journal.finalize(ownership);
       const proof = await exportCheckpointProof(journal);
+      const asyncExecution = extra.asyncUnknown
+        ? (vi.setSystemTime(clock + 60_000), await resolveFinalizedAsyncExecution({ commonDir: dir, namespace: id, plan, ownership }))
+        : extra.async ? await sealAsyncPhase({ commonDir: dir, namespace: id, plan, ownership }) : undefined;
       const assembly: any = {
         projection: projectCheckpointReport({
           sources: [],
@@ -312,7 +315,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
           policy: captured.policy,
         }),
         supplementalAsync: extra.supplementalAsync ?? captureSupplementalAsync([], extra.async ? 2 : 0),
-        ...(extra.async ? { asyncExecution: await sealAsyncPhase({ commonDir: dir, namespace: id, plan, ownership }) } : {}),
+        ...(asyncExecution ? { asyncExecution } : {}),
         diff,
         startTime: 1,
         run,
@@ -347,7 +350,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
       };
     },
   });
-  if (extra.async) vi.useRealTimers();
+  if (extra.async || extra.asyncUnknown) vi.useRealTimers();
   return { dir, plan, captured, id, sourceProof, sourceTerminal, run };
 }
 
@@ -487,6 +490,18 @@ function coordinator(fixture: Fixture) {
 }
 
 describe('retained reviewer recovery coordinator', () => {
+  it('reports an inherited unknown async bound without counting it as actual successor calls', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { asyncUnknown: true }), options = coordinator(fixture);
+    const result = await applyReviewerRecovery(options.input); expect(result.kind).toBe('completed');
+    const status = await inspectReviewerStatus({ commonDir: fixture.dir, target,
+      runId: options.input.successorRunId, nowMs: 1_800_000_000_100 });
+    expect(status.attempts.async).toMatchObject({ current: { intents: 0, uncertain: 0, status: 'absent' },
+      inherited: { intents: 0, uncertain: 0, physicalUpperBound: 2 } });
+    expect(status.attempts.combined).toMatchObject({ physical: 4, newOnly: 1, uncertain: 0 });
+    expect(formatReviewerStatus(status)).toContain('inherited async outcome unknown (up to 2 calls reserved)');
+    expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
   it('inherits exact observed and uncertain original async proof across actual recovery without rebilling', async () => {
     const fixture = await sealed(1, 'timeout', 3, { async: true }), options = coordinator(fixture);
     const sourceBytes = JSON.parse(fixture.sourceTerminal!.reviewerArtifactBytes).asyncExecution.bytes;

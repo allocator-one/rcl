@@ -293,10 +293,12 @@ export function formatReviewerStatus(status: ReviewerStatus): string {
   const async = status.attempts.async.current.status === 'unknown'
     ? `original async outcome unknown (up to ${status.attempts.async.current.physicalUpperBound} calls)`
     : `${status.attempts.async.current.intents} current async calls (${status.attempts.async.current.uncertain} uncertain)`;
+  const inheritedAsync = status.attempts.async.inherited.physicalUpperBound === undefined ? ''
+    : `; inherited async outcome unknown (up to ${status.attempts.async.inherited.physicalUpperBound} calls reserved)`;
   return `${status.target} run ${status.runId}: ${status.health.successfulSeats}/${status.health.minimumSuccessful} complete seats; ` +
     `${status.attempts.physical} reviewer calls (${status.attempts.uncertain} uncertain); ` +
     `${status.attempts.verifier.current.intents} current verifier calls; ` +
-    `${async}; ` +
+    `${async}${inheritedAsync}; ` +
     `${status.attempts.combined.physical} combined physical intents, ${status.attempts.combined.newOnly} current; ` +
     `${status.finalized ? 'finalized' : 'open'}; terminal artifact ${status.terminalArtifact.available ? 'available' : 'unavailable'}.`;
 }
