@@ -48,6 +48,9 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
 
   let providerCalls = 0;
   const providerCallsByModel = new Map<string, number>();
+  const ordinaryArtifacts = new Map<string, Buffer>();
+  const reviewerArtifacts = new Map<string, Buffer>();
+  const reviewerDeclarations = new Map<string, { sha256: string; bytes: number }>();
   const server = createServer(async (request, response) => {
     const parts: Buffer[] = [];
     for await (const part of request) parts.push(Buffer.from(part));
@@ -57,6 +60,12 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(JSON.stringify(value));
     };
+    const artifactBytes = (bytes: Buffer) => {
+      response.writeHead(200, { 'content-type': 'application/octet-stream',
+        'x-artifact-sha256': digest(bytes), 'cache-control': 'private, no-store',
+        'content-disposition': 'attachment', 'x-content-type-options': 'nosniff' });
+      response.end(bytes);
+    };
     if (path === '/v1/chat/completions') {
       providerCalls++;
       const model = JSON.parse(raw.toString('utf8')).model as string;
@@ -65,15 +74,48 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
         model: 'fixture', choices: [{ index: 0, finish_reason: 'stop',
           message: { role: 'assistant', content: '{"findings":[]}' } }] });
     }
+    if (path === '/api/v1/reviews/model-stats' && request.method === 'GET') {
+      return answer(200, { data: { models: [] }, meta: { reviewer_recovery_protocol: 2,
+        reviewer_checkpoint_plan_version: 2, reviewer_capture_version: 2,
+        reviewer_provider_concurrency_version: 1, reviewer_artifact_schema: 1,
+        reviewer_artifact_max_bytes: 25_000_000 } });
+    }
     if (path === '/api/v1/reviews/runs' && request.method === 'POST') {
       const envelope = JSON.parse(raw.toString('utf8'));
+      if (envelope.reviewer_recovery) {
+        reviewerDeclarations.set(envelope.run.id, {
+          sha256: envelope.reviewer_recovery.sha256,
+          bytes: envelope.reviewer_recovery.bytes,
+        });
+      }
       return answer(201, { data: { id: envelope.run.id,
         url: `http://127.0.0.1/runs/${envelope.run.id}`,
         artifacts_expected: envelope.artifacts_declared.map((item: { kind: string }) => item.kind) } });
     }
-    const artifact = path.match(/^\/api\/v1\/reviews\/runs\/[^/]+\/artifacts\/(report_json|report_md)$/);
-    if (artifact && request.method === 'PUT') {
-      return answer(201, { data: { kind: artifact[1], sha256: digest(raw) } });
+    const artifact = path.match(/^\/api\/v1\/reviews\/runs\/([^/]+)\/artifacts\/(report_json|report_md)$/);
+    if (artifact) {
+      const key = `${artifact[1]}/${artifact[2]}`;
+      if (request.method === 'PUT') {
+        ordinaryArtifacts.set(key, raw);
+        return answer(201, { data: { kind: artifact[2], sha256: digest(raw) } });
+      }
+      const stored = ordinaryArtifacts.get(key);
+      return stored ? artifactBytes(stored) : answer(404, { error: 'not_found' });
+    }
+    const reviewerArtifact = path.match(/^\/api\/v1\/reviews\/runs\/([^/]+)\/reviewer-artifact$/);
+    if (reviewerArtifact) {
+      const runId = reviewerArtifact[1]!;
+      const declaration = reviewerDeclarations.get(runId);
+      if (!declaration) return answer(404, { error: 'not_found' });
+      if (request.method === 'PUT') {
+        reviewerArtifacts.set(runId, raw);
+        return answer(201, { data: { run_id: runId, sha256: digest(raw), bytes: raw.length },
+          meta: { status: 'created' } });
+      }
+      const stored = reviewerArtifacts.get(runId);
+      return stored ? artifactBytes(stored) : answer(404, {
+        error: 'reviewer_artifact_pending', data: { run_id: runId, ...declaration },
+      });
     }
     if (path === '/api/v1/reviews/converge/events') {
       const events = JSON.parse(raw.toString('utf8')).events;
