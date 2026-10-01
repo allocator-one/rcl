@@ -110,6 +110,9 @@ Review a PR, a local diff, or uncommitted work.
 | `--launch-intent <intent>` | Guarded intent: `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
 | `--retry-report <path>` | Bind an original legacy report to an inconclusive retry; new inputs may differ; requires `--retry-reason` |
+| `--resume-pending` / `--resume-async-sha256 <hashes>` | Recover one proven dead-owner pending launch while retaining exact async artifacts and treating unknown blocking work as failed |
+| `--resume-pending-preview <path>` | Write an immutable ordinary pending recovery package without changing native state or calling reviewers |
+| `--resume-pending-package <path>` / `--resume-pending-package-sha256 <sha256>` | Apply an exact reviewed ordinary recovery package under an explicit retry reason |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
@@ -231,6 +234,34 @@ An unadmitted source retries its pending round; an exact latest admitted source
 whose blocking health was inconclusive continues at the next native round. Its
 original admission, findings, verdicts and spent claims remain unchanged. The
 new claim retains the source bytes and binding; no history or budget is reset.
+
+For an ordinary pending launch whose coordinator is provably dead, first create
+and inspect a package that binds the target, head, base, patch, spec, effective
+config, roster, plan, caps, ordinals and retained async result digests:
+
+```bash
+rcl review change.patch --guarded-converge --converge-target repo-123 \
+  --for-pr owner/repo#123 --head-sha <captured-head> --base-sha <captured-base> \
+  --resume-pending --resume-async-sha256 <digest[,digest...]> \
+  --resume-pending-preview pending-recovery.json --spec captured-spec.md
+```
+
+Apply those same inputs with the package file SHA-256 printed by preview,
+`--evidence-required`, and a concrete `--retry-reason`. RCL revalidates every
+binding, marks the spent pending attempt failed with blocking outcome unknown,
+archives the retained async artifacts, and claims exactly the next checkpointed
+attempt without lowering or replenishing either cap. Live owners, drift,
+malformed state, package changes and unknown retained results fail before a call.
+
+```bash
+rcl review change.patch --guarded-converge --converge-target repo-123 \
+  --for-pr owner/repo#123 --head-sha <captured-head> --base-sha <captured-base> \
+  --evidence-required --resume-pending --resume-async-sha256 <digest[,digest...]> \
+  --resume-pending-package pending-recovery.json \
+  --resume-pending-package-sha256 <file-sha256> \
+  --retry-reason "Coordinator exited before durable blocking receipts." \
+  --spec captured-spec.md --json-file recovered-report.json
+```
 
 When native triage reports `converged-dismissal-only` but Harness still reports
 `fixes_pending` with no actionable findings, an explicit recovery can authorize

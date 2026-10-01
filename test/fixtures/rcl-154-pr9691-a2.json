@@ -1,0 +1,15 @@
+{
+  "target": "allocator-one-9691",
+  "headSha": "60df6d782f9ef9a255028391595dbbbe92442a57",
+  "baseSha": "403d4390ea4a0e33b9caa8319600f12633398573",
+  "inputSha256": "b1cedd3d7d55720b8efea4474f9cf82e5c8ee7accf6a1f9e0121e7d5ad7ae2db",
+  "attempt": 2,
+  "round": 2,
+  "cap": 20,
+  "roundCap": 15,
+  "patchSha256": "da34014a5cd6e7fe7bd8abccb834259f9906b3ad150aeae0bfb3d430464ac92e",
+  "specSha256": "de6e3db4fc6c28f111ca1cd739d94d50c90238aa6e963dfadc0277cea2427e7f",
+  "retainedAsyncSha256": [
+    "92705bdeb895e3bcab6863b5f717262f45fa4a4b6e98853b214677b64771e834"
+  ]
+}

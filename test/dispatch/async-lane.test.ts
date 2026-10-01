@@ -4,13 +4,14 @@ vi.mock('node:crypto', { spy: true });
 
 import * as crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   partitionAsyncAssignments,
   asyncTargetKey,
   resolveAsyncStoreDir,
+  resolveExistingAsyncStoreDir,
   spoolAsyncCalls,
   runAsyncWorker,
   collectAsyncResults,
@@ -383,6 +384,17 @@ describe('spool → worker → collect round trip', () => {
     expect(await collectAsyncResults(otherStore, key)).toEqual([]);
     expect(await collectAsyncResults(linkedStore, key)).toHaveLength(1);
     expect(await collectAsyncResults(store, key)).toEqual([]);
+  });
+
+  it('validates an existing store for preview without changing its permissions', async () => {
+    if (process.platform === 'win32') return;
+    const repo = join(dir, 'preview-repo');
+    execFileSync('git', ['init', '-q', repo], { cwd: dir });
+    const store = await resolveAsyncStoreDir(repo);
+    await chmod(store, 0o750);
+
+    expect(await resolveExistingAsyncStoreDir(repo)).toBe(store);
+    expect((await stat(store)).mode & 0o777).toBe(0o750);
   });
 
   it('does not collect results belonging to a different target', async () => {

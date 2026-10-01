@@ -19,11 +19,15 @@ const bodySchema = z.object({
   nativeStateSha256: digest,
   attemptStateSha256: digest,
   retainedAsyncSha256: z.array(digest).min(1),
-  retrySource: retrySourceSchema,
+  retrySource: retrySourceSchema.optional(),
+  ordinaryPackageSha256: digest.optional(),
 }).strict().superRefine((source, context) => {
-  if (source.retrySource.attempt !== source.pendingAttempt - 1 ||
+  if ((source.retrySource === undefined) === (source.ordinaryPackageSha256 === undefined)) {
+    context.addIssue({ code: 'custom', message: 'Pending recovery must bind exactly one source kind' });
+  }
+  if (source.retrySource && (source.retrySource.attempt !== source.pendingAttempt - 1 ||
       source.retrySource.round !== source.round ||
-      source.retrySource.headSha !== source.headSha) {
+      source.retrySource.headSha !== source.headSha)) {
     context.addIssue({ code: 'custom', message: 'Pending recovery lineage is inconsistent' });
   }
   if (new Set(source.retainedAsyncSha256).size !== source.retainedAsyncSha256.length) {

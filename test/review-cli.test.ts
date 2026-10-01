@@ -229,12 +229,15 @@ describe('rcl review — bound fix-obligation recovery (RCL-148)', () => {
   });
 });
 
-describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
-  it('advertises unknown finalization, fresh recovery and immutable async bindings', () => {
+describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
+  it('advertises unknown finalization, ordinary preview/apply and immutable async bindings', () => {
     const result = runRcl(['review', '--help'], tempRepository());
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('--resume-pending');
     expect(result.stdout).toContain('--resume-async-sha256 <hashes>');
+    expect(result.stdout).toContain('--resume-pending-preview <path>');
+    expect(result.stdout).toContain('--resume-pending-package <path>');
+    expect(result.stdout).toContain('--resume-pending-package-sha256 <sha256>');
   });
 
   it.each([
@@ -243,6 +246,19 @@ describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
   ])('refuses %s before attempt or provider spend', async (_label, extra) => {
     await withGuardedFixture(async fixture => {
       const result = await runRclAsync([...fixture.args, ...extra], fixture.repo, fixture.env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('pending_resume_incompatible');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  });
+
+  it('requires an exact package path and digest pair before reading review inputs', async () => {
+    await withGuardedFixture(async fixture => {
+      const result = await runRclAsync([...fixture.args,
+        '--resume-pending', '--resume-async-sha256', 'f'.repeat(64),
+        '--resume-pending-package', 'reviewed.json', '--retry-reason', 'Owner died.',
+        '--evidence-required'], fixture.repo, fixture.env);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('pending_resume_incompatible');
       expect(fixture.calls()).toBe(0);

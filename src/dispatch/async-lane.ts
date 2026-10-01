@@ -122,6 +122,25 @@ export async function resolveAsyncStoreDir(cwd = process.cwd()): Promise<string>
   return base;
 }
 
+/** Resolve and validate an existing async store without changing it. */
+export async function resolveExistingAsyncStoreDir(cwd = process.cwd()): Promise<string> {
+  let base: string;
+  try {
+    base = join(await resolveGitCommonDir(cwd), 'rcl-async');
+  } catch {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 'user';
+    base = join(tmpdir(), `rcl-async-${uid}`);
+  }
+  const info = await lstat(base);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`async store path is not a plain directory: ${base}`);
+  }
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error(`async store directory is not owned by the current user: ${base}`);
+  }
+  return base;
+}
+
 function spoolPath(storeDir: string, targetKey: string): string {
   return join(storeDir, `pending-${targetKey}-${randomUUID()}.json`);
 }

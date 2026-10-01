@@ -34,7 +34,8 @@ export interface PreparedOriginalLaunch {
 }
 export interface OriginalLaunchPreflight {
   input: Omit<OriginalLaunchInput, 'target' | 'originalNativeClaim'>;
-  beforeClaim: (value: PreparedOriginalLaunch) => Promise<void>;
+  /** Persist the immutable package while the target is exclusively owned, before spending the claim. */
+  beforeClaim: (value: PreparedOriginalLaunch, ownership: NativeTargetOwnership) => Promise<void>;
   nowMs?: () => number;
 }
 
@@ -319,7 +320,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
           originalNativeClaim: { attempt: (attempts?.attemptsUsed ?? 0) + 1, round } });
         preparedOriginal = Object.freeze({ launch, launchBytes: encodeOriginalLaunch(launch) });
         assertOriginalLive();
-        await options.originalLaunch.beforeClaim(preparedOriginal);
+        await options.originalLaunch.beforeClaim(preparedOriginal, ownership);
         assertOriginalLive();
       }
       if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);

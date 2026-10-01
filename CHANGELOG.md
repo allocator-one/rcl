@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.4.11 - 2026-10-01
+
+- Add preview/apply recovery for an ordinary guarded launch whose coordinator
+  died before a durable report. The reviewed package binds the exact launch
+  inputs, plan, caps and retained async artifacts; apply records the unknown
+  blocking outcome, preserves existing accounting, and claims exactly one
+  checkpointed successor attempt without relaunching async work (RCL-154).
+
 ## 4.4.10 - 2026-09-29
 
 - Fail closed when an interrupted legacy retry has no durable blocking-call
