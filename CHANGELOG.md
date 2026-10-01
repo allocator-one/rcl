@@ -9,6 +9,16 @@
   read-only; apply records unknown blocking work, preserves retained artifacts,
   and claims one bounded successor without resetting native accounting (RCL-154).
 
+## 4.4.14 - 2026-10-01
+
+- Deliver an immutable verified-consensus report without finding labels only
+  when its authenticated private reviewer artifact proves the existing sealed
+  failed-verification strict fallback with a conservative nonzero CI result.
+  Generic, altered and completed-verification reports still fail closed before
+  transport. `rcl telemetry recover-reviewer` reopens an exact terminal pair
+  for idempotent delivery without restarting reviewers or verification
+  (RCL-159).
+
 ## 4.4.13 - 2026-10-01
 
 - Accept the authenticated historical original-reviewer reservation limit when

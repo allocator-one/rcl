@@ -14,6 +14,8 @@ import { inspectReviewerArtifact, serializeReviewerArtifact } from '../../src/re
 import { buildRunEnvelope, declareReviewerRecovery } from '../../src/telemetry/envelope.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import { deliverRun, flushOutbox, createTelemetryRuntime } from '../../src/telemetry/deliver.js';
+import { strictFallbackReviewerFixture } from '../support/strict-fallback-reviewer.js';
+import { deliverTerminalReviewerRun } from '../../src/telemetry/terminal-reviewer-delivery.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -28,7 +30,8 @@ async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-private-delivery-'))); roots.push(root);
   return { root, entry, result, artifacts, artifact, envelope, runId: result.run.id as string };
 }
-function server(f: Awaited<ReturnType<typeof fixture>>) {
+type DeliveryFixture = Pick<Awaited<ReturnType<typeof fixture>>, 'runId' | 'artifacts' | 'artifact'>;
+function server(f: DeliveryFixture) {
   const requests: Array<{ method: string; url: string; body?: string; token: string }> = [];
   let privateBytes: string | undefined; let posted = false; let lostAck = false; let refused = false; let capability = true; let requireReports = false;
   const generic = new Map<string, string>();
@@ -51,6 +54,88 @@ function server(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe('private immutable reviewer delivery', () => {
+  it('delivers only a branded sealed-failed strict fallback without rewriting its report', async () => {
+    const make = async (terminal: 'failed' | 'complete' = 'failed') => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-strict-fallback-delivery-'))); roots.push(root);
+      return { root, ...await strictFallbackReviewerFixture(root, terminal) };
+    };
+    const strict = await make(), remote = server(strict);
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: strict.root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+      fetchImpl: remote.fetchImpl });
+
+    expect(strict.artifact.validation.gate).toMatchObject({ reportedCiExitCode: 1,
+      conservativeCiExitCode: 1, annotations: [] });
+    const strictOutcome = await deliverRun(runtime, { result: strict.result, artifacts: strict.artifacts,
+      reviewerArtifact: strict.artifact, evidenceRequired: true });
+    expect(strictOutcome).toMatchObject({ status: 'recorded', exitCode: 0 });
+    expect(remote.requests.find(row => row.url.endsWith('/artifacts/report_json'))?.body)
+      .toBe(strict.artifacts.report_json);
+
+    const mismatched = await make(), mismatchedRemote = server(mismatched);
+    const mismatchedResult = structuredClone(mismatched.result);
+    mismatchedResult.stats.totalReviews++;
+    const mismatchedRuntime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: mismatched.root,
+      env: {}, credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+      fetchImpl: mismatchedRemote.fetchImpl });
+    expect(await deliverRun(mismatchedRuntime, { result: mismatchedResult, artifacts: mismatched.artifacts,
+      reviewerArtifact: mismatched.artifact, evidenceRequired: true }))
+      .toMatchObject({ status: 'rejected', exitCode: 4 });
+    expect(mismatchedRemote.requests).toEqual([]);
+
+    const unbranded = await make(), unbrandedRemote = server(unbranded);
+    const unbrandedRuntime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: unbranded.root,
+      env: {}, credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+      fetchImpl: unbrandedRemote.fetchImpl });
+    expect(await deliverRun(unbrandedRuntime, { result: unbranded.result, artifacts: unbranded.artifacts,
+      reviewerArtifact: structuredClone(unbranded.artifact) as any, evidenceRequired: true }))
+      .toMatchObject({ status: 'rejected', exitCode: 4 });
+    expect(unbrandedRemote.requests).toEqual([]);
+
+    for (const [terminal, mutate] of [
+      ['failed', (result: any) => { result.findings[0].gating = { reason: 'invalid' }; }],
+      ['failed', (result: any) => { result.run.ci_exit_code = 0; }],
+      ['complete', (result: any) => {
+        for (const finding of [...result.findings, ...(result.belowThresholdFindings ?? [])]) delete finding.gating;
+        delete result.stats.verification;
+      }],
+    ] as const) {
+      const changedFixture = await make(terminal), changedRemote = server(changedFixture);
+      const changed = structuredClone(changedFixture.result);
+      mutate(changed);
+      const changedArtifacts = { ...changedFixture.artifacts, report_json: JSON.stringify(changed) };
+      const changedRuntime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: changedFixture.root,
+        env: {}, credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+        fetchImpl: changedRemote.fetchImpl });
+      expect(await deliverRun(changedRuntime, { result: changed, artifacts: changedArtifacts,
+        reviewerArtifact: changedFixture.artifact, evidenceRequired: true }))
+        .toMatchObject({ status: 'rejected', exitCode: 4 });
+      expect(changedRemote.requests).toEqual([]);
+    }
+  });
+
+  it('reopens and idempotently delivers an exact terminal strict fallback without provider calls', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-terminal-reviewer-delivery-'))); roots.push(root);
+    const retained = { root, ...await strictFallbackReviewerFixture(root) };
+    const remote = server(retained);
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+      fetchImpl: remote.fetchImpl });
+
+    const first = await deliverTerminalReviewerRun(runtime, {
+      commonDir: root, target: 'rcl-159', runId: retained.runId,
+    });
+    expect(first).toMatchObject({ outcome: { status: 'recorded', exitCode: 0 },
+      reportSha256: sha256(retained.artifacts.report_json), reviewerArtifactSha256: retained.artifact.digest });
+    expect(await deliverTerminalReviewerRun(runtime, {
+      commonDir: root, target: 'rcl-159', runId: retained.runId,
+    })).toMatchObject({ outcome: { status: 'recorded', exitCode: 0 } });
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))).toHaveLength(1);
+    expect(remote.requests.some(row => /provider|model\/chat|completion/.test(row.url))).toBe(false);
+    expect(remote.requests.find(row => row.url.endsWith('/artifacts/report_json'))?.body)
+      .toBe(retained.artifacts.report_json);
+  });
+
   it('persists privately before network and recovers lost PUT ACK with renewed login and no duplicate private PUT', async () => {
     const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
     remote.requireReports(); remote.loseAck();
