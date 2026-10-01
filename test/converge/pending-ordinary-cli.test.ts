@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
+import { checkpointPath } from '../../src/dispatch/checkpoint.js';
 
 const cli = process.env.RCL_TEST_PACKAGED_CLI ||
   fileURLToPath(new URL('../../dist/index.js', import.meta.url));
@@ -46,6 +47,7 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
   }));
 
   let providerCalls = 0;
+  const providerCallsByModel = new Map<string, number>();
   const server = createServer(async (request, response) => {
     const parts: Buffer[] = [];
     for await (const part of request) parts.push(Buffer.from(part));
@@ -57,6 +59,8 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
     };
     if (path === '/v1/chat/completions') {
       providerCalls++;
+      const model = JSON.parse(raw.toString('utf8')).model as string;
+      providerCallsByModel.set(model, (providerCallsByModel.get(model) ?? 0) + 1);
       return answer(200, { id: 'fixture', object: 'chat.completion', created: 0,
         model: 'fixture', choices: [{ index: 0, finish_reason: 'stop',
           message: { role: 'assistant', content: '{"findings":[]}' } }] });
@@ -127,6 +131,9 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
     expect(asyncName).toBeDefined();
     const asyncBytes = await readFile(join(asyncDirectory, asyncName!));
     const asyncSha256 = digest(asyncBytes);
+    const asyncCallsBeforeApply = providerCallsByModel.get('async') ?? 0;
+    const blockingCallsBeforeApply = providerCallsByModel.get('blocking') ?? 0;
+    expect(asyncCallsBeforeApply).toBeGreaterThan(0);
 
     const common = join(root, '.git');
     const nativePath = convergeRunStatePath(common, 'ordinary-pending-fixture');
@@ -151,15 +158,29 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
     const applied = await run(applyArgs);
     expect(applied.code, applied.output).toBe(0);
     const callsAfterApply = providerCalls;
+    expect(providerCallsByModel.get('async') ?? 0).toBe(asyncCallsBeforeApply);
+    expect(providerCallsByModel.get('blocking') ?? 0).toBeGreaterThan(blockingCallsBeforeApply);
     expect(await loadConvergeAttemptState(common, 'ordinary-pending-fixture'))
       .toMatchObject({ cap: 20, attemptsUsed: 2 });
-    expect(await loadConvergeRunState(common, 'ordinary-pending-fixture'))
-      .toMatchObject({ lastLaunch: { status: 'completed', attempt: 2, round: 1,
-        pendingRecovery: { pendingAttempt: 1, blockingOutcome: 'unknown' } } });
+    const recovered = (await loadConvergeRunState(common, 'ordinary-pending-fixture'))!;
+    expect(recovered).toMatchObject({ lastLaunch: { status: 'completed', attempt: 2, round: 1,
+      pendingRecovery: { pendingAttempt: 1, blockingOutcome: 'unknown' } } });
+    const sourceDigest = recovered.lastLaunch!.pendingRecovery!.sourceDigest;
+    const archive = join(common, 'rcl-converge-pending-recovery', sourceDigest);
+    expect(await readFile(join(archive, asyncSha256))).toEqual(asyncBytes);
+    expect(JSON.parse(await readFile(join(archive, 'manifest.json'), 'utf8'))).toEqual({
+      version: 1, sourceDigest, blockingOutcome: 'unknown', artifacts: [{ sha256: asyncSha256 }],
+    });
+    const recoveryRunId = recovered.lastLaunch!.runId!;
+    const capturedBytes = await readFile(join(checkpointPath(common,
+      'ordinary-pending-fixture', recoveryRunId), 'binding-captured-inputs.data'), 'utf8');
+    expect(JSON.parse(capturedBytes)).not.toHaveProperty('async');
+    expect(digest(capturedBytes)).toBe(recovered.lastLaunch!.pendingResume!.capturedInputsSha256);
 
     const replayed = await run(applyArgs);
     expect(replayed.code, replayed.output).toBe(0);
     expect(providerCalls).toBe(callsAfterApply);
+    expect(providerCallsByModel.get('async') ?? 0).toBe(asyncCallsBeforeApply);
     expect(await loadConvergeAttemptState(common, 'ordinary-pending-fixture'))
       .toMatchObject({ attemptsUsed: 2 });
   } finally {

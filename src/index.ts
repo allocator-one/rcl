@@ -2155,13 +2155,16 @@ async function executeCouncil(
       const aggregationInputs = captureAggregationInputs({ algorithm: AGGREGATION_ALGORITHM,
         diffSha256: diffDigest(diff.files), roleMap, thresholds, gating: prepared.gatingConfig,
         belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true });
-      const captured = capturePreparedCouncil({ target: prepared.converge!.target,
+      const captureInput = { target: prepared.converge!.target,
         headSha: extra.target.headSha ?? '', mergeBaseSha: extra.target.baseSha ?? '', diff,
         assignments,
         lanes: assignments.map(item => assignmentLane(item.model, prepared.coreModels, prepared.explicit)),
         chunks, prompts, config, specBytes: prepared.specContent ?? '', contextDocs,
         compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: AGGREGATION_ALGORITHM },
         aggregationInputs,
+      } as const;
+      const recoveryCaptured = capturePreparedCouncil(captureInput);
+      const captured = capturePreparedCouncil({ ...captureInput,
         ...(pendingClaimAsyncChunks.length ? { async: {
           assignments: pendingClaimPlan.asyncAssignments, prompts: pendingClaimAsyncPrompts,
           timeoutMs: config.asyncTimeout ?? DEFAULT_ASYNC_TIMEOUT_MS,
@@ -2306,7 +2309,7 @@ async function executeCouncil(
         retryReason: opts.retryReason!,
         ...(legacyPending ? { legacyRetry: { reportPath: opts.retryReport!, config, roster,
           historicalPlan: prepared.historicalRetryPlan === true } } : { migrationPackage }),
-        captured,
+        captured, recoveryCaptured,
         retainedAsyncSha256: expectedAsyncSha256,
         ...(legacyPending ? { maxAttempts: Number(opts.maxAttempts) } : {}),
         maxPhysicalCalls: captured.plan.cells.length * ((config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1),

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { inspectPendingLegacyRetry, type LegacyRetrySelection } from './legacy-launch-health.js';
 import { completionSchema, launchSchema, type GuardedLaunchCompletion, type GuardedLaunchState } from './launch-record.js';
 import { convergeRunStatePath, loadConvergeRunState, writeState } from './run-state.js';
@@ -39,7 +40,10 @@ export interface PendingLegacyResumeOptions {
   recoveryInputSha256: string;
   retryReason: string;
   legacyRetry?: LegacyRetrySelection;
+  /** Reviewed interrupted-launch capture, including its detached async contract. */
   captured: CapturedPreparedCouncil;
+  /** Fresh successor capture. Recovery preserves detached async bytes but never relaunches that lane. */
+  recoveryCaptured?: CapturedPreparedCouncil;
   retainedAsyncSha256: readonly string[];
   maxAttempts?: number;
   maxPhysicalCalls: number;
@@ -134,6 +138,19 @@ function validateMigrationPackage(options: PendingLegacyResumeOptions,
   }
 }
 
+function recoveryCapture(options: PendingLegacyResumeOptions): CapturedPreparedCouncil {
+  const recovery = options.recoveryCaptured ?? options.captured;
+  const comparable = (value: CapturedPreparedCouncil) => {
+    const { bytes: _bytes, digest: _digest, async: _async, ...captured } = value.captured;
+    return { ...value, captured };
+  };
+  if (recovery.captured.async !== undefined ||
+      !isDeepStrictEqual(comparable(recovery), comparable(options.captured))) {
+    fail('recovery_capture_mismatch');
+  }
+  return recovery;
+}
+
 async function archiveAsync(common: string, source: PendingRecoverySource,
   artifacts: readonly AsyncResultReference[]): Promise<void> {
   const expected = [...source.retainedAsyncSha256].sort();
@@ -157,8 +174,9 @@ async function runBound(options: PendingLegacyResumeOptions, ownership: NativeTa
   state: NonNullable<Awaited<ReturnType<typeof loadConvergeRunState>>>, claim: ConvergeAttemptClaim,
   source: PendingRecoverySource, launch: OriginalLaunch,
   resume: NonNullable<GuardedLaunchState['pendingResume']>): Promise<GuardedLaunchCompletion> {
+  const captured = recoveryCapture(options);
   const journal = await bindOriginalCouncil({ commonDir: options.gitCommonDir, ownership,
-    captured: options.captured.captured, launch });
+    captured: captured.captured, launch });
   const emptyAsync = captureSupplementalAsync([], 0).bytes;
   const bindings = await journal.readBindings();
   if (bindings['supplemental-async'] === undefined) {
@@ -192,8 +210,9 @@ async function claimFresh(options: PendingLegacyResumeOptions, ownership: Native
   }
   const now = (options.nowMs ?? Date.now)();
   if (!Number.isSafeInteger(now) || now < 0) fail('invalid_clock');
-  const resume = { version: 1 as const, runId: uuidv7(), planDigest: options.captured.plan.digest,
-    capturedInputsSha256: options.captured.captured.digest, originalPid: source.originalPid,
+  const captured = recoveryCapture(options);
+  const resume = { version: 1 as const, runId: uuidv7(), planDigest: captured.plan.digest,
+    capturedInputsSha256: captured.captured.digest, originalPid: source.originalPid,
     pid: process.pid, phase: 'running' as const, startedAtMs: now,
     expiresAtMs: now + options.maxDurationMs, maxPhysicalCalls: options.maxPhysicalCalls,
     maxAttemptsPerCell: options.maxAttemptsPerCell };
@@ -244,8 +263,9 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
     await archiveAsync(options.gitCommonDir, source, await options.loadRetainedAsync());
     const now = (options.nowMs ?? Date.now)();
     if (!Number.isSafeInteger(now) || now < 0) fail('invalid_clock');
-    const resume = { version: 1 as const, runId: uuidv7(), planDigest: options.captured.plan.digest,
-      capturedInputsSha256: options.captured.captured.digest, originalPid: source.originalPid,
+    const captured = recoveryCapture(options);
+    const resume = { version: 1 as const, runId: uuidv7(), planDigest: captured.plan.digest,
+      capturedInputsSha256: captured.captured.digest, originalPid: source.originalPid,
       pid: process.pid, phase: 'running' as const, startedAtMs: now,
       expiresAtMs: now + options.maxDurationMs, maxPhysicalCalls: options.maxPhysicalCalls,
       maxAttemptsPerCell: options.maxAttemptsPerCell };
@@ -266,8 +286,8 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
   const resume = current.pendingResume;
   if (!resume || current.attempt !== attempts.attemptsUsed ||
       current.headSha !== options.headSha || current.inputSha256 !== options.recoveryInputSha256 ||
-      resume.planDigest !== options.captured.plan.digest ||
-      resume.capturedInputsSha256 !== options.captured.captured.digest ||
+      resume.planDigest !== recoveryCapture(options).plan.digest ||
+      resume.capturedInputsSha256 !== recoveryCapture(options).captured.digest ||
       current.pendingRecovery?.sourceDigest !== source.digest) fail('capture_mismatch');
   if (current.status === 'completed') {
     if (!current.runId || current.runId !== resume.runId) fail('completed_mismatch');
@@ -294,6 +314,7 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
 /** Finalize unknown A34 evidence, then claim one fresh checkpointed A35. */
 export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions): Promise<PendingLegacyResumeResult> {
   validateOptions(input);
+  recoveryCapture(input);
   const options = { ...input, target: input.target.trim(), retainedAsyncSha256: [...input.retainedAsyncSha256].sort(),
     gitCommonDir: await realpath(resolve(input.gitCommonDir)) };
   return withRecoveryTarget(options.gitCommonDir, options.target, async ownership => {

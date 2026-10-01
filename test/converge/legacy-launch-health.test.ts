@@ -257,12 +257,23 @@ describe('bound legacy launch health recovery', () => {
     const prompts = chunks.flatMap(() => assignments.map(assignment => ({
       systemPrompt: assignment.role.systemPrompt, userPrompt: 'exact patch',
     })));
-    const captured = capturePreparedCouncil({ target: f.target, headSha: 'a'.repeat(40),
+    const captureInput = { target: f.target, headSha: 'a'.repeat(40),
       mergeBaseSha: 'b'.repeat(40), diff, assignments, chunks, prompts,
       config: f.retry.legacyRetry!.config, specBytes: 'spec', contextDocs: [],
       lanes: assignments.map(() => 'blocking' as const),
       compatibility: { parser: { name: 'findings-json', version: 1 },
-        aggregation: { name: 'consensus', version: 2 } } });
+        aggregation: { name: 'consensus', version: 2 } },
+    } as const;
+    const recoveryCaptured = capturePreparedCouncil(captureInput);
+    const asyncRole = { name: 'general', systemPrompt: 'async system', description: 'async fixture',
+      focus: ['correctness'], isSpecialized: false };
+    const captured = capturePreparedCouncil({ ...captureInput, async: {
+      assignments: [{ model: 'moonshotai/kimi-k2-0905', provider: 'openrouter', role: asyncRole }],
+      prompts: [{ systemPrompt: asyncRole.systemPrompt, userPrompt: 'exact async patch' }],
+      timeoutMs: 5_000, maxAttemptsPerCall: 1, maxPhysicalCalls: 1,
+    } });
+    expect(captured.captured.async).toBeDefined();
+    expect(recoveryCaptured.captured.async).toBeUndefined();
     const asyncBytes = Buffer.from(JSON.stringify({ ...sampleReview({
       model: 'moonshotai/kimi-k2-0905', role: 'general', provider: 'openrouter',
     }), async: true }));
@@ -277,19 +288,34 @@ describe('bound legacy launch health recovery', () => {
     });
     const run = vi.fn(async ({ launch, skipAsyncLaunch }: any) => {
       expect(skipAsyncLaunch).toBe(true);
+      expect(launch.planDigest).toBe(recoveryCaptured.plan.digest);
+      expect(launch.capturedInputsSha256).toBe(recoveryCaptured.captured.digest);
+      expect(launch.capturedInputsSha256).not.toBe(captured.captured.digest);
       return { runId: launch.runId, reportJsonSha256: 'e'.repeat(64),
         successfulReviews: 12, totalReviews: 17, deliveryPending: false,
         reviewerHealth: { version: 1, policy: { version: 1, fraction: 2 / 3,
           seatCount: 17, minimumSuccessful: 12 }, successfulSeats: 12 } };
     });
+    const loadRetainedAsync = vi.fn(async () => [{ path: join(f.common, 'async-result.json'),
+      sha256: asyncSha256, bytesBase64: asyncBytes.toString('base64') }]);
     const recovery = { gitCommonDir: f.common, target: f.target,
       headSha: 'a'.repeat(40), pendingInputSha256: 'b'.repeat(64),
       recoveryInputSha256: 'c'.repeat(64), retryReason: 'Dead owner proved; exact A2 package reviewed.',
-      migrationPackage, captured, retainedAsyncSha256: [asyncSha256],
+      migrationPackage, captured, recoveryCaptured, retainedAsyncSha256: [asyncSha256],
       maxPhysicalCalls: 68, maxAttemptsPerCell: 4, maxDurationMs: 10_000,
       validate: vi.fn(async () => {}), ownerAlive: () => false,
-      loadRetainedAsync: async () => [{ path: join(f.common, 'async-result.json'),
-        sha256: asyncSha256, bytesBase64: asyncBytes.toString('base64') }], run };
+      loadRetainedAsync, run };
+
+    const beforeRefusals = await f.bytes();
+    await expect(resumePendingLegacyLaunch({ ...recovery, recoveryCaptured: captured }))
+      .rejects.toThrow('pending_legacy_resume_recovery_capture_mismatch');
+    expect(await f.bytes()).toEqual(beforeRefusals);
+    const driftedRecovery = capturePreparedCouncil({ ...captureInput, specBytes: 'changed spec' });
+    await expect(resumePendingLegacyLaunch({ ...recovery, recoveryCaptured: driftedRecovery }))
+      .rejects.toThrow('pending_legacy_resume_recovery_capture_mismatch');
+    expect(await f.bytes()).toEqual(beforeRefusals);
+    expect(loadRetainedAsync).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
     const result = await resumePendingLegacyLaunch(recovery);
 
     expect(result).toMatchObject({ claim: { attempt: 3, attemptsUsed: 3, cap: 20 } });
@@ -300,7 +326,14 @@ describe('bound legacy launch health recovery', () => {
       blockingOutcome: 'unknown', retainedAsyncSha256: [asyncSha256],
     });
     expect(after.attempts[2]?.pendingRecoverySource?.retrySource).toBeUndefined();
-    expect((await loadConvergeRunState(f.common, f.target))?.rounds).toHaveLength(1);
+    const recoveredState = await loadConvergeRunState(f.common, f.target);
+    expect(recoveredState?.lastLaunch?.pendingResume).toMatchObject({
+      planDigest: recoveryCaptured.plan.digest,
+      capturedInputsSha256: recoveryCaptured.captured.digest,
+    });
+    expect(recoveredState?.lastLaunch?.pendingResume?.capturedInputsSha256)
+      .not.toBe(captured.captured.digest);
+    expect(recoveredState?.rounds).toHaveLength(1);
 
     const substituted = createOrdinaryPendingPackage({
       target: migrationPackage.target, headSha: migrationPackage.headSha,
