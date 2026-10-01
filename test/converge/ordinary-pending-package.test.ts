@@ -1,7 +1,11 @@
+import { gunzipSync } from 'node:zlib';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { guardedInputSha256 } from '../../src/report/run-header.js';
 import { validateOrdinaryPendingPackage } from '../../src/converge/ordinary-pending-package.js';
-import pr9691Input from '../fixtures/pr9691-a2-guarded-input.json' with { type: 'json' };
+const pr9691Input = JSON.parse(gunzipSync(Buffer.from(readFileSync(
+  new URL('../fixtures/pr9691-a2-guarded-input.json.gz.b64', import.meta.url), 'utf8').replace(/\s/g, ''), 'base64'
+)).toString('utf8')) as Record<string, unknown>;
 import pr9691Migration from '../fixtures/pr9691-a2-migration.json' with { type: 'json' };
 
 const input = { head: 'a'.repeat(40), kind: 'patch', repo: 'allocator-one/allocator-one', pr: 9691, diff: 'd'.repeat(64), config: 'e'.repeat(64), roster: [{ model: 'openai/test', role: 'general', provider: 'openai', lane: 'async' }], prompts: [], asyncRoles: [{ name: 'general' }], spec: { source: 'flag', sha256: 'f'.repeat(64) } };
