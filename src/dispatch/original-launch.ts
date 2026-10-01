@@ -3,7 +3,7 @@ import { stableStringify } from '../report/run-header.js';
 import { UUID } from '../telemetry/recovery/source.js';
 
 const VERSION = 1;
-const MAX_LIMIT = 1_000_000;
+export const MAX_ORIGINAL_LAUNCH_LIMIT = 1_000_000;
 const MAX_BYTES = 64 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 
@@ -49,8 +49,8 @@ function digest(value: unknown, error: string): asserts value is string { if (ty
 /** Validate effective execution limits before the native attempt is claimed. */
 export function assertOriginalLaunchBudget(durationMs: number, maxPhysicalCalls: number, maxAttemptsPerCell: number): void {
   integer(durationMs, 'original_launch_invalid_duration', 1, MAX_TIMER_DELAY_MS);
-  integer(maxPhysicalCalls, 'original_launch_invalid_max_physical_calls', 1, MAX_LIMIT);
-  integer(maxAttemptsPerCell, 'original_launch_invalid_max_attempts_per_cell', 1, MAX_LIMIT);
+  integer(maxPhysicalCalls, 'original_launch_invalid_max_physical_calls', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
+  integer(maxAttemptsPerCell, 'original_launch_invalid_max_attempts_per_cell', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
 }
 
 function target(value: unknown): asserts value is string {
@@ -70,13 +70,13 @@ function validate(input: OriginalLaunchInput | OriginalLaunch, withVersion: bool
   const claim = input.originalNativeClaim;
   if (!claim || typeof claim !== 'object' || Array.isArray(claim)) throw new Error('original_launch_invalid_native_claim');
   exactKeys(claim as Record<string, unknown>, ['attempt', 'round'], 'original_launch_invalid_native_claim');
-  integer(claim.attempt, 'original_launch_invalid_native_attempt', 1, MAX_LIMIT);
-  integer(claim.round, 'original_launch_invalid_native_round', 1, MAX_LIMIT);
+  integer(claim.attempt, 'original_launch_invalid_native_attempt', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
+  integer(claim.round, 'original_launch_invalid_native_round', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
   integer(input.startedAtMs, 'original_launch_invalid_started_at', 0);
   integer(input.expiresAtMs, 'original_launch_invalid_deadline', 0);
   if (input.expiresAtMs < input.startedAtMs || input.expiresAtMs - input.startedAtMs > MAX_TIMER_DELAY_MS) throw new Error('original_launch_invalid_deadline');
-  integer(input.maxPhysicalCalls, 'original_launch_invalid_max_physical_calls', 1, MAX_LIMIT);
-  integer(input.maxAttemptsPerCell, 'original_launch_invalid_max_attempts_per_cell', 1, MAX_LIMIT);
+  integer(input.maxPhysicalCalls, 'original_launch_invalid_max_physical_calls', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
+  integer(input.maxAttemptsPerCell, 'original_launch_invalid_max_attempts_per_cell', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
   return deepFreeze({ version: VERSION, runId: input.runId, target: input.target,
     originalNativeClaim: { attempt: claim.attempt, round: claim.round }, capturedInputsSha256: input.capturedInputsSha256,
     planDigest: input.planDigest, startedAtMs: input.startedAtMs, expiresAtMs: input.expiresAtMs,
@@ -113,8 +113,8 @@ export function remainingOriginalBudget(value: OriginalLaunch, nowMs: number, ru
   const maxPhysicalCalls = runtime.maxPhysicalCalls === undefined ? launch.maxPhysicalCalls : runtime.maxPhysicalCalls;
   const maxAttemptsPerCell = runtime.maxAttemptsPerCell === undefined ? launch.maxAttemptsPerCell : runtime.maxAttemptsPerCell;
   const expiresAtMs = runtime.expiresAtMs === undefined ? launch.expiresAtMs : runtime.expiresAtMs;
-  integer(maxPhysicalCalls, 'original_launch_invalid_runtime_cap', 0, MAX_LIMIT);
-  integer(maxAttemptsPerCell, 'original_launch_invalid_runtime_cap', 1, MAX_LIMIT);
+  integer(maxPhysicalCalls, 'original_launch_invalid_runtime_cap', 0, MAX_ORIGINAL_LAUNCH_LIMIT);
+  integer(maxAttemptsPerCell, 'original_launch_invalid_runtime_cap', 1, MAX_ORIGINAL_LAUNCH_LIMIT);
   integer(expiresAtMs, 'original_launch_invalid_runtime_deadline', launch.startedAtMs);
   if (maxPhysicalCalls > launch.maxPhysicalCalls || maxAttemptsPerCell > launch.maxAttemptsPerCell) throw new Error('original_launch_runtime_cap_raise');
   if (expiresAtMs > launch.expiresAtMs) throw new Error('original_launch_runtime_deadline_extend');
