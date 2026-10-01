@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 4.4.14 - 2026-10-01
+## 4.4.15 - 2026-10-01
 
 - Accept the authenticated historical original-reviewer reservation limit when
   retaining a finalized checkpoint's async outcome as unknown, while keeping

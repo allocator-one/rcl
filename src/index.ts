@@ -2138,7 +2138,13 @@ async function executeCouncil(
         console.log(JSON.stringify({ mode: 'preview', ...preview }));
         return undefined;
       }
-      const pendingClaimPlan = prepared.pendingClaimPlan;
+      // An ordinary migration package authenticates the old launch itself. The
+      // current prepared plan is used only for its fresh successor; it must not
+      // be substituted for the interrupted launch's input.
+      const pendingClaimPlan = migrationPackage ? {
+        assignments, asyncAssignments, gatingConfig: prepared.gatingConfig,
+        contextFiles: prepared.contextFiles,
+      } : prepared.pendingClaimPlan;
       if (!pendingClaimPlan) {
         throw new ReviewLaunchRefused('pending_claim_plan_missing', 'The pending launch has no supported original planner reconstruction.');
       }
@@ -2160,12 +2166,14 @@ async function executeCouncil(
         .slice(0, MAX_ASYNC_CALLS_PER_ROUND);
       const pendingClaimAsyncPrompts = await Promise.all(pendingClaimAsyncChunks.map(({ assignment, chunk }) =>
         buildPrompt(chunk, assignment.role, { contextDocs: pendingClaimContext, plan: planContext })));
-      const claimedInputSha256 = sha256Hex(stableStringify({
-        head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
-        diff: diffDigest(diff.files), config: configDigest(config), roster: pendingClaimRoster,
-        prompts: pendingClaimPrompts,
-        asyncRoles: pendingClaimPlan.asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
-      }));
+      const claimedInputSha256 = migrationPackage
+        ? guardedInputSha256(migrationPackage.guardedInput)
+        : guardedInputSha256({
+          head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
+          diff: diffDigest(diff.files), config: configDigest(config), roster: pendingClaimRoster,
+          prompts: pendingClaimPrompts,
+          asyncRoles: pendingClaimPlan.asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
+        });
       if (process.env['RCL_DEBUG']) process.stderr.write(`Pending claim input: ${claimedInputSha256}\n`);
       const thresholds = {
         minConsensusScore: config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
