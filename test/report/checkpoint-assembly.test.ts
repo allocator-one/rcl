@@ -27,7 +27,8 @@ function finding(id: string, file = 'tenant.ts'): Finding {
     title: 'Missing tenant isolation', description: 'An unrelated tenant can read this record.' };
 }
 function fixture(options: { models?: string[]; chunks?: number; appendix?: boolean; minConfidence?: number;
-  aggregation?: boolean; verified?: boolean; missingThresholds?: boolean } = {}) {
+  aggregation?: boolean; verified?: boolean; missingThresholds?: boolean; omitAppendix?: boolean;
+  aggregationAppendix?: boolean } = {}) {
   const models = options.models ?? ['model-a', 'model-b', 'model-c'];
   const chunks = options.chunks ?? 2;
   const diff: Diff = { source: 'local', files: [{ filename: 'tenant.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, language: 'typescript' }] };
@@ -37,6 +38,7 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
   const config: Config = { quorumFraction: policy.fraction, thresholds: resolvedThresholds,
     output: { belowThresholdAppendix: options.appendix ?? true } };
   if (options.missingThresholds) delete config.thresholds;
+  if (options.omitAppendix) delete config.output;
   const configBytes = stableStringify(config), specBytes = 'Exact spec', contextBytes = '[]';
   const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
   const chunkBytes = Array.from({ length: chunks }, (_, chunk) => `chunk ${chunk}`);
@@ -53,7 +55,8 @@ function fixture(options: { models?: string[]; chunks?: number; appendix?: boole
     gating: { mode: options.verified ? 'verified-consensus' : 'all-findings', minModels: 2,
       verificationModel: options.verified ? 'google/gemini-3.8-flash' : undefined,
       verificationTimeoutMs: 100, verificationPassTimeoutMs: 100 },
-    modelWeights: new Map([[models[0]!, 0.75]]), belowThresholdAppendix: options.appendix ?? true });
+    modelWeights: new Map([[models[0]!, 0.75]]),
+    belowThresholdAppendix: options.aggregationAppendix ?? options.appendix ?? true });
   const capture = captureReviewerInputs({ plan, policy, patchBytes, configBytes, specBytes, contextBytes, toolsBytes,
     chunkBytes, assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
     prompts: plan.cells.map(cell => ({ systemPrompt: 'system', userPrompt: `prompt ${cell.chunk}` })),
@@ -228,6 +231,16 @@ describe('proof-bound checkpoint assembly', () => {
     expect(result.observations).toEqual([]);
   });
 
+  it('reconstructs the captured default appendix when a legacy config omitted it', async () => {
+    const f = fixture({ chunks: 1, minConfidence: 1, omitAppendix: true });
+    const rows = rowsFor(f, ['s0', 's1', 's2'], 'complete');
+    rows[0]!.findings = [{ ...finding('minority'), severity: 'minor' }];
+    const result = await assembleCheckpointReview(input(f, await proof(f, rows), await proof(f, [])));
+    expect(f.capture.config.output).toBeUndefined();
+    expect(f.capture.aggregation?.belowThresholdAppendix).toBe(true);
+    expect(result.report.belowThresholdFindings).toHaveLength(1);
+  });
+
   it('preserves failed observations and exposes only successor attempts including uncertain cost', async () => {
     const f = fixture({ chunks: 1 });
     const source = await proof(f, [
@@ -290,6 +303,17 @@ describe('proof-bound checkpoint assembly', () => {
     changed.blobs['f'.repeat(64)] = 'unreferenced';
     const foreignCapture = await proof(f, [], stableStringify(changed));
     await expect(assembleCheckpointReview(input(f, source, foreignCapture), { ask })).rejects.toThrow();
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { appendix: false, aggregationAppendix: true },
+    { omitAppendix: true, aggregationAppendix: false },
+  ])('refuses conflicting appendix capture %#', async options => {
+    const f = fixture(options), ask = vi.fn();
+    await expect(assembleCheckpointReview(
+      input(f, await proof(f, rowsFor(f, ['s0', 's1'], 'source')), await proof(f, [])), { ask },
+    )).rejects.toThrow('checkpoint_assembly_static_config_mismatch');
     expect(ask).not.toHaveBeenCalled();
   });
 });

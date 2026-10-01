@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.4.11 - 2026-10-01
+
+- Reconstruct finalized historical checkpoints whose original config omitted
+  the true below-threshold appendix default while their authenticated
+  aggregation inputs sealed that effective value. Explicit conflicts and a
+  captured false value still fail closed, and no captured bytes, attempts or
+  reviewer calls are replaced (RCL-155).
+
 ## 4.4.10 - 2026-09-29
 
 - Fail closed when an interrupted legacy retry has no durable blocking-call
