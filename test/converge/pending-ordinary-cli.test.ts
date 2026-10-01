@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +28,8 @@ it('previews, applies and idempotently replays an ordinary dead-owner recovery t
   git('add', '.');
   git('commit', '-qm', 'fixture');
   const head = git('rev-parse', 'HEAD');
+  await mkdir(join(root, '.harness-cli'));
+  await writeFile(join(root, '.harness-cli', 'config.json'), '{}');
   await writeFile(join(root, 'change.patch'),
     'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;\n');
   await writeFile(join(root, 'config.json'), JSON.stringify({

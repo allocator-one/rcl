@@ -2,13 +2,21 @@
 
 ## Unreleased
 
-## 4.4.11 - 2026-10-01
+## 4.4.12 - 2026-10-01
 
 - Add preview/apply recovery for an ordinary guarded launch whose coordinator
   died before a durable report. The reviewed package binds the exact launch
   inputs, plan, caps and retained async artifacts; apply records the unknown
   blocking outcome, preserves existing accounting, and claims exactly one
   checkpointed successor attempt without relaunching async work (RCL-154).
+
+## 4.4.11 - 2026-10-01
+
+- Reconstruct finalized historical checkpoints whose original config omitted
+  the true below-threshold appendix default while their authenticated
+  aggregation inputs sealed that effective value. Explicit conflicts and a
+  captured false value still fail closed, and no captured bytes, attempts or
+  reviewer calls are replaced (RCL-155).
 
 ## 4.4.10 - 2026-09-29
 
