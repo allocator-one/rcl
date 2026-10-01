@@ -1,0 +1,2 @@
+export const MAX_CARRIER_INVENTORY = 2000;
+export const MAX_CARRIER_PREFIX_ROUNDS = 1000;

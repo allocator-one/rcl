@@ -1,0 +1,171 @@
+import { nativeReviewCycleSchema } from '../../../converge/review-cycle.js';
+import type { RecoveryMaterial } from './materials.js';
+import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { claimDescriptorSchema } from './claims.js';
+import type { NativeCorrectionAnchor } from './anchors.js';
+import { decodeRecoveryOriginal as decodeOriginalReport } from './recovery-json.js';
+import { object, uuidSchema } from './primitives.js';
+import type { ConvergeRunState, FindingEntry } from './types.js';
+
+const MAX_BYTES = 64 * 1024 * 1024;
+/** Total predecessor bytes admitted by one proof; outer readers must enforce this while reading too. */
+export const MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const sha = (raw: string) => createHash('sha256').update(raw).digest('hex');
+const digest = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const uuid = (value: unknown): value is string => uuidSchema.safeParse(value).success;
+const identity = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{16}$/.test(value);
+const requireSource = (valid: unknown): void => { if (!valid) throw new Error('native_recovery_source_conflict'); };
+
+function decode(raw: string): Record<string, unknown> {
+  requireSource(typeof raw === 'string' && Buffer.byteLength(raw) <= MAX_BYTES);
+  const decoded = decodeOriginalReport(raw, { exactNumbers: true });
+  requireSource(decoded.transformations.length === 0 && object(decoded.value));
+  return decoded.value as Record<string, unknown>;
+}
+function nativeSource(raw: string, target: string): ConvergeRunState {
+  const state = decode(raw);
+  requireSource(state.startOverPending === undefined && (state.cycle === undefined ||
+    state.version !== 1 && nativeReviewCycleSchema.safeParse(state.cycle).success));
+  // Released cycle-v2 predates semantic sightings. A hybrid must not use its
+  // cycle metadata to bypass the separate semantic-v2 membership requirements.
+  const cycleOrigin = state.version === 2 && state.cycle !== undefined;
+  requireSource(!cycleOrigin || state.sightings === undefined && state.migration === undefined);
+  requireSource((state.version === 1 || state.version === 2 || state.version === 3) && state.target === target &&
+    Number.isSafeInteger(state.roundCap) && (state.roundCap as number) >= 2 && (state.roundCap as number) <= 99 &&
+    Array.isArray(state.rounds) && object(state.findings) && typeof state.updatedAt === 'string');
+  requireSource(state.version === 3 ? object(state.recovery) && [1, 2].includes(state.recovery.version as number) &&
+    Array.isArray(state.recovery.operations) && state.recovery.operations.length > 0 &&
+    state.recovery.operations.every(operation => object(operation) && uuid(operation.operationId) &&
+      [1, 2, 3].includes(operation.sourceVersion as number) && digest(operation.sourceSha256) &&
+      Array.isArray(operation.anchors) && operation.anchors.every(anchor => object(anchor) && identity(anchor.identity)) &&
+      Array.isArray(operation.sourceReceipts)) : state.recovery === undefined);
+  requireSource(state.migration === undefined || object(state.migration) && digest(state.migration.sourceSha256) &&
+    typeof state.migration.snapshotPath === 'string' && typeof state.migration.migratedAt === 'string');
+  requireSource(state.version !== 1 || state.sightings === undefined && state.migration === undefined);
+  const rounds = state.rounds as Record<string, unknown>[]; const seen = new Set<number>();
+  const positive = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) > 0;
+  for (const round of rounds) {
+    requireSource(object(round) && positive(round.round) && round.round <= (state.roundCap as number) && !seen.has(round.round) && object(round.counts) &&
+      ['new', 'repeat', 'suppressed', 'regating'].every(k => Number.isSafeInteger((round.counts as Record<string, unknown>)[k]) && ((round.counts as Record<string, number>)[k] ?? -1) >= 0));
+    seen.add(round.round as number);
+    requireSource(round.runId === undefined || uuid(round.runId));
+    requireSource(round.severities === undefined || object(round.severities) && Object.entries(round.severities).every(([key, value]) =>
+      identity(key) && ['critical', 'important', 'minor', 'nitpick'].includes(value as string)));
+  }
+  for (const [key, rawEntry] of Object.entries(state.findings as Record<string, unknown>)) {
+    requireSource(identity(key) && object(rawEntry)); const entry = rawEntry as Record<string, unknown>;
+    requireSource(entry.key === key && ['file', 'category', 'title', 'severity'].every(k => typeof entry[k] === 'string') &&
+      ['critical', 'important', 'minor', 'nitpick'].includes(entry.severity as string) && Array.isArray(entry.models) && entry.models.every(m => typeof m === 'string') &&
+      Number.isSafeInteger(entry.startLine) && Number.isSafeInteger(entry.endLine) && (entry.startLine as number) >= 0 && (entry.endLine as number) >= (entry.startLine as number) &&
+      positive(entry.firstRound) && positive(entry.lastRound) && (entry.firstRound as number) <= (entry.lastRound as number) &&
+      seen.has(entry.firstRound as number) && seen.has(entry.lastRound as number));
+    requireSource(entry.pendingRound === undefined || positive(entry.pendingRound) && seen.has(entry.pendingRound) && entry.pendingRound <= (entry.lastRound as number));
+    requireSource(entry.verdict === undefined ? entry.verdictRound === undefined && entry.verdictSeverity === undefined :
+      ['fixed', 'dismissed'].includes(entry.verdict as string) && positive(entry.verdictRound) && seen.has(entry.verdictRound));
+    requireSource(entry.verdictSeverity === undefined || ['critical', 'important', 'minor', 'nitpick'].includes(entry.verdictSeverity as string));
+    requireSource(entry.claimDescriptor === undefined || state.version !== 1 && claimDescriptorSchema.safeParse(entry.claimDescriptor).success);
+  }
+  // A recovered v3 descendant may omit its semantic sighting cache only
+  // provisionally. The full snapshot walk below proves its released cycle-v2
+  // root; this parser must not trust an operation's claimed source version.
+  requireSource(state.version === 1 || cycleOrigin || Array.isArray(state.sightings) ||
+    state.version === 3 && state.sightings === undefined);
+  if (state.lastAnnotations !== undefined) {
+    requireSource(object(state.lastAnnotations)); const annotations = state.lastAnnotations as Record<string, unknown>;
+    requireSource(positive(annotations.round) && seen.has(annotations.round) && Array.isArray(annotations.identities) &&
+      annotations.identities.every(row => object(row) && identity(row.identity) && Object.hasOwn(state.findings as object, row.identity) &&
+        ['new', 'repeat', 'suppressed', 'regating'].includes(row.status as string) && typeof row.gating === 'string'));
+  }
+  return state as unknown as ConvergeRunState;
+}
+
+function retainedFindingIdentity(current: FindingEntry, predecessor: FindingEntry): boolean {
+  // Ordinary verdicts can follow recovery, and semantic sightings update their
+  // caches. Their evidence is validated by the semantic proof kernel; lineage
+  // preserves the original identity rather than freezing those later results.
+  const mutable = new Set(['pendingRound', 'verdict', 'verdictRound', 'verdictSeverity', 'verdictReason',
+    ...(predecessor.claimDescriptor ? ['lastRound', 'models', 'startLine', 'endLine', 'severity'] : [])]);
+  const retained = (entry: FindingEntry) => Object.fromEntries(Object.entries(entry).filter(([key]) => !mutable.has(key)));
+  return isDeepStrictEqual(retained(current), retained(predecessor)) && current.lastRound >= predecessor.lastRound &&
+    (predecessor.verdict === undefined || current.verdict !== undefined && current.verdictRound! >= predecessor.verdictRound!);
+}
+
+function retainedRounds(current: ConvergeRunState, predecessor: ConvergeRunState): boolean {
+  const rounds = new Map(current.rounds.map(round => [round.round, round]));
+  return predecessor.rounds.every(round => isDeepStrictEqual(rounds.get(round.round), round));
+}
+
+/** Pure snapshot lineage and retained identity proof; later semantic updates and remote acceptance are validated separately. */
+export function verifyNativeRecoveryLineage(sourceJson: string, target: string, nativeSourceJsons: string[] = []): {
+  state: ConvergeRunState; original: ConvergeRunState; legacy?: ConvergeRunState; reservedIdentities: string[];
+} {
+  try {
+    const state = nativeSource(sourceJson, target);
+    requireSource(Array.isArray(nativeSourceJsons));
+    const maximumSnapshots = (state.recovery?.operations.length ?? 0) + (state.migration ? 1 : 0);
+    requireSource(nativeSourceJsons.length <= maximumSnapshots);
+    // Bound the whole ancestry before hashing any predecessor. Oversized
+    // histories remain retained but cannot be admitted to an in-memory proof.
+    let snapshotBytes = 0;
+    for (const raw of nativeSourceJsons) {
+      requireSource(typeof raw === 'string' && raw.length <= MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES - snapshotBytes);
+      snapshotBytes += Buffer.byteLength(raw);
+      requireSource(snapshotBytes <= MAX_NATIVE_RECOVERY_SNAPSHOT_BYTES);
+    }
+    const snapshots = new Map(nativeSourceJsons.map(raw => [sha(raw), raw]));
+    requireSource(snapshots.size === nativeSourceJsons.length);
+    const used = new Set<string>();
+    const take = (digest: string): ConvergeRunState => {
+      requireSource(/^[a-f0-9]{64}$/.test(digest) && !used.has(digest) && snapshots.has(digest));
+      used.add(digest); return nativeSource(snapshots.get(digest)!, target);
+    };
+    let current = state;
+    let requiresReleasedCycleRoot = false;
+    const reserved = new Set<string>();
+    if (state.version === 3) for (const anchor of recoveryAnchors(state)) {
+      requireSource(identity(anchor.identity) && !reserved.has(anchor.identity)); reserved.add(anchor.identity);
+    }
+    while (current.version === 3) {
+      requiresReleasedCycleRoot ||= current.sightings === undefined;
+      const operations = current.recovery!.operations; const operation = operations.at(-1)!;
+      requireSource(object(operation) && uuid(operation.operationId));
+      const predecessor = take(operation.sourceSha256);
+      requireSource(operation.sourceVersion === predecessor.version &&
+        isDeepStrictEqual(operations.slice(0, -1), predecessor.recovery?.operations ?? []) &&
+        isDeepStrictEqual(current.migration, predecessor.migration) &&
+        isDeepStrictEqual(current.cycle, predecessor.cycle) &&
+        current.roundCap === predecessor.roundCap &&
+        retainedRounds(current, predecessor) &&
+        Object.entries(predecessor.findings).every(([key, finding]) =>
+          Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
+      current = predecessor;
+    }
+    // Every sighting-less v3 link is admissible only when its exact walked root
+    // is an authentic released cycle-v2 snapshot. The link checks above retain
+    // the cycle byte-for-byte through every recovery operation.
+    if (requiresReleasedCycleRoot) requireSource(current.version === 2 && current.cycle !== undefined &&
+      current.sightings === undefined && current.migration === undefined);
+    let legacy = current.version === 1 ? current : undefined;
+    if (current.version === 2 && current.migration) {
+      legacy = take(current.migration.sourceSha256);
+      requireSource(legacy.version === 1 && current.roundCap === legacy.roundCap && retainedRounds(current, legacy) &&
+        Object.entries(legacy.findings).every(([key, finding]) =>
+          Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
+    }
+    requireSource(used.size === snapshots.size);
+    return { state, original: current, ...(legacy ? { legacy } : {}), reservedIdentities: [...reserved].sort() };
+  } catch (cause) { throw new Error('native_recovery_lineage_conflict', { cause }); }
+}
+
+export function recoveryAnchors(state: ConvergeRunState): NativeCorrectionAnchor[] {
+  return state.version === 3 ? state.recovery!.operations.flatMap(operation => operation.anchors) : [];
+}
+/** Exact bytes supplied by an outer reader; no filesystem or authenticated-read qualification is implied. */
+export interface RetainedNativeEvidence {
+  sourceJson: string;
+  target: string;
+  reports: string[];
+  nativeSourceJsons?: string[];
+  recoveryMaterials?: RecoveryMaterial[];
+}
