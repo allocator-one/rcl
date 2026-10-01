@@ -33,16 +33,9 @@ function fixture() {
 
 describe('ordinary pending recovery package', () => {
   it('binds the immutable PR9691 A2 identity and original caps', () => {
-    const historical = JSON.parse(readFileSync(
-      new URL('../fixtures/rcl-154-pr9691-a2.json', import.meta.url), 'utf8'));
-    const packet = createOrdinaryPendingPackage({
-      target: historical.target, headSha: historical.headSha, baseSha: historical.baseSha,
-      inputSha256: historical.inputSha256, attempt: historical.attempt, round: historical.round,
-      attemptCap: historical.cap, roundCap: historical.roundCap,
-      patch: 'fixture patch', spec: 'fixture spec', plan: '{"version":2}',
-      capturedInputsSha256: 'c'.repeat(64), config: '{}', roster: '[]',
-      retainedAsyncSha256: historical.retainedAsyncSha256,
-    });
+    const bytes = readFileSync(
+      new URL('../fixtures/rcl-154-pr9691-a2.json', import.meta.url), 'utf8');
+    const packet = decodeOrdinaryPendingPackage(bytes);
     expect(packet).toMatchObject({
       target: 'allocator-one-9691',
       headSha: '60df6d782f9ef9a255028391595dbbbe92442a57',
@@ -51,6 +44,13 @@ describe('ordinary pending recovery package', () => {
       attempt: 2, round: 2, attemptCap: 20, roundCap: 15,
       retainedAsyncSha256: ['92705bdeb895e3bcab6863b5f717262f45fa4a4b6e98853b214677b64771e834'],
     });
+    expect(packet.patchSha256).toBe('da34014a5cd6e7fe7bd8abccb834259f9906b3ad150aeae0bfb3d430464ac92e');
+    expect(packet.specSha256).toBe('de6e3db4fc6c28f111ca1cd739d94d50c90238aa6e963dfadc0277cea2427e7f');
+    expect(validateOrdinaryPendingPackage(packet, {
+      target: packet.target, headSha: packet.headSha, inputSha256: packet.inputSha256,
+      attempt: packet.attempt, round: packet.round, attemptCap: packet.attemptCap,
+      roundCap: packet.roundCap,
+    }, packet)).toEqual(packet);
   });
 
   it('round-trips one canonical reviewed package and exact spent launch identity', () => {

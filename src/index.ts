@@ -2272,7 +2272,7 @@ async function executeCouncil(
           target: source.target, headSha: source.headSha, baseSha: extra.target.baseSha ?? '',
           inputSha256: source.inputSha256, attempt: source.pendingAttempt, round: source.round,
           attemptCap: pendingAttempts.cap, roundCap: pendingNative.roundCap,
-          patch: captured.patchBytes, spec: prepared.specContent ?? '',
+          patch: diff.rawDiff ?? captured.patchBytes, spec: prepared.specContent ?? '',
           plan: stableStringify(captured.plan), capturedInputsSha256: captured.captured.digest,
           config: captured.configBytes, roster: stableStringify(pendingClaimRoster),
           retainedAsyncSha256: expectedAsyncSha256,
