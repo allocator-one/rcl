@@ -163,6 +163,8 @@ import { loadConvergeRunState } from './converge/run-state.js';
 import { resumePendingLegacyLaunch, type PendingLegacyResumeExecution } from './converge/pending-legacy-resume.js';
 import { capturePreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
+import { resolveFinalizedAsyncExecution } from './dispatch/checkpoint-async-store.js';
+import type { SealedAsyncProof } from './dispatch/checkpoint-async-context.js';
 import { exportCheckpointProof, type CheckpointProof } from './dispatch/checkpoint.js';
 import { captureAggregationInputs, AGGREGATION_ALGORITHM } from './report/aggregation-inputs.js';
 import { decodeSupplementalAsync } from './report/supplemental-async.js';
@@ -2361,6 +2363,7 @@ async function executeCouncil(
 
   let chunkReviews: ModelReview[];
   let pendingProjection: ReturnType<typeof projectCheckpointReport> | undefined;
+  let pendingAsyncExecution: SealedAsyncProof | undefined;
   try {
     if (extra.pendingResume) {
       if (!(await extra.pendingResume.journal.read()).finalized) {
@@ -2373,6 +2376,9 @@ async function executeCouncil(
           } });
         await extra.pendingResume.journal.finalize(extra.pendingResume.ownership);
       }
+      pendingAsyncExecution = await resolveFinalizedAsyncExecution({ commonDir: await resolveGitCommonDir(),
+        namespace: extra.pendingResume.launch.runId, plan: extra.pendingResume.journal.getPlan(),
+        ownership: extra.pendingResume.ownership });
       const proof = await exportCheckpointProof(extra.pendingResume.journal);
       pendingProjection = projectCheckpointReport({ sources: [],
         successor: { runId: extra.pendingResume.launch.runId, proof },
@@ -2564,6 +2570,7 @@ async function executeCouncil(
     const checkpointAssembly = {
       projection: pendingProjection!,
       supplementalAsync,
+      ...(pendingAsyncExecution === undefined ? {} : { asyncExecution: pendingAsyncExecution }),
       diff,
       startTime: extra.pendingResume.launch.startedAtMs,
       run: runInput,

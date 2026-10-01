@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.4.12 - 2026-10-01
+
+- Recover an expired finalized original checkpoint whose captured async matrix
+  has no durable phase by retaining an exact, source-bound outcome-unknown
+  record. The record contributes no opinion, finding or quorum row, claims no
+  dispatch or cost, and reserves only the captured upper bound for fail-closed
+  verifier accounting. Live, partial, conflicting and unbound state still
+  refuses without provider calls (RCL-156).
+
 ## 4.4.11 - 2026-10-01
 
 - Reconstruct finalized historical checkpoints whose original config omitted

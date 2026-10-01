@@ -21,15 +21,17 @@ vi.mock('../../src/telemetry/recovery/files.js', async original => {
   } };
 });
 import { constants } from 'node:fs';
-import { mkdtemp, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rm, realpath, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
-import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { CheckpointJournal, checkpointPath, exportCheckpointProof, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
-import { initializeAsyncPhase, openAsyncDelegate, recordAsyncLateFailure, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit, readAsyncLateFailures } from '../../src/dispatch/checkpoint-async-store.js';
+import { initializeAsyncPhase, openAsyncDelegate, readCheckpointAsyncExecution, recordAsyncLateFailure,
+  resolveFinalizedAsyncExecution, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit,
+  readAsyncLateFailures } from '../../src/dispatch/checkpoint-async-store.js';
 import { decodeAsyncProof, validateAsyncRecords, validateAsyncResult } from '../../src/dispatch/checkpoint-async.js';
 const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], requireWritableSyncPath:'', afterSync: undefined as undefined | ((path:string)=>void)}));
 vi.mock('node:fs/promises',async original=>{const fs=await original<typeof import('node:fs/promises')>();return {...fs,open:async(...args:Parameters<typeof fs.open>)=>{const h=await fs.open(...args),sync=h.sync.bind(h);h.sync=async()=>{const path=String(args[0]);durability.synced.push(path);if(path===durability.requireWritableSyncPath&&!(Number(args[1])&constants.O_RDWR))throw Object.assign(new Error('sync requires write access'),{code:'EACCES'});if(path===durability.failPath){durability.failPath='';throw Object.assign(new Error('synthetic fsync failure'),{code:'EIO'});}const result=await sync();durability.afterSync?.(path);return result;};return h;}};});
@@ -54,6 +56,35 @@ async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, permutedChu
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
 const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
 describe('restricted original async checkpoint persistence',()=>{
+ it('retains a deterministic outcome-unknown proof for an expired finalized checkpoint without inventing calls',async()=>{
+  const f=await fixture();
+  await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
+  const finalized=await exportCheckpointProof(f.journal);
+  vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.expiresAtMs);
+  const first=await withNativeTarget(f.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...f.input,ownership}));
+  const second=await withNativeTarget(f.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...f.input,ownership}));
+  expect(second).toEqual(first);expect(await readCheckpointAsyncExecution(f.input)).toEqual(first);
+  expect(JSON.parse(first!.bytes)).toMatchObject({version:1,kind:'async-outcome-unknown',
+   reason:'finalized_checkpoint_missing_async_phase',checkpointSha256:finalized.digest,
+   capturedAsyncSha256:sha256Hex(stableStringify(f.captured.async)),physicalCallUpperBound:3});
+  await expect(lstat(join(f.path,'async'))).rejects.toMatchObject({code:'ENOENT'});
+  expect(await exportCheckpointProof(f.journal)).toEqual(finalized);
+ });
+ it('refuses outcome-unknown recovery while live or unfinalized and never masks partial phase state',async()=>{
+  const unfinalized=await fixture();
+  vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(unfinalized.launch.expiresAtMs);
+  await expect(withNativeTarget(unfinalized.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...unfinalized.input,ownership})))
+   .rejects.toThrow('unknown_unfinalized_checkpoint');
+  const live=await fixture();await withNativeTarget(live.commonDir,target,owner=>live.journal.finalize(owner));
+  vi.setSystemTime(live.launch.expiresAtMs-1);
+  await expect(withNativeTarget(live.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...live.input,ownership})))
+   .rejects.toThrow('unknown_live_launch');
+  const partial=await fixture();await withNativeTarget(partial.commonDir,target,owner=>partial.journal.finalize(owner));
+  await mkdir(join(partial.path,'async'),{mode:0o700});vi.setSystemTime(partial.launch.expiresAtMs);
+  await expect(withNativeTarget(partial.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...partial.input,ownership})))
+   .rejects.toThrow();
+  await expect(lstat(join(partial.path,'async-outcome-unknown.json'))).rejects.toMatchObject({code:'ENOENT'});
+ });
  it('refuses a claim at the non-dispatch cap before appending an intent or running its callback',async()=>{
   const f=await fixture(1),opened=await initialize(f),phase=await readAsyncPhase(f.input),writer=await openAsyncDelegate(opened.delegates[0]);
   const events:import('../../src/dispatch/checkpoint-async.js').AsyncEvent[]=[],bytes=review('error');

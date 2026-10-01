@@ -1,5 +1,6 @@
-import { readAsyncPhase } from './checkpoint-async-store.js';
+import { readAsyncPhase, readCheckpointAsyncExecution } from './checkpoint-async-store.js';
 import { encodeAsyncProof } from './checkpoint-async.js';
+import { isAsyncOutcomeUnknown } from './checkpoint-async-unknown.js';
 import type { AskFn } from '../consensus/gating.js';
 import { withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import type { CheckpointAssemblyInput } from '../report/checkpoint-consensus.js';
@@ -37,16 +38,20 @@ export function executeCheckpointGating(input: CheckpointGatingExecutionOptions)
   const options = { ...input, assembly: { ...input.assembly,
     diff: structuredClone(input.assembly.diff), run: structuredClone(input.assembly.run) } };
   return withOwnedNativeOperation(options.ownership, options.commonDir, options.journal.getPlan().target, async ownership => {
-    const { plan, originalAsync, currentReviewerCalls } = prepareCheckpointGating(options.assembly);
+    const { plan, originalAsync, currentReviewerCalls, asyncExecution } = prepareCheckpointGating(options.assembly);
     const expected = options.assembly.projection.proofs.at(-1)!.proof;
     const actual = await options.journal.exportProof();
     if (actual.bytes !== expected.bytes || actual.digest !== expected.digest) {
       throw new Error('checkpoint_gating_execution_journal_mismatch');
     }
     if (options.assembly.asyncExecution && options.assembly.projection.proofs.length === 1) {
-      const phase = await readAsyncPhase({ commonDir: options.commonDir, namespace: options.assembly.projection.proofs.at(-1)!.runId, plan: options.journal.getPlan() });
-      const sealed = encodeAsyncProof(phase.plan, phase.state.records);
-      if (sealed.bytes !== options.assembly.asyncExecution.bytes || sealed.digest !== options.assembly.asyncExecution.digest) {
+      const location = { commonDir: options.commonDir,
+        namespace: options.assembly.projection.proofs.at(-1)!.runId, plan: options.journal.getPlan() };
+      const sealed = asyncExecution && isAsyncOutcomeUnknown(asyncExecution)
+        ? await readCheckpointAsyncExecution(location) : undefined;
+      const exact = sealed ?? await readAsyncPhase(location).then(phase => encodeAsyncProof(phase.plan, phase.state.records));
+      if (!exact) throw new Error('checkpoint_gating_execution_async_mismatch');
+      if (exact.bytes !== options.assembly.asyncExecution.bytes || exact.digest !== options.assembly.asyncExecution.digest) {
         throw new Error('checkpoint_gating_execution_async_mismatch');
       }
     }
