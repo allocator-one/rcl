@@ -272,7 +272,7 @@ export async function loadReviewerLineage(input: LoadReviewerLineageInput): Prom
   const root = runs[0]!;
   if (root.captured.async) {
     const proof = await readCheckpointAsyncExecution({ commonDir, namespace: root.runId, plan: root.plan });
-    if (proof?.bytes !== root.inspected.asyncExecution?.bytes || proof?.digest !== root.inspected.asyncExecution?.digest) fail('async_mismatch');
+    if (!proof || proof.bytes !== root.inspected.asyncExecution?.bytes || proof.digest !== root.inspected.asyncExecution?.digest) fail('async_mismatch');
   }
   if (!root.inspected.launch || !root.inspected.nativeClaim ||
     root.inspected.launch.originalNativeClaim.attempt !== root.inspected.nativeClaim.attempt ||

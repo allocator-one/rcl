@@ -90,6 +90,17 @@ it('reserves an authenticated unknown async upper bound without inventing physic
   .flatMap(group=>'origins' in group?group.origins:[group.origin]).some(origin=>origin.kind==='async')).toBe(false);
 });
 
+it.each([
+ ['launch',captureSupplementalAsync([],1)],
+ ['result',captureSupplementalAsync([JSON.stringify({model:'async-model',provider:'fake',role:'general',async:true,
+  status:'success',durationMs:1,findings:[]})],0)],
+])('refuses supplemental async %s under outcome-unknown evidence',async(_kind,supplementalAsync)=>{
+ const f=await fixture({asyncPhysical:2,asyncLaunched:0});
+ const unknown=encodeAsyncOutcomeUnknown(f.proof,asyncContextForBindings(f.plan,f.proof.bindings).context,f.captured);
+ f.assembly.asyncExecution={bytes:unknown.bytes,digest:unknown.digest};f.assembly.supplementalAsync=supplementalAsync;
+ expect(()=>prepareCheckpointGating(f.assembly)).toThrow('checkpoint_gating_unknown_async_supplemental');
+});
+
 it('excludes durable non-dispatch markers from async physical-call reservations',async()=>{
  const f=await fixture({asyncPhysical:498,asyncNotDispatched:true});const p=await phase(f);
  const result=deriveCheckpointGating(f.assembly,p);

@@ -51,6 +51,10 @@ export function prepareCheckpointGating(assembly: CheckpointAssemblyInput): {
   if (assembly.supplementalAsync.asyncLaunched > 0 && asyncExecution === undefined) {
     throw new Error('checkpoint_gating_unbound_async_launches');
   }
+  if (asyncExecution && isAsyncOutcomeUnknown(asyncExecution) &&
+    (assembly.supplementalAsync.asyncLaunched > 0 || assembly.supplementalAsync.reviewBytes.length > 0)) {
+    throw new Error('checkpoint_gating_unknown_async_supplemental');
+  }
   if (captured.async && assembly.supplementalAsync.asyncLaunched > captured.async.calls.length) {
     throw new Error('checkpoint_gating_async_launch_count');
   }

@@ -1,6 +1,6 @@
 import { checkpointRecoveryCells, blockingCheckpointSeatIds, requireReviewerLaneBinding } from '../dispatch/checkpoint.js';
-import { readAsyncPhase, readCheckpointAsyncExecution } from '../dispatch/checkpoint-async-store.js';
-import { validateCheckpointAsync } from '../dispatch/checkpoint-async-context.js';
+import { inspectCheckpointAsyncExecution } from '../dispatch/checkpoint-async-store.js';
+import { assertCapturedAsyncPlan, validateCheckpointAsync } from '../dispatch/checkpoint-async-context.js';
 import { isAsyncOutcomeUnknown } from '../dispatch/checkpoint-async-unknown.js';
 import { decodeCapturedInputs } from '../dispatch/captured-inputs.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointState, type FrozenCheckpointPlan } from '../dispatch/checkpoint.js';
@@ -59,7 +59,7 @@ export interface ReviewerStatus {
         maxPhysicalCalls?: number; expiresAtMs?: number; remainingMs?: number };
       inherited: { intents: number; uncertain: number };
     };
-    async: { current: { intents: number; uncertain: number; status: 'absent' | 'open' | 'sealed' | 'unknown';
+    async: { current: { intents: number; uncertain: number; status: 'absent' | 'open' | 'sealed' | 'unknown' | 'missing';
       physicalUpperBound?: number }; inherited: { intents: number; uncertain: number; physicalUpperBound?: number } };
     combined: { physical: number; newOnly: number; uncertain: number };
     /** Compatibility counter; explicitly excludes async. */
@@ -270,13 +270,17 @@ export async function inspectReviewerStatus(input: InspectReviewerStatusInput): 
   const verifier = await verifierAttempts(chain.runs, request.nowMs);
   const root = chain.runs[0]!, rootCapture = decodeCapturedInputs((await root.journal.readBindings())['captured-inputs']!, root.plan);
   const asyncLocation = { commonDir: request.commonDir, namespace: chain.lineage[0]!.runId, plan: root.plan };
-  const sealedAsync = rootCapture.async ? await readCheckpointAsyncExecution(asyncLocation) : undefined;
-  const decodedAsync = sealedAsync ? validateCheckpointAsync(await exportCheckpointProof(root.journal), sealedAsync) : undefined;
-  const phase = decodedAsync && !isAsyncOutcomeUnknown(decodedAsync) ? await readAsyncPhase(asyncLocation) : undefined;
+  const storedAsync = rootCapture.async ? await inspectCheckpointAsyncExecution(asyncLocation) : undefined;
+  const decodedAsync = storedAsync?.kind === 'unknown'
+    ? validateCheckpointAsync(await exportCheckpointProof(root.journal), storedAsync.proof) : undefined;
+  if (storedAsync?.kind === 'phase') assertCapturedAsyncPlan(storedAsync.phase.plan, rootCapture);
   const asyncRoot = decodedAsync && isAsyncOutcomeUnknown(decodedAsync)
     ? { intents: 0, uncertain: 0, status: 'unknown' as const, physicalUpperBound: decodedAsync.physicalCallUpperBound }
-    : phase ? { intents: phase.state.intents.length, uncertain: phase.state.uncertain.length,
-      status: phase.state.cutoffMs === undefined ? 'open' as const : 'sealed' as const }
+    : storedAsync?.kind === 'phase' ? { intents: storedAsync.phase.state.intents.length,
+      uncertain: storedAsync.phase.state.uncertain.length,
+      status: storedAsync.phase.state.cutoffMs === undefined ? 'open' as const : 'sealed' as const }
+      : rootCapture.async && root.state.finalized
+        ? { intents: 0, uncertain: 0, status: 'missing' as const, physicalUpperBound: rootCapture.async.maxPhysicalCalls }
       : { intents: 0, uncertain: 0, status: 'absent' as const };
   const async = run.kind === 'original' ? { current: asyncRoot, inherited: { intents: 0, uncertain: 0 } }
     : { current: { intents: 0, uncertain: 0, status: 'absent' as const }, inherited: { intents: asyncRoot.intents,
@@ -290,9 +294,12 @@ export async function inspectReviewerStatus(input: InspectReviewerStatusInput): 
 
 /** Plain local summary; it deliberately excludes prompts, results, errors and credentials. */
 export function formatReviewerStatus(status: ReviewerStatus): string {
-  const async = status.attempts.async.current.status === 'unknown'
-    ? `original async outcome unknown (up to ${status.attempts.async.current.physicalUpperBound} calls)`
-    : `${status.attempts.async.current.intents} current async calls (${status.attempts.async.current.uncertain} uncertain)`;
+  const currentAsync = status.attempts.async.current;
+  const async = currentAsync.status === 'unknown'
+    ? `original async outcome unknown (up to ${currentAsync.physicalUpperBound} calls)`
+    : currentAsync.status === 'missing'
+      ? `original async evidence missing (captured upper bound ${currentAsync.physicalUpperBound} calls)`
+      : `${currentAsync.intents} current async calls (${currentAsync.uncertain} uncertain)`;
   const inheritedAsync = status.attempts.async.inherited.physicalUpperBound === undefined ? ''
     : `; inherited async outcome unknown (up to ${status.attempts.async.inherited.physicalUpperBound} calls reserved)`;
   return `${status.target} run ${status.runId}: ${status.health.successfulSeats}/${status.health.minimumSuccessful} complete seats; ` +

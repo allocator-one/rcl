@@ -1,4 +1,4 @@
-import { mkdtemp, rm, readFile, writeFile, realpath } from "node:fs/promises";
+import { mkdtemp, rm, readFile, unlink, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -500,6 +500,15 @@ describe('retained reviewer recovery coordinator', () => {
     expect(status.attempts.combined).toMatchObject({ physical: 4, newOnly: 1, uncertain: 0 });
     expect(formatReviewerStatus(status)).toContain('inherited async outcome unknown (up to 2 calls reserved)');
     expect(options.called).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses successor status when retained unknown async evidence disappears', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { asyncUnknown: true }), options = coordinator(fixture);
+    const result = await applyReviewerRecovery(options.input); expect(result.kind).toBe('completed');
+    await unlink(join(checkpointPath(fixture.dir, target, fixture.id), 'async-outcome-unknown.json'));
+    await expect(inspectReviewerStatus({ commonDir: fixture.dir, target,
+      runId: options.input.successorRunId, nowMs: 1_800_000_000_100 }))
+      .rejects.toThrow('reviewer_lineage_async_mismatch');
   });
 
   it('inherits exact observed and uncertain original async proof across actual recovery without rebilling', async () => {

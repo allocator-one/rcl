@@ -30,7 +30,7 @@ import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { initializeAsyncPhase, openAsyncDelegate, readCheckpointAsyncExecution, recordAsyncLateFailure,
-  resolveFinalizedAsyncExecution, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit,
+  inspectCheckpointAsyncExecution, resolveFinalizedAsyncExecution, sealAsyncPhase, readAsyncPhase, readAsyncLateAudit,
   readAsyncLateFailures } from '../../src/dispatch/checkpoint-async-store.js';
 import { decodeAsyncProof, validateAsyncRecords, validateAsyncResult } from '../../src/dispatch/checkpoint-async.js';
 const durability = vi.hoisted(() => ({failPath:'',synced:[] as string[], requireWritableSyncPath:'', afterSync: undefined as undefined | ((path:string)=>void)}));
@@ -56,6 +56,14 @@ async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, permutedChu
 const initialize = (f: Awaited<ReturnType<typeof fixture>>, overrides = {}) => withNativeTarget(f.commonDir,target,ownership=>initializeAsyncPhase({...f.input,...overrides,ownership}));
 const seal = (f: Awaited<ReturnType<typeof fixture>>) => withNativeTarget(f.commonDir,target,ownership=>sealAsyncPhase({...f.input,ownership}));
 describe('restricted original async checkpoint persistence',()=>{
+ it('reads an open phase structurally without pretending it is sealed execution evidence',async()=>{
+  const f=await fixture(),opened=await initialize(f);
+  const stored=await inspectCheckpointAsyncExecution(f.input);
+  expect(stored?.kind).toBe('phase');if(stored?.kind!=='phase')throw new Error('expected open phase');
+  expect(stored.phase.state.cutoffMs).toBeUndefined();expect(await readAsyncPhase(f.input)).toEqual(stored.phase);
+  await expect(readCheckpointAsyncExecution(f.input)).rejects.toThrow();
+  expect(opened.delegates).toHaveLength(2);
+ });
  it('retains a deterministic outcome-unknown proof for an expired finalized checkpoint without inventing calls',async()=>{
   const f=await fixture();
   await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
