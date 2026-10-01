@@ -174,6 +174,7 @@ import { assembleCheckpointReview, type CheckpointAssemblyInput } from './report
 import type { SealedVerificationProof } from './report/checkpoint-gating.js';
 import { describeReviewerEvidence } from './report/reviewer-evidence.js';
 import { serializeReviewerArtifact } from './report/reviewer-artifact.js';
+import { deliverTerminalReviewerRun } from './telemetry/terminal-reviewer-delivery.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -1000,6 +1001,27 @@ program
 const telemetry = program
   .command('telemetry')
   .description('Evidence delivery to Harness: credentials, queued deliveries and retained rejected reports');
+
+telemetry
+  .command('recover-reviewer')
+  .description('Deliver one exact retained terminal reviewer report without restarting reviewers or verification')
+  .requiredOption('--target <target>', 'Exact guarded convergence target')
+  .requiredOption('--run <id>', 'Exact retained terminal run UUID')
+  .option('--json', 'Output JSON')
+  .action(async (opts: { target: string; run: string; json?: boolean }) => {
+    try {
+      const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
+      const result = await deliverTerminalReviewerRun(runtime, { target: opts.target, runId: opts.run });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`${result.outcome.line}\nReport ${result.reportSha256}; reviewer artifact ${result.reviewerArtifactSha256}`);
+      process.exitCode = result.outcome.exitCode;
+    } catch (error) {
+      const message = scrubText(error instanceof Error ? error.message : String(error), 300);
+      if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_TERMINAL_REVIEWER_DELIVERY', message } }));
+      else console.error(chalk.red(`Cannot recover terminal reviewer delivery: ${message}`));
+      process.exitCode = 4;
+    }
+  });
 
 telemetry
   .command('rejected')

@@ -30,7 +30,8 @@ function sameJson(left: unknown, right: unknown): boolean {
  * delivery and queued replay.
  */
 export function verifiedConsensusReportProblem(
-  report: unknown, envelope: RunEnvelope, reportJson: string, directResult?: ReviewResult
+  report: unknown, envelope: RunEnvelope, reportJson: string, directResult?: ReviewResult,
+  options: { allowUnlabeledStrictFallback?: boolean } = {},
 ): string | undefined {
   if (!isRecord(report) || !isRecord(report['run']) || !isRecord(report['run']['gating']) ||
       report['run']['id'] !== envelope.run.id || report['run']['rcl_version'] !== envelope.run.rcl_version ||
@@ -53,13 +54,16 @@ export function verifiedConsensusReportProblem(
   let wireIndex = 0;
   for (const [group, findings] of groups) {
     for (const [index, finding] of findings.entries()) {
-      if (!isRecord(finding) || !isRecord(finding['gating']) || !GATING_REASONS.has(finding['gating']['reason'] as string)) {
+      if (!isRecord(finding)) return `${group}.${index}.gating.reason missing or invalid in report_json`;
+      const gating = finding['gating'];
+      const strictFallback = options.allowUnlabeledStrictFallback === true && gating === undefined;
+      if (!strictFallback && (!isRecord(gating) || !GATING_REASONS.has(gating['reason'] as string))) {
         return `${group}.${index}.gating.reason missing or invalid in report_json`;
       }
-      const verification = finding['gating']['verification'];
+      const verification = strictFallback ? undefined : (gating as Record<string, unknown>)['verification'];
       if (verification !== undefined) hasVerification = true;
       const verdict = isRecord(verification) ? verification['verdict'] : undefined;
-      const reason = finding['gating']['reason'];
+      const reason = strictFallback ? 'none' : (gating as Record<string, unknown>)['reason'];
       const coherent = reason === 'verified'
         ? verdict === 'confirmed' || verdict === 'unrefuted' ||
           (verdict === 'unavailable' && allowsUnavailableVerified(envelope.run.rcl_version))
@@ -70,7 +74,7 @@ export function verifiedConsensusReportProblem(
         return `${group}.${index}.gating.verification.verdict contradicts the ${reason} gating reason in report_json`;
       }
       const wire = envelope.findings[wireIndex++];
-      if (hasWireFindings && (wire?.gating_reason !== finding['gating']['reason'] || wire?.below_threshold !== (group === 'belowThresholdFindings'))) {
+      if (hasWireFindings && (wire?.gating_reason !== reason || wire?.below_threshold !== (group === 'belowThresholdFindings'))) {
         return `${group}.${index}.gating.reason differs from the queued envelope`;
       }
     }
@@ -97,7 +101,8 @@ export function verifiedConsensusReportProblem(
   try {
     if (!Array.isArray(report['reviews']) || !isRecord(report['stats'])) return 'report_json reviews or stats are malformed';
     const projected = [false, true].map(parseFailures => buildRunEnvelope(report as unknown as ReviewResult,
-      { report_json: reportJson }, { level, delivery: envelope.delivery, parseFailures }));
+      { report_json: reportJson }, { level, delivery: envelope.delivery, parseFailures,
+        ...(envelope.reviewer_recovery === undefined ? {} : { reviewerRecovery: envelope.reviewer_recovery }) }));
     for (const field of ['run', 'stats', 'findings', 'calls'] as const) {
       if (!projected.some(candidate => sameJson(candidate[field], envelope[field]))) {
         return `report_json ${field} differ from the queued envelope`;

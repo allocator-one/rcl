@@ -13,7 +13,8 @@ import { ensureNoticeShown, type NoticeScope } from './notice.js';
 import { Outbox, OUTBOX_DIR, type FlushOptions, type FlushSummary } from './outbox.js';
 import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
-import type { ReviewerArtifact } from '../report/reviewer-artifact.js';
+import { isReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
+import { sha256Hex } from '../report/run-header.js';
 import { ReviewerDeliveryQueue } from './reviewer-delivery.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 import { verifiedConsensusReportProblem } from './report-consistency.js';
@@ -332,15 +333,30 @@ function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[
   return diagnostics.slice(0, 20);
 }
 
+/** Only a proof-derived private artifact may explain intentionally unlabeled strict-fallback bytes. */
+function authenticatedStrictFallback(input: DeliverRunInput): boolean {
+  const artifact = input.reviewerArtifact, gate = artifact?.validation.gate;
+  if (!artifact || !isReviewerArtifact(artifact) || artifact.gatingDisposition !== 'strict_fallback' ||
+    artifact.reportSha256 !== sha256Hex(input.artifacts.report_json) || gate === undefined ||
+    gate.validation !== 'deterministic' || gate.reportedCiExitCode === 0 ||
+    gate.reportedCiExitCode !== gate.conservativeCiExitCode || gate.annotations.length !== 0 ||
+    gate.unresolvedFindingIdentities.length !== 0 ||
+    input.result.run?.ci_exit_code !== gate.reportedCiExitCode || input.result.stats?.verification != null) return false;
+  return [...input.result.findings, ...(input.result.belowThresholdFindings ?? [])]
+    .every(finding => finding.gating === undefined);
+}
+
 function verifiedConsensusEnvelopeDiagnostics(
   input: DeliverRunInput,
   envelope: RunEnvelope,
 ): EvidenceDiagnostic[] {
-  const diagnostics = verifiedConsensusDiagnostics(input.result);
+  const strictFallback = authenticatedStrictFallback(input);
+  const diagnostics = strictFallback ? [] : verifiedConsensusDiagnostics(input.result);
   if (diagnostics.length > 0 || envelope.run.gating?.mode !== 'verified-consensus') return diagnostics;
   try {
     const report = JSON.parse(input.artifacts.report_json) as unknown;
-    const problem = verifiedConsensusReportProblem(report, envelope, input.artifacts.report_json, input.result);
+    const problem = verifiedConsensusReportProblem(report, envelope, input.artifacts.report_json, input.result,
+      { allowUnlabeledStrictFallback: strictFallback });
     if (problem) diagnostics.push({ path: 'report_json', message: problem });
   } catch {
     diagnostics.push({ path: 'report_json', message: 'report_json malformed; verified-consensus source cannot be checked' });
