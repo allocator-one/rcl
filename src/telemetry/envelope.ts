@@ -117,7 +117,7 @@ export interface WireFinding {
   description: string;
   suggested_fix?: string;
   consensus: ConsensusFinding['consensus'];
-  gating_reason: 'consensus' | 'critical' | 'verified' | 'none';
+  gating_reason: 'consensus' | 'critical' | 'verified' | 'severity-fallback' | 'none';
   verification_verdict?: string;
   verification_model?: string;
   verification_note?: string;
