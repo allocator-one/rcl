@@ -33,6 +33,11 @@ describe('ordinary pending migration package', () => {
     const malformed = packet(); malformed.guardedInput.roster = ['not-a-roster-entry'];
     expect(() => validateOrdinaryPendingPackage(malformed, expected)).toThrow('ordinary_pending_package_mismatch');
   });
+  it.each(['target', 'headSha', 'baseSha', 'attempt', 'round', 'pid', 'retainedAsyncSha256'] as const)('refuses mismatched %s launch metadata', key => {
+    const changed = packet() as any;
+    changed[key] = key === 'attempt' || key === 'round' || key === 'pid' ? 1 : key === 'retainedAsyncSha256' ? ['d'.repeat(64)] : 'f'.repeat(40);
+    expect(() => validateOrdinaryPendingPackage(changed, expected)).toThrow('ordinary_pending_package_mismatch');
+  });
   it.each([
     ['missing descriptor', (value: any) => { value.retainedAsync = []; }],
     ['duplicate descriptor', (value: any) => { value.retainedAsync.push({ ...value.retainedAsync[0] }); }],

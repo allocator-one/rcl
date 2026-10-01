@@ -69,6 +69,12 @@ describe('ordinary pending launch migration', () => {
     await expect(resumePendingLegacyLaunch({ ...options, pendingInputSha256: 'f'.repeat(64) }))
       .rejects.toThrow('pending_legacy_resume_launch_mismatch');
     expect(await readFile(nativePath)).toEqual(before);
+    const tampered = structuredClone(options.migrationPackage);
+    tampered.target = 'another-target';
+    await expect(resumePendingLegacyLaunch({ ...options, migrationPackage: tampered }))
+      .rejects.toThrow('ordinary_pending_package_mismatch');
+    expect(await readFile(nativePath)).toEqual(before);
+    expect((await loadConvergeAttemptState(common, target))?.attemptsUsed).toBe(1);
     await expect(resumePendingLegacyLaunch(options)).rejects.toThrow('crash after ordinary finalization');
     expect((await loadConvergeRunState(common, target))?.lastLaunch)
       .toMatchObject({ status: 'failed', attempt: 2, pendingRecovery: { pendingAttempt: 1, blockingOutcome: 'unknown' } });

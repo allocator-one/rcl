@@ -172,6 +172,8 @@ describe('ordinary launch health through the public CLI', () => {
       const telemetryEnv = { RCL_TELEMETRY: 'full', HARNESS_API_TOKEN: 'aone_SYNTHETIC_TEST_TOKEN', HARNESS_API_URL: f.harnessUrl };
       const result = await f.run(args, telemetryEnv);
       expect(result.status, result.stderr).toBe(0); expect(f.calls()).toBe(0);
+      expect(f.requests().filter(request => /^(POST|PUT) /.test(request))).toEqual([]);
+      expect(await readdir(f.dir)).not.toContain('report.json');
       expect([await readFile(nativePath), await readFile(attemptPath), await readFile(asyncPath)]).toEqual(before);
       pkg.baseSha = 'e'.repeat(40); await writeFile(join(f.dir, 'ordinary.json'), JSON.stringify(pkg));
       expect((await f.run(args, telemetryEnv)).status).not.toBe(0);
