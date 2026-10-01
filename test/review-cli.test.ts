@@ -230,6 +230,14 @@ describe('rcl review — bound fix-obligation recovery (RCL-148)', () => {
 });
 
 describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
+  it('advertises exact terminal reviewer delivery recovery separately from review resumption', () => {
+    const result = runRcl(['telemetry', 'recover-reviewer', '--help'], tempRepository());
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--target <target>');
+    expect(result.stdout).toContain('--run <id>');
+    expect(result.stdout.replace(/\s+/g, ' ')).toContain('without restarting reviewers or verification');
+  });
+
   it('advertises unknown finalization, fresh recovery and immutable async bindings', () => {
     const result = runRcl(['review', '--help'], tempRepository());
     expect(result.status).toBe(0);

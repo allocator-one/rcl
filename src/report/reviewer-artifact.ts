@@ -18,7 +18,7 @@ import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { originalRunReportSchema, UUID } from '../telemetry/recovery/source.js';
 import { type CheckpointAssemblyInput, type CheckpointAssemblyContribution,
   type CheckpointAssemblyObservation } from './checkpoint-assembly.js';
-import { deriveCheckpointGating, type SealedVerificationProof } from './checkpoint-gating.js';
+import { deriveCheckpointGating, type CheckpointGatingProjection, type SealedVerificationProof } from './checkpoint-gating.js';
 import { projectCheckpointReport, type PhysicalCheckpointAttempt } from './checkpoint-projection.js';
 import { decodeSupplementalAsync, type SupplementalAsync } from './supplemental-async.js';
 import { describeReviewerEvidence, isInspectedReviewerReport, validateInspectedReviewerArtifactChain, MAX_REVIEWER_LINEAGE_DEPTH, type InspectedReviewerReport, type ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
@@ -50,6 +50,8 @@ export type ReviewerArtifact = DeepReadonly<{
   bytes: string;
   digest: string;
   reportSha256: string;
+  /** Runtime-only derivation from authenticated checkpoint/verifier proofs; never serialized into private bytes. */
+  gatingDisposition: CheckpointGatingProjection['disposition'];
   validation: { body: 'deterministic'; health: 'derived'; gate: ReviewerArtifactGate };
   health: ReviewerHealth;
   contributions: CheckpointAssemblyContribution[];
@@ -228,7 +230,8 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
     ...(asyncExecution === undefined ? {} : isAsyncOutcomeUnknown(gated.asyncExecution)
       ? { asyncExecution } : { asyncExecution, newAsyncPhysicalAttempts }), lineage,
     contributions: derived.contributions, observations: derived.observations, health: projection.health, newPhysicalAttempts, validation };
-  return { wire, projection, derived, validation, newPhysicalAttempts, newAsyncPhysicalAttempts };
+  return { wire, projection, derived, validation, gatingDisposition: gated.disposition,
+    newPhysicalAttempts, newAsyncPhysicalAttempts };
 }
 /**
  * Serialize PRIVATE evidence after ordinary sanitization/rendering. Pure and
@@ -243,9 +246,9 @@ export function serializeReviewerArtifact(input: ReviewerArtifactContext & { rep
 }
 
 function finishArtifact(result: ReturnType<typeof derive>, bytes: string): ReviewerArtifact {
-  const { wire, projection, derived, validation, newPhysicalAttempts, newAsyncPhysicalAttempts } = result;
+  const { wire, projection, derived, validation, gatingDisposition, newPhysicalAttempts, newAsyncPhysicalAttempts } = result;
   const artifact: ReviewerArtifact = freeze({ version: 1 as const, bytes, digest: sha256Hex(bytes), reportSha256: wire.report.sha256,
-    validation, health: projection.health, contributions: derived.contributions, observations: derived.observations, newPhysicalAttempts,
+    validation, gatingDisposition, health: projection.health, contributions: derived.contributions, observations: derived.observations, newPhysicalAttempts,
     ...(newAsyncPhysicalAttempts === undefined ? {} : { newAsyncPhysicalAttempts }) });
   validated.add(artifact);
   return artifact;
