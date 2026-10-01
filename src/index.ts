@@ -120,6 +120,7 @@ import {
   detectRunner,
   parseSpecSource,
   resolveConvergeContext,
+  guardedInputSha256,
   sha256Hex,
   stableStringify,
   validateSha,
@@ -160,9 +161,12 @@ import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemet
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
-import { resumePendingLegacyLaunch, type PendingLegacyResumeExecution } from './converge/pending-legacy-resume.js';
-import { capturePreparedCouncil } from './dispatch/capture-council.js';
+import { previewOrdinaryPendingLaunch, resumePendingLegacyLaunch, type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
+import { type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
+import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
+import { resolveFinalizedAsyncExecution } from './dispatch/checkpoint-async-store.js';
+import type { SealedAsyncProof } from './dispatch/checkpoint-async-context.js';
 import { exportCheckpointProof, type CheckpointProof } from './dispatch/checkpoint.js';
 import { captureAggregationInputs, AGGREGATION_ALGORITHM } from './report/aggregation-inputs.js';
 import { decodeSupplementalAsync } from './report/supplemental-async.js';
@@ -347,6 +351,8 @@ program
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-report <path>', 'Original legacy report proving an inconclusive launch; the new inputs may differ; requires --retry-reason')
   .option('--resume-pending', 'Finalize an unobservable pending legacy dispatch, then claim one fresh checkpointed retry under its target lock')
+  .option('--ordinary-pending-package <path>', 'Immutable ordinary pending-launch package; requires --resume-pending and replaces --retry-report')
+  .option('--preview-pending', 'Authenticate an ordinary pending recovery under its target lock without writes or provider calls')
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
@@ -1507,6 +1513,8 @@ interface CouncilCliOpts {
   retryReason?: string;
   retryReport?: string;
   resumePending?: boolean;
+  ordinaryPendingPackage?: string;
+  previewPending?: boolean;
   resumeAsyncSha256?: string;
   maxAttempts?: string;
   maxRounds?: string;
@@ -1837,13 +1845,17 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         throw new ReviewLaunchRefused('bound_fix_recovery_invalid', '--bound-fix-recovery must name an exact native run UUID.');
       }
     }
-    if (opts.resumePending && (!opts.guardedConverge || !opts.retryReport || !opts.retryReason ||
+    if (opts.resumePending && (!opts.guardedConverge || (!opts.retryReport && !opts.ordinaryPendingPackage) ||
+      (opts.retryReport && opts.ordinaryPendingPackage) || !opts.retryReason ||
       !opts.resumeAsyncSha256 || !opts.evidenceRequired || opts.telemetry === false ||
       opts.maxAttempts === undefined || opts.startOver || opts.boundFixRecovery || opts.attest)) {
-      throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-pending requires guarded convergence, evidence delivery, the exact legacy retry report, retained retry reason, an explicit attempt cap and retained async result digests.');
+      throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-pending requires guarded convergence, evidence delivery, exactly one legacy retry report or ordinary package, retained retry reason, an explicit attempt cap and retained async result digests.');
     }
-    if (!opts.resumePending && opts.resumeAsyncSha256 !== undefined) {
-      throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-async-sha256 is valid only with --resume-pending.');
+    if (!opts.resumePending && (opts.resumeAsyncSha256 !== undefined || opts.ordinaryPendingPackage !== undefined)) {
+      throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-async-sha256 and --ordinary-pending-package are valid only with --resume-pending.');
+    }
+    if (opts.previewPending && (!opts.resumePending || !opts.ordinaryPendingPackage || opts.retryReport)) {
+      throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires --resume-pending and --ordinary-pending-package, without --retry-report.');
     }
     opts = { ...opts, ...await discoverCycleReview(target, opts) };
     if (!opts.cycleReview && opts.telemetry !== false && (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
@@ -2056,7 +2068,7 @@ async function executeCouncil(
     pendingResume?: PendingLegacyResumeExecution;
   },
   preparedWork?: Awaited<ReturnType<typeof prepareCouncilWork>>
-): Promise<GuardedLaunchCompletion> {
+): Promise<GuardedLaunchCompletion | undefined> {
   const { config, roleMap, assignments, asyncAssignments } = prepared;
   const planContext = extra.focus !== undefined ? { focus: extra.focus } : undefined;
   const work = preparedWork ?? await prepareCouncilWork(spinner, prepared, diff, opts, extra.focus);
@@ -2088,6 +2100,43 @@ async function executeCouncil(
       if (expectedAsyncSha256.length === 0 || expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
         new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid', 'Retained async SHA-256 bindings must be unique lowercase 64-character digests.');
+      }
+      const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
+        (await readStable(opts.ordinaryPendingPackage)).text
+      ) as OrdinaryPendingPackage;
+      if (opts.previewPending && migrationPackage) {
+        const asyncStoreDir = await resolveAsyncStoreDir();
+        const names = await readdir(asyncStoreDir);
+        const artifacts: AsyncResultReference[] = [];
+        for (const descriptor of migrationPackage.retainedAsync) {
+          let artifact: AsyncResultReference | undefined;
+          for (const name of names) {
+            const path = join(asyncStoreDir, name);
+            const bytes = await readStable(path).catch(() => undefined);
+            if (!bytes || bytes.sha256 !== descriptor.sha256) continue;
+            let decoded: unknown;
+            try { decoded = JSON.parse(bytes.text); } catch { throw new ReviewLaunchRefused('pending_async_corrupt', 'A package-bound retained async artifact is not valid JSON.'); }
+            const row = decoded as { model?: unknown; role?: unknown; provider?: unknown };
+            if (row.model !== descriptor.model || row.role !== descriptor.role || row.provider !== descriptor.provider) {
+              throw new ReviewLaunchRefused('pending_async_identity_mismatch', 'A package-bound retained async artifact has a different reviewer identity.');
+            }
+            if (artifact) throw new ReviewLaunchRefused('pending_async_duplicate', 'Multiple retained async artifacts match one authenticated digest.');
+            artifact = { path, sha256: bytes.sha256, bytesBase64: bytes.raw.toString('base64') };
+          }
+          if (!artifact) throw new ReviewLaunchRefused('pending_async_missing', 'A package-bound retained async artifact is unavailable.');
+          artifacts.push(artifact);
+        }
+        const inputSha256 = guardedInputSha256(migrationPackage.guardedInput);
+        const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
+          target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
+          pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256, retryReason: opts.retryReason!,
+          captured: {} as CapturedPreparedCouncil, retainedAsyncSha256: expectedAsyncSha256,
+          migrationPackage, maxAttempts: Number(opts.maxAttempts), maxPhysicalCalls: 1, maxAttemptsPerCell: 1,
+          maxDurationMs: 1, validate: async () => {}, loadRetainedAsync: async () => artifacts,
+          run: async () => { throw new Error('preview_must_not_run'); }, preview: true });
+        spinner.stop();
+        console.log(JSON.stringify({ mode: 'preview', ...preview }));
+        return undefined;
       }
       const pendingClaimPlan = prepared.pendingClaimPlan;
       if (!pendingClaimPlan) {
@@ -2149,12 +2198,14 @@ async function executeCouncil(
         pr: extra.target.prNumber, diff: diffDigest(diff.files), config: configDigest(config),
         roster, prompts, asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
       }));
-      const result = await resumePendingLegacyLaunch({ gitCommonDir: common,
+      const pendingResumeOptions: PendingLegacyResumeOptions = { gitCommonDir: common,
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
+        baseSha: extra.target.baseSha ?? '',
         pendingInputSha256: claimedInputSha256, recoveryInputSha256,
         retryReason: opts.retryReason!,
-        legacyRetry: { reportPath: opts.retryReport!, config, roster,
-          historicalPlan: prepared.historicalRetryPlan === true }, captured,
+        ...(opts.retryReport ? { legacyRetry: { reportPath: opts.retryReport, config, roster,
+          historicalPlan: prepared.historicalRetryPlan === true } } : {}),
+        ...(migrationPackage ? { migrationPackage } : {}), captured,
         retainedAsyncSha256: expectedAsyncSha256,
         maxAttempts: Number(opts.maxAttempts),
         maxPhysicalCalls: captured.plan.cells.length * ((config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1),
@@ -2185,9 +2236,20 @@ async function executeCouncil(
           }
           return snapshot.artifacts;
         },
-        run: execution => executeCouncil(spinner, { ...prepared, converge: execution.context }, diff,
-          { ...opts, guardedConverge: false, exclusiveOutputs: true }, { ...extra, pendingResume: execution }, work),
-      });
+        run: async execution => {
+          const completion = await executeCouncil(spinner, { ...prepared, converge: execution.context }, diff,
+            { ...opts, guardedConverge: false, exclusiveOutputs: true }, { ...extra, pendingResume: execution }, work);
+          if (!completion) throw new Error('pending_resume_missing_completion');
+          return completion;
+        },
+      };
+      if (opts.previewPending) {
+        const preview = await resumePendingLegacyLaunch({ ...pendingResumeOptions, preview: true });
+        spinner.stop();
+        console.log(JSON.stringify({ mode: 'preview', ...preview }));
+        return undefined;
+      }
+      const result = await resumePendingLegacyLaunch({ ...pendingResumeOptions, preview: false });
       try {
         await consumeBoundAsyncResults(asyncStoreDir, asyncKey, expectedAsyncSha256,
           { allowAlreadyConsumed: result.reusedCompletion });
@@ -2206,11 +2268,11 @@ async function executeCouncil(
       startOver: opts.startOver, cycleRemote,
       boundFixRecovery,
       headSha: extra.target.headSha ?? '',
-      inputSha256: sha256Hex(stableStringify({
+      inputSha256: guardedInputSha256({
         head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
         diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
         asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
-      })),
+      }),
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,
@@ -2237,9 +2299,11 @@ async function executeCouncil(
         if (boundFixRecovery) process.stderr.write(`Bound fix recovery verified from run ${boundFixRecovery.runId}; attempt ${claim.attempt} retains the existing review history.\n`);
       },
       run: async converge => {
-        completion = await executeCouncil(spinner, { ...prepared, converge }, diff,
+        const guardedCompletion = await executeCouncil(spinner, { ...prepared, converge }, diff,
           { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
-        return completion;
+        if (!guardedCompletion) throw new Error('guarded_launch_missing_completion');
+        completion = guardedCompletion;
+        return guardedCompletion;
       },
     });
     if (claim.warning) process.stderr.write(`${claim.warning}\n`);
@@ -2361,6 +2425,7 @@ async function executeCouncil(
 
   let chunkReviews: ModelReview[];
   let pendingProjection: ReturnType<typeof projectCheckpointReport> | undefined;
+  let pendingAsyncExecution: SealedAsyncProof | undefined;
   try {
     if (extra.pendingResume) {
       if (!(await extra.pendingResume.journal.read()).finalized) {
@@ -2373,6 +2438,9 @@ async function executeCouncil(
           } });
         await extra.pendingResume.journal.finalize(extra.pendingResume.ownership);
       }
+      pendingAsyncExecution = await resolveFinalizedAsyncExecution({ commonDir: await resolveGitCommonDir(),
+        namespace: extra.pendingResume.launch.runId, plan: extra.pendingResume.journal.getPlan(),
+        ownership: extra.pendingResume.ownership });
       const proof = await exportCheckpointProof(extra.pendingResume.journal);
       pendingProjection = projectCheckpointReport({ sources: [],
         successor: { runId: extra.pendingResume.launch.runId, proof },
@@ -2564,6 +2632,7 @@ async function executeCouncil(
     const checkpointAssembly = {
       projection: pendingProjection!,
       supplementalAsync,
+      ...(pendingAsyncExecution === undefined ? {} : { asyncExecution: pendingAsyncExecution }),
       diff,
       startTime: extra.pendingResume.launch.startedAtMs,
       run: runInput,

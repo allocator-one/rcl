@@ -494,6 +494,17 @@ describe('operation-bound original preflight', () => {
     expect((await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch!.runId).toBe(completion.runId);
   });
 
+  it('supplies native target ownership before the pending claim is persisted', async () => {
+    const options = await fixture(), original = retainedOriginal();
+    const beforeClaim = vi.fn(async (_bound: any, ownership: NativeTargetOwnership) => {
+      expect(ownership.target).toBe(target);
+      expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+      expect(await loadConvergeRunState(options.gitCommonDir, target)).toBeUndefined();
+    });
+    await guardReviewLaunch({ ...options, originalLaunch: { input: original.input, beforeClaim, nowMs: () => 1500 } });
+    expect(beforeClaim).toHaveBeenCalledTimes(1);
+  });
+
   it('does not spend when the frozen original deadline expires during awaited preflight', async () => {
     const options = await fixture(), original = retainedOriginal(); let now = 1500;
     const beforeClaim = vi.fn(async () => { now = 6000; });

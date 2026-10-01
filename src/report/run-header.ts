@@ -174,6 +174,10 @@ export function stableStringify(value: unknown): string {
   return encoded === undefined ? 'null' : encoded;
 }
 
+export function guardedInputSha256(value: Record<string, unknown>): string {
+  return sha256Hex(stableStringify(value));
+}
+
 /**
  * Digest of what the council actually read: every file's name, status,
  * previous name and patch, sorted by filename so the value is independent of

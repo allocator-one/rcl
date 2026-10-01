@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 4.4.14 - 2026-10-01
+
+- Accept the authenticated historical original-reviewer reservation limit when
+  retaining a finalized checkpoint's async outcome as unknown, while keeping
+  the captured async proof upper bound at 500. This lets legacy retries with a
+  larger original roster recover without provider calls and keeps malformed,
+  unbound or oversized async evidence fail-closed (RCL-158).
+
+## 4.4.12 - 2026-10-01
+
+- Recover an expired finalized original checkpoint whose captured async matrix
+  has no durable phase by retaining an exact, source-bound outcome-unknown
+  record. The record contributes no opinion, finding or quorum row, claims no
+  dispatch or cost, and reserves only the captured upper bound for fail-closed
+  verifier accounting. Live, partial, conflicting and unbound state still
+  refuses without provider calls (RCL-156).
+
+## 4.4.11 - 2026-10-01
+
+- Reconstruct finalized historical checkpoints whose original config omitted
+  the true below-threshold appendix default while their authenticated
+  aggregation inputs sealed that effective value. Explicit conflicts and a
+  captured false value still fail closed, and no captured bytes, attempts or
+  reviewer calls are replaced (RCL-155).
+
 ## 4.4.10 - 2026-09-29
 
 - Fail closed when an interrupted legacy retry has no durable blocking-call

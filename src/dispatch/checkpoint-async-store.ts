@@ -9,7 +9,8 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type FrozenCheckpointPlan } from './checkpoint.js';
 import { CAPTURED_INPUT_LIMITS } from './captured-inputs.js';
-import { asyncContextForBindings, assertCapturedAsyncPlan } from './checkpoint-async-context.js';
+import { asyncContextForBindings, assertCapturedAsyncPlan, type SealedAsyncProof } from './checkpoint-async-context.js';
+import { decodeAsyncOutcomeUnknown, encodeAsyncOutcomeUnknown } from './checkpoint-async-unknown.js';
 import { withOwnedNativeOperation, type NativeTargetOwnership } from '../converge/target-ownership.js';
 import { syncNativeDirectory, withNativeLock } from '../converge/native-lock.js';
 import { readStable } from '../telemetry/recovery/files.js';
@@ -32,7 +33,10 @@ export interface AsyncWriter {
 }
 interface OpinionCycle { version: 1; cycleId: string | null }
 interface Metadata { version: 1; plan: AsyncPlan; grants: string[]; opinionCycle?: OpinionCycle }
-interface Phase { plan: AsyncPlan; state: AsyncState }
+export interface AsyncPhaseSnapshot { plan: AsyncPlan; state: AsyncState }
+export type CheckpointAsyncExecutionState =
+  | { kind: 'phase'; phase: AsyncPhaseSnapshot }
+  | { kind: 'unknown'; proof: SealedAsyncProof };
 export interface AsyncLateRecord { sequence: number; previousDigest: string; digest: string; sealedProofSha256: string; result: AsyncResult }
 export interface AsyncLateFailure { sequence: number; kind: 'late_audit_failure'; callIndex: number; attemptId: string; digest: string }
 const delegateSchema = z.object({ version: z.literal(1), commonDir: z.string().min(1), namespace: z.string().min(1), target: z.string().min(1),
@@ -41,6 +45,7 @@ const metadataSchema = z.object({ version: z.literal(1), plan: z.unknown(), gran
   opinionCycle: z.object({ version: z.literal(1), cycleId: z.string().uuid().nullable() }).strict().optional() }).strict();
 const filename = (index: number) => `${String(index).padStart(8, '0')}.json`;
 const isMissing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+const unknownFilename = 'async-outcome-unknown.json';
 async function privateDirectory(path: string): Promise<void> {
   const stat = await lstat(path); asyncRefuse(stat.isDirectory() && !stat.isSymbolicLink() && await realpath(path) === path &&
     (stat.mode & 0o7777) === 0o700 && (!process.geteuid || stat.uid === process.geteuid()), 'unsafe_directory');
@@ -266,8 +271,75 @@ export function sealAsyncPhase(input: LocationInput & { ownership: NativeTargetO
   }));
 }
 /** Structural local read; this does not authenticate capture matrix, producer or server authority. */
-export function readAsyncPhase(input: LocationInput): Promise<Phase> {
+export function readAsyncPhase(input: LocationInput): Promise<AsyncPhaseSnapshot> {
   const location = snapshotLocation(input); return locked(location, async (metadata, state) => freezeAsync({ plan: metadata.plan, state }));
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try { await lstat(path); return true; }
+  catch (error) { if (isMissing(error)) return false; throw error; }
+}
+
+/** Read the exact stored original-async evidence without creating or sealing state. */
+export async function inspectCheckpointAsyncExecution(input: LocationInput): Promise<CheckpointAsyncExecutionState | undefined> {
+  const location = snapshotLocation(input);
+  const [hasPhase, hasUnknown] = await Promise.all([
+    pathExists(location.phasePath), pathExists(join(location.checkpointPath, unknownFilename)),
+  ]);
+  asyncRefuse(!(hasPhase && hasUnknown), 'conflicting_execution_evidence');
+  if (hasPhase) {
+    return freezeAsync({ kind: 'phase' as const, phase: await readAsyncPhase(input) });
+  }
+  if (!hasUnknown) return undefined;
+  const { journal, context, captured } = await contextAt(location), root = await journal.exportProof();
+  const bytes = await safeRead(join(location.checkpointPath, unknownFilename));
+  const unknown = decodeAsyncOutcomeUnknown(bytes, root, context, captured);
+  return freezeAsync({ kind: 'unknown' as const,
+    proof: freezeAsync({ bytes: unknown.bytes, digest: unknown.digest }) });
+}
+
+/** Read only terminal execution evidence; an open phase is deliberately not a proof. */
+export async function readCheckpointAsyncExecution(input: LocationInput): Promise<SealedAsyncProof | undefined> {
+  const stored = await inspectCheckpointAsyncExecution(input);
+  if (stored === undefined) return undefined;
+  if (stored.kind === 'unknown') return stored.proof;
+  const proof = encodeAsyncProof(stored.phase.plan, stored.phase.state.records);
+  return freezeAsync({ bytes: proof.bytes, digest: proof.digest });
+}
+
+/**
+ * Seal a real phase or retain an explicit unknown outcome after a finalized,
+ * expired original launch. The unknown form never creates intents or claims
+ * that any captured async call did or did not dispatch.
+ */
+export async function resolveFinalizedAsyncExecution(input: LocationInput & {
+  ownership: NativeTargetOwnership;
+  nowMs?: () => number;
+}): Promise<SealedAsyncProof | undefined> {
+  const location = snapshotLocation(input);
+  return withOwnedNativeOperation(input.ownership, location.commonDir, location.plan.target, async ownership => {
+    const { journal, context, captured } = await contextAt(location);
+    const [hasPhase, hasUnknown] = await Promise.all([
+      pathExists(location.phasePath), pathExists(join(location.checkpointPath, unknownFilename)),
+    ]);
+    asyncRefuse(!(hasPhase && hasUnknown), 'conflicting_execution_evidence');
+    if (captured.async === undefined) {
+      asyncRefuse(!hasPhase && !hasUnknown, 'unexpected_execution_evidence');
+      return undefined;
+    }
+    const state = await journal.read();
+    asyncRefuse(state.finalized, 'unknown_unfinalized_checkpoint');
+    if (hasPhase) return sealAsyncPhase({ ...input, ownership });
+    const now = (input.nowMs ?? Date.now)();
+    asyncRefuse(Number.isSafeInteger(now) && now >= context.expiresAtMs, 'unknown_live_launch');
+    if (hasUnknown) return readCheckpointAsyncExecution(input);
+    asyncRefuse(!await pathExists(join(location.checkpointPath, 'terminal-report')), 'unknown_terminal_report');
+    const root = await journal.exportProof(), unknown = encodeAsyncOutcomeUnknown(root, context, captured);
+    await publish(location.checkpointPath, join(location.checkpointPath, unknownFilename), unknown.bytes);
+    const readback = await readCheckpointAsyncExecution(input);
+    asyncRefuse(readback?.bytes === unknown.bytes && readback.digest === unknown.digest, 'unknown_readback');
+    return readback;
+  });
 }
 async function lateAt(location: Location, proof: AsyncProof): Promise<AsyncLateRecord[]> {
   const directory = join(location.phasePath, 'late'); await privateDirectory(directory); const names = (await readdir(directory)).sort();

@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CheckpointJournal, exportCheckpointProof, freezeCheckpointPlan, type CheckpointProof } from '../../src/dispatch/checkpoint.js';
+import { CheckpointJournal, checkpointPath, exportCheckpointProof, freezeCheckpointPlan, type CheckpointProof } from '../../src/dispatch/checkpoint.js';
+import { initializeAsyncPhase, readCheckpointAsyncExecution } from '../../src/dispatch/checkpoint-async-store.js';
+import { encodeAsyncOutcomeUnknown } from '../../src/dispatch/checkpoint-async-unknown.js';
+import { asyncContextForBindings } from '../../src/dispatch/checkpoint-async-context.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
@@ -24,7 +27,7 @@ const target='allocator-one/rcl#105', runId='11111111-1111-4111-8111-11111111111
 const role={name:'general',systemPrompt:'s',description:'d',focus:[],isSpecialized:false};
 const thresholds={minConsensusScore:0,minConfidence:0,dedupeLineWindow:5,jaccardThreshold:0.3};
 function finding(file='a.ts'){return {id:'f',file,startLine:1,endLine:1,severity:'important' as const,category:'correctness',title:'guard missing',description:'guard missing'};}
-async function fixture(opts:{mode?:'verified-consensus'|'all-findings'; both?:boolean; second?:boolean; file?:string; asyncLaunched?:number; id?:string; minScore?:number; unknownSecond?:boolean; seats?:number; minConfidence?:number}={}) {
+async function fixture(opts:{mode?:'verified-consensus'|'all-findings'; both?:boolean; second?:boolean; file?:string; asyncLaunched?:number; id?:string; minScore?:number; unknownSecond?:boolean; seats?:number; minConfidence?:number; asyncConflict?:boolean}={}) {
  const fixtureRunId=opts.id??runId;
  const localThresholds={...thresholds,minConsensusScore:opts.minScore??thresholds.minConsensusScore,minConfidence:opts.minConfidence??thresholds.minConfidence};
  const seats=opts.seats??2;
@@ -32,10 +35,21 @@ async function fixture(opts:{mode?:'verified-consensus'|'all-findings'; both?:bo
  const config:any={quorumFraction:1,thresholds:localThresholds,output:{belowThresholdAppendix:true}}; const tools=stableStringify({parser:{name:'findings-json',version:1},aggregation:AGGREGATION_ALGORITHM});
  const plan=freezeCheckpointPlan({target,headSha:'a'.repeat(40),mergeBaseSha:'b'.repeat(40),patchSha256:diffDigest(diff.files),configSha256:configDigest(config),specSha256:hash('spec'),contextSha256:hash('[]'),toolsSha256:hash(tools),parser:{name:'findings-json',version:1},roster:Array.from({length:seats},(_,i)=>({seat:`s${i}`,model:`m${i}`,role:'general',route:'openai'})),chunks:[{index:0,total:1,digest:hash('chunk')}],prompts:Array.from({length:seats},(_,i)=>({seat:`s${i}`,chunk:0,systemSha256:hash('s'),userSha256:hash('u')}))});
  const aggregation=captureAggregationInputs({algorithm:AGGREGATION_ALGORITHM,diffSha256:plan.patchSha256,roleMap:new Map([['general',role]]),thresholds:localThresholds,gating:{mode:opts.mode??'verified-consensus',minModels:2,verificationModel:'openai/verifier',verificationTimeoutMs:100,verificationPassTimeoutMs:500},modelWeights:new Map(Array.from({length:seats},(_,i)=>[`m${i}`,1])),belowThresholdAppendix:true});
- const captured=captureReviewerInputs({plan,policy:{version:1,fraction:1},patchBytes:stableStringify(diff.files.map((f:any)=>({filename:f.filename,status:f.status,previousFilename:null,patch:f.patch,additions:f.additions,deletions:f.deletions,blobSha:null}))),configBytes:stableStringify(config),specBytes:'spec',contextBytes:'[]',toolsBytes:tools,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})),aggregation});
+ const captured=captureReviewerInputs({plan,policy:{version:1,fraction:1},patchBytes:stableStringify(diff.files.map((f:any)=>({filename:f.filename,status:f.status,previousFilename:null,patch:f.patch,additions:f.additions,deletions:f.deletions,blobSha:null}))),configBytes:stableStringify(config),specBytes:'spec',contextBytes:'[]',toolsBytes:tools,chunkBytes:['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})),aggregation,
+  ...(opts.asyncConflict ? {async:{timeoutMs:100,maxPhysicalCalls:1,maxAttemptsPerCall:1,calls:[{assignmentId:'async:0',chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{systemPrompt:'async system',userPrompt:'async user'}}]}} : {})});
  let journal!:CheckpointJournal; let proof!:CheckpointProof;
- await withNativeTarget(dir,target,async owner=>{journal=await CheckpointJournal.create({commonDir:dir,namespace:fixtureRunId,plan,ownership:owner}); await journal.bind('captured-inputs',captured.bytes,owner); await journal.bind('launch',encodeOriginalLaunch(createOriginalLaunch({runId:fixtureRunId,target,originalNativeClaim:{attempt:1,round:1},capturedInputsSha256:hash(captured.bytes),planDigest:plan.digest,startedAtMs:1,expiresAtMs:1000,maxPhysicalCalls:4,maxAttemptsPerCell:1})),owner); for(const i of Array.from({length:seats},(_,i)=>i)) {if(opts.second===false&&i===1) continue;const review={model:`m${i}`,role:'general',provider:'openai',status:'success' as const,durationMs:1,findings:i===0?[finding(opts.file),...(opts.both?[{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[])]:opts.both?[finding(opts.file),{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[]};const paidAttempt={id:`r${i}`,kind:(opts.unknownSecond&&i===1?'unknown':'paid')} as const;await journal.recordIntent(`s${i}:0`,paidAttempt,owner);if(!(opts.unknownSecond&&i===1))await journal.recordResult(`s${i}:0`,paidAttempt,{kind:'success',chunk:0,reviewBytes:JSON.stringify(review)},owner);} await journal.finalize(owner);proof=await exportCheckpointProof(journal);});
- const assembly:CheckpointAssemblyInput={projection:projectCheckpointReport({sources:[],successor:{runId:fixtureRunId,proof},policy:{version:1,fraction:1}}),supplementalAsync:captureSupplementalAsync([],opts.asyncLaunched??0),diff,startTime:1,run:{id:fixtureRunId,rclVersion:'x',command:'review',target:{kind:'pr',repo:'allocator-one/rcl',prNumber:105,headSha:plan.headSha},roster:plan.roster.map(s=>({model:s.model,role:s.role,provider:s.route,lane:'blocking' as const})),spec:{source:'flag',sha256:plan.specSha256},contextFiles:[],runner:{kind:'agent'},startedAt:new Date(1),converge:{target,attempt:1,round:1}}};
+ let asyncExecution;
+ const launchStartedAtMs=opts.asyncConflict?Date.now()-10:1,launchExpiresAtMs=opts.asyncConflict?Date.now()+10_000:1000;
+ await withNativeTarget(dir,target,async owner=>{journal=await CheckpointJournal.create({commonDir:dir,namespace:fixtureRunId,plan,ownership:owner}); await journal.bind('captured-inputs',captured.bytes,owner); await journal.bind('launch',encodeOriginalLaunch(createOriginalLaunch({runId:fixtureRunId,target,originalNativeClaim:{attempt:1,round:1},capturedInputsSha256:hash(captured.bytes),planDigest:plan.digest,startedAtMs:launchStartedAtMs,expiresAtMs:launchExpiresAtMs,maxPhysicalCalls:4,maxAttemptsPerCell:1})),owner);
+  if (opts.asyncConflict) await initializeAsyncPhase({commonDir:dir,namespace:fixtureRunId,plan,ownership:owner,calls:captured.async!.calls.map(call=>call.ref),maxPhysicalCalls:1,maxAttemptsPerCall:1,expiresAtMs:launchExpiresAtMs});
+  for(const i of Array.from({length:seats},(_,i)=>i)) {if(opts.second===false&&i===1) continue;const review={model:`m${i}`,role:'general',provider:'openai',status:'success' as const,durationMs:1,findings:i===0?[finding(opts.file),...(opts.both?[{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[])]:opts.both?[finding(opts.file),{...finding('b.ts'),id:'dropped',severity:'minor' as const,title:'other guard',description:'other guard',startLine:5,endLine:5}]:[]};const paidAttempt={id:`r${i}`,kind:(opts.unknownSecond&&i===1?'unknown':'paid')} as const;await journal.recordIntent(`s${i}:0`,paidAttempt,owner);if(!(opts.unknownSecond&&i===1))await journal.recordResult(`s${i}:0`,paidAttempt,{kind:'success',chunk:0,reviewBytes:JSON.stringify(review)},owner);} await journal.finalize(owner);proof=await exportCheckpointProof(journal);
+  if (opts.asyncConflict) {
+   asyncExecution=await readCheckpointAsyncExecution({commonDir:dir,namespace:fixtureRunId,plan});
+   const {context}=asyncContextForBindings(proof.plan,proof.bindings),unknown=encodeAsyncOutcomeUnknown(proof,context,captured);
+   await writeFile(join(checkpointPath(dir,target,fixtureRunId),'async-outcome-unknown.json'),unknown.bytes,{mode:0o600});
+  }
+ });
+ const assembly:CheckpointAssemblyInput={projection:projectCheckpointReport({sources:[],successor:{runId:fixtureRunId,proof},policy:{version:1,fraction:1}}),supplementalAsync:captureSupplementalAsync([],opts.asyncLaunched??0),...(asyncExecution?{asyncExecution}:{}),diff,startTime:1,run:{id:fixtureRunId,rclVersion:'x',command:'review',target:{kind:'pr',repo:'allocator-one/rcl',prNumber:105,headSha:plan.headSha},roster:[...plan.roster.map(s=>({model:s.model,role:s.role,provider:s.route,lane:'blocking' as const})),...(opts.asyncConflict?[{model:'async-model',role:'general',provider:'fake',lane:'async' as const}]:[])],spec:{source:'flag',sha256:plan.specSha256},contextFiles:[],runner:{kind:'agent'},startedAt:new Date(1),converge:{target,attempt:1,round:1}}};
  return {dir,journal,assembly,plan,captured,proof};
 }
 
@@ -95,6 +109,12 @@ describe('retained checkpoint verifier integration', () => {
   it('refuses unbound logical async counts before verifier intent or provider construction',async()=>{
     const f=await fixture({asyncLaunched:498}),factory=vi.fn();
     await expect(execute(f,{askFactory:factory})).rejects.toThrow('checkpoint_gating_unbound_async_launches');
+    expect(await f.journal.readVerification()).toBeUndefined();
+    expect(factory).not.toHaveBeenCalled();
+  });
+  it('refuses conflicting real and unknown async evidence before verifier intent or provider construction',async()=>{
+    const f=await fixture({asyncConflict:true}),factory=vi.fn();
+    await expect(execute(f,{askFactory:factory})).rejects.toThrow('conflicting_execution_evidence');
     expect(await f.journal.readVerification()).toBeUndefined();
     expect(factory).not.toHaveBeenCalled();
   });

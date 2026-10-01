@@ -151,8 +151,12 @@ export function prepareCheckpointAssembly(input: CheckpointAssemblyInput) {
   if (stableStringify(captured.policy) !== stableStringify(projection.health.policy)) throw new Error('checkpoint_assembly_policy_mismatch');
   if (input.run.id !== successor.runId) throw new Error('checkpoint_assembly_run_mismatch');
   // Do not hydrate defaults into config: that would change its captured digest.
+  // Legacy captures omitted the true appendix default while separately sealing
+  // the effective aggregation value. An explicit value must still match.
+  const capturedAppendix = captured.config.output?.belowThresholdAppendix;
   if (stableStringify(captured.config.thresholds) !== stableStringify(aggregation.thresholds) ||
-    captured.config.output?.belowThresholdAppendix !== aggregation.belowThresholdAppendix) {
+    capturedAppendix !== aggregation.belowThresholdAppendix &&
+      !(capturedAppendix === undefined && aggregation.belowThresholdAppendix)) {
     throw new Error('checkpoint_assembly_static_config_mismatch');
   }
   const diff = structuredClone(input.diff), run = structuredClone(input.run);

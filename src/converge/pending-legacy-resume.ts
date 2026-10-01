@@ -18,8 +18,9 @@ import { stableStringify } from '../report/run-header.js';
 import { readStable } from '../telemetry/recovery/files.js';
 import { prepareLockRoot } from '../evidence/original-run/lock-path.js';
 import { retainStaleFile } from './stale-report-storage.js';
-import { createPendingRecoverySource, pendingRecoverySourceSchema,
+import { createPendingRecoverySource, createOrdinaryMigrationSource, pendingRecoverySourceSchema,
   type PendingRecoverySource } from './pending-recovery-source.js';
+import { validateOrdinaryPendingPackage, type OrdinaryPendingPackage } from './ordinary-pending-package.js';
 
 export interface PendingLegacyResumeExecution {
   context: { target: string; attempt: number; round: number };
@@ -34,10 +35,11 @@ export interface PendingLegacyResumeOptions {
   gitCommonDir: string;
   target: string;
   headSha: string;
+  baseSha: string;
   pendingInputSha256: string;
   recoveryInputSha256: string;
   retryReason: string;
-  legacyRetry: LegacyRetrySelection;
+  legacyRetry?: LegacyRetrySelection;
   captured: CapturedPreparedCouncil;
   retainedAsyncSha256: readonly string[];
   maxAttempts: number;
@@ -49,12 +51,24 @@ export interface PendingLegacyResumeOptions {
   nowMs?: () => number;
   ownerAlive?: (pid: number) => boolean;
   loadRetainedAsync: () => Promise<AsyncResultReference[]>;
+  /** Required for recovering an ordinary dead-owner launch without a legacy report. */
+  migrationPackage?: OrdinaryPendingPackage;
+  preview?: boolean;
 }
 
 export interface PendingLegacyResumeResult {
   claim: ConvergeAttemptClaim;
   completion: GuardedLaunchCompletion;
   reusedCompletion: boolean;
+}
+
+export interface OrdinaryPendingPreview {
+  source: PendingRecoverySource;
+  nativeStateSha256: string;
+  attemptStateSha256: string;
+  attemptsUsed: number;
+  cap: number;
+  nextAttempt: number;
 }
 
 function fail(code: string): never { throw new Error(`pending_legacy_resume_${code}`); }
@@ -74,16 +88,31 @@ function descriptor(source: PendingRecoverySource) {
     reason: 'coordinator_exited_without_durable_blocking_receipts' as const,
     nativeStateSha256: source.nativeStateSha256, attemptStateSha256: source.attemptStateSha256,
     retainedAsyncSha256: [...source.retainedAsyncSha256],
+    ...('migrationPackageSha256' in source ? { migrationPackageSha256: source.migrationPackageSha256 } : {}),
   };
 }
 
 function sourceFromFinalized(target: string, launch: GuardedLaunchState,
-  attempts: ConvergeAttemptState): PendingRecoverySource {
+  attempts: ConvergeAttemptState, migrationPackage?: OrdinaryPendingPackage): PendingRecoverySource {
   const recovery = launch.pendingRecovery;
   const claim = attempts.attempts.find(item => item.attempt === launch.attempt);
-  if (!recovery || !claim?.retrySource || launch.attempt !== recovery.pendingAttempt ||
+  if (!recovery || !claim || launch.attempt !== recovery.pendingAttempt ||
       launch.round !== recovery.round || launch.pid !== recovery.originalPid ||
       launch.startedAt !== recovery.originalStartedAt) fail('finalization_mismatch');
+  if (recovery.migrationPackageSha256) {
+    if (!migrationPackage) fail('migration_package_required');
+    const migrationPackageSha256 = createHash('sha256').update(stableStringify(migrationPackage)).digest('hex');
+    if (migrationPackageSha256 !== recovery.migrationPackageSha256) fail('finalization_mismatch');
+    const source = createOrdinaryMigrationSource({ version: 1, target, headSha: launch.headSha,
+      inputSha256: launch.inputSha256, pendingAttempt: launch.attempt, round: launch.round,
+      originalPid: launch.pid, startedAt: launch.startedAt, blockingOutcome: recovery.blockingOutcome,
+      reason: recovery.reason, nativeStateSha256: recovery.nativeStateSha256,
+      attemptStateSha256: recovery.attemptStateSha256, retainedAsyncSha256: recovery.retainedAsyncSha256,
+      migrationPackageSha256 });
+    if (source.digest !== recovery.sourceDigest) fail('finalization_mismatch');
+    return source;
+  }
+  if (!claim.retrySource) fail('finalization_mismatch');
   return pendingRecoverySourceSchema.parse({
     version: 1, target, headSha: launch.headSha, inputSha256: launch.inputSha256,
     pendingAttempt: launch.attempt, round: launch.round, originalPid: launch.pid,
@@ -99,12 +128,14 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
     !/^[a-f0-9]{40}$/.test(input.headSha ?? '') ||
+    !/^[a-f0-9]{40}$/.test(input.baseSha ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.recoveryInputSha256 ?? '') ||
     typeof input.retryReason !== 'string' || !input.retryReason.trim() || input.retryReason.length > 500 ||
     !Array.isArray(hashes) || hashes.length === 0 || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
     new Set(hashes).size !== hashes.length || typeof input.validate !== 'function' ||
     typeof input.run !== 'function' || typeof input.loadRetainedAsync !== 'function' ||
+    (!input.migrationPackage && !input.legacyRetry) ||
     !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 ||
     !Number.isSafeInteger(input.maxPhysicalCalls) || input.maxPhysicalCalls < 1 ||
     !Number.isSafeInteger(input.maxAttemptsPerCell) || input.maxAttemptsPerCell < 1 ||
@@ -115,21 +146,69 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
 
 async function archiveAsync(common: string, source: PendingRecoverySource,
   artifacts: readonly AsyncResultReference[]): Promise<void> {
-  const expected = [...source.retainedAsyncSha256].sort();
-  const actual = artifacts.map(item => item.sha256).sort();
-  if (expected.length !== actual.length || expected.some((item, index) => item !== actual[index])) {
-    fail('async_binding_mismatch');
-  }
+  validateAsyncArtifacts(source, artifacts);
   const directory = await prepareLockRoot(join(common, 'rcl-converge-pending-recovery', source.digest));
   for (const artifact of artifacts) {
     const bytes = Buffer.from(artifact.bytesBase64, 'base64');
-    if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) fail('async_binding_mismatch');
     await retainStaleFile(join(directory, artifact.sha256), bytes);
   }
   const manifest = Buffer.from(stableStringify({ version: 1, sourceDigest: source.digest,
     blockingOutcome: 'unknown', artifacts: artifacts.map(item => ({ sha256: item.sha256 })).sort((a, b) =>
       a.sha256.localeCompare(b.sha256)) }));
   await retainStaleFile(join(directory, 'manifest.json'), manifest);
+}
+
+function validateAsyncArtifacts(source: PendingRecoverySource,
+  artifacts: readonly AsyncResultReference[]): void {
+  const expected = [...source.retainedAsyncSha256].sort();
+  const actual = artifacts.map(item => item.sha256).sort();
+  if (expected.length !== actual.length || expected.some((item, index) => item !== actual[index])) {
+    fail('async_binding_mismatch');
+  }
+  for (const artifact of artifacts) {
+    const bytes = Buffer.from(artifact.bytesBase64, 'base64');
+    if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) fail('async_binding_mismatch');
+  }
+}
+
+/** Authenticate an ordinary dead-owner recovery under its target lock without mutating native state. */
+export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOptions): Promise<OrdinaryPendingPreview> {
+  validateOptions(input);
+  if (!input.migrationPackage) fail('migration_package_required');
+  const options = { ...input, target: input.target.trim(), retainedAsyncSha256: [...input.retainedAsyncSha256].sort(),
+    gitCommonDir: await realpath(resolve(input.gitCommonDir)) };
+  return withRecoveryTarget(options.gitCommonDir, options.target, async ownership => {
+    const [state, attempts] = await Promise.all([
+      loadConvergeRunState(options.gitCommonDir, options.target),
+      previewConvergeAttemptState(options.gitCommonDir, options.target),
+    ]);
+    if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
+    const current = launchSchema.parse(state.lastLaunch);
+    const record = attempts.attempts.find(item => item.attempt === current.attempt);
+    if (!record || current.status !== 'pending' || current.attempt !== attempts.attemptsUsed ||
+      current.headSha !== options.headSha || current.inputSha256 !== options.pendingInputSha256) fail('launch_mismatch');
+    if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');
+    const packet = validateOrdinaryPendingPackage(options.migrationPackage!, {
+      target: options.target, headSha: current.headSha, inputSha256: current.inputSha256,
+      baseSha: options.baseSha, attempt: current.attempt, round: current.round, pid: current.pid,
+      retainedAsyncSha256: options.retainedAsyncSha256,
+    });
+    const [nativeBytes, attemptBytes] = await Promise.all([
+      readStable(convergeRunStatePath(options.gitCommonDir, options.target)),
+      readStable(convergeAttemptStatePath(options.gitCommonDir, options.target)),
+    ]);
+    const source = createOrdinaryMigrationSource({ version: 1, target: options.target,
+      headSha: current.headSha, inputSha256: current.inputSha256, pendingAttempt: current.attempt,
+      round: current.round, originalPid: current.pid, startedAt: current.startedAt,
+      blockingOutcome: 'unknown', reason: 'coordinator_exited_without_durable_blocking_receipts',
+      nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
+      retainedAsyncSha256: options.retainedAsyncSha256,
+      migrationPackageSha256: createHash('sha256').update(stableStringify(packet)).digest('hex'),
+    });
+    validateAsyncArtifacts(source, await options.loadRetainedAsync());
+    return { source, nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
+      attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextAttempt: current.attempt + 1 };
+  });
 }
 
 async function runBound(options: PendingLegacyResumeOptions, ownership: NativeTargetOwnership,
@@ -267,7 +346,10 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
 }
 
 /** Finalize unknown A34 evidence, then claim one fresh checkpointed A35. */
-export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions): Promise<PendingLegacyResumeResult> {
+export function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions & { preview: true }): Promise<OrdinaryPendingPreview>;
+export function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions & { preview?: false }): Promise<PendingLegacyResumeResult>;
+export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions): Promise<PendingLegacyResumeResult | OrdinaryPendingPreview> {
+  if (input.preview) return previewOrdinaryPendingLaunch(input);
   validateOptions(input);
   const options = { ...input, target: input.target.trim(), retainedAsyncSha256: [...input.retainedAsyncSha256].sort(),
     gitCommonDir: await realpath(resolve(input.gitCommonDir)) };
@@ -278,29 +360,43 @@ export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOption
     ]);
     if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
     const current = launchSchema.parse(state.lastLaunch);
-    if (attempts.attempts.at(-1)?.pendingRecoverySource) {
+    const persistedSource = attempts.attempts.at(-1)?.pendingRecoverySource;
+    const original = persistedSource ?? current;
+    const originalAttempt = 'pendingAttempt' in original ? original.pendingAttempt : original.attempt;
+    const originalPid = 'originalPid' in original ? original.originalPid : original.pid;
+    const migrationPackage = options.migrationPackage && validateOrdinaryPendingPackage(options.migrationPackage, {
+        target: options.target, headSha: original.headSha, inputSha256: original.inputSha256,
+        baseSha: options.baseSha, attempt: originalAttempt, round: original.round, pid: originalPid,
+        retainedAsyncSha256: options.retainedAsyncSha256,
+      });
+    if (persistedSource) {
       return resumeFresh(options, ownership, state, attempts, current);
     }
     const record = attempts.attempts.find(item => item.attempt === current.attempt);
-    if (!record?.retrySource || current.attempt !== attempts.attemptsUsed ||
+    if (!record || (!record.retrySource && !migrationPackage) || current.attempt !== attempts.attemptsUsed ||
       current.headSha !== options.headSha || current.inputSha256 !== options.pendingInputSha256 ||
       !['pending', 'failed'].includes(current.status)) fail('launch_mismatch');
     let source: PendingRecoverySource;
     if (current.status === 'pending') {
       if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');
-      const proof = await inspectPendingLegacyRetry(options.legacyRetry, options.gitCommonDir,
-        state, current, attempts);
       const [nativeBytes, attemptBytes] = await Promise.all([
         readStable(convergeRunStatePath(options.gitCommonDir, options.target)),
         readStable(convergeAttemptStatePath(options.gitCommonDir, options.target)),
       ]);
-      source = createPendingRecoverySource({ version: 1, target: options.target,
+      source = migrationPackage ? createOrdinaryMigrationSource({ version: 1, target: options.target,
         headSha: current.headSha, inputSha256: current.inputSha256, pendingAttempt: current.attempt,
         round: current.round, originalPid: current.pid, startedAt: current.startedAt,
         blockingOutcome: 'unknown', reason: 'coordinator_exited_without_durable_blocking_receipts',
         nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
-        retainedAsyncSha256: options.retainedAsyncSha256, retrySource: proof.binding });
-    } else source = sourceFromFinalized(options.target, current, attempts);
+        retainedAsyncSha256: options.retainedAsyncSha256,
+        migrationPackageSha256: createHash('sha256').update(stableStringify(migrationPackage)).digest('hex'),
+      }) : createPendingRecoverySource({ version: 1, target: options.target,
+        headSha: current.headSha, inputSha256: current.inputSha256, pendingAttempt: current.attempt,
+        round: current.round, originalPid: current.pid, startedAt: current.startedAt,
+        blockingOutcome: 'unknown', reason: 'coordinator_exited_without_durable_blocking_receipts',
+        nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
+        retainedAsyncSha256: options.retainedAsyncSha256, retrySource: (await inspectPendingLegacyRetry(options.legacyRetry!, options.gitCommonDir, state, current, attempts)).binding });
+    } else source = sourceFromFinalized(options.target, current, attempts, migrationPackage);
     if (source.retainedAsyncSha256.join(',') !== options.retainedAsyncSha256.join(',')) {
       fail('async_binding_mismatch');
     }
