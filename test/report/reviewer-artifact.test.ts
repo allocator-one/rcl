@@ -14,6 +14,8 @@ import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { assembleCheckpointReview, deriveCheckpointConsensus } from '../../src/report/checkpoint-assembly.js';
 import { appendAsyncRecord, encodeAsyncProof, validateAsyncPlan, type AsyncRecord } from '../../src/dispatch/checkpoint-async.js';
+import { asyncContextForBindings } from '../../src/dispatch/checkpoint-async-context.js';
+import { encodeAsyncOutcomeUnknown } from '../../src/dispatch/checkpoint-async-unknown.js';
 import { prepareCheckpointGating } from '../../src/report/checkpoint-gating.js';
 import { planGating } from '../../src/consensus/gating.js';
 import { projectCheckpointReport } from '../../src/report/checkpoint-projection.js';
@@ -401,6 +403,23 @@ async function originalArtifact(withAsync = false) {
 }
 
 describe('captured async physical artifact inheritance', () => {
+  it('retains an exact unknown-outcome envelope without publishing calls or opinions', async () => {
+    const original = await originalArtifact(true);
+    const unknown = encodeAsyncOutcomeUnknown(original.originalProof,
+      asyncContextForBindings(original.f.plan, original.originalProof.bindings).context, original.f.capture);
+    const args = { ...original.args, asyncExecution: { bytes: unknown.bytes, digest: unknown.digest },
+      supplementalAsync: captureSupplementalAsync([], 0) };
+    const assembled = await assembleCheckpointReview(args);
+    const reportBytes = JSON.stringify(sanitizeForDelivery({ ...assembled.report, run: { ...assembled.report.run,
+      reviewer_evidence: describeReviewerEvidence(original.originalProof, args.supplementalAsync) } } as typeof assembled.report));
+    expect(JSON.parse(reportBytes).stats.asyncLaunched).toBeUndefined();
+    const artifact = serializeReviewerArtifact({ assembly: args, representation, reportBytes });
+    const wire = JSON.parse(artifact.bytes);
+    expect(wire.asyncExecution).toEqual({ bytes: unknown.bytes, sha256: unknown.digest });
+    expect(wire).not.toHaveProperty('newAsyncPhysicalAttempts');
+    expect(inspectReviewerArtifact(artifact.bytes, { ...original.expected, expectedReportBytes: reportBytes }).asyncExecution)
+      .toEqual(args.asyncExecution);
+  });
   it('refuses a current async header roster unrelated to the captured call matrix', async () => {
     const original = await originalArtifact(true);
     await expect(assembleCheckpointReview({ ...original.args, run: { ...original.args.run,

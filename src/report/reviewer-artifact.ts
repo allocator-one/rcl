@@ -1,6 +1,7 @@
 import { summarizeCheckpointBlockingHealth } from './checkpoint-consensus.js';
 import type { SealedAsyncProof } from '../dispatch/checkpoint-async-context.js';
 import type { AsyncProof } from '../dispatch/checkpoint-async.js';
+import { isAsyncOutcomeUnknown } from '../dispatch/checkpoint-async-unknown.js';
 import { z } from 'zod';
 import { evaluateCiGate } from '../ci.js';
 import type { GatingInfo } from '../consensus/gating.js';
@@ -216,7 +217,7 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
   const newPhysicalAttempts = projection.newPhysicalAttempts.map(({ review: _review, reviewBytes: _bytes, ...attempt }) => attempt);
   const validation = { body: 'deterministic' as const, health: 'derived' as const, gate };
   const asyncExecution = gated.asyncExecution === undefined ? undefined : { bytes: gated.asyncExecution.bytes, sha256: gated.asyncExecution.digest };
-  const newAsyncPhysicalAttempts = gated.asyncExecution === undefined ? undefined :
+  const newAsyncPhysicalAttempts = gated.asyncExecution === undefined || isAsyncOutcomeUnknown(gated.asyncExecution) ? undefined :
     (projection.proofs.length === 1 ? gated.asyncExecution.physicalAttempts : []).map(({ reviewBytes: _bytes, ...attempt }) => attempt);
   const verification = gated.phase === undefined ? undefined : { bytes: gated.phase.proof.bytes, sha256: gated.phase.proof.digest };
   const wire = { version: 1 as const, kind: 'private-reviewer-evidence' as const,
@@ -224,7 +225,8 @@ function derive(input: ReviewerArtifactContext & { reportBytes: string }) {
     checkpoints: projection.proofs.map(item => ({ runId: item.runId, sha256: item.proof.digest, bytes: item.proof.bytes })),
     supplementalAsync: { bytes: supplementalAsync.bytes, sha256: supplementalAsync.digest },
     ...(verification ? { verification } : {}),
-    ...(asyncExecution === undefined ? {} : { asyncExecution, newAsyncPhysicalAttempts }), lineage,
+    ...(asyncExecution === undefined ? {} : isAsyncOutcomeUnknown(gated.asyncExecution)
+      ? { asyncExecution } : { asyncExecution, newAsyncPhysicalAttempts }), lineage,
     contributions: derived.contributions, observations: derived.observations, health: projection.health, newPhysicalAttempts, validation };
   return { wire, projection, derived, validation, newPhysicalAttempts, newAsyncPhysicalAttempts };
 }

@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { CheckpointJournal, checkpointPath, exportCheckpointProof, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
 import { createOriginalLaunch, encodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
+import { initializeAsyncPhase } from '../../src/dispatch/checkpoint-async-store.js';
 import { createRecoveryOperation, encodeRecoveryOperation } from '../../src/dispatch/recovery-operation.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { assembleCheckpointReview } from '../../src/report/checkpoint-assembly.js';
@@ -18,7 +19,7 @@ import { sanitizeForDelivery } from '../../src/telemetry/envelope.js';
 import { formatReviewerStatus, inspectReviewerStatus, inspectReviewerRecoveryPreview } from '../../src/evidence/reviewer-status.js';
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const target = 'allocator-one/allocator-one#9165';
 const runId = '01a0daa6-b575-759b-942c-e879460be5bf';
 const successorRunId = '01a0daa6-b575-759b-942c-e879460be5c1';
@@ -27,7 +28,8 @@ const role = { name: 'general', systemPrompt: 'Review.', focus: [], description:
 const review = (model: string, status: 'success' | 'timeout' = 'success') => JSON.stringify({ model, provider: 'fake', role: 'general', status,
   durationMs: 1, findings: [], ...(status === 'timeout' ? { error: 'timeout' } : {}) });
 
-async function fixture(namespace = runId, chunkCount = 2, version: 1 | 2 = 2) {
+async function fixture(namespace = runId, chunkCount = 2, version: 1 | 2 = 2,
+  asyncMode: 'none' | 'open' | 'missing' = 'none') {
   const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-reviewer-status-'))); roots.push(commonDir);
   const files = [{ filename: 'changed.ts', status: 'modified' as const, previousFilename: null, patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, blobSha: null, language: 'typescript' }];
   const thresholds = { minConsensusScore: 0, minConfidence: 0, dedupeLineWindow: 3, jaccardThreshold: 0.3 };
@@ -48,6 +50,9 @@ async function fixture(namespace = runId, chunkCount = 2, version: 1 | 2 = 2) {
     specBytes: 'spec', contextBytes: '[]', toolsBytes: stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } }),
     chunkBytes: chunks, assignments: plan.cells.map(cell => ({ model: cell.model, provider: cell.route, role })),
     prompts: plan.cells.map(cell => ({ systemPrompt: 'Review.', userPrompt: `prompt ${cell.seat}:${cell.chunk}` })), aggregation,
+    ...(asyncMode === 'none' ? {} : { async: { timeoutMs: 100, maxPhysicalCalls: 2, maxAttemptsPerCall: 1,
+      calls: [{ assignmentId: 'async:0', chunk: 0, assignment: { model: 'async-model', provider: 'fake', role },
+        prompt: { systemPrompt: 'async system', userPrompt: 'async user' } }] } }),
   });
   let journal!: CheckpointJournal;
   await withNativeTarget(commonDir, target, async ownership => {
@@ -55,6 +60,12 @@ async function fixture(namespace = runId, chunkCount = 2, version: 1 | 2 = 2) {
     await journal.bind('captured-inputs', capture.bytes, ownership);
     await journal.bind('launch', encodeOriginalLaunch(createOriginalLaunch({ runId, target, originalNativeClaim: { attempt: 25, round: 14 },
       capturedInputsSha256: capture.digest, planDigest: plan.digest, startedAtMs: 1_000, expiresAtMs: 10_000, maxPhysicalCalls: 12, maxAttemptsPerCell: 2 })), ownership);
+    if (asyncMode === 'open') {
+      vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(2_000);
+      await initializeAsyncPhase({ commonDir, namespace, plan, ownership, calls: capture.async!.calls.map(call => call.ref),
+        maxPhysicalCalls: 2, maxAttemptsPerCall: 1, expiresAtMs: 10_000 });
+      vi.useRealTimers();
+    }
     for (const { index: chunk } of plan.chunks) {
       const cell = `a:${chunk}`, attempt = { id: `paid-a-${chunk}`, kind: 'paid' as const };
       await journal.recordIntent(cell, attempt, ownership);
@@ -82,6 +93,19 @@ async function terminalPair(run: string, plan: ReturnType<typeof freezeCheckpoin
 }
 
 describe('local reviewer status', () => {
+  it('distinguishes a real open async phase from finalized missing async evidence', async () => {
+    const open = await fixture(runId, 2, 2, 'open');
+    expect((await inspectReviewerStatus({ commonDir: open.commonDir, target, runId, nowMs: 4_000 })).attempts.async.current)
+      .toEqual({ intents: 0, uncertain: 0, status: 'open' });
+
+    const missing = await fixture(runId, 2, 2, 'missing');
+    await withNativeTarget(missing.commonDir, target, ownership => missing.journal.finalize(ownership));
+    const status = await inspectReviewerStatus({ commonDir: missing.commonDir, target, runId, nowMs: 20_000 });
+    expect(status.attempts.async.current).toEqual({ intents: 0, uncertain: 0, status: 'missing', physicalUpperBound: 2 });
+    expect(status.attempts.combined.physical).toBe(status.attempts.physical);
+    expect(formatReviewerStatus(status)).toContain('original async evidence missing (captured upper bound 2 calls)');
+  });
+
   it('derives original-seat health, attempts and saved budget without exposing result bytes', async () => {
     const { commonDir, plan } = await fixture();
     const status = await inspectReviewerStatus({ commonDir, target, runId, nowMs: 4_000 });

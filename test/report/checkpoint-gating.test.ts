@@ -1,5 +1,6 @@
 import { encodeAsyncProof, validateAsyncPlan, type AsyncRecord, type AsyncEvent } from '../../src/dispatch/checkpoint-async.js';
 import { asyncContextForBindings } from '../../src/dispatch/checkpoint-async-context.js';
+import { encodeAsyncOutcomeUnknown, isAsyncOutcomeUnknown } from '../../src/dispatch/checkpoint-async-unknown.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ import { deriveCheckpointConsensus, type CheckpointAssemblyInput } from '../../s
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { planGating } from '../../src/consensus/gating.js';
-import { deriveCheckpointGating } from '../../src/report/checkpoint-gating.js';
+import { deriveCheckpointGating, prepareCheckpointGating } from '../../src/report/checkpoint-gating.js';
 import { executeCheckpointGating } from '../../src/dispatch/checkpoint-gating-execution.js';
 const roots: string[] = []; afterEach(async () => { await Promise.all(roots.splice(0).map(x => rm(x,{recursive:true,force:true}))); });
 const target='allocator-one/rcl#105', runId='11111111-1111-4111-8111-111111111111', hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -72,17 +73,41 @@ it('counts actual observed and uncertain async intents with verifier reservation
  const over=await fixture({asyncPhysical:498,asyncLaunched:0});const p=await phase(over);
  expect(()=>deriveCheckpointGating(over.assembly,p)).toThrow('checkpoint_gating_call_cap');
  const exact=await fixture({asyncPhysical:497,asyncLaunched:1});const q=await phase(exact);
- expect(deriveCheckpointGating(exact.assembly,q).asyncExecution!.state.intents).toHaveLength(497);
+ const execution=deriveCheckpointGating(exact.assembly,q).asyncExecution!;expect(isAsyncOutcomeUnknown(execution)).toBe(false);
+ if(isAsyncOutcomeUnknown(execution))throw new Error('unexpected unknown evidence');expect(execution.state.intents).toHaveLength(497);
  const none=await fixture({asyncPhysical:0,asyncLaunched:1});const r=await phase(none);
  expect(deriveCheckpointGating(none.assembly,r).disposition).toBe('replayed');
+});
+
+it('reserves an authenticated unknown async upper bound without inventing physical attempts or opinions',async()=>{
+ const f=await fixture({asyncPhysical:32,asyncLaunched:0});
+ const unknown=encodeAsyncOutcomeUnknown(f.proof,asyncContextForBindings(f.plan,f.proof.bindings).context,f.captured);
+ f.assembly.asyncExecution={bytes:unknown.bytes,digest:unknown.digest};
+ const prepared=prepareCheckpointGating(f.assembly);expect(prepared.originalAsync).toBe(32);
+ const gating=deriveCheckpointGating(f.assembly,await phase(f));
+ expect(gating.asyncExecution).toMatchObject({kind:'async-outcome-unknown',physicalCallUpperBound:32});
+ expect([...gating.derived.contributions,...gating.derived.observations]
+  .flatMap(group=>'origins' in group?group.origins:[group.origin]).some(origin=>origin.kind==='async')).toBe(false);
+});
+
+it.each([
+ ['launch',captureSupplementalAsync([],1)],
+ ['result',captureSupplementalAsync([JSON.stringify({model:'async-model',provider:'fake',role:'general',async:true,
+  status:'success',durationMs:1,findings:[]})],0)],
+])('refuses supplemental async %s under outcome-unknown evidence',async(_kind,supplementalAsync)=>{
+ const f=await fixture({asyncPhysical:2,asyncLaunched:0});
+ const unknown=encodeAsyncOutcomeUnknown(f.proof,asyncContextForBindings(f.plan,f.proof.bindings).context,f.captured);
+ f.assembly.asyncExecution={bytes:unknown.bytes,digest:unknown.digest};f.assembly.supplementalAsync=supplementalAsync;
+ expect(()=>prepareCheckpointGating(f.assembly)).toThrow('checkpoint_gating_unknown_async_supplemental');
 });
 
 it('excludes durable non-dispatch markers from async physical-call reservations',async()=>{
  const f=await fixture({asyncPhysical:498,asyncNotDispatched:true});const p=await phase(f);
  const result=deriveCheckpointGating(f.assembly,p);
- expect(result.asyncExecution!.state.intents).toHaveLength(498);
- expect(result.asyncExecution!.state.notDispatched).toHaveLength(1);
- expect(result.asyncExecution!.physicalAttempts).toHaveLength(497);
+ if(!result.asyncExecution||isAsyncOutcomeUnknown(result.asyncExecution))throw new Error('expected physical proof');
+ expect(result.asyncExecution.state.intents).toHaveLength(498);
+ expect(result.asyncExecution.state.notDispatched).toHaveLength(1);
+ expect(result.asyncExecution.physicalAttempts).toHaveLength(497);
  expect(result.disposition).toBe('replayed');
 });
 
