@@ -15,11 +15,12 @@ describe('complete pinned claim history',() => {
     const alternate = JSON.stringify(report);
     expect(Buffer.byteLength(alternate)).toBe(Buffer.byteLength(original));
     expect(sha(alternate)).not.toBe(selection.reportSha256);
-    // The transport body and header agree; the selected and stored digests stay pinned.
+    // The transport body, header, and selected digest agree; the stored run stays pinned.
     source.reportJson = alternate;
     source.selector.reportSha256 = sha(alternate);
+    selection.reportSha256 = sha(alternate);
     expect(await readClaimTargetHistory(f.sink, selection, f.actor))
-      .toMatchObject({ kind: 'conflict', message: 'claim_history_artifact_conflict' });
+      .toMatchObject({ kind: 'conflict', message: 'claim_history_source_binding_conflict' });
   });
 
   it('always indexes all same-target runs including later rounds and reconstructs exact selected history',async () => {
