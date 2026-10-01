@@ -153,6 +153,7 @@ describe('bound legacy launch health recovery', () => {
       bytesBase64: asyncBytes.toString('base64'),
     }]);
     const options = { gitCommonDir: f.common, target: f.target, headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
       pendingInputSha256: 'b'.repeat(64), recoveryInputSha256: 'c'.repeat(64),
       retryReason: 'Fresh retry after unknown legacy dispatch.',
       legacyRetry: f.retry.legacyRetry!, captured, retainedAsyncSha256: [asyncSha256],

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 4.4.15 - 2026-10-01
+
+- Recover authenticated ordinary dead-owner pending launches from a sealed package
+  that binds the original guarded input and retained async evidence. Preview is
+  read-only; apply records unknown blocking work, preserves retained artifacts,
+  and claims one bounded successor without resetting native accounting (RCL-154).
+
 ## 4.4.14 - 2026-10-01
 
 - Deliver an immutable verified-consensus report without finding labels only
