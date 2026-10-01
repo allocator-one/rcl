@@ -5,13 +5,14 @@ import { asyncRefuse, freezeAsync } from './checkpoint-async.js';
 import type { CheckpointProof } from './checkpoint.js';
 import { sha256Hex, stableStringify } from '../report/run-header.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
+import { MAX_ORIGINAL_LAUNCH_LIMIT } from './original-launch.js';
 
 const integer = z.number().int().nonnegative().safe();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const text = z.string().min(1).max(512).refine(value => !!value.trim() && !/[\0\r\n]/.test(value));
 const contextSchema = z.object({ runId: z.string().uuid(), target: text, planDigest: digest,
   capturedInputsSha256: digest, launchSha256: digest, startedAtMs: integer, expiresAtMs: integer,
-  reviewerReservedCalls: integer.min(1).max(500) }).strict();
+  reviewerReservedCalls: integer.min(1).max(MAX_ORIGINAL_LAUNCH_LIMIT) }).strict();
 const wireSchema = z.object({ version: z.literal(1), kind: z.literal('async-outcome-unknown'),
   reason: z.literal('finalized_checkpoint_missing_async_phase'), checkpointSha256: digest,
   context: contextSchema, capturedAsyncSha256: digest, physicalCallUpperBound: integer.min(1).max(500) }).strict();
