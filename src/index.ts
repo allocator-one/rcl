@@ -43,6 +43,7 @@ import {
   partitionAsyncAssignments,
   asyncTargetKey,
   resolveAsyncStoreDir,
+  resolveExistingAsyncStoreDir,
   spoolAsyncCalls,
   launchAsyncWorkers,
   runAsyncWorker,
@@ -2104,39 +2105,36 @@ async function executeCouncil(
       const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
         (await readStable(opts.ordinaryPendingPackage)).text
       ) as OrdinaryPendingPackage;
-      if (opts.previewPending && migrationPackage) {
-        const asyncStoreDir = await resolveAsyncStoreDir();
-        const names = await readdir(asyncStoreDir);
-        const artifacts: AsyncResultReference[] = [];
-        for (const descriptor of migrationPackage.retainedAsync) {
-          let artifact: AsyncResultReference | undefined;
-          for (const name of names) {
-            const path = join(asyncStoreDir, name);
-            const bytes = await readStable(path).catch(() => undefined);
-            if (!bytes || bytes.sha256 !== descriptor.sha256) continue;
-            let decoded: unknown;
-            try { decoded = JSON.parse(bytes.text); } catch { throw new ReviewLaunchRefused('pending_async_corrupt', 'A package-bound retained async artifact is not valid JSON.'); }
-            const row = decoded as { model?: unknown; role?: unknown; provider?: unknown };
-            if (row.model !== descriptor.model || row.role !== descriptor.role || row.provider !== descriptor.provider) {
-              throw new ReviewLaunchRefused('pending_async_identity_mismatch', 'A package-bound retained async artifact has a different reviewer identity.');
-            }
-            if (artifact) throw new ReviewLaunchRefused('pending_async_duplicate', 'Multiple retained async artifacts match one authenticated digest.');
-            artifact = { path, sha256: bytes.sha256, bytesBase64: bytes.raw.toString('base64') };
+      const loadMigrationRetainedAsync = async (): Promise<AsyncResultReference[]> => {
+        if (!migrationPackage) throw new ReviewLaunchRefused('pending_async_missing', 'An ordinary package is required.');
+        const store = await resolveExistingAsyncStoreDir();
+        const wanted = new Map(migrationPackage.retainedAsync.map(item => [item.sha256, item]));
+        const found = new Map<string, AsyncResultReference>();
+        for (const name of await readdir(store)) {
+          const path = join(store, name); const bytes = await readStable(path).catch(() => undefined);
+          if (!bytes || !wanted.has(bytes.sha256)) continue;
+          let row: { model?: unknown; role?: unknown; provider?: unknown };
+          try { row = JSON.parse(bytes.text) as typeof row; } catch { throw new ReviewLaunchRefused('pending_async_corrupt', 'A package-bound retained async artifact is not valid JSON.'); }
+          const descriptor = wanted.get(bytes.sha256)!;
+          if (row.model !== descriptor.model || row.role !== descriptor.role || row.provider !== descriptor.provider) {
+            throw new ReviewLaunchRefused('pending_async_identity_mismatch', 'A package-bound retained async artifact has a different reviewer identity.');
           }
-          if (!artifact) throw new ReviewLaunchRefused('pending_async_missing', 'A package-bound retained async artifact is unavailable.');
-          artifacts.push(artifact);
+          if (found.has(bytes.sha256)) throw new ReviewLaunchRefused('pending_async_duplicate', 'Multiple retained async artifacts match one authenticated digest.');
+          found.set(bytes.sha256, { path, sha256: bytes.sha256, bytesBase64: bytes.raw.toString('base64') });
         }
+        if (found.size !== wanted.size) throw new ReviewLaunchRefused('pending_async_missing', 'A package-bound retained async artifact is unavailable.');
+        return [...found.values()].sort((a, b) => a.sha256.localeCompare(b.sha256));
+      };
+      if (opts.previewPending && migrationPackage) {
         const inputSha256 = guardedInputSha256(migrationPackage.guardedInput);
         const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
           pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256, retryReason: opts.retryReason!,
           captured: {} as CapturedPreparedCouncil, retainedAsyncSha256: expectedAsyncSha256,
           migrationPackage, maxAttempts: Number(opts.maxAttempts), maxPhysicalCalls: 1, maxAttemptsPerCell: 1,
-          maxDurationMs: 1, validate: async () => {}, loadRetainedAsync: async () => artifacts,
+          maxDurationMs: 1, validate: async () => {}, loadRetainedAsync: loadMigrationRetainedAsync,
           run: async () => { throw new Error('preview_must_not_run'); }, preview: true });
-        spinner.stop();
-        console.log(JSON.stringify({ mode: 'preview', ...preview }));
-        return undefined;
+        spinner.stop(); console.log(JSON.stringify({ mode: 'preview', ...preview })); return undefined;
       }
       // An ordinary migration package authenticates the old launch itself. The
       // current prepared plan is used only for its fresh successor; it must not
@@ -2223,7 +2221,7 @@ async function executeCouncil(
           ((config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1) +
           prepared.gatingConfig.verificationTimeoutMs),
         validate: async () => { validateLaunchProviders(roster.map(entry => entry.provider)); await validateLaunchOutputs(opts); },
-        loadRetainedAsync: async () => {
+        loadRetainedAsync: migrationPackage ? loadMigrationRetainedAsync : async () => {
           const snapshot = await snapshotAsyncResults(asyncStoreDir, asyncKey,
             pendingClaimPlan.assignments.map(assignment => ({
               model: assignment.model, role: assignment.role.name,
@@ -2259,7 +2257,7 @@ async function executeCouncil(
       }
       const result = await resumePendingLegacyLaunch({ ...pendingResumeOptions, preview: false });
       try {
-        await consumeBoundAsyncResults(asyncStoreDir, asyncKey, expectedAsyncSha256,
+        if (!migrationPackage) await consumeBoundAsyncResults(asyncStoreDir, asyncKey, expectedAsyncSha256,
           { allowAlreadyConsumed: result.reusedCompletion });
       } catch (error) {
         console.warn(`Retained async results could not be cleaned after terminal recovery: ${String(error)}`);
