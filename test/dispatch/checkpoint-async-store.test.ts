@@ -40,13 +40,14 @@ afterEach(async () => { vi.useRealTimers(); durability.failPath=''; durability.s
 const target = 'fixture#105', runId = '11111111-1111-4111-8111-111111111111';
 const prompts = { systemPrompt: 'async system', userPrompt: 'async user' };
 const review = (status = 'success', extra = {}) => JSON.stringify({ model: 'async-model', role: 'general', provider: 'fake', async: true, status, findings: [{ id: 'same', file: 'a.ts', startLine: 1, endLine: 1, severity: 'critical', category: 'security', title: 'keep', description: 'raw finding' }], durationMs: 9, usage: { inputTokens: 3, outputTokens: 2 }, ...extra }, null, 2) + '\n';
-async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, permutedChunks = false) {
+async function fixture(cap = 3, systemPrompt = prompts.systemPrompt, permutedChunks = false,
+  reviewerReservedCalls = 2) {
  const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'async-phase-'))); roots.push(commonDir);
  const configBytes = '{}', toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: sha256Hex('[]'), configSha256: sha256Hex(configBytes), specSha256: sha256Hex(''), contextSha256: sha256Hex('[]'), toolsSha256: sha256Hex(toolsBytes), parser: { name: 'findings-json', version: 1 }, roster: ['a','b'].map(seat => ({seat, model: seat, role: 'general', route: 'fake'})), chunks: permutedChunks ? [{index:1,total:2,digest:sha256Hex('other chunk')},{index:0,total:2,digest:sha256Hex('chunk')}] : [{index:0,total:1,digest:sha256Hex('chunk')}], prompts: (permutedChunks ? [1,0] : [0]).flatMap(chunk=>['a','b'].map(seat=>({seat,chunk,systemSha256:sha256Hex('s'),userSha256:sha256Hex('u')}))) });
  const role = { name:'general',systemPrompt:'s',focus:[],description:'d',isSpecialized:false };
  const captured = captureReviewerInputs({ plan, policy:{version:1,fraction:2/3},patchBytes:'[]',configBytes,specBytes:'',contextBytes:'[]',toolsBytes,chunkBytes:permutedChunks ? ['other chunk','chunk'] : ['chunk'],assignments:plan.cells.map(c=>({model:c.model,provider:c.route,role})),prompts:plan.cells.map(()=>({systemPrompt:'s',userPrompt:'u'})), async: { timeoutMs: 1000, maxPhysicalCalls: cap, maxAttemptsPerCall: 2, calls: ['assignment-a','assignment-b'].map(assignmentId=>({assignmentId,chunk:0,assignment:{model:'async-model',provider:'fake',role},prompt:{...prompts,systemPrompt}})) } });
- const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim:{attempt:3,round:2},startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:2,maxAttemptsPerCell:1});
+ const now = Date.now(); const launch = createOriginalLaunch({runId,target,planDigest:plan.digest,capturedInputsSha256:captured.digest,originalNativeClaim:{attempt:3,round:2},startedAtMs:now-10,expiresAtMs:now+60_000,maxPhysicalCalls:reviewerReservedCalls,maxAttemptsPerCell:1});
  let journal!: CheckpointJournal;
  await withNativeTarget(commonDir,target,async ownership=>{journal=await CheckpointJournal.create({commonDir,namespace:runId,plan,ownership});await journal.bind('captured-inputs',captured.bytes,ownership);await journal.bind('launch',encodeOriginalLaunch(launch),ownership);});
  const calls = ['assignment-a','assignment-b'].map(assignment=>({id:`${assignment}:0`,assignment,chunk:0,chunkSha256:plan.chunks.find(chunk=>chunk.index===0)!.digest,model:'async-model',role:'general',provider:'fake',systemPromptSha256:sha256Hex(systemPrompt),userPromptSha256:sha256Hex(prompts.userPrompt)}));
@@ -76,7 +77,19 @@ describe('restricted original async checkpoint persistence',()=>{
    reason:'finalized_checkpoint_missing_async_phase',checkpointSha256:finalized.digest,
    capturedAsyncSha256:sha256Hex(stableStringify(f.captured.async)),physicalCallUpperBound:3});
   await expect(lstat(join(f.path,'async'))).rejects.toMatchObject({code:'ENOENT'});
-  expect(await exportCheckpointProof(f.journal)).toEqual(finalized);
+ expect(await exportCheckpointProof(f.journal)).toEqual(finalized);
+ });
+ it('retains outcome-unknown evidence for a historical launch whose reviewer reservation exceeds the async cap',async()=>{
+  const f=await fixture(3,prompts.systemPrompt,false,952);
+  await withNativeTarget(f.commonDir,target,owner=>f.journal.finalize(owner));
+  vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(f.launch.expiresAtMs);
+  const first=await withNativeTarget(f.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...f.input,ownership}));
+  const second=await withNativeTarget(f.commonDir,target,ownership=>resolveFinalizedAsyncExecution({...f.input,ownership}));
+  expect(second).toEqual(first);
+  expect(JSON.parse(first!.bytes)).toMatchObject({
+   context:{reviewerReservedCalls:952},physicalCallUpperBound:3,
+  });
+  expect(await readCheckpointAsyncExecution(f.input)).toEqual(first);
  });
  it('refuses outcome-unknown recovery while live or unfinalized and never masks partial phase state',async()=>{
   const unfinalized=await fixture();

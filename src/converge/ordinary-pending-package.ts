@@ -6,7 +6,7 @@ export interface PendingLaunchIdentity { target: string; headSha: string; inputS
 export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, expected: PendingLaunchIdentity): OrdinaryPendingPackage {
   const input = value?.guardedInput, keys = ['asyncRoles','config','diff','head','kind','pr','prompts','repo','roster','spec'];
   const digest = (candidate: unknown): candidate is string => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
-  const structuredInput = input && input.kind === 'patch' && typeof input.repo === 'string' && /^[^/\\s]+\/[^/\\s]+$/.test(input.repo) &&
+  const structuredInput = input && input.kind === 'patch' && typeof input.repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(input.repo) &&
     Number.isSafeInteger(input.pr) && (input.pr as number) > 0 && digest(input.diff) && digest(input.config) &&
     Array.isArray(input.roster) && Array.isArray(input.prompts) && Array.isArray(input.asyncRoles) &&
     input.roster.every(item => item && typeof item === 'object') &&
@@ -23,7 +23,9 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
   if (!structuredInput || !/^[a-f0-9]{40}$/.test(value.headSha) || !new Set(value.retainedAsyncSha256).size ||
       new Set(value.retainedAsyncSha256).size !== value.retainedAsyncSha256.length ||
       value.retainedAsyncSha256.some(hash => !digest(hash)) || !Array.isArray(value.retainedAsync) ||
-      value.retainedAsync.length !== value.retainedAsyncSha256.length || value.retainedAsync.some(item =>
+      value.retainedAsync.length !== value.retainedAsyncSha256.length ||
+      new Set(value.retainedAsync.map(item => item?.sha256)).size !== value.retainedAsync.length ||
+      value.retainedAsync.some(item =>
         !item || !digest(item.sha256) || !value.retainedAsyncSha256.includes(item.sha256) ||
         typeof item.model !== 'string' || !item.model || typeof item.role !== 'string' || !item.role ||
         typeof item.provider !== 'string' || !item.provider || item.lane !== 'async' ||

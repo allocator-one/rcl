@@ -35,7 +35,7 @@ export interface PendingLegacyResumeOptions {
   gitCommonDir: string;
   target: string;
   headSha: string;
-  baseSha: string;
+  baseSha?: string;
   pendingInputSha256: string;
   recoveryInputSha256: string;
   retryReason: string;
@@ -128,7 +128,7 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
     !/^[a-f0-9]{40}$/.test(input.headSha ?? '') ||
-    !/^[a-f0-9]{40}$/.test(input.baseSha ?? '') ||
+    (input.migrationPackage && !/^[a-f0-9]{40}$/.test(input.baseSha ?? '')) ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.recoveryInputSha256 ?? '') ||
     typeof input.retryReason !== 'string' || !input.retryReason.trim() || input.retryReason.length > 500 ||
@@ -145,8 +145,8 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
 }
 
 async function archiveAsync(common: string, source: PendingRecoverySource,
-  artifacts: readonly AsyncResultReference[]): Promise<void> {
-  validateAsyncArtifacts(source, artifacts);
+  artifacts: readonly AsyncResultReference[], packet?: OrdinaryPendingPackage): Promise<void> {
+  validateAsyncArtifacts(source, artifacts, packet);
   const directory = await prepareLockRoot(join(common, 'rcl-converge-pending-recovery', source.digest));
   for (const artifact of artifacts) {
     const bytes = Buffer.from(artifact.bytesBase64, 'base64');
@@ -159,7 +159,7 @@ async function archiveAsync(common: string, source: PendingRecoverySource,
 }
 
 function validateAsyncArtifacts(source: PendingRecoverySource,
-  artifacts: readonly AsyncResultReference[]): void {
+  artifacts: readonly AsyncResultReference[], packet?: OrdinaryPendingPackage): void {
   const expected = [...source.retainedAsyncSha256].sort();
   const actual = artifacts.map(item => item.sha256).sort();
   if (expected.length !== actual.length || expected.some((item, index) => item !== actual[index])) {
@@ -168,6 +168,13 @@ function validateAsyncArtifacts(source: PendingRecoverySource,
   for (const artifact of artifacts) {
     const bytes = Buffer.from(artifact.bytesBase64, 'base64');
     if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) fail('async_binding_mismatch');
+    if (packet) {
+      const descriptor = packet.retainedAsync.find(item => item.sha256 === artifact.sha256);
+      let row: { model?: unknown; role?: unknown; provider?: unknown };
+      try { row = JSON.parse(bytes.toString('utf8')) as typeof row; } catch { fail('async_binding_mismatch'); }
+      if (!descriptor || row.model !== descriptor.model || row.role !== descriptor.role ||
+          row.provider !== descriptor.provider) fail('async_binding_mismatch');
+    }
   }
 }
 
@@ -187,10 +194,11 @@ export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOpt
     const record = attempts.attempts.find(item => item.attempt === current.attempt);
     if (!record || current.status !== 'pending' || current.attempt !== attempts.attemptsUsed ||
       current.headSha !== options.headSha || current.inputSha256 !== options.pendingInputSha256) fail('launch_mismatch');
+    if (attempts.attemptsUsed >= attempts.cap) fail('attempt_cap_exhausted');
     if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');
     const packet = validateOrdinaryPendingPackage(options.migrationPackage!, {
       target: options.target, headSha: current.headSha, inputSha256: current.inputSha256,
-      baseSha: options.baseSha, attempt: current.attempt, round: current.round, pid: current.pid,
+      baseSha: options.baseSha!, attempt: current.attempt, round: current.round, pid: current.pid,
       retainedAsyncSha256: options.retainedAsyncSha256,
     });
     const [nativeBytes, attemptBytes] = await Promise.all([
@@ -205,7 +213,7 @@ export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOpt
       retainedAsyncSha256: options.retainedAsyncSha256,
       migrationPackageSha256: createHash('sha256').update(stableStringify(packet)).digest('hex'),
     });
-    validateAsyncArtifacts(source, await options.loadRetainedAsync());
+    validateAsyncArtifacts(source, await options.loadRetainedAsync(), packet);
     return { source, nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
       attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextAttempt: current.attempt + 1 };
   });
@@ -295,7 +303,7 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
       fail('claim_gap_mismatch');
     }
     await options.validate();
-    await archiveAsync(options.gitCommonDir, source, await options.loadRetainedAsync());
+    await archiveAsync(options.gitCommonDir, source, await options.loadRetainedAsync(), options.migrationPackage);
     const now = (options.nowMs ?? Date.now)();
     if (!Number.isSafeInteger(now) || now < 0) fail('invalid_clock');
     const resume = { version: 1 as const, runId: uuidv7(), planDigest: options.captured.plan.digest,
@@ -348,6 +356,7 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
 /** Finalize unknown A34 evidence, then claim one fresh checkpointed A35. */
 export function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions & { preview: true }): Promise<OrdinaryPendingPreview>;
 export function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions & { preview?: false }): Promise<PendingLegacyResumeResult>;
+export function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions): Promise<PendingLegacyResumeResult | OrdinaryPendingPreview>;
 export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOptions): Promise<PendingLegacyResumeResult | OrdinaryPendingPreview> {
   if (input.preview) return previewOrdinaryPendingLaunch(input);
   validateOptions(input);
@@ -366,16 +375,18 @@ export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOption
     const originalPid = 'originalPid' in original ? original.originalPid : original.pid;
     const migrationPackage = options.migrationPackage && validateOrdinaryPendingPackage(options.migrationPackage, {
         target: options.target, headSha: original.headSha, inputSha256: original.inputSha256,
-        baseSha: options.baseSha, attempt: originalAttempt, round: original.round, pid: originalPid,
+        baseSha: options.baseSha!, attempt: originalAttempt, round: original.round, pid: originalPid,
         retainedAsyncSha256: options.retainedAsyncSha256,
       });
     if (persistedSource) {
       return resumeFresh(options, ownership, state, attempts, current);
     }
     const record = attempts.attempts.find(item => item.attempt === current.attempt);
-    if (!record || (!record.retrySource && !migrationPackage) || current.attempt !== attempts.attemptsUsed ||
-      current.headSha !== options.headSha || current.inputSha256 !== options.pendingInputSha256 ||
-      !['pending', 'failed'].includes(current.status)) fail('launch_mismatch');
+    if (!record || (!record.retrySource && !migrationPackage) || (migrationPackage && record.retrySource) ||
+      current.attempt !== attempts.attemptsUsed || current.headSha !== options.headSha ||
+      current.inputSha256 !== options.pendingInputSha256 || !['pending', 'failed'].includes(current.status)) {
+      fail('launch_mismatch');
+    }
     let source: PendingRecoverySource;
     if (current.status === 'pending') {
       if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');

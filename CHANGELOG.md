@@ -4,6 +4,13 @@
 
 ## 4.4.15 - 2026-10-01
 
+- Recover authenticated ordinary dead-owner pending launches from a sealed package
+  that binds the original guarded input and retained async evidence. Preview is
+  read-only; apply records unknown blocking work, preserves retained artifacts,
+  and claims one bounded successor without resetting native accounting (RCL-154).
+
+## 4.4.13 - 2026-10-01
+
 - Accept the authenticated historical original-reviewer reservation limit when
   retaining a finalized checkpoint's async outcome as unknown, while keeping
   the captured async proof upper bound at 500. This lets legacy retries with a
