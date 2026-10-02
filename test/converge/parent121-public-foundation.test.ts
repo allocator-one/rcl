@@ -7,7 +7,7 @@ import { sha, uuid } from '../evidence/recovery-validation/fixtures.js';
 import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
 import { correctionAnchor } from '../../src/converge/correction-anchors.js';
 import { deriveNativeRecovery, applyNativeRecovery } from '../../src/converge/recovery-state.js';
-import { loadConvergeRunState, writeStateIfUnchanged } from '../../src/converge/run-state.js';
+import { loadConvergeRunState, processRoundReport, writeStateIfUnchanged } from '../../src/converge/run-state.js';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { loadConvergeAttemptState, recordConvergeAttemptLaunch } from '../../src/converge/attempt-budget.js';
 import { processSemanticRound } from '../../src/converge/semantic-state.js';
@@ -158,6 +158,23 @@ it('records immutable pending/completed metadata on an actual cycle3 already-spe
   expect(await readFile(f.attemptPath, 'utf8')).toBe(retained);
   expect(await readFile(f.runPath, 'utf8')).toBe(f.sourceJson);
   expect(await readFile(f.archivePath, 'utf8')).toBe(f.archiveJson);
+});
+
+it('refuses recovered admission from an authoritative locally invalid attempt launch', async () => {
+  const f = await fixture(); await f.apply();
+  const attempt = JSON.parse(await readFile(f.attemptPath, 'utf8'));
+  attempt.lastLaunch = { ...f.native.lastLaunch, deliveryFailure: 'local-invalid' };
+  await writeFile(f.attemptPath, JSON.stringify(attempt));
+  const nativeBefore = await readFile(f.runPath, 'utf8');
+  const attemptBefore = await readFile(f.attemptPath, 'utf8');
+  expect(JSON.parse(nativeBefore).lastLaunch.deliveryFailure).toBeUndefined();
+  const report = JSON.parse(f.selection.reportJson);
+  await expect(processRoundReport({ gitCommonDir: f.root, target: f.plan.target, round: 1,
+    runId: report.run.id, cycleId: f.native.cycle.id, reportSha256: sha(f.selection.reportJson),
+    findings: [...report.findings, ...report.belowThresholdFindings] }))
+    .rejects.toThrow('terminal_rejection_cannot_be_admitted');
+  expect(await readFile(f.runPath, 'utf8')).toBe(nativeBefore);
+  expect(await readFile(f.attemptPath, 'utf8')).toBe(attemptBefore);
 });
 
 it('recursively applies a second distinct retained finding correction without rewriting original cycle ancestry', async () => {

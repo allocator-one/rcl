@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.4.19 - 2026-10-02
+
+- Distinguish terminal local evidence rejection from retryable delivery. Add
+  `converge-rejected` preview/apply recovery for original reports rejected for
+  missing verified-consensus gating labels. Recovery verifies and retains exact
+  original evidence, preserves reviewer health and spent attempts, and permits
+  only a later normal guarded retry with an explicit reason and remaining budget.
+  Rejected originals remain ineligible for admission (RCL-168).
+
 ## 4.4.18 - 2026-10-02
 
 - Authenticate and export pending direct-PR review inputs against the original

@@ -1,3 +1,4 @@
+import { terminalRejectionForLaunch, verifyTerminalRejections } from './terminal-rejection.js';
 import { inspectLegacyRetry, retainLegacyRetry, type LegacyRetrySelection } from './legacy-launch-health.js';
 import { hasSuccessfulQuorum } from '../dispatch/quorum.js';
 import { completionSchema, launchSchema, ordinaryLaunchInputsBindingSchema,
@@ -112,6 +113,10 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     refuse('triage_required', 'Resolve the existing native gating findings before another launch.');
   }
   const previous = state.lastLaunch === undefined ? undefined : launchSchema.parse(state.lastLaunch);
+  const terminalRejected = previous?.status === 'completed' && await terminalRejectionForLaunch(options.gitCommonDir, state);
+  if (previous?.deliveryFailure === 'local-invalid' && !terminalRejected) {
+    refuse('terminal_rejection_proof_required', 'Inspect the original quarantine and preview rcl converge-rejected; a local-invalid marker is not recovery proof.');
+  }
   let boundFixRecoverySource: BoundFixRecoverySource | undefined;
   if (options.boundFixRecovery) {
     const recovery = options.boundFixRecovery;
@@ -160,6 +165,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (!options.retryReason) refuse('dispatch_unknown', 'Previous dispatch is unknown; no automatic retry. Supply a bounded retry reason only after recovery.');
     return { round };
   }
+  if (terminalRejected && !options.retryReason) refuse('terminal_rejection_retry_reason', 'The rejected attempt remains spent; provide an explicit bounded retry reason.');
   if (previous.deliveryPending && ((previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) ||
     !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId))) {
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
@@ -171,8 +177,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   const healthy = retryProof ? hasSuccessfulQuorum(retryProof.binding.reviewerHealth.policy,
     retryProof.binding.reviewerHealth.successfulSeats) : hasHealthyGuardedLaunch(previous);
-  let disposed = false;
-  if (healthy && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
+  let disposed = terminalRejected;
+  if (healthy && !terminalRejected && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
     const entry = candidates.find(e => {
       const m = staleManifest(e);
@@ -292,6 +298,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       try {
         state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
         await verifyStaleReportReceipts(options.gitCommonDir,state.staleReportAudit ?? []);
+        await verifyTerminalRejections(options.gitCommonDir, state);
       }
       catch (error) {
         if (!(error instanceof StaleReportAuditError)) throw error;

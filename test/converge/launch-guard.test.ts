@@ -645,3 +645,17 @@ describe('operation-bound original preflight', () => {
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
   });
 });
+
+it('requires terminal rejection proof even when invalid evidence also has unhealthy reviewer quorum', async () => {
+  const options = await fixture();
+  options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 1,
+    reviewerHealth: { version: 1, policy: resolveQuorumPolicy(3), successfulSeats: 1 },
+    deliveryFailure: 'local-invalid', deliveryPending: false, hardFailure: true, exitCode: 4 });
+  await guardReviewLaunch(options);
+  const before = await readFile(convergeRunStatePath(options.gitCommonDir, target));
+  await expect(guardReviewLaunch({ ...options, retryReason: 'A reason is not retained rejection proof' }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  expect(await readFile(convergeRunStatePath(options.gitCommonDir, target))).toEqual(before);
+  expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  expect(options.run).toHaveBeenCalledTimes(1);
+});

@@ -1372,3 +1372,44 @@ the stored login token, and injected for the run.
 ## License
 
 MIT © 2026 Michael Ströck
+
+### Recovering a terminal local evidence rejection
+
+A locally invalid report is retained in quarantine, outside the retryable outbox.
+`deliveryFailure: local-invalid` describes delivery, independently of reviewer
+quorum. It does not admit the report or authorize another review. Transport
+failures and spooled evidence retain their existing delivery gates.
+
+For an ordinary completed report rejected for missing verified-consensus gating
+labels, preview a disposition using its original report and exact digest:
+
+```bash
+rcl converge-rejected --preview --target owner-repo-123 --run ORIGINAL_RUN_UUID \
+  --report /path/to/original.json --report-sha256 ORIGINAL_SHA256 \
+  --reason "Original local rejection diagnosed; producer repair verified" \
+  --manifest /path/to/rejection-preview.json --json
+rcl converge-rejected --apply --manifest /path/to/rejection-preview.json \
+  --manifest-sha256 REVIEWED_PREVIEW_SHA256 --json
+```
+
+The command verifies the original report, quarantine diagnostics and envelope,
+blocking health, run/head/input identity, cycle and latest spent attempt. It
+requires an exited coordinator and no admitted round or queued delivery. Valid
+reports, unsupported rejection classes, incomplete or conflicting proof, live or
+uncertain owners, and queued evidence refuse. Neither an empty outbox nor exit
+code 4 establishes terminal rejection.
+
+Apply retains complete immutable evidence before an atomic native-state update;
+repeating the same apply is idempotent. The original reports, health, attempt
+ledger, caps and review cycle stay unchanged. The native audit permanently bars
+admission of the rejected original. A later normal guarded review still requires
+an explicit bounded `--retry-reason`, normal preflight and remaining budget; it
+claims the next attempt in the same cycle and native round. Recovery itself
+uploads nothing, starts no provider calls and provides no convergence or approval.
+
+Queue checks are fail-closed observations, not a new global outbox lock. This
+narrow recovery proves rejection before network delivery and requires the
+original producer to have exited. It rechecks for queued evidence at apply and
+before the later guarded claim. It never treats a server/transport refusal as
+that proof. Historical audits use their retained copies, so ordinary temporary
+source cleanup does not break subsequent review and admission.

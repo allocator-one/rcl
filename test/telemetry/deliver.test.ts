@@ -8,6 +8,7 @@ import type { Config } from '../../src/config/schema.js';
 import {
   createTelemetryRuntime,
   deliverRun,
+  guardedDeliveryState,
   emitConvergeEvents,
   EVIDENCE_REQUIRED_EXIT_CODE,
   evidenceRequirementConflict,
@@ -83,6 +84,27 @@ describe('telemetry delivery', () => {
   afterEach(async () => {
     await rm(repo, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('keeps spooled and uncertain nonzero delivery guarded, without treating failure as health', () => {
+    expect(guardedDeliveryState({ spooled: false, exitCode: 4 })).toEqual({ deliveryPending: true });
+    expect(guardedDeliveryState({ spooled: true, exitCode: 4 })).toEqual({ deliveryPending: true });
+    expect(guardedDeliveryState({ spooled: false, exitCode: 0 })).toEqual({ deliveryPending: false });
+    expect(guardedDeliveryState({ spooled: false, exitCode: 4, failureDisposition: 'local-invalid' }))
+      .toEqual({ deliveryPending: true, deliveryFailure: 'local-invalid' });
+    expect(guardedDeliveryState({ spooled: false, exitCode: 0, failureDisposition: 'local-invalid' }))
+      .toEqual({ deliveryPending: false });
+  });
+
+  it('classifies invalid unspooled consensus evidence as terminal local rejection', async () => {
+    const { rt, requests } = await runtime(acceptEverything);
+    const result = sampleResult();
+    delete result.findings[0]!.gating;
+    const outcome = await deliverRun(rt, { result, artifacts: { report_json: JSON.stringify(result) }, evidenceRequired: true });
+    expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4,
+      failureDisposition: 'local-invalid', retention: { status: 'complete' } });
+    expect(requests).toEqual([]);
+    expect(await rt.outbox.list()).toEqual([]);
   });
 
   it.each([false, true])('delivers fresh normalized prose and exact artifact bytes (attested=%s)', async attested => {
