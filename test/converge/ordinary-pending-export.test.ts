@@ -7,28 +7,87 @@ import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
 import { claimConvergeAttempt, convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath } from '../../src/converge/run-state.js';
 
-const fault = vi.hoisted(() => ({ partialWrite: false }));
+const fault = vi.hoisted(() => ({ partialWrite: false, directoryMode: null as number | null, windowsDirectoryOpen: false, windowsFileFlags: false }));
+vi.mock('node:fs', async original => {
+  const fs = await original<typeof import('node:fs')>();
+  return { ...fs, constants: { ...fs.constants,
+    get O_NOFOLLOW() { return fault.windowsFileFlags ? undefined : fs.constants.O_NOFOLLOW; },
+    get O_NONBLOCK() { return fault.windowsFileFlags ? undefined : fs.constants.O_NONBLOCK; },
+  } };
+});
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
-  return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
-    const handle = await fs.open(...args);
-    const write = handle.writeFile.bind(handle);
-    handle.writeFile = async (...values: Parameters<typeof handle.writeFile>) => {
-      if (fault.partialWrite && String(args[0]).includes('rcl-ordinary-inputs')) {
-        fault.partialWrite = false;
-        await write('{"version":');
-        throw new Error('simulated interrupted write');
+  return { ...fs,
+    lstat: async (...args: Parameters<typeof fs.lstat>) => {
+      const info = await fs.lstat(...args);
+      if (fault.directoryMode !== null && String(args[0]).replaceAll('\\', '/').endsWith('/rcl-ordinary-inputs')) {
+        return new Proxy(info, { get(target, property, receiver) {
+          if (property === 'mode') return fault.directoryMode;
+          if (property === 'uid' && fault.windowsDirectoryOpen) return 0;
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
       }
-      return write(...values);
-    };
-    return handle;
-  } };
+      return info;
+    },
+    open: async (...args: Parameters<typeof fs.open>) => {
+      if (fault.windowsDirectoryOpen && args[1] === 'r' && (await fs.stat(args[0])).isDirectory()) {
+        throw Object.assign(new Error('simulated Windows directory open refusal'), { code: 'EPERM' });
+      }
+      const handle = await fs.open(...args);
+      const write = handle.writeFile.bind(handle);
+      handle.writeFile = async (...values: Parameters<typeof handle.writeFile>) => {
+        if (fault.partialWrite && String(args[0]).includes('rcl-ordinary-inputs')) {
+          fault.partialWrite = false;
+          await write('{"version":');
+          throw new Error('simulated interrupted write');
+        }
+        return write(...values);
+      };
+      return handle;
+    } };
 });
 
 const dirs: string[] = [];
-afterEach(async () => { fault.partialWrite = false; for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+afterEach(async () => {
+  fault.partialWrite = false;
+  fault.directoryMode = null;
+  fault.windowsDirectoryOpen = false;
+  fault.windowsFileFlags = false;
+  Object.defineProperty(process, 'platform', platform);
+  for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+});
 
 describe('ordinary launch input retention', () => {
+  it('retains ordinary inputs with Windows directory permissions and no directory fsync', async () => {
+    const gitCommonDir = await mkdtemp(join(tmpdir(), 'ordinary-windows-retention-')); dirs.push(gitCommonDir);
+    const options = { gitCommonDir, target: 'owner-repo-1', headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40), guardedInput: { head: 'a'.repeat(40), kind: 'pr' }, attempt: 1, round: 1 };
+    // Simulate Node's Windows stat result, not Windows ACL qualification.
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    fault.directoryMode = 0o40777;
+    fault.windowsDirectoryOpen = true;
+    fault.windowsFileFlags = true;
+    const retained = await retainOrdinaryLaunchInputs(options);
+    const bytes = await readFile(retained.path, 'utf8');
+    expect(JSON.parse(bytes).guardedInput).toEqual(options.guardedInput);
+    expect(retained.sha256).toBe(sha256Hex(bytes));
+    expect(await retainOrdinaryLaunchInputs(options)).toEqual(retained);
+    expect(await readFile(retained.path, 'utf8')).toBe(bytes);
+    if (platform.value !== 'win32') expect((await stat(retained.path)).mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses unsafe POSIX directory permission bits before publishing ordinary inputs', async () => {
+    const gitCommonDir = await mkdtemp(join(tmpdir(), 'ordinary-posix-retention-')); dirs.push(gitCommonDir);
+    const options = { gitCommonDir, target: 'owner-repo-1', headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40), guardedInput: { head: 'a'.repeat(40), kind: 'pr' }, attempt: 1, round: 1 };
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    fault.directoryMode = 0o40755;
+    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('ordinary_retained_input_directory_unsafe');
+    expect(await readdir(join(gitCommonDir, 'rcl-ordinary-inputs'))).toEqual([]);
+  });
+
   it('refuses to export a pending bound-fix recovery claim as an ordinary launch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'ordinary-bound-fix-')); dirs.push(root);
     const gitCommonDir = join(root, 'native');

@@ -8,7 +8,8 @@ import { validateOrdinaryPendingPackage, type OrdinaryPendingPackage } from './o
 import { snapshotAsyncResults } from '../dispatch/async-lane.js';
 import { guardedInputSha256, sha256Hex } from '../report/run-header.js';
 import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
-import { serializeRecoveryDocument, syncDirectory, writeExclusive } from '../evidence/original-run/journal.js';
+import { serializeRecoveryDocument, writeExclusive } from '../evidence/original-run/journal.js';
+import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 
 // Leave room for the recovery package's retained-async descriptors beneath
 // the shared recovery reader ceiling (25 MiB). Apply this before any claim.
@@ -71,22 +72,27 @@ export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs):
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
   });
   const info = await lstat(directory);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
-      (typeof process.getuid === 'function' && info.uid !== process.getuid())) throw new Error('ordinary_retained_input_directory_unsafe');
+  const uid = process.geteuid?.();
+  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(directory) !== directory ||
+      (process.platform !== 'win32' && (uid === undefined || info.uid !== uid || (info.mode & 0o077) !== 0))) {
+    throw new Error('ordinary_retained_input_directory_unsafe');
+  }
   // Only complete, fsynced bytes become a final capture. Interrupted staging
   // files remain private evidence and do not reserve the immutable final name.
   const temporary = `${path}.${randomUUID()}.pending`;
-  await writeExclusive(temporary, packet, MAX_RETAINED_INPUT_BYTES);
+  await writeNativeStateExclusive(temporary, packet);
   try { await link(temporary, path); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if ((await readStable(path, MAX_RETAINED_INPUT_BYTES)).text !== bytes) throw new Error('ordinary_retained_input_mismatch');
-    await readStable(path, MAX_RETAINED_INPUT_BYTES, { sync: true });
+    if ((await readStable(path, MAX_RETAINED_INPUT_BYTES, { allowMissingSafeFlagsOnWindows: true })).text !== bytes) {
+      throw new Error('ordinary_retained_input_mismatch');
+    }
+    await readStable(path, MAX_RETAINED_INPUT_BYTES, { sync: true, allowMissingSafeFlagsOnWindows: true });
   }
-  await syncDirectory(directory);
+  await syncNativeDirectory(directory);
   await unlink(temporary);
-  await syncDirectory(directory);
-  await syncDirectory(common);
+  await syncNativeDirectory(directory);
+  await syncNativeDirectory(common);
   return { path, sha256: packetSha256, baseSha: options.baseSha };
 }
 

@@ -16,9 +16,10 @@ export function platformPath(path: string): string {
   return absolute.replace(/^\/tmp(?=\/|$)/, '/private/tmp').replace(/^\/var(?=\/|$)/, '/private/var');
 }
 
-/** Stable, bounded, regular-file read. In particular, opening a FIFO cannot block. */
-export async function readStable(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean } = {}): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
-  if (constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined) throw new Error('safe_file_flags_unavailable');
+/** Stable, bounded, regular-file read. Ordinary Windows capture reuse may opt into its native file checks. */
+export async function readStable(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean; allowMissingSafeFlagsOnWindows?: boolean } = {}): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
+  if ((constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined) &&
+      !(options.allowMissingSafeFlagsOnWindows && process.platform === 'win32')) throw new Error('safe_file_flags_unavailable');
   const canonical = platformPath(path);
   if (await realpath(dirname(canonical)) !== dirname(canonical)) throw new Error('symlink_directory');
   const entry = await lstat(canonical);
@@ -26,7 +27,7 @@ export async function readStable(path: string, limit = MAX_REPORT_BYTES, options
   // Windows requires a writable descriptor for FlushFileBuffers. POSIX permits
   // fsync on this read descriptor, preserving ordinary read-only recovery.
   const access = options.sync && process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY;
-  const handle = await open(canonical, access | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const handle = await open(canonical, access | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
     const before = await handle.stat();
     if (!before.isFile()) throw new Error('not_regular');
