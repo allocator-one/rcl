@@ -1,6 +1,10 @@
 import { expect, it } from 'vitest';
-import { effectivePendingIdentities, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
+import { effectivePendingIdentities, recoveredDismissalsByRound, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
+import { packNativeMaterial } from '../../../src/evidence/claim-recovery/validation/native-material.js';
+import { deriveNativeOccurrenceEvidence } from '../../../src/evidence/claim-recovery/validation/native-occurrences.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
+import { setup } from '../parent-r9-projection-fixture.js';
+import { laterSource } from './occurrence-fixtures.js';
 
 it('validates v1 content without assigning a descriptor, sighting or migration', () => {
   const f = legacyFixture(); const input = f.input(); const before = structuredClone(input);
@@ -146,6 +150,60 @@ it('accepts a later nongating sighting after a verdict clears the earlier obliga
   state.lastAnnotations = { round: 2, identities: [{ identity: f.key, status: 'repeat', gating: 'none' }] };
   expect(validateRetainedNativeEvidence({ sourceJson: JSON.stringify(state), target,
     reports: [f.reportJson, reportJson] }).actionableIdentities).toEqual([]);
+});
+
+it('keeps same-round recovered dismissals when a later operation has no current projection', () => {
+  const f = setup('dismissed');
+  const projection = f.run();
+  const sourceJson = JSON.stringify(f.state);
+  const occurrences = deriveNativeOccurrenceEvidence({ dispositions: [f.disposition] }, {
+    target: f.state.target, sourceJson, anchors: [f.anchor], previous: [],
+  });
+  expect(occurrences).toBeDefined();
+  const packed = packNativeMaterial({
+    currentProjection: projection,
+    occurrences,
+  });
+  const state = {
+    ...structuredClone(f.state),
+    version: 3,
+    recovery: {
+      version: 2,
+      operations: [
+        { operationId: uuid(970), sourceVersion: 1, sourceSha256: sha(sourceJson), anchors: [], sourceReceipts: [], material: packed.reference },
+        { operationId: uuid(971), sourceVersion: 1, sourceSha256: sha(sourceJson), anchors: [], sourceReceipts: [] },
+      ],
+    },
+  } as any;
+
+  expect(recoveredDismissalsByRound(state, packed.materials, new Map([[sha(sourceJson), sourceJson]])))
+    .toEqual(new Map([[1, new Map([[f.anchor.identity, 'important']])]]));
+});
+
+it('does not recover a dismissed receipt after the current projection reopens the claim', () => {
+  const f = setup('dismissed');
+  f.add(laterSource(f.f.disposition, 2, true, 'critical'));
+  const projection = f.run();
+  expect(projection.claims[0]).toMatchObject({ identity: f.anchor.identity, standing: 'pending' });
+  const sourceJson = JSON.stringify(f.state);
+  const occurrences = deriveNativeOccurrenceEvidence({ dispositions: [f.disposition] }, {
+    target: f.state.target, sourceJson, anchors: [f.anchor], previous: [],
+  });
+  expect(occurrences).toBeDefined();
+  const packed = packNativeMaterial({
+    currentProjection: projection,
+    occurrences,
+  });
+  const state = {
+    ...structuredClone(f.state),
+    version: 3,
+    recovery: { version: 2, operations: [
+      { operationId: uuid(972), sourceVersion: 1, sourceSha256: sha(sourceJson), anchors: [], sourceReceipts: [], material: packed.reference },
+    ] },
+  } as any;
+
+  expect(recoveredDismissalsByRound(state, packed.materials, new Map([[sha(sourceJson), sourceJson]])))
+    .toEqual(new Map([[1, new Map()]]));
 });
 
 it('retains pending identities from every recovery operation when no current projection applies', () => {

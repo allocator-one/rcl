@@ -221,20 +221,22 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
   requireSource(usedReports.size === reports.size && usedReceipts.size === receipts.size);
 }
 
-function recoveredDismissalsByRound(state: ConvergeRunState, materials: RecoveryMaterial[], snapshots: ReadonlyMap<string, string>): Map<number, Map<string, string>> {
+/** @internal Pure retained-material projection used by validation regressions. */
+export function recoveredDismissalsByRound(state: ConvergeRunState, materials: RecoveryMaterial[], snapshots: ReadonlyMap<string, string>): Map<number, Map<string, string>> {
   const dismissals = new Map<number, Map<string, string>>();
   for (const operation of state.recovery?.operations ?? []) {
     const raw = snapshots.get(operation.sourceSha256); requireSource(raw !== undefined);
     const source = nativeSource(raw!, state.target);
     const sourceRound = Math.max(0, ...source.rounds.map(round => round.round));
     const reference = operation.material;
-    if (!reference?.current) { dismissals.set(sourceRound, new Map()); continue; }
+    const values = dismissals.get(sourceRound) ?? new Map<string, string>();
+    if (!reference?.current) { dismissals.set(sourceRound, values); continue; }
     const content = nativeMaterial(reference, materials);
     const projection = content.currentProjection;
-    const values = new Map<string, string>();
     if (projection && projection.residuals.length === 0) for (const claim of projection.claims) {
       const proof = content.occurrences?.dispositions.find(row => row.receipt.id === claim.dispositionEventId);
-      if (proof?.preparation.split.selection.identity === claim.identity && proof.preparation.verdict === 'dismissed') values.set(claim.identity, proof.preparation.severity);
+      if (claim.standing === 'dismissed' && proof?.preparation.split.selection.identity === claim.identity &&
+          proof.preparation.verdict === 'dismissed') values.set(claim.identity, proof.preparation.severity);
     }
     dismissals.set(sourceRound, values);
   }

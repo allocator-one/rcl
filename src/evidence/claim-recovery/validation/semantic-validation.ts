@@ -244,10 +244,16 @@ function validateSightingClassification(state: ConvergeRunState, sightings: NonN
   requireIntegrity: (valid: boolean) => void, recoveryDismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>): void {
   if (state.version === 1) return;
   const anchored = new Set(state.version === 3 ? recoveryAnchors(state).map(anchor => anchor.identity) : []);
+  const sightingsByIdentity = new Map<string, typeof sightings>();
+  for (const sighting of sightings) {
+    const rows = sightingsByIdentity.get(sighting.canonicalIdentity) ?? [];
+    rows.push(sighting);
+    sightingsByIdentity.set(sighting.canonicalIdentity, rows);
+  }
   for (const [key, entry] of Object.entries(state.findings)) {
     if (entry.claimDescriptor === undefined) continue;
     const byRound = new Map<number, typeof sightings>();
-    for (const sighting of sightings.filter(row => row.canonicalIdentity === key)) {
+    for (const sighting of sightingsByIdentity.get(key) ?? []) {
       byRound.set(sighting.round, [...(byRound.get(sighting.round) ?? []), sighting]);
     }
     if (byRound.size === 0) continue;
