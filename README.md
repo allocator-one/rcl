@@ -111,7 +111,8 @@ Review a PR, a local diff, or uncommitted work.
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed/unknown launch; preserves spent attempts |
 | `--retry-report <path>` | Bind an original legacy report to an inconclusive retry; new inputs may differ; requires `--retry-reason` |
 | `--resume-pending` / `--resume-async-sha256 <hashes>` | Recover one proven dead-owner pending launch while retaining exact async artifacts and treating unknown blocking work as failed |
-| `--ordinary-pending-package <path>` / `--preview-pending` | Authenticate a sealed ordinary pending recovery package without mutation, then apply it under an explicit retry reason |
+| `--ordinary-pending-package <path>` / `--preview-pending` | Authenticate a sealed ordinary pending recovery package without mutation before choosing a recovery operation |
+| `--finalize-pending-only` / `--pending-native-sha256 <digest>` / `--pending-attempt-sha256 <digest>` | Finalize the previewed ordinary pending attempt as failed/unknown without claiming or dispatching its successor |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--attest` | GitHub Actions gate workflow only: exchange the job's OIDC token for a run-bound Harness credential and record the review as attested (see below) |
 | `--config <path>` | Path to a config file |
@@ -236,7 +237,9 @@ new claim retains the source bytes and binding; no history or budget is reset.
 
 For an ordinary pending launch whose coordinator is provably dead, supply an independently reconstructed immutable package that binds the original target, head, base, guarded input, attempt, round, PID and retained async artifact descriptors. RCL recomputes its production guarded-input digest and checks every binding under the target lock before it mutates native state.
 
-Use `--preview-pending` with `--resume-pending --ordinary-pending-package <path>` to authenticate that package with zero state, output or provider writes. The normal invocation repeats the checks, marks the spent attempt failed with blocking outcome unknown, archives the exact retained async artifacts, and claims exactly the next checkpointed attempt without resetting either cap.
+Use `--preview-pending` with either `--resume-pending` or `--finalize-pending-only` and `--ordinary-pending-package <path>` to authenticate that package with zero state, output or provider writes. Combined `--resume-pending` repeats the checks, marks the spent attempt failed with blocking outcome unknown, archives the exact retained async artifacts, and claims exactly the next checkpointed attempt under its explicitly bounded cap.
+
+Use `--finalize-pending-only` when recovery must stop at that failed/unknown finalization. Pass the unchanged cap plus the exact `nativeStateSha256` and `attemptStateSha256` returned by its preview as `--pending-native-sha256` and `--pending-attempt-sha256`. Apply archives the retained async artifacts idempotently and returns a source-bound receipt while leaving the attempt counter, cap, round history and next-free ordinal unchanged. Repeating the command reads back the same receipt; it never creates a successor claim, checkpoint, reviewer callback or provider call. Receipt readback validates either the exact finalized state or a monotonic successor against retained source snapshots. An exact legacy receipt without those snapshots is upgraded idempotently before a successor proceeds, without changing native state or accounting. A later guarded convergence process may claim the next attempt independently.
 
 When native triage reports `converged-dismissal-only` but Harness still reports
 `fixes_pending` with no actionable findings, an explicit recovery can authorize

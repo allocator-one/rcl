@@ -162,7 +162,8 @@ import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemet
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
-import { previewOrdinaryPendingLaunch, resumePendingLegacyLaunch, type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
+import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
+  type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
 import { type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
@@ -353,7 +354,10 @@ program
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-report <path>', 'Original legacy report proving an inconclusive launch; the new inputs may differ; requires --retry-reason')
   .option('--resume-pending', 'Finalize an unobservable pending legacy dispatch, then claim one fresh checkpointed retry under its target lock')
-  .option('--ordinary-pending-package <path>', 'Immutable ordinary pending-launch package; requires --resume-pending and replaces --retry-report')
+  .option('--finalize-pending-only', 'Finalize one authenticated ordinary pending launch without claiming or dispatching its successor')
+  .option('--pending-native-sha256 <digest>', 'Finalize-only: exact native state digest returned by --preview-pending')
+  .option('--pending-attempt-sha256 <digest>', 'Finalize-only: exact attempt state digest returned by --preview-pending')
+  .option('--ordinary-pending-package <path>', 'Immutable ordinary pending-launch package; requires --resume-pending or --finalize-pending-only and replaces --retry-report')
   .option('--preview-pending', 'Authenticate an ordinary pending recovery under its target lock without writes or provider calls')
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
@@ -1536,6 +1540,9 @@ interface CouncilCliOpts {
   retryReason?: string;
   retryReport?: string;
   resumePending?: boolean;
+  finalizePendingOnly?: boolean;
+  pendingNativeSha256?: string;
+  pendingAttemptSha256?: string;
   ordinaryPendingPackage?: string;
   previewPending?: boolean;
   resumeAsyncSha256?: string;
@@ -1868,20 +1875,45 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         throw new ReviewLaunchRefused('bound_fix_recovery_invalid', '--bound-fix-recovery must name an exact native run UUID.');
       }
     }
-    if (opts.resumePending && (!opts.guardedConverge || (!opts.retryReport && !opts.ordinaryPendingPackage) ||
+    if (opts.resumePending && (!opts.guardedConverge || opts.finalizePendingOnly || (!opts.retryReport && !opts.ordinaryPendingPackage) ||
       (opts.retryReport && opts.ordinaryPendingPackage) || !opts.retryReason ||
       !opts.resumeAsyncSha256 || !opts.evidenceRequired || opts.telemetry === false ||
       opts.maxAttempts === undefined || opts.startOver || opts.boundFixRecovery || opts.attest)) {
       throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-pending requires guarded convergence, evidence delivery, exactly one legacy retry report or ordinary package, retained retry reason, an explicit attempt cap and retained async result digests.');
     }
-    if (!opts.resumePending && (opts.resumeAsyncSha256 !== undefined || opts.ordinaryPendingPackage !== undefined)) {
-      throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-async-sha256 and --ordinary-pending-package are valid only with --resume-pending.');
+    const finalizeOnlyIgnoredReviewFlags = opts.retryReason !== undefined || opts.maxRounds !== undefined ||
+      opts.round !== undefined || opts.attempt !== undefined || opts.post || opts.json ||
+      opts.jsonFile !== undefined || opts.markdown !== undefined || opts.ci || opts.evidenceRequired ||
+      opts.forPr !== undefined || opts.role !== undefined || opts.roles !== undefined ||
+      opts.models !== undefined || opts.secondaryModels !== undefined || opts.asyncModels !== undefined ||
+      (opts.reviewer?.length ?? 0) > 0 || (opts.context?.length ?? 0) > 0 ||
+      opts.spec !== undefined || opts.focus !== undefined;
+    const finalizeOnlySourceFlags = opts.staged || opts.workingTree || opts.specSource !== undefined;
+    if (opts.finalizePendingOnly && (!opts.guardedConverge || opts.resumePending || !opts.ordinaryPendingPackage ||
+      opts.retryReport !== undefined || !opts.resumeAsyncSha256 || opts.maxAttempts === undefined ||
+      (!opts.previewPending && (!opts.pendingNativeSha256 || !opts.pendingAttemptSha256)) ||
+      (opts.previewPending && (opts.pendingNativeSha256 !== undefined || opts.pendingAttemptSha256 !== undefined)) ||
+      opts.startOver || opts.boundFixRecovery || opts.attest || opts.launchIntent !== undefined ||
+      finalizeOnlyIgnoredReviewFlags || finalizeOnlySourceFlags)) {
+      throw new ReviewLaunchRefused('pending_finalize_incompatible', '--finalize-pending-only accepts only guarded target/head/base/config bindings, one ordinary pending package, an explicit unchanged attempt cap, retained async result digests and, for apply, both exact state digests from preview; do not combine it with review, output, evidence or retry flags.');
     }
-    if (opts.previewPending && (!opts.resumePending || !opts.ordinaryPendingPackage || opts.retryReport)) {
-      throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires --resume-pending and --ordinary-pending-package, without --retry-report.');
+    if (!opts.finalizePendingOnly &&
+      (opts.pendingNativeSha256 !== undefined || opts.pendingAttemptSha256 !== undefined)) {
+      throw new ReviewLaunchRefused('pending_finalize_incompatible', 'Pending native and attempt state digests apply only to --finalize-pending-only.');
+    }
+    if (!opts.resumePending && !opts.finalizePendingOnly &&
+      (opts.resumeAsyncSha256 !== undefined || opts.ordinaryPendingPackage !== undefined)) {
+      throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-async-sha256 and --ordinary-pending-package require --resume-pending or --finalize-pending-only.');
+    }
+    if (opts.previewPending && ((!opts.resumePending && !opts.finalizePendingOnly) ||
+      !opts.ordinaryPendingPackage || opts.retryReport)) {
+      throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires one pending recovery mode and --ordinary-pending-package, without --retry-report.');
     }
     opts = { ...opts, ...await discoverCycleReview(target, opts) };
-    if (!opts.cycleReview && opts.telemetry !== false && (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
+    // Finalize-only is a recovery-state operation even though it is exposed by
+    // `review`; preview and apply must not flush unrelated review evidence.
+    if (!opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
+      (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
       try {
         if ((await readdir(join(resolveDataDir(), 'outbox')).catch(() => [])).length > 0) {
           await flushOutboxAtStart(await createTelemetryRuntime({ rclVersion: RCL_VERSION }));
@@ -2118,7 +2150,7 @@ async function executeCouncil(
       if (!runtime.sink || runtime.level !== 'full') throw new Error('Fresh review cycles require full Harness evidence and an actor credential');
       cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber, extra.target.headSha ?? '');
     }
-    if (opts.resumePending) {
+    if (opts.resumePending || opts.finalizePendingOnly) {
       const expectedAsyncSha256 = opts.resumeAsyncSha256!.split(',').map(value => value.trim());
       if (expectedAsyncSha256.length === 0 || expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
         new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length) {
@@ -2151,12 +2183,26 @@ async function executeCouncil(
         const inputSha256 = guardedInputSha256(migrationPackage.guardedInput);
         const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
-          pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256, retryReason: opts.retryReason!,
+          pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256,
+          retryReason: opts.retryReason ?? 'Finalize-only authentication preview.',
           captured: {} as CapturedPreparedCouncil, retainedAsyncSha256: expectedAsyncSha256,
           migrationPackage, maxAttempts: Number(opts.maxAttempts), maxPhysicalCalls: 1, maxAttemptsPerCell: 1,
           maxDurationMs: 1, validate: async () => {}, loadRetainedAsync: loadMigrationRetainedAsync,
-          run: async () => { throw new Error('preview_must_not_run'); }, preview: true });
-        spinner.stop(); console.log(JSON.stringify({ mode: 'preview', ...preview })); return undefined;
+          run: async () => { throw new Error('preview_must_not_run'); }, preview: true,
+          previewMode: opts.finalizePendingOnly ? 'finalize-only' : 'combined' });
+        spinner.stop(); console.log(JSON.stringify({
+          mode: opts.finalizePendingOnly ? 'finalize-only-preview' : 'preview', ...preview,
+        })); return undefined;
+      }
+      if (opts.finalizePendingOnly && migrationPackage) {
+        const inputSha256 = guardedInputSha256(migrationPackage.guardedInput);
+        const result = await finalizeOrdinaryPendingLaunch({ gitCommonDir: common,
+          target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
+          baseSha: extra.target.baseSha ?? '', pendingInputSha256: inputSha256,
+          nativeStateSha256: opts.pendingNativeSha256!, attemptStateSha256: opts.pendingAttemptSha256!,
+          retainedAsyncSha256: expectedAsyncSha256, migrationPackage,
+          maxAttempts: Number(opts.maxAttempts), loadRetainedAsync: loadMigrationRetainedAsync });
+        spinner.stop(); console.log(JSON.stringify({ mode: 'finalize-only', ...result })); return undefined;
       }
       // An ordinary migration package authenticates the old launch itself. The
       // current prepared plan is used only for its fresh successor; it must not

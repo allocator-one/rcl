@@ -233,6 +233,36 @@ export function writeState(gitCommonDir: string, state: ConvergeRunState, owners
   return withOwnedNativeOperation(ownership, gitCommonDir, state.target, () => writeStateOwned(gitCommonDir, state));
 }
 
+/** Read-only qualification for an update to an existing native state file. */
+export function preflightConvergeRunStateWrite(gitCommonDir: string, state: ConvergeRunState,
+  ownership: NativeTargetOwnership): Promise<void> {
+  return withOwnedNativeOperation(ownership, gitCommonDir, state.target, async () => {
+    const common = await realpath(resolve(gitCommonDir));
+    const { assertReviewCyclePair } = await import('./fresh-review.js');
+    await assertReviewCyclePair(common, state.target, state.cycle);
+    await inspectStateDirectory(join(common, STATE_DIR));
+    const path = convergeRunStatePath(common, state.target);
+    const file = await lstat(path), uid = process.geteuid?.();
+    if (await realpath(path) !== path || !file.isFile() || file.isSymbolicLink() ||
+        (process.platform !== 'win32' &&
+          (uid === undefined || file.uid !== uid || (file.mode & 0o022) !== 0))) {
+      throw new Error('unsafe_converge_state_file');
+    }
+  });
+}
+
+async function inspectStateDirectory(stateDir: string): Promise<void> {
+  const directory = await lstat(stateDir), uid = process.geteuid?.();
+  if (await realpath(stateDir) !== stateDir || !directory.isDirectory() || directory.isSymbolicLink() ||
+      (process.platform !== 'win32' &&
+        (uid === undefined || directory.uid !== uid || (directory.mode & 0o022) !== 0))) {
+    throw new Error('unsafe_converge_state_directory');
+  }
+  if (process.platform === 'darwin') {
+    checkDarwinLockACL(await lockScope.lockSystemCommand('/bin/ls', ['-lde', stateDir]));
+  }
+}
+
 async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): Promise<void> {
   // Callers pass the immutable directory bound to target ownership; resolving
   // it here normalizes platform aliases without consulting a mutable caller path.
@@ -242,12 +272,7 @@ async function writeStateOwned(gitCommonDir: string, state: ConvergeRunState): P
   const path = convergeRunStatePath(gitCommonDir, state.target);
   const stateDir = join(gitCommonDir, STATE_DIR);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const directory = await lstat(stateDir), uid = process.geteuid?.();
-  if (!directory.isDirectory() || directory.isSymbolicLink() ||
-      (process.platform !== 'win32' && (uid === undefined || directory.uid !== uid || (directory.mode & 0o022) !== 0))) {
-    throw new Error('unsafe_converge_state_directory');
-  }
-  if (process.platform === 'darwin') checkDarwinLockACL(await lockScope.lockSystemCommand('/bin/ls', ['-lde', stateDir]));
+  await inspectStateDirectory(stateDir);
   await syncNativeDirectory(gitCommonDir);
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {

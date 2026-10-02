@@ -18,9 +18,9 @@ import type { ReviewAdapter } from '../src/dispatch/adapter.js';
 import { Quarantine } from '../src/telemetry/quarantine.js';
 import { buildRunEnvelope } from '../src/telemetry/envelope.js';
 import { sampleResult } from './telemetry/fixtures.js';
-import { loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
-import { loadConvergeRunState, processRoundReport } from '../src/converge/run-state.js';
-import { sha256Hex } from '../src/report/run-header.js';
+import { claimConvergeAttempt, loadConvergeAttemptState } from '../src/converge/attempt-budget.js';
+import { convergeRunStatePath, loadConvergeRunState, processRoundReport } from '../src/converge/run-state.js';
+import { guardedInputSha256, sha256Hex } from '../src/report/run-header.js';
 
 // Global setup builds dist unless an installed package entrypoint is selected.
 const cliEntrypoint = process.env['RCL_TEST_PACKAGED_CLI'] || process.env['RCL_TEST_REVIEW_ENTRYPOINT'] || fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -294,6 +294,116 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
     });
   });
+});
+
+describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () => {
+  it('advertises a distinct finalize-only mode', () => {
+    const result = runRcl(['review', '--help'], tempRepository());
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--finalize-pending-only');
+    expect(result.stdout.replace(/\s+/g, ' ')).toContain('without claiming or dispatching its successor');
+  });
+
+  it.each([
+    ['retry reason', ['--retry-reason', 'ignored']],
+    ['round cap', ['--max-rounds', '15']],
+    ['post', ['--post']],
+    ['JSON output', ['--json']],
+    ['JSON file', ['--json-file', 'ignored.json']],
+    ['Markdown output', ['--markdown', 'ignored.md']],
+    ['required evidence', ['--evidence-required']],
+    ['staged source', ['--staged']],
+    ['working-tree source', ['--working-tree']],
+    ['spec source', ['--spec-source', 'repo_file']],
+    ['apply-only digests during preview', ['--pending-native-sha256', 'a'.repeat(64),
+      '--pending-attempt-sha256', 'b'.repeat(64)]],
+  ])('refuses ignored %s flags before state or provider work', (_label, extra) => {
+    const repo = tempRepository();
+    writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n');
+    const result = runRcl(['review', 'change.patch', '--guarded-converge', '--converge-target',
+      'guarded-fixture', '--head-sha', 'a'.repeat(40), '--base-sha', 'b'.repeat(40),
+      '--finalize-pending-only', '--preview-pending', '--ordinary-pending-package', 'pending.json',
+      '--resume-async-sha256', 'c'.repeat(64), '--max-attempts', '20', ...extra], repo,
+    { RCL_DATA_DIR: join(repo, 'rcl-data') });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('pending_finalize_incompatible');
+    expect(existsSync(join(repo, '.git', 'rcl-converge-runs'))).toBe(false);
+  });
+
+  it('previews then finalizes an exact pending launch without a provider call or successor claim', async () => {
+    await withGuardedFixture(async fixture => {
+      const common = join(fixture.repo, '.git');
+      const target = 'guarded-fixture';
+      const headSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: fixture.repo, env: GIT_ENV, encoding: 'utf8',
+      }).trim();
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        await claimConvergeAttempt({ gitCommonDir: common, target, maxAttempts: 20,
+          recordPid: 800_000 + attempt });
+      }
+      const retainedBytes = JSON.stringify({ model: 'openai/async', role: 'general', provider: 'openai' });
+      const retained = sha256Hex(retainedBytes);
+      const guardedInput = { head: headSha, kind: 'patch', repo: 'allocator-one/rcl', pr: 146,
+        diff: 'c'.repeat(64), config: 'd'.repeat(64),
+        roster: [{ model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }],
+        prompts: [], asyncRoles: [{ name: 'general' }] };
+      const inputSha256 = guardedInputSha256(guardedInput);
+      const nativePath = convergeRunStatePath(common, target);
+      mkdirSync(join(common, 'rcl-converge-runs'), { recursive: true, mode: 0o700 });
+      writeFileSync(nativePath, `${JSON.stringify({ version: 1, target, roundCap: 15, rounds: [],
+        findings: {}, updatedAt: '2026-10-02T00:00:00.000Z', lastLaunch: { status: 'pending',
+          attempt: 6, round: 4, headSha, inputSha256, startedAt: '2026-10-02T00:00:00.000Z',
+          pid: 999_999 } }, null, 2)}\n`);
+      const packagePath = join(fixture.repo, 'ordinary-pending.json');
+      writeFileSync(packagePath, JSON.stringify({ target, headSha, baseSha: headSha, attempt: 6,
+        round: 4, pid: 999_999, retainedAsyncSha256: [retained],
+        retainedAsync: [{ sha256: retained, model: 'openai/async', role: 'general',
+          provider: 'openai', lane: 'async' }], guardedInput }));
+      const asyncStore = join(common, 'rcl-async');
+      mkdirSync(asyncStore, { recursive: true, mode: 0o700 });
+      writeFileSync(join(asyncStore, 'retained.json'), retainedBytes, { mode: 0o600 });
+      const outboxSentinel = join(fixture.env.RCL_DATA_DIR!, 'outbox', 'sentinel.json');
+      mkdirSync(join(fixture.env.RCL_DATA_DIR!, 'outbox'), { recursive: true, mode: 0o700 });
+      writeFileSync(outboxSentinel, 'unrelated retained evidence\n', { mode: 0o600 });
+      const finalizeArgs = fixture.args.filter((value, index, values) =>
+        value !== '--json-file' && values[index - 1] !== '--json-file');
+      const args = [...finalizeArgs, '--finalize-pending-only', '--ordinary-pending-package', packagePath,
+        '--resume-async-sha256', retained, '--max-attempts', '20', '--expect-head-sha', headSha];
+      expect(args).toContain('--no-telemetry');
+      const nativeBefore = readFileSync(nativePath);
+      const attemptsBefore = readFileSync(join(common, 'rcl-converge-attempts',
+        readdirSync(join(common, 'rcl-converge-attempts')).find(name => name.endsWith('.json'))!));
+
+      const preview = await runRclAsync([...args, '--preview-pending'], fixture.repo, fixture.env);
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(JSON.parse(preview.stdout)).toMatchObject({ mode: 'finalize-only-preview',
+        attemptsUsed: 6, cap: 20, nextAttempt: 7 });
+      const previewReceipt = JSON.parse(preview.stdout);
+      expect(readFileSync(nativePath)).toEqual(nativeBefore);
+
+      const applyArgs = [...args, '--pending-native-sha256', previewReceipt.nativeStateSha256,
+        '--pending-attempt-sha256', previewReceipt.attemptStateSha256];
+      const applied = await runRclAsync(applyArgs, fixture.repo, fixture.env);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout)).toMatchObject({ mode: 'finalize-only', reusedReceipt: false,
+        receipt: { finalizedAttempt: 6, attemptsUsed: 6, cap: 20, nextFreeAttempt: 7 } });
+      expect(fixture.calls()).toBe(0);
+      expect(readFileSync(outboxSentinel, 'utf8')).toBe('unrelated retained evidence\n');
+      expect((await loadConvergeAttemptState(common, target))?.attemptsUsed).toBe(6);
+      expect((await loadConvergeRunState(common, target))?.lastLaunch)
+        .toMatchObject({ status: 'failed', attempt: 6, round: 4 });
+      const attemptsAfter = readFileSync(join(common, 'rcl-converge-attempts',
+        readdirSync(join(common, 'rcl-converge-attempts')).find(name => name.endsWith('.json'))!));
+      expect(attemptsAfter).toEqual(attemptsBefore);
+
+      rmSync(join(asyncStore, 'retained.json'));
+      const repeated = await runRclAsync(applyArgs, fixture.repo, fixture.env);
+      expect(repeated.status, repeated.stderr).toBe(0);
+      expect(JSON.parse(repeated.stdout)).toMatchObject({ mode: 'finalize-only', reusedReceipt: true });
+      expect(fixture.calls()).toBe(0);
+      expect(readFileSync(outboxSentinel, 'utf8')).toBe('unrelated retained evidence\n');
+    });
+  }, 40_000);
 });
 
 describe('rcl review — guarded native launch', () => {

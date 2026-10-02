@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
 import { inspectPendingLegacyRetry, type LegacyRetrySelection } from './legacy-launch-health.js';
 import { completionSchema, launchSchema, type GuardedLaunchCompletion, type GuardedLaunchState } from './launch-record.js';
-import { convergeRunStatePath, loadConvergeRunState, writeState } from './run-state.js';
+import { convergeRunStatePath, loadConvergeRunState, preflightConvergeRunStateWrite,
+  writeState, type ConvergeRunState } from './run-state.js';
 import { claimConvergeAttempt, convergeAttemptStatePath, previewConvergeAttemptState,
   type ConvergeAttemptClaim, type ConvergeAttemptState } from './attempt-budget.js';
 import { withRecoveryTarget, type NativeTargetOwnership } from './target-ownership.js';
@@ -16,6 +19,7 @@ import { uuidv7 } from '../report/uuid.js';
 import { captureSupplementalAsync } from '../report/supplemental-async.js';
 import { stableStringify } from '../report/run-header.js';
 import { readStable } from '../telemetry/recovery/files.js';
+import { serializeRecoveryDocument } from '../evidence/original-run/journal.js';
 import { prepareLockRoot } from '../evidence/original-run/lock-path.js';
 import { retainStaleFile } from './stale-report-storage.js';
 import { createPendingRecoverySource, createOrdinaryMigrationSource, pendingRecoverySourceSchema,
@@ -54,6 +58,7 @@ export interface PendingLegacyResumeOptions {
   /** Required for recovering an ordinary dead-owner launch without a legacy report. */
   migrationPackage?: OrdinaryPendingPackage;
   preview?: boolean;
+  previewMode?: 'combined' | 'finalize-only';
 }
 
 export interface PendingLegacyResumeResult {
@@ -69,6 +74,66 @@ export interface OrdinaryPendingPreview {
   attemptsUsed: number;
   cap: number;
   nextAttempt: number;
+}
+
+export interface OrdinaryPendingFinalizeOptions {
+  gitCommonDir: string;
+  target: string;
+  headSha: string;
+  baseSha: string;
+  pendingInputSha256: string;
+  nativeStateSha256: string;
+  attemptStateSha256: string;
+  retainedAsyncSha256: readonly string[];
+  maxAttempts: number;
+  migrationPackage: OrdinaryPendingPackage;
+  ownerAlive?: (pid: number) => boolean;
+  loadRetainedAsync: () => Promise<AsyncResultReference[]>;
+  /** Fault-injection boundary for proving archive-complete/native-write recovery. */
+  writeFinalizedState?: typeof writeState;
+}
+
+const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const ordinaryPendingFinalizationReceiptBodySchema = z.object({
+  version: z.literal(1),
+  operation: z.literal('ordinary-pending-finalize-only'),
+  target: z.string().min(1),
+  headSha: z.string().regex(/^[a-f0-9]{40}$/),
+  baseSha: z.string().regex(/^[a-f0-9]{40}$/),
+  inputSha256: digestSchema,
+  sourceDigest: digestSchema,
+  migrationPackageSha256: digestSchema,
+  finalizedAttempt: z.number().int().positive().safe(),
+  round: z.number().int().positive().safe(),
+  originalPid: z.number().int().positive().safe(),
+  attemptsUsed: z.number().int().positive().safe(),
+  cap: z.number().int().positive().safe(),
+  nextFreeAttempt: z.number().int().positive().safe(),
+  blockingOutcome: z.literal('unknown'),
+  retainedAsyncSha256: z.array(digestSchema).min(1),
+  sourceNativeStateSha256: digestSchema,
+  sourceAttemptStateSha256: digestSchema,
+  finalizedNativeStateSha256: digestSchema,
+}).strict();
+const ordinaryPendingFinalizationReceiptSchema = ordinaryPendingFinalizationReceiptBodySchema.extend({
+  receiptDigest: digestSchema,
+}).strict().superRefine((receipt, context) => {
+  const { receiptDigest, ...body } = receipt;
+  if (receiptDigest !== createHash('sha256').update(stableStringify(body)).digest('hex')) {
+    context.addIssue({ code: 'custom', message: 'Pending finalization receipt digest is invalid' });
+  }
+  if (receipt.nextFreeAttempt !== receipt.finalizedAttempt + 1 ||
+      receipt.attemptsUsed !== receipt.finalizedAttempt || receipt.attemptsUsed > receipt.cap ||
+      new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length) {
+    context.addIssue({ code: 'custom', message: 'Pending finalization accounting is inconsistent' });
+  }
+});
+
+export type OrdinaryPendingFinalizationReceipt = z.infer<typeof ordinaryPendingFinalizationReceiptSchema>;
+export interface OrdinaryPendingFinalizeResult {
+  receipt: OrdinaryPendingFinalizationReceipt;
+  reusedReceipt: boolean;
+  snapshotBindingUpgraded: boolean;
 }
 
 function fail(code: string): never { throw new Error(`pending_legacy_resume_${code}`); }
@@ -139,7 +204,23 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
     !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 ||
     !Number.isSafeInteger(input.maxPhysicalCalls) || input.maxPhysicalCalls < 1 ||
     !Number.isSafeInteger(input.maxAttemptsPerCell) || input.maxAttemptsPerCell < 1 ||
-    !Number.isSafeInteger(input.maxDurationMs) || input.maxDurationMs < 1 || input.maxDurationMs > 2_147_483_647) {
+    !Number.isSafeInteger(input.maxDurationMs) || input.maxDurationMs < 1 || input.maxDurationMs > 2_147_483_647 ||
+    (input.previewMode !== undefined && !['combined', 'finalize-only'].includes(input.previewMode))) {
+    fail('invalid_input');
+  }
+}
+
+function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
+  const hashes = input?.retainedAsyncSha256;
+  if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
+    !/^[a-f0-9]{40}$/.test(input.headSha ?? '') || !/^[a-f0-9]{40}$/.test(input.baseSha ?? '') ||
+    !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
+    !/^[a-f0-9]{64}$/.test(input.nativeStateSha256 ?? '') ||
+    !/^[a-f0-9]{64}$/.test(input.attemptStateSha256 ?? '') ||
+    !Array.isArray(hashes) || hashes.length === 0 || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
+    new Set(hashes).size !== hashes.length || typeof input.loadRetainedAsync !== 'function' ||
+    (input.writeFinalizedState !== undefined && typeof input.writeFinalizedState !== 'function') ||
+    !input.migrationPackage || !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1) {
     fail('invalid_input');
   }
 }
@@ -158,7 +239,291 @@ async function archiveAsync(common: string, source: PendingRecoverySource,
   await retainStaleFile(join(directory, 'manifest.json'), manifest);
 }
 
-function validateAsyncArtifacts(source: PendingRecoverySource,
+function finalizationReceiptPath(common: string, migrationPackageSha256: string): string {
+  return join(common, 'rcl-converge-pending-finalizations', migrationPackageSha256, 'receipt.json');
+}
+
+function finalizationSnapshotPath(common: string, migrationPackageSha256: string,
+  name: 'source-attempt-state.json' | 'finalized-native-state.json'): string {
+  return join(common, 'rcl-converge-pending-finalizations', migrationPackageSha256, name);
+}
+
+async function readFinalizationReceipt(common: string, migrationPackageSha256: string): Promise<OrdinaryPendingFinalizationReceipt | undefined> {
+  try {
+    const stored = await readStable(finalizationReceiptPath(common, migrationPackageSha256));
+    return ordinaryPendingFinalizationReceiptSchema.parse(JSON.parse(stored.text));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+async function retainFinalizationReceipt(common: string, receipt: OrdinaryPendingFinalizationReceipt): Promise<void> {
+  const directory = await prepareLockRoot(join(common, 'rcl-converge-pending-finalizations', receipt.migrationPackageSha256));
+  await retainStaleFile(join(directory, 'receipt.json'), Buffer.from(stableStringify(receipt)));
+}
+
+async function retainFinalizationSnapshots(common: string, receipt: OrdinaryPendingFinalizationReceipt,
+  sourceAttemptState: Buffer, finalizedNativeState: Buffer): Promise<void> {
+  if (createHash('sha256').update(sourceAttemptState).digest('hex') !== receipt.sourceAttemptStateSha256 ||
+      createHash('sha256').update(finalizedNativeState).digest('hex') !== receipt.finalizedNativeStateSha256) {
+    fail('finalization_snapshot_mismatch');
+  }
+  const directory = await prepareLockRoot(join(common, 'rcl-converge-pending-finalizations',
+    receipt.migrationPackageSha256));
+  await retainStaleFile(join(directory, 'source-attempt-state.json'), sourceAttemptState);
+  await retainStaleFile(join(directory, 'finalized-native-state.json'), finalizedNativeState);
+}
+
+async function readFinalizationSnapshot(common: string, receipt: OrdinaryPendingFinalizationReceipt,
+  name: 'source-attempt-state.json' | 'finalized-native-state.json', digest: string): Promise<Buffer> {
+  const snapshot = await readStable(finalizationSnapshotPath(common, receipt.migrationPackageSha256, name));
+  if (snapshot.sha256 !== digest) fail('finalization_snapshot_mismatch');
+  return snapshot.raw;
+}
+
+function isPrefix<T>(before: readonly T[], after: readonly T[]): boolean {
+  return before.length <= after.length && before.every((value, index) => isDeepStrictEqual(value, after[index]));
+}
+
+async function finalizationSnapshotsPresent(common: string,
+  receipt: OrdinaryPendingFinalizationReceipt): Promise<boolean> {
+  try {
+    await Promise.all([
+      readFinalizationSnapshot(common, receipt, 'source-attempt-state.json', receipt.sourceAttemptStateSha256),
+      readFinalizationSnapshot(common, receipt, 'finalized-native-state.json', receipt.finalizedNativeStateSha256),
+    ]);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function assertFinalizedStateMatchesReceipt(common: string,
+  receipt: OrdinaryPendingFinalizationReceipt): Promise<{ native: Buffer; attempts: Buffer; exact: boolean }> {
+  const [native, attempts] = await Promise.all([
+    readStable(convergeRunStatePath(common, receipt.target)),
+    readStable(convergeAttemptStatePath(common, receipt.target)),
+  ]);
+  if (native.sha256 === receipt.finalizedNativeStateSha256 &&
+      attempts.sha256 === receipt.sourceAttemptStateSha256) {
+    return { native: native.raw, attempts: attempts.raw, exact: true };
+  }
+
+  let originalAttemptsBytes: Buffer, finalizedNativeBytes: Buffer;
+  try {
+    [originalAttemptsBytes, finalizedNativeBytes] = await Promise.all([
+      readFinalizationSnapshot(common, receipt, 'source-attempt-state.json', receipt.sourceAttemptStateSha256),
+      readFinalizationSnapshot(common, receipt, 'finalized-native-state.json', receipt.finalizedNativeStateSha256),
+    ]);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail('finalization_receipt_state_mismatch');
+    throw error;
+  }
+  const [currentNative, currentAttempts] = await Promise.all([
+    loadConvergeRunState(common, receipt.target),
+    previewConvergeAttemptState(common, receipt.target),
+  ]);
+  if (!currentNative || !currentAttempts) fail('finalization_receipt_state_mismatch');
+  const originalAttempts = JSON.parse(originalAttemptsBytes.toString('utf8')) as ConvergeAttemptState;
+  const finalizedNative = JSON.parse(finalizedNativeBytes.toString('utf8')) as ConvergeRunState;
+  const finalizedLaunch = launchSchema.safeParse(finalizedNative.lastLaunch);
+  const currentLaunch = launchSchema.safeParse(currentNative.lastLaunch);
+  const priorStale = finalizedNative.staleReportAudit ?? [], currentStale = currentNative.staleReportAudit ?? [];
+  const priorGaps = finalizedNative.roundGapAudit?.entries ?? [], currentGaps = currentNative.roundGapAudit?.entries ?? [];
+  if (originalAttempts.target !== receipt.target || currentAttempts.target !== receipt.target ||
+      originalAttempts.attemptsUsed !== receipt.attemptsUsed || originalAttempts.cap !== receipt.cap ||
+      originalAttempts.migratedAttempts !== currentAttempts.migratedAttempts ||
+      currentAttempts.attemptsUsed <= receipt.attemptsUsed ||
+      currentAttempts.cap < currentAttempts.attemptsUsed || currentAttempts.cap > receipt.cap ||
+      !isDeepStrictEqual(currentAttempts.cycle, originalAttempts.cycle) ||
+      !isPrefix(originalAttempts.attempts, currentAttempts.attempts) ||
+      currentAttempts.attempts.at(originalAttempts.attempts.length)?.attempt !== receipt.nextFreeAttempt ||
+      finalizedNative.target !== receipt.target || currentNative.target !== receipt.target ||
+      !finalizedLaunch.success || finalizedLaunch.data.status !== 'failed' ||
+      finalizedLaunch.data.attempt !== receipt.finalizedAttempt ||
+      finalizedLaunch.data.round !== receipt.round ||
+      finalizedLaunch.data.pendingRecovery?.sourceDigest !== receipt.sourceDigest ||
+      !isDeepStrictEqual(currentNative.cycle, finalizedNative.cycle) ||
+      currentNative.roundCap < finalizedNative.roundCap ||
+      !isPrefix(finalizedNative.rounds, currentNative.rounds) ||
+      !isPrefix(priorStale, currentStale) || !isPrefix(priorGaps, currentGaps) ||
+      Object.entries(finalizedNative.findings)
+        .some(([key, value]) => !isDeepStrictEqual(value, currentNative.findings[key])) ||
+      !currentLaunch.success || currentLaunch.data.attempt <= receipt.finalizedAttempt ||
+      currentLaunch.data.attempt !== currentAttempts.attemptsUsed) {
+    fail('finalization_receipt_state_mismatch');
+  }
+  return { native: native.raw, attempts: attempts.raw, exact: false };
+}
+
+function createFinalizationReceipt(input: z.input<typeof ordinaryPendingFinalizationReceiptBodySchema>): OrdinaryPendingFinalizationReceipt {
+  const body = ordinaryPendingFinalizationReceiptBodySchema.parse(input);
+  return ordinaryPendingFinalizationReceiptSchema.parse({
+    ...body,
+    receiptDigest: createHash('sha256').update(stableStringify(body)).digest('hex'),
+  });
+}
+
+function assertReceiptMatchesInput(receipt: OrdinaryPendingFinalizationReceipt,
+  input: OrdinaryPendingFinalizeOptions, migrationPackageSha256: string): OrdinaryPendingPackage {
+  if (receipt.target !== input.target || receipt.headSha !== input.headSha || receipt.baseSha !== input.baseSha ||
+      receipt.inputSha256 !== input.pendingInputSha256 || receipt.migrationPackageSha256 !== migrationPackageSha256 ||
+      receipt.sourceNativeStateSha256 !== input.nativeStateSha256 ||
+      receipt.sourceAttemptStateSha256 !== input.attemptStateSha256 ||
+      receipt.cap !== input.maxAttempts ||
+      receipt.retainedAsyncSha256.join(',') !== [...input.retainedAsyncSha256].sort().join(',')) {
+    fail('finalization_receipt_mismatch');
+  }
+  return validateOrdinaryPendingPackage(input.migrationPackage, {
+    target: receipt.target, headSha: receipt.headSha, inputSha256: receipt.inputSha256,
+    baseSha: receipt.baseSha, attempt: receipt.finalizedAttempt, round: receipt.round,
+    pid: receipt.originalPid, retainedAsyncSha256: receipt.retainedAsyncSha256,
+  });
+}
+
+async function readArchivedAsync(common: string, sourceDigest: string,
+  retainedAsyncSha256: readonly string[]): Promise<AsyncResultReference[]> {
+  const directory = join(common, 'rcl-converge-pending-recovery', sourceDigest);
+  const artifacts = await Promise.all(retainedAsyncSha256.map(async digest => {
+    const file = await readStable(join(directory, digest));
+    if (file.sha256 !== digest) fail('async_binding_mismatch');
+    return { path: join(directory, digest), sha256: digest, bytesBase64: file.raw.toString('base64') };
+  }));
+  const expectedManifest = stableStringify({ version: 1, sourceDigest,
+    blockingOutcome: 'unknown', artifacts: [...retainedAsyncSha256].sort().map(sha256 => ({ sha256 })) });
+  if ((await readStable(join(directory, 'manifest.json'))).text !== expectedManifest) {
+    fail('async_binding_mismatch');
+  }
+  return artifacts;
+}
+
+async function loadOriginalOrArchivedAsync(options: OrdinaryPendingFinalizeOptions,
+  source: PendingRecoverySource): Promise<AsyncResultReference[]> {
+  try {
+    return await readArchivedAsync(options.gitCommonDir, source.digest, source.retainedAsyncSha256);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return options.loadRetainedAsync();
+  }
+}
+
+/** Finalize one authenticated ordinary pending launch without claiming or dispatching its successor. */
+export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinalizeOptions): Promise<OrdinaryPendingFinalizeResult> {
+  validateFinalizeOptions(input);
+  const options = { ...input, target: input.target.trim(),
+    retainedAsyncSha256: [...input.retainedAsyncSha256].sort(),
+    gitCommonDir: await realpath(resolve(input.gitCommonDir)) };
+  const migrationPackageSha256 = createHash('sha256')
+    .update(stableStringify(options.migrationPackage)).digest('hex');
+  return withRecoveryTarget(options.gitCommonDir, options.target, async ownership => {
+    const existingReceipt = await readFinalizationReceipt(options.gitCommonDir, migrationPackageSha256);
+    if (existingReceipt) {
+      const packet = assertReceiptMatchesInput(existingReceipt, options, migrationPackageSha256);
+      const state = await assertFinalizedStateMatchesReceipt(options.gitCommonDir, existingReceipt);
+      validateAsyncArtifacts({ retainedAsyncSha256: existingReceipt.retainedAsyncSha256 },
+        await readArchivedAsync(options.gitCommonDir, existingReceipt.sourceDigest,
+          existingReceipt.retainedAsyncSha256), packet);
+      const snapshotsPresent = await finalizationSnapshotsPresent(options.gitCommonDir, existingReceipt);
+      if (!snapshotsPresent) {
+        if (!state.exact) fail('finalization_receipt_state_mismatch');
+        await retainFinalizationSnapshots(options.gitCommonDir, existingReceipt,
+          state.attempts, state.native);
+      }
+      return { receipt: existingReceipt, reusedReceipt: true,
+        snapshotBindingUpgraded: !snapshotsPresent };
+    }
+    const [state, attempts] = await Promise.all([
+      loadConvergeRunState(options.gitCommonDir, options.target),
+      previewConvergeAttemptState(options.gitCommonDir, options.target),
+    ]);
+    if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
+    if (attempts.cap !== options.maxAttempts) fail('attempt_cap_mismatch');
+    const current = launchSchema.parse(state.lastLaunch);
+    if (current.attempt !== attempts.attemptsUsed || current.headSha !== options.headSha ||
+        current.inputSha256 !== options.pendingInputSha256 || !['pending', 'failed'].includes(current.status)) {
+      fail('launch_mismatch');
+    }
+    const packet = validateOrdinaryPendingPackage(options.migrationPackage, {
+      target: options.target, headSha: current.headSha, inputSha256: current.inputSha256,
+      baseSha: options.baseSha, attempt: current.attempt, round: current.round, pid: current.pid,
+      retainedAsyncSha256: options.retainedAsyncSha256,
+    });
+    let source: PendingRecoverySource;
+    let sourceAttemptStateBytes: Buffer | undefined;
+    if (current.status === 'pending') {
+      if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');
+      const [nativeBytes, attemptBytes] = await Promise.all([
+        readStable(convergeRunStatePath(options.gitCommonDir, options.target)),
+        readStable(convergeAttemptStatePath(options.gitCommonDir, options.target)),
+      ]);
+      sourceAttemptStateBytes = attemptBytes.raw;
+      source = createOrdinaryMigrationSource({ version: 1, target: options.target,
+        headSha: current.headSha, inputSha256: current.inputSha256, pendingAttempt: current.attempt,
+        round: current.round, originalPid: current.pid, startedAt: current.startedAt,
+        blockingOutcome: 'unknown', reason: 'coordinator_exited_without_durable_blocking_receipts',
+        nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
+        retainedAsyncSha256: options.retainedAsyncSha256, migrationPackageSha256 });
+    } else {
+      source = sourceFromFinalized(options.target, current, attempts, packet);
+    }
+    if (source.nativeStateSha256 !== options.nativeStateSha256 ||
+        source.attemptStateSha256 !== options.attemptStateSha256) fail('source_digest_mismatch');
+    // Once the failed/unknown native state exists, archive publication already
+    // completed. Resume from those immutable bytes so a lost acknowledgment
+    // does not depend on the original async store still being available.
+    const artifacts = current.status === 'pending'
+      ? await loadOriginalOrArchivedAsync(options, source)
+      : await readArchivedAsync(options.gitCommonDir, source.digest, source.retainedAsyncSha256);
+    validateAsyncArtifacts(source, artifacts, packet);
+
+    let finalizedNativeStateSha256: string;
+    if (current.status === 'pending') {
+      state.lastLaunch = { ...current, status: 'failed', pendingRecovery: descriptor(source) };
+      state.updatedAt = new Date().toISOString();
+      finalizedNativeStateSha256 = createHash('sha256')
+        .update(serializeRecoveryDocument(state)).digest('hex');
+    } else {
+      finalizedNativeStateSha256 = (await readStable(
+        convergeRunStatePath(options.gitCommonDir, options.target))).sha256;
+    }
+    // Construct and validate the exact receipt before the first write. The
+    // native serializer is shared with writeState, so its post-state digest is
+    // known without publishing a partially validated operation.
+    const receipt = createFinalizationReceipt({ version: 1, operation: 'ordinary-pending-finalize-only',
+      target: options.target, headSha: current.headSha, baseSha: options.baseSha,
+      inputSha256: current.inputSha256, sourceDigest: source.digest, migrationPackageSha256,
+      finalizedAttempt: current.attempt, round: current.round, originalPid: current.pid,
+      attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextFreeAttempt: current.attempt + 1,
+      blockingOutcome: 'unknown', retainedAsyncSha256: options.retainedAsyncSha256,
+      sourceNativeStateSha256: source.nativeStateSha256,
+      sourceAttemptStateSha256: source.attemptStateSha256,
+      finalizedNativeStateSha256 });
+
+    if (current.status === 'pending') {
+      await preflightConvergeRunStateWrite(options.gitCommonDir, state, ownership);
+    }
+
+    // Every fallible authentication and accounting check above precedes the
+    // first durable write. Archive publication is idempotent if this process
+    // stops before the native failed/unknown state or receipt is published.
+    await archiveAsync(options.gitCommonDir, source, artifacts, packet);
+    if (current.status === 'pending') {
+      await (options.writeFinalizedState ?? writeState)(options.gitCommonDir, state, ownership);
+    }
+    const finalizedNative = await readStable(convergeRunStatePath(options.gitCommonDir, options.target));
+    if (finalizedNative.sha256 !== finalizedNativeStateSha256) fail('finalization_write_mismatch');
+    const finalizedAttempts = await readStable(convergeAttemptStatePath(options.gitCommonDir, options.target));
+    sourceAttemptStateBytes ??= finalizedAttempts.raw;
+    await retainFinalizationSnapshots(options.gitCommonDir, receipt,
+      sourceAttemptStateBytes, finalizedNative.raw);
+    await retainFinalizationReceipt(options.gitCommonDir, receipt);
+    return { receipt, reusedReceipt: false, snapshotBindingUpgraded: false };
+  });
+}
+
+function validateAsyncArtifacts(source: Pick<PendingRecoverySource, 'retainedAsyncSha256'>,
   artifacts: readonly AsyncResultReference[], packet?: OrdinaryPendingPackage): void {
   const expected = [...source.retainedAsyncSha256].sort();
   const actual = artifacts.map(item => item.sha256).sort();
@@ -194,7 +559,12 @@ export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOpt
     const record = attempts.attempts.find(item => item.attempt === current.attempt);
     if (!record || current.status !== 'pending' || current.attempt !== attempts.attemptsUsed ||
       current.headSha !== options.headSha || current.inputSha256 !== options.pendingInputSha256) fail('launch_mismatch');
-    if (attempts.attemptsUsed >= attempts.cap) fail('attempt_cap_exhausted');
+    if (options.previewMode === 'finalize-only'
+      ? attempts.cap !== options.maxAttempts
+      : options.maxAttempts > current.attempt + 1) fail('attempt_cap_mismatch');
+    if (options.previewMode !== 'finalize-only' && attempts.attemptsUsed >= attempts.cap) {
+      fail('attempt_cap_exhausted');
+    }
     if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');
     const packet = validateOrdinaryPendingPackage(options.migrationPackage!, {
       target: options.target, headSha: current.headSha, inputSha256: current.inputSha256,
@@ -378,6 +748,10 @@ export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOption
         baseSha: options.baseSha!, attempt: originalAttempt, round: original.round, pid: originalPid,
         retainedAsyncSha256: options.retainedAsyncSha256,
       });
+    // Combined finalize-and-successor recovery is explicit one-attempt
+    // authority. Refuse a broader cap before archiving evidence or changing
+    // the pending launch to failed/unknown.
+    if (options.maxAttempts > originalAttempt + 1) fail('attempt_cap_mismatch');
     if (persistedSource) {
       return resumeFresh(options, ownership, state, attempts, current);
     }
