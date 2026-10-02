@@ -1,12 +1,14 @@
 import { expect } from 'vitest';
+import type { ClaimHistoryContent } from '../../src/evidence/claim-recovery/carrier-inventory.js';
 import { HarnessSink } from '../../src/telemetry/sink.js';
 import { projectionFixture } from './recovery-validation/carrier-fixtures.js';
 import { uuid } from './recovery-validation/fixtures.js';
-export function historyFixture(legacy=true) {
+export function historyFixture(legacy=true,history?: ClaimHistoryContent) {
   const { projection }=projectionFixture(legacy);
-  const actor=uuid(900);
-  const scope=projection.carrier.scope;
-  const sources=structuredClone(projection.sources);
+  const actor=history?.actorUserId??uuid(900);
+  const scope=history?.sources[0]?.selector.scope??projection.carrier.scope;
+  const sources=structuredClone(history?.sources??projection.sources);
+  const receipts=(source: typeof sources[number]) => history?.histories.find(h => h.runId===source.selector.scope.run_id)?.receipts??[...source.classifications!,...source.corrections!];
   const calls: string[]=[];
   const counts=new Map<string,number>();
   let mutate: (body: any,url: URL,visit: number) => unknown=body => body;
@@ -40,7 +42,7 @@ export function historyFixture(legacy=true) {
         };
       }
       else if(url.pathname.endsWith('/events')) {
-        const all=[...source!.classifications!,...source!.corrections!].sort((a,b) => a.sequence-b.sequence);
+        const all=receipts(source!).slice().sort((a,b) => a.sequence-b.sequence);
         if(url.searchParams.get('index')==='claim_recovery') {
           const after=Number(url.searchParams.get('after_sequence'));
           const through=Number(url.searchParams.get('through_sequence'));
@@ -56,7 +58,7 @@ export function historyFixture(legacy=true) {
         }
         const ids=url.searchParams.get('ids')!.split(',');
         body={
-          data: [...source!.classifications!,...source!.corrections!].filter(r => ids.includes(r.id)),
+          data: receipts(source!).slice().filter(r => ids.includes(r.id)),
           meta: { org_id: scope.org_id,run_id: source!.selector.scope.run_id,claim_recovery_version: 1 }
         };
       }
@@ -66,8 +68,8 @@ export function historyFixture(legacy=true) {
           data: structuredClone(source!.storedRun),meta: {
             org_id: scope.org_id,evidence_protocol_version: 2,
             claim_recovery_version: 1,actor_user_id: actor,recovery: {
-              event_sequence: Math.max(5,...source!.classifications!.map(e => e.sequence),...source!.corrections!.map(e => e.sequence)),truncated: false,
-              claim_events_complete: true,claim_events: [...source!.classifications!,...source!.corrections!].sort((a,b) => a.sequence-b.sequence).map(({ id,sequence,kind }) => ({ id,sequence,kind })),
+              event_sequence: Math.max(5,...receipts(source!).map(e => e.sequence)),truncated: false,
+              claim_events_complete: true,claim_events: receipts(source!).slice().sort((a,b) => a.sequence-b.sequence).map(({ id,sequence,kind }) => ({ id,sequence,kind })),
               classification_event: classification? {
                 id: classification.id,round: classification.round,
                 sequence: classification.sequence,identities: classification.payload.identities

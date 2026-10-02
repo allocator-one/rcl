@@ -1,5 +1,6 @@
+import { prepareObligationTransfer } from '../../../src/evidence/claim-recovery/validation/occurrence.js';
 import type { ObligationTransferInput, OccurrenceSource } from '../../../src/evidence/claim-recovery/validation/occurrence-types.js';
-import type { CarrierProjectionInput, CarrierSourceInventory, OccurrenceCarrierSelector } from '../../../src/evidence/claim-recovery/validation/carrier-types.js';
+import type { AcceptedOccurrenceTransfer, CarrierProjectionInput, CarrierSourceInventory, OccurrenceCarrierSelector } from '../../../src/evidence/claim-recovery/validation/carrier-types.js';
 import { fixture, laterSource, rebind } from './occurrence-fixtures.js';
 import { sha, uuid } from './fixtures.js';
 
@@ -28,6 +29,22 @@ export function inventory(source: OccurrenceSource): CarrierSourceInventory {
 
 export function carrier(source: OccurrenceSource, identity: string, kind: OccurrenceCarrierSelector['kind'] = 'classified_group'): OccurrenceCarrierSelector {
   return { ...inventory(source).selector, kind, classificationId: source.classification.id, identity };
+}
+
+export function accepted(input: ObligationTransferInput, ref = 1): AcceptedOccurrenceTransfer {
+  input = structuredClone(input);
+  input.split.selection.findingRef = `f${String(ref).padStart(3, '0')}`;
+  input.split.selection.identity = `2222222222222${String(ref).padStart(3, '0')}`;
+  input.split.selection.eventId = uuid(1000 + input.sourceContext.round * 10 + ref);
+  input.split.selection.expectedEventSequence = ref + 1;
+  input.split.receipt.sequence = ref + 2;
+  input.sourceContext.eventSequence = ref + 2;
+  if (input.carrierContext.scope.run_id === input.sourceContext.scope.run_id) input.carrierContext.eventSequence = ref + 2;
+  input.eventId = uuid(2000 + input.sourceContext.round * 10 + ref);
+  rebind(input, JSON.parse(input.split.selection.reportJson));
+  const event = prepareObligationTransfer(input).event;
+  return { preparation: input, actorUserId: input.actorUserId, receipt: { ...input.carrierContext.scope, ...event,
+    actor_user_id: input.actorUserId, attempt: null, sequence: 20 + ref, received_at: '2026-09-22T15:00:00.123456Z' } };
 }
 
 export function emptySource(input: ObligationTransferInput, round: number, legacy = false): OccurrenceSource {
