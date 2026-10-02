@@ -35,6 +35,7 @@ async function fixture(version: 1 | 3, bound = false) {
   await writeFile(path, raw, { mode: 0o600 });
   expect((await loadConvergeRunStateEvidence(root, target))!.state.version).toBe(version);
   const options = { gitCommonDir: root, target, round: 1,
+    ...(version === 3 ? { runId: f.report.run.id } : {}),
     verdicts: [{ key: f.key, verdict: 'dismissed' as const, reason: 'Synthetic source-backed triage.' }] };
   return { ...f, root, path, raw, reportPath, options };
 }
@@ -46,6 +47,19 @@ it.each([1, 3] as const)('requires an original round binding when explicitly req
   const result = await recordVerdicts({ ...f.options, requireVerifiedBinding: false });
   expect(result.entries).toHaveLength(1);
   expect(result.entries[0]).toMatchObject({ key: f.key, verdict: 'dismissed' });
+});
+
+it('binds pure recovered-v3 verdict preparation to the reviewed run ID', async () => {
+  const f = await fixture(3);
+  const source = (await loadConvergeRunStateEvidence(f.root, f.options.target))!.state;
+  const options = { target: f.options.target, round: 1, verdicts: f.options.verdicts,
+    recordedAt: '2026-09-24T12:00:00.000Z' };
+  expect(prepareVerdicts(source, options).result.entries).toHaveLength(1);
+  expect(() => prepareVerdicts(source, { ...options, runId: uuid(999) })).toThrow(/verdict_run_mismatch/);
+  expect(prepareVerdicts(source, { ...options, runId: f.report.run.id }).result.entries).toHaveLength(1);
+  const cycled = structuredClone(source) as any;
+  cycled.cycle = { id: uuid(998), repo: 'synthetic/recovery', prNumber: 7 };
+  expect(() => prepareVerdicts(cycled, options)).toThrow(/verdict_run_mismatch/);
 });
 
 it.each([1, 3] as const)('accepts an exact bound v%i verdict and refuses later report-byte drift', async version => {

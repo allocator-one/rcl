@@ -10,6 +10,7 @@ import { deriveNativeRecovery, applyNativeRecovery } from '../../src/converge/re
 import { loadConvergeRunState, writeStateIfUnchanged } from '../../src/converge/run-state.js';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { loadConvergeAttemptState, recordConvergeAttemptLaunch } from '../../src/converge/attempt-budget.js';
+import { processSemanticRound } from '../../src/converge/semantic-state.js';
 
 // Genuine unchanged public writer in each fixture's own canonical root. The
 // external cycle issuer and reviewer callback are the public fixture's fakes.
@@ -87,6 +88,55 @@ it('loads, applies, reloads and replays genuine cycle recovery without spending 
   expect(sha(await readFile(first.snapshotPath, 'utf8'))).toBe(f.plan.sourceSha256);
   expect(await readFile(f.attemptPath, 'utf8')).toBe(f.attemptsJson);
   expect(await readFile(f.archivePath, 'utf8')).toBe(f.archiveJson);
+});
+
+it.each(['missing-cycle', 'cycle', 'repository', 'pull-request'] as const)
+('refuses a recovered report with mismatched %s before changing native bytes', async mismatch => {
+  const f = await fixture(); await f.apply();
+  const runId = uuid(880); const report = JSON.parse(f.selection.reportJson);
+  report.run.id = runId;
+  report.run.converge = { target: f.plan.target, round: 2,
+    recovery_source: { version: 1, native_sha256: sha(f.plan.resultJson) } };
+  report.run.cycle_id = f.native.cycle.id;
+  report.run.target.repo = f.native.cycle.repo;
+  report.run.target.pr_number = f.native.cycle.prNumber;
+  const finding = { ...report.findings[0], identity: `report:${runId}:cycle-binding`,
+    claimDescriptor: f.selection.descriptor };
+  report.findings = [finding]; report.belowThresholdFindings = [];
+  if (mismatch === 'missing-cycle') delete report.run.cycle_id;
+  if (mismatch === 'cycle') report.run.cycle_id = uuid(881);
+  if (mismatch === 'repository') report.run.target.repo = 'other/repository';
+  if (mismatch === 'pull-request') report.run.target.pr_number++;
+  const reportJson = JSON.stringify(report), reportSha256 = sha(reportJson);
+  const binding = { runId, target: f.plan.target, round: 2, reportSha256,
+    sourcePath: `${f.runPath}.evidence/${reportSha256}.json` };
+  const before = await readFile(f.runPath, 'utf8');
+  await expect(withNativeTarget(f.root, f.plan.target, ownership => processSemanticRound({
+    gitCommonDir: f.root, target: f.plan.target, round: 2, runId, findings: [finding], evidence: { reportJson },
+  }, binding, ownership))).rejects.toThrow(/cycle, repository and pull request/);
+  expect(await readFile(f.runPath, 'utf8')).toBe(before);
+});
+
+it('accepts a recovered report whose repository differs only by case', async () => {
+  const f = await fixture(); await f.apply();
+  const runId = uuid(882); const report = JSON.parse(f.selection.reportJson);
+  report.run.id = runId;
+  report.run.converge = { target: f.plan.target, round: 2,
+    recovery_source: { version: 1, native_sha256: sha(f.plan.resultJson) } };
+  report.run.cycle_id = f.native.cycle.id;
+  report.run.target.repo = f.native.cycle.repo.toUpperCase();
+  report.run.target.pr_number = f.native.cycle.prNumber;
+  const finding = { ...report.findings[0], identity: `report:${runId}:cycle-binding-case`,
+    claimDescriptor: f.selection.descriptor };
+  report.findings = [finding]; report.belowThresholdFindings = [];
+  const reportJson = JSON.stringify(report), reportSha256 = sha(reportJson);
+  const binding = { runId, target: f.plan.target, round: 2, reportSha256,
+    sourcePath: `${f.runPath}.evidence/${reportSha256}.json` };
+  const admitted = await withNativeTarget(f.root, f.plan.target, ownership => processSemanticRound({
+    gitCommonDir: f.root, target: f.plan.target, round: 2, runId, findings: [finding], evidence: { reportJson },
+  }, binding, ownership));
+  expect(admitted.reportBinding?.reportSha256).toBe(reportSha256);
+  expect((await loadConvergeRunState(f.root, f.plan.target))!.cycle).toEqual(f.native.cycle);
 });
 
 it('records immutable pending/completed metadata on an actual cycle3 already-spent attempt', async () => {

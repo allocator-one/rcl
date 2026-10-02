@@ -298,7 +298,13 @@ export async function loadConvergeRunStateEvidence(
 
 /** Persist only under live explicit target authority; started writes drain before release. */
 export function writeState(gitCommonDir: string, state: ConvergeRunState, ownership: NativeTargetOwnership): Promise<void> {
-  return withOwnedNativeOperation(ownership, gitCommonDir, state.target, () => writeStateOwned(gitCommonDir, state));
+  const next = structuredClone(state);
+  return withOwnedNativeOperation(ownership, gitCommonDir, next.target, async () => {
+    if (next.version === 3) {
+      await validateNativeRecoveryState(next, gitCommonDir, Buffer.from(`${JSON.stringify(next, null, 2)}\n`));
+    }
+    await writeStateOwned(gitCommonDir, next);
+  });
 }
 
 /** Exact ordinary CAS for retained transitions under the same target lease. */
@@ -315,6 +321,9 @@ export function writeStateIfUnchanged(gitCommonDir: string, sourceSha256: string
     if (current?.sha256 === afterSha256) return 'already-written';
     if (current?.sha256 !== sourceSha256) {
       throw new ConvergeRunStateError('Native state changed after this transition was prepared.');
+    }
+    if (state.version === 3) {
+      await validateNativeRecoveryState(state, gitCommonDir, Buffer.from(bytes));
     }
     await writeStateOwned(gitCommonDir, state);
     return 'written';
@@ -447,6 +456,10 @@ export interface ProcessRoundOptions {
 }
 
 export async function processRoundReport(options: ProcessRoundOptions): Promise<RoundReport> {
+  // The caller keeps ownership of its objects. Freeze the complete finding
+  // batch synchronously so queued ownership and filesystem work cannot observe
+  // later caller mutation after the original report comparison.
+  options = { ...options, findings: structuredClone(options.findings) };
   const { target } = validateRoundReportInput(options);
   return options.ownership
     ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership))
@@ -945,6 +958,10 @@ export function prepareVerdicts(
   const reviewedRound = state.rounds.find((round) => round.round === options.round);
   if (!reviewedRound) {
     throw new ConvergeRunStateError(`Round ${options.round} is not recorded for ${target}.`);
+  }
+  if (state.version === 3 && ((state.cycle && options.runId === undefined) ||
+      (options.runId !== undefined && options.runId !== reviewedRound.runId))) {
+    throw new ConvergeRunStateError('review_cycle_verdict_run_mismatch: use the run ID bound to the reviewed round');
   }
 
   const pendingBeforeTriage = effectivePendingIdentities(state);

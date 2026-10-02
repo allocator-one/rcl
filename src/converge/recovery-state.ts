@@ -142,9 +142,11 @@ function materialPath(commonDir: string, target: string, digest: string): string
   return `${convergeRunStatePath(commonDir, target)}.recovery-materials/${digest}`;
 }
 function snapshotPath(commonDir: string, target: string, digest: string): string {
+  requireSource(/^[a-f0-9]{64}$/.test(digest));
   return `${convergeRunStatePath(commonDir, target)}.recovery-sources/${digest}.json`;
 }
 function reportPath(commonDir: string, target: string, digest: string): string {
+  requireSource(/^[a-f0-9]{64}$/.test(digest));
   return `${convergeRunStatePath(commonDir, target)}.evidence/${digest}.json`;
 }
 function decodeState(raw: string, target: string): ConvergeRunState {

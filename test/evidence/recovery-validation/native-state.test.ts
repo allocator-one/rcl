@@ -1,11 +1,13 @@
 import { expect, it } from 'vitest';
-import { effectivePendingIdentities, recoveredDismissalsByRound, validateAnchorIdentityBatch, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
+import { effectivePendingIdentities, recoveredDismissalsByRound, validateAnchorIdentityBatch,
+  validateRetainedNativeEvidence, validateSightinglessLegacyEvolution } from '../../../src/evidence/claim-recovery/validation/native-state.js';
 import { packNativeMaterial } from '../../../src/evidence/claim-recovery/validation/native-material.js';
 import { deriveNativeOccurrenceEvidence } from '../../../src/evidence/claim-recovery/validation/native-occurrences.js';
 import { createRecoveredDismissalLookup, recoveredDismissalsBefore } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
 import { setup } from '../parent-r9-projection-fixture.js';
 import { laterSource } from './occurrence-fixtures.js';
+import { retainedRecoveredDismissalsByRound } from '../../../src/converge/semantic-state.js';
 
 it('retains recovered dismissals from every preceding source round', () => {
   const dismissals = new Map([
@@ -154,6 +156,70 @@ it.each(['duplicate-key', 'rounded-counter', 'wrong-target', 'extra-recovery', '
   expect(() => validateRetainedNativeEvidence(input)).toThrow();
 });
 
+it.each(['round', 'finding', 'annotation'] as const)('refuses a sighting-less legacy descendant that invents a semantic %s', change => {
+  const f = recoveredFixture();
+  const state = structuredClone(f.state) as any;
+  delete state.sightings;
+  const input = { sourceJson: JSON.stringify(state), target, reports: [f.reportJson], nativeSourceJsons: [f.sourceJson] };
+  expect(validateRetainedNativeEvidence(input).state.rounds).toEqual(state.rounds);
+  if (change === 'round') state.rounds.push({ round: 2, runId: uuid(900), counts: { new: 0, repeat: 0, suppressed: 0, regating: 0 } });
+  else if (change === 'finding') state.findings.invented = { ...structuredClone(state.findings[f.key]), key: 'invented' };
+  else state.lastAnnotations.identities[0].status = 'repeat';
+  input.sourceJson = JSON.stringify(state);
+  expect(() => validateRetainedNativeEvidence(input)).toThrow('native_recovery_content_invalid');
+});
+
+it('permits ordinary verdict evolution on an unchanged sighting-less legacy descendant', () => {
+  const f = recoveredFixture();
+  const state = structuredClone(f.state) as any;
+  delete state.sightings;
+  Object.assign(state.findings[f.key], { verdict: 'fixed', verdictRound: 1, verdictSeverity: 'important' });
+  const result = validateRetainedNativeEvidence({ sourceJson: JSON.stringify(state), target,
+    reports: [f.reportJson], nativeSourceJsons: [f.sourceJson] });
+  expect(result.state.findings[f.key]).toMatchObject({ verdict: 'fixed', verdictRound: 1 });
+});
+
+it.each(['pending-addition', 'verdict-severity', 'verdict-reason'] as const)
+('refuses invalid %s on a sighting-less legacy descendant', change => {
+  const f = recoveredFixture();
+  const state = structuredClone(f.state) as any;
+  delete state.sightings;
+  const entry = state.findings[f.key];
+  if (change === 'pending-addition') entry.pendingRound = 1;
+  if (change === 'verdict-severity') Object.assign(entry, { verdict: 'fixed', verdictRound: 1, verdictSeverity: 'minor' });
+  if (change === 'verdict-reason') Object.assign(entry, { verdict: 'fixed', verdictRound: 1,
+    verdictSeverity: 'important', verdictReason: 42 });
+  const input = { sourceJson: JSON.stringify(state), target, reports: [f.reportJson], nativeSourceJsons: [f.sourceJson] };
+  expect(() => validateRetainedNativeEvidence(input)).toThrow('native_recovery_content_invalid');
+});
+
+it('accepts only reachable pending and verdict evolution without a semantic sighting ledger', () => {
+  const f = legacyFixture();
+  const original = structuredClone(f.state) as any;
+  original.findings[f.key].pendingRound = 1;
+  const retainedPending = structuredClone(original);
+  expect(() => validateSightinglessLegacyEvolution(retainedPending, original)).not.toThrow();
+
+  const cleared = structuredClone(original);
+  Object.assign(cleared.findings[f.key], { verdict: 'fixed', verdictRound: 1, verdictSeverity: 'important' });
+  delete cleared.findings[f.key].pendingRound;
+  expect(() => validateSightinglessLegacyEvolution(cleared, original)).not.toThrow();
+
+  const stalePending = structuredClone(cleared);
+  stalePending.findings[f.key].pendingRound = 1;
+  expect(() => validateSightinglessLegacyEvolution(stalePending, original)).toThrow('native_recovery_source_conflict');
+
+  const reasonWithoutVerdict = structuredClone(original);
+  reasonWithoutVerdict.findings[f.key].verdictReason = 'unreachable reason';
+  expect(() => validateSightinglessLegacyEvolution(reasonWithoutVerdict, original)).toThrow('native_recovery_source_conflict');
+
+  const historical = structuredClone(original);
+  Object.assign(historical.findings[f.key], { verdict: 'dismissed', verdictRound: 1,
+    verdictSeverity: 'important', verdictReason: 'retained historical reason' });
+  delete historical.findings[f.key].pendingRound;
+  expect(() => validateSightinglessLegacyEvolution(structuredClone(historical), historical)).not.toThrow();
+});
+
 it('retains a critical pending source despite an earlier important verdict', () => {
   const f = semanticFixture(); const state = JSON.parse(JSON.stringify(f.state));
   const report = structuredClone(f.report); report.run.id = uuid(2); report.run.converge.round = 2;
@@ -273,6 +339,34 @@ it('keeps same-round recovered dismissals when a later operation has no current 
 
   expect(recoveredDismissalsByRound(state, packed.materials, new Map([[sha(sourceJson), sourceJson]])))
     .toEqual(new Map([[1, new Map([[f.anchor.identity, 'important']])]]));
+});
+
+it('reads physical recovery artifacts through the shared same-round dismissal projection', async () => {
+  const { mkdir, mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { convergeRunStatePath } = await import('../../../src/converge/run-state.js');
+  const f = setup('dismissed'); const sourceJson = JSON.stringify(f.state);
+  const occurrences = deriveNativeOccurrenceEvidence({ dispositions: [f.disposition] }, {
+    target: f.state.target, sourceJson, anchors: [f.anchor], previous: [],
+  });
+  const packed = packNativeMaterial({ currentProjection: f.run(), occurrences });
+  const state = { ...structuredClone(f.state), version: 3, recovery: { version: 2, operations: [
+    { operationId: uuid(973), sourceVersion: 1, sourceSha256: sha(sourceJson), anchors: [], sourceReceipts: [], material: packed.reference },
+    { operationId: uuid(974), sourceVersion: 1, sourceSha256: sha(sourceJson), anchors: [], sourceReceipts: [] },
+  ] } } as any;
+  const dir = await mkdtemp(join(tmpdir(), 'dismissal-adapter-'));
+  try {
+    const path = convergeRunStatePath(dir, state.target);
+    await mkdir(`${path}.recovery-sources`, { recursive: true });
+    await mkdir(`${path}.recovery-materials`, { recursive: true });
+    await writeFile(`${path}.recovery-sources/${sha(sourceJson)}.json`, sourceJson);
+    for (const material of packed.materials) await writeFile(`${path}.recovery-materials/${material.sha256}`, material.text);
+    expect(await retainedRecoveredDismissalsByRound(state, dir))
+      .toEqual(new Map([[1, new Map([[f.anchor.identity, 'important']])]]));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 it('does not recover a dismissed receipt after the current projection reopens the claim', () => {

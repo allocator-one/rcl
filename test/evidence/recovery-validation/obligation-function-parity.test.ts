@@ -21,6 +21,7 @@ describe.each([['pure', pure], ['effectful', effectful]] as const)('%s legacy pe
 
   it('retains a same-round critical regating obligation until its verdict is critical', () => {
     const entry = finding({ severity: 'important', verdictSeverity: 'important' }); const value = state(entry);
+    value.rounds[0]!.severities![entry.key] = 'important';
     value.lastAnnotations = { round: 1, identities: [{ identity: entry.key, status: 'regating', gating: 'critical' }] };
     expect(migratedLegacyPendingRound(entry, value)).toBe(1);
   });

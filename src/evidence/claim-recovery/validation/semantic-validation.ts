@@ -222,7 +222,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     let latestGatedRound: number | null = null;
     let latestGatedRoundAfterVerdict: number | null = null;
     for (const [round, group] of [...byRound].sort(([a], [b]) => a - b)) {
-      if (group.some(s => s.gating !== 'none')) {
+      if (group.some(s => s.gating !== 'none' && s.status !== 'suppressed')) {
         latestGatedRound = round;
         if (entry.verdict === undefined || !verdictClearsPending(state, key, round, entry.verdictRound!, entry.verdictSeverity)) {
           latestGatedRoundAfterVerdict = round;
@@ -230,7 +230,9 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       }
       requireIntegrity(group.every(s => s.pendingRound === group[0]!.pendingRound));
       const capturedPending = group[0]!.pendingRound;
-      requireIntegrity(capturedPending === null || byRound.get(capturedPending)?.some(s => s.gating !== 'none') === true);
+      requireIntegrity(capturedPending === null || byRound.get(capturedPending)?.some(s =>
+        s.gating !== 'none' && s.status !== 'suppressed') === true);
+      if (group.every(s => s.status === 'suppressed')) continue;
       // A verdict is recorded after its round's sightings, so it can clear the
       // obligation carried by later sightings without rewriting that round's
       // immutable capture. A weaker verdict cannot clear a critical source.

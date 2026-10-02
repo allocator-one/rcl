@@ -49,7 +49,11 @@ vi.mock('node:fs/promises', async importOriginal => {
 });
 
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => {
+  Object.assign(retentionFault, { failNextSnapshotWrite: false, collideTemp: false, fired: 0, prefixWritten: 0,
+    rejectReadOnlySync: false, readOnlySyncs: 0 });
+  await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
+});
 function fixture(refs = [1]) {
   const f = projectionFixture(); const transfers = refs.map(ref => accepted(f.input, ref));
   const operationId = uuid(9000);

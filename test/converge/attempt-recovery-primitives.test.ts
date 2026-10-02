@@ -219,9 +219,17 @@ it('refuses forged, wrong-target, wrong-repository and released ownership for bo
   const flag = (owner: NativeTargetOwnership) => recordConvergeAttemptLaunch(f.root, f.target, terminal(expected), owner, 'delivery');
   for (const owner of [{ target: f.target }, released]) for (const operation of [request, flag]) await expect(operation(owner)).rejects.toThrow(/not_owned/);
   for (const [p, target] of [[await root(), f.target], [f.root, 'another-target']]) {
-    await withNativeTarget(p!, target!, async owner => {
-      for (const operation of [request, flag]) await expect(operation(owner)).rejects.toThrow(/not_owned/);
-    }).catch(error => { expect(String(error)).toMatch(/not_owned|operations_failed/); });
+    let callbackCompleted = false;
+    try {
+      await withNativeTarget(p!, target!, async owner => {
+        for (const operation of [request, flag]) await expect(operation(owner)).rejects.toThrow(/not_owned/);
+        callbackCompleted = true;
+      });
+    } catch (error) {
+      if (!callbackCompleted) throw error;
+      expect(String(error)).toMatch(/not_owned|operations_failed/);
+    }
+    expect(callbackCompleted).toBe(true);
   }
   expect(await readFile(f.attemptPath, 'utf8')).toBe(retained);
 });

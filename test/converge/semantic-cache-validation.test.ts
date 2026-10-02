@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { describeClaim } from '../../src/consensus/claim-identity.js';
+import { compareClaims, describeClaim, type ClaimDescriptor } from '../../src/consensus/claim-identity.js';
 import type { ConsensusFinding } from '../../src/consensus/types.js';
 import { correctionAnchor } from '../../src/converge/correction-anchors.js';
 import { deriveNativeRecovery, validateNativeRecoveryState, verifyNativeRecoveryLineage } from '../../src/converge/recovery-state.js';
@@ -25,10 +25,11 @@ async function fixture() {
   const claim = sampleFinding({ file: 'cache.ts', startLine: 10, endLine: 12,
     title: 'Cache entries never expire', description: 'The positive cache returns expired entries without testing their TTL.',
     suggestedFix: 'Check the expiry timestamp before returning a cached result.' });
-  async function round(number: number, findings: ConsensusFinding[], predecessor?: string) {
+  async function round(number: number, findings: Array<ConsensusFinding & { claimDescriptor?: ClaimDescriptor }>, predecessor?: string) {
     const runId = uuid(number);
     const rows = findings.map((finding, index) => ({ ...finding,
-      identity: `report:${runId}:${String(index + 1).padStart(16, '0')}`, claimDescriptor: describeClaim(finding) }));
+      identity: `report:${runId}:${String(index + 1).padStart(16, '0')}`,
+      claimDescriptor: finding.claimDescriptor ?? describeClaim(finding) }));
     const reportJson = JSON.stringify({ run: { id: runId, converge: { target, round: number,
       ...(predecessor ? { recovery_source: { version: 1, native_sha256: sha(predecessor) } } : {}) },
       target: { kind: 'pr', repo: 'synthetic/recovery', pr_number: 7, head_sha: 'a'.repeat(40) },
@@ -53,6 +54,53 @@ async function fixture() {
   await writeFile(path, plan.resultJson, { mode: 0o600 });
   return { root, path, key, claim, reports, sourceJson, plan, round };
 }
+
+const bridgeDescriptors = () => {
+  const base = { version: 1 as const, operation: 'fresh-cache.ts :: cache.read',
+    invariant: 'The cache returns expired entries without checking their expiry timestamp.' };
+  return {
+    a: { ...base, evidence: ['expiry timestamp validation stale record return cache path'] },
+    b: { ...base, evidence: ['expiry timestamp validation stale record return cache path caller response'] },
+    c: { ...base, evidence: ['expiry timestamp validation record return path caller response'] },
+  };
+};
+function bridgeFinding(template: ConsensusFinding, claimDescriptor: ClaimDescriptor): ConsensusFinding & { claimDescriptor: ClaimDescriptor } {
+  return { ...template, file: 'fresh-cache.ts', startLine: 10, endLine: 12, severity: 'important',
+    gating: { reason: 'consensus' }, claimDescriptor };
+}
+
+it('refuses to expand one v3 claim through a non-clique paraphrase bridge', async () => {
+  const f = await fixture();
+  const { a, b, c } = bridgeDescriptors();
+  expect(compareClaims(a, b)).toBe('supported_paraphrase');
+  expect(compareClaims(b, c)).toBe('supported_paraphrase');
+  expect(compareClaims(a, c)).toBeUndefined();
+  const admitted = await f.round(2, [a, b, c].map(descriptor => bridgeFinding(f.claim, descriptor)), f.plan.resultJson);
+  expect(new Set(admitted.result.findings.map(row => row.identity))).toHaveLength(3);
+  expect(admitted.result.findings.map(row => row.status)).toEqual(['new', 'new', 'new']);
+  expect(admitted.result.findings.map(row => row.sighting?.matchRationale)).toEqual(['ambiguous', 'ambiguous', 'ambiguous']);
+  expect(admitted.result.findings.map(row => row.sighting?.pendingRound)).toEqual([2, 2, 2]);
+  expect(admitted.result.actionableIdentities).toEqual(expect.arrayContaining(admitted.result.findings.map(row => row.identity)));
+});
+
+it('keeps disconnected v3 matches from sharing one prior identity and allocates them independent of report order', async () => {
+  async function admit(order: Array<'a' | 'c'>) {
+    const f = await fixture(); const descriptors = bridgeDescriptors();
+    const prior = await f.round(2, [bridgeFinding(f.claim, descriptors.b)], f.plan.resultJson);
+    const admitted = await f.round(3, order.map(key => bridgeFinding(f.claim, descriptors[key])), await readFile(f.path, 'utf8'));
+    expect(admitted.result.findings.every(row => row.identity !== prior.result.findings[0]!.identity)).toBe(true);
+    expect(new Set(admitted.result.findings.map(row => row.identity))).toHaveLength(2);
+    expect(admitted.result.findings.map(row => row.status)).toEqual(['new', 'new']);
+    expect(admitted.result.findings.map(row => row.sighting?.matchRationale)).toEqual(['ambiguous', 'ambiguous']);
+    expect(admitted.result.findings.map(row => row.sighting?.pendingRound)).toEqual([3, 3]);
+    expect(admitted.result.actionableIdentities).toEqual(expect.arrayContaining(admitted.result.findings.map(row => row.identity)));
+    return Object.fromEntries(admitted.result.findings.map(row => [
+      (row.finding.claimDescriptor as ClaimDescriptor).evidence[0],
+      { identity: row.identity, status: row.status, rationale: row.sighting?.matchRationale, pending: row.sighting?.pendingRound },
+    ]));
+  }
+  expect(await admit(['a', 'c'])).toEqual(await admit(['c', 'a']));
+});
 
 
 it.each(['repeat', 'suppressed', 'regating'] as const)('refuses a v2 producer first sighting relabeled %s', status => {
@@ -165,12 +213,16 @@ it('accepts ordinary later repeat, suppression, and critical re-gating', async (
     verdicts: [{ key, verdict: 'dismissed', reason: 'Current source explicitly enforces cache expiry.' }] });
   const suppressed = await f.round(4, [important], await readFile(f.path, 'utf8'));
   expect(suppressed.result.findings[0]!.status).toBe('suppressed');
+  expect(suppressed.result.actionableIdentities).not.toContain(key);
+  expect((await loadConvergeRunState(f.root, target))!.sightings!.at(-1)).toMatchObject({ status: 'suppressed', pendingRound: null });
   const regated = await f.round(5, [{ ...important, severity: 'critical' }], await readFile(f.path, 'utf8'));
   expect(regated.result.findings[0]!.status).toBe('regating');
+  expect(regated.result.actionableIdentities).toContain(key);
   await recordVerdicts({ gitCommonDir: f.root, target, round: 5,
     verdicts: [{ key, verdict: 'dismissed', reason: 'Explicit critical re-triage.' }] });
   const afterRetriage = await f.round(6, [{ ...important, severity: 'critical' }], await readFile(f.path, 'utf8'));
   expect(afterRetriage.result.findings[0]!.status).toBe('suppressed');
+  expect(afterRetriage.result.actionableIdentities).not.toContain(key);
   const raw = await readFile(f.path, 'utf8');
   const state = (await loadConvergeRunState(f.root, target))!;
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();

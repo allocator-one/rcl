@@ -1,12 +1,13 @@
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { installRecoveredProduction } from '../fixtures/recovered-production.js';
 import { sha, uuid } from '../evidence/recovery-validation/fixtures.js';
 
-const fault = vi.hoisted(() => ({ path: '', afterRead: undefined as (() => Promise<void>) | undefined }));
+const fault = vi.hoisted(() => ({ path: '', afterRead: undefined as (() => Promise<void>) | undefined,
+  syncFile: '', syncDirectory: '' }));
 vi.mock('../../src/telemetry/recovery/files.js', async original => {
   const files = await original<typeof import('../../src/telemetry/recovery/files.js')>();
   return { ...files, readOrdinaryNativeFile: async (...args: Parameters<typeof files.readOrdinaryNativeFile>) => {
@@ -21,7 +22,15 @@ vi.mock('../../src/telemetry/recovery/files.js', async original => {
 });
 vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
-  return { ...fs, readFile: async (...args: Parameters<typeof fs.readFile>) => {
+  return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
+    const handle = await fs.open(...args);
+    if (String(args[0]) !== fault.syncFile) return handle;
+    return new Proxy(handle, { get(target, property) {
+      if (property === 'sync') return async () => { throw new Error('synthetic_report_file_sync_failure'); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  }, readFile: async (...args: Parameters<typeof fs.readFile>) => {
     const bytes = await fs.readFile(...args);
     if (String(args[0]) === fault.path && fault.afterRead) {
       const afterRead = fault.afterRead;
@@ -31,11 +40,28 @@ vi.mock('node:fs/promises', async original => {
     return bytes;
   } };
 });
+vi.mock('../../src/converge/native-lock.js', async original => {
+  const locks = await original<typeof import('../../src/converge/native-lock.js')>();
+  return { ...locks, syncNativeDirectory: async (path: string) => {
+    if (path === fault.syncDirectory) throw new Error('synthetic_report_directory_sync_failure');
+    await locks.syncNativeDirectory(path);
+  } };
+});
 
 const roots: string[] = [];
 afterEach(async () => {
-  fault.path = ''; fault.afterRead = undefined;
+  fault.path = ''; fault.afterRead = undefined; fault.syncFile = ''; fault.syncDirectory = '';
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+});
+
+it.each(['file', 'directory'] as const)('does not publish native state when retained report %s sync fails', async kind => {
+  const f = await fixture();
+  const reportPath = `${f.recovered.path}.evidence/${sha(f.reportJson)}.json`;
+  if (kind === 'file') fault.syncFile = reportPath;
+  else fault.syncDirectory = dirname(reportPath);
+  const before = await readFile(f.recovered.path, 'utf8');
+  await expect(processRoundReport(f.options)).rejects.toThrow(`synthetic_report_${kind}_sync_failure`);
+  expect(await readFile(f.recovered.path, 'utf8')).toBe(before);
 });
 
 async function fixture() {
@@ -73,6 +99,28 @@ it('retains a recovered report in its owned canonical directory when the caller 
   expect(state?.sightings).toHaveLength(f.options.findings.length);
 });
 
+it('snapshots caller findings before queued ownership work can observe mutation', async () => {
+  const f = await fixture();
+  const original = structuredClone(f.options.findings);
+  const pending = processRoundReport(f.options);
+  f.options.findings[0]!.title = 'Caller mutation after dispatch';
+  const admitted = await pending;
+  expect(admitted.findings[0]!.finding).toEqual(original[0]);
+  expect((await loadConvergeRunState(f.canonical, f.options.target))!.sightings![0]!.reportKey)
+    .toBe(original[0]!.identity);
+});
+
+it('refuses an unbounded semantic finding batch before allocating the relation graph', async () => {
+  const f = await fixture();
+  const findings = Array.from({ length: 2_001 }, (_, index) => ({
+    ...structuredClone(f.options.findings[0]!),
+    identity: `report:${f.options.runId}:${String(index).padStart(16, '0')}`,
+  }));
+  const report = JSON.parse(f.reportJson); report.findings = findings;
+  await expect(processRoundReport({ ...f.options, findings, evidence: { reportJson: JSON.stringify(report) } }))
+    .rejects.toThrow(/at most 2000 findings/);
+});
+
 it('writes a recovered verdict in its owned canonical directory when the caller alias moves after the state read', async () => {
   const f = await fixture();
   const admitted = await processRoundReport({ ...f.options, gitCommonDir: f.canonical });
@@ -80,6 +128,7 @@ it('writes a recovered verdict in its owned canonical directory when the caller 
   const before = await loadConvergeRunState(f.canonical, f.options.target);
   f.retargetAfterOwnedRead();
   await recordVerdicts({ gitCommonDir: f.alias, target: f.options.target, round: 2,
+    runId: f.options.runId,
     verdicts: [{ key, verdict: 'dismissed', reason: 'Synthetic source-backed adjudication.' }] });
   expect(await realpath(f.alias)).toBe(f.diverted);
   expect(await readdir(f.diverted)).toEqual([]);

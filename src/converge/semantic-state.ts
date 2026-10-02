@@ -2,16 +2,18 @@ import { recoverySourceSchema } from '../report/recovery-source.js';
 import { decodeOriginalReport, decodeRecoveryDocument } from '../evidence/original-run/decode.js';
 import { object } from '../evidence/original-run/remote.js';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withOwnedNativeOperation, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
 import { effectivePendingIdentities, readNativeRecoveryMaterials, readNativeRecoverySourceJsons, recoveryAnchors } from './recovery-state.js';
-import { nativeMaterial, type NativeMaterialReference } from '../evidence/claim-recovery/validation/native-material.js';
-import type { RecoveryMaterial } from '../evidence/claim-recovery/validation/materials.js';
+import { recoveredDismissalsByRound } from '../evidence/claim-recovery/validation/native-state.js';
+import { recoveredDismissalsBefore } from '../evidence/claim-recovery/validation/semantic-validation.js';
 import { recoveryProjectionFreshness } from '../evidence/claim-recovery/validation/current-projection.js';
 import { semanticCacheMatches } from '../evidence/claim-recovery/validation/semantic-cache.js';
 import { migratedLegacyPendingRound } from '../evidence/claim-recovery/validation/obligations.js';
+import { syncNativeDirectory } from './native-lock.js';
+import { readStable } from '../telemetry/recovery/files.js';
 
 export { migratedLegacyPendingRound };
 import { z } from 'zod';
@@ -52,6 +54,7 @@ export interface SemanticSighting {
   endLine: number;
 }
 const sha = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
+const MAX_SEMANTIC_FINDINGS = 2_000;
 
 function decodeBoundReport(raw: string): ReviewResult {
   try {
@@ -87,11 +90,24 @@ export function bindRoundEvidence(options: ProcessRoundOptions): ReportBinding {
 }
 export async function retainReportEvidence(raw: string, binding: ReportBinding): Promise<void> {
   if (sha(raw) !== binding.reportSha256) throw new ConvergeRunStateError('Original report digest changed.');
-  await mkdir(dirname(binding.sourcePath), { recursive: true, mode: 0o700 });
-  try { await writeFile(binding.sourcePath, raw, { flag: 'wx', mode: 0o400 }); }
-  catch (e) {
+  const directory = dirname(binding.sourcePath);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await syncNativeDirectory(dirname(directory));
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(binding.sourcePath, 'wx', 0o400);
+    await handle.writeFile(raw);
+    await handle.sync();
+  } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST' || !(await readFile(binding.sourcePath)).equals(Buffer.from(raw))) throw e;
+    const retained = await readStable(binding.sourcePath, Buffer.byteLength(raw), {
+      sync: true, allowMissingSafeFlagsOnWindows: true,
+    });
+    if (!retained.raw.equals(Buffer.from(raw))) throw new ConvergeRunStateError('Original report digest changed.');
+  } finally {
+    await handle?.close();
   }
+  await syncNativeDirectory(directory);
 }
 export async function verifyRoundBinding(binding: ReportBinding, target: string, round: number, runId: string): Promise<ReviewResult> {
   let bytes: Buffer;
@@ -275,15 +291,24 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
       entry.firstRound === Math.min(...members.map(s => s.round)) && entry.lastRound === Math.max(...members.map(s => s.round)) &&
       members.some(s => s.round === entry.firstRound && isDeepStrictEqual(s.claimDescriptor, entry.claimDescriptor)));
     requireIntegrity(semanticCacheMatches(entry, members, originalTitles));
-    for (const round of new Set(members.map(s => s.round))) {
+    let latestGatedRound: number | null = null;
+    let latestGatedRoundAfterVerdict: number | null = null;
+    for (const round of [...new Set(members.map(s => s.round))].sort((a, b) => a - b)) {
       const group = members.filter(s => s.round === round);
+      if (group.some(s => s.gating !== 'none' && s.status !== 'suppressed')) {
+        latestGatedRound = round;
+        if (entry.verdict === undefined || !verdictClearsPending(state, key, round, entry.verdictRound!, entry.verdictSeverity)) {
+          latestGatedRoundAfterVerdict = round;
+        }
+      }
       requireIntegrity(group.every(s => s.pendingRound === group[0]!.pendingRound));
       const capturedPending = group[0]!.pendingRound;
-      requireIntegrity(capturedPending === null || members.some(s => s.round === capturedPending && s.gating !== 'none'));
-      if (entry.verdict === undefined) {
-        const gated = members.filter(s => s.round <= round && s.gating !== 'none').map(s => s.round);
-        requireIntegrity(capturedPending === (gated.length ? Math.max(...gated) : null));
-      }
+      requireIntegrity(capturedPending === null || members.some(s => s.round === capturedPending &&
+        s.gating !== 'none' && s.status !== 'suppressed'));
+      if (group.every(s => s.status === 'suppressed')) continue;
+      const expectedCaptured = entry.verdict !== undefined && entry.verdictRound! < round ?
+        latestGatedRoundAfterVerdict : latestGatedRound;
+      requireIntegrity(capturedPending === expectedCaptured);
     }
     const latestPending = members.find(s => s.round === entry.lastRound)!.pendingRound;
     const expectedPending = latestPending !== null &&
@@ -371,9 +396,24 @@ export function processSemanticRound(options: ProcessRoundOptions, binding: Repo
     operation => processSemanticRoundOwned(options, binding, operation));
 }
 
+/** @internal Bind a recovered report to the retained review cycle before any native mutation. */
+function assertSemanticReportCycle(state: ConvergeRunState, report: ReviewResult): void {
+  const reportRepo = report.run?.target?.repo;
+  const matches = state.cycle
+    ? report.run?.cycle_id === state.cycle.id && typeof reportRepo === 'string' &&
+      reportRepo.toLowerCase() === state.cycle.repo.toLowerCase() && report.run?.target?.pr_number === state.cycle.prNumber
+    : report.run?.cycle_id === undefined;
+  if (!matches) {
+    throw new ConvergeRunStateError('Recovered-v3 report cycle, repository and pull request must match the retained native cycle.');
+  }
+}
+
 async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: ReportBinding,
   ownership: NativeTargetOwnership): Promise<RoundReport> {
   const findings = options.findings;
+  if (findings.length > MAX_SEMANTIC_FINDINGS) {
+    throw new ConvergeRunStateError(`Semantic continuation supports at most ${MAX_SEMANTIC_FINDINGS} findings per report.`);
+  }
   const keys = new Set<string>();
   for (const f of findings) {
     if (!claimDescriptorSchema.safeParse(f.claimDescriptor).success || !f.identity || !f.identity.startsWith(`report:${binding.runId}:`) || keys.has(f.identity)) {
@@ -405,6 +445,7 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   if (current?.sha256 !== predecessor.native_sha256) {
     throw new ConvergeRunStateError('Native recovery state changed during review; original report retained without native admission.');
   }
+  assertSemanticReportCycle(state, report);
   if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
   if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) throw new ConvergeRoundCapError(binding.target, options.round, state.roundCap);
   const max = Math.max(0, ...state.rounds.map(r => r.round));
@@ -491,7 +532,7 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     entry.startLine = Math.min(...rows.map(f => f.startLine)); entry.endLine = Math.max(...rows.map(f => f.endLine));
     entry.models = [...new Set([...entry.models, ...rows.flatMap(f => f.consensus.models)])].sort();
     const gated = group.indices.some(i => i < keptCount && findingGatingReason(findings[i]!) !== 'none');
-    if (gated && (entry.pendingRound !== undefined || status === 'new' || status === 'regating' ||
+    if (gated && status !== 'suppressed' && (entry.pendingRound !== undefined || status === 'new' || status === 'regating' ||
         entry.verdict === undefined || !verdictClearsPending(state, key, options.round, entry.verdictRound!, entry.verdictSeverity))) {
       entry.pendingRound = options.round;
     }
@@ -522,42 +563,11 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
  * Each recovery operation is bound to the exact predecessor state that existed
  * before it. A later refresh cannot rewrite the dismissal explaining an earlier
  * semantic sighting. */
-async function retainedRecoveredDismissalsByRound(state: ConvergeRunState, gitCommonDir: string): Promise<Map<number, Map<string, string>>> {
+/** @internal Physical adapter for the shared retained-dismissal projection. */
+export async function retainedRecoveredDismissalsByRound(state: ConvergeRunState, gitCommonDir: string): Promise<Map<number, Map<string, string>>> {
   const materials = await readNativeRecoveryMaterials(gitCommonDir, state);
   const snapshots = new Map((await readNativeRecoverySourceJsons(gitCommonDir, state)).map(raw => [sha(raw), raw]));
-  const dismissals = new Map<number, Map<string, string>>();
-  for (const operation of state.recovery?.operations ?? []) {
-    const raw = snapshots.get(operation.sourceSha256);
-    if (raw === undefined) throw new ConvergeRunStateError('Missing retained recovery predecessor.');
-    const source = decodeRecoveryDocument(raw) as ConvergeRunState;
-    if (!Array.isArray(source.rounds) || !source.rounds.every(round => Number.isSafeInteger(round.round) && round.round > 0)) {
-      throw new ConvergeRunStateError('Invalid retained recovery predecessor.');
-    }
-    dismissals.set(Math.max(0, ...source.rounds.map(round => round.round)), recoveredDismissals(operation.material, materials));
-  }
-  return dismissals;
-}
-function recoveredDismissals(reference: NativeMaterialReference | undefined, materials: RecoveryMaterial[]): Map<string, string> {
-  if (!reference?.current) return new Map();
-  const content = nativeMaterial(reference, materials);
-  const projection = content.currentProjection;
-  const dismissed = new Map<string, string>();
-  if (!projection || projection.residuals.length) return dismissed;
-  for (const claim of projection.claims) {
-    const proof = content.occurrences?.dispositions.find(row => row.receipt.id === claim.dispositionEventId);
-    if (proof?.preparation.split.selection.identity === claim.identity && proof.preparation.verdict === 'dismissed') {
-      dismissed.set(claim.identity, proof.preparation.severity);
-    }
-  }
-  return dismissed;
-}
-function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>, round: number): ReadonlyMap<string, string> {
-  let selected: ReadonlyMap<string, string> | undefined;
-  let selectedRound = -1;
-  for (const [sourceRound, dismissals] of dismissalsByRound) {
-    if (sourceRound < round && sourceRound >= selectedRound) { selected = dismissals; selectedRound = sourceRound; }
-  }
-  return selected ?? new Map();
+  return recoveredDismissalsByRound(state, materials, snapshots);
 }
 
 export function pending(state: ConvergeRunState): string[] {

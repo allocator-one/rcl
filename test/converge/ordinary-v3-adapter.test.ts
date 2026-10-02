@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { deriveNativeRecovery } from '../../src/converge/recovery-state.js';
-import { convergeRunStatePath, loadConvergeRunStateEvidence, prepareVerdicts, writeStateIfUnchanged } from '../../src/converge/run-state.js';
+import { deriveNativeRecovery, validateNativeRecoveryState } from '../../src/converge/recovery-state.js';
+import { convergeRunStatePath, loadConvergeRunStateEvidence, prepareVerdicts, writeState, writeStateIfUnchanged } from '../../src/converge/run-state.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { recoveredFixture, uuid } from '../evidence/recovery-validation/fixtures.js';
 import { accepted, projectionFixture } from '../evidence/recovery-validation/carrier-fixtures.js';
@@ -65,6 +65,7 @@ it('prepares an ordinary v3 verdict without changing recovery evidence or cleari
   const state = JSON.parse(source.resultJson);
   const before = structuredClone(state.recovery);
   const prepared = prepareVerdicts(state, { target: source.target, round: 1,
+    runId: state.rounds[0].runId,
     verdicts: [{ key: recovered().key, verdict: 'dismissed', reason: 'ordinary synthetic triage' }], recordedAt: '2026-09-23T02:00:00.000Z' });
   expect(prepared.state.recovery).toEqual(before);
   expect(prepared.state.updatedAt).toBe('2026-09-23T02:00:00.000Z');
@@ -76,6 +77,7 @@ it('uses exact v3 source/next CAS and refuses a changed validated source without
   const source = await loadConvergeRunStateEvidence(dir, plan.target);
   expect(source).toBeDefined();
   const prepared = prepareVerdicts(source!.state, { target: plan.target, round: 1,
+    runId: source!.state.rounds[0].runId,
     verdicts: [{ key: base.key, verdict: 'dismissed' }], recordedAt: '2026-09-23T02:00:00.000Z' });
   await withNativeTarget(dir, plan.target, ownership => writeStateIfUnchanged(dir, source!.sha256, prepared.state, ownership));
   const next = await readFile(path, 'utf8');
@@ -91,6 +93,35 @@ it('uses exact v3 source/next CAS and refuses a changed validated source without
   expect(await readFile(path, 'utf8')).toBe(changedSource);
 });
 
+it('refuses a malformed prepared v3 state before the CAS publishes it', async () => {
+  const plan = deriveNativeRecovery(recovered().input); const { dir, path } = await install(plan);
+  const source = (await loadConvergeRunStateEvidence(dir, plan.target))!;
+  const malformed = structuredClone(source.state);
+  malformed.recovery!.operations[0]!.sourceSha256 = 'not-a-digest';
+  const before = await readFile(path, 'utf8');
+  await expect(withNativeTarget(dir, plan.target, ownership =>
+    writeStateIfUnchanged(dir, source.sha256, malformed, ownership))).rejects.toThrow(/native_recovery_state_invalid/);
+  expect(await readFile(path, 'utf8')).toBe(before);
+});
+
+it('refuses a malformed v3 state before the public writer publishes it', async () => {
+  const plan = deriveNativeRecovery(recovered().input); const { dir, path } = await install(plan);
+  const malformed = JSON.parse(plan.resultJson);
+  malformed.recovery.operations[0].sourceSha256 = 'not-a-digest';
+  const before = await readFile(path, 'utf8');
+  await expect(withNativeTarget(dir, plan.target, ownership => writeState(dir, malformed, ownership)))
+    .rejects.toThrow(/native_recovery_state_invalid/);
+  expect(await readFile(path, 'utf8')).toBe(before);
+});
+
+it('refuses a malformed report digest before deriving a filesystem path', async () => {
+  const plan = deriveNativeRecovery(recovered().input); const { dir } = await install(plan);
+  const state = JSON.parse(plan.resultJson);
+  state.recovery.operations[0].anchors[0].source.reportSha256 = '../../outside';
+  await expect(validateNativeRecoveryState(state, dir, Buffer.from(JSON.stringify(state))))
+    .rejects.toThrow(/native_recovery_state_invalid/);
+});
+
 it('prepares and CAS-publishes ordinary fixed and dismissed verdicts without changing occurrence recovery standing or caller state', async () => {
   const original = occurrenceRecovered();
   const inputBefore = structuredClone(original.input);
@@ -100,8 +131,10 @@ it('prepares and CAS-publishes ordinary fixed and dismissed verdicts without cha
   const effectiveBefore = source.recovery.operations[0].occurrences.projection;
   const key = Object.keys(source.findings)[0]!;
   const fixed = prepareVerdicts(source, { target: plan.target, round: 1,
+    runId: source.rounds[0].runId,
     verdicts: [{ key, verdict: 'fixed', reason: 'Ordinary source-backed fixture result.' }], recordedAt: '2026-09-23T03:00:00.000Z' });
   const dismissed = prepareVerdicts(source, { target: plan.target, round: 1,
+    runId: source.rounds[0].runId,
     verdicts: [{ key, verdict: 'dismissed', reason: 'Ordinary source-backed fixture result.' }], recordedAt: '2026-09-23T03:00:00.000Z' });
   expect(original.input).toEqual(inputBefore);
   for (const prepared of [fixed, dismissed]) {
@@ -142,8 +175,8 @@ it('clears a stale recovered-v3 dismissal reason for a reasonless fixed verdict 
   state.findings[key].verdict = 'dismissed';
   state.findings[key].verdictRound = 1;
   state.findings[key].verdictReason = 'stale dismissal';
-  const bare = prepareVerdicts(state, { target: plan.target, round: 1, verdicts: [{ key, verdict: 'fixed' }], recordedAt: '2026-09-23T04:00:00.000Z' });
+  const bare = prepareVerdicts(state, { target: plan.target, round: 1, runId: state.rounds[0].runId, verdicts: [{ key, verdict: 'fixed' }], recordedAt: '2026-09-23T04:00:00.000Z' });
   expect(bare.state.findings[key]).not.toHaveProperty('verdictReason');
-  const explicit = prepareVerdicts(state, { target: plan.target, round: 1, verdicts: [{ key, verdict: 'fixed', reason: 'Fresh recovered-v3 fix.' }], recordedAt: '2026-09-23T04:00:00.000Z' });
+  const explicit = prepareVerdicts(state, { target: plan.target, round: 1, runId: state.rounds[0].runId, verdicts: [{ key, verdict: 'fixed', reason: 'Fresh recovered-v3 fix.' }], recordedAt: '2026-09-23T04:00:00.000Z' });
   expect(explicit.state.findings[key]!.verdictReason).toBe('Fresh recovered-v3 fix.');
 });

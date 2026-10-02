@@ -9,24 +9,26 @@ import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/
 import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
 import { sha, uuid } from '../evidence/recovery-validation/fixtures.js';
 
-const { bundle } = await retainedCycleFixture();
-async function preserve() {
+const [{ bundle: loadBundle }, { bundle: applyBundle }] = await Promise.all([retainedCycleFixture(), retainedCycleFixture()]);
+async function preserve(bundle: typeof loadBundle) {
   expect(await readFile(bundle.runPath, 'utf8')).toBe(bundle.nativeJson);
   expect(await readFile(bundle.attemptPath, 'utf8')).toBe(bundle.attemptsJson);
   expect(await readFile(bundle.archivePath, 'utf8')).toBe(bundle.archiveJson);
 }
 
 it('loads actual released cycle2 physical state without inventing semantic sightings', async () => {
-  await preserve();
+  const bundle = loadBundle;
+  await preserve(bundle);
   expect(validateRetainedNativeEvidence({ sourceJson: bundle.nativeJson, target: bundle.selection.target, reports: [] }).state).toEqual(bundle.native);
   try {
     const loaded = await loadConvergeRunState(bundle.root, bundle.selection.target);
     expect(loaded).toEqual(bundle.native);
-  } finally { await preserve(); }
+  } finally { await preserve(bundle); }
 });
 
 it('derives, owns, applies, reloads and replays actual released-cycle recovery without changing accounting', async () => {
-  await preserve();
+  const bundle = applyBundle;
+  await preserve(bundle);
   const selection = bundle.selection, operationId = uuid(803);
   const event = prepareClaimSplit(selection).event;
   const receipt = { ...selection.scope, ...event, actor_user_id: uuid(7), attempt: null };

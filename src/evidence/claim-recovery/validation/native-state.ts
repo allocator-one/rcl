@@ -12,7 +12,7 @@ import type { EventReceipt } from './receipts.js';
 import { decodeRecoveryOriginal as decodeOriginalReport } from './recovery-json.js';
 import { object, uuidSchema } from './primitives.js';
 import type { ConvergeRunState, FindingEntry } from './types.js';
-import { migratedLegacyPendingRound } from './obligations.js';
+import { migratedLegacyPendingRound, verdictClearsPending } from './obligations.js';
 import { validateSemanticState } from './semantic-validation.js';
 import type { RetainedSources, SourcePathRequirement } from './sources.js';
 
@@ -116,6 +116,37 @@ function retainedFindingIdentity(current: FindingEntry, predecessor: FindingEntr
 function retainedRounds(current: ConvergeRunState, predecessor: ConvergeRunState): boolean {
   const rounds = new Map(current.rounds.map(round => [round.round, round]));
   return predecessor.rounds.every(round => isDeepStrictEqual(rounds.get(round.round), round));
+}
+
+/** @internal Validate the only mutations ordinary verdict recording can make without a semantic sighting ledger. */
+export function validateSightinglessLegacyEvolution(state: ConvergeRunState, original: ConvergeRunState): void {
+  requireSource(isDeepStrictEqual(state.rounds, original.rounds));
+  requireSource(isDeepStrictEqual(Object.keys(state.findings).sort(), Object.keys(original.findings).sort()));
+  requireSource(isDeepStrictEqual(state.lastAnnotations, original.lastAnnotations));
+  const mutable = new Set(['pendingRound', 'verdict', 'verdictRound', 'verdictSeverity', 'verdictReason']);
+  const fixed = (entry: FindingEntry) => Object.fromEntries(Object.entries(entry).filter(([field]) => !mutable.has(field)));
+  const verdictTuple = (entry: FindingEntry) => ({ verdict: entry.verdict, verdictRound: entry.verdictRound,
+    verdictSeverity: entry.verdictSeverity, verdictReason: entry.verdictReason });
+  for (const [key, entry] of Object.entries(state.findings)) {
+    const prior = original.findings[key]!;
+    requireSource(isDeepStrictEqual(fixed(entry), fixed(prior)));
+    const unchangedVerdict = isDeepStrictEqual(verdictTuple(entry), verdictTuple(prior));
+    requireSource(entry.verdict === undefined ? entry.verdictReason === prior.verdictReason :
+      entry.verdictReason === undefined || typeof entry.verdictReason === 'string');
+    if (prior.verdict !== undefined) requireSource(entry.verdict !== undefined && entry.verdictRound! >= prior.verdictRound!);
+    if (entry.verdict !== undefined) {
+      const reviewed = state.rounds.find(round => round.round === entry.verdictRound);
+      requireSource(reviewed !== undefined && reviewed.severities?.[key] !== undefined);
+      const unchangedImplicitSeverity = prior.verdict === entry.verdict && prior.verdictRound === entry.verdictRound &&
+        prior.verdictSeverity === undefined && entry.verdictSeverity === undefined;
+      requireSource(unchangedImplicitSeverity || entry.verdictSeverity === reviewed?.severities?.[key]);
+    }
+    const clearsPrior = prior.pendingRound !== undefined && entry.verdict !== undefined &&
+      verdictClearsPending(state, key, prior.pendingRound, entry.verdictRound!, entry.verdictSeverity);
+    const expectedPending = prior.pendingRound !== undefined && !clearsPrior ? prior.pendingRound : undefined;
+    requireSource(unchangedVerdict ? entry.pendingRound === prior.pendingRound || clearsPrior && entry.pendingRound === undefined :
+      entry.pendingRound === expectedPending);
+  }
 }
 
 export function verifyNativeRecoveryLineage(sourceJson: string, target: string, nativeSourceJsons: string[] = []): {
@@ -388,6 +419,7 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
       // Their exact predecessor bytes, anchors, receipts and reports were
       // validated above; descendants do not invent a semantic ledger merely
       // to cross the recovery boundary.
+      if (legacyOrigin && state.sightings === undefined) validateSightinglessLegacyEvolution(state, lineage.original);
       if (!legacyOrigin || state.sightings !== undefined) {
         validateSemanticState(state, sources, legacyOrigin ? lineage.original : undefined,
           recoveredDismissalsByRound(state, input.recoveryMaterials ?? [], snapshots));
