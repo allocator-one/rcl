@@ -152,6 +152,38 @@ it('accepts a later nongating sighting after a verdict clears the earlier obliga
     reports: [f.reportJson, reportJson] }).actionableIdentities).toEqual([]);
 });
 
+it('validates a long per-identity round history with exact grouped pending captures', () => {
+  const f = semanticFixture();
+  const state = structuredClone(f.state) as any;
+  const reports = [f.reportJson];
+  state.roundCap = 99;
+  for (let round = 2; round <= 99; round++) {
+    const report = structuredClone(f.report);
+    report.run.id = uuid(1_000 + round);
+    report.run.converge.round = round;
+    report.findings[0]!.identity = `report:${report.run.id}:repeat`;
+    const reportJson = JSON.stringify(report);
+    const digest = sha(reportJson);
+    const binding = { runId: report.run.id, target, round, reportSha256: digest,
+      sourcePath: `/synthetic/native.evidence/${digest}.json` };
+    state.rounds.push({ round, runId: report.run.id, reportBinding: binding,
+      counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [f.key]: 'important' } });
+    const { sourcePath: _sourcePath, ...sightingBinding } = binding;
+    state.sightings.push({ ...state.sightings[0], ...sightingBinding, reportKey: report.findings[0]!.identity,
+      status: 'repeat', pendingRound: round });
+    reports.push(reportJson);
+  }
+  state.findings[f.key].lastRound = 99;
+  state.findings[f.key].pendingRound = 99;
+  state.lastAnnotations = { round: 99, identities: [{ identity: f.key, status: 'repeat', gating: 'consensus' }] };
+
+  const input = { sourceJson: JSON.stringify(state), target, reports };
+  expect(validateRetainedNativeEvidence(input).actionableIdentities).toEqual([f.key]);
+  state.sightings[49].pendingRound = 1;
+  input.sourceJson = JSON.stringify(state);
+  expect(() => validateRetainedNativeEvidence(input)).toThrow('native_recovery_content_invalid');
+});
+
 it('keeps same-round recovered dismissals when a later operation has no current projection', () => {
   const f = setup('dismissed');
   const projection = f.run();

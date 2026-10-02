@@ -33,7 +33,7 @@ export function carrier(source: OccurrenceSource, identity: string, kind: Occurr
 
 export function accepted(input: ObligationTransferInput, ref = 1): AcceptedOccurrenceTransfer {
   input = structuredClone(input);
-  input.split.selection.findingRef = `f00${ref}`;
+  input.split.selection.findingRef = `f${String(ref).padStart(3, '0')}`;
   input.split.selection.identity = `2222222222222${String(ref).padStart(3, '0')}`;
   input.split.selection.eventId = uuid(1000 + input.sourceContext.round * 10 + ref);
   input.split.selection.expectedEventSequence = ref + 1;

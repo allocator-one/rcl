@@ -136,11 +136,16 @@ function pendingDecision(receipt: StoredEventReceipt,identity: string,markers: P
     const entry=entries.find(v => v.identity_key===identity);
     const classification=source.input.classification,received=source.input.storedRun.received_at;
     const members=source.members.filter(m => m.mapping?.matched_identity===identity);
+    const latestMarkerRound=Math.max(...markers.filter(marker => marker.source.round<=source.round).map(marker => marker.source.round));
+    const sourceMarkers=markers.filter(marker => marker.source===source);
+    // Compare one authenticated subject generation, retaining duplicates within
+    // that generation without counting the same carried obligation every round.
+    const subjectMarkers=sourceMarkers.length?sourceMarkers:markers.filter(marker => marker.source.round===latestMarkerRound);
     if(!entry||classification.payload.classification_version!==1||!uuidSchema.safeParse(classification.actor_user_id).success||
-      typeof received!=='string'||time(classification.received_at)<time(received)||members.length===0||
+      typeof received!=='string'||time(classification.received_at)<time(received)||members.length===0||subjectMarkers.length===0||
       members.some(m => m.mapping?.version!==1||m.correction)||
       new Set(source.members.map(m => m.raw.identity)).size!==source.members.length||
-      !isDeepStrictEqual(subjects(members),subjects(markers.map(m => m.member)))) return undefined;
+      !isDeepStrictEqual(subjects(members),subjects(subjectMarkers.map(m => m.member)))) return undefined;
     before(classification,receipt);
     for(const marker of markers) {
       if(marker.member.correction||!uuidSchema.safeParse(marker.source.input.classification.actor_user_id).success) return undefined;

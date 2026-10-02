@@ -39,6 +39,10 @@ function sameRun(a: OccurrenceRunSelector, b: OccurrenceRunSelector): boolean {
   return sameTarget(a, b) && a.scope.run_id === b.scope.run_id && a.round === b.round &&
     a.headSha === b.headSha && a.reportSha256 === b.reportSha256;
 }
+function runKey(value: OccurrenceRunSelector): string {
+  return stable([value.scope.base_url, value.scope.org_id, value.scope.repo.toLowerCase(), value.scope.pr_number,
+    value.target, value.scope.run_id, value.round, value.headSha, value.reportSha256]);
+}
 function sourceSelector(source: ValidatedOccurrenceSource): OccurrenceRunSelector {
   return { scope: source.input.scope, target: source.target, round: source.round, headSha: source.head, reportSha256: source.digest };
 }
@@ -167,8 +171,10 @@ function sourceReceiptResiduals(sources: ValidatedOccurrenceSource[], proofRecei
   }
   // New conflicting inventory does not rewrite accepted transfer history, but
   // it prevents a residual-free content result until the conflict is resolved.
-  for (const transfer of out.transfers) if (rows.some(row => row.receipt.id === transfer.eventId ||
-      row.receipt.run_id === out.carrier.scope.run_id && row.receipt.sequence === transfer.sequence)) {
+  const receiptIds = new Set(rows.map(row => row.receipt.id));
+  const carrierSequences = new Set(rows.filter(row => row.receipt.run_id === out.carrier.scope.run_id)
+    .map(row => row.receipt.sequence));
+  for (const transfer of out.transfers) if (receiptIds.has(transfer.eventId) || carrierSequences.has(transfer.sequence)) {
     out.residuals.push({ reason: 'transfer-conflict', eventIds: [transfer.eventId] });
   }
 }
@@ -223,6 +229,13 @@ export function projectOccurrenceCarrier(input: CarrierProjectionInput): Occurre
     if (!included) out.ignoredSources.push(row.selector);
     return included;
   });
+  const sourceCountByRunId = new Map<string, number>();
+  const sourceRunKeys = new Set<string>();
+  for (const source of sources) {
+    const runId = source.selector.scope.run_id;
+    sourceCountByRunId.set(runId, (sourceCountByRunId.get(runId) ?? 0) + 1);
+    sourceRunKeys.add(runKey(source.selector));
+  }
   let rounds = [c.round];
   if (c.kind === 'legacy_pending') {
     if (c.round > MAX_CARRIER_PREFIX_ROUNDS) {
@@ -235,7 +248,7 @@ export function projectOccurrenceCarrier(input: CarrierProjectionInput): Occurre
     if (!runIds.length) out.residuals.push({ reason: 'round-missing', round, runIds });
     if (runIds.length > 1) out.residuals.push({ reason: 'round-conflict', round, runIds });
   }
-  for (const row of sources) if (sources.filter(s => s.selector.scope.run_id === row.selector.scope.run_id).length > 1) {
+  for (const row of sources) if (sourceCountByRunId.get(row.selector.scope.run_id)! > 1) {
     out.residuals.push({ reason: 'source-conflict', source: row.selector });
   }
   const validated = sources.map(s => inspectSource(s, out.residuals)).filter((s): s is ValidatedOccurrenceSource => !!s);
@@ -253,6 +266,7 @@ export function projectOccurrenceCarrier(input: CarrierProjectionInput): Occurre
   const accepted = acceptedTransfers(input, out);
   out.transfers = accepted.values;
   sourceReceiptResiduals(validated, accepted.receipts, out);
+  const transfersByOccurrence = new Map(out.transfers.map(transfer => [occurrenceKey(transfer.occurrence), transfer]));
   for (const source of validated) for (const member of source.members) {
     const selector = occurrence(source, member.ref);
     if (member.unresolvedReason) {
@@ -262,7 +276,7 @@ export function projectOccurrenceCarrier(input: CarrierProjectionInput): Occurre
       out.residuals.push({ reason: 'classification-ambiguous', occurrence: selector });
     }
     if (member.identity !== c.identity && member.mapping?.matched_identity !== c.identity) continue;
-    const transferred = out.transfers.find(t => occurrenceKey(t.occurrence) === occurrenceKey(selector));
+    const transferred = transfersByOccurrence.get(occurrenceKey(selector));
     const matches = transferred && sameRun(transferred.occurrence.source, selector.source) &&
       transferred.occurrence.classificationId === selector.classificationId && transferred.occurrence.correctionId === selector.correctionId &&
       transferred.occurrence.reportKey === selector.reportKey && member.identity === c.identity;
@@ -271,7 +285,7 @@ export function projectOccurrenceCarrier(input: CarrierProjectionInput): Occurre
     if (!matches) out.residuals.push({ reason: transferred ? 'transfer-source-conflict' : 'untransferred-occurrence', occurrence: selector });
     if (member.identity !== c.identity) out.residuals.push({ reason: 'source-mapping-changed', occurrence: selector });
   }
-  for (const transfer of out.transfers) if (!sources.some(s => sameRun(s.selector, transfer.occurrence.source))) {
+  for (const transfer of out.transfers) if (!sourceRunKeys.has(runKey(transfer.occurrence.source))) {
     out.residuals.push({ reason: 'source-unlisted', occurrence: transfer.occurrence });
   }
   nativeResiduals(input, sources, out);

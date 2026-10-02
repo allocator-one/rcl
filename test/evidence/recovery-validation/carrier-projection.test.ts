@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_CARRIER_INVENTORY, MAX_CARRIER_PREFIX_ROUNDS, projectOccurrenceCarrier } from '../../../src/evidence/claim-recovery/validation/carrier-projection.js';
 import { accepted, carrier, inventory, projectionFixture, roundInput } from './carrier-fixtures.js';
-import { laterSource } from './occurrence-fixtures.js';
+import { laterSource, rebind } from './occurrence-fixtures.js';
 import type { CarrierSourceInventory } from '../../../src/evidence/claim-recovery/validation/carrier-types.js';
 import { sha, uuid } from './fixtures.js';
 
@@ -244,6 +244,56 @@ describe('supplied-inventory occurrence carrier projection', () => {
     const { projection } = projectionFixture(); projection.sources = Array(MAX_CARRIER_INVENTORY + 1).fill(projection.sources[0]);
     const out = projectOccurrenceCarrier(projection);
     expect(out.coverage).toBe('residuals-present'); expect(out.residuals).toEqual([{ reason: 'inventory-limit' }]);
+  });
+
+  it('indexes a large conflict-free run inventory without changing per-round coverage', () => {
+    const { projection } = projectionFixture(true);
+    const template = structuredClone(projection.sources[0]);
+    projection.carrier.round = 250;
+    projection.sources = Array.from({ length: 500 }, (_, index) => ({
+      ...structuredClone(template),
+      selector: {
+        ...structuredClone(template.selector),
+        scope: { ...structuredClone(template.selector.scope), run_id: uuid(10_000 + index) },
+        round: index % 250 + 1,
+      },
+      reportJson: null,
+      storedRun: null,
+      classifications: [],
+      correctionIds: null,
+      corrections: null,
+    }));
+
+    const out = projectOccurrenceCarrier(projection);
+
+    expect(out.inspectedRounds).toHaveLength(250);
+    expect(out.inspectedRounds.every(round => round.runIds.length === 2)).toBe(true);
+    expect(out.residuals.filter(row => row.reason === 'run-unavailable')).toHaveLength(500);
+    expect(out.residuals.some(row => row.reason === 'source-conflict')).toBe(false);
+  });
+
+  it('matches a large reverse-ordered transfer set to each exact occurrence', () => {
+    const { input, projection } = projectionFixture();
+    const report = JSON.parse(input.split.source.reportJson);
+    const original = report.findings[0];
+    report.findings = Array.from({ length: 200 }, (_, index) => ({
+      ...structuredClone(original),
+      id: `finding-${index + 1}`,
+      identity: `raw-${index + 1}`,
+    }));
+    report.belowThresholdFindings = [];
+    rebind(input, report);
+    projection.carrier = carrier(input.split.source, input.carrierIdentity);
+    projection.sources = [inventory(input.split.source)];
+    projection.transfers = Array.from({ length: 200 }, (_, index) => accepted(input, index + 1)).reverse();
+    projection.transfers.forEach((proof, index) => { proof.receipt.sequence = 10_000 + index; });
+
+    const out = projectOccurrenceCarrier(projection);
+
+    expect(out.occurrences).toHaveLength(200);
+    expect(out.transfers).toHaveLength(200);
+    expect(out.occurrences.every(occurrence => occurrence.transferEventId !== null)).toBe(true);
+    expect(out.residuals).toEqual([]);
   });
 
   it('caps legacy numeric prefixes instead of allocating attacker-controlled round counts', () => {

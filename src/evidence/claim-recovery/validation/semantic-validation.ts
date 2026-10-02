@@ -73,12 +73,17 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
   const originalTitles = new Map<typeof sightings[number], string>();
   const sightingsByRound = new Map<number, typeof sightings>();
   const sightingsByIdentity = new Map<string, typeof sightings>();
+  const sightingsByIdentityAndRound = new Map<string, Map<number, typeof sightings>>();
   requireIntegrity(sightings.every(s => sightingSchema.safeParse(s).success));
   for (const sighting of sightings) {
     const roundMembers = sightingsByRound.get(sighting.round) ?? [];
     roundMembers.push(sighting); sightingsByRound.set(sighting.round, roundMembers);
     const identityMembers = sightingsByIdentity.get(sighting.canonicalIdentity) ?? [];
     identityMembers.push(sighting); sightingsByIdentity.set(sighting.canonicalIdentity, identityMembers);
+    const identityRounds = sightingsByIdentityAndRound.get(sighting.canonicalIdentity) ?? new Map<number, typeof sightings>();
+    const identityRoundMembers = identityRounds.get(sighting.round) ?? [];
+    identityRoundMembers.push(sighting); identityRounds.set(sighting.round, identityRoundMembers);
+    sightingsByIdentityAndRound.set(sighting.canonicalIdentity, identityRounds);
   }
   for (const anchor of recoveryAnchors(state)) {
     requireIntegrity((sightingsByIdentity.get(anchor.identity) ?? []).every(sighting =>
@@ -172,7 +177,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     requireIntegrity(isDeepStrictEqual(counts, round.counts) && isDeepStrictEqual(severities, round.severities));
   }
   requireIntegrity(sightings.every(s => rounds.has(s.round)));
-  validateSightingClassification(state, sightingsByIdentity, requireIntegrity, recoveryDismissalsByRound);
+  validateSightingClassification(state, sightingsByIdentityAndRound, requireIntegrity, recoveryDismissalsByRound);
   if (legacy) {
     // Semantic admission never replaces or removes migrated original entries.
     requireIntegrity(Object.keys(legacy.findings).every(key => Object.hasOwn(state.findings, key)));
@@ -213,27 +218,34 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       entry.firstRound === Math.min(...members.map(s => s.round)) && entry.lastRound === Math.max(...members.map(s => s.round)) &&
       members.some(s => s.round === entry.firstRound && isDeepStrictEqual(s.claimDescriptor, entry.claimDescriptor)));
     requireIntegrity(semanticCacheMatches(entry, members, originalTitles));
-    for (const round of new Set(members.map(s => s.round))) {
-      const group = members.filter(s => s.round === round);
+    const byRound = sightingsByIdentityAndRound.get(key)!;
+    let latestGatedRound: number | null = null;
+    let latestGatedRoundAfterVerdict: number | null = null;
+    for (const [round, group] of [...byRound].sort(([a], [b]) => a - b)) {
+      if (group.some(s => s.gating !== 'none')) {
+        latestGatedRound = round;
+        if (entry.verdict === undefined || !verdictClearsPending(state, key, round, entry.verdictRound!, entry.verdictSeverity)) {
+          latestGatedRoundAfterVerdict = round;
+        }
+      }
       requireIntegrity(group.every(s => s.pendingRound === group[0]!.pendingRound));
       const capturedPending = group[0]!.pendingRound;
-      requireIntegrity(capturedPending === null || members.some(s => s.round === capturedPending && s.gating !== 'none'));
+      requireIntegrity(capturedPending === null || byRound.get(capturedPending)?.some(s => s.gating !== 'none') === true);
       // A verdict is recorded after its round's sightings, so it can clear the
       // obligation carried by later sightings without rewriting that round's
       // immutable capture. A weaker verdict cannot clear a critical source.
-      const gated = members.filter(s => s.round <= round && s.gating !== 'none' &&
-        !(entry.verdict !== undefined && entry.verdictRound! < round &&
-          verdictClearsPending(state, key, s.round, entry.verdictRound!, entry.verdictSeverity))).map(s => s.round);
-      requireIntegrity(capturedPending === (gated.length ? Math.max(...gated) : null));
+      const expectedCaptured = entry.verdict !== undefined && entry.verdictRound! < round ?
+        latestGatedRoundAfterVerdict : latestGatedRound;
+      requireIntegrity(capturedPending === expectedCaptured);
     }
-    const latestPending = members.find(s => s.round === entry.lastRound)!.pendingRound;
+    const latestPending = byRound.get(entry.lastRound)![0]!.pendingRound;
     const expectedPending = latestPending !== null &&
       !(entry.verdict !== undefined && verdictClearsPending(state, key, latestPending, entry.verdictRound!, entry.verdictSeverity)) ? latestPending : undefined;
     requireIntegrity(entry.pendingRound === expectedPending);
   }
   const latest = Math.max(0, ...rounds);
   if (latest && !legacy?.rounds.some(r => r.round === latest)) {
-    requireIntegrity(isDeepStrictEqual(state.lastAnnotations, { round: latest, identities: sightings.filter(s => s.round === latest)
+    requireIntegrity(isDeepStrictEqual(state.lastAnnotations, { round: latest, identities: (sightingsByRound.get(latest) ?? [])
       .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) }));
   }
 }
@@ -249,16 +261,14 @@ function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number, Readon
 }
 
 function validateSightingClassification(state: ConvergeRunState,
-  sightingsByIdentity: ReadonlyMap<string, NonNullable<ConvergeRunState['sightings']>>,
+  sightingsByIdentityAndRound: ReadonlyMap<string, ReadonlyMap<number, NonNullable<ConvergeRunState['sightings']>>>,
   requireIntegrity: (valid: boolean) => void, recoveryDismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>): void {
   if (state.version === 1) return;
   const anchored = new Set(state.version === 3 ? recoveryAnchors(state).map(anchor => anchor.identity) : []);
   for (const [key, entry] of Object.entries(state.findings)) {
     if (entry.claimDescriptor === undefined) continue;
-    const byRound = new Map<number, NonNullable<ConvergeRunState['sightings']>>();
-    for (const sighting of sightingsByIdentity.get(key) ?? []) {
-      byRound.set(sighting.round, [...(byRound.get(sighting.round) ?? []), sighting]);
-    }
+    const byRound = sightingsByIdentityAndRound.get(key) ??
+      new Map<number, NonNullable<ConvergeRunState['sightings']>>();
     if (byRound.size === 0) continue;
     const firstRound = Math.min(...byRound.keys());
     for (const [round, group] of byRound) {
