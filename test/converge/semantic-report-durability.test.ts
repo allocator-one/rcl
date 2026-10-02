@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, truncate, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -42,7 +42,8 @@ vi.mock('node:fs/promises', async importOriginal => {
   } };
 });
 
-import { retainReportEvidence } from '../../src/converge/semantic-state.js';
+import { retainReportEvidence, verifyRoundBinding } from '../../src/converge/semantic-state.js';
+import { MAX_REPORT_BYTES } from '../../src/telemetry/recovery/files.js';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -110,7 +111,21 @@ it('reuses an exact read-only retained report without another file flush', async
   expect(trace.filter(entry => entry.startsWith(`file:${sourcePath}.`))).toHaveLength(firstFileSyncs);
   const finalReads = opens.filter(entry => entry.path === sourcePath && typeof entry.flags === 'number');
   expect(finalReads.length).toBeGreaterThan(0);
-  expect(finalReads.every(entry => ((entry.flags as number) & constants.O_ACCMODE) === constants.O_RDONLY)).toBe(true);
+  expect(finalReads.every(entry => ((entry.flags as number) & (constants.O_WRONLY | constants.O_RDWR)) === constants.O_RDONLY)).toBe(true);
+});
+
+it('bounds immutable report verification before decoding retained bytes', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'semantic-report-bound-'))); roots.push(root);
+  const raw = '{"run":{"id":"00000000-0000-7000-8000-000000000001"},"findings":[]}';
+  const digest = createHash('sha256').update(raw).digest('hex');
+  const sourcePath = join(root, 'rcl-converge-runs', `target.evidence/${digest}.json`);
+  const binding = { runId: '00000000-0000-7000-8000-000000000001', target: 'target', round: 1,
+    reportSha256: digest, sourcePath };
+  await retainReportEvidence(raw, binding);
+  await chmod(sourcePath, 0o600);
+  await truncate(sourcePath, MAX_REPORT_BYTES + 1);
+  await expect(verifyRoundBinding(binding, 'target', 1, binding.runId))
+    .rejects.toThrow('Original bound report bytes unavailable');
 });
 
 it('flushes report bytes and their directory entry before native state may reference them', async () => {

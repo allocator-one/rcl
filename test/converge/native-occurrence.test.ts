@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
 import { correctionAnchor } from '../../src/converge/correction-anchors.js';
@@ -24,7 +24,7 @@ vi.mock('node:fs/promises', async importOriginal => {
     const path = String(args[0]);
     if (retentionFault.collideTemp && path.includes('.retain-tmp')) { retentionFault.collideTemp = false; await real.writeFile(path, 'foreign temp bytes', { flag: 'wx', mode: 0o600 }); }
     const handle = await real.open(...args);
-    if (retentionFault.rejectReadOnlySync && path.includes('.recovery-sources/') &&
+    if (retentionFault.rejectReadOnlySync && path.includes(`.recovery-sources${sep}`) &&
       typeof args[1] === 'number' && (args[1] & 3) === 0) {
       return new Proxy(handle, { get(target, property) {
         if (property === 'sync') return async () => {
@@ -35,7 +35,7 @@ vi.mock('node:fs/promises', async importOriginal => {
         return typeof value === 'function' ? value.bind(target) : value;
       } });
     }
-    if (!retentionFault.failNextSnapshotWrite || !path.includes('.recovery-sources/')) return handle;
+    if (!retentionFault.failNextSnapshotWrite || !path.includes(`.recovery-sources${sep}`)) return handle;
     retentionFault.failNextSnapshotWrite = false;
     return new Proxy(handle, { get(target, property) {
       if (property === 'writeFile') return async (data: string, ...rest: unknown[]) => {

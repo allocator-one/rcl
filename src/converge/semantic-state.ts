@@ -14,7 +14,7 @@ import { recoveryProjectionFreshness } from '../evidence/claim-recovery/validati
 import { semanticCacheMatches } from '../evidence/claim-recovery/validation/semantic-cache.js';
 import { migratedLegacyPendingRound } from '../evidence/claim-recovery/validation/obligations.js';
 import { syncNativeDirectory } from './native-lock.js';
-import { readStable } from '../telemetry/recovery/files.js';
+import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 
 export { migratedLegacyPendingRound };
 import { z } from 'zod';
@@ -141,7 +141,10 @@ export async function retainReportEvidence(raw: string, binding: ReportBinding):
 }
 export async function verifyRoundBinding(binding: ReportBinding, target: string, round: number, runId: string): Promise<ReviewResult> {
   let bytes: Buffer;
-  try { bytes = await readFile(binding.sourcePath); }
+  try {
+    bytes = (await readStable(binding.sourcePath, MAX_REPORT_BYTES,
+      { allowMissingSafeFlagsOnWindows: true })).raw;
+  }
   catch { throw new ConvergeRunStateError('Original bound report bytes unavailable; refusing verdict mutation.'); }
   let report: ReviewResult;
   try { report = decodeBoundReport(bytes.toString()); }

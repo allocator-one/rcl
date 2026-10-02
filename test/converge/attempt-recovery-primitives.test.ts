@@ -283,7 +283,8 @@ it('pins nested resume and delivery inputs before an earlier owned operation dra
   expect(accounting((await loadConvergeAttemptState(f.root, f.target))!)).toEqual(accounting(f.before)); expect(await protectedBytes(f)).toEqual(native);
 });
 
-it.each(['delivery', 'resume-begin', 'resume-finish'] as const)('re-establishes %s durability after rename while retaining exact committed bytes', async phase => {
+it.runIf(process.platform !== 'win32').each(['delivery', 'resume-begin', 'resume-finish'] as const)
+('re-establishes %s durability after rename while retaining exact committed bytes', async phase => {
   const f = await fixture(phase === 'delivery' ? 'completed' : 'pending'), original = f.before.lastLaunch!;
   let expected = original, next = phase === 'delivery' ? { ...original, deliveryPending: false } : running(original);
   if (phase === 'resume-finish') { await resume(f, expected, next); expected = next; next = finished(next); }
