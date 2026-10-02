@@ -210,10 +210,13 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       requireIntegrity(group.every(s => s.pendingRound === group[0]!.pendingRound));
       const capturedPending = group[0]!.pendingRound;
       requireIntegrity(capturedPending === null || members.some(s => s.round === capturedPending && s.gating !== 'none'));
-      if (entry.verdict === undefined) {
-        const gated = members.filter(s => s.round <= round && s.gating !== 'none').map(s => s.round);
-        requireIntegrity(capturedPending === (gated.length ? Math.max(...gated) : null));
-      }
+      // A verdict is recorded after its round's sightings, so it can clear the
+      // obligation carried by later sightings without rewriting that round's
+      // immutable capture. A weaker verdict cannot clear a critical source.
+      const gated = members.filter(s => s.round <= round && s.gating !== 'none' &&
+        !(entry.verdict !== undefined && entry.verdictRound! < round &&
+          verdictClearsPending(state, key, s.round, entry.verdictRound!, entry.verdictSeverity))).map(s => s.round);
+      requireIntegrity(capturedPending === (gated.length ? Math.max(...gated) : null));
     }
     const latestPending = members.find(s => s.round === entry.lastRound)!.pendingRound;
     const expectedPending = latestPending !== null &&

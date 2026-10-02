@@ -11,7 +11,7 @@ import { fixture, preserved } from './recovery-validation/occurrence-fixtures.js
 import { sha, uuid } from './recovery-validation/fixtures.js';
 
 const floor = '2026-09-22T13:00:00.123456Z';
-async function evidence(change?: (report: any, stored: any, classification: any) => void, preserve = false) {
+async function evidence(change?: (report: any, stored: any, classification: any, corrections: any[]) => void, preserve = false) {
   const f = preserve ? preserved() : fixture();
   const p = f.disposition;
   const receipt = { ...p.sourceContext.scope, ...prepareClaimDisposition(p).event, actor_user_id: p.actorUserId,
@@ -35,11 +35,16 @@ async function evidence(change?: (report: any, stored: any, classification: any)
     kind: 'round_processed', converge_target: p.sourceContext.target, round: 2, attempt: 3, sequence: 1,
     occurred_at: '2026-09-22T14:02:00.000000Z', received_at: '2026-09-22T14:02:00.000000Z',
     payload: { classification_version: 1, report_json_sha256: sha(JSON.stringify(report)), identities: [] } } as any;
+  const corrections: any[] = [];
   const originalReport = JSON.stringify(report);
-  change?.(report, stored, classification);
+  change?.(report, stored, classification, corrections);
   if (JSON.stringify(report) !== originalReport) Object.assign(stored, makeStored());
   const raw = JSON.stringify(report);
   classification.payload.report_json_sha256 = sha(raw);
+  for (const row of classification.payload.identities) {
+    if (Object.hasOwn(row, 'report_json_sha256')) row.report_json_sha256 = sha(raw);
+  }
+  for (const correction of corrections) correction.payload.report_json_sha256 = sha(raw);
   classification.round = report.run.converge.round;
   classification.attempt = report.run.converge.attempt;
   const scope = p.sourceContext.scope;
@@ -55,12 +60,13 @@ async function evidence(change?: (report: any, stored: any, classification: any)
       if (url.pathname === '/api/v1/reviews/runs') return Response.json({ data: [{ id: report.run.id,
         target: stored.target, converge: stored.converge }], meta: { org_id: scope.org_id,
         evidence_protocol_version: 2, page: 1, page_size: 100, total: 1, total_pages: 1 } });
-      if (url.pathname.endsWith('/events')) return Response.json({ data: (candidate ? [classification] : sourceReceipts)
+      if (url.pathname.endsWith('/events')) return Response.json({ data: (candidate ? [classification, ...corrections] : sourceReceipts)
         .filter(row => url.searchParams.get('ids')!.split(',').includes(row.id)), meta: { org_id: scope.org_id,
         run_id: candidate ? report.run.id : scope.run_id, claim_recovery_version: 1 } });
       return Response.json({ data: candidate ? stored : p.split.source.storedRun,
         meta: { org_id: scope.org_id, actor_user_id: p.actorUserId, claim_recovery_version: 1, evidence_protocol_version: 2,
-          recovery: { truncated: false, event_sequence: candidate ? 1 : 4, native_corrections: [],
+          recovery: { truncated: false, event_sequence: candidate ? 1 + corrections.length : 4,
+            native_corrections: candidate ? corrections.map(row => ({ id: row.id, sequence: row.sequence })) : [],
             classification_event: candidate ? { id: classification.id, sequence: 1, round: classification.round } : null } } });
     } });
   const verified = await verifyAuthenticatedSelectedReceipts(sink, p.actorUserId, [{ selection: p.sourceContext,
@@ -161,6 +167,31 @@ describe('recovery confirmation evidence', () => {
     if (result.kind !== 'eligible') throw new Error(JSON.stringify(result));
     expect(recoveryConfirmationContent(result.value)).toMatchObject({ claimStanding: 'not-evaluated',
       sightings: [{ findingRef: 'f001', severity: 'critical', gating: 'critical', status: 'regating', pendingRound: 2 }] });
+  });
+
+  it('retains a sighting that was mapped to the claim before an authenticated correction', async () => {
+    const original = fixture().disposition;
+    const f = await evidence((report, _stored, classification, corrections) => {
+      const finding = sampleFinding({ identity: 'candidate-report-key', claimDescriptor: original.split.selection.descriptor,
+        severity: 'critical', gating: { reason: 'critical' } });
+      report.findings = [finding];
+      classification.payload.identities = [{ version: 1, identity_key: finding.identity,
+        matched_identity: original.split.selection.identity, status: 'regating', finding_ref: 'f001',
+        report_json_sha256: '', claim_descriptor: finding.claimDescriptor,
+        match_rationale: 'exact_descriptor', pending_round: 2 }];
+      corrections.push({ ...classification, id: uuid(903), kind: 'finding_identity_corrected', sequence: 2,
+        occurred_at: '2026-09-22T14:02:01.000000Z', received_at: '2026-09-22T14:02:01.000000Z',
+        payload: { org_id: original.sourceContext.scope.org_id, repo: original.sourceContext.scope.repo,
+          pr_number: original.sourceContext.scope.pr_number, head_sha: report.run.target.head_sha,
+          report_json_sha256: '', finding_ref: 'f001', identity_key: finding.identity,
+          matched_identity: 'ffffffffffffffff' } });
+    });
+    const result = qualifyRecoveryConfirmation(f.proof, f.inventory, f.receipts);
+    expect(result.kind).toBe('eligible');
+    if (result.kind !== 'eligible') throw new Error(JSON.stringify(result));
+    expect(recoveryConfirmationContent(result.value).sightings).toEqual([
+      { findingRef: 'f001', severity: 'critical', gating: 'critical', status: 'regating', pendingRound: 2 },
+    ]);
   });
 
   it('rejects serialized inventory and receipt tokens as unauthenticated inputs', async () => {

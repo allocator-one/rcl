@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
-import { validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
-import { legacyFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
+import { effectivePendingIdentities, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
+import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
 
 it('validates v1 content without assigning a descriptor, sighting or migration', () => {
   const f = legacyFixture(); const input = f.input(); const before = structuredClone(input);
@@ -109,6 +109,56 @@ it('retains a critical pending source despite an earlier important verdict', () 
   expect(validateRetainedNativeEvidence(input).actionableIdentities).toEqual([f.key]);
   delete state.findings[f.key].pendingRound; input.sourceJson = JSON.stringify(state);
   expect(() => validateRetainedNativeEvidence(input)).toThrow();
+
+  const later = structuredClone(report); later.run.id = uuid(3); later.run.converge.round = 3;
+  later.findings[0]!.identity = `report:${uuid(3)}:ungated-repeat`;
+  later.findings[0]!.gating.reason = 'none';
+  const laterJson = JSON.stringify(later); const laterDigest = sha(laterJson);
+  const laterBinding = { runId: uuid(3), target, round: 3, reportSha256: laterDigest,
+    sourcePath: `/synthetic/native.evidence/${laterDigest}.json` };
+  state.rounds.push({ round: 3, runId: uuid(3), reportBinding: laterBinding,
+    counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [f.key]: 'critical' } });
+  state.sightings.push({ ...state.sightings[0], runId: uuid(3), round: 3, reportSha256: laterDigest,
+    reportKey: later.findings[0]!.identity, severity: 'critical', gating: 'none', status: 'repeat', pendingRound: null });
+  state.findings[f.key].lastRound = 3;
+  state.lastAnnotations = { round: 3, identities: [{ identity: f.key, status: 'repeat', gating: 'none' }] };
+  input.reports = [f.reportJson, reportJson, laterJson]; input.sourceJson = JSON.stringify(state);
+  expect(() => validateRetainedNativeEvidence(input)).toThrow('native_recovery_content_invalid');
+});
+
+it('accepts a later nongating sighting after a verdict clears the earlier obligation', () => {
+  const f = semanticFixture(); const state = structuredClone(f.state) as any;
+  Object.assign(state.findings[f.key], {
+    verdict: 'fixed', verdictRound: 1, verdictSeverity: 'important', verdictReason: 'Fixed on the reviewed head.',
+  });
+  delete state.findings[f.key].pendingRound;
+  const report = structuredClone(f.report); report.run.id = uuid(4); report.run.converge.round = 2;
+  report.findings[0]!.identity = `report:${uuid(4)}:nongating-repeat`;
+  report.findings[0]!.gating.reason = 'none';
+  const reportJson = JSON.stringify(report); const digest = sha(reportJson);
+  const binding = { runId: uuid(4), target, round: 2, reportSha256: digest,
+    sourcePath: `/synthetic/native.evidence/${digest}.json` };
+  state.rounds.push({ round: 2, runId: uuid(4), reportBinding: binding,
+    counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [f.key]: 'important' } });
+  state.sightings.push({ ...state.sightings[0], runId: uuid(4), round: 2, reportSha256: digest,
+    reportKey: report.findings[0]!.identity, gating: 'none', status: 'repeat', pendingRound: null });
+  state.findings[f.key].lastRound = 2;
+  state.lastAnnotations = { round: 2, identities: [{ identity: f.key, status: 'repeat', gating: 'none' }] };
+  expect(validateRetainedNativeEvidence({ sourceJson: JSON.stringify(state), target,
+    reports: [f.reportJson, reportJson] }).actionableIdentities).toEqual([]);
+});
+
+it('retains pending identities from every recovery operation when no current projection applies', () => {
+  const f = recoveredFixture(); const state = structuredClone(f.state) as any;
+  state.recovery.operations[0].material = {
+    version: 1, rootSha256: 'a'.repeat(64), sha256s: ['a'.repeat(64)],
+    pendingIdentities: ['1111111111111111'],
+  };
+  state.recovery.operations.push({
+    operationId: uuid(99), sourceVersion: 3, sourceSha256: sha(JSON.stringify(state)), anchors: [], sourceReceipts: [],
+    material: { version: 1, rootSha256: 'b'.repeat(64), sha256s: ['b'.repeat(64)], pendingIdentities: [] },
+  });
+  expect(effectivePendingIdentities(state)).toContain('1111111111111111');
 });
 
 it('keeps unresolved legacy claims typed separately from producer descriptors and recorded pending rounds', () => {

@@ -153,7 +153,7 @@ export function replayEligibleConfirmationCandidate(context:OccurrenceContext,cl
     return structuredClone({ actorUserId: candidates.actorUserId, claimIdentity: claimIdentity,
       assertion, source, sourceEventSequence: candidates.runSequences.find(r => r.runId === selection.scope.run_id)!.eventSequence,
       health: { blocking: blocking.length, successful, required }, claimStanding: 'not-evaluated' as const,
-      sightings: bound.members.filter(m => m.identity === claimIdentity).map(m => ({ findingRef: m.ref,
+      sightings: bound.members.filter(m => m.identity === claimIdentity || m.mapping?.matched_identity === claimIdentity).map(m => ({ findingRef: m.ref,
         severity: m.severity, gating: m.gating, status: m.mapping!.status as string, pendingRound: m.mapping!.pending_round as number | null })),
       receiptCutoff: receiptCutoff ?? null });
   } catch { return null; }

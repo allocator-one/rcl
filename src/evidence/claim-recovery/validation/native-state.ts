@@ -250,8 +250,10 @@ export function effectivePendingIdentities(state: ConvergeRunState): string[] {
   if(current && current.nativeFingerprint===nativeProjectionFingerprint(state))return [...current.actionableIdentities];
   const pending = Object.values(state.findings).filter(entry => entry.pendingRound !== undefined ||
     state.version === 3 && entry.claimDescriptor === undefined && migratedLegacyPendingRound(entry, state) !== undefined).map(entry => entry.key);
-  const occurrences = state.recovery?.operations.flatMap(operation => operation.occurrences ? [operation.occurrences] : []).at(-1);
-  return [...new Set([...pending, ...occurrencePendingIdentities(occurrences), ...(state.recovery?.operations.at(-1)?.material?.pendingIdentities ?? []),
+  const operations = state.recovery?.operations ?? [];
+  const occurrencePending = operations.flatMap(operation => occurrencePendingIdentities(operation.occurrences));
+  const materialPending = operations.flatMap(operation => operation.material?.pendingIdentities ?? []);
+  return [...new Set([...pending, ...occurrencePending, ...materialPending,
     ...recoveryAnchors(state).filter(anchor => anchor.source.gating !== 'none').map(anchor => anchor.identity)])].sort();
 }
 function ancestorsOf(source: ConvergeRunState, snapshots: Map<string, string>): string[] {
