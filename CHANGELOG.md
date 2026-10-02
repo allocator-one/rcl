@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 4.4.17 - 2026-10-02
+
+- Add an authenticated `--finalize-pending-only` operation for ordinary
+  dead-owner pending launches. Preview validates the exact package, state, cap,
+  cycle, owner and retained-async bindings without writes; apply finalizes only
+  the named attempt as failed/unknown, preserves the attempt ledger and cap,
+  archives evidence idempotently, and never claims or dispatches a successor.
+  Receipt snapshots support safe readback after later monotonic successors and
+  recovery across interrupted archive/state writes (RCL-165).
+- Synchronize the late-verifier lifecycle regression with durable launch,
+  provider-invocation and request-abort boundaries instead of a fixed one-second
+  observer, keeping product deadlines and runtime behavior unchanged (RCL-164).
+
 ## 4.4.16 - 2026-10-02
 
 - Validate authenticated recovery claim splits against exact report bytes,
