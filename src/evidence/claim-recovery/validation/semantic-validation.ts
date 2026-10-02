@@ -71,9 +71,17 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
   requireIntegrity(Array.isArray(state.sightings));
   const sightings = state.sightings!;
   const originalTitles = new Map<typeof sightings[number], string>();
+  const sightingsByRound = new Map<number, typeof sightings>();
+  const sightingsByIdentity = new Map<string, typeof sightings>();
   requireIntegrity(sightings.every(s => sightingSchema.safeParse(s).success));
+  for (const sighting of sightings) {
+    const roundMembers = sightingsByRound.get(sighting.round) ?? [];
+    roundMembers.push(sighting); sightingsByRound.set(sighting.round, roundMembers);
+    const identityMembers = sightingsByIdentity.get(sighting.canonicalIdentity) ?? [];
+    identityMembers.push(sighting); sightingsByIdentity.set(sighting.canonicalIdentity, identityMembers);
+  }
   for (const anchor of recoveryAnchors(state)) {
-    requireIntegrity(sightings.filter(sighting => sighting.canonicalIdentity === anchor.identity).every(sighting =>
+    requireIntegrity((sightingsByIdentity.get(anchor.identity) ?? []).every(sighting =>
       sighting.file === anchor.source.file && sighting.category === anchor.source.category &&
       compareClaims(sighting.claimDescriptor, anchor.descriptor) !== undefined));
   }
@@ -104,7 +112,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
   for (const round of state.rounds) {
     requireIntegrity(!!round && Number.isSafeInteger(round.round) && round.round > 0 && !rounds.has(round.round));
     rounds.add(round.round);
-    const members = sightings.filter(s => s.round === round.round);
+    const members = sightingsByRound.get(round.round) ?? [];
     if (legacy?.rounds.some(r => r.round === round.round)) {
       // Migrated legacy rounds deliberately have no semantic sightings. Their
       // exact snapshot is the boundary, not an invented descriptor or ref.
@@ -164,7 +172,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     requireIntegrity(isDeepStrictEqual(counts, round.counts) && isDeepStrictEqual(severities, round.severities));
   }
   requireIntegrity(sightings.every(s => rounds.has(s.round)));
-  validateSightingClassification(state, sightings, requireIntegrity, recoveryDismissalsByRound);
+  validateSightingClassification(state, sightingsByIdentity, requireIntegrity, recoveryDismissalsByRound);
   if (legacy) {
     // Semantic admission never replaces or removes migrated original entries.
     requireIntegrity(Object.keys(legacy.findings).every(key => Object.hasOwn(state.findings, key)));
@@ -200,7 +208,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       requireIntegrity(entry.pendingRound === expectedPending);
       continue;
     }
-    const members = sightings.filter(s => s.canonicalIdentity === key);
+    const members = sightingsByIdentity.get(key) ?? [];
     requireIntegrity(members.length > 0 && claimDescriptorSchema.safeParse(entry.claimDescriptor).success &&
       entry.firstRound === Math.min(...members.map(s => s.round)) && entry.lastRound === Math.max(...members.map(s => s.round)) &&
       members.some(s => s.round === entry.firstRound && isDeepStrictEqual(s.claimDescriptor, entry.claimDescriptor)));
@@ -240,19 +248,14 @@ function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number, Readon
   return selected ?? new Map();
 }
 
-function validateSightingClassification(state: ConvergeRunState, sightings: NonNullable<ConvergeRunState['sightings']>,
+function validateSightingClassification(state: ConvergeRunState,
+  sightingsByIdentity: ReadonlyMap<string, NonNullable<ConvergeRunState['sightings']>>,
   requireIntegrity: (valid: boolean) => void, recoveryDismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>): void {
   if (state.version === 1) return;
   const anchored = new Set(state.version === 3 ? recoveryAnchors(state).map(anchor => anchor.identity) : []);
-  const sightingsByIdentity = new Map<string, typeof sightings>();
-  for (const sighting of sightings) {
-    const rows = sightingsByIdentity.get(sighting.canonicalIdentity) ?? [];
-    rows.push(sighting);
-    sightingsByIdentity.set(sighting.canonicalIdentity, rows);
-  }
   for (const [key, entry] of Object.entries(state.findings)) {
     if (entry.claimDescriptor === undefined) continue;
-    const byRound = new Map<number, typeof sightings>();
+    const byRound = new Map<number, NonNullable<ConvergeRunState['sightings']>>();
     for (const sighting of sightingsByIdentity.get(key) ?? []) {
       byRound.set(sighting.round, [...(byRound.get(sighting.round) ?? []), sighting]);
     }

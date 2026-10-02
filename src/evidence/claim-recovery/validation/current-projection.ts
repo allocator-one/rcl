@@ -90,7 +90,9 @@ function latestDecision(receipts: StoredEventReceipt[]): { latest?: StoredEventR
 }
 interface PendingMarker { source: ValidatedOccurrenceSource; member: OccurrenceMember }
 function subjects(members: OccurrenceMember[]): string[] {
-  return [...new Set(members.map(m => stableStringify({ file: m.raw.file,category: m.raw.category,descriptor: m.raw.claimDescriptor })))].sort();
+  // Keep multiplicity: two separately bound occurrences with the same descriptor
+  // remain two obligations until both appear in the carried proof.
+  return members.map(m => stableStringify({ file: m.raw.file,category: m.raw.category,descriptor: m.raw.claimDescriptor })).sort();
 }
 
 /** Carried pending rounds need their original bound obligation, not just a
