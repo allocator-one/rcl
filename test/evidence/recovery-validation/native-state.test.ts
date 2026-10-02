@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { effectivePendingIdentities, recoveredDismissalsByRound, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
 import { packNativeMaterial } from '../../../src/evidence/claim-recovery/validation/native-material.js';
 import { deriveNativeOccurrenceEvidence } from '../../../src/evidence/claim-recovery/validation/native-occurrences.js';
-import { recoveredDismissalsBefore } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
+import { createRecoveredDismissalLookup, recoveredDismissalsBefore } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
 import { setup } from '../parent-r9-projection-fixture.js';
 import { laterSource } from './occurrence-fixtures.js';
@@ -22,6 +22,34 @@ it('retains recovered dismissals from every preceding source round', () => {
     ['first-identity', 'minor'],
     ['shared-identity', 'important'],
   ]));
+});
+
+it('reuses recovered dismissal projections for repeated reverse-ordered rounds', () => {
+  class CountingMap extends Map<number, ReadonlyMap<string, string>> {
+    iterations = 0;
+
+    override [Symbol.iterator](): MapIterator<[number, ReadonlyMap<string, string>]> {
+      this.iterations += 1;
+      return super[Symbol.iterator]();
+    }
+  }
+  const dismissals = new CountingMap([
+    [2, new Map([['second-identity', 'critical']])],
+    [1, new Map([['first-identity', 'important']])],
+  ]);
+  const lookup = createRecoveredDismissalLookup(dismissals);
+
+  expect(lookup(3)).toEqual(new Map([
+    ['first-identity', 'important'],
+    ['second-identity', 'critical'],
+  ]));
+  expect(lookup(2)).toEqual(new Map([['first-identity', 'important']]));
+  expect(lookup(3)).toEqual(new Map([
+    ['first-identity', 'important'],
+    ['second-identity', 'critical'],
+  ]));
+  expect(lookup(2)).toEqual(new Map([['first-identity', 'important']]));
+  expect(dismissals.iterations).toBe(2);
 });
 
 it('validates v1 content without assigning a descriptor, sighting or migration', () => {

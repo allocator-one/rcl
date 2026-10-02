@@ -261,11 +261,26 @@ export function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number,
   return selected;
 }
 
+/** @internal Cache retained-history projections shared by identity groups in the same round. */
+export function createRecoveredDismissalLookup(
+  dismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>,
+): (round: number) => ReadonlyMap<string, string> {
+  const cache = new Map<number, ReadonlyMap<string, string>>();
+  return round => {
+    const cached = cache.get(round);
+    if (cached !== undefined) return cached;
+    const selected = recoveredDismissalsBefore(dismissalsByRound, round);
+    cache.set(round, selected);
+    return selected;
+  };
+}
+
 function validateSightingClassification(state: ConvergeRunState,
   sightingsByIdentityAndRound: ReadonlyMap<string, ReadonlyMap<number, NonNullable<ConvergeRunState['sightings']>>>,
   requireIntegrity: (valid: boolean) => void, recoveryDismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>): void {
   if (state.version === 1) return;
   const anchored = new Set(state.version === 3 ? recoveryAnchors(state).map(anchor => anchor.identity) : []);
+  const recoveryDismissalsForRound = createRecoveredDismissalLookup(recoveryDismissalsByRound);
   for (const [key, entry] of Object.entries(state.findings)) {
     if (entry.claimDescriptor === undefined) continue;
     const byRound = sightingsByIdentityAndRound.get(key) ??
@@ -274,7 +289,7 @@ function validateSightingClassification(state: ConvergeRunState,
     const firstRound = Math.min(...byRound.keys());
     for (const [round, group] of byRound) {
       const ordinaryVerdict = (entry.verdictRound ?? Infinity) < round;
-      const recoveryDismissals = recoveredDismissalsBefore(recoveryDismissalsByRound, round);
+      const recoveryDismissals = recoveryDismissalsForRound(round);
       const recoveredEscalation = !ordinaryVerdict && group.some(row => row.severity === 'critical') &&
         recoveryDismissals.has(key) && recoveryDismissals.get(key) !== 'critical';
       const expectedStatus = state.version === 2 ? round === firstRound ? 'new' : undefined
