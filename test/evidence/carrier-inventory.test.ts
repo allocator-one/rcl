@@ -3,6 +3,7 @@ import { readCarrierInventory, carrierInventoryContent } from '../../src/evidenc
 import { HarnessSink } from '../../src/telemetry/sink.js';
 import { projectionFixture } from './recovery-validation/carrier-fixtures.js';
 import { sha, uuid } from './recovery-validation/fixtures.js';
+import { projectOccurrenceCarrier } from '../../src/evidence/claim-recovery/validation/carrier-projection.js';
 
 function fixture(legacy = true) {
   const { projection } = projectionFixture(legacy);
@@ -89,6 +90,7 @@ describe('authenticated carrier inventory', () => {
     expect(content.inventory.inventoryStatus).toBe('complete');
     expect(f.calls.filter(p => p.startsWith('/api/v1/reviews/runs?'))).toHaveLength(2);
     expect(f.calls.filter(p => p.endsWith('/artifacts/report_json'))).toHaveLength(3);
+    expect(projectOccurrenceCarrier({ ...f.projection, ...content.inventory }).residuals.some(r => r.reason === 'untransferred-occurrence')).toBe(true);
   });
 
   it('does not authenticate a serialized or forged result and protects accepted content from caller mutation', async () => {
@@ -98,10 +100,12 @@ describe('authenticated carrier inventory', () => {
     expect(carrierInventoryContent(result.value).inventory.sources).toHaveLength(1);
   });
 
-  it('retains a missing round in the source inventory without inventing an empty source', async () => {
+  it('retains missing rounds as explicit residuals rather than inferring an empty round', async () => {
     const f = fixture(); f.sources.splice(1, 1);
     const result = await read(f); if (result.kind !== 'ok') throw new Error(JSON.stringify(result));
     expect(carrierInventoryContent(result.value).inventory.sources.map(source => source.selector.round).sort()).toEqual([1, 3]);
+    expect(projectOccurrenceCarrier({ ...f.projection, ...carrierInventoryContent(result.value).inventory }).residuals)
+      .toContainEqual({ reason: 'round-missing', round: 2, runIds: [] });
   });
 
   it('keeps conflicting same-round runs in the inventory', async () => {
@@ -117,6 +121,8 @@ describe('authenticated carrier inventory', () => {
     expect(carrierInventoryContent(result.value).inventory.sources).toHaveLength(4);
     expect(carrierInventoryContent(result.value).inventory.sources.filter(source => source.selector.round === 1)
       .map(source => source.selector.scope.run_id).sort()).toEqual([f.sources[0]!.selector.scope.run_id, uuid(950)].sort());
+    expect(projectOccurrenceCarrier({ ...f.projection, ...carrierInventoryContent(result.value).inventory }).residuals)
+      .toContainEqual({ reason: 'round-conflict', round: 1, runIds: [f.sources[0]!.selector.scope.run_id, uuid(950)].sort() });
   });
 
   it.each(['actor', 'sequence', 'classification', 'run-set'])('refuses %s drift across the read window', async kind => {
@@ -194,6 +200,8 @@ describe('authenticated carrier inventory', () => {
     const content = carrierInventoryContent(result.value);
     expect(content.inventory.sources[0]!.reportJson).toBeNull();
     expect(content.inventory.sources[0]!.classifications).toEqual([]);
+    const reasons = projectOccurrenceCarrier({ ...f.projection, ...content.inventory }).residuals.map(r => r.reason);
+    expect(reasons).toContain('artifact-unavailable'); expect(reasons).toContain('classification-unavailable');
   });
 
   it('uses every stable list page and excludes explicit other targets without losing the selected source', async () => {
