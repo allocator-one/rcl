@@ -193,10 +193,10 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
   const identities = new Set<string>(); const members = new Set<string>(); const eventIds = new Set<string>();
   const destination = input.anchors[0]?.destination;
   const prior = recoveryAnchors(source);
+  requireSource(validateAnchorIdentityBatch(prior, input.anchors, source.findings));
   requireSource(source.version !== 3 || source.recovery!.operations.every(operation => operation.operationId !== input.operationId));
   for (const anchor of input.anchors) {
-    requireSource(object(anchor) && anchor.operationId === input.operationId && identity(anchor.identity) &&
-      !Object.hasOwn(source.findings, anchor.identity) && !prior.some(existing => existing.identity === anchor.identity) && !identities.has(anchor.identity));
+    requireSource(object(anchor) && anchor.operationId === input.operationId && identity(anchor.identity));
     identities.add(anchor.identity);
     requireSource(['base_url', 'org_id', 'repo', 'pr_number'].every(field =>
       anchor.destination[field as keyof typeof destination] === destination![field as keyof NonNullable<typeof destination>]));
@@ -219,6 +219,19 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
     requireSource(!members.has(member)); members.add(member);
   }
   requireSource(usedReports.size === reports.size && usedReceipts.size === receipts.size);
+}
+
+/** @internal Validate one new identity batch against retained anchors in linear time. */
+export function validateAnchorIdentityBatch(prior: readonly Pick<NativeCorrectionAnchor, 'identity'>[],
+  anchors: readonly Pick<NativeCorrectionAnchor, 'identity'>[], findings: Readonly<Record<string, unknown>>): boolean {
+  const priorIdentities = new Set(prior.map(anchor => anchor.identity));
+  const identities = new Set<string>();
+  for (const anchor of anchors) {
+    if (!identity(anchor.identity) || Object.hasOwn(findings, anchor.identity) ||
+        priorIdentities.has(anchor.identity) || identities.has(anchor.identity)) return false;
+    identities.add(anchor.identity);
+  }
+  return true;
 }
 
 /** @internal Pure retained-material projection used by validation regressions. */

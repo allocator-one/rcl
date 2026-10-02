@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { effectivePendingIdentities, recoveredDismissalsByRound, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
+import { effectivePendingIdentities, recoveredDismissalsByRound, validateAnchorIdentityBatch, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
 import { packNativeMaterial } from '../../../src/evidence/claim-recovery/validation/native-material.js';
 import { deriveNativeOccurrenceEvidence } from '../../../src/evidence/claim-recovery/validation/native-occurrences.js';
 import { createRecoveredDismissalLookup, recoveredDismissalsBefore } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
@@ -50,6 +50,23 @@ it('reuses recovered dismissal projections for repeated reverse-ordered rounds',
   ]));
   expect(lookup(2)).toEqual(new Map([['first-identity', 'important']]));
   expect(dismissals.iterations).toBe(2);
+});
+
+it('validates a new anchor batch without rescanning prior identities', () => {
+  let reads = 0;
+  const prior = Array.from({ length: 2_000 }, (_, index) => ({
+    get identity() { reads += 1; return index.toString(16).padStart(16, '0'); },
+  }));
+  const anchors = Array.from({ length: 2_000 }, (_, index) => ({
+    identity: (index + 2_000).toString(16).padStart(16, '0'),
+  }));
+
+  expect(validateAnchorIdentityBatch(prior, anchors, {})).toBe(true);
+
+  expect(reads).toBe(2_000);
+  expect(validateAnchorIdentityBatch(prior, [anchors[0]!, anchors[0]!], {})).toBe(false);
+  expect(validateAnchorIdentityBatch(prior, [{ identity: prior[0]!.identity }], {})).toBe(false);
+  expect(validateAnchorIdentityBatch(prior, [{ identity: 'ffffffffffffffff' }], { ffffffffffffffff: {} })).toBe(false);
 });
 
 it('validates v1 content without assigning a descriptor, sighting or migration', () => {
