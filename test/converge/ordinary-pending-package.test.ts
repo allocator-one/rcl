@@ -13,6 +13,31 @@ const expected = { target: 'allocator-one-9691', headSha: input.head, inputSha25
 const packet = () => ({ target: expected.target, headSha: input.head, baseSha: expected.baseSha, attempt: 2, round: 2, pid: 32832, retainedAsyncSha256: [...expected.retainedAsyncSha256], retainedAsync: [{ sha256: 'c'.repeat(64), model: 'openai/test', role: 'general', provider: 'openai', lane: 'async' as const }], guardedInput: structuredClone(input) });
 
 describe('ordinary pending migration package', () => {
+  it('authenticates a historical guarded input whose undefined spec was omitted by JSON', () => {
+    const guardedInput = structuredClone(input) as Record<string, unknown>;
+    guardedInput.spec = undefined;
+    const jsonPacket = JSON.parse(JSON.stringify({ ...packet(), guardedInput })) as ReturnType<typeof packet>;
+    const omittedExpected = { ...expected, inputSha256: guardedInputSha256(guardedInput) };
+
+    expect(jsonPacket.guardedInput).not.toHaveProperty('spec');
+    expect(validateOrdinaryPendingPackage(jsonPacket, omittedExpected).guardedInput).not.toHaveProperty('spec');
+
+    const invented = structuredClone(jsonPacket);
+    invented.guardedInput.spec = {};
+    expect(() => validateOrdinaryPendingPackage(invented, omittedExpected))
+      .toThrow('ordinary_pending_package_mismatch');
+
+    const ambiguous = packet();
+    ambiguous.guardedInput.spec = undefined as unknown as typeof input.spec;
+    expect(() => validateOrdinaryPendingPackage(ambiguous, omittedExpected))
+      .toThrow('ordinary_pending_package_mismatch');
+
+    const newlyOmitted = packet();
+    delete (newlyOmitted.guardedInput as Partial<typeof input>).spec;
+    expect(() => validateOrdinaryPendingPackage(newlyOmitted, expected))
+      .toThrow('ordinary_pending_package_mismatch');
+  });
+
   it('recomputes the authenticated PR9691 A2 production input', () => {
     expect(guardedInputSha256(pr9691Input)).toBe('b1cedd3d7d55720b8efea4474f9cf82e5c8ee7accf6a1f9e0121e7d5ad7ae2db');
     expect(validateOrdinaryPendingPackage({ target: pr9691Migration.target, headSha: pr9691Input.head as string,
@@ -32,6 +57,8 @@ describe('ordinary pending migration package', () => {
     expect(() => validateOrdinaryPendingPackage(changed, expected)).toThrow('ordinary_pending_package_mismatch');
     const malformed = packet(); malformed.guardedInput.roster = ['not-a-roster-entry'];
     expect(() => validateOrdinaryPendingPackage(malformed, expected)).toThrow('ordinary_pending_package_mismatch');
+    const missingInput = packet() as any; missingInput.guardedInput = null;
+    expect(() => validateOrdinaryPendingPackage(missingInput, expected)).toThrow('ordinary_pending_package_mismatch');
   });
   it.each(['target', 'headSha', 'baseSha', 'attempt', 'round', 'pid', 'retainedAsyncSha256'] as const)('refuses mismatched %s launch metadata', key => {
     const changed = packet() as any;
