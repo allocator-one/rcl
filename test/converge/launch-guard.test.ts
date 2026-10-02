@@ -10,6 +10,7 @@ import { assertNativeTargetOwnership, type NativeTargetOwnership } from '../../s
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
 import { decodeOriginalLaunch } from '../../src/dispatch/original-launch.js';
 import { resolveQuorumPolicy } from '../../src/dispatch/quorum.js';
+import type { ConvergeContext } from '../../src/report/run-header.js';
 
 const directories: string[] = [];
 const target = 'fixture-launch';
@@ -450,6 +451,125 @@ function retainedOriginal() {
   return { plan, input: { runId: completion.runId, capturedInputsSha256: digest, planDigest: plan.digest,
     startedAtMs: 1000, expiresAtMs: 6000, maxPhysicalCalls: 2, maxAttemptsPerCell: 2 } };
 }
+
+describe('ordinary launch retention before claim', () => {
+  it.each(['e'.repeat(40), null])('binds retained input bytes and base %s before dispatch and preserves the binding at completion', async baseSha => {
+    const options = await fixture();
+    const ordinaryInputs = { version: 1 as const, packetSha256: 'd'.repeat(64), baseSha };
+    const originalBinding = { ...ordinaryInputs };
+    options.run = vi.fn(async () => {
+      expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({
+        lastLaunch: { status: 'pending', ordinaryInputs: originalBinding },
+      });
+      // The guard owns a validated snapshot, not the caller's mutable marker.
+      ordinaryInputs.packetSha256 = 'f'.repeat(64);
+      return completion;
+    });
+
+    await guardReviewLaunch({ ...options, beforeClaim: async () => ({ ordinaryInputs }) });
+
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({
+      lastLaunch: { status: 'completed', ordinaryInputs: originalBinding },
+    });
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('keeps the retained input binding when provider dispatch fails after the claim', async () => {
+    const options = await fixture();
+    const ordinaryInputs = { version: 1 as const, packetSha256: 'd'.repeat(64), baseSha: 'e'.repeat(40) };
+    options.run = vi.fn().mockRejectedValue(new Error('provider disconnected'));
+
+    await expect(guardReviewLaunch({ ...options, beforeClaim: async () => ({ ordinaryInputs }) }))
+      .rejects.toThrow('provider disconnected');
+
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toMatchObject({
+      lastLaunch: { status: 'failed', ordinaryInputs },
+    });
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it.each([
+    { version: 2, packetSha256: 'd'.repeat(64), baseSha: null },
+    { version: 1, packetSha256: 'invalid', baseSha: null },
+    { version: 1, packetSha256: 'd'.repeat(64), baseSha: 'invalid' },
+    { version: 1, packetSha256: 'd'.repeat(64) },
+  ])('rejects malformed retained input binding before spending a claim: %j', async ordinaryInputs => {
+    const options = await fixture();
+
+    await expect(guardReviewLaunch({ ...options, beforeClaim: async () => ({ ordinaryInputs }) } as any))
+      .rejects.toThrow();
+
+    expect(options.run).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toBeUndefined();
+  });
+
+  it('durably retains authenticated inputs with the exact upcoming claim before dispatch', async () => {
+    const options = await fixture();
+    const retainedPath = join(options.gitCommonDir, 'retained-inputs.json');
+    const captured = { headSha: options.headSha, baseSha: 'e'.repeat(40), inputSha256: options.inputSha256 };
+    const order: string[] = [];
+    options.validate = async () => { order.push('validate'); };
+    const beforeClaim = vi.fn(async (context: ConvergeContext, ownership: NativeTargetOwnership) => {
+      await assertNativeTargetOwnership(ownership, options.gitCommonDir, target);
+      expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+      expect(await loadConvergeRunState(options.gitCommonDir, target)).toBeUndefined();
+      await writeFile(retainedPath, JSON.stringify({ ...captured, context }));
+      order.push('retain');
+    });
+    options.onClaim = async () => { order.push('claim'); };
+    options.run = vi.fn(async context => {
+      expect(JSON.parse(await readFile(retainedPath, 'utf8'))).toEqual({ ...captured, context });
+      order.push('dispatch');
+      return completion;
+    });
+
+    await guardReviewLaunch({ ...options, beforeClaim });
+
+    expect(order).toEqual(['validate', 'retain', 'claim', 'dispatch']);
+    expect(beforeClaim).toHaveBeenCalledExactlyOnceWith({ target, round: 1, attempt: 1 }, expect.objectContaining({ target }));
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
+  });
+
+  it('fails closed without spending a claim when retaining inputs fails', async () => {
+    const options = await fixture();
+    const beforeClaim = vi.fn(async () => { throw new Error('retained package write failed'); });
+
+    await expect(guardReviewLaunch({ ...options, beforeClaim })).rejects.toThrow('retained package write failed');
+
+    expect(beforeClaim).toHaveBeenCalledTimes(1);
+    expect(options.run).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+    expect(await loadConvergeRunState(options.gitCommonDir, target)).toBeUndefined();
+  });
+
+  it('retains the next existing attempt on bounded retry and skips retention when the budget refuses', async () => {
+    const options = await fixture();
+    const beforeClaim = vi.fn(async () => {});
+    options.run = vi.fn().mockRejectedValueOnce(new Error('dispatch lost')).mockResolvedValueOnce(completion);
+    await expect(guardReviewLaunch({ ...options, beforeClaim, maxAttempts: 1 })).rejects.toThrow('dispatch lost');
+    await expect(guardReviewLaunch({ ...options, beforeClaim, retryReason: 'Provider recovered.' }))
+      .rejects.toThrow(/budget exhausted/i);
+    expect(beforeClaim).toHaveBeenCalledTimes(1);
+
+    await guardReviewLaunch({ ...options, beforeClaim, maxAttempts: 2, retryReason: 'Provider recovered.' });
+
+    expect(beforeClaim).toHaveBeenNthCalledWith(2, { target, round: 1, attempt: 2 }, expect.objectContaining({ target }));
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 2, cap: 2 });
+  });
+
+  it('does not retain inputs before launch validation succeeds', async () => {
+    const options = await fixture();
+    const beforeClaim = vi.fn(async () => {});
+    options.validate = async () => { throw new Error('provider validation failed'); };
+
+    await expect(guardReviewLaunch({ ...options, beforeClaim })).rejects.toThrow('provider validation failed');
+
+    expect(beforeClaim).not.toHaveBeenCalled();
+    expect(options.run).not.toHaveBeenCalled();
+    expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toBeUndefined();
+  });
+});
 
 describe('operation-bound original preflight', () => {
   it('refuses capability before a native claim, checkpoint or provider callback', async () => {

@@ -14,6 +14,15 @@ export const reviewerHealthSchema = z.object({
   version: z.literal(1), policy: quorumPolicySchema, successfulSeats: z.number().int().nonnegative().safe(),
 }).strict().refine(health => health.successfulSeats <= health.policy.seatCount);
 
+/** Exact retained ordinary launch packet bound before its native claim was dispatched. */
+export const ordinaryLaunchInputsBindingSchema = z.object({
+  version: z.literal(1),
+  packetSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  baseSha: z.string().regex(/^[a-f0-9]{40}$/).nullable(),
+}).strict();
+
+export type OrdinaryLaunchInputsBinding = z.infer<typeof ordinaryLaunchInputsBindingSchema>;
+
 export const completionSchema = z.object({
   runId: z.string().uuid(),
   reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -50,6 +59,7 @@ export const launchSchema = z.object({
   exitCode: z.number().int().nonnegative().optional(),
   reportPath: z.string().min(1).optional(),
   reviewerHealth: reviewerHealthSchema.optional(),
+  ordinaryInputs: ordinaryLaunchInputsBindingSchema.optional(),
   retainedOriginal: z.object({ version: z.literal(1), runId: z.string().uuid(),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/), capturedInputsSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   pendingResume: z.object({ version: z.literal(1), runId: z.string().uuid(),
