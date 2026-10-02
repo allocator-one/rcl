@@ -131,6 +131,8 @@ it('retains a critical pending source despite an earlier important verdict', () 
   expect(validateRetainedNativeEvidence(input).actionableIdentities).toEqual([f.key]);
   delete state.findings[f.key].pendingRound; input.sourceJson = JSON.stringify(state);
   expect(() => validateRetainedNativeEvidence(input)).toThrow();
+  state.findings[f.key].pendingRound = 2; input.sourceJson = JSON.stringify(state);
+  expect(validateRetainedNativeEvidence(input).actionableIdentities).toEqual([f.key]);
 
   const later = structuredClone(report); later.run.id = uuid(3); later.run.converge.round = 3;
   later.findings[0]!.identity = `report:${uuid(3)}:ungated-repeat`;
@@ -141,10 +143,12 @@ it('retains a critical pending source despite an earlier important verdict', () 
   state.rounds.push({ round: 3, runId: uuid(3), reportBinding: laterBinding,
     counts: { new: 0, repeat: 1, suppressed: 0, regating: 0 }, severities: { [f.key]: 'critical' } });
   state.sightings.push({ ...state.sightings[0], runId: uuid(3), round: 3, reportSha256: laterDigest,
-    reportKey: later.findings[0]!.identity, severity: 'critical', gating: 'none', status: 'repeat', pendingRound: null });
+    reportKey: later.findings[0]!.identity, severity: 'critical', gating: 'none', status: 'repeat', pendingRound: 2 });
   state.findings[f.key].lastRound = 3;
   state.lastAnnotations = { round: 3, identities: [{ identity: f.key, status: 'repeat', gating: 'none' }] };
   input.reports = [f.reportJson, reportJson, laterJson]; input.sourceJson = JSON.stringify(state);
+  expect(validateRetainedNativeEvidence(input).actionableIdentities).toEqual([f.key]);
+  delete state.findings[f.key].pendingRound; input.sourceJson = JSON.stringify(state);
   expect(() => validateRetainedNativeEvidence(input)).toThrow('native_recovery_content_invalid');
 });
 
