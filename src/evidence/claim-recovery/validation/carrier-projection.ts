@@ -1,4 +1,4 @@
-import { hash, key, validateOccurrenceSource, type ValidatedOccurrenceSource } from './occurrence-source.js';
+import { hash, key, validateOccurrenceSource, type OccurrenceMember, type ValidatedOccurrenceSource } from './occurrence-source.js';
 import { prepareObligationTransfer } from './occurrence.js';
 import { verifyNativeRecoveryLineage } from './native-state.js';
 import { instant, object, uuidSchema } from './primitives.js';
@@ -46,10 +46,13 @@ function runKey(value: OccurrenceRunSelector): string {
 function sourceSelector(source: ValidatedOccurrenceSource): OccurrenceRunSelector {
   return { scope: source.input.scope, target: source.target, round: source.round, headSha: source.head, reportSha256: source.digest };
 }
+function occurrenceForMember(source: ValidatedOccurrenceSource, member: OccurrenceMember): CarrierOccurrenceSelector {
+  return { source: sourceSelector(source), classificationId: source.input.classification.id,
+    correctionId: member.correction?.id ?? null, findingRef: member.ref, reportKey: member.raw.identity as string };
+}
 function occurrence(source: ValidatedOccurrenceSource, ref: string): CarrierOccurrenceSelector {
   const member = source.members.find(m => m.ref === ref); requireInput(member);
-  return { source: sourceSelector(source), classificationId: source.input.classification.id,
-    correctionId: member.correction?.id ?? null, findingRef: ref, reportKey: member.raw.identity as string };
+  return occurrenceForMember(source, member);
 }
 function occurrenceKey(value: CarrierOccurrenceSelector): string {
   const s = value.source;
@@ -268,7 +271,7 @@ export function projectOccurrenceCarrier(input: CarrierProjectionInput): Occurre
   sourceReceiptResiduals(validated, accepted.receipts, out);
   const transfersByOccurrence = new Map(out.transfers.map(transfer => [occurrenceKey(transfer.occurrence), transfer]));
   for (const source of validated) for (const member of source.members) {
-    const selector = occurrence(source, member.ref);
+    const selector = occurrenceForMember(source, member);
     if (member.unresolvedReason) {
       out.residuals.push({ reason: member.unresolvedReason, occurrence: selector }); continue;
     }

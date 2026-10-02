@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MAX_CARRIER_INVENTORY, MAX_CARRIER_PREFIX_ROUNDS, projectOccurrenceCarrier } from '../../../src/evidence/claim-recovery/validation/carrier-projection.js';
 import { accepted, carrier, inventory, projectionFixture, roundInput } from './carrier-fixtures.js';
 import { laterSource, rebind } from './occurrence-fixtures.js';
@@ -289,12 +289,22 @@ describe('supplied-inventory occurrence carrier projection', () => {
     projection.transfers = Array.from({ length: occurrenceCount }, (_, index) => accepted(input, index + 1)).reverse();
     projection.transfers.forEach((proof, index) => { proof.receipt.sequence = 10_000 + index; });
 
-    const out = projectOccurrenceCarrier(projection);
+    const memberLookups = new Map<unknown[], number>();
+    const find = Array.prototype.find;
+    const findSpy = vi.spyOn(Array.prototype, 'find').mockImplementation(function (predicate, thisArg) {
+      if (this.length === occurrenceCount && this.every(row => row && typeof row === 'object' && 'ref' in row)) {
+        memberLookups.set(this, (memberLookups.get(this) ?? 0) + 1);
+      }
+      return find.call(this, predicate, thisArg);
+    });
+    let out: ReturnType<typeof projectOccurrenceCarrier>;
+    try { out = projectOccurrenceCarrier(projection); } finally { findSpy.mockRestore(); }
 
     expect(out.occurrences).toHaveLength(occurrenceCount);
     expect(out.transfers).toHaveLength(occurrenceCount);
     expect(out.occurrences.every(occurrence => occurrence.transferEventId !== null)).toBe(true);
     expect(out.residuals).toEqual([]);
+    expect(Math.max(...memberLookups.values())).toBe(1);
   });
 
   it('caps legacy numeric prefixes instead of allocating attacker-controlled round counts', () => {
