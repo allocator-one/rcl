@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 4.4.16 - 2026-10-02
+
+- Validate authenticated recovery claim splits against exact report bytes,
+  destinations, cycle membership and retained predecessor history. Complete,
+  bounded carrier and occurrence inventories preserve attribution and leave
+  missing, ambiguous, later or stronger obligations unresolved (RCL-119).
+- Resume an authenticated ordinary pending launch whose original guarded input
+  omitted `spec`. The absent historical shape is accepted only when the exact
+  guarded-input hash and every other package binding match; explicit object
+  specs remain strict, and preview remains read-only (RCL-163).
+
 ## 4.4.15 - 2026-10-01
 
 - Recover authenticated ordinary dead-owner pending launches from a sealed package
