@@ -100,7 +100,7 @@ function bound(m: RejectionManifest, state: ConvergeRunState, launch: ReturnType
 }
 function directory(common: string, m: RejectionManifest): string { return join(common, 'rcl-terminal-rejections', m.operationId); }
 function nextState(before: ConvergeRunState, entry: RejectionEntry, m: RejectionManifest): ConvergeRunState {
-  return { ...before, lastLaunch: { ...before.lastLaunch!, deliveryPending: false },
+  return { ...before, lastLaunch: { ...before.lastLaunch!, deliveryPending: false, deliveryFailure: 'local-invalid' },
     terminalRejections: [...(before.terminalRejections ?? []), entry],
     terminalRejectionCount: (before.terminalRejections?.length ?? 0) + 1, updatedAt: m.createdAt };
 }
@@ -222,7 +222,9 @@ export async function terminalRejectionForLaunch(common: string, state: Converge
   if (!entry) return false;
   const m = rejectionManifest(entry);
   const before = parse(await selected(join(directory(common, m), 'native-before.json'), m.stateSha256)) as ConvergeRunState;
-  if (!isDeepStrictEqual(launch, { ...before.lastLaunch, deliveryPending: false })) refuse('launch_changed');
+  if (!isDeepStrictEqual(launch, { ...before.lastLaunch, deliveryPending: false, deliveryFailure: 'local-invalid' })) {
+    refuse('launch_changed');
+  }
   await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
   deadOwner(launch!.pid); await noDelivery(m.dataDir, m.runId);
   return true;
