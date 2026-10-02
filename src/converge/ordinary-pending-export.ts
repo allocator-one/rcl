@@ -134,7 +134,8 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const launch = launchSchema.parse(state.lastLaunch);
   const record = attempts.attempts.find(item => item.attempt === launch.attempt);
   if (launch.status !== 'pending' || launch.pendingResume || launch.retainedOriginal || launch.recovery ||
-      launch.pendingRecovery || !record || record.pid !== launch.pid || record.retrySource || record.pendingRecoverySource ||
+      launch.pendingRecovery || !record || record.pid !== launch.pid || record.retrySource ||
+      record.boundFixRecoverySource || record.pendingRecoverySource ||
       launch.attempt !== attempts.attemptsUsed || launch.headSha !== options.headSha ||
       (options.expectedRound !== undefined && launch.round !== options.expectedRound) ||
       launch.inputSha256 !== guardedInputSha256(options.guardedInput)) refuse('input_mismatch');

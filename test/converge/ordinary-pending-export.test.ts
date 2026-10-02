@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { retainOrdinaryLaunchInputs } from '../../src/converge/ordinary-pending-export.js';
+import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from '../../src/converge/ordinary-pending-export.js';
 import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
+import { claimConvergeAttempt, convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
+import { convergeRunStatePath } from '../../src/converge/run-state.js';
 
 const fault = vi.hoisted(() => ({ partialWrite: false }));
 vi.mock('node:fs/promises', async original => {
@@ -27,6 +29,47 @@ const dirs: string[] = [];
 afterEach(async () => { fault.partialWrite = false; for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 describe('ordinary launch input retention', () => {
+  it('refuses to export a pending bound-fix recovery claim as an ordinary launch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ordinary-bound-fix-')); dirs.push(root);
+    const gitCommonDir = join(root, 'native');
+    await mkdir(gitCommonDir);
+    const target = 'owner-repo-1', headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+    const descriptor = { model: 'openai/async', role: 'general', provider: 'openai' };
+    const guardedInput = { head: headSha, kind: 'pr', repo: 'owner/repo', pr: 1,
+      diff: 'c'.repeat(64), config: 'd'.repeat(64),
+      roster: [{ ...descriptor, lane: 'async' }], prompts: [], asyncRoles: [{ name: 'general' }] };
+    const inputSha256 = guardedInputSha256(guardedInput);
+    await claimConvergeAttempt({ gitCommonDir, target, recordPid: 999_999 });
+    await claimConvergeAttempt({ gitCommonDir, target, recordPid: 999_999,
+      beforeClaim: async () => ({ boundFixRecoverySource: { version: 1, runId: '019921a0-0000-7000-8000-000000000002',
+        target, repo: 'owner/repo', prNumber: 1, headSha, inputSha256, round: 1, attempt: 1,
+        verifiedAt: '2026-10-02T00:00:00.000Z', serverProof: { status: 'fixes_pending',
+          conclusive: true, actionableCount: 0, classificationPending: false, legacyPendingCount: 0,
+          statusSha256: 'e'.repeat(64), runSha256: 'f'.repeat(64) } } }) });
+    const nativePath = convergeRunStatePath(gitCommonDir, target);
+    await mkdir(join(gitCommonDir, 'rcl-converge-runs'), { recursive: true });
+    await writeFile(nativePath, JSON.stringify({ version: 1, target, roundCap: 15, rounds: [],
+      findings: {}, updatedAt: '2026-10-02T00:00:00.000Z', lastLaunch: { status: 'pending',
+        attempt: 2, round: 2, headSha, inputSha256, startedAt: '2026-10-02T00:00:00.000Z', pid: 999_999 } }));
+    const asyncStoreDir = join(root, 'async');
+    await mkdir(asyncStoreDir);
+    const asyncPath = join(asyncStoreDir, 'result-bound-fix-fixture.json');
+    const asyncBytes = JSON.stringify({ ...descriptor, status: 'success', findings: [], raw: '', durationMs: 1, async: true });
+    await writeFile(asyncPath, asyncBytes);
+    const attemptPath = convergeAttemptStatePath(gitCommonDir, target);
+    const nativeBefore = await readFile(nativePath), attemptsBefore = await readFile(attemptPath);
+    expect(JSON.parse(attemptsBefore.toString()).attempts[1].boundFixRecoverySource)
+      .toMatchObject({ target, attempt: 1, headSha, inputSha256 });
+    const path = join(root, 'pending.json');
+    await expect(exportOrdinaryPendingPackage({ gitCommonDir, target, headSha, baseSha,
+      expectedBaseSha: baseSha, guardedInput, asyncStoreDir, asyncTargetKey: 'bound-fix',
+      asyncDescriptors: [descriptor], path, preview: false })).rejects.toThrow('pending_export_input_mismatch');
+    expect(await readFile(nativePath)).toEqual(nativeBefore);
+    expect(await readFile(attemptPath)).toEqual(attemptsBefore);
+    expect(await readFile(asyncPath, 'utf8')).toBe(asyncBytes);
+    expect(await readdir(root)).not.toContain('pending.json');
+  });
+
   it('refuses repeated async descriptor bytes that would exceed the recovery package ceiling', async () => {
     const gitCommonDir = await mkdtemp(join(tmpdir(), 'ordinary-descriptor-boundary-')); dirs.push(gitCommonDir);
     const descriptor = { model: 'openai/' + 'x'.repeat(9 * 1024 * 1024), role: 'general', provider: 'openai' };

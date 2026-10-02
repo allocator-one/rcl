@@ -8,8 +8,9 @@
   guarded digest, exact head, current base and retained async bytes. Preview is
   read-only; the private package supports finalize-only recovery of a dead
   ordinary attempt without replaying uncertain reviewer work or changing its cap.
-  Future guarded launches retain their inputs before spending the claim so an
-  interrupted launch has a durable, digest-bound recovery source (RCL-166).
+  Future ordinary guarded launches retain their inputs before spending the
+  claim so an interrupted launch has a durable, digest-bound recovery source
+  (RCL-166).
 
 ## 4.4.17 - 2026-10-02
 

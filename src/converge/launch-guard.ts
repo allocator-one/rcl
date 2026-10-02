@@ -328,9 +328,13 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         await options.originalLaunch.beforeClaim(preparedOriginal, ownership);
         assertOriginalLive();
       }
-      const retained = await options.beforeClaim?.(Object.freeze({ target: options.target, round,
-        attempt: (attempts?.attemptsUsed ?? 0) + 1,
-        ...(state.cycle ? { cycleId: state.cycle.id } : {}) }), ownership);
+      // Pending-package export covers ordinary launches only. Special launch
+      // modes keep their own recovery contract and must not inherit this
+      // capture's size or storage requirements.
+      const ordinaryLaunch = !options.startOver && !state.cycle && !options.originalLaunch &&
+        !options.legacyRetry && !options.boundFixRecovery;
+      const retained = ordinaryLaunch ? await options.beforeClaim?.(Object.freeze({ target: options.target, round,
+        attempt: (attempts?.attemptsUsed ?? 0) + 1 }), ownership) : undefined;
       const ordinaryInputs = retained === undefined ? undefined : ordinaryLaunchInputsBindingSchema.parse(retained.ordinaryInputs);
       if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);
       assertOriginalLive();
