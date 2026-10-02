@@ -91,7 +91,7 @@ describe('telemetry delivery', () => {
     expect(guardedDeliveryState({ spooled: true, exitCode: 4 })).toEqual({ deliveryPending: true });
     expect(guardedDeliveryState({ spooled: false, exitCode: 0 })).toEqual({ deliveryPending: false });
     expect(guardedDeliveryState({ spooled: false, exitCode: 4, failureDisposition: 'local-invalid' }))
-      .toEqual({ deliveryPending: false, deliveryFailure: 'local-invalid' });
+      .toEqual({ deliveryPending: true, deliveryFailure: 'local-invalid' });
   });
 
   it('classifies invalid unspooled consensus evidence as terminal local rejection', async () => {

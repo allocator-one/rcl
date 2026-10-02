@@ -757,6 +757,6 @@ export async function emitConvergeEvents(
 
 /** Keep transport uncertainty conservative, while distinguishing proven pre-network rejection. */
 export function guardedDeliveryState(delivery: Pick<DeliveryOutcome, 'spooled' | 'exitCode' | 'failureDisposition'>) {
-  return { deliveryPending: delivery.spooled || (delivery.exitCode !== 0 && delivery.failureDisposition !== 'local-invalid'),
+  return { deliveryPending: delivery.spooled || delivery.exitCode !== 0,
     ...(delivery.failureDisposition ? { deliveryFailure: delivery.failureDisposition } : {}) };
 }
