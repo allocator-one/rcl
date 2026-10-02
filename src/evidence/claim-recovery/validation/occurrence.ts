@@ -202,7 +202,7 @@ export function validatePreservedDispositionSubject(input: {
     if (sibling.correction) before(sibling.correction, receipt);
     requireSource(claimDescriptorSchema.safeParse(sibling.raw.claimDescriptor).success &&
       isDeepStrictEqual(sibling.raw.claimDescriptor, sibling.stored.claim_descriptor) &&
-      isDeepStrictEqual(sibling.raw.claimDescriptor, sibling.mapping?.claim_descriptor) &&
+      (!sibling.mapping || isDeepStrictEqual(sibling.raw.claimDescriptor, sibling.mapping.claim_descriptor)) &&
       isDeepStrictEqual(sibling.raw.claimDescriptor, input.descriptor));
   }
   requireSource(receipt.kind === 'verdicts_recorded' && Array.isArray(receipt.payload.verdicts));

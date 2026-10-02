@@ -116,7 +116,10 @@ function acceptedTransfers(input: CarrierProjectionInput, out: OccurrenceCarrier
   const evidence = distinct.flatMap(c => c.evidence.map(receipt => ({ receipt, owner: c.value.eventId })));
   for (const select of [(r: StoredEventReceipt) => r.id, (r: StoredEventReceipt) => `${r.run_id}:${r.sequence}`]) {
     const groups = new Map<string, typeof evidence>();
-    for (const row of evidence) { const k = select(row.receipt); groups.set(k, [...(groups.get(k) ?? []), row]); }
+    for (const row of evidence) {
+      const k = select(row.receipt); const group = groups.get(k);
+      if (group) group.push(row); else groups.set(k, [row]);
+    }
     for (const group of groups.values()) if (unique(group.map(row => row.receipt)).length > 1) {
       const ids = [...new Set(group.map(row => row.owner))].sort(); ids.forEach(id => blocked.add(id));
       out.residuals.push({ reason: 'transfer-conflict', eventIds: ids });
@@ -128,7 +131,10 @@ function acceptedTransfers(input: CarrierProjectionInput, out: OccurrenceCarrier
     (v: ProjectedCarrierTransfer) => String(v.sequence),
   ]) {
     const groups = new Map<string, typeof distinct>();
-    for (const candidate of distinct) { const k = select(candidate.value); groups.set(k, [...(groups.get(k) ?? []), candidate]); }
+    for (const candidate of distinct) {
+      const k = select(candidate.value); const group = groups.get(k);
+      if (group) group.push(candidate); else groups.set(k, [candidate]);
+    }
     for (const group of groups.values()) if (group.length > 1) {
       const ids = [...new Set(group.map(c => c.value.eventId))].sort();
       ids.forEach(id => blocked.add(id)); out.residuals.push({ reason: 'transfer-conflict', eventIds: ids });

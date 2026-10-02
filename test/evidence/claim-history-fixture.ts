@@ -6,9 +6,9 @@ import { uuid } from './recovery-validation/fixtures.js';
 export function historyFixture(legacy=true,history?: ClaimHistoryContent) {
   const { projection }=projectionFixture(legacy);
   const actor=history?.actorUserId??uuid(900);
-  const scope=history?.sources[0]!.selector.scope??projection.carrier.scope;
+  const scope=history?.sources[0]?.selector.scope??projection.carrier.scope;
   const sources=structuredClone(history?.sources??projection.sources);
-  const receipts=(source: typeof sources[number]) => history?.histories.find(h => h.runId===source.selector.scope.run_id)!.receipts??[...source.classifications!,...source.corrections!];
+  const receipts=(source: typeof sources[number]) => history?.histories.find(h => h.runId===source.selector.scope.run_id)?.receipts??[...source.classifications!,...source.corrections!];
   const calls: string[]=[];
   const counts=new Map<string,number>();
   let mutate: (body: any,url: URL,visit: number) => unknown=body => body;

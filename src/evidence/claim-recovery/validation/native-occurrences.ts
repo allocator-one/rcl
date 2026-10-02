@@ -119,7 +119,9 @@ export function deriveNativeOccurrenceEvidence(input: NativeOccurrenceInput, con
   }
   const projected: NativeOccurrenceProjection['dispositions'] = [];
   const latest = new Map<string, AcceptedClaimDisposition>();
-  for (const proof of dispositions.sort((a, b) => a.receipt.run_id.localeCompare(b.receipt.run_id) || a.receipt.sequence - b.receipt.sequence)) {
+  for (const proof of dispositions.sort((a, b) => time(a.receipt.received_at) < time(b.receipt.received_at) ? -1 :
+    time(a.receipt.received_at) > time(b.receipt.received_at) ? 1 : a.receipt.run_id.localeCompare(b.receipt.run_id) ||
+      a.receipt.sequence - b.receipt.sequence)) {
     const p = proof.preparation; ensureTarget(p.split);
     const prepared = prepareClaimDisposition(p); const scope = p.sourceContext.scope;
     requireEvidence(proof.actorUserId === p.actorUserId && isStoredEventReceipt(proof.receipt, scope) &&

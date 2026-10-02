@@ -12,7 +12,12 @@ export function semanticCacheMatches(entry: FindingEntry, members: SemanticSight
   const latest = members.filter(s => s.round === entry.lastRound);
   if (!representative || latest.length === 0 || !originalTitles.has(representative)) return false;
   const severity = DEFAULT_SEVERITY_ORDER.find(value => latest.some(s => s.severity === value));
+  let startLine = latest[0]!.startLine;
+  let endLine = latest[0]!.endLine;
+  for (const sighting of latest.slice(1)) {
+    startLine = Math.min(startLine, sighting.startLine);
+    endLine = Math.max(endLine, sighting.endLine);
+  }
   return entry.title === originalTitles.get(representative) && entry.severity === severity &&
-    entry.startLine === Math.min(...latest.map(s => s.startLine)) &&
-    entry.endLine === Math.max(...latest.map(s => s.endLine));
+    entry.startLine === startLine && entry.endLine === endLine;
 }
