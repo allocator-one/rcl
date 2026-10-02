@@ -278,6 +278,8 @@ export interface DeliveryOutcome {
   runId?: string;
   /** Something waits in the outbox for `rcl telemetry flush`. */
   spooled: boolean;
+  /** Validation rejected before any network operation; never retryable delivery. */
+  failureDisposition?: 'local-invalid';
   /** Original recovery inputs retained locally; never means server acknowledgment or auto-retry. */
   retention?: RetentionOutcome;
   /**
@@ -311,7 +313,7 @@ function localFailure(err: unknown): string {
 }
 
 /** The wire builder defaults an absent finding label to `none`; inspect the immutable report first. */
-function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[] {
+export function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[] {
   if (result.run?.gating?.mode !== 'verified-consensus') return [];
   const diagnostics: EvidenceDiagnostic[] = [];
   const reasons = new Set(['consensus', 'critical', 'verified', 'none']);
@@ -469,14 +471,14 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     });
   } catch {
     const retention = await retainRun(runtime, input, undefined, [{ path: 'envelope', message: 'Could not build a complete evidence envelope' }]);
-    return { status: 'rejected', runId, spooled: false, retention, exitCode: exitFor('rejected', evidenceRequired),
+    return { status: 'rejected', runId, spooled: false, failureDisposition: 'local-invalid', retention, exitCode: exitFor('rejected', evidenceRequired),
       line: `Evidence refused locally: invalid envelope; ${retentionLine(retention, runId)}` };
   }
   const diagnostics = validateRunEnvelope(envelope, input.artifacts);
   diagnostics.push(...verifiedConsensusEnvelopeDiagnostics(input, envelope));
   if (diagnostics.length > 0) {
     const retention = await retainRun(runtime, input, envelope, diagnostics);
-    return { status: 'rejected', runId, spooled: false, retention, exitCode: exitFor('rejected', evidenceRequired),
+    return { status: 'rejected', runId, spooled: false, failureDisposition: 'local-invalid', retention, exitCode: exitFor('rejected', evidenceRequired),
       line: `Evidence refused locally (${diagnostics[0]!.path}: ${diagnostics[0]!.message}); ${retentionLine(retention, runId)}` };
   }
   const events = (input.events ?? []).filter(deliverable);
@@ -751,4 +753,10 @@ export async function emitConvergeEvents(
       );
       return 'refused';
   }
+}
+
+/** Keep transport uncertainty conservative, while distinguishing proven pre-network rejection. */
+export function guardedDeliveryState(delivery: Pick<DeliveryOutcome, 'spooled' | 'exitCode' | 'failureDisposition'>) {
+  return { deliveryPending: delivery.spooled || (delivery.exitCode !== 0 && delivery.failureDisposition !== 'local-invalid'),
+    ...(delivery.failureDisposition ? { deliveryFailure: delivery.failureDisposition } : {}) };
 }

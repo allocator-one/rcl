@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { previewTerminalRejection, applyTerminalRejection } from './converge/terminal-rejection.js';
+import { guardedDeliveryState } from './telemetry/deliver.js';
 import { AmbiguousReviewerIdentityError, assertUnambiguousReviewerIdentities } from './dispatch/reviewer-identity.js';
 import { retainAssemblyRefusal } from './output/assembly-refusal.js';
 import { createReviewCycleRemote } from './converge/cycle-remote.js';
@@ -201,7 +203,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   if (name === 'review') return; // Review flushes after detecting explicit/pending cycles.
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'converge-stale' || name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-rejected' || name === 'converge-stale' || name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -532,6 +534,39 @@ program
     }
   );
 
+
+program
+  .command('converge-rejected')
+  .description('Preview or apply an evidenced terminal local rejection; preserves the original report and spent attempts')
+  .option('--preview').option('--apply')
+  .requiredOption('--manifest <path>', 'Exclusive preview output or exact reviewed manifest')
+  .option('--manifest-sha256 <sha256>')
+  .option('--target <target>').option('--run <uuid>')
+  .option('--report <path>').option('--report-sha256 <sha256>')
+  .option('--reason <text>').option('--json')
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      if ([opts.preview, opts.apply].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_rejection_mode');
+      const common = await resolveGitCommonDir(), dataDir = resolveDataDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
+        const manifest = await previewTerminalRejection({ target: opts.target as string, runId: opts.run as string,
+          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string, reason: opts.reason as string }, common, dataDir);
+        await writeExclusive(opts.manifest as string, manifest, 16384);
+        result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)) };
+      } else {
+        if ([opts.target, opts.run, opts.report, opts.reportSha256, opts.reason].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
+        result = { mode: 'apply', result: await applyTerminalRejection({ manifest: opts.manifest as string,
+          manifestSha256: opts.manifestSha256 as string }, common, dataDir) };
+      }
+      console.log(JSON.stringify({ ...result as object, accounting: 'unchanged',
+        scope: 'local terminal disposition only; no admission, upload, provider calls or approval' }));
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_REJECTED', message: error instanceof Error ? error.message : String(error) } }));
+      process.exitCode = 3;
+    }
+  });
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
 program
@@ -2926,7 +2961,7 @@ async function executeCouncil(
     reviewerHealth: blockingHealth
       ? { version: 1, policy: blockingHealth.policy, successfulSeats: blockingHealth.successfulSeats.length }
       : { version: 1, policy: resolveQuorumPolicy(0), successfulSeats: 0 },
-    deliveryPending: delivery.spooled || delivery.exitCode !== 0,
+    ...guardedDeliveryState(delivery),
     ...(prepared.converge?.cycleId ? {
       exitCode: opts.ci && run.ci_exit_code !== 0 ? run.ci_exit_code : delivery.exitCode || (outputDiagnostics.length > 0 ? 1 : 0),
       ...(opts.jsonFile ? { reportPath: resolve(opts.jsonFile) } : {}),
