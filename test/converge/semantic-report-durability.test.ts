@@ -128,6 +128,16 @@ it('bounds immutable report verification before decoding retained bytes', async 
     .rejects.toThrow('Original bound report bytes unavailable');
 });
 
+it('refuses oversized immutable report bytes before publishing them', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'semantic-report-oversized-source-'))); roots.push(root);
+  const raw = 'x'.repeat(MAX_REPORT_BYTES + 1);
+  const digest = createHash('sha256').update(raw).digest('hex');
+  const sourcePath = join(root, 'rcl-converge-runs', `target.evidence/${digest}.json`);
+  await expect(retainReportEvidence(raw, { runId: '00000000-0000-7000-8000-000000000001', target: 'target', round: 1,
+    reportSha256: digest, sourcePath })).rejects.toThrow('Immutable report exceeds the retained byte limit.');
+  await expect(access(sourcePath)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
 it('flushes report bytes and their directory entry before native state may reference them', async () => {
   const root = await mkdtemp(join(tmpdir(), 'semantic-report-durability-')); roots.push(root);
   const raw = '{"run":{"id":"00000000-0000-7000-8000-000000000001"},"findings":[]}';

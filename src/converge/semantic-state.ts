@@ -91,10 +91,13 @@ export function bindRoundEvidence(options: ProcessRoundOptions): ReportBinding {
 }
 export async function retainReportEvidence(raw: string, binding: ReportBinding): Promise<void> {
   if (sha(raw) !== binding.reportSha256) throw new ConvergeRunStateError('Original report digest changed.');
+  const bytes = Buffer.from(raw);
+  if (bytes.length > MAX_REPORT_BYTES) {
+    throw new ConvergeRunStateError('Immutable report exceeds the retained byte limit.');
+  }
   const directory = dirname(binding.sourcePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await syncNativeDirectory(dirname(directory));
-  const bytes = Buffer.from(raw);
   try {
     const retained = await readStable(binding.sourcePath, bytes.length, { allowMissingSafeFlagsOnWindows: true });
     if (!retained.raw.equals(bytes)) throw new ConvergeRunStateError('Original report digest changed.');
