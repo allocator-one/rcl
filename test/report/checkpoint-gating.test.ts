@@ -16,7 +16,7 @@ import { projectCheckpointReport } from '../../src/report/checkpoint-projection.
 import { deriveCheckpointConsensus, type CheckpointAssemblyInput } from '../../src/report/checkpoint-assembly.js';
 import { captureSupplementalAsync } from '../../src/report/supplemental-async.js';
 import { configDigest, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
-import { planGating } from '../../src/consensus/gating.js';
+import { planGating, type AskFn } from '../../src/consensus/gating.js';
 import { deriveCheckpointGating, prepareCheckpointGating } from '../../src/report/checkpoint-gating.js';
 import { executeCheckpointGating } from '../../src/dispatch/checkpoint-gating-execution.js';
 const roots: string[] = []; afterEach(async () => { await Promise.all(roots.splice(0).map(x => rm(x,{recursive:true,force:true}))); });
@@ -120,23 +120,35 @@ it('drains a real late verifier answer under checkpoint ownership without changi
  const f = await fixture(), errors: unknown[] = [];
  const answer = { model: 'openai/verifier', provider: 'openai', status: 'success' as const, durationMs: 1,
   text: '[{"id":"F1","verdict":"confirmed","reason":"The supplied changed operation reaches the reported path.","failureMechanism":"The changed operation executes without the required guard.","evidence":[{"file":"a.ts","quote":"y"}]}]' };
- let resolveAnswer!: (value: typeof answer) => void;
- const ask = vi.fn(() => new Promise<typeof answer>(resolve => { resolveAnswer = resolve; }));
+ let resolveAnswer!: (value: typeof answer) => void, enterProvider!: () => void, observeAbort!: () => void;
+ const providerEntered = new Promise<void>(resolve => { enterProvider = resolve; });
+ const requestAborted = new Promise<void>(resolve => { observeAbort = resolve; });
+ const ask = vi.fn<AskFn>((_model, _system, _user, request) => {
+  enterProvider(); request.signal?.addEventListener('abort', observeAbort, { once: true });
+  return new Promise<typeof answer>(resolve => { resolveAnswer = resolve; });
+ });
+ let enterPreflight!: () => void, releasePreflight!: () => void;
+ const preflightEntered = new Promise<void>(resolve => { enterPreflight = resolve; });
+ const preflightRelease = new Promise<void>(resolve => { releasePreflight = resolve; });
  const options = { assembly: f.assembly, commonDir: f.dir, journal: f.journal,
-  askFactory: () => ask, beforeLaunch: async () => {}, onLateAuditError: (error: unknown) => errors.push(error),
+  askFactory: () => ask, beforeLaunch: async () => { enterPreflight(); await preflightRelease; },
+  onLateAuditError: (error: unknown) => errors.push(error),
   nowMs: () => 10, monotonicNow: () => 0 };
  let returned = false;
  const execution = withNativeTarget(f.dir, target, ownership => executeCheckpointGating({ ...options, ownership }))
   .then(result => { returned = true; return result; });
- await Promise.race([
-  execution.then(() => { throw new Error('checkpoint operation returned before its pending verifier answer'); }),
-  vi.waitFor(async () => expect((await f.journal.readVerification())?.terminal?.status).toBe('failed')),
- ]);
- await new Promise<void>(resolve => setImmediate(resolve));
- expect(returned).toBe(false);
+ await preflightEntered;
+ expect((await f.journal.readVerification())?.terminal).toBeUndefined();
+ releasePreflight();
+ await providerEntered;
  expect(ask).toHaveBeenCalledTimes(1);
- const sealed = await f.journal.exportVerificationProof();
+ expect((await f.journal.readVerification())?.intents).toHaveLength(1);
+ await requestAborted;
+ await vi.waitFor(async () => expect((await f.journal.readVerification())?.terminal?.status).toBe('failed'));
  const before = (await f.journal.readVerification())!;
+ expect(before.terminal.status).toBe('failed');
+ expect(returned).toBe(false);
+ const sealed = await f.journal.exportVerificationProof();
  expect(before.intents).toHaveLength(1);
  expect(before.uncertain).toHaveLength(1);
  expect(before.outcomes).toEqual([]);
