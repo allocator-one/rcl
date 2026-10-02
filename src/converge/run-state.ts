@@ -1,3 +1,4 @@
+import { rejectionManifest, validateTerminalRejectionAudit, type RejectionEntry } from './terminal-rejection-schema.js';
 import { staleManifest, validateStaleReportAudit, type StaleReportEntry } from './stale-report-schema.js';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
@@ -132,6 +133,8 @@ export interface ConvergeRunState {
   findings: Record<string, FindingEntry>;
   updatedAt: string;
   lastLaunch?: GuardedLaunchState;
+  terminalRejections?: RejectionEntry[];
+  terminalRejectionCount?: number;
   staleReportAudit?: StaleReportEntry[];
   /** Detect accidental truncation while preserving native state as the local authority. */
   staleReportAuditCount?: number;
@@ -225,6 +228,7 @@ export async function loadConvergeRunStateEvidence(
   }
   validateRoundGapAudit(state as ConvergeRunState);
   validateStaleReportAudit(state as ConvergeRunState);
+  validateTerminalRejectionAudit(state as ConvergeRunState);
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
 
@@ -431,6 +435,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   // A guarded launch that recorded inconclusive blocking health is never
   // admitted, whatever its aggregate counters say (RCL-136).
   const launch = state.lastLaunch;
+  if (launch && launch.runId === runId && launch.deliveryFailure === 'local-invalid') throw new ConvergeRunStateError('terminal_rejection_cannot_be_admitted');
   if (launch?.status === 'completed' && launch.reviewerHealth !== undefined && launch.runId === runId) {
     // The run's own report bytes and round, or nothing: a rewritten copy is not admissible evidence.
     if (launch.round !== options.round || launch.reportJsonSha256 !== options.reportSha256) {
@@ -448,6 +453,11 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   if (state.staleReportAudit?.length) {
     const { verifyStaleReportReceipts } = await import('./stale-report.js');
     await verifyStaleReportReceipts(gitCommonDir, state.staleReportAudit);
+  }
+  if (state.terminalRejections?.some(entry => rejectionManifest(entry).runId === runId || rejectionManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('terminal_rejection_cannot_be_admitted');
+  if (state.terminalRejections) {
+    const { verifyTerminalRejections } = await import('./terminal-rejection.js');
+    await verifyTerminalRejections(gitCommonDir, state);
   }
   const gapEntries = state.roundGapAudit?.entries ?? [];
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
