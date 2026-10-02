@@ -53,6 +53,18 @@ describe('process identity', () => {
     await expect(inspectProcessIdentity(original, io())).resolves.toBe('alive');
   });
 
+  it('does not treat a missing Darwin ps executable as proof that the owner died', async () => {
+    const darwinScope = { platform: 'darwin' as const, boot: scope.boot, namespace: 'native' as const };
+    const original = await captureProcessIdentity(17, {
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {},
+      command: async () => 'Thu Oct  2 12:34:56 2026\n',
+    });
+    await expect(inspectProcessIdentity(original, {
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {},
+      command: async () => { throw Object.assign(new Error('missing ps'), { code: 'ENOENT' }); },
+    })).resolves.toBe('unverifiable');
+  });
+
   it('fails closed when scope or process birth cannot be established', async () => {
     const original = await captureProcessIdentity(17, io());
     const probe = vi.fn();
@@ -64,6 +76,9 @@ describe('process identity', () => {
     await expect(inspectProcessIdentity(original, io({
       linuxStat: async () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); },
     }))).resolves.toBe('unverifiable');
+    await expect(inspectProcessIdentity(original, io({
+      linuxStat: async () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); },
+    }))).resolves.toBe('dead');
     await expect(inspectProcessIdentity(original, io({
       probe: () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }); },
     }))).resolves.toBe('unverifiable');
