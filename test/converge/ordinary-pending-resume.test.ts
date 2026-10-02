@@ -4,21 +4,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
-import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
 import { chunkDiff } from '../../src/prepare/chunker.js';
 import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
-import { resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
+import { previewOrdinaryPendingLaunch, resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
 
 describe('ordinary pending launch migration', () => {
   it('finalizes a dead owner as unknown and claims exactly one fresh attempt without legacy inspection', async () => {
     const common = await realpath(await mkdtemp(join(tmpdir(), 'rcl-ordinary-pending-')));
     onTestFinished(() => rm(common, { recursive: true, force: true }));
     const target = 'ordinary-pending', headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
-    const retained = sha256Hex('retained async result');
+    const retainedBytes = JSON.stringify({ model: 'openai/test', role: 'general', provider: 'openai' });
+    const retained = sha256Hex(retainedBytes);
     const guardedInput = { head: headSha, kind: 'patch', repo: 'allocator-one/allocator-one', pr: 9691,
       diff: 'c'.repeat(64), config: 'd'.repeat(64), roster: [{ model: 'openai/test', role: 'general', provider: 'openai', lane: 'async' }], prompts: [],
-      asyncRoles: [{ name: 'general' }], spec: { source: 'flag', sha256: 'e'.repeat(64) } };
+      asyncRoles: [{ name: 'general' }] };
     const inputSha256 = guardedInputSha256(guardedInput);
     const initialRun = vi.fn(async () => ({ runId: '018f21b4-bf80-7fd5-8000-000000000001',
       reportJsonSha256: 'f'.repeat(64), successfulReviews: 1, totalReviews: 1, deliveryPending: false }));
@@ -61,8 +62,18 @@ describe('ordinary pending launch migration', () => {
         retainedAsyncSha256: [retained], retainedAsync: [{ sha256: retained, model: 'openai/test', role: 'general', provider: 'openai', lane: 'async' }], guardedInput }, maxAttempts: 2, maxPhysicalCalls: 1,
       maxAttemptsPerCell: 1, maxDurationMs: 1_000, validate: vi.fn(async () => {}), ownerAlive: () => false,
       loadRetainedAsync: async () => [{ path: join(common, 'async.json'), sha256: retained,
-        bytesBase64: Buffer.from('retained async result').toString('base64') }], run: recoveredRun };
+        bytesBase64: Buffer.from(retainedBytes).toString('base64') }], run: recoveredRun };
     const before = await readFile(nativePath);
+    const attemptsPath = convergeAttemptStatePath(common, target);
+    const attemptsBefore = await readFile(attemptsPath);
+    await expect(previewOrdinaryPendingLaunch(options)).resolves.toMatchObject({
+      attemptsUsed: 1, cap: 2, nextAttempt: 2,
+      source: { pendingAttempt: 1, round: 1, originalPid: 987_654 },
+    });
+    expect(options.validate).not.toHaveBeenCalled();
+    expect(recoveredRun).not.toHaveBeenCalled();
+    expect(await readFile(nativePath)).toEqual(before);
+    expect(await readFile(attemptsPath)).toEqual(attemptsBefore);
     await expect(resumePendingLegacyLaunch({ ...options, ownerAlive: () => true }))
       .rejects.toThrow('pending_legacy_resume_owner_alive');
     expect(await readFile(nativePath)).toEqual(before);

@@ -4,7 +4,10 @@ export interface OrdinaryPendingPackage { target: string; headSha: string; baseS
 export interface PendingLaunchIdentity { target: string; headSha: string; inputSha256: string; baseSha: string; attempt: number; round: number; pid: number; retainedAsyncSha256: readonly string[]; }
 
 export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, expected: PendingLaunchIdentity): OrdinaryPendingPackage {
-  const input = value?.guardedInput, keys = ['asyncRoles','config','diff','head','kind','pr','prompts','repo','roster','spec'];
+  const input = value?.guardedInput;
+  const specPresent = !!input && Object.hasOwn(input, 'spec');
+  const keys = ['asyncRoles','config','diff','head','kind','pr','prompts','repo','roster',
+    ...(specPresent ? ['spec'] : [])];
   const digest = (candidate: unknown): candidate is string => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
   const structuredInput = input && input.kind === 'patch' && typeof input.repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(input.repo) &&
     Number.isSafeInteger(input.pr) && (input.pr as number) > 0 && digest(input.diff) && digest(input.config) &&
@@ -15,7 +18,7 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
       const role = item as Record<string, unknown>;
       return item && typeof item === 'object' && typeof role.name === 'string' && role.name.length > 0;
     }) &&
-    input.spec && typeof input.spec === 'object';
+    (!specPresent || (input.spec && typeof input.spec === 'object'));
   if (!value || value.target !== expected.target || value.headSha !== expected.headSha || value.baseSha !== expected.baseSha || value.attempt !== expected.attempt || value.round !== expected.round || value.pid !== expected.pid || !/^[a-f0-9]{40}$/.test(value.baseSha) ||
     !Number.isSafeInteger(value.attempt) || value.attempt < 1 || !Number.isSafeInteger(value.round) || value.round < 1 ||
     !Number.isSafeInteger(value.pid) || value.pid < 1 || !input || Object.keys(input).sort().join(',') !== keys.join(',') ||
