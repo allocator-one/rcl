@@ -164,6 +164,8 @@ export interface ConvergeRunState {
   lastAnnotations?: {
     round: number;
     identities: Array<{ identity: string; status: FindingStatus; gating: string }>;
+    /** Pending obligations as admitted, before verdicts can clear them. */
+    actionableBeforeTriage?: string[];
   };
 }
 
@@ -211,15 +213,26 @@ async function readState(
 
 async function validateSemanticStateFiles(state: ConvergeRunState, gitCommonDir: string): Promise<void> {
   const path = convergeRunStatePath(gitCommonDir, state.target);
+  const requireCanonicalPath = async (storedPath: string | undefined, expectedPath: string): Promise<void> => {
+    try {
+      if (!storedPath || await realpath(storedPath) !== await realpath(expectedPath)) {
+        throw new Error('canonical_path_mismatch');
+      }
+    } catch (cause) {
+      throw new ConvergeRunStateError('Retained semantic evidence is outside its canonical native path.', { cause });
+    }
+  };
   const sources: RetainedSources = { reports: new Map(), snapshots: new Map(), usedReports: new Set(), pathRequirements: [] };
   let remaining = MAX_NATIVE_STATE_BYTES;
   for (const binding of state.rounds.flatMap(round => round.reportBinding ? [round.reportBinding] : [])) {
+    await requireCanonicalPath(binding.sourcePath, `${path}.evidence/${binding.reportSha256}.json`);
     const source = await readStable(binding.sourcePath, remaining);
     remaining -= source.raw.length;
     if (remaining < 0 || source.sha256 !== binding.reportSha256) throw new ConvergeRunStateError('Invalid retained report evidence.');
     sources.reports.set(binding.reportSha256, source.text);
   }
   if (state.migration) {
+    await requireCanonicalPath(state.migration.snapshotPath, `${path}.v1-${state.migration.sourceSha256}.snapshot`);
     const source = await readStable(state.migration.snapshotPath, remaining);
     remaining -= source.raw.length;
     if (remaining < 0 || source.sha256 !== state.migration.sourceSha256) throw new ConvergeRunStateError('Invalid migration evidence.');
@@ -228,9 +241,7 @@ async function validateSemanticStateFiles(state: ConvergeRunState, gitCommonDir:
   validateRetainedSemanticState(state, sources);
   for (const requirement of sources.pathRequirements) {
     const expected = requirement.nativePathSuffix ? `${path}${requirement.nativePathSuffix}` : undefined;
-    if (expected && (!requirement.storedPath || await realpath(requirement.storedPath) !== await realpath(expected))) {
-      throw new ConvergeRunStateError('Retained semantic evidence is outside its canonical native path.');
-    }
+    if (expected) await requireCanonicalPath(requirement.storedPath, expected);
   }
 }
 
@@ -461,6 +472,7 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
   // later caller mutation after the original report comparison.
   options = { ...options, findings: structuredClone(options.findings) };
   const { target } = validateRoundReportInput(options);
+  options = { ...options, target };
   return options.ownership
     ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership))
     : withNativeTarget(options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership));
@@ -772,6 +784,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
       status: a.status,
       gating: findingGatingReason(a.finding),
     })),
+    actionableBeforeTriage: effectivePendingIdentities(state),
   };
   state.updatedAt = new Date().toISOString();
   await writeState(gitCommonDir, state, ownership);
@@ -904,7 +917,8 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   return { entries: updated, ...(reviewedRound.runId ? { runId: reviewedRound.runId } : {}), ...(resolution ? { resolution } : {}) };
 }
 
-export function resolveRoundResolution(state: ConvergeRunState, round: number): RoundResolution | undefined {
+function deriveRoundResolution(state: ConvergeRunState, round: number,
+  pendingBeforeTriage?: readonly string[]): RoundResolution | undefined {
   if (state.lastAnnotations && state.lastAnnotations.round === round) {
     const actionable = state.lastAnnotations.identities.filter(
       (a) => (a.status === 'new' || a.status === 'regating') && a.gating !== 'none'
@@ -921,13 +935,16 @@ export function resolveRoundResolution(state: ConvergeRunState, round: number): 
     const fixedThisRound = Object.values(state.findings).filter(
       (e) => e.verdict === 'fixed' && e.verdictRound === round
     ).length;
+    const admittedActionable = pendingBeforeTriage ?? state.lastAnnotations.actionableBeforeTriage ?? effectivePendingIdentities(state);
+    const recoveryProjection = recoveryProjectionFreshness(state);
     return {
       round,
-      actionable: state.version === 3
-        ? new Set([...actionable.map(entry => entry.identity), ...unresolved]).size
-        : actionable.length,
+      actionable: state.version === 3 ? new Set([
+        ...actionable.map(entry => entry.identity), ...admittedActionable, ...unresolved,
+      ]).size : actionable.length,
       unresolved,
       fixedThisRound,
+      ...(recoveryProjection ? { recoveryProjection } : {}),
       status:
         unresolved.length > 0
           ? 'unresolved'
@@ -936,6 +953,10 @@ export function resolveRoundResolution(state: ConvergeRunState, round: number): 
             : 'converged-dismissal-only',
     };
   }
+}
+
+export function resolveRoundResolution(state: ConvergeRunState, round: number): RoundResolution | undefined {
+  return deriveRoundResolution(state, round);
 }
 
 /** Pure ordinary verdict projection for retained persistence before any write. */
@@ -965,6 +986,9 @@ export function prepareVerdicts(
   }
 
   const pendingBeforeTriage = effectivePendingIdentities(state);
+  if (state.lastAnnotations?.round === options.round && state.lastAnnotations.actionableBeforeTriage === undefined) {
+    state.lastAnnotations.actionableBeforeTriage = pendingBeforeTriage;
+  }
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
 
@@ -999,43 +1023,7 @@ export function prepareVerdicts(
 
   state.updatedAt = options.recordedAt;
 
-  let resolution: RoundResolution | undefined;
-  if (state.lastAnnotations && state.lastAnnotations.round === options.round) {
-    const actionable = state.lastAnnotations.identities.filter(
-      (identity) => (identity.status === 'new' || identity.status === 'regating') && identity.gating !== 'none'
-    );
-    // An untriaged earlier claim remains an obligation even if this report
-    // calls it repeat or does not contain it. A zero-new round cannot erase it.
-    const unresolved = [...new Set([
-      ...effectivePendingIdentities(state),
-      ...actionable
-        .filter((identity) => {
-          const entry = state.findings[identity.identity];
-          return !entry || entry.verdict === undefined || entry.verdictRound !== options.round;
-        })
-        .map((identity) => identity.identity),
-    ])].sort();
-    const fixedThisRound = Object.values(state.findings).filter(
-      (entry) => entry.verdict === 'fixed' && entry.verdictRound === options.round
-    ).length;
-    resolution = {
-      round: options.round,
-      actionable: new Set([
-        ...actionable.map((identity) => identity.identity),
-        ...pendingBeforeTriage,
-        ...unresolved,
-      ]).size,
-      unresolved,
-      fixedThisRound,
-      ...(recoveryProjectionFreshness(state) ? { recoveryProjection: recoveryProjectionFreshness(state) } : {}),
-      status:
-        unresolved.length > 0
-          ? 'unresolved'
-          : fixedThisRound > 0
-            ? 'fixes-pending-fresh-round'
-            : 'converged-dismissal-only',
-    };
-  }
+  const resolution = deriveRoundResolution(state, options.round, pendingBeforeTriage);
 
   return { state, result: { entries: updated, ...(resolution ? { resolution } : {}) } };
 }

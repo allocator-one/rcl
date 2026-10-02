@@ -3,7 +3,8 @@ import { effectivePendingIdentities, recoveredDismissalsByRound, validateAnchorI
   validateRetainedNativeEvidence, validateSightinglessLegacyEvolution } from '../../../src/evidence/claim-recovery/validation/native-state.js';
 import { packNativeMaterial } from '../../../src/evidence/claim-recovery/validation/native-material.js';
 import { deriveNativeOccurrenceEvidence } from '../../../src/evidence/claim-recovery/validation/native-occurrences.js';
-import { createRecoveredDismissalLookup, recoveredDismissalsBefore } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
+import { createRecoveredDismissalLookup, indexSemanticSightings,
+  recoveredDismissalsBefore, validateSemanticState } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
 import { setup } from '../parent-r9-projection-fixture.js';
 import { laterSource } from './occurrence-fixtures.js';
@@ -24,6 +25,57 @@ it('retains recovered dismissals from every preceding source round', () => {
     ['first-identity', 'minor'],
     ['shared-identity', 'important'],
   ]));
+});
+
+it('indexes each semantic sighting once and preserves input order in every projection', () => {
+  let roundReads = 0; let identityReads = 0;
+  const sightings = Array.from({ length: 2_000 }, (_, index) => ({
+    get round() { roundReads += 1; return index % 3 + 1; },
+    get canonicalIdentity() { identityReads += 1; return String(index % 5).padStart(16, '0'); },
+    index,
+  }));
+  const indexed = indexSemanticSightings(sightings);
+  expect(roundReads).toBe(2_000);
+  expect(identityReads).toBe(2_000);
+  expect(indexed.byRound.get(1)?.map(row => row.index)).toEqual(sightings.filter((_, index) => index % 3 === 0).map(row => row.index));
+  expect(indexed.byIdentity.get('0000000000000000')?.map(row => row.index))
+    .toEqual(sightings.filter((_, index) => index % 5 === 0).map(row => row.index));
+});
+
+it('bounds overwritten recovered-escalation history to a non-fresh classification', () => {
+  const build = (status: 'new' | 'repeat' | 'suppressed' | 'regating',
+    severity: 'important' | 'critical' = 'critical', recoveredSeverity: 'important' | 'critical' = 'important') => {
+    const fixture = semanticFixture(); const state = structuredClone(fixture.state) as any;
+    state.version = 3; state.recovery = { version: 1, operations: [] };
+    const report = structuredClone(fixture.report) as any;
+    report.run.converge.round = 2; report.findings[0].severity = severity;
+    const reportJson = JSON.stringify(report); const digest = sha(reportJson); const key = fixture.key;
+    const binding = { ...state.rounds[0].reportBinding, round: 2,
+      reportSha256: digest, sourcePath: `/synthetic/native.evidence/${digest}.json` };
+    const counts = { new: 0, repeat: 0, suppressed: 0, regating: 0 }; counts[status] = 1;
+    state.rounds[0] = { ...state.rounds[0], round: 2, reportBinding: binding, counts, severities: { [key]: severity } };
+    state.findings[key] = { ...state.findings[key], severity, firstRound: 2, lastRound: 2,
+      verdict: 'dismissed', verdictRound: 2, verdictSeverity: severity, verdictReason: 'Same-round source audit.' };
+    delete state.findings[key].pendingRound;
+    state.sightings[0] = { ...state.sightings[0], ...binding, round: 2, sourcePath: undefined,
+      severity, status, pendingRound: status === 'suppressed' ? null : 2 };
+    state.lastAnnotations = { round: 2, identities: [{ identity: key, status, gating: 'consensus' }],
+      actionableBeforeTriage: status === 'suppressed' ? [] : [key] };
+    const sources = { reports: new Map([[digest, reportJson]]), snapshots: new Map(),
+      usedReports: new Set<string>(), pathRequirements: [] };
+    const dismissals = new Map([[1, new Map([[key, recoveredSeverity]])]]);
+    return () => validateSemanticState(state, sources, undefined, dismissals);
+  };
+  // A prior fixed verdict makes the later critical sighting repeat; a verdict
+  // recorded for that sighting then overwrites the only retained verdict tuple.
+  expect(build('repeat')).not.toThrow();
+  expect(build('regating')).not.toThrow();
+  expect(build('new')).toThrow('Invalid v2 sighting ledger');
+  expect(build('suppressed')).not.toThrow();
+  expect(build('new', 'important')).not.toThrow();
+  expect(build('new', 'critical', 'critical')).not.toThrow();
+  expect(build('repeat', 'important')).toThrow('Invalid v2 sighting ledger');
+  expect(build('repeat', 'critical', 'critical')).toThrow('Invalid v2 sighting ledger');
 });
 
 it('reuses recovered dismissal projections for repeated reverse-ordered rounds', () => {
@@ -75,6 +127,31 @@ it('validates v1 content without assigning a descriptor, sighting or migration',
   expect(result.state).not.toHaveProperty('sightings');
   expect(result.state).not.toHaveProperty('migration');
   expect(input).toEqual(before);
+});
+
+it('accepts only sorted unique native identities in the optional pre-triage annotation', () => {
+  const valid = legacyFixture();
+  valid.state.lastAnnotations = {
+    ...valid.state.lastAnnotations,
+    actionableBeforeTriage: ['1111111111111111', 'aaaaaaaaaaaaaaaa'],
+  } as typeof valid.state.lastAnnotations;
+  expect(validateRetainedNativeEvidence(valid.input()).state.lastAnnotations)
+    .toEqual(valid.state.lastAnnotations);
+
+  for (const actionableBeforeTriage of [
+    ['aaaaaaaaaaaaaaaa', '1111111111111111'],
+    ['1111111111111111', '1111111111111111'],
+    ['111111111111111'],
+    ['AAAAAAAAAAAAAAAA'],
+  ]) {
+    const invalid = legacyFixture();
+    invalid.state.lastAnnotations = {
+      ...invalid.state.lastAnnotations,
+      actionableBeforeTriage,
+    } as typeof invalid.state.lastAnnotations;
+    expect(() => validateRetainedNativeEvidence(invalid.input()))
+      .toThrow('native_recovery_content_invalid');
+  }
 });
 
 it('accepts exact retained v2 report membership without running a producer', () => {
@@ -218,6 +295,31 @@ it('accepts only reachable pending and verdict evolution without a semantic sigh
     verdictSeverity: 'important', verdictReason: 'retained historical reason' });
   delete historical.findings[f.key].pendingRound;
   expect(() => validateSightinglessLegacyEvolution(structuredClone(historical), historical)).not.toThrow();
+});
+
+it('preserves an unchanged implicit legacy verdict severity without a retained severity map', () => {
+  const f = legacyFixture();
+  const original = structuredClone(f.state) as any;
+  Object.assign(original.findings[f.key], { verdict: 'dismissed', verdictRound: 1 });
+  delete original.findings[f.key].verdictSeverity;
+  delete original.rounds[0].severities;
+
+  expect(() => validateSightinglessLegacyEvolution(structuredClone(original), original)).not.toThrow();
+
+  const changedVerdict = structuredClone(original);
+  changedVerdict.findings[f.key].verdict = 'fixed';
+  expect(() => validateSightinglessLegacyEvolution(changedVerdict, original))
+    .toThrow('native_recovery_source_conflict');
+
+  const changedRound = structuredClone(original);
+  changedRound.findings[f.key].verdictRound = 2;
+  expect(() => validateSightinglessLegacyEvolution(changedRound, original))
+    .toThrow('native_recovery_source_conflict');
+
+  const explicitSeverity = structuredClone(original);
+  explicitSeverity.findings[f.key].verdictSeverity = 'critical';
+  expect(() => validateSightinglessLegacyEvolution(explicitSeverity, original))
+    .toThrow('native_recovery_source_conflict');
 });
 
 it('retains a critical pending source despite an earlier important verdict', () => {

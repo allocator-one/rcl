@@ -97,6 +97,10 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     requireSource(positive(annotations.round) && seen.has(annotations.round) && Array.isArray(annotations.identities) &&
       annotations.identities.every(row => object(row) && identity(row.identity) && Object.hasOwn(state.findings as object, row.identity) &&
         ['new', 'repeat', 'suppressed', 'regating'].includes(row.status as string) && typeof row.gating === 'string'));
+    const actionableBeforeTriage = annotations.actionableBeforeTriage;
+    requireSource(actionableBeforeTriage === undefined || Array.isArray(actionableBeforeTriage) &&
+      actionableBeforeTriage.every(identity) &&
+      isDeepStrictEqual(actionableBeforeTriage, [...new Set(actionableBeforeTriage)].sort()));
   }
   return state as unknown as ConvergeRunState;
 }
@@ -136,9 +140,9 @@ export function validateSightinglessLegacyEvolution(state: ConvergeRunState, ori
     if (prior.verdict !== undefined) requireSource(entry.verdict !== undefined && entry.verdictRound! >= prior.verdictRound!);
     if (entry.verdict !== undefined) {
       const reviewed = state.rounds.find(round => round.round === entry.verdictRound);
-      requireSource(reviewed !== undefined && reviewed.severities?.[key] !== undefined);
       const unchangedImplicitSeverity = prior.verdict === entry.verdict && prior.verdictRound === entry.verdictRound &&
         prior.verdictSeverity === undefined && entry.verdictSeverity === undefined;
+      requireSource(reviewed !== undefined && (unchangedImplicitSeverity || reviewed.severities?.[key] !== undefined));
       requireSource(unchangedImplicitSeverity || entry.verdictSeverity === reviewed?.severities?.[key]);
     }
     const clearsPrior = prior.pendingRound !== undefined && entry.verdict !== undefined &&

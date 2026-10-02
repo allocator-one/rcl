@@ -9,6 +9,7 @@ import { deriveNativeRecovery, validateNativeRecoveryState, verifyNativeRecovery
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
 import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
+import { indexSemanticPriorByFileCategory } from '../../src/converge/semantic-state.js';
 import { recoveredFixture, semanticFixture, sha, uuid, target } from '../evidence/recovery-validation/fixtures.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
 
@@ -68,6 +69,26 @@ function bridgeFinding(template: ConsensusFinding, claimDescriptor: ClaimDescrip
   return { ...template, file: 'fresh-cache.ts', startLine: 10, endLine: 12, severity: 'important',
     gating: { reason: 'consensus' }, claimDescriptor };
 }
+
+it('indexes dense admission candidates once while preserving first-seen order', () => {
+  const prior = Array.from({ length: 2_000 }, (_, index) => ({
+    marker: true, file: 'cache.ts', category: 'correctness', index,
+  }));
+  const original = Array.prototype[Symbol.iterator];
+  let traversed = 0;
+  Array.prototype[Symbol.iterator] = function* () {
+    if ((this as Array<{ marker?: boolean }>)[0]?.marker) traversed += this.length;
+    yield* original.call(this);
+  };
+  try {
+    const indexed = indexSemanticPriorByFileCategory(prior);
+    expect(indexed.get(JSON.stringify(['cache.ts', 'correctness']))?.map(row => row.index))
+      .toEqual(prior.map(row => row.index));
+  } finally {
+    Array.prototype[Symbol.iterator] = original;
+  }
+  expect(traversed).toBe(2_000);
+});
 
 it('refuses to expand one v3 claim through a non-clique paraphrase bridge', async () => {
   const f = await fixture();
@@ -227,6 +248,15 @@ it('accepts ordinary later repeat, suppression, and critical re-gating', async (
   const state = (await loadConvergeRunState(f.root, target))!;
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
   expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+  const admitted = state.lastAnnotations?.actionableBeforeTriage ?? [];
+  const inactive = Object.keys(state.findings).find(identity => !admitted.includes(identity));
+  expect(inactive).toBeDefined();
+  const forged = structuredClone(state);
+  forged.lastAnnotations!.actionableBeforeTriage = [...admitted, inactive!].sort();
+  const forgedRaw = JSON.stringify(forged);
+  await expect(validateNativeRecoveryState(forged, f.root, Buffer.from(forgedRaw))).rejects.toThrow('native_recovery_state_invalid');
+  expect(() => validateRetainedNativeEvidence({ sourceJson: forgedRaw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson] })).toThrow('native_recovery_content_invalid');
 });
 
 it('accepts recovered anchors before they have semantic sightings', async () => {
@@ -235,6 +265,23 @@ it('accepts recovered anchors before they have semantic sightings', async () => 
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(f.plan.resultJson))).resolves.toBeUndefined();
   expect(validateRetainedNativeEvidence({ sourceJson: f.plan.resultJson, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state)
     .toEqual(state);
+});
+
+it('retains an exact stale report before refusing changed recovery state without admission', async () => {
+  const f = await fixture();
+  const predecessor = f.plan.resultJson;
+  const changed = JSON.stringify({ ...JSON.parse(predecessor), updatedAt: '2026-09-24T12:00:00.000Z' });
+  await writeFile(f.path, changed);
+  const runId = uuid(2);
+  const rows = [{ ...f.claim, identity: `report:${runId}:0000000000000001`, claimDescriptor: describeClaim(f.claim) }];
+  const reportJson = JSON.stringify({ run: { id: runId, converge: { target, round: 2,
+    recovery_source: { version: 1, native_sha256: sha(predecessor) } },
+  target: { kind: 'pr', repo: 'synthetic/recovery', pr_number: 7, head_sha: 'a'.repeat(40) },
+  gating: { bound_classification_protocol: 1 } }, findings: rows });
+  await expect(processRoundReport({ gitCommonDir: f.root, target, round: 2, runId, findings: rows,
+    evidence: { reportJson } })).rejects.toThrow('original report retained without native admission');
+  expect(await readFile(`${f.path}.evidence/${sha(reportJson)}.json`, 'utf8')).toBe(reportJson);
+  expect(await readFile(f.path, 'utf8')).toBe(changed);
 });
 
 it.each(['new', 'suppressed'] as const)('refuses a later status relabeled %s without a recorded verdict', async status => {

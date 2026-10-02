@@ -77,6 +77,7 @@ export interface ConvergeRunState {
   lastAnnotations?: {
     round: number;
     identities: Array<{ identity: string; status: FindingStatus; gating: string }>;
+    actionableBeforeTriage?: string[];
   };
 }
 

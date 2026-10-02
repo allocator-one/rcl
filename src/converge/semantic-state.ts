@@ -1,14 +1,15 @@
 import { recoverySourceSchema } from '../report/recovery-source.js';
 import { decodeOriginalReport, decodeRecoveryDocument } from '../evidence/original-run/decode.js';
 import { object } from '../evidence/original-run/remote.js';
-import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, realpath } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { link, mkdir, open, readFile, realpath, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withOwnedNativeOperation, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
 import { effectivePendingIdentities, readNativeRecoveryMaterials, readNativeRecoverySourceJsons, recoveryAnchors } from './recovery-state.js';
 import { recoveredDismissalsByRound } from '../evidence/claim-recovery/validation/native-state.js';
-import { recoveredDismissalsBefore } from '../evidence/claim-recovery/validation/semantic-validation.js';
+import { admittedActionableBeforeTriage, createRecoveredDismissalLookup, indexSemanticSightings,
+  recoveredDismissalsBefore } from '../evidence/claim-recovery/validation/semantic-validation.js';
 import { recoveryProjectionFreshness } from '../evidence/claim-recovery/validation/current-projection.js';
 import { semanticCacheMatches } from '../evidence/claim-recovery/validation/semantic-cache.js';
 import { migratedLegacyPendingRound } from '../evidence/claim-recovery/validation/obligations.js';
@@ -93,19 +94,48 @@ export async function retainReportEvidence(raw: string, binding: ReportBinding):
   const directory = dirname(binding.sourcePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await syncNativeDirectory(dirname(directory));
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  const bytes = Buffer.from(raw);
   try {
-    handle = await open(binding.sourcePath, 'wx', 0o400);
-    await handle.writeFile(raw);
-    await handle.sync();
+    const retained = await readStable(binding.sourcePath, bytes.length, { allowMissingSafeFlagsOnWindows: true });
+    if (!retained.raw.equals(bytes)) throw new ConvergeRunStateError('Original report digest changed.');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'EEXIST' || !(await readFile(binding.sourcePath)).equals(Buffer.from(raw))) throw e;
-    const retained = await readStable(binding.sourcePath, Buffer.byteLength(raw), {
-      sync: true, allowMissingSafeFlagsOnWindows: true,
-    });
-    if (!retained.raw.equals(Buffer.from(raw))) throw new ConvergeRunStateError('Original report digest changed.');
-  } finally {
-    await handle?.close();
+    const initialCode = (e as NodeJS.ErrnoException).code;
+    const initialMessage = e instanceof Error ? e.message : '';
+    if (initialCode !== 'ENOENT') {
+      if (initialMessage === 'oversized' || initialMessage === 'invalid_utf8') {
+        throw new ConvergeRunStateError('Original report digest changed.', { cause: e });
+      }
+      throw e;
+    }
+    const staging = `${binding.sourcePath}.${randomUUID()}.pending`;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(staging, 'wx', 0o400);
+      await handle.writeFile(bytes);
+      await handle.sync();
+      await handle.close(); handle = undefined;
+      try { await link(staging, binding.sourcePath); }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause;
+        try {
+          const retained = await readStable(binding.sourcePath, bytes.length, { allowMissingSafeFlagsOnWindows: true });
+          if (!retained.raw.equals(bytes)) throw new ConvergeRunStateError('Original report digest changed.');
+        } catch (conflict) {
+          if (conflict instanceof ConvergeRunStateError) throw conflict;
+          const code = (conflict as NodeJS.ErrnoException).code;
+          const message = conflict instanceof Error ? conflict.message : '';
+          if (code === 'ENOENT' || message === 'oversized' || message === 'invalid_utf8') {
+            throw new ConvergeRunStateError('Original report digest changed.', { cause: conflict });
+          }
+          throw conflict;
+        }
+      }
+    } finally {
+      await handle?.close();
+      await unlink(staging).catch(cleanup => {
+        if ((cleanup as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanup;
+      });
+    }
   }
   await syncNativeDirectory(directory);
 }
@@ -156,8 +186,10 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
   const sightings = state.sightings!;
   const originalTitles = new Map<typeof sightings[number], string>();
   requireIntegrity(sightings.every(s => sightingSchema.safeParse(s).success));
+  const { byRound: sightingsByRound, byIdentity: sightingsByIdentity,
+    byIdentityAndRound: sightingsByIdentityAndRound } = indexSemanticSightings(sightings);
   for (const anchor of recoveryAnchors(state)) {
-    requireIntegrity(sightings.filter(sighting => sighting.canonicalIdentity === anchor.identity).every(sighting =>
+    requireIntegrity((sightingsByIdentity.get(anchor.identity) ?? []).every(sighting =>
       sighting.file === anchor.source.file && sighting.category === anchor.source.category &&
       compareClaims(sighting.claimDescriptor, anchor.descriptor) !== undefined));
   }
@@ -189,7 +221,7 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
   for (const round of state.rounds) {
     requireIntegrity(!!round && Number.isSafeInteger(round.round) && round.round > 0 && !rounds.has(round.round));
     rounds.add(round.round);
-    const members = sightings.filter(s => s.round === round.round);
+    const members = sightingsByRound.get(round.round) ?? [];
     if (legacy?.rounds.some(r => r.round === round.round)) {
       // Migrated legacy rounds deliberately have no semantic sightings. Their
       // exact snapshot is the boundary, not an invented descriptor or ref.
@@ -250,7 +282,7 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
     requireIntegrity(isDeepStrictEqual(counts, round.counts) && isDeepStrictEqual(severities, round.severities));
   }
   requireIntegrity(sightings.every(s => rounds.has(s.round)));
-  validateSightingClassification(state, sightings, requireIntegrity, recoveryDismissalsByRound);
+  validateSightingClassification(state, sightingsByIdentityAndRound, requireIntegrity, recoveryDismissalsByRound);
   if (legacy) {
     // Semantic admission never replaces or removes migrated original entries.
     requireIntegrity(Object.keys(legacy.findings).every(key => Object.hasOwn(state.findings, key)));
@@ -286,15 +318,15 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
       requireIntegrity(entry.pendingRound === expectedPending);
       continue;
     }
-    const members = sightings.filter(s => s.canonicalIdentity === key);
+    const members = sightingsByIdentity.get(key) ?? [];
     requireIntegrity(members.length > 0 && claimDescriptorSchema.safeParse(entry.claimDescriptor).success &&
       entry.firstRound === Math.min(...members.map(s => s.round)) && entry.lastRound === Math.max(...members.map(s => s.round)) &&
       members.some(s => s.round === entry.firstRound && isDeepStrictEqual(s.claimDescriptor, entry.claimDescriptor)));
     requireIntegrity(semanticCacheMatches(entry, members, originalTitles));
     let latestGatedRound: number | null = null;
     let latestGatedRoundAfterVerdict: number | null = null;
-    for (const round of [...new Set(members.map(s => s.round))].sort((a, b) => a - b)) {
-      const group = members.filter(s => s.round === round);
+    const groups = sightingsByIdentityAndRound.get(key) ?? new Map<number, typeof members>();
+    for (const [round, group] of [...groups.entries()].sort(([a], [b]) => a - b)) {
       if (group.some(s => s.gating !== 'none' && s.status !== 'suppressed')) {
         latestGatedRound = round;
         if (entry.verdict === undefined || !verdictClearsPending(state, key, round, entry.verdictRound!, entry.verdictSeverity)) {
@@ -310,37 +342,46 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
         latestGatedRoundAfterVerdict : latestGatedRound;
       requireIntegrity(capturedPending === expectedCaptured);
     }
-    const latestPending = members.find(s => s.round === entry.lastRound)!.pendingRound;
+    const latestPending = sightingsByIdentityAndRound.get(key)!.get(entry.lastRound)![0]!.pendingRound;
     const expectedPending = latestPending !== null &&
       !(entry.verdict !== undefined && verdictClearsPending(state, key, latestPending, entry.verdictRound!, entry.verdictSeverity)) ? latestPending : undefined;
     requireIntegrity(entry.pendingRound === expectedPending);
   }
   const latest = Math.max(0, ...rounds);
   if (latest && !legacy?.rounds.some(r => r.round === latest)) {
-    requireIntegrity(isDeepStrictEqual(state.lastAnnotations, { round: latest, identities: sightings.filter(s => s.round === latest)
-      .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) }));
+    const expected = { round: latest, identities: (sightingsByRound.get(latest) ?? [])
+      .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) };
+    requireIntegrity(state.lastAnnotations !== undefined && state.lastAnnotations.round === expected.round &&
+      isDeepStrictEqual(state.lastAnnotations.identities, expected.identities));
+    if (state.lastAnnotations!.actionableBeforeTriage !== undefined) {
+      const retained = state.lastAnnotations!.actionableBeforeTriage;
+      requireIntegrity(isDeepStrictEqual(retained, admittedActionableBeforeTriage(state)));
+    }
   }
 }
 
 
-function validateSightingClassification(state: ConvergeRunState, sightings: NonNullable<ConvergeRunState['sightings']>,
+function validateSightingClassification(state: ConvergeRunState,
+  sightingsByIdentityAndRound: ReadonlyMap<string, ReadonlyMap<number, NonNullable<ConvergeRunState['sightings']>>>,
   requireIntegrity: (valid: boolean) => void, recoveryDismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>): void {
   if (state.version === 1) return;
   const anchored = new Set(state.version === 3 ? recoveryAnchors(state).map(anchor => anchor.identity) : []);
+  const recoveryDismissalsForRound = createRecoveredDismissalLookup(recoveryDismissalsByRound);
   for (const [key, entry] of Object.entries(state.findings)) {
     if (entry.claimDescriptor === undefined) continue;
-    const byRound = new Map<number, typeof sightings>();
-    for (const sighting of sightings.filter(row => row.canonicalIdentity === key)) {
-      byRound.set(sighting.round, [...(byRound.get(sighting.round) ?? []), sighting]);
-    }
+    const byRound = sightingsByIdentityAndRound.get(key) ?? new Map<number, NonNullable<ConvergeRunState['sightings']>>();
     if (byRound.size === 0) continue;
     const firstRound = Math.min(...byRound.keys());
     for (const [round, group] of byRound) {
       const ordinaryVerdict = (entry.verdictRound ?? Infinity) < round;
-      const recoveryDismissals = recoveredDismissalsBefore(recoveryDismissalsByRound, round);
-      const recoveredEscalation = !ordinaryVerdict && group.some(row => row.severity === 'critical') &&
-        recoveryDismissals.has(key) && recoveryDismissals.get(key) !== 'critical';
+      const verdictRecordedForThisSightingOrLater = entry.verdict !== undefined && entry.verdictRound! >= round;
+      const recoveryDismissal = recoveryDismissalsForRound(round, key);
+      const overwrittenRecoveredEscalation = verdictRecordedForThisSightingOrLater &&
+        group.some(row => row.severity === 'critical') && recoveryDismissal !== undefined && recoveryDismissal !== 'critical';
+      const recoveredEscalation = entry.verdict === undefined && group.some(row => row.severity === 'critical') &&
+        recoveryDismissal !== undefined && recoveryDismissal !== 'critical';
       const expectedStatus = state.version === 2 ? round === firstRound ? 'new' : undefined
+        : overwrittenRecoveredEscalation ? undefined
         : recoveredEscalation ? 'regating' : round === firstRound
           ? anchored.has(key) ? 'repeat' : 'new'
           : entry.verdict === undefined ? 'repeat'
@@ -387,6 +428,18 @@ function located(a: Pick<ConsensusFinding, 'file' | 'category' | 'startLine' | '
 }
 function highest(rows: ConsensusFinding[]): ConsensusFinding['severity'] {
   return rows.map(f => f.severity).sort((a, b) => DEFAULT_SEVERITY_ORDER.indexOf(a) - DEFAULT_SEVERITY_ORDER.indexOf(b))[0]!;
+}
+
+/** @internal Linear first-seen index for admission candidates. */
+export function indexSemanticPriorByFileCategory<T extends { file: string; category: string }>(prior: readonly T[]): Map<string, T[]> {
+  const result = new Map<string, T[]>();
+  for (const entry of prior) {
+    const key = JSON.stringify([entry.file, entry.category]);
+    const bucket = result.get(key);
+    if (bucket) bucket.push(entry);
+    else result.set(key, [entry]);
+  }
+  return result;
 }
 
 /** Frozen batch matching: a component must be a clique and agree on one prior claim. */
@@ -441,28 +494,39 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   if (!predecessor || !recoverySourceSchema.safeParse(predecessor).success) {
     throw new ConvergeRunStateError('Recovered-v3 report requires its versioned native predecessor binding.');
   }
+  assertSemanticReportCycle(state, report);
   const current = await loadConvergeRunStateEvidence(options.gitCommonDir, binding.target);
   if (current?.sha256 !== predecessor.native_sha256) {
+    await retainReportEvidence(options.evidence!.reportJson, binding);
     throw new ConvergeRunStateError('Native recovery state changed during review; original report retained without native admission.');
   }
-  assertSemanticReportCycle(state, report);
   if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
   if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) throw new ConvergeRoundCapError(binding.target, options.round, state.roundCap);
   const max = Math.max(0, ...state.rounds.map(r => r.round));
   if (max && options.round !== max + 1) throw new ConvergeRunStateError(`Round ${options.round} is out of order; next round is ${max + 1}.`);
   const window = options.lineWindow ?? 5;
   const anchors = recoveryAnchors(state);
+  const anchorsByIdentity = new Map<string, typeof anchors>();
+  for (const anchor of anchors) {
+    const bucket = anchorsByIdentity.get(anchor.identity);
+    if (bucket) bucket.push(anchor);
+    else anchorsByIdentity.set(anchor.identity, [anchor]);
+  }
+  const { byIdentity: sightingsByIdentity } = indexSemanticSightings(state.sightings);
   const prior = [
     ...Object.values(state.findings).filter(e => e.claimDescriptor !== undefined),
     ...anchors.filter(anchor => !Object.hasOwn(state.findings, anchor.identity)).map(anchor => ({
       key: anchor.identity, ...anchor.source, claimDescriptor: anchor.descriptor,
     })),
   ];
+  const priorByFileCategory = indexSemanticPriorByFileCategory(prior);
   // Never expand equivalence through a paraphrase bridge. Every previously
   // associated descriptor must support the new sighting, not just the latest.
-  const candidates = findings.map(f => prior.filter(e => located(f, e, window) && compareClaims(f.claimDescriptor!, e.claimDescriptor!) &&
-    anchors.filter(anchor => anchor.identity === e.key).every(anchor => compareClaims(f.claimDescriptor!, anchor.descriptor)) &&
-    state.sightings!.filter(s => s.canonicalIdentity === e.key).every(s => compareClaims(f.claimDescriptor!, s.claimDescriptor))).map(e => e.key).sort());
+  const candidates = findings.map(f => (priorByFileCategory.get(JSON.stringify([f.file, f.category])) ?? [])
+    .filter(e => located(f, e, window) && compareClaims(f.claimDescriptor!, e.claimDescriptor!) &&
+      (anchorsByIdentity.get(e.key) ?? []).every(anchor => compareClaims(f.claimDescriptor!, anchor.descriptor)) &&
+      (sightingsByIdentity.get(e.key) ?? []).every(s => compareClaims(f.claimDescriptor!, s.claimDescriptor)))
+    .map(e => e.key).sort());
   const related = findings.map(a => findings.map(b => located(a, b, window) && compareClaims(a.claimDescriptor!, b.claimDescriptor!) !== undefined));
   const visited = new Set<number>();
   const groups: Array<{ indices: number[]; matched?: string; rationale: MatchRationale; key?: string; representative?: ConsensusFinding }> = [];
@@ -522,7 +586,7 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     const previous = state.findings[key];
     const recoveredEscalation = previous?.verdict === undefined && severity === 'critical' &&
       recoveredDismissals.has(key) && recoveredDismissals.get(key) !== 'critical';
-    const status: FindingStatus = recoveredEscalation ? 'regating' : !previous ? anchors.some(anchor => anchor.identity === key) ? 'repeat' : 'new' : previous.verdict === 'dismissed'
+    const status: FindingStatus = recoveredEscalation ? 'regating' : !previous ? anchorsByIdentity.has(key) ? 'repeat' : 'new' : previous.verdict === 'dismissed'
       ? severity === 'critical' && (previous.verdictSeverity ?? previous.severity) !== 'critical' ? 'regating' : 'suppressed' : 'repeat';
     const suppressReason = status === 'suppressed' ? `dismissed in round ${previous!.verdictRound}${previous!.verdictReason ? ` (${previous!.verdictReason})` : ''} — matching semantic claim; escalation to critical re-gates` : undefined;
     const entry: FindingEntry = previous ?? { key, file: representative.file, category: representative.category, startLine: representative.startLine,
@@ -552,7 +616,9 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   }
   state.sightings.push(...annotations.map(a => a.sighting!));
   state.rounds.push({ round: options.round, counts, severities, runId: binding.runId, reportBinding: binding });
-  state.lastAnnotations = { round: options.round, identities: annotations.map(a => ({ identity: a.identity, status: a.status, gating: a.sighting!.gating })) };
+  state.lastAnnotations = { round: options.round,
+    identities: annotations.map(a => ({ identity: a.identity, status: a.status, gating: a.sighting!.gating })),
+    actionableBeforeTriage: pending(state) };
   state.updatedAt = new Date().toISOString();
   await retainReportEvidence(options.evidence!.reportJson, binding);
   await writeStateIfUnchanged(options.gitCommonDir, predecessor.native_sha256, state, ownership);

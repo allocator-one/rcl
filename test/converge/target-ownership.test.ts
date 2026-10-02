@@ -35,6 +35,19 @@ it('serializes sibling report operations under one explicit owner before reading
   expect(Object.values(state.findings)).toHaveLength(1);
 });
 
+it.each(['implicit', 'explicit'] as const)('normalizes a %s report target before ownership and persistence', async mode => {
+  const spaced = `  ${target}  `;
+  if (mode === 'explicit') {
+    await withNativeTarget(dir, target, ownership => processRoundReport({
+      gitCommonDir: dir, target: spaced, ownership, round: 1, findings: [finding()],
+    }));
+  } else {
+    await processRoundReport({ gitCommonDir: dir, target: spaced, round: 1, findings: [finding()] });
+  }
+  expect((await loadConvergeRunState(dir, target))?.target).toBe(target);
+  await expect(readFile(convergeRunStatePath(dir, spaced))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
 it('permits a different target to progress during recovery', async () => {
   await withRecoveryTarget(dir, target, async () => {
     await processRoundReport({ gitCommonDir: dir, target: 'unrelated', round: 1, findings: [] });

@@ -24,7 +24,7 @@ vi.mock('node:fs/promises', async original => {
   const fs = await original<typeof import('node:fs/promises')>();
   return { ...fs, open: async (...args: Parameters<typeof fs.open>) => {
     const handle = await fs.open(...args);
-    if (String(args[0]) !== fault.syncFile) return handle;
+    if (String(args[0]) !== fault.syncFile && !String(args[0]).startsWith(`${fault.syncFile}.`)) return handle;
     return new Proxy(handle, { get(target, property) {
       if (property === 'sync') return async () => { throw new Error('synthetic_report_file_sync_failure'); };
       const value = Reflect.get(target, property, target);

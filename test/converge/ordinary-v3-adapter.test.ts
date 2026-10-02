@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { deriveNativeRecovery, validateNativeRecoveryState } from '../../src/converge/recovery-state.js';
-import { convergeRunStatePath, loadConvergeRunStateEvidence, prepareVerdicts, writeState, writeStateIfUnchanged } from '../../src/converge/run-state.js';
+import { convergeRunStatePath, loadConvergeRunStateEvidence, prepareVerdicts, resolveRoundResolution, writeState, writeStateIfUnchanged } from '../../src/converge/run-state.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { recoveredFixture, uuid } from '../evidence/recovery-validation/fixtures.js';
 import { accepted, projectionFixture } from '../evidence/recovery-validation/carrier-fixtures.js';
@@ -70,6 +70,7 @@ it('prepares an ordinary v3 verdict without changing recovery evidence or cleari
   expect(prepared.state.recovery).toEqual(before);
   expect(prepared.state.updatedAt).toBe('2026-09-23T02:00:00.000Z');
   expect(prepared.result.resolution?.unresolved).toContain(state.recovery.operations[0].anchors[0].identity);
+  expect(resolveRoundResolution(prepared.state, 1)).toEqual(prepared.result.resolution);
 });
 
 it('uses exact v3 source/next CAS and refuses a changed validated source without mutation', async () => {

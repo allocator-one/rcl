@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { validateNativeRecoveryState } from '../../src/converge/recovery-state.js';
 import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
 import { sha } from '../evidence/recovery-validation/fixtures.js';
+import { semanticFixture } from '../evidence/recovery-validation/fixtures.js';
 
 const reads = vi.hoisted(() => [] as string[]);
 vi.mock('../../src/telemetry/recovery/files.js', async importOriginal => {
@@ -49,4 +50,15 @@ it.each(['anchor', 'round'] as const)('rejects a malformed %s report digest befo
   await expect(validateNativeRecoveryState(state, bundle.root, Buffer.from(JSON.stringify(state))))
     .rejects.toThrow('native_recovery_state_invalid');
   expect(reads.some(path => path.includes('outside'))).toBe(false);
+});
+
+it('rejects an off-canonical retained report path before opening it', async () => {
+  reads.splice(0);
+  const fixture = semanticFixture(); const state = structuredClone(fixture.state);
+  const binding = state.rounds[0]!.reportBinding;
+  binding.sourcePath = `${bundle.root}/outside-report.json`;
+  await writeFile(binding.sourcePath, fixture.reportJson);
+  await expect(validateNativeRecoveryState(state, bundle.root, Buffer.from(JSON.stringify(state))))
+    .rejects.toThrow('native_recovery_state_invalid');
+  expect(reads).not.toContain(binding.sourcePath);
 });

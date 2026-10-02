@@ -45,12 +45,14 @@ it.each([1, 3] as const)('requires an original round binding when explicitly req
   await expect(recordVerdicts({ ...f.options, requireVerifiedBinding: true })).rejects.toThrow(/verified original report binding/);
   expect(await readFile(f.path, 'utf8')).toBe(f.raw);
   const result = await recordVerdicts({ ...f.options, requireVerifiedBinding: false });
-  expect(result.entries).toHaveLength(1);
   expect(result.entries[0]).toMatchObject({ key: f.key, verdict: 'dismissed' });
+  if (version === 3) expect(prepareVerdicts(JSON.parse(f.raw), {
+    ...f.options, recordedAt: '2026-09-24T12:00:00.000Z',
+  }).result.entries).toHaveLength(1);
 });
 
 it('binds pure recovered-v3 verdict preparation to the reviewed run ID', async () => {
-  const f = await fixture(3);
+  const f = await fixture(3, true);
   const source = (await loadConvergeRunStateEvidence(f.root, f.options.target))!.state;
   const options = { target: f.options.target, round: 1, verdicts: f.options.verdicts,
     recordedAt: '2026-09-24T12:00:00.000Z' };
@@ -73,7 +75,7 @@ it.each([1, 3] as const)('accepts an exact bound v%i verdict and refuses later r
 
 it.each([[1, 'native'], [3, 'native'], [1, 'pure'], [3, 'pure']] as const)
 ('refuses duplicate verdict keys at the v%i %s boundary', async (version, boundary) => {
-  const f = await fixture(version);
+  const f = await fixture(version, version === 3);
   const source = (await loadConvergeRunStateEvidence(f.root, f.options.target))!.state;
   const before = structuredClone(source);
   for (const verdict of ['fixed', 'dismissed'] as const) {
