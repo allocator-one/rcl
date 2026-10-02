@@ -6,6 +6,7 @@ import { prepareClaimDisposition, prepareObligationTransfer } from './occurrence
 import type { AcceptedSplitEvidence, ClaimDispositionInput, ReceiptAttribution } from './occurrence-types.js';
 import { instant } from './primitives.js';
 import { isStoredEventReceipt, matchesPreparedEventReceipt, type EventReceiptScope, type StoredEventReceipt } from './receipts.js';
+import { stableStringify } from '../../../report/run-header.js';
 
 export interface AcceptedClaimDisposition {
   preparation: ClaimDispositionInput;
@@ -46,7 +47,19 @@ const requireEvidence = (condition: unknown): void => { if (!condition) throw ne
 const time = (value: unknown) => BigInt(instant(value));
 const attribution = (r: StoredEventReceipt): ReceiptAttribution => ({ eventId: r.id, actorUserId: r.actor_user_id,
   occurredAt: r.occurred_at, receivedAt: r.received_at, sequence: r.sequence });
-const cloneUnique = <T>(rows: readonly T[]): T[] => rows.filter((row, i) => rows.findIndex(r => isDeepStrictEqual(r, row)) === i).map(row => structuredClone(row));
+/** @internal Canonical JSON-like evidence dedupe with linear row comparisons. */
+export function cloneUniqueEvidenceRows<T>(rows: readonly T[]): T[] {
+  const buckets = new Map<string, T[]>();
+  const unique: T[] = [];
+  for (const row of rows) {
+    const canonical = stableStringify(row);
+    const bucket = buckets.get(canonical) ?? [];
+    if (bucket.some(existing => isDeepStrictEqual(existing, row))) continue;
+    const retained = structuredClone(row);
+    bucket.push(retained); buckets.set(canonical, bucket); unique.push(retained);
+  }
+  return unique;
+}
 function carrierKey(c: OccurrenceCarrierSelector): string {
   return JSON.stringify([c.scope.base_url, c.scope.org_id, c.scope.repo.toLowerCase(), c.scope.pr_number, c.target,
     c.scope.run_id, c.classificationId, c.identity, c.kind]);
@@ -91,10 +104,12 @@ export function deriveNativeOccurrenceEvidence(input: NativeOccurrenceInput, con
 }): NativeOccurrenceEvidence | undefined {
   for (const rows of [input.transfers, input.dispositions, input.carriers]) requireEvidence(rows === undefined || Array.isArray(rows));
   if (![input.transfers, input.dispositions, input.carriers].some(rows => rows?.length)) return undefined;
-  const transfers = cloneUnique([...context.previous.flatMap(p => p.transfers), ...input.transfers ?? []]);
-  const dispositions = cloneUnique([...context.previous.flatMap(p => p.dispositions), ...input.dispositions ?? []]);
+  const transferRows = [...context.previous.flatMap(p => p.transfers), ...input.transfers ?? []];
+  const dispositionRows = [...context.previous.flatMap(p => p.dispositions), ...input.dispositions ?? []];
   const inventories = [...context.previous.flatMap(p => p.carriers), ...input.carriers ?? []];
-  requireEvidence(transfers.length + dispositions.length + inventories.length <= 2000);
+  requireEvidence(transferRows.length + dispositionRows.length + inventories.length <= 2000);
+  const transfers = cloneUniqueEvidenceRows(transferRows);
+  const dispositions = cloneUniqueEvidenceRows(dispositionRows);
   const receipts: StoredEventReceipt[] = [];
   const requirements: NativeOccurrenceReadRequirement[] = [];
   const selected = (scope: EventReceiptScope, rows: StoredEventReceipt[]) => {
@@ -172,14 +187,14 @@ export function deriveNativeOccurrenceEvidence(input: NativeOccurrenceInput, con
           source: source.selector, eventIds: [r.id] }); content.coverage = 'residuals-present';
       }
     }
-    content.residuals = cloneUnique(content.residuals);
+    content.residuals = cloneUniqueEvidenceRows(content.residuals);
     carriers.push({ content, unresolved: ['authenticated-inventory-unavailable'] });
     requirements.push({ kind: 'carrier-inventory', carrier: inventory.carrier,
       firstRound: inventory.carrier.kind === 'legacy_pending' ? 1 : inventory.carrier.round, lastRound: inventory.carrier.round });
   }
   return structuredClone({ version: 1, transfers: [...input.transfers ?? []], dispositions: [...input.dispositions ?? []],
     carriers: [...input.carriers ?? []], projection: { qualification: 'supplied-content-only', readProvenance: 'unavailable',
-      carriers, dispositions: projected, readRequirements: cloneUnique(requirements) } });
+      carriers, dispositions: projected, readRequirements: cloneUniqueEvidenceRows(requirements) } });
 }
 
 /** Retain adverse/unknown carriers. Recovery cannot manufacture a gating source. */
