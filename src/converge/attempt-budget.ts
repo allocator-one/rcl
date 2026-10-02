@@ -22,6 +22,8 @@ import { promisify } from 'node:util';
 import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
+import { captureProcessIdentity, inspectProcessIdentity, processIdentitySchema,
+  type ProcessIdentity } from './process-identity.js';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
 
@@ -40,6 +42,7 @@ export interface ConvergeAttemptRecord {
   attempt: number;
   claimedAt: string;
   pid: number;
+  processIdentity?: ProcessIdentity;
   source: 'claim';
   retrySource?: RetrySource;
   boundFixRecoverySource?: BoundFixRecoverySource;
@@ -66,6 +69,7 @@ export interface ConvergeAttemptClaim {
   stateFile: string;
   warning?: string;
   cycle?: NativeReviewCycle;
+  processIdentity?: ProcessIdentity;
 }
 
 export class ConvergeAttemptBudgetExceededError extends Error {
@@ -203,6 +207,8 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
         record.attempt !== (state.migratedAttempts ?? 0) + index + 1 ||
         typeof record.claimedAt !== 'string' ||
         !Number.isInteger(record.pid) ||
+        (record.processIdentity !== undefined &&
+          (!processIdentitySchema.safeParse(record.processIdentity).success || record.processIdentity.pid !== record.pid)) ||
         record.source !== 'claim' ||
         (record.retrySource !== undefined && (!retrySourceSchema.safeParse(record.retrySource).success ||
           record.retrySource.attempt !== record.attempt - 1)) ||
@@ -228,6 +234,11 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
     if (!launch.success || !attempts.some(record =>
       record.attempt === launch.data.attempt && record.pid === launch.data.pid)) {
       throw new ConvergeAttemptStateError(`Invalid guarded launch in convergence attempt state: ${stateFile}`);
+    }
+    const launchAttempt = attempts.find(record => record.attempt === launch.data.attempt);
+    if ((launchAttempt?.processIdentity !== undefined || launch.data.processIdentity !== undefined) &&
+      !isDeepStrictEqual(launchAttempt?.processIdentity, launch.data.processIdentity)) {
+      throw new ConvergeAttemptStateError(`Guarded launch process identity does not match its attempt owner: ${stateFile}`);
     }
   }
 
@@ -701,6 +712,10 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
   const lockFile = `${stateFile}.lock`;
   const now = options.now ?? (() => new Date());
   const recordPid = options.recordPid ?? process.pid;
+  const recordProcessIdentity = recordPid === process.pid &&
+    (process.platform === 'linux' || process.platform === 'darwin')
+    ? await captureProcessIdentity()
+    : undefined;
   const lockOwner: AttemptLockOwner = {
     pid: process.pid,
     claimedAt: now().toISOString(),
@@ -771,6 +786,7 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
       attempts: [
         ...(previous?.attempts ?? []),
         { attempt, claimedAt: timestamp, pid: recordPid, source: 'claim',
+          ...(recordProcessIdentity ? { processIdentity: recordProcessIdentity } : {}),
           ...(options.retrySource ? { retrySource: options.retrySource } : {}),
           ...(options.boundFixRecoverySource ? { boundFixRecoverySource: options.boundFixRecoverySource } : {}),
           ...(options.pendingRecoverySource ? { pendingRecoverySource: options.pendingRecoverySource } : {}) },
@@ -779,6 +795,7 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
     };
     await writeStateAtomically(stateFile, state);
     claim = { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile,
+      ...(recordProcessIdentity ? { processIdentity: recordProcessIdentity } : {}),
       ...(state.cycle ? { cycle: state.cycle } : {}) };
   } catch (err) {
     claimError = err;
@@ -853,6 +870,11 @@ export async function recordConvergeAttemptLaunch(
         mutation === 'completion' && incoming.pid !== process.pid) {
         throw new ConvergeAttemptStateError('Guarded launch requires this process\'s latest durable attempt claim.');
       }
+      const attemptOwner = state.attempts.at(-1)?.processIdentity;
+      if ((attemptOwner !== undefined || incoming.processIdentity !== undefined) &&
+        !isDeepStrictEqual(attemptOwner, incoming.processIdentity)) {
+        throw new ConvergeAttemptStateError('Guarded launch process identity does not match its attempt owner.');
+      }
       const { assertReviewCyclePair } = await import('./fresh-review.js');
       await assertReviewCyclePair(commonDir, target, state.cycle);
       const previous = state.lastLaunch;
@@ -908,6 +930,9 @@ export async function recordConvergeAttemptRecoveryResume(
   const expected = launchSchema.parse(input.expected);
   const next = launchSchema.parse(input.next);
   const source = { nativeSha256: input.nativeSha256, cycleId: input.cycleId };
+  let currentIdentity;
+  try { currentIdentity = await captureProcessIdentity(); }
+  catch (error) { throw new ConvergeAttemptStateError('recovery_resume_owner_unverifiable', { cause: error }); }
   const binding = (launch: GuardedLaunchState) => {
     const { status: _status, reportJsonSha256: _report, successfulReviews: _success, totalReviews: _total,
       deliveryPending: _delivery, hardFailure: _hard, reviewerHealth: _health, exitCode: _exit, reportPath: _path,
@@ -916,7 +941,8 @@ export async function recordConvergeAttemptRecoveryResume(
     return { ...immutable, recovery: operation };
   };
   if (!expected.recovery?.operationId || !expected.runId || !isDeepStrictEqual(binding(expected), binding(next)) ||
-    next.recovery?.resume?.pid !== process.pid) {
+    next.recovery?.resume?.pid !== process.pid ||
+    !isDeepStrictEqual(next.recovery.resume.processIdentity, currentIdentity)) {
     throw new ConvergeAttemptStateError('recovery_resume_binding_mismatch');
   }
   return withOwnedNativeOperation(ownership, gitCommonDir, target, async owned => {
@@ -954,21 +980,20 @@ export async function recordConvergeAttemptRecoveryResume(
           recovery: { ...expected.recovery, resume } })) {
           throw new ConvergeAttemptStateError('recovery_resume_invalid_begin');
         }
-        const previousOwner = expected.recovery!.resume?.phase === 'running' ? expected.recovery!.resume.pid
-          : expected.status === 'pending' ? expected.pid : undefined;
-        if (previousOwner !== undefined) {
-          try { process.kill(previousOwner, 0); }
-          catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
-              throw new ConvergeAttemptStateError('recovery_resume_owner_unverifiable');
-            }
-            await writeStateAtomically(stateFile, { ...state, lastLaunch: next, updatedAt: new Date().toISOString() });
-            return;
-          }
-          throw new ConvergeAttemptStateError('recovery_resume_owner_alive');
+        const previousOwner = expected.recovery!.resume?.phase === 'running'
+          ? expected.recovery!.resume.processIdentity
+          : expected.status === 'pending' ? expected.processIdentity : undefined;
+        if (expected.recovery!.resume?.phase === 'running' || expected.status === 'pending') {
+          if (!previousOwner) throw new ConvergeAttemptStateError('recovery_resume_owner_unverifiable');
+          const ownerStatus = await inspectProcessIdentity(previousOwner);
+          if (ownerStatus === 'unverifiable') throw new ConvergeAttemptStateError('recovery_resume_owner_unverifiable');
+          if (ownerStatus === 'alive') throw new ConvergeAttemptStateError('recovery_resume_owner_alive');
+          await writeStateAtomically(stateFile, { ...state, lastLaunch: next, updatedAt: new Date().toISOString() });
+          return;
         }
       } else if (expected.status !== 'pending' || expected.recovery!.resume?.phase !== 'running' ||
-        expected.recovery!.resume.pid !== process.pid || resume.phase !== 'finished' ||
+        expected.recovery!.resume.pid !== process.pid ||
+        !isDeepStrictEqual(expected.recovery!.resume!.processIdentity, currentIdentity) || resume.phase !== 'finished' ||
         !['completed', 'failed'].includes(next.status) || next.status === 'failed' && !isDeepStrictEqual(next,
           { ...expected, status: 'failed', recovery: { ...expected.recovery, resume } })) {
         throw new ConvergeAttemptStateError('recovery_resume_invalid_finish');

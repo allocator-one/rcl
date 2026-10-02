@@ -14,8 +14,8 @@ import * as lockScope from '../evidence/original-run/lock-scope.js';
 import type { ConsensusFinding } from '../consensus/types.js';
 import type { ReviewResult } from '../consensus/types.js';
 import type { ClaimDescriptor } from '../evidence/claim-recovery/validation/claims.js';
-import type { NativeRecoveryMetadata, ReportBinding, SemanticSighting } from '../evidence/claim-recovery/validation/types.js';
-import { validateSemanticState as validateRetainedSemanticState } from '../evidence/claim-recovery/validation/semantic-validation.js';
+import type { NativeRecoveryMetadata, ReportBinding, RoundAdmissionSnapshot, SemanticSighting } from '../evidence/claim-recovery/validation/types.js';
+import { admittedActionableBeforeTriage, validateSemanticState as validateRetainedSemanticState } from '../evidence/claim-recovery/validation/semantic-validation.js';
 import type { RetainedSources } from '../evidence/claim-recovery/validation/sources.js';
 import { recoveryProjectionFreshness, type RecoveryProjectionFreshness } from '../evidence/claim-recovery/validation/current-projection.js';
 import type { GuardedLaunchState } from './launch-guard.js';
@@ -145,6 +145,8 @@ export interface ConvergeRunState {
     counts: RoundCounts;
     runId?: string;
     reportBinding?: ReportBinding;
+    /** Immutable obligations at semantic admission, before verdict or later recovery mutation. */
+    admission?: RoundAdmissionSnapshot;
     /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
     severities?: Record<string, ConsensusFinding['severity']>;
   }>;
@@ -945,7 +947,7 @@ function deriveRoundResolution(state: ConvergeRunState, round: number,
     const fixedThisRound = Object.values(state.findings).filter(
       (e) => e.verdict === 'fixed' && e.verdictRound === round
     ).length;
-    const admittedActionable = pendingBeforeTriage ?? state.lastAnnotations.actionableBeforeTriage ?? effectivePendingIdentities(state);
+    const admittedActionable = pendingBeforeTriage ?? admittedActionableBeforeTriage(state, round);
     const recoveryProjection = recoveryProjectionFreshness(state);
     return {
       round,
@@ -995,7 +997,7 @@ export function prepareVerdicts(
     throw new ConvergeRunStateError('review_cycle_verdict_run_mismatch: use the run ID bound to the reviewed round');
   }
 
-  const pendingBeforeTriage = effectivePendingIdentities(state);
+  const pendingBeforeTriage = admittedActionableBeforeTriage(state, options.round);
   if (state.lastAnnotations?.round === options.round && state.lastAnnotations.actionableBeforeTriage === undefined) {
     state.lastAnnotations.actionableBeforeTriage = pendingBeforeTriage;
   }

@@ -9,19 +9,22 @@ import { deriveNativeRecovery, validateNativeRecoveryState, verifyNativeRecovery
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
 import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
+import { admittedActionableBeforeTriage } from '../../src/evidence/claim-recovery/validation/semantic-validation.js';
 import { indexSemanticPriorByFileCategory } from '../../src/converge/semantic-state.js';
-import { recoveredFixture, semanticFixture, sha, uuid, target } from '../evidence/recovery-validation/fixtures.js';
+import { legacyFixture, recoveredFixture, semanticFixture, sha, uuid, target } from '../evidence/recovery-validation/fixtures.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
-async function fixture() {
+async function fixture(version: 1 | 2 = 2) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-semantic-cache-')));
   roots.push(root);
   const path = convergeRunStatePath(root, target);
-  const retained = semanticFixture();
-  retained.state.rounds[0]!.reportBinding.sourcePath = `${path}.evidence/${sha(retained.reportJson)}.json`;
+  const retained = version === 1 ? legacyFixture() : semanticFixture();
+  if ('reportBinding' in retained.state.rounds[0]!) {
+    retained.state.rounds[0]!.reportBinding.sourcePath = `${path}.evidence/${sha(retained.reportJson)}.json`;
+  }
   const reports: string[] = [retained.reportJson];
   const claim = sampleFinding({ file: 'cache.ts', startLine: 10, endLine: 12,
     title: 'Cache entries never expire', description: 'The positive cache returns expired entries without testing their TTL.',
@@ -41,7 +44,7 @@ async function fixture() {
   }
   const key = retained.key;
   const sourceJson = JSON.stringify(retained.state);
-  const old = recoveredFixture(2).selection;
+  const old = recoveredFixture(version).selection;
   const selection = { ...old, nativeJson: sourceJson };
   const event = prepareClaimSplit(selection).event;
   const anchor = correctionAnchor(selection, { ...selection.scope, ...event,
@@ -49,11 +52,11 @@ async function fixture() {
   const plan = deriveNativeRecovery({ sourceJson, target, operationId: uuid(8), anchors: [anchor],
     reports: [retained.reportJson], sourceReceipts: selection.sourceReceipts });
   await mkdir(`${path}.evidence`, { recursive: true, mode: 0o700 });
-  await writeFile(retained.state.rounds[0]!.reportBinding.sourcePath, retained.reportJson, { mode: 0o600 });
+  await writeFile(`${path}.evidence/${sha(retained.reportJson)}.json`, retained.reportJson, { mode: 0o600 });
   await mkdir(`${path}.recovery-sources`, { recursive: true, mode: 0o700 });
   await writeFile(`${path}.recovery-sources/${sha(sourceJson)}.json`, sourceJson, { mode: 0o600 });
   await writeFile(path, plan.resultJson, { mode: 0o600 });
-  return { root, path, key, claim, reports, sourceJson, plan, round };
+  return { root, path, key, claim, reports, sourceJson, plan, selection: old, round };
 }
 
 const bridgeDescriptors = () => {
@@ -173,6 +176,36 @@ it('accepts later producer severity and bounds while preserving initial title, o
   expect(await readFile(`${f.path}.recovery-sources/${sha(f.sourceJson)}.json`, 'utf8')).toBe(f.sourceJson);
 });
 
+it('retains an older admitted obligation after a later empty round and delayed verdict clear it', async () => {
+  const f = await fixture();
+  const first = await f.round(2, [f.claim], f.plan.resultJson);
+  const key = first.result.findings[0]!.identity;
+  await f.round(3, [], await readFile(f.path, 'utf8'));
+  const beforeVerdict = (await loadConvergeRunState(f.root, target))!;
+  const admitted = beforeVerdict.lastAnnotations!.actionableBeforeTriage!;
+  const admission = structuredClone(beforeVerdict.rounds.find(row => row.round === 3)!.admission);
+  expect(admitted).toContain(key);
+  expect(admission?.actionableIdentities).toEqual(admitted);
+
+  const omitted = structuredClone(beforeVerdict);
+  omitted.rounds.find(row => row.round === 3)!.admission!.actionableIdentities = admitted.filter(identity => identity !== key);
+  omitted.lastAnnotations!.actionableBeforeTriage = admitted.filter(identity => identity !== key);
+  const omittedRaw = JSON.stringify(omitted);
+  await expect(validateNativeRecoveryState(omitted, f.root, Buffer.from(omittedRaw)))
+    .rejects.toThrow('native_recovery_state_invalid');
+
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 2,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'The retained source checks cache expiry.' }] });
+  const raw = await readFile(f.path, 'utf8');
+  const state = (await loadConvergeRunState(f.root, target))!;
+  expect(state.findings[key]).not.toHaveProperty('pendingRound');
+  expect(admittedActionableBeforeTriage(state)).toEqual(admitted);
+  expect(state.rounds.find(row => row.round === 3)!.admission).toEqual(admission);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
+  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+});
+
 it('keeps a new operation pending despite identical evidence and an earlier dismissed operation', async () => {
   const f = await fixture();
   const claim = sampleFinding({ file: 'auth.ts', title: 'GET /accounts lacks authentication',
@@ -257,6 +290,71 @@ it('accepts ordinary later repeat, suppression, and critical re-gating', async (
   await expect(validateNativeRecoveryState(forged, f.root, Buffer.from(forgedRaw))).rejects.toThrow('native_recovery_state_invalid');
   expect(() => validateRetainedNativeEvidence({ sourceJson: forgedRaw, target, reports: f.reports,
     nativeSourceJsons: [f.sourceJson] })).toThrow('native_recovery_content_invalid');
+
+  const forgedAdmission = structuredClone(state);
+  forgedAdmission.rounds.find(row => row.round === forgedAdmission.lastAnnotations!.round)!
+    .admission!.actionableIdentities = [...admitted, inactive!].sort();
+  forgedAdmission.lastAnnotations!.actionableBeforeTriage = [...admitted, inactive!].sort();
+  const forgedAdmissionRaw = JSON.stringify(forgedAdmission);
+  await expect(validateNativeRecoveryState(forgedAdmission, f.root, Buffer.from(forgedAdmissionRaw)))
+    .rejects.toThrow('native_recovery_state_invalid');
+
+  const forgedOperationBoundary = structuredClone(state);
+  forgedOperationBoundary.rounds.find(row => row.round === forgedOperationBoundary.lastAnnotations!.round)!
+    .admission!.recoveryOperationCount += 1;
+  const forgedOperationBoundaryRaw = JSON.stringify(forgedOperationBoundary);
+  await expect(validateNativeRecoveryState(forgedOperationBoundary, f.root, Buffer.from(forgedOperationBoundaryRaw)))
+    .rejects.toThrow('native_recovery_state_invalid');
+});
+
+it('retains a descriptor-less legacy obligation admitted before its delayed original-round verdict', async () => {
+  const f = await fixture(1);
+  await f.round(2, [], f.plan.resultJson);
+  const before = (await loadConvergeRunState(f.root, target))!;
+  const admitted = before.rounds.find(row => row.round === 2)!.admission!.actionableIdentities;
+  expect(admitted).toContain(f.key);
+
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 1,
+    verdicts: [{ key: f.key, verdict: 'dismissed', reason: 'The retained original claim was source-refuted.' }] });
+  const raw = await readFile(f.path, 'utf8');
+  const state = (await loadConvergeRunState(f.root, target))!;
+  expect(state.findings[f.key]).not.toHaveProperty('pendingRound');
+  expect(state.rounds.find(row => row.round === 2)!.admission!.actionableIdentities).toEqual(admitted);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
+});
+
+it('keeps a genuinely appended recovery operation outside an earlier admission snapshot', async () => {
+  const f = await fixture();
+  const admitted = await f.round(2, [f.claim], f.plan.resultJson);
+  const predecessor = await readFile(f.path, 'utf8');
+  const retained = admittedActionableBeforeTriage((await loadConvergeRunState(f.root, target))!);
+  const laterIdentity = 'eeeeeeeeeeeeeeee';
+  const classificationId = uuid(220);
+  const scope = { ...f.selection.scope, run_id: uuid(2) };
+  const sourceReceipts = [{ id: classificationId, org_id: scope.org_id,
+    run_id: scope.run_id, repo: scope.repo, pr_number: scope.pr_number,
+    actor_user_id: uuid(221), kind: 'round_processed' as const, converge_target: target, round: 2, attempt: 2,
+    occurred_at: '2026-09-23T12:00:00.123456Z', payload: { identities: [{
+      identity_key: admitted.rows[0]!.identity, matched_identity: admitted.result.findings[0]!.identity, status: 'new',
+    }] } }];
+  const selection = { ...f.selection, scope, eventId: uuid(222), occurredAt: '2026-09-23T12:00:01.123456Z',
+    nativeJson: predecessor, nativeSourceJsons: [f.sourceJson], reportJson: admitted.reportJson, findingRef: 'f001',
+    previousIdentity: admitted.result.findings[0]!.identity, identity: laterIdentity,
+    descriptor: admitted.rows[0]!.claimDescriptor!, reason: 'Independent later retained claim.',
+    expectedEventSequence: 8, classificationId, sourceReceipts };
+  const event = prepareClaimSplit(selection).event;
+  const operationId = uuid(223);
+  const anchor = correctionAnchor(selection, { ...selection.scope, ...event, actor_user_id: uuid(224),
+    converge_target: target, round: 2, attempt: null }, uuid(224), operationId);
+  const later = deriveNativeRecovery({ sourceJson: predecessor, target, operationId, anchors: [anchor],
+    reports: [admitted.reportJson], sourceReceipts, nativeSourceJsons: [f.sourceJson] });
+  await writeFile(`${f.path}.recovery-sources/${sha(predecessor)}.json`, predecessor, { mode: 0o600 });
+  await writeFile(f.path, later.resultJson, { mode: 0o600 });
+  const state = (await loadConvergeRunState(f.root, target))!;
+  expect(admittedActionableBeforeTriage(state)).toEqual(retained);
+  expect(admittedActionableBeforeTriage(state)).not.toContain(laterIdentity);
+  expect(later.actionableIdentities).toContain(laterIdentity);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(later.resultJson))).resolves.toBeUndefined();
 });
 
 it('accepts recovered anchors before they have semantic sightings', async () => {

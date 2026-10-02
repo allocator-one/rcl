@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { claimDescriptorSchema, compareClaims } from './claims.js';
 import { decodeOriginalReport, decodeRecoveryDocument } from '../../original-run/decode.js';
 import { effectivePendingIdentities, recoveryAnchors } from './native-state.js';
+import { occurrencePendingIdentities } from './native-occurrences.js';
 import { ConvergeRunStateError, findingGatingReason, migratedLegacyPendingRound, verdictClearsPending } from './obligations.js';
 import { DEFAULT_SEVERITY_ORDER } from '../../../config/defaults.js';
 import type { ConsensusFinding } from '../../../consensus/types.js';
@@ -33,21 +34,13 @@ export function indexSemanticSightings<T extends { round: number; canonicalIdent
 }
 
 /** Reconstruct the exact obligations present when the latest round was admitted, before its verdicts could clear them. */
-export function admittedActionableBeforeTriage(state: ConvergeRunState): string[] {
+export function admittedActionableBeforeTriage(state: ConvergeRunState, round = state.lastAnnotations?.round): string[] {
   const annotations = state.lastAnnotations;
-  if (!annotations) return effectivePendingIdentities(state);
-  const admitted = new Set(effectivePendingIdentities(state));
-  for (const row of annotations.identities) {
-    if (row.gating === 'none' || row.status === 'suppressed') continue;
-    const entry = state.findings[row.identity];
-    if (row.status === 'new' || row.status === 'regating' || entry?.verdictRound === annotations.round) {
-      admitted.add(row.identity);
-    }
-  }
-  for (const sighting of state.sightings ?? []) {
-    if (sighting.round === annotations.round && sighting.pendingRound !== null) admitted.add(sighting.canonicalIdentity);
-  }
-  return [...admitted].sort();
+  const reviewedRound = state.rounds.find(row => row.round === round);
+  const retainedAnnotations = annotations && annotations.round === round
+    ? annotations.actionableBeforeTriage : undefined;
+  const retained = reviewedRound?.admission?.actionableIdentities ?? retainedAnnotations;
+  return retained ? [...retained] : effectivePendingIdentities(state);
 }
 
 export function verifyRoundBinding(binding: ReportBinding, target: string, round: number, runId: string, raw: string): RetainedReport {
@@ -271,15 +264,49 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       !(entry.verdict !== undefined && verdictClearsPending(state, key, latestPending, entry.verdictRound!, entry.verdictSeverity)) ? latestPending : undefined;
     requireIntegrity(entry.pendingRound === expectedPending);
   }
+  for (const roundEntry of state.rounds) {
+    const admission = roundEntry.admission;
+    if (!admission) continue;
+    requireIntegrity(admission.version === 1 && Number.isSafeInteger(admission.recoveryOperationCount) &&
+      admission.recoveryOperationCount >= 0 && admission.recoveryOperationCount <= (state.recovery?.operations.length ?? 0));
+    const retainedSet = new Set(admission.actionableIdentities);
+    const roundSightings = sightingsByRound.get(roundEntry.round) ?? [];
+    requireIntegrity(roundSightings.every(sighting =>
+      sighting.pendingRound === null || retainedSet.has(sighting.canonicalIdentity)));
+    requireIntegrity(Object.values(state.findings).every(entry => entry.firstRound > roundEntry.round ||
+      entry.pendingRound === undefined || entry.pendingRound > roundEntry.round || retainedSet.has(entry.key)));
+    const admittedOperations = state.recovery?.operations.slice(0, admission.recoveryOperationCount) ?? [];
+    const operationPending = new Set(admittedOperations.flatMap(operation => [
+      ...operation.anchors.filter(anchor => anchor.source.gating !== 'none').map(anchor => anchor.identity),
+      ...occurrencePendingIdentities(operation.occurrences),
+      ...(operation.material?.pendingIdentities ?? []),
+    ]));
+    requireIntegrity(admission.actionableIdentities.every(identity => {
+      const entry = state.findings[identity];
+      const latestSighting = (sightingsByIdentity.get(identity) ?? [])
+        .filter(sighting => sighting.round <= roundEntry.round).at(-1);
+      const legacyEntry = legacy?.findings[identity];
+      return operationPending.has(identity) ||
+        legacyEntry !== undefined && migratedLegacyPendingRound(legacyEntry, legacy!) !== undefined ||
+        latestSighting !== undefined && latestSighting.pendingRound !== null;
+    }));
+  }
   const latest = Math.max(0, ...rounds);
   if (latest && !legacy?.rounds.some(r => r.round === latest)) {
     const expected = { round: latest, identities: (sightingsByRound.get(latest) ?? [])
       .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) };
     requireIntegrity(state.lastAnnotations !== undefined && state.lastAnnotations.round === expected.round &&
       isDeepStrictEqual(state.lastAnnotations.identities, expected.identities));
+    const admission = state.rounds.find(row => row.round === latest)?.admission;
+    if (admission) requireIntegrity(state.lastAnnotations!.actionableBeforeTriage !== undefined &&
+      isDeepStrictEqual(admission.actionableIdentities, state.lastAnnotations!.actionableBeforeTriage));
     if (state.lastAnnotations!.actionableBeforeTriage !== undefined) {
       const retained = state.lastAnnotations!.actionableBeforeTriage;
-      requireIntegrity(isDeepStrictEqual(retained, admittedActionableBeforeTriage(state)));
+      const retainedSet = new Set(retained);
+      requireIntegrity((sightingsByRound.get(latest) ?? []).every(sighting =>
+        sighting.pendingRound === null || retainedSet.has(sighting.canonicalIdentity)));
+      requireIntegrity(state.lastAnnotations!.identities.every(row =>
+        row.gating === 'none' || row.status === 'suppressed' || retainedSet.has(row.identity)));
     }
   }
 }

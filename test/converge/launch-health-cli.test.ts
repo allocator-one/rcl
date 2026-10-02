@@ -152,6 +152,7 @@ describe('ordinary launch health through the public CLI', () => {
       const nativePath = convergeRunStatePath(f.common, 'health-fixture');
       const native = JSON.parse(await readFile(nativePath, 'utf8'));
       native.lastLaunch.status = 'pending'; native.lastLaunch.pid = 987_654;
+      if (native.lastLaunch.processIdentity) native.lastLaunch.processIdentity.pid = 987_654;
       delete native.lastLaunch.runId; delete native.lastLaunch.reportJsonSha256; delete native.lastLaunch.successfulReviews;
       delete native.lastLaunch.totalReviews; delete native.lastLaunch.deliveryPending;
       await writeFile(nativePath, JSON.stringify(native));

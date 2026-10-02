@@ -57,7 +57,10 @@ async function fixture(legacy = true, cap = 20) {
   // Model the now-exited coordinator without killing or consulting any real task.
   const nativePath = convergeRunStatePath(common, target), attemptsPath = convergeAttemptStatePath(common, target);
   const state = JSON.parse(await readFile(nativePath, 'utf8')), attempts = JSON.parse(await readFile(attemptsPath, 'utf8'));
-  state.lastLaunch.pid = 99999999; attempts.attempts[2].pid = 99999999;
+  state.lastLaunch.pid = 99999999;
+  if (state.lastLaunch.processIdentity) state.lastLaunch.processIdentity.pid = 99999999;
+  attempts.attempts[2].pid = 99999999;
+  if (attempts.attempts[2].processIdentity) attempts.attempts[2].processIdentity.pid = 99999999;
   await writeFile(nativePath, JSON.stringify(state)); await writeFile(attemptsPath, JSON.stringify(attempts));
   const selection = { target, runId: result.run!.id, reportPath, reportSha256: sha256(await readFile(reportPath)), reason: 'Original strict-fallback labels rejected locally; fix verified before bounded retry.' };
   const preview = () => previewTerminalRejection(selection, common, dataDir);

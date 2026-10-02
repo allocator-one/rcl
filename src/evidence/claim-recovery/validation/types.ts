@@ -48,6 +48,12 @@ export interface RoundCounts {
   regating: number;
 }
 
+export interface RoundAdmissionSnapshot {
+  version: 1;
+  recoveryOperationCount: number;
+  actionableIdentities: string[];
+}
+
 export interface ConvergeRunState {
   version: 1 | 2 | 3;
   /** Released cycle-v2 and its recovered successors retain original cycle/accounting metadata. */
@@ -63,6 +69,8 @@ export interface ConvergeRunState {
     counts: RoundCounts;
     runId?: string;
     reportBinding?: ReportBinding;
+    /** Immutable obligations at semantic admission, before verdict or later recovery mutation. */
+    admission?: RoundAdmissionSnapshot;
     /** Strongest sighting per identity in this round, including for delayed verdicts. Absent in legacy state. */
     severities?: Record<string, ConsensusFinding['severity']>;
   }>;

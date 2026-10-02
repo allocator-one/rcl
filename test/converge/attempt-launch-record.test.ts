@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   claimConvergeAttempt, convergeAttemptStatePath, loadConvergeAttemptState,
-  recordConvergeAttemptLaunch, type ConvergeAttemptState,
+  recordConvergeAttemptLaunch, type ConvergeAttemptClaim, type ConvergeAttemptState,
 } from '../../src/converge/attempt-budget.js';
 import { withNativeTarget, withOwnedNativeOperation } from '../../src/converge/target-ownership.js';
 import type { GuardedLaunchState } from '../../src/converge/launch-record.js';
@@ -59,9 +59,10 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function pending(attempt: number): GuardedLaunchState {
-  return { status: 'pending', attempt, round: 2, headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64),
-    startedAt: new Date().toISOString(), pid: process.pid };
+function pending(claim: Pick<ConvergeAttemptClaim, 'attempt' | 'processIdentity'>): GuardedLaunchState {
+  return { status: 'pending', attempt: claim.attempt, round: 2, headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64),
+    startedAt: new Date().toISOString(), pid: process.pid,
+    ...(claim.processIdentity ? { processIdentity: claim.processIdentity } : {}) };
 }
 function completed(launch: GuardedLaunchState): GuardedLaunchState {
   return { ...launch, status: 'completed', runId: '00000000-0000-7000-8000-000000000901',
@@ -83,7 +84,7 @@ function barrier() {
 describe('owned attempt launch metadata', () => {
   it.each(['pending', 'completed'] as const)('pins %s input before an earlier owned operation finishes', async status => {
     const claim = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 4 });
-    const first = pending(claim.attempt);
+    const first = pending(claim);
     if (status === 'completed') await persist(first);
     // Retain the caller's nested reference, including terminal completion facts.
     const request = { launch: status === 'completed' ? completed(first) : first };
@@ -117,7 +118,8 @@ describe('owned attempt launch metadata', () => {
     expect(claim.attempt).toBe(3);
     const path = convergeAttemptStatePath(directory, target);
     const state = (await loadConvergeAttemptState(directory, target))!;
-    state.lastLaunch = pending(kind === 'migrated-only' ? 2 : claim.attempt);
+    state.lastLaunch = pending({ attempt: kind === 'migrated-only' ? 2 : claim.attempt,
+      ...(kind === 'foreign-pid' && claim.processIdentity ? { processIdentity: claim.processIdentity } : {}) });
     if (kind === 'foreign-pid') state.lastLaunch.pid = process.pid + 1;
     const corrupted = JSON.stringify(state);
     await writeFile(path, corrupted, { mode: 0o600 });
@@ -129,7 +131,7 @@ describe('owned attempt launch metadata', () => {
 
   it('retains a valid older launch and every claim when the next attempt is spent', async () => {
     const first = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 4 });
-    const launch = pending(first.attempt);
+    const launch = pending(first);
     await persist(launch);
     await persist(completed(launch));
     const before = (await loadConvergeAttemptState(directory, target))!;
@@ -147,7 +149,7 @@ describe('owned attempt launch metadata', () => {
     await writeFile(join(directory, `rcl-converge-${target}-ledger.md`), '## Round 2\n', { mode: 0o600 });
     const claim = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 7 });
     const before = (await loadConvergeAttemptState(directory, target))!;
-    const launch = pending(claim.attempt);
+    const launch = pending(claim);
     const path = convergeAttemptStatePath(directory, target);
     Object.assign(fault, { file: path, directory: dirname(path), fail: true });
 

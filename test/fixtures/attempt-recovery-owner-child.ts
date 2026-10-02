@@ -8,6 +8,7 @@ import * as attempts from '../../src/converge/attempt-budget.js';
 import { loadConvergeRunStateEvidence } from '../../src/converge/run-state.js';
 import type { GuardedLaunchState } from '../../src/converge/launch-record.js';
 import { resolveQuorumPolicy } from '../../src/dispatch/quorum.js';
+import { captureProcessIdentity } from '../../src/converge/process-identity.js';
 
 export async function primitiveFixture(root: string) {
   await mkdir(`${root}/rcl-converge-runs`, { mode: 0o700 });
@@ -32,8 +33,10 @@ export async function spendAndRecord(root: string, target: string, mode: 'pendin
     const native = (await loadConvergeRunStateEvidence(root, target))!;
     const claim = await attempts.claimConvergeAttempt({ gitCommonDir: root, target, ownership });
     const original = native.state.rounds.at(-1)!;
+    const processIdentity = await captureProcessIdentity();
     let launch: GuardedLaunchState = { status: 'pending', attempt: claim.attempt, round: original.round + 1,
       headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid,
+      processIdentity,
       runId: uuid(931), recovery: { operationId: uuid(932), sourceRunId: original.runId!,
         originalNativeClaim: { attempt: claim.attempt - 1, round: original.round },
         sourceNativeClaim: { attempt: claim.attempt - 1, round: original.round } } };
@@ -57,12 +60,15 @@ if (process.argv[2] === '--primitive-child') {
   if (request.mode === 'resume-complete' || request.mode === 'resume-running' || request.mode === 'resume-running-released') {
     await withNativeTarget(request.root, request.target, async ownership => {
       const expected = (await attempts.loadConvergeAttemptState(request.root, request.target))!.lastLaunch!;
-      const next = { ...expected, status: 'pending' as const, recovery: { ...expected.recovery!, resume: { pid: process.pid, phase: 'running' as const } } };
+      const processIdentity = await captureProcessIdentity();
+      const next = { ...expected, status: 'pending' as const, recovery: { ...expected.recovery!,
+        resume: { pid: process.pid, processIdentity, phase: 'running' as const } } };
       const input = { expected, next, nativeSha256: request.nativeSha256, cycleId: request.cycleId };
       await attempts.recordConvergeAttemptRecoveryResume(request.root, request.target, input, ownership);
       if (request.mode === 'resume-running') await hold();
       if (request.mode === 'resume-running-released') return;
-      const complete = { ...terminal(next), recovery: { ...next.recovery, resume: { pid: process.pid, phase: 'finished' as const } } };
+      const complete = { ...terminal(next), recovery: { ...next.recovery,
+        resume: { pid: process.pid, processIdentity, phase: 'finished' as const } } };
       await attempts.recordConvergeAttemptRecoveryResume(request.root, request.target, { ...input, expected: next, next: complete }, ownership);
       const file = attempts.convergeAttemptStatePath(request.root, request.target), retained = await readFile(file, 'utf8');
       await attempts.recordConvergeAttemptRecoveryResume(request.root, request.target, { ...input, expected: next, next: complete }, ownership);

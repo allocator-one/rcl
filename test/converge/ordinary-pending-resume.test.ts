@@ -34,6 +34,7 @@ describe('ordinary pending launch migration', () => {
     delete native.lastLaunch.totalReviews;
     delete native.lastLaunch.deliveryPending;
     native.lastLaunch.pid = 987_654;
+    if (native.lastLaunch.processIdentity) native.lastLaunch.processIdentity.pid = 987_654;
     await writeFile(nativePath, JSON.stringify(native));
 
     const role = { name: 'general', description: 'review', focus: ['correctness'], isSpecialized: false,

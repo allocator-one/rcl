@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { guardReviewerRecoveryLaunch, guardReviewerRecoveryResume } from "../../src/converge/recovery-launch.js";
-import { loadConvergeAttemptState } from "../../src/converge/attempt-budget.js";
+import { convergeAttemptStatePath, loadConvergeAttemptState } from "../../src/converge/attempt-budget.js";
 import { guardReviewLaunch } from "../../src/converge/launch-guard.js";
 import { withNativeTarget } from "../../src/converge/target-ownership.js";
 import { loadConvergeRunState, convergeRunStatePath } from "../../src/converge/run-state.js";
@@ -1039,12 +1039,18 @@ describe('same-operation guarded reviewer recovery resume', () => {
     await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted');
     const path = convergeRunStatePath(fixture.dir, target), native = JSON.parse(await readFile(path, 'utf8'));
     native.lastLaunch.status = 'pending';
+    if (kind === 'dead') native.lastLaunch.processIdentity.birthSha256 = 'f'.repeat(64);
     await writeFile(path, JSON.stringify(native));
+    if (kind === 'dead') {
+      const attemptPath = convergeAttemptStatePath(fixture.dir, target);
+      const attemptState = JSON.parse(await readFile(attemptPath, 'utf8'));
+      attemptState.attempts.at(-1).processIdentity = native.lastLaunch.processIdentity;
+      await writeFile(attemptPath, JSON.stringify(attemptState));
+    }
     const before = await state(fixture), run = vi.fn(async (context: any) => { await sealSuccessor(fixture, context, [{ cell: 's1:0' }]); });
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
-      if (kind === 'alive') return true;
-      throw Object.assign(new Error('pid probe'), { code: kind === 'dead' ? 'ESRCH' : 'EPERM' });
-    });
+    const kill = kind === 'unverifiable' ? vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('pid probe'), { code: 'EPERM' });
+    }) : undefined;
     try {
       if (kind === 'dead') {
         await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run })).resolves.toMatchObject({ kind: 'resumed' });
@@ -1056,7 +1062,7 @@ describe('same-operation guarded reviewer recovery resume', () => {
         expect(await runState(fixture)).toEqual(native);
       }
       expect(await state(fixture)).toEqual(before);
-    } finally { kill.mockRestore(); }
+    } finally { kill?.mockRestore(); }
   });
 });
 

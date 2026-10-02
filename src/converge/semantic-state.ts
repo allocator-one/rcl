@@ -618,10 +618,12 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     }
   }
   state.sightings.push(...annotations.map(a => a.sighting!));
-  state.rounds.push({ round: options.round, counts, severities, runId: binding.runId, reportBinding: binding });
+  const admission = { version: 1 as const, recoveryOperationCount: state.recovery!.operations.length,
+    actionableIdentities: pending(state) };
+  state.rounds.push({ round: options.round, counts, severities, runId: binding.runId, reportBinding: binding, admission });
   state.lastAnnotations = { round: options.round,
     identities: annotations.map(a => ({ identity: a.identity, status: a.status, gating: a.sighting!.gating })),
-    actionableBeforeTriage: pending(state) };
+    actionableBeforeTriage: [...admission.actionableIdentities] };
   state.updatedAt = new Date().toISOString();
   await retainReportEvidence(options.evidence!.reportJson, binding);
   await writeStateIfUnchanged(options.gitCommonDir, predecessor.native_sha256, state, ownership);

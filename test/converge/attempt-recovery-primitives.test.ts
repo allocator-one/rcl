@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { fork, type ChildProcess } from 'node:child_process';
+import { ChildProcess, fork } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, realpath, readFile, writeFile, rm, stat, appendFile } from 'node:fs/promises';
@@ -12,6 +12,7 @@ import { claimConvergeAttempt, loadConvergeAttemptState, recordConvergeAttemptLa
 import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { launchSchema } from '../../src/converge/launch-record.js';
 import type { GuardedLaunchState } from '../../src/converge/launch-record.js';
+import { captureProcessIdentity } from '../../src/converge/process-identity.js';
 
 const fault = vi.hoisted(() => ({
   file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
@@ -44,6 +45,7 @@ vi.mock('node:fs/promises', async importOriginal => {
   };
 });
 const roots: string[] = [], children = new Set<ChildProcess>();
+const selfIdentity = await captureProcessIdentity();
 async function root() { const p = await realpath(await mkdtemp(join(tmpdir(), 'rcl121-primitive-'))); roots.push(p); return p; }
 async function trace(row: object) { if (process.env.RCL_PRIMITIVE_TRACE) await appendFile(process.env.RCL_PRIMITIVE_TRACE, JSON.stringify(row) + '\n'); }
 async function stop(child: ChildProcess) {
@@ -58,21 +60,41 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true })));
 });
 type Fixture = Awaited<ReturnType<typeof primitiveFixture>>;
+type ChildTerminal = { kind: 'exit'; result: [number | null, NodeJS.Signals | null] } |
+  { kind: 'error'; error: Error };
+function childLifecycle(child: ChildProcess, stderr: () => string, timeoutMs = 10000) {
+  const terminal = new Promise<ChildTerminal>(resolve => {
+    child.once('exit', (code, signal) => resolve({ kind: 'exit', result: [code, signal] }));
+    child.once('error', error => resolve({ kind: 'error', error }));
+  });
+  const message = new Promise<any>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Synthetic child timeout: ${stderr()}`)), timeoutMs);
+    child.once('message', value => { clearTimeout(timer); resolve(value); });
+    void terminal.then(result => {
+      clearTimeout(timer);
+      if (result.kind === 'error') reject(result.error);
+      else reject(new Error(`Synthetic child exit ${result.result[0]}: ${stderr()}`));
+    });
+  });
+  return { message, terminal };
+}
 async function childRun(f: Pick<Fixture, 'root' | 'target' | 'nativeJson' | 'native'>, mode: string) {
   const request = join(f.root, `child-${mode}-${Date.now()}.json`);
   await writeFile(request, JSON.stringify({ root: f.root, target: f.target, mode, nativeSha256: sha(f.nativeJson), cycleId: f.native.cycle.id }));
   const child = fork(fileURLToPath(new URL('../fixtures/attempt-recovery-owner-child.ts', import.meta.url)), ['--primitive-child', request],
     { execArgv: ['--import', import.meta.resolve('tsx')], env: { ...process.env }, silent: true });
   children.add(child); let stderr = ''; child.stderr!.on('data', bytes => { stderr += bytes; });
-  const exited = once(child, 'exit');
-  const message = await new Promise<any>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Synthetic child timeout: ${stderr}`)), 10000);
-    child.once('message', value => { clearTimeout(timer); resolve(value); });
-    child.once('exit', code => { clearTimeout(timer); reject(new Error(`Synthetic child exit ${code}: ${stderr}`)); });
-  });
+  const lifecycle = childLifecycle(child, () => stderr);
+  void lifecycle.terminal.then(() => children.delete(child));
+  const message = await lifecycle.message;
   await trace({ event: 'owned-child-ready', mode, pid: child.pid, message });
   expect(message.pid).toBe(child.pid);
-  if (message.phase === 'complete') { expect(await exited).toEqual([0, null]); children.delete(child); await trace({ event: 'owned-child-exit', pid: child.pid, result: [0, null] }); }
+  if (message.phase === 'complete') {
+    const terminal = await lifecycle.terminal;
+    if (terminal.kind === 'error') throw terminal.error;
+    expect(terminal.result).toEqual([0, null]);
+    await trace({ event: 'owned-child-exit', pid: child.pid, result: terminal.result });
+  }
   return child;
 }
 async function fixture(mode: 'pending' | 'completed' | 'pending-released' = 'pending') {
@@ -82,8 +104,8 @@ async function fixture(mode: 'pending' | 'completed' | 'pending-released' = 'pen
   return { ...f, child, before: (await loadConvergeAttemptState(f.root, f.target))! };
 }
 function accounting(state: any) { const { lastLaunch, updatedAt, ...rest } = state; return rest; }
-function running(launch: GuardedLaunchState): GuardedLaunchState { return { ...launch, status: 'pending', recovery: { ...launch.recovery!, resume: { pid: process.pid, phase: 'running' } } }; }
-function finished(launch: GuardedLaunchState): GuardedLaunchState { return { ...terminal(launch), recovery: { ...launch.recovery!, resume: { pid: process.pid, phase: 'finished' } } }; }
+function running(launch: GuardedLaunchState): GuardedLaunchState { return { ...launch, status: 'pending', recovery: { ...launch.recovery!, resume: { pid: process.pid, processIdentity: selfIdentity, phase: 'running' } } }; }
+function finished(launch: GuardedLaunchState): GuardedLaunchState { return { ...terminal(launch), recovery: { ...launch.recovery!, resume: { pid: process.pid, processIdentity: selfIdentity, phase: 'finished' } } }; }
 async function protectedBytes(f: Fixture) { return Promise.all([f.runPath, f.snapshotPath, f.archivePath].map(p => readFile(p, 'utf8'))); }
 async function resume(f: Fixture, expected: GuardedLaunchState, next: GuardedLaunchState, extra: Record<string, unknown> = {}) {
   return withNativeTarget(f.root, f.target, owner => recordConvergeAttemptRecoveryResume(f.root, f.target,
@@ -92,6 +114,15 @@ async function resume(f: Fixture, expected: GuardedLaunchState, next: GuardedLau
 async function delivery(f: Fixture, launch: GuardedLaunchState, mutation: any = 'delivery') {
   return withNativeTarget(f.root, f.target, owner => recordConvergeAttemptLaunch(f.root, f.target, launch, owner, mutation));
 }
+
+it('surfaces an asynchronous child spawn error without waiting for the setup timeout', async () => {
+  const child = new ChildProcess();
+  const lifecycle = childLifecycle(child, () => '', 25);
+  const failure = new Error('Synthetic asynchronous fork failure.');
+  queueMicrotask(() => child.emit('error', failure));
+  await expect(lifecycle.message).rejects.toThrow(failure.message);
+  expect(await lifecycle.terminal).toEqual({ kind: 'error', error: failure });
+});
 
 it('cold delivery retains the original claimant, configured M and all immutable completion fields', async () => {
   const f = await fixture('completed'), beforeNative = await protectedBytes(f), before = await readFile(f.attemptPath, 'utf8');
@@ -138,7 +169,8 @@ it('resumes in an actual new process and replays exact completion without anothe
   const after = (await loadConvergeAttemptState(f.root, f.target))!;
   expect(successor.pid).not.toBe(f.child.pid);
   expect(after.lastLaunch).toMatchObject({ status: 'completed', pid: f.child.pid, runId: before.lastLaunch!.runId,
-    recovery: { ...before.lastLaunch!.recovery, resume: { pid: successor.pid, phase: 'finished' } } });
+    recovery: { ...before.lastLaunch!.recovery, resume: { pid: successor.pid,
+      processIdentity: after.lastLaunch!.recovery!.resume!.processIdentity, phase: 'finished' } } });
   expect(accounting(after)).toEqual(accounting(before)); expect(await protectedBytes(f)).toEqual(native);
   expect(after.lastLaunch!.reportJsonSha256).toBe('c'.repeat(64));
   await expect(delivery(f, { ...after.lastLaunch!, deliveryPending: false }, 'completion')).rejects.toThrow(/this process/);
@@ -151,8 +183,11 @@ it('refuses resume binding substitutions before changing the original spent ledg
     source: v => { v.recovery.sourceRunId = uuid(952); }, rootClaim: v => { v.recovery.originalNativeClaim.round++; },
     parentClaim: v => { v.recovery.sourceNativeClaim.attempt++; }, attempt: v => { v.attempt++; }, round: v => { v.round++; },
     head: v => { v.headSha = 'd'.repeat(40); }, input: v => { v.inputSha256 = 'd'.repeat(64); },
-    pid: v => { v.pid = process.pid; }, time: v => { v.startedAt = '2026-01-01T00:00:00.000Z'; },
-    reason: v => { v.retryReason = 'different'; }, resumeOwner: v => { v.recovery.resume.pid = f.child.pid; },
+    pid: v => { v.pid = process.pid; v.processIdentity = selfIdentity; }, time: v => { v.startedAt = '2026-01-01T00:00:00.000Z'; },
+    reason: v => { v.retryReason = 'different'; }, resumeOwner: v => {
+      v.recovery.resume.pid = f.child.pid; v.recovery.resume.processIdentity = expected.processIdentity;
+    },
+    resumeIdentity: v => { v.recovery.resume.processIdentity = { ...selfIdentity, birthSha256: 'f'.repeat(64) }; },
   };
   for (const [kind, mutate] of Object.entries(mutations)) {
     const next = running(structuredClone(expected)); mutate(next);
@@ -191,14 +226,9 @@ it('refuses a genuine unrecovered cycle source without manufacturing v3 authorit
   expect(await readFile(f.attemptPath, 'utf8')).toBe(retained); expect(await readFile(f.runPath, 'utf8')).toBe(nativeJson);
 });
 
-it('refuses alive or unverifiable prior claimants and permits only a dead-owner continuation', async () => {
+it('refuses exact live prior claimants and permits only a dead-owner continuation', async () => {
   const f = await fixture('pending-released'), expected = f.before.lastLaunch!, next = running(expected), retained = await readFile(f.attemptPath, 'utf8');
   await expect(resume(f, expected, next)).rejects.toThrow(/owner_alive/);
-  const kill = process.kill.bind(process); const spy = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
-    if (pid === f.child.pid && signal === 0) throw Object.assign(new Error('Synthetic liveness permission refusal'), { code: 'EPERM' });
-    return kill(pid, signal);
-  });
-  await expect(resume(f, expected, next)).rejects.toThrow(/owner_unverifiable/); spy.mockRestore();
   expect(await readFile(f.attemptPath, 'utf8')).toBe(retained);
   await stop(f.child);
   const resumeOwner = await childRun(f, 'resume-running-released');
@@ -209,6 +239,70 @@ it('refuses alive or unverifiable prior claimants and permits only a dead-owner 
   await stop(resumeOwner); await resume(f, owned, running(owned));
   expect(await readFile(f.attemptPath, 'utf8')).not.toBe(ownedBytes);
   expect(accounting((await loadConvergeAttemptState(f.root, f.target))!)).toEqual(accounting(f.before));
+});
+
+it('distinguishes same-PID reuse and fails closed for legacy or foreign owner identities', async () => {
+  const f = await primitiveFixture(await root());
+  await spendAndRecord(f.root, f.target, 'pending');
+  const originalBytes = await readFile(f.attemptPath, 'utf8');
+  const original = JSON.parse(originalBytes);
+  expect(original.attempts.at(-1).processIdentity).toEqual(original.lastLaunch.processIdentity);
+
+  const legacy = structuredClone(original);
+  delete legacy.lastLaunch.processIdentity;
+  delete legacy.attempts.at(-1).processIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(legacy));
+  let expected = (await loadConvergeAttemptState(f.root, f.target))!.lastLaunch!;
+  await expect(resume({ ...f, before: legacy } as any, expected, running(expected)))
+    .rejects.toThrow(/owner_unverifiable/);
+
+  const foreign = structuredClone(original);
+  foreign.lastLaunch.processIdentity.scope.boot = uuid(999);
+  foreign.attempts.at(-1).processIdentity = foreign.lastLaunch.processIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(foreign));
+  expected = (await loadConvergeAttemptState(f.root, f.target))!.lastLaunch!;
+  await expect(resume({ ...f, before: foreign } as any, expected, running(expected)))
+    .rejects.toThrow(/owner_unverifiable/);
+
+  const reused = structuredClone(original);
+  reused.lastLaunch.processIdentity.birthSha256 = 'f'.repeat(64);
+  reused.attempts.at(-1).processIdentity = reused.lastLaunch.processIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(reused));
+  expected = (await loadConvergeAttemptState(f.root, f.target))!.lastLaunch!;
+  await expect(resume({ ...f, before: reused } as any, expected, running(expected))).resolves.toBeUndefined();
+  expect((await loadConvergeAttemptState(f.root, f.target))!.lastLaunch!.recovery!.resume!.processIdentity)
+    .toEqual(selfIdentity);
+});
+
+it('qualifies only the real claimant and rejects a launch-owner mismatch', async () => {
+  const p = await root(), syntheticTarget = 'synthetic-owner';
+  await claimConvergeAttempt({ gitCommonDir: p, target: syntheticTarget, recordPid: 999_999 });
+  expect((await loadConvergeAttemptState(p, syntheticTarget))!.attempts[0]!.processIdentity).toBeUndefined();
+
+  const f = await primitiveFixture(await root());
+  await spendAndRecord(f.root, f.target, 'pending');
+  const state = JSON.parse(await readFile(f.attemptPath, 'utf8'));
+  state.lastLaunch.processIdentity.birthSha256 = 'f'.repeat(64);
+  await writeFile(f.attemptPath, JSON.stringify(state));
+  await expect(loadConvergeAttemptState(f.root, f.target)).rejects.toThrow(/attempt owner/);
+
+  const attemptOnly = structuredClone(state);
+  attemptOnly.lastLaunch.processIdentity = attemptOnly.attempts.at(-1).processIdentity;
+  delete attemptOnly.lastLaunch.processIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(attemptOnly));
+  await expect(loadConvergeAttemptState(f.root, f.target)).rejects.toThrow(/attempt owner/);
+
+  const launchOnly = structuredClone(state);
+  launchOnly.lastLaunch.processIdentity = launchOnly.attempts.at(-1).processIdentity;
+  delete launchOnly.attempts.at(-1).processIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(launchOnly));
+  await expect(loadConvergeAttemptState(f.root, f.target)).rejects.toThrow(/attempt owner/);
+
+  const legacy = structuredClone(state);
+  delete legacy.lastLaunch.processIdentity;
+  delete legacy.attempts.at(-1).processIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(legacy));
+  await expect(loadConvergeAttemptState(f.root, f.target)).resolves.toBeDefined();
 });
 
 it('refuses forged, wrong-target, wrong-repository and released ownership for both primitives', async () => {
@@ -241,8 +335,16 @@ it('preserves terminal immutability and rejects stale launches, unsupported tran
   await resume(f, expected, next);
   const altered = { ...next, reportPath: '/unexpected' };
   await expect(resume(f, expected, altered)).rejects.toThrow(/stale_launch/);
-  await expect(resume(f, next, { ...next, status: 'failed', reportPath: '/unexpected', recovery: { ...next.recovery!, resume: { pid: process.pid, phase: 'finished' } } })).rejects.toThrow(/invalid_finish/);
-  const failed = { ...next, status: 'failed' as const, recovery: { ...next.recovery!, resume: { pid: process.pid, phase: 'finished' as const } } };
+  const forgedState = JSON.parse(await readFile(f.attemptPath, 'utf8'));
+  forgedState.lastLaunch.recovery.resume.processIdentity.birthSha256 = 'f'.repeat(64);
+  await writeFile(f.attemptPath, JSON.stringify(forgedState));
+  const forgedExpected = (await loadConvergeAttemptState(f.root, f.target))!.lastLaunch!;
+  const forgedBytes = await readFile(f.attemptPath, 'utf8');
+  await expect(resume(f, forgedExpected, finished(forgedExpected))).rejects.toThrow(/invalid_finish/);
+  expect(await readFile(f.attemptPath, 'utf8')).toBe(forgedBytes);
+  await writeFile(f.attemptPath, JSON.stringify({ ...forgedState, lastLaunch: next }));
+  await expect(resume(f, next, { ...next, status: 'failed', reportPath: '/unexpected', recovery: { ...next.recovery!, resume: { pid: process.pid, processIdentity: selfIdentity, phase: 'finished' } } })).rejects.toThrow(/invalid_finish/);
+  const failed = { ...next, status: 'failed' as const, recovery: { ...next.recovery!, resume: { pid: process.pid, processIdentity: selfIdentity, phase: 'finished' as const } } };
   await resume(f, next, failed); const restarted = running(failed); await resume(f, failed, restarted);
   const complete = finished(restarted); await resume(f, restarted, complete);
   const bytes = await readFile(f.attemptPath, 'utf8');
@@ -303,7 +405,7 @@ it.runIf(process.platform !== 'win32').each(['delivery', 'resume-begin', 'resume
 
 it('refuses malformed recovery metadata while retaining legacy schema compatibility', () => {
   const valid: any = { status: 'pending', attempt: 2, round: 2, headSha: 'a'.repeat(40), inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid,
-    runId: uuid(931), recovery: { operationId: uuid(932), sourceRunId: uuid(401), originalNativeClaim: { attempt: 1, round: 1 }, sourceNativeClaim: { attempt: 1, round: 1 }, resume: { pid: process.pid, phase: 'running' } } };
+    processIdentity: selfIdentity, runId: uuid(931), recovery: { operationId: uuid(932), sourceRunId: uuid(401), originalNativeClaim: { attempt: 1, round: 1 }, sourceNativeClaim: { attempt: 1, round: 1 }, resume: { pid: process.pid, processIdentity: selfIdentity, phase: 'running' } } };
   expect(launchSchema.parse(valid)).toEqual(valid);
   const legacy = structuredClone(valid); delete legacy.recovery.operationId; expect(launchSchema.parse(legacy)).toEqual(legacy);
   for (const mutate of [(v: any) => { v.recovery.sourceRunId = 'invalid'; }, (v: any) => { v.recovery.operationId = 'invalid'; },
@@ -337,7 +439,7 @@ it('retains exact prebound completion and lets an ordinary unbound launch learn 
   expect(accounting((await loadConvergeAttemptState(f.root, f.target))!)).toEqual(accounting(before));
   const claim = await claimConvergeAttempt({ gitCommonDir: f.root, target: f.target });
   const ordinary: GuardedLaunchState = { status: 'pending', attempt: claim.attempt, round: 2, headSha: 'a'.repeat(40),
-    inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid };
+    inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid, processIdentity: selfIdentity };
   await delivery(f, ordinary, 'completion');
   await delivery(f, terminal(ordinary), 'completion');
   expect((await loadConvergeAttemptState(f.root, f.target))!.lastLaunch).toEqual(terminal(ordinary));
@@ -347,7 +449,7 @@ it('retains exact prebound completion and lets an ordinary unbound launch learn 
 it('does not let an ordinary pending launch acquire a recovery identity at completion', async () => {
   const f = await primitiveFixture(await root()), claim = await claimConvergeAttempt({ gitCommonDir: f.root, target: f.target });
   const pending: GuardedLaunchState = { status: 'pending', attempt: claim.attempt, round: 2, headSha: 'a'.repeat(40),
-    inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid };
+    inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid, processIdentity: selfIdentity };
   await delivery(f, pending, 'completion'); const bytes = await readFile(f.attemptPath, 'utf8');
   const next = { ...terminal(pending), recovery: { operationId: uuid(972), sourceRunId: uuid(401),
     originalNativeClaim: { attempt: 1, round: 1 }, sourceNativeClaim: { attempt: 1, round: 1 } } };

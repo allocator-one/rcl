@@ -71,7 +71,19 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     requireSource(round.runId === undefined || uuid(round.runId));
     requireSource(round.severities === undefined || object(round.severities) && Object.entries(round.severities).every(([key, value]) =>
       identity(key) && ['critical', 'important', 'minor', 'nitpick'].includes(value as string)));
+    requireSource(round.admission === undefined || object(round.admission) && round.admission.version === 1 &&
+      Number.isSafeInteger(round.admission.recoveryOperationCount) && (round.admission.recoveryOperationCount as number) >= 0 &&
+      Array.isArray(round.admission.actionableIdentities) && round.admission.actionableIdentities.every(identity) &&
+      isDeepStrictEqual(round.admission.actionableIdentities,
+        [...new Set(round.admission.actionableIdentities as string[])].sort()));
     requireSource(!cycleOrigin || round.reportBinding === undefined);
+  }
+  const recoveryOperationCount = state.version === 3 && object(state.recovery) &&
+    Array.isArray(state.recovery.operations) ? state.recovery.operations.length : 0;
+  for (const round of rounds) {
+    const admission = round.admission;
+    requireSource(admission === undefined || object(admission) &&
+      (admission.recoveryOperationCount as number) <= recoveryOperationCount);
   }
   for (const [key, rawEntry] of Object.entries(state.findings as Record<string, unknown>)) {
     requireSource(identity(key) && object(rawEntry)); const entry = rawEntry as Record<string, unknown>;
