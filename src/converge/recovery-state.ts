@@ -248,7 +248,7 @@ async function retainRaw(path: string, raw: string): Promise<void> {
     try { await link(temporary, path); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || (await readStable(path, MAX_BYTES)).text !== raw) throw error;
-      const retained = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const retained = await open(path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
       try { await retained.sync(); } finally { await retained.close(); }
     }
     await syncDirectory(directory);

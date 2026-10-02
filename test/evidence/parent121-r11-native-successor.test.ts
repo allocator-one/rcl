@@ -5,14 +5,12 @@ import { afterEach, expect, it } from 'vitest';
 import { migratedLegacyPendingRound as pure } from '../../src/evidence/claim-recovery/validation/obligations.js';
 import { migratedLegacyPendingRound as native } from '../../src/converge/semantic-state.js';
 import { validateRetainedNativeEvidence, verifyNativeRecoveryLineage } from '../../src/evidence/claim-recovery/validation/native-state.js';
-import { deriveCurrentClaimProjection } from '../../src/evidence/claim-recovery/validation/current-projection.js';
 import { applyNativeRecovery, deriveNativeRecovery, effectivePendingIdentities } from '../../src/converge/recovery-state.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { correctionAnchor } from '../../src/converge/correction-anchors.js';
 import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
 import { legacyFixture, recoveredFixture, sha, target, uuid } from './recovery-validation/fixtures.js';
-import { setup } from './parent-r9-projection-fixture.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -50,7 +48,7 @@ it.each(cases)('%s cannot erase a parser-accepted critical obligation in either 
   expect(JSON.stringify(accepted)).toBe(before);
 });
 
-it.each(cases.flatMap(scenario => (['filesystem'] as const).map(consumer => ({ scenario, consumer }))))
+it.each(cases.flatMap(scenario => (['filesystem', 'pure'] as const).map(consumer => ({ scenario, consumer }))))
 ('$scenario $consumer migration refuses to lose the original critical obligation', async ({ scenario, consumer }) => {
   const f = legacyFixture(); weakVerdict(f.state, f.key, scenario); acceptedLegacy(f.state);
   const original = JSON.stringify(f.state);

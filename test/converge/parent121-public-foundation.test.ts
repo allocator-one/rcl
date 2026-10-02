@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { afterEach, expect, it } from 'vitest';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { releasedCycleFixture } from '../evidence/recovery-validation/fixtures.js';
@@ -13,8 +13,12 @@ import { loadConvergeAttemptState, recordConvergeAttemptLaunch } from '../../src
 
 // Genuine unchanged public writer in each fixture's own canonical root. The
 // external cycle issuer and reviewer callback are the public fixture's fakes.
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl121-foundation-')));
+  roots.push(root);
   await mkdir(join(root, 'rcl-converge-runs'), { mode: 0o700 });
   const f = await releasedCycleFixture(root), sourceJson = await readFile(f.runPath, 'utf8');
   const selection = f.selection, operationId = uuid(803);

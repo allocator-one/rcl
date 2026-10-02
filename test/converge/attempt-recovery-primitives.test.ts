@@ -13,13 +13,25 @@ import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership 
 import { launchSchema } from '../../src/converge/launch-record.js';
 import type { GuardedLaunchState } from '../../src/converge/launch-record.js';
 
-const fault = vi.hoisted(() => ({ file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0 }));
+const fault = vi.hoisted(() => ({
+  file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
+}));
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
   return { ...fs,
     rename: async (...args: Parameters<typeof fs.rename>) => { await fs.rename(...args); if (String(args[1]) === fault.file) fault.renamed = true; },
     open: async (...args: Parameters<typeof fs.open>) => {
       const handle = await fs.open(...args);
+      if (String(args[0]) === fault.file && args[1] === 'r') {
+        return new Proxy(handle, { get(target, property) {
+          if (property === 'sync') return async () => {
+            fault.readOnlySyncs++;
+            throw Object.assign(new Error('Synthetic Windows read-only fsync refusal.'), { code: 'EACCES' });
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+      }
       if (String(args[0]) !== fault.directory) return handle;
       return new Proxy(handle, { get(target, property) {
         if (property === 'sync') return async () => {
@@ -39,7 +51,9 @@ async function stop(child: ChildProcess) {
   children.delete(child);
 }
 afterEach(async () => {
-  vi.restoreAllMocks(); Object.assign(fault, { file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0 });
+  vi.restoreAllMocks(); Object.assign(fault, {
+    file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
+  });
   for (const child of children) await stop(child);
   await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true })));
 });
@@ -271,8 +285,9 @@ it.each(['delivery', 'resume-begin', 'resume-finish'] as const)('re-establishes 
   expect(fault.renamed).toBe(true); expect(fault.failures).toBe(1);
   const bytes = await readFile(f.attemptPath, 'utf8'), inode = (await stat(f.attemptPath)).ino;
   expect((await loadConvergeAttemptState(f.root, f.target))!.lastLaunch).toEqual(next);
-  await expect(persist()).rejects.toThrow(/fsync|sync|durab/); expect(fault.failures).toBe(2);
-  fault.fail = false; await persist(); expect(fault.synced).toBeGreaterThan(0);
+  await expect(persist()).rejects.toThrow(/fsync|sync|durab/);
+  expect(fault.failures + fault.readOnlySyncs).toBe(2);
+  fault.fail = false; await persist(); expect(fault.readOnlySyncs).toBe(0); expect(fault.synced).toBeGreaterThan(0);
   expect(await readFile(f.attemptPath, 'utf8')).toBe(bytes); expect((await stat(f.attemptPath)).ino).toBe(inode);
   expect(accounting((await loadConvergeAttemptState(f.root, f.target))!)).toEqual(accounting(f.before));
 });

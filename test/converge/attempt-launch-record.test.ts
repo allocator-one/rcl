@@ -9,7 +9,9 @@ import {
 import { withNativeTarget, withOwnedNativeOperation } from '../../src/converge/target-ownership.js';
 import type { GuardedLaunchState } from '../../src/converge/launch-record.js';
 
-const fault = vi.hoisted(() => ({ file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0 }));
+const fault = vi.hoisted(() => ({
+  file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
+}));
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -20,6 +22,16 @@ vi.mock('node:fs/promises', async importOriginal => {
     },
     open: async (...args: Parameters<typeof fs.open>) => {
       const handle = await fs.open(...args);
+      if (String(args[0]) === fault.file && args[1] === 'r') {
+        return new Proxy(handle, { get(target, property) {
+          if (property === 'sync') return async () => {
+            fault.readOnlySyncs++;
+            throw Object.assign(new Error('Synthetic Windows read-only fsync refusal.'), { code: 'EACCES' });
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+      }
       if (String(args[0]) !== fault.directory) return handle;
       return new Proxy(handle, { get(target, property) {
         if (property === 'sync') return async () => {
@@ -41,7 +53,9 @@ let directory: string;
 const target = 'synthetic-launch-record';
 beforeEach(async () => { directory = await realpath(await mkdtemp(join(tmpdir(), 'rcl-attempt-launch-'))); });
 afterEach(async () => {
-  Object.assign(fault, { file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0 });
+  Object.assign(fault, {
+    file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
+  });
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -145,10 +159,11 @@ describe('owned attempt launch metadata', () => {
     expect(accounting(committed)).toEqual(accounting(before));
 
     await expect(persist(launch)).rejects.toThrow(/sync|durab/i);
-    expect(fault.failures).toBe(2);
+    expect(fault.failures + fault.readOnlySyncs).toBe(2);
     fault.fail = false;
     await persist(launch);
 
+    expect(fault.readOnlySyncs).toBe(0);
     expect(fault.synced).toBeGreaterThan(0);
     const after = (await loadConvergeAttemptState(directory, target))!;
     expect(after.lastLaunch).toEqual(committed.lastLaunch);

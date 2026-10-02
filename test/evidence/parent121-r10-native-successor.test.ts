@@ -5,14 +5,12 @@ import { afterEach, expect, it } from 'vitest';
 import { migratedLegacyPendingRound as pure } from '../../src/evidence/claim-recovery/validation/obligations.js';
 import { migratedLegacyPendingRound as native } from '../../src/converge/semantic-state.js';
 import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
-import { deriveCurrentClaimProjection } from '../../src/evidence/claim-recovery/validation/current-projection.js';
 import { applyNativeRecovery, deriveNativeRecovery, effectivePendingIdentities } from '../../src/converge/recovery-state.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { correctionAnchor } from '../../src/converge/correction-anchors.js';
 import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
 import { legacyFixture, recoveredFixture, sha, target, uuid } from './recovery-validation/fixtures.js';
-import { setup } from './parent-r9-projection-fixture.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -49,7 +47,7 @@ it('native helper handles the same large retained-history bound as the donor hel
   expect(native(entry, f.state as any)).toBe(1);
 });
 
-it.each(['filesystem'] as const)('%s migration refuses the erased obligation despite an earlier legacy verdict', async consumer => {
+it.each(['filesystem', 'pure'] as const)('%s migration refuses the erased obligation despite an earlier legacy verdict', async consumer => {
   const f = legacyFixture(); addEarlyVerdict(f.state, f.key);
   const original = JSON.stringify(f.state);
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-r10-migration-'))); roots.push(root);

@@ -14,13 +14,27 @@ import { accepted, projectionFixture, roundInput, inventory, carrier } from '../
 import { legacyFixture, sha, uuid } from '../evidence/recovery-validation/fixtures.js';
 import { preserved, laterSource, rebind } from '../evidence/recovery-validation/occurrence-fixtures.js';
 import { sampleRunHeader } from '../telemetry/fixtures.js';
-const retentionFault = vi.hoisted(() => ({ failNextSnapshotWrite: false, collideTemp: false, fired: 0, prefixWritten: 0 }));
+const retentionFault = vi.hoisted(() => ({
+  failNextSnapshotWrite: false, collideTemp: false, fired: 0, prefixWritten: 0,
+  rejectReadOnlySync: false, readOnlySyncs: 0,
+}));
 vi.mock('node:fs/promises', async importOriginal => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
   return { ...real, open: async (...args: Parameters<typeof real.open>) => {
     const path = String(args[0]);
     if (retentionFault.collideTemp && path.includes('.retain-tmp')) { retentionFault.collideTemp = false; await real.writeFile(path, 'foreign temp bytes', { flag: 'wx', mode: 0o600 }); }
     const handle = await real.open(...args);
+    if (retentionFault.rejectReadOnlySync && path.includes('.recovery-sources/') &&
+      typeof args[1] === 'number' && (args[1] & 3) === 0) {
+      return new Proxy(handle, { get(target, property) {
+        if (property === 'sync') return async () => {
+          retentionFault.readOnlySyncs++;
+          throw Object.assign(new Error('Synthetic Windows read-only fsync refusal.'), { code: 'EACCES' });
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+    }
     if (!retentionFault.failNextSnapshotWrite || !path.includes('.recovery-sources/')) return handle;
     retentionFault.failNextSnapshotWrite = false;
     return new Proxy(handle, { get(target, property) {
@@ -143,6 +157,18 @@ it('publishes immutable recovery artifacts atomically after an interrupted tempo
   await expect(readFile(snapshot, 'utf8')).resolves.toBe(f.input.sourceJson);
   await expect(readFile(path, 'utf8')).resolves.toBe(plan.resultJson);
   expect((await apply()).status).toBe('already_applied');
+});
+
+it('retries an existing immutable artifact with a write-capable durability handle', async () => {
+  const f = fixture(); const { dir, path } = await install(f); const plan = deriveNativeRecovery(f.input);
+  const snapshot = `${path}.recovery-sources/${plan.sourceSha256}.json`;
+  await mkdir(dirname(snapshot), { recursive: true, mode: 0o700 });
+  await writeFile(snapshot, f.input.sourceJson, { mode: 0o600 });
+  retentionFault.rejectReadOnlySync = true;
+  await expect(withRecoveryTarget(dir, f.input.target,
+    ownership => applyNativeRecovery({ gitCommonDir: dir, plan, ownership }))).resolves.toMatchObject({ status: 'applied' });
+  expect(retentionFault.readOnlySyncs).toBe(0);
+  await expect(readFile(snapshot, 'utf8')).resolves.toBe(f.input.sourceJson);
 });
 
 it('leaves no final immutable artifact after a partial snapshot write failure and retries exactly', async () => {

@@ -861,7 +861,7 @@ export async function recordConvergeAttemptLaunch(
         throw new ConvergeAttemptStateError('Delivery recording may change only the exact completed launch delivery flag.');
       }
       if (isDeepStrictEqual(previous, incoming)) {
-        const handle = await open(stateFile, 'r');
+        const handle = await open(stateFile, 'r+');
         try { await handle.sync(); }
         finally { await handle.close(); }
         await syncDirectory(dirname(stateFile));
@@ -940,7 +940,7 @@ export async function recordConvergeAttemptRecoveryResume(
         throw new ConvergeAttemptStateError('recovery_resume_source_mismatch');
       }
       if (isDeepStrictEqual(state.lastLaunch, next)) {
-        const handle = await open(stateFile, 'r');
+        const handle = await open(stateFile, 'r+');
         try { await handle.sync(); } finally { await handle.close(); }
         await syncDirectory(dirname(stateFile));
         return;
