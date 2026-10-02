@@ -1,7 +1,8 @@
 import { inspectLegacyRetry, retainLegacyRetry, type LegacyRetrySelection } from './legacy-launch-health.js';
 import { hasSuccessfulQuorum } from '../dispatch/quorum.js';
-import { completionSchema, launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion } from './launch-record.js';
-export { launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion } from './launch-record.js';
+import { completionSchema, launchSchema, ordinaryLaunchInputsBindingSchema,
+  type GuardedLaunchState, type GuardedLaunchCompletion, type OrdinaryLaunchInputsBinding } from './launch-record.js';
+export { launchSchema, type GuardedLaunchState, type GuardedLaunchCompletion, type OrdinaryLaunchInputsBinding } from './launch-record.js';
 import { isDeepStrictEqual } from 'node:util';
 import { assertNoPendingFreshReview, freshReviewCompletionPending, freshReviewRequestVersion, prepareFreshReview, finishFreshReview, verifyReviewCycle } from './fresh-review.js';
 import type { ReviewCycleRemote } from './review-cycle.js';
@@ -56,6 +57,10 @@ export interface GuardedLaunchOptions {
   validate: () => Promise<void>;
   /** Optional retained execution only; ordinary launch behavior is unchanged. */
   originalLaunch?: OriginalLaunchPreflight;
+  /** Retain authenticated launch inputs under ownership after validation, before spending the native claim. */
+  beforeClaim?: (context: ConvergeContext, ownership: NativeTargetOwnership) => Promise<void | {
+    ordinaryInputs: OrdinaryLaunchInputsBinding;
+  }>;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
   /** Reuse this ownership for durable reviewer checkpoints; never take a second target lock. */
   run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch) => Promise<GuardedLaunchCompletion>;
@@ -323,12 +328,21 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         await options.originalLaunch.beforeClaim(preparedOriginal, ownership);
         assertOriginalLive();
       }
+      // Pending-package export covers ordinary launches only. Special launch
+      // modes keep their own recovery contract and must not inherit this
+      // capture's size or storage requirements.
+      const ordinaryLaunch = !options.startOver && !state.cycle && !options.originalLaunch &&
+        !options.legacyRetry && !options.boundFixRecovery;
+      const retained = ordinaryLaunch ? await options.beforeClaim?.(Object.freeze({ target: options.target, round,
+        attempt: (attempts?.attemptsUsed ?? 0) + 1 }), ownership) : undefined;
+      const ordinaryInputs = retained === undefined ? undefined : ordinaryLaunchInputsBindingSchema.parse(retained.ordinaryInputs);
       if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);
       assertOriginalLive();
       state.lastLaunch = {
         status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
         startedAt: new Date().toISOString(), pid: process.pid,
+        ...(ordinaryInputs ? { ordinaryInputs } : {}),
         ...(preparedOriginal ? { retainedOriginal: { version: 1 as const, runId: preparedOriginal.launch.runId,
           planDigest: preparedOriginal.launch.planDigest, capturedInputsSha256: preparedOriginal.launch.capturedInputsSha256 } } : {}),
         ...(options.retryReason ? { retryReason: scrubText(options.retryReason.trim(), 500) } : {}),

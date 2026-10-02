@@ -12,7 +12,57 @@ const input = { head: 'a'.repeat(40), kind: 'patch', repo: 'allocator-one/alloca
 const expected = { target: 'allocator-one-9691', headSha: input.head, inputSha256: guardedInputSha256(input), baseSha: 'b'.repeat(40), attempt: 2, round: 2, pid: 32832, retainedAsyncSha256: ['c'.repeat(64)] };
 const packet = () => ({ target: expected.target, headSha: input.head, baseSha: expected.baseSha, attempt: 2, round: 2, pid: 32832, retainedAsyncSha256: [...expected.retainedAsyncSha256], retainedAsync: [{ sha256: 'c'.repeat(64), model: 'openai/test', role: 'general', provider: 'openai', lane: 'async' as const }], guardedInput: structuredClone(input) });
 
+function directPrPackage() {
+  const guardedInput = { ...structuredClone(input), kind: 'pr', spec: undefined };
+  const value = JSON.parse(JSON.stringify({ ...packet(), guardedInput })) as ReturnType<typeof packet>;
+  return { value, identity: { ...expected, inputSha256: guardedInputSha256(guardedInput) } };
+}
+
 describe('ordinary pending migration package', () => {
+  it('authenticates a direct PR production input with omitted spec without changing its source kind', () => {
+    const { value, identity } = directPrPackage();
+
+    expect(value.guardedInput).not.toHaveProperty('spec');
+    const validated = validateOrdinaryPendingPackage(value, identity);
+    expect(validated).toEqual(value);
+    expect(validated.guardedInput.kind).toBe('pr');
+    expect(validated.guardedInput).not.toHaveProperty('spec');
+    expect(guardedInputSha256(validated.guardedInput)).toBe(identity.inputSha256);
+  });
+
+  it.each([
+    ['patch source kind', (value: ReturnType<typeof packet>) => { value.guardedInput.kind = 'patch'; }],
+    ['repo', (value: ReturnType<typeof packet>) => { value.guardedInput.repo = 'other/repo'; }],
+    ['PR number', (value: ReturnType<typeof packet>) => { value.guardedInput.pr += 1; }],
+    ['head', (value: ReturnType<typeof packet>) => { value.guardedInput.head = 'f'.repeat(40); }],
+    ['base', (value: ReturnType<typeof packet>) => { value.baseSha = 'f'.repeat(40); }],
+    ['diff digest', (value: ReturnType<typeof packet>) => { value.guardedInput.diff = 'f'.repeat(64); }],
+    ['config digest', (value: ReturnType<typeof packet>) => { value.guardedInput.config = 'f'.repeat(64); }],
+    ['invented spec', (value: ReturnType<typeof packet>) => { value.guardedInput.spec = input.spec; }],
+    ['async model', (value: ReturnType<typeof packet>) => { value.retainedAsync[0].model = 'other/model'; }],
+    ['async hash', (value: ReturnType<typeof packet>) => { value.retainedAsync[0].sha256 = 'f'.repeat(64); }],
+  ] as const)('rejects direct PR %s drift', (_label, mutate) => {
+    const { value, identity } = directPrPackage();
+    mutate(value);
+    expect(() => validateOrdinaryPendingPackage(value, identity)).toThrow('ordinary_pending_package_mismatch');
+  });
+
+  it.each([
+    ['unsupported source kind', { kind: 'staged' }],
+    ['malformed repo', { repo: 'not-a-repository' }],
+    ['malformed PR number', { pr: '9691' }],
+    ['malformed diff digest', { diff: 'invalid' }],
+    ['malformed roster', { roster: ['not-a-roster-entry'] }],
+    ['malformed async roles', { asyncRoles: [null] }],
+    ['null spec', { spec: null }],
+    ['unexpected input key', { unexpected: true }],
+  ] as const)('rejects direct PR %s even with a matching digest', (_label, change) => {
+    const { value, identity } = directPrPackage();
+    Object.assign(value.guardedInput, change);
+    identity.inputSha256 = guardedInputSha256(value.guardedInput);
+    expect(() => validateOrdinaryPendingPackage(value, identity)).toThrow('ordinary_pending_package_mismatch');
+  });
+
   it('authenticates a historical guarded input whose undefined spec was omitted by JSON', () => {
     const guardedInput = structuredClone(input) as Record<string, unknown>;
     guardedInput.spec = undefined;

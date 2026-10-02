@@ -165,6 +165,7 @@ import { loadConvergeRunState } from './converge/run-state.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
 import { type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
+import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from './converge/ordinary-pending-export.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
 import { resolveFinalizedAsyncExecution } from './dispatch/checkpoint-async-store.js';
@@ -357,8 +358,10 @@ program
   .option('--finalize-pending-only', 'Finalize one authenticated ordinary pending launch without claiming or dispatching its successor')
   .option('--pending-native-sha256 <digest>', 'Finalize-only: exact native state digest returned by --preview-pending')
   .option('--pending-attempt-sha256 <digest>', 'Finalize-only: exact attempt state digest returned by --preview-pending')
+  .option('--export-pending-package <path>', 'Export authenticated ordinary pending inputs to an exclusive private file without provider calls or native writes')
+  .option('--expect-base-sha <sha>', 'Pending package export: require the resolved current base to equal this SHA')
   .option('--ordinary-pending-package <path>', 'Immutable ordinary pending-launch package; requires --resume-pending or --finalize-pending-only and replaces --retry-report')
-  .option('--preview-pending', 'Authenticate an ordinary pending recovery under its target lock without writes or provider calls')
+  .option('--preview-pending', 'Authenticate pending recovery or preview a pending package export without provider calls')
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
@@ -1544,6 +1547,8 @@ interface CouncilCliOpts {
   pendingNativeSha256?: string;
   pendingAttemptSha256?: string;
   ordinaryPendingPackage?: string;
+  exportPendingPackage?: string;
+  expectBaseSha?: string;
   previewPending?: boolean;
   resumeAsyncSha256?: string;
   maxAttempts?: string;
@@ -1616,7 +1621,7 @@ async function prepareCouncil(
     { convergeTarget: opts.convergeTarget, round: opts.round, attempt: opts.attempt },
     reviewConvergeEnvironment(opts)
   );
-  await fetchHarnessKeys(spinner, attestation?.credential);
+  if (!opts.exportPendingPackage) await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
 
   // Validate mutually exclusive role options
@@ -1864,6 +1869,19 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
   const spinner = ora('Loading configuration...').start();
 
   try {
+    if (opts.exportPendingPackage !== undefined && (!opts.exportPendingPackage.trim() || !opts.guardedConverge ||
+      !opts.expectBaseSha || opts.startOver || opts.boundFixRecovery || opts.attest || opts.resumePending ||
+      opts.finalizePendingOnly || opts.ordinaryPendingPackage || opts.retryReport || opts.retryReason ||
+      opts.resumeAsyncSha256 || opts.pendingNativeSha256 || opts.pendingAttemptSha256 || opts.launchIntent ||
+      opts.maxAttempts !== undefined || opts.maxRounds !== undefined || opts.attempt !== undefined ||
+      opts.post || opts.json || opts.jsonFile !== undefined || opts.markdown !== undefined || opts.ci ||
+      opts.evidenceRequired || opts.staged || opts.workingTree || !target)) {
+      throw new ReviewLaunchRefused('pending_export_incompatible', '--export-pending-package requires an ordinary guarded PR or patch target, original preparation flags and --expect-base-sha; do not combine it with launch, recovery, output or evidence flags.');
+    }
+    if (opts.expectBaseSha !== undefined && !opts.exportPendingPackage) {
+      throw new ReviewLaunchRefused('pending_export_incompatible', '--expect-base-sha requires --export-pending-package.');
+    }
+    if (opts.expectBaseSha) validateSha(opts.expectBaseSha, '--expect-base-sha');
     if (opts.boundFixRecovery !== undefined) {
       if (!opts.guardedConverge || !opts.evidenceRequired || opts.telemetry === false ||
         opts.startOver || opts.attest || opts.retryReport !== undefined || opts.retryReason !== undefined ||
@@ -1905,14 +1923,14 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       (opts.resumeAsyncSha256 !== undefined || opts.ordinaryPendingPackage !== undefined)) {
       throw new ReviewLaunchRefused('pending_resume_incompatible', '--resume-async-sha256 and --ordinary-pending-package require --resume-pending or --finalize-pending-only.');
     }
-    if (opts.previewPending && ((!opts.resumePending && !opts.finalizePendingOnly) ||
+    if (opts.previewPending && !opts.exportPendingPackage && ((!opts.resumePending && !opts.finalizePendingOnly) ||
       !opts.ordinaryPendingPackage || opts.retryReport)) {
       throw new ReviewLaunchRefused('pending_preview_incompatible', '--preview-pending requires one pending recovery mode and --ordinary-pending-package, without --retry-report.');
     }
-    opts = { ...opts, ...await discoverCycleReview(target, opts) };
+    if (!opts.exportPendingPackage) opts = { ...opts, ...await discoverCycleReview(target, opts) };
     // Finalize-only is a recovery-state operation even though it is exposed by
     // `review`; preview and apply must not flush unrelated review evidence.
-    if (!opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
+    if (!opts.exportPendingPackage && !opts.finalizePendingOnly && !opts.cycleReview && opts.telemetry !== false &&
       (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() !== 'off') {
       try {
         if ((await readdir(join(resolveDataDir(), 'outbox')).catch(() => [])).length > 0) {
@@ -2046,6 +2064,9 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       assertExpectedHead(runTarget, opts.expectHeadSha);
     }
 
+    if (diff.files.length === 0 && opts.exportPendingPackage) {
+      throw new ReviewLaunchRefused('pending_export_input_mismatch', 'The pending launch cannot be authenticated with an empty diff.');
+    }
     if (diff.files.length === 0) {
       spinner.warn(
         gitMode === 'staged'
@@ -2131,8 +2152,27 @@ async function executeCouncil(
   if (opts.guardedConverge) {
     const roster = buildRoster({ assignments, asyncAssignments, coreModels: prepared.coreModels,
       explicit: prepared.explicit, gating: prepared.gatingConfig });
+    const guardedInput = {
+      head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
+      diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
+      asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
+    };
+    const ordinaryAsyncDescriptors = chunks.flatMap(() => asyncAssignments.map(assignment => ({
+      model: assignment.model, role: assignment.role.name, provider: assignment.provider,
+    }))).slice(0, MAX_ASYNC_CALLS_PER_ROUND);
     let completion: GuardedLaunchCompletion | undefined;
     const common = await resolveGitCommonDir();
+    if (opts.exportPendingPackage) {
+      const receipt = await exportOrdinaryPendingPackage({ gitCommonDir: common,
+        target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
+        expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
+        guardedInput, path: opts.exportPendingPackage,
+        preview: opts.previewPending === true, asyncStoreDir: await resolveExistingAsyncStoreDir(),
+        asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
+          extra.target.kind === 'patch' ? prepared.converge!.target : undefined),
+        asyncDescriptors: ordinaryAsyncDescriptors });
+      spinner.stop(); console.log(JSON.stringify(receipt)); return undefined;
+    }
     const native = opts.startOver ? undefined : await loadConvergeRunState(common, prepared.converge!.target);
     let cycleRemote: GuardedLaunchOptions['cycleRemote'];
     let boundFixRecovery: GuardedLaunchOptions['boundFixRecovery'];
@@ -2342,11 +2382,7 @@ async function executeCouncil(
       startOver: opts.startOver, cycleRemote,
       boundFixRecovery,
       headSha: extra.target.headSha ?? '',
-      inputSha256: guardedInputSha256({
-        head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
-        diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
-        asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
-      }),
+      inputSha256: guardedInputSha256(guardedInput),
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,
@@ -2360,6 +2396,14 @@ async function executeCouncil(
           throw new ReviewLaunchRefused('insufficient_reviewers', 'Convergence needs at least two reviewer assignments for a conclusive round.');
         }
         await validateLaunchOutputs(opts);
+      },
+      beforeClaim: async context => {
+        const retained = await retainOrdinaryLaunchInputs({ gitCommonDir: common, target: context.target,
+          attempt: context.attempt!, round: context.round!, ...(context.cycleId ? { cycleId: context.cycleId } : {}),
+          headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? null,
+          guardedInput, asyncDescriptors: ordinaryAsyncDescriptors });
+        return { ordinaryInputs: { version: 1 as const, packetSha256: retained.sha256,
+          baseSha: retained.baseSha } };
       },
       onClaim: async claim => {
         if (opts.telemetry !== false) await reportConvergeEvents([buildEvent({
