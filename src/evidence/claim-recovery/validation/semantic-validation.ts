@@ -261,17 +261,28 @@ export function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number,
   return selected;
 }
 
-/** @internal Cache retained-history projections shared by identity groups in the same round. */
+/** @internal Index retained dismissal history once for bounded per-identity lookups. */
 export function createRecoveredDismissalLookup(
   dismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>,
-): (round: number) => ReadonlyMap<string, string> {
-  const cache = new Map<number, ReadonlyMap<string, string>>();
-  return round => {
-    const cached = cache.get(round);
-    if (cached !== undefined) return cached;
-    const selected = recoveredDismissalsBefore(dismissalsByRound, round);
-    cache.set(round, selected);
-    return selected;
+): (round: number, identity: string) => string | undefined {
+  const histories = new Map<string, Array<{ round: number; severity: string }>>();
+  for (const [round, dismissals] of [...dismissalsByRound].sort(([a], [b]) => a - b)) {
+    for (const [identity, severity] of dismissals) {
+      const values = histories.get(identity) ?? [];
+      values.push({ round, severity });
+      histories.set(identity, values);
+    }
+  }
+  return (round, identity) => {
+    const values = histories.get(identity);
+    if (!values) return undefined;
+    let low = 0; let high = values.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (values[middle]!.round < round) low = middle + 1;
+      else high = middle;
+    }
+    return low === 0 ? undefined : values[low - 1]!.severity;
   };
 }
 
@@ -289,9 +300,9 @@ function validateSightingClassification(state: ConvergeRunState,
     const firstRound = Math.min(...byRound.keys());
     for (const [round, group] of byRound) {
       const ordinaryVerdict = (entry.verdictRound ?? Infinity) < round;
-      const recoveryDismissals = recoveryDismissalsForRound(round);
+      const recoveryDismissal = recoveryDismissalsForRound(round, key);
       const recoveredEscalation = !ordinaryVerdict && group.some(row => row.severity === 'critical') &&
-        recoveryDismissals.has(key) && recoveryDismissals.get(key) !== 'critical';
+        recoveryDismissal !== undefined && recoveryDismissal !== 'critical';
       const expectedStatus = state.version === 2 ? round === firstRound ? 'new' : undefined
         : recoveredEscalation ? 'regating' : round === firstRound
           ? anchored.has(key) ? 'repeat' : 'new'

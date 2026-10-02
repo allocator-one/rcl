@@ -39,17 +39,13 @@ it('reuses recovered dismissal projections for repeated reverse-ordered rounds',
   ]);
   const lookup = createRecoveredDismissalLookup(dismissals);
 
-  expect(lookup(3)).toEqual(new Map([
-    ['first-identity', 'important'],
-    ['second-identity', 'critical'],
-  ]));
-  expect(lookup(2)).toEqual(new Map([['first-identity', 'important']]));
-  expect(lookup(3)).toEqual(new Map([
-    ['first-identity', 'important'],
-    ['second-identity', 'critical'],
-  ]));
-  expect(lookup(2)).toEqual(new Map([['first-identity', 'important']]));
-  expect(dismissals.iterations).toBe(2);
+  expect(lookup(3, 'first-identity')).toBe('important');
+  expect(lookup(3, 'second-identity')).toBe('critical');
+  expect(lookup(2, 'first-identity')).toBe('important');
+  expect(lookup(2, 'second-identity')).toBeUndefined();
+  expect(lookup(1, 'first-identity')).toBeUndefined();
+  expect(lookup(99, 'missing-identity')).toBeUndefined();
+  expect(dismissals.iterations).toBe(1);
 });
 
 it('validates a new anchor batch without rescanning prior identities', () => {
