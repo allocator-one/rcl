@@ -2,9 +2,27 @@ import { expect, it } from 'vitest';
 import { effectivePendingIdentities, recoveredDismissalsByRound, validateRetainedNativeEvidence } from '../../../src/evidence/claim-recovery/validation/native-state.js';
 import { packNativeMaterial } from '../../../src/evidence/claim-recovery/validation/native-material.js';
 import { deriveNativeOccurrenceEvidence } from '../../../src/evidence/claim-recovery/validation/native-occurrences.js';
+import { recoveredDismissalsBefore } from '../../../src/evidence/claim-recovery/validation/semantic-validation.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } from './fixtures.js';
 import { setup } from '../parent-r9-projection-fixture.js';
 import { laterSource } from './occurrence-fixtures.js';
+
+it('retains recovered dismissals from every preceding source round', () => {
+  const dismissals = new Map([
+    [2, new Map([['second-identity', 'important'], ['shared-identity', 'critical']])],
+    [1, new Map([['first-identity', 'minor'], ['shared-identity', 'important']])],
+  ]);
+
+  expect(recoveredDismissalsBefore(dismissals, 3)).toEqual(new Map([
+    ['first-identity', 'minor'],
+    ['second-identity', 'important'],
+    ['shared-identity', 'critical'],
+  ]));
+  expect(recoveredDismissalsBefore(dismissals, 2)).toEqual(new Map([
+    ['first-identity', 'minor'],
+    ['shared-identity', 'important'],
+  ]));
+});
 
 it('validates v1 content without assigning a descriptor, sighting or migration', () => {
   const f = legacyFixture(); const input = f.input(); const before = structuredClone(input);

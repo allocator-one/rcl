@@ -88,6 +88,11 @@ function latestDecision(receipts: StoredEventReceipt[]): { latest?: StoredEventR
   const latest=ordered.at(-1);
   return { latest,ambiguous: !!latest&&ordered.some(r => r.run_id!==latest.run_id&&time(r.received_at)===time(latest.received_at)) };
 }
+function adverseAfter(candidate: StoredEventReceipt,assertion: StoredEventReceipt): boolean {
+  const candidateAt=time(candidate.received_at),assertionAt=time(assertion.received_at);
+  return candidateAt>assertionAt||candidateAt===assertionAt&&
+    (candidate.run_id!==assertion.run_id||candidate.sequence>assertion.sequence);
+}
 interface PendingMarker { source: ValidatedOccurrenceSource; member: OccurrenceMember }
 function subjects(members: OccurrenceMember[]): string[] {
   // Keep multiplicity: two separately bound occurrences with the same descriptor
@@ -373,7 +378,7 @@ export function deriveCurrentClaimProjection(state: ConvergeRunState,anchors: Na
       const round=severitySources.length? Math.max(...severitySources.map(o => o.source.round)):undefined;
       const severity=round===undefined? anchor.source.severity:['critical','important','minor','nitpick'].find(s => severitySources.some(o => o.source.round===round&&o.member.severity===s));
       const criticalMismatch=severity==='critical'&&p.severity!=='critical';
-      const adverse=observed.filter(o => time(o.source.input.classification.received_at)>=time(assertion.received_at));
+      const adverse=observed.filter(o => adverseAfter(o.source.input.classification,assertion));
       const regated=projectionVersion===2? p.verdict==='dismissed'&&adverse.length>0:observed.some(o => time(o.source.input.classification.received_at)>time(assertion.received_at)&&
         (o.member.classificationStanding.kind==='known'&&['regating','new'].includes(o.member.classificationStanding.status)||
           o.member.severity==='critical'&&p.severity!=='critical'));

@@ -183,6 +183,12 @@ describe('current complete claim snapshot',() => {
     f.source.classification.sequence=3;
     expect(f.run().claims[0]!.standing).toBe('pending');
   });
+  it('does not treat the same-run classification preceding a same-timestamp dismissal as adverse',() => {
+    const f=laterVerdict();
+    f.source.classification.received_at=f.receipt.received_at;
+    expect(f.source.classification.sequence).toBeLessThan(f.receipt.sequence);
+    expect(f.run().claims[0]).toMatchObject({ standing: 'dismissed',reasons: [] });
+  });
   it.each([false,true])('keeps a contradictory legacy status unresolved in v1 replay (suppressed first: %s)',suppressedFirst => {
     const f=setup('dismissed');
     const source=laterSource(f.f.disposition,2,true,'important');

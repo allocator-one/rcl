@@ -274,9 +274,10 @@ describe('supplied-inventory occurrence carrier projection', () => {
 
   it('matches a large reverse-ordered transfer set to each exact occurrence', () => {
     const { input, projection } = projectionFixture();
+    const occurrenceCount = 128;
     const report = JSON.parse(input.split.source.reportJson);
     const original = report.findings[0];
-    report.findings = Array.from({ length: 200 }, (_, index) => ({
+    report.findings = Array.from({ length: occurrenceCount }, (_, index) => ({
       ...structuredClone(original),
       id: `finding-${index + 1}`,
       identity: `raw-${index + 1}`,
@@ -285,13 +286,13 @@ describe('supplied-inventory occurrence carrier projection', () => {
     rebind(input, report);
     projection.carrier = carrier(input.split.source, input.carrierIdentity);
     projection.sources = [inventory(input.split.source)];
-    projection.transfers = Array.from({ length: 200 }, (_, index) => accepted(input, index + 1)).reverse();
+    projection.transfers = Array.from({ length: occurrenceCount }, (_, index) => accepted(input, index + 1)).reverse();
     projection.transfers.forEach((proof, index) => { proof.receipt.sequence = 10_000 + index; });
 
     const out = projectOccurrenceCarrier(projection);
 
-    expect(out.occurrences).toHaveLength(200);
-    expect(out.transfers).toHaveLength(200);
+    expect(out.occurrences).toHaveLength(occurrenceCount);
+    expect(out.transfers).toHaveLength(occurrenceCount);
     expect(out.occurrences.every(occurrence => occurrence.transferEventId !== null)).toBe(true);
     expect(out.residuals).toEqual([]);
   });

@@ -251,13 +251,14 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
 }
 
 
-function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>, round: number): ReadonlyMap<string, string> {
-  let selected: ReadonlyMap<string, string> | undefined;
-  let selectedRound = -1;
-  for (const [sourceRound, dismissals] of dismissalsByRound) {
-    if (sourceRound < round && sourceRound >= selectedRound) { selected = dismissals; selectedRound = sourceRound; }
+/** @internal Pure retained-history projection used by validation regressions. */
+export function recoveredDismissalsBefore(dismissalsByRound: ReadonlyMap<number, ReadonlyMap<string, string>>, round: number): ReadonlyMap<string, string> {
+  const selected = new Map<string, string>();
+  for (const [sourceRound, dismissals] of [...dismissalsByRound].sort(([a], [b]) => a - b)) {
+    if (sourceRound >= round) continue;
+    for (const [identity, severity] of dismissals) selected.set(identity, severity);
   }
-  return selected ?? new Map();
+  return selected;
 }
 
 function validateSightingClassification(state: ConvergeRunState,
