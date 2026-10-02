@@ -152,6 +152,10 @@ export async function applyTerminalRejection(input: { manifest: string; manifest
       deadOwner(state.lastLaunch!.pid); await noDelivery(m.dataDir, m.runId);
       return 'unchanged';
     }
+    if (state.terminalRejections?.some(e => {
+      const priorManifest = rejectionManifest(e);
+      return priorManifest.runId === m.runId || priorManifest.reportSha256 === m.reportSha256;
+    })) refuse('already_disposed');
     const before = await selected(convergeRunStatePath(common, m.target), m.stateSha256);
     const attempts = await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
     const evidence = await proof(state, attempts, m, m.dataDir);

@@ -169,6 +169,19 @@ it('serializes competing apply calls to one audit and no new claim', async () =>
   expect(await readFile(f.attemptsPath)).toEqual(before);
 });
 
+it('refuses a second preview for the same rejected run after another preview was applied', async () => {
+  const f = await fixture(), first = await f.prepare();
+  const secondManifest = await f.preview();
+  const secondPath = join(f.common, 'second-recovery.json');
+  const secondBytes = serializeRecoveryDocument(secondManifest);
+  await writeFile(secondPath, secondBytes, { mode: 0o600 });
+
+  await expect(applyTerminalRejection(first.input, f.common, f.dataDir)).resolves.toBe('applied');
+  await expect(applyTerminalRejection({ manifest: secondPath, manifestSha256: sha256(secondBytes) }, f.common, f.dataDir))
+    .rejects.toThrow('terminal_rejection_already_disposed');
+  expect((await loadConvergeRunState(f.common, f.selection.target))!.terminalRejections).toHaveLength(1);
+});
+
 it('uses retained originals after source cleanup and admits the later normal report', async () => {
   const f = await fixture(), { input } = await f.prepare();
   await applyTerminalRejection(input, f.common, f.dataDir);
