@@ -1,0 +1,226 @@
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, expect, it } from 'vitest';
+import { describeClaim } from '../../src/consensus/claim-identity.js';
+import type { ConsensusFinding } from '../../src/consensus/types.js';
+import { correctionAnchor } from '../../src/converge/correction-anchors.js';
+import { deriveNativeRecovery, validateNativeRecoveryState, verifyNativeRecoveryLineage } from '../../src/converge/recovery-state.js';
+import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
+import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
+import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
+import { recoveredFixture, semanticFixture, sha, uuid, target } from '../evidence/recovery-validation/fixtures.js';
+import { sampleFinding } from '../telemetry/fixtures.js';
+
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+
+async function fixture() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-semantic-cache-')));
+  roots.push(root);
+  const path = convergeRunStatePath(root, target);
+  const retained = semanticFixture();
+  retained.state.rounds[0]!.reportBinding.sourcePath = `${path}.evidence/${sha(retained.reportJson)}.json`;
+  const reports: string[] = [retained.reportJson];
+  const claim = sampleFinding({ file: 'cache.ts', startLine: 10, endLine: 12,
+    title: 'Cache entries never expire', description: 'The positive cache returns expired entries without testing their TTL.',
+    suggestedFix: 'Check the expiry timestamp before returning a cached result.' });
+  async function round(number: number, findings: ConsensusFinding[], predecessor?: string) {
+    const runId = uuid(number);
+    const rows = findings.map((finding, index) => ({ ...finding,
+      identity: `report:${runId}:${String(index + 1).padStart(16, '0')}`, claimDescriptor: describeClaim(finding) }));
+    const reportJson = JSON.stringify({ run: { id: runId, converge: { target, round: number,
+      ...(predecessor ? { recovery_source: { version: 1, native_sha256: sha(predecessor) } } : {}) },
+      target: { kind: 'pr', repo: 'synthetic/recovery', pr_number: 7, head_sha: 'a'.repeat(40) },
+      gating: { bound_classification_protocol: 1 } }, findings: rows });
+    const result = await processRoundReport({ gitCommonDir: root, target, round: number, runId, findings: rows, evidence: { reportJson } });
+    reports.push(reportJson);
+    return { result, rows, reportJson };
+  }
+  const key = retained.key;
+  const sourceJson = JSON.stringify(retained.state);
+  const old = recoveredFixture(2).selection;
+  const selection = { ...old, nativeJson: sourceJson };
+  const event = prepareClaimSplit(selection).event;
+  const anchor = correctionAnchor(selection, { ...selection.scope, ...event,
+    actor_user_id: uuid(7), converge_target: target, round: 1, attempt: null }, uuid(7), uuid(8));
+  const plan = deriveNativeRecovery({ sourceJson, target, operationId: uuid(8), anchors: [anchor],
+    reports: [retained.reportJson], sourceReceipts: selection.sourceReceipts });
+  await mkdir(`${path}.evidence`, { recursive: true, mode: 0o700 });
+  await writeFile(retained.state.rounds[0]!.reportBinding.sourcePath, retained.reportJson, { mode: 0o600 });
+  await mkdir(`${path}.recovery-sources`, { recursive: true, mode: 0o700 });
+  await writeFile(`${path}.recovery-sources/${sha(sourceJson)}.json`, sourceJson, { mode: 0o600 });
+  await writeFile(path, plan.resultJson, { mode: 0o600 });
+  return { root, path, key, claim, reports, sourceJson, plan, round };
+}
+
+
+it.each(['repeat', 'suppressed', 'regating'] as const)('refuses a v2 producer first sighting relabeled %s', status => {
+  const f = semanticFixture();
+  const state = structuredClone(f.state);
+  state.sightings[0]!.status = status;
+  state.rounds[0]!.counts = { new: 0, repeat: status === 'repeat' ? 1 : 0,
+    suppressed: status === 'suppressed' ? 1 : 0, regating: status === 'regating' ? 1 : 0 };
+  state.lastAnnotations = { round: 1, identities: [{ identity: f.key, status, gating: 'consensus' }] };
+  expect(() => validateRetainedNativeEvidence({ sourceJson: JSON.stringify(state), target, reports: [f.reportJson] }))
+    .toThrow('native_recovery_content_invalid');
+});
+
+it.each(['title', 'severity', 'startLine', 'endLine'] as const)('refuses changed %s cache values through filesystem and pure recovered validation', async field => {
+  const f = await fixture();
+  const state = JSON.parse(f.plan.resultJson);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(f.plan.resultJson))).resolves.toBeUndefined();
+  const entry = state.findings[f.key];
+  if (field === 'title') entry.title = 'Unrelated changed claim';
+  if (field === 'severity') entry.severity = 'nitpick';
+  if (field === 'startLine') entry.startLine = 11;
+  if (field === 'endLine') entry.endLine = 13;
+  const raw = JSON.stringify(state);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+    .toThrow('native_recovery_content_invalid');
+  expect(await readFile(f.path, 'utf8')).toBe(f.plan.resultJson);
+});
+
+it('accepts later producer severity and bounds while preserving initial title, ordinary verdicts, and recovery proof', async () => {
+  const f = await fixture();
+  const claim = { ...f.claim, file: 'fresh-cache.ts', title: 'Cache result survives expiry' };
+  const first = await f.round(2, [claim], f.plan.resultJson);
+  const key = first.result.findings[0]!.identity;
+  const later = await f.round(3, [
+    { ...claim, title: 'Expired cache entries are returned', severity: 'critical', startLine: 12, endLine: 15 },
+    { ...claim, title: 'Expired cache entries are returned', severity: 'important', startLine: 13, endLine: 16 },
+  ], await readFile(f.path, 'utf8'));
+  expect(later.result.findings.map(finding => finding.identity)).toEqual([key, key]);
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 3,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'Current source explicitly enforces cache expiry.' }] });
+  const raw = await readFile(f.path, 'utf8');
+  const state = (await loadConvergeRunState(f.root, target))!;
+  expect(state.findings[key]).toMatchObject({ title: claim.title, severity: 'critical', startLine: 12, endLine: 16,
+    verdict: 'dismissed', verdictRound: 3, verdictSeverity: 'critical', verdictReason: 'Current source explicitly enforces cache expiry.' });
+  expect(state.recovery).toEqual(JSON.parse(f.plan.resultJson).recovery);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
+  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+  expect(await readFile(`${f.path}.recovery-sources/${sha(f.sourceJson)}.json`, 'utf8')).toBe(f.sourceJson);
+});
+
+it('keeps a new operation pending despite identical evidence and an earlier dismissed operation', async () => {
+  const f = await fixture();
+  const claim = sampleFinding({ file: 'auth.ts', title: 'GET /accounts lacks authentication',
+    description: 'The request handler accepts unauthenticated requests without checking the current session.',
+    suggestedFix: 'Validate the current session before processing the request.' });
+  const first = await f.round(2, [claim], f.plan.resultJson);
+  const key = first.result.findings[0]!.identity;
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 2,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'The GET route checks the current session.' }] });
+  const later = await f.round(3, [{ ...claim, title: 'POST /accounts lacks authentication' }],
+    await readFile(f.path, 'utf8'));
+
+  expect(later.result.findings[0]!.identity).not.toBe(key);
+  expect(later.result.findings[0]!.status).toBe('new');
+  const raw = await readFile(f.path, 'utf8');
+  const state = (await loadConvergeRunState(f.root, target))!;
+  expect(state.findings[key]).toMatchObject({ verdict: 'dismissed', verdictRound: 2 });
+  expect(state.findings[later.result.findings[0]!.identity]).toMatchObject({ pendingRound: 3 });
+  expect(state.recovery).toEqual(JSON.parse(f.plan.resultJson).recovery);
+  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+});
+
+it.each(['repeat', 'suppressed', 'regating'] as const)(
+  'refuses a post-recovery first sighting relabeled %s',
+  async status => {
+    const f = await fixture();
+    await f.round(2, [f.claim], f.plan.resultJson);
+    await f.round(3, [f.claim], await readFile(f.path, 'utf8'));
+    const state = (await loadConvergeRunState(f.root, target))!;
+    const sighting = state.sightings!.find(row => row.round === 2)!;
+    sighting.status = status;
+    sighting.pendingRound = sighting.round;
+    state.rounds.find(row => row.round === 2)!.counts = {
+      new: 0,
+      repeat: status === 'repeat' ? 1 : 0,
+      suppressed: status === 'suppressed' ? 1 : 0,
+      regating: status === 'regating' ? 1 : 0,
+    };
+    // Keep the later ordinary round and its current pending annotation intact:
+    // only the retained first sighting is forged.
+    const raw = JSON.stringify(state);
+
+    expect(() => verifyNativeRecoveryLineage(raw, target, [f.sourceJson])).not.toThrow();
+    await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
+    expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+      .toThrow('native_recovery_content_invalid');
+  },
+);
+
+it('accepts ordinary later repeat, suppression, and critical re-gating', async () => {
+  const f = await fixture();
+  const important = { ...f.claim, severity: 'important' as const };
+  const first = await f.round(2, [important], f.plan.resultJson);
+  const key = first.result.findings[0]!.identity;
+  const repeated = await f.round(3, [important], await readFile(f.path, 'utf8'));
+  expect(repeated.result.findings[0]!.status).toBe('repeat');
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 3,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'Current source explicitly enforces cache expiry.' }] });
+  const suppressed = await f.round(4, [important], await readFile(f.path, 'utf8'));
+  expect(suppressed.result.findings[0]!.status).toBe('suppressed');
+  const regated = await f.round(5, [{ ...important, severity: 'critical' }], await readFile(f.path, 'utf8'));
+  expect(regated.result.findings[0]!.status).toBe('regating');
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 5,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'Explicit critical re-triage.' }] });
+  const afterRetriage = await f.round(6, [{ ...important, severity: 'critical' }], await readFile(f.path, 'utf8'));
+  expect(afterRetriage.result.findings[0]!.status).toBe('suppressed');
+  const raw = await readFile(f.path, 'utf8');
+  const state = (await loadConvergeRunState(f.root, target))!;
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
+  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+});
+
+it('accepts recovered anchors before they have semantic sightings', async () => {
+  const f = await fixture();
+  const state = JSON.parse(f.plan.resultJson);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(f.plan.resultJson))).resolves.toBeUndefined();
+  expect(validateRetainedNativeEvidence({ sourceJson: f.plan.resultJson, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state)
+    .toEqual(state);
+});
+
+it.each(['new', 'suppressed'] as const)('refuses a later status relabeled %s without a recorded verdict', async status => {
+  const f = await fixture();
+  await f.round(2, [f.claim], f.plan.resultJson);
+  await f.round(3, [f.claim], await readFile(f.path, 'utf8'));
+  const state = (await loadConvergeRunState(f.root, target))!;
+  const sighting = state.sightings!.find(row => row.round === 3)!;
+  sighting.status = status;
+  if (status === 'suppressed') sighting.suppressReason = 'forged dismissal';
+  state.rounds.find(row => row.round === 3)!.counts = {
+    new: status === 'new' ? 1 : 0,
+    repeat: 0,
+    suppressed: status === 'suppressed' ? 1 : 0,
+    regating: 0,
+  };
+  state.lastAnnotations = { round: 3, identities: [{ identity: sighting.canonicalIdentity, status, gating: sighting.gating }] };
+  const raw = JSON.stringify(state);
+
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+    .toThrow('native_recovery_content_invalid');
+});
+
+it.each([undefined, 'forged dismissal'])('refuses a later suppression with %s reason', async suppressReason => {
+  const f = await fixture();
+  const important = { ...f.claim, severity: 'important' as const };
+  const first = await f.round(2, [important], f.plan.resultJson);
+  const key = first.result.findings[0]!.identity;
+  await f.round(3, [important], await readFile(f.path, 'utf8'));
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 3,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'Current source explicitly enforces cache expiry.' }] });
+  await f.round(4, [important], await readFile(f.path, 'utf8'));
+  const state = (await loadConvergeRunState(f.root, target))!;
+  state.sightings!.find(row => row.round === 4)!.suppressReason = suppressReason;
+  const raw = JSON.stringify(state);
+
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+    .toThrow('native_recovery_content_invalid');
+});

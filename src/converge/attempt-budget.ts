@@ -1,6 +1,8 @@
 import { retrySourceSchema, type RetrySource } from './retry-source.js';
 import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
 import { pendingRecoverySourceSchema, type PendingRecoverySource } from './pending-recovery-source.js';
+import { isDeepStrictEqual } from 'node:util';
+import { launchSchema, type GuardedLaunchState } from './launch-record.js';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -17,7 +19,7 @@ import {
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
+import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
 
@@ -53,6 +55,7 @@ export interface ConvergeAttemptState {
   attemptsUsed: number;
   attempts: ConvergeAttemptRecord[];
   updatedAt: string;
+  lastLaunch?: GuardedLaunchState;
 }
 
 export interface ConvergeAttemptClaim {
@@ -218,6 +221,14 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
     throw new ConvergeAttemptStateError(
       `Invalid convergence attempt state in ${stateFile}; refusing to reset the safety budget.`
     );
+  }
+
+  if (state.lastLaunch !== undefined) {
+    const launch = launchSchema.safeParse(state.lastLaunch);
+    if (!launch.success || !attempts.some(record =>
+      record.attempt === launch.data.attempt && record.pid === launch.data.pid)) {
+      throw new ConvergeAttemptStateError(`Invalid guarded launch in convergence attempt state: ${stateFile}`);
+    }
   }
 
   return state as ConvergeAttemptState;
@@ -752,6 +763,7 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
     const state: ConvergeAttemptState = {
       version: previous?.version ?? STATE_VERSION,
       ...(previous?.cycle ? { cycle: previous.cycle } : {}),
+      ...(previous?.lastLaunch ? { lastLaunch: previous.lastLaunch } : {}),
       target,
       cap: effectiveCap,
       migratedAttempts: previous?.migratedAttempts ?? 0,
@@ -814,6 +826,167 @@ export async function loadConvergeAttemptState(
   target: string
 ): Promise<ConvergeAttemptState | undefined> {
   return readState(convergeAttemptStatePath(gitCommonDir, target), validateTarget(target));
+}
+
+/** Update only an owned, already-spent launch; never create or alter accounting. */
+export async function recordConvergeAttemptLaunch(
+  gitCommonDir: string,
+  target: string,
+  launch: GuardedLaunchState,
+  ownership: NativeTargetOwnership,
+  mutation: 'completion' | 'delivery' = 'completion'
+): Promise<void> {
+  if (mutation !== 'completion' && mutation !== 'delivery') {
+    throw new ConvergeAttemptStateError('Unsupported guarded launch mutation.');
+  }
+  const incoming = launchSchema.parse(launch);
+  return withOwnedNativeOperation(ownership, gitCommonDir, target, async operation => {
+    const commonDir = await ownedNativeTargetCommonDir(operation, gitCommonDir, target);
+    const stateFile = convergeAttemptStatePath(commonDir, target);
+    const lockFile = `${stateFile}.lock`;
+    const owner = { pid: process.pid, claimedAt: new Date().toISOString(), token: randomUUID() };
+    await acquireOwnedLock(lockFile, DEFAULT_LOCK_TIMEOUT_MS, DEFAULT_LOCK_RETRY_MS, owner);
+    let failure: unknown;
+    try {
+      const state = await readState(stateFile, target);
+      if (!state || state.attemptsUsed !== incoming.attempt || state.attempts.at(-1)?.pid !== incoming.pid ||
+        mutation === 'completion' && incoming.pid !== process.pid) {
+        throw new ConvergeAttemptStateError('Guarded launch requires this process\'s latest durable attempt claim.');
+      }
+      const { assertReviewCyclePair } = await import('./fresh-review.js');
+      await assertReviewCyclePair(commonDir, target, state.cycle);
+      const previous = state.lastLaunch;
+      if (mutation === 'delivery' && (!previous || previous.status !== 'completed' ||
+        !isDeepStrictEqual({ ...previous, deliveryPending: incoming.deliveryPending }, incoming))) {
+        throw new ConvergeAttemptStateError('Delivery recording may change only the exact completed launch delivery flag.');
+      }
+      if (isDeepStrictEqual(previous, incoming)) {
+        const handle = await open(stateFile, 'r');
+        try { await handle.sync(); }
+        finally { await handle.close(); }
+        await syncDirectory(dirname(stateFile));
+        return;
+      }
+      if (mutation === 'completion') {
+        if (incoming.status === 'pending') {
+          if (previous && previous.attempt >= incoming.attempt) {
+            throw new ConvergeAttemptStateError('A recorded guarded launch cannot be replaced or reset.');
+          }
+        } else {
+          const binding = ['attempt', 'round', 'headSha', 'inputSha256', 'startedAt', 'pid', 'retryReason'] as const;
+          if (!previous || previous.status !== 'pending' ||
+            binding.some(key => previous[key] !== incoming[key]) ||
+            previous.runId !== undefined && previous.runId !== incoming.runId ||
+            !isDeepStrictEqual(previous.recovery, incoming.recovery)) {
+            throw new ConvergeAttemptStateError('Guarded completion does not match its original pending launch.');
+          }
+        }
+      }
+      await writeStateAtomically(stateFile, { ...state, lastLaunch: incoming, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      try { await releaseOwnedLock(lockFile, owner); }
+      catch (error) {
+        if (failure !== undefined) {
+          throw new AggregateError([failure, error], 'Guarded launch recording and lock release failed.');
+        }
+        throw error;
+      }
+    }
+  });
+}
+
+/** Continue one fully validated saved recovery under a new native target lease. */
+export async function recordConvergeAttemptRecoveryResume(
+  gitCommonDir: string,
+  target: string,
+  input: { expected: GuardedLaunchState; next: GuardedLaunchState; nativeSha256: string; cycleId?: string },
+  ownership: NativeTargetOwnership,
+): Promise<void> {
+  const expected = launchSchema.parse(input.expected);
+  const next = launchSchema.parse(input.next);
+  const source = { nativeSha256: input.nativeSha256, cycleId: input.cycleId };
+  const binding = (launch: GuardedLaunchState) => {
+    const { status: _status, reportJsonSha256: _report, successfulReviews: _success, totalReviews: _total,
+      deliveryPending: _delivery, hardFailure: _hard, reviewerHealth: _health, exitCode: _exit, reportPath: _path,
+      recovery, ...immutable } = launch;
+    const { resume: _resume, ...operation } = recovery ?? {};
+    return { ...immutable, recovery: operation };
+  };
+  if (!expected.recovery?.operationId || !expected.runId || !isDeepStrictEqual(binding(expected), binding(next)) ||
+    next.recovery?.resume?.pid !== process.pid) {
+    throw new ConvergeAttemptStateError('recovery_resume_binding_mismatch');
+  }
+  return withOwnedNativeOperation(ownership, gitCommonDir, target, async owned => {
+    const commonDir = await ownedNativeTargetCommonDir(owned, gitCommonDir, target);
+    const stateFile = convergeAttemptStatePath(commonDir, target);
+    const lockFile = `${stateFile}.lock`;
+    const owner = { pid: process.pid, claimedAt: new Date().toISOString(), token: randomUUID() };
+    await acquireOwnedLock(lockFile, DEFAULT_LOCK_TIMEOUT_MS, DEFAULT_LOCK_RETRY_MS, owner);
+    let failure: unknown;
+    try {
+      const state = await readState(stateFile, target);
+      if (!state || state.attemptsUsed !== expected.attempt || state.attempts.at(-1)?.pid !== expected.pid) {
+        throw new ConvergeAttemptStateError('recovery_resume_claim_mismatch');
+      }
+      const { assertReviewCyclePair } = await import('./fresh-review.js');
+      await assertReviewCyclePair(commonDir, target, state.cycle);
+      const { loadConvergeRunStateEvidence } = await import('./run-state.js');
+      const native = await loadConvergeRunStateEvidence(commonDir, target);
+      if (native?.state.version !== 3 || native.sha256 !== source.nativeSha256 ||
+        native.state.cycle?.id !== source.cycleId) {
+        throw new ConvergeAttemptStateError('recovery_resume_source_mismatch');
+      }
+      if (isDeepStrictEqual(state.lastLaunch, next)) {
+        const handle = await open(stateFile, 'r');
+        try { await handle.sync(); } finally { await handle.close(); }
+        await syncDirectory(dirname(stateFile));
+        return;
+      }
+      if (!isDeepStrictEqual(state.lastLaunch, expected)) {
+        throw new ConvergeAttemptStateError('recovery_resume_stale_launch');
+      }
+      const resume = next.recovery!.resume!;
+      if (next.status === 'pending' && resume.phase === 'running') {
+        if (expected.status === 'completed' || !isDeepStrictEqual(next, { ...expected, status: 'pending',
+          recovery: { ...expected.recovery, resume } })) {
+          throw new ConvergeAttemptStateError('recovery_resume_invalid_begin');
+        }
+        const previousOwner = expected.recovery!.resume?.phase === 'running' ? expected.recovery!.resume.pid
+          : expected.status === 'pending' ? expected.pid : undefined;
+        if (previousOwner !== undefined) {
+          try { process.kill(previousOwner, 0); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+              throw new ConvergeAttemptStateError('recovery_resume_owner_unverifiable');
+            }
+            await writeStateAtomically(stateFile, { ...state, lastLaunch: next, updatedAt: new Date().toISOString() });
+            return;
+          }
+          throw new ConvergeAttemptStateError('recovery_resume_owner_alive');
+        }
+      } else if (expected.status !== 'pending' || expected.recovery!.resume?.phase !== 'running' ||
+        expected.recovery!.resume.pid !== process.pid || resume.phase !== 'finished' ||
+        !['completed', 'failed'].includes(next.status) || next.status === 'failed' && !isDeepStrictEqual(next,
+          { ...expected, status: 'failed', recovery: { ...expected.recovery, resume } })) {
+        throw new ConvergeAttemptStateError('recovery_resume_invalid_finish');
+      }
+      await writeStateAtomically(stateFile, { ...state, lastLaunch: next, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      try { await releaseOwnedLock(lockFile, owner); }
+      catch (error) {
+        if (failure !== undefined) {
+          throw new AggregateError([failure, error], 'Recovery resume recording and lock release failed.');
+        }
+        throw error;
+      }
+    }
+  });
 }
 
 export async function previewConvergeAttemptState(

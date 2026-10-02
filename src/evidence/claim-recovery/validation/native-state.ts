@@ -162,10 +162,11 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
           Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
       current = predecessor;
     }
-    // Every sighting-less v3 link is admissible only when its exact walked root
-    // is an authentic released cycle-v2 snapshot. The link checks above retain
-    // the cycle byte-for-byte through every recovery operation.
-    if (requiresReleasedCycleRoot) requireSource(current.version === 2 && current.cycle !== undefined &&
+    // A sighting-less recovery can start at either exact legacy boundary:
+    // native-v1, or the released cycle-v2 format that also predates semantic
+    // sightings. The snapshot walk above retains that root byte-for-byte.
+    if (requiresReleasedCycleRoot) requireSource(current.version === 1 ||
+      current.version === 2 && current.cycle !== undefined &&
       current.sightings === undefined && current.migration === undefined);
     let legacy = current.version === 1 ? current : undefined;
     if (current.version === 2 && current.migration) {
@@ -219,6 +220,14 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
     requireSource(!members.has(member)); members.add(member);
   }
   requireSource(usedReports.size === reports.size && usedReceipts.size === receipts.size);
+}
+
+/** Validate one proposed additive operation without requiring retained files
+ * for already-qualified predecessor operations. The effectful adapter validates
+ * the complete resulting lineage before publication. */
+export function validateNativeRecoveryOperationInput(input: NativeRecoveryInput): void {
+  const source = verifyNativeRecoveryLineage(input.sourceJson, input.target, input.nativeSourceJsons).state;
+  validateAnchors(input, source);
 }
 
 /** @internal Validate one new identity batch against retained anchors in linear time. */
@@ -375,8 +384,14 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
       if (!legacyOrigin) validateSemanticState(lineage.original, sources);
       // Only exact predecessor rounds are legacy; added rounds still require
       // the full immutable report, sighting membership and cache validation.
-      validateSemanticState(state, sources, legacyOrigin ? lineage.original : undefined,
-        recoveredDismissalsByRound(state, input.recoveryMaterials ?? [], snapshots));
+      // Released cycle-v2 roots have no semantic sightings or report bindings.
+      // Their exact predecessor bytes, anchors, receipts and reports were
+      // validated above; descendants do not invent a semantic ledger merely
+      // to cross the recovery boundary.
+      if (!legacyOrigin || state.sightings !== undefined) {
+        validateSemanticState(state, sources, legacyOrigin ? lineage.original : undefined,
+          recoveredDismissalsByRound(state, input.recoveryMaterials ?? [], snapshots));
+      }
     }
     requireSource(sources.usedReports.size === reports.size);
     const legacyClaims: LegacyClaimEvidence[] = Object.values(state.findings).filter(entry => entry.claimDescriptor === undefined).map(entry => {
