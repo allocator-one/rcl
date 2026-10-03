@@ -21,7 +21,7 @@ describe('vendored skills', () => {
 
   it('drop text that only applies inside the rcl repository', () => {
     for (const [path, content] of vendored()) {
-      expect(content, path).not.toContain("review-council's own source");
+      expect(content, path).not.toContain("Review Council's own source");
       expect(content, path).not.toContain('npm run build && npm link');
       expect(content, path).not.toContain('`npm run lint` (type-check) and `npm test` (vitest suite)');
       if (path.includes('/rcl-converge/')) expect(content, path).toContain("run this repository's required quality gates");
@@ -29,7 +29,7 @@ describe('vendored skills', () => {
     // …while this repository's own copies keep it.
     const own = new Map((renderAll() as Array<{ path: string; content: string }>).map(({ path, content }) => [path.replaceAll('\\', '/'), content]));
     for (const [path, content] of own) {
-      if (path.endsWith('/rcl/SKILL.md')) expect(content, path).toContain("review-council's own source");
+      if (path.endsWith('/rcl/SKILL.md')) expect(content, path).toContain("Review Council's own source");
       if (path.includes('/rcl-converge/')) expect(content, path).not.toContain("run this repository's required quality gates");
     }
   });
@@ -61,7 +61,11 @@ describe('vendored skills', () => {
       } else {
         expect(content, path).toContain('### 2a. Check what leaves the machine');
         expect(content, path).toContain('never pin a version');
-        expect(content, path).toContain('npm install -g --ignore-scripts "review-council@<RCL_LATEST>"');
+        expect(content, path).toContain('npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        // The legacy package owns the same `rcl` bin; it must be removed before the install, never installed.
+        expect(content, path).toContain('npm uninstall -g --ignore-scripts review-council &&\n  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>"');
+        expect(content, path).not.toMatch(/npm (install|view)[^\n]*review-council@/);
+        expect(content, path).toContain('Bash(npm view @allocator-one/rcl:*)');
         expect(content, path).toContain('dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"');
         expect(content, path).toContain('--registry https://registry.npmjs.org');
         expect(content, path).toContain('--proxy=null');

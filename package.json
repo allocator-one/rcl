@@ -1,5 +1,5 @@
 {
-  "name": "review-council",
+  "name": "@allocator-one/rcl",
   "version": "4.4.19",
   "description": "Review Council — multi-model AI code review CLI",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     "build:skills": "node scripts/build-skills.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "repository": {
     "type": "git",

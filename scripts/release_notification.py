@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 
 PROJECTS = {
-    'allocator-one/rcl': ('review-council', 'RCL', 'rcl'),
+    'allocator-one/rcl': ('@allocator-one/rcl', 'RCL', 'rcl'),
     'allocator-one/harness-cli': ('@allocator-one/harness-cli', 'Harness CLI', 'harness-cli'),
 }
 STABLE = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
@@ -101,7 +101,13 @@ def validate_package(package, name, version, sha):
 
 
 def attestation_url(name, version):
-    return f'{NPM_REGISTRY}/-/npm/v1/attestations/{urllib.parse.quote(f"{name}@{version}", safe="@")}'
+    # The registry writes a scoped name with a lowercase separator: .../attestations/@scope%2fname@1.0.0.
+    return f'{NPM_REGISTRY}/-/npm/v1/attestations/{name.replace("/", "%2f")}@{version}'
+
+
+def package_url(name, version):
+    # Provenance subjects are package URLs, which percent-encode a scope's "@": pkg:npm/%40scope/name@1.0.0.
+    return f'pkg:npm/{"%40" + name[1:] if name.startswith("@") else name}@{version}'
 
 
 def validate_attestation(document, name, version, repository, sha, run_id=None, run_attempt=None):
@@ -122,7 +128,7 @@ def validate_attestation(document, name, version, repository, sha, run_id=None, 
             dependencies = payload['predicate']['buildDefinition']['resolvedDependencies']
             invocation = payload['predicate']['runDetails']['metadata']['invocationId']
             subject_matches = any(
-                subject.get('name') == f'pkg:npm/{name}@{version}'
+                subject.get('name') == package_url(name, version)
                 and subject.get('digest', {}).get('sha512') == expected_digest
                 for subject in payload['subject'])
             dependency_matches = any(
