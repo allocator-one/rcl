@@ -34,7 +34,7 @@ it('reproduces and resolves a reconciled delivered hard failure without admittin
     deliveryPending: false,
     reviewerHealth: { policy: { seatCount: 10, minimumSuccessful: 7 }, successfulSeats: 7 },
     deliveryReconciliation: {
-      version: 1,
+      version: 2,
       runId: expect.any(String),
       reportJsonSha256: f.reportSha256,
       round: 1,
@@ -70,9 +70,9 @@ it('requires the exact reviewed retry reason and replacement inputs before claim
   const before = await loadConvergeAttemptState(f.dir, f.target);
 
   await expect(guardReviewLaunch({ ...f.options, ...f.selection }))
-    .rejects.toThrow('stale_report_retry_reason_mismatch');
+    .rejects.toThrow('stale_report_continuation_mismatch');
   await expect(guardReviewLaunch({ ...f.options, ...f.selection, retryReason: 'A different bounded reason.' }))
-    .rejects.toThrow('stale_report_retry_reason_mismatch');
+    .rejects.toThrow('stale_report_continuation_mismatch');
   await expect(guardReviewLaunch({ ...f.options, ...f.selection, headSha: 'e'.repeat(40), retryReason: f.retryReason }))
     .rejects.toThrow('stale_report_input_mismatch');
   expect(await loadConvergeAttemptState(f.dir, f.target)).toEqual(before);
@@ -102,7 +102,7 @@ it.each([
   await writeFile(f.statePath, JSON.stringify(state));
   const before = await f.bytes();
   await expect(previewStaleReport(f.hardFailureSelection, f.dir))
-    .rejects.toThrow(/stale_report_(outcome_ineligible|health_binding_mismatch|reconciliation_binding_mismatch)/);
+    .rejects.toThrow(/stale_report_(outcome_ineligible|health_binding_mismatch|reconciliation_binding_mismatch)|Delivery reconciliation must bind/);
   expect(await f.bytes()).toEqual(before);
   expect(f.options.run).toHaveBeenCalledTimes(1);
 });
@@ -110,7 +110,7 @@ it.each([
 it('refuses ordinary healthy stale work and unchanged effective inputs in the special path', async () => {
   const ordinary = await staleFixture();
   await expect(previewStaleReport({ ...ordinary.selection, retryReason: 'Cannot relabel ordinary work.' }, ordinary.dir))
-    .rejects.toThrow('stale_report_outcome_ineligible');
+    .rejects.toThrow('stale_report_continuation_ineligible');
 
   const f = await reconciledHardFailureFixture();
   await expect(previewStaleReport({ ...f.hardFailureSelection,
@@ -203,7 +203,8 @@ it('continues the incident ordinal at round 14 and attempt 26 without changing 1
   attempts.attempts = Array.from({ length: 25 }, (_, index) => ({ ...attempts.attempts[0], attempt: index + 1 }));
   await writeFile(f.attemptsPath, JSON.stringify(attempts));
   const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: {
-    id: state.lastLaunch!.runId, converge: { target: f.target, round: 14, attempt: 25 },
+    id: state.lastLaunch!.runId, provenance: 'live', cycle_id: report.run.cycle_id,
+    converge: { target: f.target, round: 14, attempt: 25 },
     target: { kind: 'pull_request', head_sha: state.lastLaunch!.headSha },
     artifacts: [{ kind: 'report_json', stored: true, declared_sha256: f.selection.reportSha256 }], findings: [], calls: [],
   } });

@@ -54,7 +54,8 @@ it('previews and applies a reconciled delivered hard failure through the support
     '--head',f.selection.headSha,'--input-sha256',f.selection.inputSha256,'--report',f.reportPath,
     '--report-sha256',f.reportSha256,'--reason',f.selection.reason,'--retry-reason',f.retryReason],deny);
   expect(preview.code,preview.stderr).toBe(0);
-  expect(JSON.parse(preview.stdout).manifest).toMatchObject({version:2,outcome:'delivered-hard-failure',retryReason:f.retryReason});
+  expect(JSON.parse(preview.stdout).manifest).toMatchObject({version:3,outcome:'delivered-hard-failure',retryReason:f.retryReason,
+    deliveryReconciliation:{version:2}});
   expect(await f.bytes()).toEqual(before);
   const digest = sha256(await readFile(f.manifestPath));
   for (const mode of ['apply','resume']) {

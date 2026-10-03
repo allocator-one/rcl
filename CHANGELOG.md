@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.5.3 - 2026-10-04
+
+- Strengthen delivered hard-failure reconciliation with a versioned marker
+  bound to the exact input digest, claim PID, review cycle and reconciliation
+  time. Every hard-failure marker now requires live server provenance and exact
+  server/native cycle, repository and pull-request authority. Existing 4.5.2
+  markers and stale audit receipts remain readable and can be authenticated
+  forward without changing attempts, rounds, findings or provider calls
+  (RCL-177).
+
 ## 4.5.2 - 2026-10-03
 
 - Continue a guarded review when an old-head report retained `hardFailure`

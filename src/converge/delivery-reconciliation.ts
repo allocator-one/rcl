@@ -1,10 +1,10 @@
 import { resolveGitCommonDir } from './attempt-budget.js';
 import { loadConvergeRunState, writeState } from './run-state.js';
+import { strongDeliveryReconciliationSchema } from './launch-record.js';
 import { withNativeTarget } from './target-ownership.js';
 import type { HarnessSink } from '../telemetry/sink.js';
 import { getRun } from '../evidence/reads.js';
 import type { FlushSummary } from '../telemetry/outbox.js';
-import { deliveryReconciliationSchema } from './launch-record.js';
 
 type FlushReconciliationSummary = Pick<FlushSummary, 'remaining' | 'failed' | 'dropped'>;
 type ReconcileOptions = Parameters<typeof reconcileDeliveredRun>[2];
@@ -27,24 +27,37 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
   return withNativeTarget(common, target, async ownership => {
     const state = await loadConvergeRunState(common, target), launch = state?.lastLaunch;
     const round = detail.converge?.round, attempt = detail.converge?.attempt, headSha = detail.target.head_sha;
+    const marker = launch?.deliveryReconciliation;
+    const markerlessLegacy = launch?.deliveryPending === false && launch.hardFailure === true &&
+      launch.exitCode === 4 && launch.deliveryReconciliation === undefined;
+    const weakMarker = marker?.version === 1 && launch?.hardFailure === true && launch.deliveryPending === false &&
+      launch.exitCode === 4 && marker.runId === launch.runId && marker.reportJsonSha256 === launch.reportJsonSha256 &&
+      marker.headSha === launch.headSha && marker.attempt === launch.attempt && marker.round === launch.round;
+    const needsStrongMarker = launch?.hardFailure === true &&
+      (launch.deliveryPending === true || markerlessLegacy || weakMarker);
     const reports = detail.artifacts?.filter(artifact => artifact.kind === 'report_json') ?? [];
-    if (!state || !launch || launch.status !== 'completed' || launch.deliveryReconciliation !== undefined ||
-      (launch.deliveryPending !== true && !(launch.deliveryPending === false && launch.hardFailure === true &&
-        launch.deliveryFailure !== 'local-invalid' && launch.exitCode === 4 &&
-        launch.deliveryReconciliation === undefined)) ||
+    const reconciledAt = new Date().toISOString();
+    const strongMarker = needsStrongMarker ? strongDeliveryReconciliationSchema.safeParse({ version: 2,
+      runId: launch.runId, reportJsonSha256: launch.reportJsonSha256, headSha: launch.headSha,
+      inputSha256: launch.inputSha256, attempt: launch.attempt, round: launch.round,
+      claimPid: launch.pid, cycleId: state?.cycle?.id ?? null, reconciledAt }) : undefined;
+    if (!state || !launch || launch.status !== 'completed' ||
+      (!launch.deliveryPending && !markerlessLegacy && !weakMarker) ||
+      (launch.deliveryReconciliation !== undefined && !weakMarker) || launch.deliveryFailure === 'local-invalid' ||
       typeof launch.runId !== 'string' || typeof launch.reportJsonSha256 !== 'string' ||
       !Number.isSafeInteger(launch.round) || !Number.isSafeInteger(launch.attempt) || typeof launch.headSha !== 'string' ||
       !Number.isSafeInteger(round) || !Number.isSafeInteger(attempt) || typeof headSha !== 'string' ||
       launch.runId.toLowerCase() !== runId.toLowerCase() ||
       round !== launch.round || attempt !== launch.attempt || headSha !== launch.headSha ||
       reports.length !== 1 || reports[0]!.stored !== true ||
-      typeof reports[0]!.declared_sha256 !== 'string' ||
-      reports[0]!.declared_sha256 !== launch.reportJsonSha256) return 'unchanged';
-    const deliveryReconciliation = deliveryReconciliationSchema.parse({ version: 1, runId: launch.runId,
-      reportJsonSha256: launch.reportJsonSha256, round: launch.round, attempt: launch.attempt,
-      headSha: launch.headSha });
-    state.lastLaunch = { ...launch, deliveryPending: false, deliveryReconciliation };
-    state.updatedAt = new Date().toISOString();
+      reports[0]!.declared_sha256 !== launch.reportJsonSha256 ||
+      (strongMarker && (!strongMarker.success || detail.provenance !== 'live' ||
+        (detail.cycle_id ?? null) !== (state.cycle?.id ?? null) ||
+        (state.cycle !== undefined && (detail.target.repo?.toLowerCase() !== state.cycle.repo.toLowerCase() ||
+          detail.target.pr_number !== state.cycle.prNumber))))) return 'unchanged';
+    state.lastLaunch = { ...launch, deliveryPending: false,
+      ...(strongMarker?.success ? { deliveryReconciliation: strongMarker.data } : {}) };
+    state.updatedAt = reconciledAt;
     await writeState(common, state, ownership);
     return 'reconciled';
   });

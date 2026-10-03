@@ -23,15 +23,34 @@ export const ordinaryLaunchInputsBindingSchema = z.object({
 
 export type OrdinaryLaunchInputsBinding = z.infer<typeof ordinaryLaunchInputsBindingSchema>;
 
-/** Durable proof that authenticated server evidence cleared one exact pending delivery. */
-export const deliveryReconciliationSchema = z.object({
+/** Published by 4.5.2; retained so existing native state and audit receipts remain readable. */
+export const legacyDeliveryReconciliationSchema = z.object({
   version: z.literal(1),
   runId: z.string().uuid(),
   reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  round: z.number().int().positive().safe(),
-  attempt: z.number().int().positive().safe(),
   headSha: z.string().regex(/^[a-f0-9]{40}$/),
+  attempt: z.number().int().positive().safe(),
+  round: z.number().int().positive().safe(),
 }).strict();
+
+/** Exact authenticated server/native binding emitted from 4.5.3 onward. */
+export const strongDeliveryReconciliationSchema = z.object({
+  version: z.literal(2),
+  runId: z.string().uuid(),
+  reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  headSha: z.string().regex(/^[a-f0-9]{40}$/),
+  inputSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  attempt: z.number().int().positive().safe(),
+  round: z.number().int().positive().safe(),
+  claimPid: z.number().int().positive().safe(),
+  cycleId: z.string().uuid().nullable(),
+  reconciledAt: z.string().datetime(),
+}).strict();
+
+export const deliveryReconciliationSchema = z.discriminatedUnion('version', [
+  legacyDeliveryReconciliationSchema,
+  strongDeliveryReconciliationSchema,
+]);
 
 export type DeliveryReconciliation = z.infer<typeof deliveryReconciliationSchema>;
 
@@ -98,7 +117,17 @@ export const launchSchema = z.object({
     migrationPackageSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).strict().optional(),
   recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),
-}).strict().refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined);
+}).strict().refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined)
+  .refine(value => value.deliveryReconciliation === undefined ||
+    (value.status === 'completed' && value.deliveryPending === false &&
+      value.runId === value.deliveryReconciliation.runId &&
+      value.reportJsonSha256 === value.deliveryReconciliation.reportJsonSha256 &&
+      value.headSha === value.deliveryReconciliation.headSha &&
+      value.attempt === value.deliveryReconciliation.attempt && value.round === value.deliveryReconciliation.round &&
+      (value.deliveryReconciliation.version === 1 ||
+        (value.hardFailure === true && value.inputSha256 === value.deliveryReconciliation.inputSha256 &&
+          value.pid === value.deliveryReconciliation.claimPid))),
+  'Delivery reconciliation must bind the exact completed launch');
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
 export type GuardedLaunchCompletion = z.infer<typeof completionSchema>;

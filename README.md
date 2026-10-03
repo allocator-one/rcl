@@ -442,6 +442,16 @@ commands are documented in
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
 | `rcl converge-attempt` | Legacy attempt accounting; guarded launches claim their own attempts |
 
+Delivered hard-failure continuation requires RCL 4.5.3 or later. Re-run
+`rcl telemetry flush --run <run-id>` to authenticate or upgrade the durable
+reconciliation marker before previewing `converge-stale`. The strong marker is
+bound to the exact run, report, head, input digest, attempt, round, claim PID,
+cycle, reconciliation time and live repository/pull-request authority. New
+stale dispositions are version 3; published 4.5.2 version 2 receipts remain
+verifiable and can be
+followed by a changed-input version 3 disposition only after that exact marker
+upgrade.
+
 ---
 
 ## Configuration

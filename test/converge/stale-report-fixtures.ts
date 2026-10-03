@@ -87,7 +87,8 @@ export async function reconciledHardFailureFixture(git = false, withHistory: boo
 
   const runId = state.lastLaunch.runId!;
   const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: {
-    id: runId, converge: { target: f.target, round: state.lastLaunch!.round, attempt: state.lastLaunch!.attempt },
+    id: runId, provenance: 'live', cycle_id: report.run.cycle_id,
+    converge: { target: f.target, round: state.lastLaunch!.round, attempt: state.lastLaunch!.attempt },
     target: { kind: 'pull_request', head_sha: state.lastLaunch.headSha },
     artifacts: [{ kind: 'report_json', stored: true, declared_sha256: f.selection.reportSha256 }],
     findings: [], calls: [],
