@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.5.1 - 2026-10-03
+
+- Stop publishing `review-council`. Every consumer installs
+  `@allocator-one/rcl`, and the former name is deprecated on npm with a pointer
+  to it; installers still remove an existing `review-council` first (RCL-175).
+
 ## 4.5.0 - 2026-10-03
 
 - Publish as `@allocator-one/rcl`. The package keeps the `rcl` executable and

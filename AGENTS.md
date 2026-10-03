@@ -60,13 +60,12 @@ npm pack --dry-run
 ## Release
 
 `@allocator-one/rcl` publishes to npm through `.github/workflows/release.yml`.
-Until every consumer has moved off the package's former name (epic RCL-169),
-each release also publishes the same files as `review-council`: the workflow
-derives a second tarball whose package.json differs only in `name`, verifies
-that, and publishes the scoped package first. Both npm packages trust that
-exact GitHub Actions workflow through OIDC, so no long-lived npm token belongs
-in this repository. Both declare the `rcl` executable, so npm will not install
-one over the other; installers remove `review-council` first.
+The package trusts that exact GitHub Actions workflow through OIDC, so no
+long-lived npm token belongs in this repository. It published as
+`review-council` through 4.4.19 and under both names in 4.5.0, while
+consumers moved (epic RCL-169); the former name is deprecated and gets no new
+versions. Both declare the `rcl` executable, so npm will not install one
+over the other; installers remove `review-council` first.
 
 1. Bump `package.json`, `package-lock.json`, and `CHANGELOG.md` on a branch.
 2. Validate and merge the protected PR with green `ci`.
@@ -77,17 +76,17 @@ one over the other; installers remove `review-council` first.
    through OIDC. To let someone release, give them the Maintain role on the
    repository; nothing else is required.
 4. Monitor the Release workflow, then verify npm's exact version and dist-tag
-   for both `@allocator-one/rcl` and `review-council`, and reinstall the
-   published CLI before checking `rcl --version`.
+   for `@allocator-one/rcl`, and reinstall the published CLI before checking
+   `rcl --version`.
 5. Confirm the GitHub Release `vX.Y.Z` exists with the CHANGELOG notes and the
    tarball attached (`gh release view vX.Y.Z`). The workflow creates it; if
    that job failed, create it by hand from `node scripts/release-notes.mjs`.
 
 The workflow accepts stable annotated tags only when their commit is on
 `main` and the tag matches `package.json`. A tokenless job reruns lint, build,
-and tests and creates both package tarballs. A separate minimal job receives only
-the two tarballs and publishes them with npm trusted publishing and provenance,
-skipping a version npm already holds with identical bytes so a partial publish
+and tests and creates the package tarball. A separate minimal job receives only
+the tarball and publishes it with npm trusted publishing and provenance,
+skipping a version npm already holds with identical bytes so a failed release
 can be re-run; npm install and package lifecycle scripts never receive OIDC
 publishing authority.
 A final job, after publish, creates the GitHub Release for the tag with notes
