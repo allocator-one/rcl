@@ -289,7 +289,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
   } else {
     await assertNoPendingFreshReview(options.gitCommonDir, options.target);
   }
-  const processIdentity = process.platform === 'linux' || process.platform === 'darwin'
+  const processIdentity = process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32'
     ? await captureCurrentProcessIdentity()
     : undefined;
   const claim = await claimConvergeAttempt({
