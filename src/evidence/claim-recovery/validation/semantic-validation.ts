@@ -133,6 +133,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     }
   }
   const rounds = new Set<number>();
+  const reportsByRound = new Map<number, RetainedReport>();
   for (const round of state.rounds) {
     requireIntegrity(!!round && Number.isSafeInteger(round.round) && round.round > 0 && !rounds.has(round.round));
     rounds.add(round.round);
@@ -150,6 +151,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     requireIntegrity(bindingSchema.safeParse(round.reportBinding).success && round.runId === round.reportBinding?.runId);
     const binding = round.reportBinding!;
     const report = readBoundReport(binding, state.target, round.round, round.runId!, sources);
+    reportsByRound.set(round.round, report);
     // Later semantic rounds must agree with the native cycle (including none).
     // Original legacy rounds remain bounded by their exact predecessor bytes.
     const cycleRun: unknown = report.run;
@@ -271,6 +273,23 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       admission.recoveryOperationCount >= 0 && admission.recoveryOperationCount <= (state.recovery?.operations.length ?? 0));
     const retainedSet = new Set(admission.actionableIdentities);
     const roundSightings = sightingsByRound.get(roundEntry.round) ?? [];
+    const report = reportsByRound.get(roundEntry.round);
+    const recoverySource = report?.run?.converge?.recovery_source;
+    requireIntegrity(recoverySource?.version === 1 && recoverySource.native_sha256 === admission.sourceStateSha256);
+    const predecessorRaw = sources.snapshots.get(admission.sourceStateSha256);
+    requireIntegrity(predecessorRaw !== undefined && sha(predecessorRaw!) === admission.sourceStateSha256);
+    const predecessor = decodeRecoveryDocument(predecessorRaw!) as ConvergeRunState;
+    requireIntegrity(predecessor.target === state.target && predecessor.version === 3 &&
+      admission.recoveryOperationCount === predecessor.recovery?.operations.length);
+    const expectedAdmission = new Set(effectivePendingIdentities(predecessor));
+    for (const sighting of roundSightings) {
+      if (sighting.gating !== 'none' && sighting.status !== 'suppressed' && sighting.pendingRound !== null) {
+        expectedAdmission.add(sighting.canonicalIdentity);
+      }
+    }
+    requireIntegrity(isDeepStrictEqual(admission.actionableIdentities, [...expectedAdmission].sort()));
+    sources.pathRequirements.push({ kind: 'native-predecessor', sha256: admission.sourceStateSha256,
+      nativePathSuffix: `.recovery-sources/${admission.sourceStateSha256}.json` });
     requireIntegrity(roundSightings.every(sighting =>
       sighting.pendingRound === null || retainedSet.has(sighting.canonicalIdentity)));
     requireIntegrity(Object.values(state.findings).every(entry => entry.firstRound > roundEntry.round ||

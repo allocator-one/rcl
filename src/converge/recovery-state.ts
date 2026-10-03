@@ -210,6 +210,15 @@ export async function validateNativeRecoveryState(state: ConvergeRunState, commo
     const sourceRaw = raw ?? Buffer.from(`${JSON.stringify(state, null, 2)}\n`);
     requireSource(sourceRaw.equals(Buffer.from(sourceRaw.toString('utf8'))));
     const sources = await readNativeRecoverySourceJsons(commonDir, state);
+    const admissionSourceJsons: string[] = [];
+    let admissionSourceBytes = MAX_BYTES;
+    for (const digest of [...new Set(state.rounds.flatMap(round =>
+      round.admission ? [round.admission.sourceStateSha256] : []))]) {
+      const source = await readStable(snapshotPath(commonDir, state.target, digest), admissionSourceBytes);
+      admissionSourceBytes -= source.raw.length;
+      requireSource(admissionSourceBytes >= 0 && source.sha256 === digest);
+      admissionSourceJsons.push(source.text);
+    }
     const materials = await readNativeRecoveryMaterials(commonDir, state);
     const reportDigests = [...new Set([
       ...state.recovery!.operations.flatMap(operation => operation.anchors.map(anchor => anchor.source.reportSha256)),
@@ -225,7 +234,7 @@ export async function validateNativeRecoveryState(state: ConvergeRunState, commo
     }
     validateRetainedNativeEvidence({
       sourceJson: sourceRaw.toString('utf8'), target: state.target, reports,
-      nativeSourceJsons: sources, recoveryMaterials: materials,
+      nativeSourceJsons: sources, admissionSourceJsons, recoveryMaterials: materials,
     });
   } catch (cause) {
     throw new Error('native_recovery_state_invalid', { cause });
@@ -258,6 +267,13 @@ async function retainRaw(path: string, raw: string): Promise<void> {
     try { if (handle) await handle.close(); }
     finally { if (created) await rm(temporary, { force: true }); }
   }
+}
+
+/** Retain the exact pre-admission native bytes authenticated by a round report. */
+export async function retainNativeRecoverySource(commonDir: string, target: string, raw: string): Promise<string> {
+  const digest = sha(raw);
+  await retainRaw(snapshotPath(commonDir, target, digest), raw);
+  return digest;
 }
 
 /** Exact CAS under strict target ownership; an already-applied result is not rewritten. */

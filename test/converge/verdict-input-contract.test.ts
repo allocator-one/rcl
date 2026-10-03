@@ -92,3 +92,19 @@ it.each([[1, 'native'], [3, 'native'], [1, 'pure'], [3, 'pure']] as const)
   expect(prepareVerdicts(source, { ...f.options, recordedAt: '2026-09-24T12:00:00.000Z' }).result.entries).toHaveLength(1);
   expect((await recordVerdicts(f.options)).entries).toHaveLength(1);
 });
+
+it.each(['native', 'pure'] as const)('refuses a prototype-chain verdict key at the %s boundary', async boundary => {
+  const f = await fixture(3, true);
+  const source = (await loadConvergeRunStateEvidence(f.root, f.options.target))!.state;
+  const before = structuredClone(source);
+  const options = { ...f.options, verdicts: [{ key: '__proto__', verdict: 'fixed' as const }] };
+  if (boundary === 'pure') {
+    expect(() => prepareVerdicts(source, { ...options, recordedAt: '2026-09-24T12:00:00.000Z' }))
+      .toThrow(/canonical finding identity/);
+  } else {
+    await expect(recordVerdicts(options)).rejects.toThrow(/canonical finding identity/);
+  }
+  expect(Object.prototype).not.toHaveProperty('verdict');
+  expect(source).toEqual(before);
+  expect(await readFile(f.path, 'utf8')).toBe(f.raw);
+});

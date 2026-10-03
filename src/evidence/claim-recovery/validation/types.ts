@@ -51,6 +51,8 @@ export interface RoundCounts {
 export interface RoundAdmissionSnapshot {
   version: 1;
   recoveryOperationCount: number;
+  /** Exact pre-admission native bytes authenticated by the bound report. */
+  sourceStateSha256: string;
   actionableIdentities: string[];
 }
 

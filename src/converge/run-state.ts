@@ -853,6 +853,9 @@ export interface RecordVerdictsOptions {
 }
 
 function validateVerdictKeys(verdicts: RecordVerdictsOptions['verdicts']): void {
+  if (verdicts.some(({ key }) => !/^[a-f0-9]{16}$/.test(key))) {
+    throw new ConvergeRunStateError('Every verdict requires a canonical finding identity.');
+  }
   if (new Set(verdicts.map(({ key }) => key)).size !== verdicts.length) {
     throw new ConvergeRunStateError('Pass each finding identity only once, as either fixed or dismissed.');
   }
@@ -903,11 +906,11 @@ async function recordVerdictsOwned(options: RecordVerdictsOptions, ownership: Na
   const updated: FindingEntry[] = [];
   const severities = reviewedRound.severities;
   for (const { key, verdict, reason } of options.verdicts) {
-    const entry = state.findings[key];
+    const entry = Object.hasOwn(state.findings, key) ? state.findings[key] : undefined;
     if (!entry) {
       throw new ConvergeRunStateError(`Unknown finding key "${key}" for target ${target}.`);
     }
-    if (severities !== undefined && severities[key] === undefined) {
+    if (severities !== undefined && !Object.hasOwn(severities, key)) {
       throw new ConvergeRunStateError(`Finding "${key}" was not sighted in round ${options.round}.`);
     }
     // Emit delayed evidence without replacing a newer round's active verdict.
@@ -1009,11 +1012,11 @@ export function prepareVerdicts(
   const severities = reviewedRound.severities;
 
   for (const { key, verdict, reason } of options.verdicts) {
-    const entry = state.findings[key];
+    const entry = Object.hasOwn(state.findings, key) ? state.findings[key] : undefined;
     if (!entry) {
       throw new ConvergeRunStateError(`Unknown finding key "${key}" for target ${target}.`);
     }
-    if (severities !== undefined && severities[key] === undefined) {
+    if (severities !== undefined && !Object.hasOwn(severities, key)) {
       throw new ConvergeRunStateError(`Finding "${key}" was not sighted in round ${options.round}.`);
     }
 

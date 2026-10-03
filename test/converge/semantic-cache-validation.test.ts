@@ -26,6 +26,7 @@ async function fixture(version: 1 | 2 = 2) {
     retained.state.rounds[0]!.reportBinding.sourcePath = `${path}.evidence/${sha(retained.reportJson)}.json`;
   }
   const reports: string[] = [retained.reportJson];
+  const admissionSourceJsons: string[] = [];
   const claim = sampleFinding({ file: 'cache.ts', startLine: 10, endLine: 12,
     title: 'Cache entries never expire', description: 'The positive cache returns expired entries without testing their TTL.',
     suggestedFix: 'Check the expiry timestamp before returning a cached result.' });
@@ -39,6 +40,7 @@ async function fixture(version: 1 | 2 = 2) {
       target: { kind: 'pr', repo: 'synthetic/recovery', pr_number: 7, head_sha: 'a'.repeat(40) },
       gating: { bound_classification_protocol: 1 } }, findings: rows });
     const result = await processRoundReport({ gitCommonDir: root, target, round: number, runId, findings: rows, evidence: { reportJson } });
+    if (predecessor) admissionSourceJsons.push(predecessor);
     reports.push(reportJson);
     return { result, rows, reportJson };
   }
@@ -56,7 +58,7 @@ async function fixture(version: 1 | 2 = 2) {
   await mkdir(`${path}.recovery-sources`, { recursive: true, mode: 0o700 });
   await writeFile(`${path}.recovery-sources/${sha(sourceJson)}.json`, sourceJson, { mode: 0o600 });
   await writeFile(path, plan.resultJson, { mode: 0o600 });
-  return { root, path, key, claim, reports, sourceJson, plan, selection: old, round };
+  return { root, path, key, claim, reports, admissionSourceJsons, sourceJson, plan, selection: old, round };
 }
 
 const bridgeDescriptors = () => {
@@ -149,7 +151,8 @@ it.each(['title', 'severity', 'startLine', 'endLine'] as const)('refuses changed
   if (field === 'endLine') entry.endLine = 13;
   const raw = JSON.stringify(state);
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
-  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }))
     .toThrow('native_recovery_content_invalid');
   expect(await readFile(f.path, 'utf8')).toBe(f.plan.resultJson);
 });
@@ -172,7 +175,8 @@ it('accepts later producer severity and bounds while preserving initial title, o
     verdict: 'dismissed', verdictRound: 3, verdictSeverity: 'critical', verdictReason: 'Current source explicitly enforces cache expiry.' });
   expect(state.recovery).toEqual(JSON.parse(f.plan.resultJson).recovery);
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
-  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }).state).toEqual(state);
   expect(await readFile(`${f.path}.recovery-sources/${sha(f.sourceJson)}.json`, 'utf8')).toBe(f.sourceJson);
 });
 
@@ -203,8 +207,52 @@ it('retains an older admitted obligation after a later empty round and delayed v
   expect(state.rounds.find(row => row.round === 3)!.admission).toEqual(admission);
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
   expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
-    nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }).state).toEqual(state);
 });
+
+it('refuses a discharged identity injected into a later admission snapshot', async () => {
+  const f = await fixture();
+  const first = await f.round(2, [f.claim], f.plan.resultJson);
+  const key = first.result.findings[0]!.identity;
+  await recordVerdicts({ gitCommonDir: f.root, target, round: 2,
+    verdicts: [{ key, verdict: 'dismissed', reason: 'The retained source checks cache expiry.' }] });
+  await f.round(3, [], await readFile(f.path, 'utf8'));
+  const state = (await loadConvergeRunState(f.root, target))!;
+  const admission = state.rounds.find(row => row.round === 3)!.admission!;
+  expect(admission.actionableIdentities).not.toContain(key);
+
+  admission.actionableIdentities.push(key);
+  admission.actionableIdentities.sort();
+  state.lastAnnotations!.actionableBeforeTriage = [...admission.actionableIdentities];
+  const raw = JSON.stringify(state);
+  await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw)))
+    .rejects.toThrow('native_recovery_state_invalid');
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }))
+    .toThrow('native_recovery_content_invalid');
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: [] }))
+    .toThrow('native_recovery_content_invalid');
+});
+
+it.each(['missing', 'mismatched'] as const)(
+  'fails closed when the authenticated pre-admission source is %s',
+  async failure => {
+    const f = await fixture();
+    await f.round(2, [f.claim], f.plan.resultJson);
+    const raw = await readFile(f.path, 'utf8');
+    const state = (await loadConvergeRunState(f.root, target))!;
+    const digest = state.rounds.find(row => row.round === 2)!.admission!.sourceStateSha256;
+    expect(digest).toBe(sha(f.plan.resultJson));
+    const sourcePath = `${f.path}.recovery-sources/${digest}.json`;
+    expect(await readFile(sourcePath, 'utf8')).toBe(f.plan.resultJson);
+    if (failure === 'missing') await rm(sourcePath);
+    else await writeFile(sourcePath, `${f.plan.resultJson}\n`);
+
+    await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw)))
+      .rejects.toThrow('native_recovery_state_invalid');
+  },
+);
 
 it('keeps a new operation pending despite identical evidence and an earlier dismissed operation', async () => {
   const f = await fixture();
@@ -226,7 +274,7 @@ it('keeps a new operation pending despite identical evidence and an earlier dism
   expect(state.findings[later.result.findings[0]!.identity]).toMatchObject({ pendingRound: 3 });
   expect(state.recovery).toEqual(JSON.parse(f.plan.resultJson).recovery);
   expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
-    nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }).state).toEqual(state);
 });
 
 it.each(['repeat', 'suppressed', 'regating'] as const)(
@@ -251,7 +299,8 @@ it.each(['repeat', 'suppressed', 'regating'] as const)(
 
     expect(() => verifyNativeRecoveryLineage(raw, target, [f.sourceJson])).not.toThrow();
     await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
-    expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+    expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+      nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }))
       .toThrow('native_recovery_content_invalid');
   },
 );
@@ -280,7 +329,8 @@ it('accepts ordinary later repeat, suppression, and critical re-gating', async (
   const raw = await readFile(f.path, 'utf8');
   const state = (await loadConvergeRunState(f.root, target))!;
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).resolves.toBeUndefined();
-  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state).toEqual(state);
+  expect(validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }).state).toEqual(state);
   const admitted = state.lastAnnotations?.actionableBeforeTriage ?? [];
   const inactive = Object.keys(state.findings).find(identity => !admitted.includes(identity));
   expect(inactive).toBeDefined();
@@ -289,7 +339,8 @@ it('accepts ordinary later repeat, suppression, and critical re-gating', async (
   const forgedRaw = JSON.stringify(forged);
   await expect(validateNativeRecoveryState(forged, f.root, Buffer.from(forgedRaw))).rejects.toThrow('native_recovery_state_invalid');
   expect(() => validateRetainedNativeEvidence({ sourceJson: forgedRaw, target, reports: f.reports,
-    nativeSourceJsons: [f.sourceJson] })).toThrow('native_recovery_content_invalid');
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }))
+    .toThrow('native_recovery_content_invalid');
 
   const forgedAdmission = structuredClone(state);
   forgedAdmission.rounds.find(row => row.round === forgedAdmission.lastAnnotations!.round)!
@@ -361,7 +412,8 @@ it('accepts recovered anchors before they have semantic sightings', async () => 
   const f = await fixture();
   const state = JSON.parse(f.plan.resultJson);
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(f.plan.resultJson))).resolves.toBeUndefined();
-  expect(validateRetainedNativeEvidence({ sourceJson: f.plan.resultJson, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }).state)
+  expect(validateRetainedNativeEvidence({ sourceJson: f.plan.resultJson, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }).state)
     .toEqual(state);
 });
 
@@ -400,7 +452,8 @@ it.each(['new', 'suppressed'] as const)('refuses a later status relabeled %s wit
   const raw = JSON.stringify(state);
 
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
-  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }))
     .toThrow('native_recovery_content_invalid');
 });
 
@@ -418,6 +471,7 @@ it.each([undefined, 'forged dismissal'])('refuses a later suppression with %s re
   const raw = JSON.stringify(state);
 
   await expect(validateNativeRecoveryState(state, f.root, Buffer.from(raw))).rejects.toThrow('native_recovery_state_invalid');
-  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports, nativeSourceJsons: [f.sourceJson] }))
+  expect(() => validateRetainedNativeEvidence({ sourceJson: raw, target, reports: f.reports,
+    nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }))
     .toThrow('native_recovery_content_invalid');
 });

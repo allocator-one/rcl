@@ -6,7 +6,8 @@ import { link, mkdir, open, readFile, realpath, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { withOwnedNativeOperation, withNativeTarget, type NativeTargetOwnership } from './target-ownership.js';
-import { effectivePendingIdentities, readNativeRecoveryMaterials, readNativeRecoverySourceJsons, recoveryAnchors } from './recovery-state.js';
+import { effectivePendingIdentities, readNativeRecoveryMaterials, readNativeRecoverySourceJsons, recoveryAnchors,
+  retainNativeRecoverySource } from './recovery-state.js';
 import { recoveredDismissalsByRound } from '../evidence/claim-recovery/validation/native-state.js';
 import { admittedActionableBeforeTriage, createRecoveredDismissalLookup, indexSemanticSightings,
   recoveredDismissalsBefore } from '../evidence/claim-recovery/validation/semantic-validation.js';
@@ -506,6 +507,11 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     await retainReportEvidence(options.evidence!.reportJson, binding);
     throw new ConvergeRunStateError('Native recovery state changed during review; original report retained without native admission.');
   }
+  const predecessorJson = await readFile(convergeRunStatePath(options.gitCommonDir, binding.target), 'utf8');
+  if (sha(predecessorJson) !== predecessor.native_sha256) {
+    await retainReportEvidence(options.evidence!.reportJson, binding);
+    throw new ConvergeRunStateError('Native recovery state changed during review; original report retained without native admission.');
+  }
   if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
   if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) throw new ConvergeRoundCapError(binding.target, options.round, state.roundCap);
   const max = Math.max(0, ...state.rounds.map(r => r.round));
@@ -621,8 +627,9 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     }
   }
   state.sightings.push(...annotations.map(a => a.sighting!));
+  await retainNativeRecoverySource(options.gitCommonDir, binding.target, predecessorJson);
   const admission = { version: 1 as const, recoveryOperationCount: state.recovery!.operations.length,
-    actionableIdentities: pending(state) };
+    sourceStateSha256: predecessor.native_sha256, actionableIdentities: pending(state) };
   state.rounds.push({ round: options.round, counts, severities, runId: binding.runId, reportBinding: binding, admission });
   state.lastAnnotations = { round: options.round,
     identities: annotations.map(a => ({ identity: a.identity, status: a.status, gating: a.sighting!.gating })),

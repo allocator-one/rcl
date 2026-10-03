@@ -73,6 +73,7 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
       identity(key) && ['critical', 'important', 'minor', 'nitpick'].includes(value as string)));
     requireSource(round.admission === undefined || object(round.admission) && round.admission.version === 1 &&
       Number.isSafeInteger(round.admission.recoveryOperationCount) && (round.admission.recoveryOperationCount as number) >= 0 &&
+      digest(round.admission.sourceStateSha256) &&
       Array.isArray(round.admission.actionableIdentities) && round.admission.actionableIdentities.every(identity) &&
       isDeepStrictEqual(round.admission.actionableIdentities,
         [...new Set(round.admission.actionableIdentities as string[])].sort()));
@@ -344,6 +345,7 @@ export interface RetainedNativeEvidence {
   target: string;
   reports: string[];
   nativeSourceJsons?: string[];
+  admissionSourceJsons?: string[];
   recoveryMaterials?: RecoveryMaterial[];
 }
 export interface LegacyClaimEvidence {
@@ -377,7 +379,8 @@ const contentCache=new Map<string,{value:ContentValidatedNative;bytes:number}>()
 function contentKey(input:RetainedNativeEvidence):string {
   const contentHash=(text:string)=>createHash('sha256').update(text,'utf16le').digest('hex');
   return sha(JSON.stringify({version:1,target:input.target,source:contentHash(input.sourceJson),reports:input.reports.map(contentHash),
-    ancestors:(input.nativeSourceJsons??[]).map(contentHash),materials:(input.recoveryMaterials??[]).map(row=>[row.sha256,contentHash(row.text)])}));
+    ancestors:(input.nativeSourceJsons??[]).map(contentHash),admissions:(input.admissionSourceJsons??[]).map(contentHash),
+    materials:(input.recoveryMaterials??[]).map(row=>[row.sha256,contentHash(row.text)])}));
 }
 export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): ContentValidatedNative {
   try {
@@ -385,6 +388,15 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
     if(cached){contentCache.delete(cacheKey);contentCache.set(cacheKey,cached);return structuredClone(cached.value);}
 
     requireSource(Array.isArray(input.reports));
+    requireSource(Array.isArray(input.admissionSourceJsons ?? []));
+    let admissionSourceBytes = 0;
+    const admissionSnapshots = new Map((input.admissionSourceJsons ?? []).map(raw => {
+      requireSource(typeof raw === 'string');
+      admissionSourceBytes += Buffer.byteLength(raw);
+      requireSource(admissionSourceBytes <= MAX_BYTES);
+      return [sha(raw), raw] as const;
+    }));
+    requireSource(admissionSnapshots.size === (input.admissionSourceJsons ?? []).length);
     const lineage = verifyNativeRecoveryLineage(input.sourceJson, input.target, input.nativeSourceJsons);
     const state = lineage.state;
     const reports = new Map(input.reports.map(raw => {
@@ -392,7 +404,12 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
       return [sha(raw), raw] as const;
     }));
     requireSource(reports.size === input.reports.length);
-    const snapshots = new Map((input.nativeSourceJsons ?? []).map(raw => [sha(raw), raw]));
+    const snapshots = new Map([...(input.nativeSourceJsons ?? []), ...admissionSnapshots.values()]
+      .map(raw => [sha(raw), raw] as const));
+    const referencedAdmissionSources = new Set(state.rounds.flatMap(round =>
+      round.admission ? [round.admission.sourceStateSha256] : []));
+    requireSource(referencedAdmissionSources.size === admissionSnapshots.size &&
+      [...referencedAdmissionSources].every(digest => admissionSnapshots.has(digest)));
     const sources: RetainedSources = { reports, snapshots, usedReports: new Set(), pathRequirements: [] };
     // Released cycle-v2 has ordinary legacy rounds, not a semantic ledger.
     // nativeSource rejects semantic fields in that disjoint producer format.
