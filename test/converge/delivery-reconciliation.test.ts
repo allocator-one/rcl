@@ -42,7 +42,25 @@ describe('reconcileDeliveredRun', () => {
       await pendingState(dir, target);
       const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) });
       await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('reconciled');
-      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ attempt: 4, round: 3, deliveryPending: false, hardFailure: true });
+      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ attempt: 4, round: 3,
+        deliveryPending: false, hardFailure: true, deliveryReconciliation: { version: 1, runId,
+          reportJsonSha256: digest, attempt: 4, round: 3, headSha: head } });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  it('backfills an exact marker for a hard failure already reconciled by an older client', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
+    try {
+      await pendingState(dir, target);
+      const state = (await loadConvergeRunState(dir, target))!;
+      state.lastLaunch!.deliveryPending = false;
+      state.lastLaunch!.exitCode = 4;
+      await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
+      const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) });
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('reconciled');
+      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ deliveryPending: false,
+        hardFailure: true, deliveryReconciliation: { version: 1, runId, reportJsonSha256: digest,
+          attempt: 4, round: 3, headSha: head } });
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('unchanged');
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
   it.each([
@@ -54,6 +72,12 @@ describe('reconcileDeliveredRun', () => {
     ['a mismatched report digest', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].declared_sha256 = 'd'.repeat(64); }],
     ['a missing report digest', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].declared_sha256 = undefined as never; }],
     ['an unstored report artifact', (detail: ReturnType<typeof matchingDetail>) => { detail.artifacts[0].stored = false; }],
+    ['duplicate matching report artifacts', (detail: ReturnType<typeof matchingDetail>) => {
+      detail.artifacts.push({ ...detail.artifacts[0] });
+    }],
+    ['a conflicting duplicate report artifact', (detail: ReturnType<typeof matchingDetail>) => {
+      detail.artifacts.push({ ...detail.artifacts[0], declared_sha256: 'e'.repeat(64) });
+    }],
     ['a mismatched run id', (detail: ReturnType<typeof matchingDetail>) => { detail.id = '019921a0-0000-7000-8000-000000000002'; }],
   ])('does not mutate %s', async (_name, mutator) => {
     await expectUnchanged(mutator);
@@ -71,8 +95,14 @@ describe('reconcileDeliveredRun', () => {
 
   it.each([
     ['a non-completed launch', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.status = 'failed'; }],
-    ['a launch without pending delivery', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.deliveryPending = false; }],
+    ['a healthy launch without pending delivery', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.deliveryPending = false; state!.lastLaunch!.hardFailure = false;
+    }],
     ['a launch for another run', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.runId = '019921a0-0000-7000-8000-000000000002'; }],
+    ['a launch with an existing mismatched marker', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.deliveryReconciliation = { version: 1, runId: '019921a0-0000-7000-8000-000000000002',
+        reportJsonSha256: digest, attempt: 4, round: 3, headSha: head };
+    }],
     ['a launch without a report digest', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.reportJsonSha256 = undefined as never; }],
     ['a launch without a head or round', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.headSha = undefined as never; state!.lastLaunch!.round = undefined as never; }],
   ])('does not mutate %s', async (_name, mutate) => {
@@ -84,6 +114,20 @@ describe('reconcileDeliveredRun', () => {
       await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
       await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun: vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) }) })).resolves.toBe('unchanged');
       expect(await loadConvergeRunState(dir, target)).toEqual(state);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([0, 1])('does not backfill a normally delivered hard failure with exit code %s', async exitCode => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
+    try {
+      await pendingState(dir, target);
+      const state = (await loadConvergeRunState(dir, target))!;
+      state.lastLaunch = { ...state.lastLaunch!, deliveryPending: false, exitCode };
+      await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
+      const before = await loadConvergeRunState(dir, target);
+      const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) });
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('unchanged');
+      expect(await loadConvergeRunState(dir, target)).toEqual(before);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 

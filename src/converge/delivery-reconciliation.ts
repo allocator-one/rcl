@@ -4,6 +4,7 @@ import { withNativeTarget } from './target-ownership.js';
 import type { HarnessSink } from '../telemetry/sink.js';
 import { getRun } from '../evidence/reads.js';
 import type { FlushSummary } from '../telemetry/outbox.js';
+import { deliveryReconciliationSchema } from './launch-record.js';
 
 type FlushReconciliationSummary = Pick<FlushSummary, 'remaining' | 'failed' | 'dropped'>;
 type ReconcileOptions = Parameters<typeof reconcileDeliveredRun>[2];
@@ -26,15 +27,23 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
   return withNativeTarget(common, target, async ownership => {
     const state = await loadConvergeRunState(common, target), launch = state?.lastLaunch;
     const round = detail.converge?.round, attempt = detail.converge?.attempt, headSha = detail.target.head_sha;
-    if (!state || !launch || launch.status !== 'completed' || !launch.deliveryPending ||
+    const reports = detail.artifacts?.filter(artifact => artifact.kind === 'report_json') ?? [];
+    if (!state || !launch || launch.status !== 'completed' || launch.deliveryReconciliation !== undefined ||
+      (launch.deliveryPending !== true && !(launch.deliveryPending === false && launch.hardFailure === true &&
+        launch.deliveryFailure !== 'local-invalid' && launch.exitCode === 4 &&
+        launch.deliveryReconciliation === undefined)) ||
       typeof launch.runId !== 'string' || typeof launch.reportJsonSha256 !== 'string' ||
       !Number.isSafeInteger(launch.round) || !Number.isSafeInteger(launch.attempt) || typeof launch.headSha !== 'string' ||
       !Number.isSafeInteger(round) || !Number.isSafeInteger(attempt) || typeof headSha !== 'string' ||
       launch.runId.toLowerCase() !== runId.toLowerCase() ||
       round !== launch.round || attempt !== launch.attempt || headSha !== launch.headSha ||
-      !detail.artifacts?.some(artifact => artifact.kind === 'report_json' && artifact.stored &&
-        typeof artifact.declared_sha256 === 'string' && artifact.declared_sha256 === launch.reportJsonSha256)) return 'unchanged';
-    state.lastLaunch = { ...launch, deliveryPending: false };
+      reports.length !== 1 || reports[0]!.stored !== true ||
+      typeof reports[0]!.declared_sha256 !== 'string' ||
+      reports[0]!.declared_sha256 !== launch.reportJsonSha256) return 'unchanged';
+    const deliveryReconciliation = deliveryReconciliationSchema.parse({ version: 1, runId: launch.runId,
+      reportJsonSha256: launch.reportJsonSha256, round: launch.round, attempt: launch.attempt,
+      headSha: launch.headSha });
+    state.lastLaunch = { ...launch, deliveryPending: false, deliveryReconciliation };
     state.updatedAt = new Date().toISOString();
     await writeState(common, state, ownership);
     return 'reconciled';

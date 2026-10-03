@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 4.5.2 - 2026-10-03
+
+- Continue a guarded review when an old-head report retained `hardFailure`
+  after its exact evidence delivery was reconciled and its blocking reviewer
+  health was conclusive. Authenticated delivery reconciliation records an exact
+  durable marker, including a guarded backfill for 4.5.1 delivery failures.
+  The audited `converge-stale` variant preserves the original report and
+  accounting, binds the replacement inputs and explicit retry reason, and
+  claims only the next attempt and native round. Pending,
+  local-invalid, unhealthy, same-input, mismatched and exhausted work remains
+  fail closed (RCL-177).
+
 ## 4.5.1 - 2026-10-03
 
 - Stop publishing `review-council`. Every consumer installs

@@ -417,6 +417,38 @@ rcl converge-stale --apply --manifest stale.json --manifest-sha256 <reviewed-man
 rcl converge-stale --resume --manifest stale.json --manifest-sha256 <reviewed-manifest-sha256>
 ```
 
+If the completed report has conclusive blocking reviewer health but retains a
+`hardFailure` marker after its initially failed evidence delivery was
+authentically reconciled, ensure the durable marker exists first. A run whose
+pending bit was already cleared by 4.5.1 must run
+`rcl telemetry flush --run <run-id>` again under 4.5.2. This performs no
+reviewer calls or accounting changes. Require the exact
+`Reconciled delivered run <run-id> with its guarded launch state.` output;
+exit code zero alone is insufficient because unavailable or mismatched server
+evidence leaves reconciliation unchanged. Then run the preview below and
+inspect its `deliveryReconciliation` object directly: its run ID, report
+SHA-256, round, attempt and head must equal the original retained launch.
+Missing or mismatched marker evidence makes preview refuse. Preview the same
+exact stale disposition with an explicit bounded retry reason:
+
+```bash
+rcl converge-stale --preview --manifest stale.json --target repo-123 \
+  --head <current-head> --input-sha256 <current-effective-input-sha256> \
+  --report original.json --report-sha256 <original-sha256> \
+  --reason "Committed changes and the current specification supersede this report" \
+  --retry-reason "Evidence delivery was reconciled; retry the changed inputs once"
+```
+
+The guarded review must use that exact `--retry-reason`. This variant binds the
+durable authenticated delivery-reconciliation marker, conclusive
+reviewer-health record, cycle, run, report, head, input, round, attempt and both
+native snapshots. Backfill additionally requires its retained delivery-failure
+exit and one exact server-stored report artifact. It never
+clears `hardFailure` or makes
+ordinary healthy stale reports, pending delivery, local-invalid rejection,
+inconclusive health, same-input work, unresolved rounds or exhausted caps
+eligible.
+
 Preview writes only its exclusive manifest. Apply retains the original report
 and exact native snapshots, then atomically adds a digest-bound audit entry
 under native target ownership. Immutable shared objects and reconstructible
