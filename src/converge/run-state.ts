@@ -476,8 +476,10 @@ export async function processRoundReport(options: ProcessRoundOptions): Promise<
   // The caller keeps ownership of its objects. Freeze the complete finding
   // batch synchronously so queued ownership and filesystem work cannot observe
   // later caller mutation after the original report comparison.
-  options = { ...options, findings: structuredClone(options.findings) };
-  const { target } = validateRoundReportInput(options);
+  options = { ...options, findings: structuredClone(options.findings),
+    evidence: options.evidence ? { reportJson: options.evidence.reportJson } : undefined };
+  const target = options.target.trim();
+  if (!target) throw new ConvergeRunStateError('Convergence target must not be empty.');
   options = { ...options, target };
   return options.ownership
     ? withOwnedNativeOperation(options.ownership, options.gitCommonDir, target, ownership => processRoundReportOwned(options, ownership))

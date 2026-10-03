@@ -215,6 +215,40 @@ it('pins attempt ownership inputs before waiting for a target lock', async () =>
   }
 });
 
+it('validates bound report evidence only after acquiring target ownership', async () => {
+  const entered = barrier(), release = barrier();
+  const contended = barrier(), retry = barrier();
+  const holder = withNativeTarget(dir, target, async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+  faults.ownershipWait = async () => { contended.resolve(); await retry.promise; };
+  const admission = processRoundReport({
+    gitCommonDir: dir,
+    target,
+    round: 1,
+    runId: '00000000-0000-7000-8000-000000000001',
+    findings: [],
+    evidence: { reportJson: '{invalid' },
+  });
+  void admission.catch(() => {});
+  try {
+    const beforeOwnership = await Promise.race([
+      contended.promise.then(() => 'contended'),
+      admission.then(() => 'resolved', error => error),
+    ]);
+    expect(beforeOwnership).toBe('contended');
+    release.resolve();
+    await holder;
+    retry.resolve();
+    await expect(admission).rejects.toThrow('Invalid immutable report JSON.');
+  } finally {
+    release.resolve(); retry.resolve();
+    await Promise.allSettled([holder, admission]);
+  }
+});
+
 it('keeps attempt state in the canonical directory when a caller symlink is retargeted while waiting', async () => {
   const canonical = join(dir, 'canonical'), diverted = join(dir, 'diverted'), alias = join(dir, 'alias');
   await mkdir(canonical); await mkdir(diverted); await symlink(canonical, alias, directoryLinkType);
