@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.0 - 2026-10-03
+
 - Publish as `@allocator-one/rcl`. The package keeps the `rcl` executable and
   the `.review-council.{yml,yaml,json}` configuration files. Every release also
   publishes the same files as `review-council` until consumers have moved;
@@ -10,6 +12,10 @@
   the `/rcl` skill install the new package and remove the old one first. The
   release announcement now validates provenance for the scoped package, and
   `engines.node` states the Node 20 the dependencies already require (RCL-170).
+- Rewrite the README for the new package name: install and migration from
+  `review-council`, provider keys, commands, configuration, exit codes and the
+  Harness evidence gate, with the convergence and recovery runbooks moved to
+  `docs/` (RCL-172).
 
 ## 4.4.19 - 2026-10-02
 
