@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { initialConvergeRunState, loadConvergeRunState, writeState } from '../../src/converge/run-state.js';
+import { convergeRunStatePath, initialConvergeRunState, loadConvergeRunState, writeState } from '../../src/converge/run-state.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { reconcileDeliveredRun, reconcileFlushedRun, shouldReconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
 const runId = '019921a0-0000-7000-8000-000000000001', head = 'a'.repeat(40);
@@ -11,6 +11,7 @@ const digest = 'c'.repeat(64);
 function matchingDetail(target: string) {
   return {
     id: runId,
+    provenance: 'live',
     converge: { target, round: 3, attempt: 4 },
     target: { kind: 'pull_request', head_sha: head },
     artifacts: [{ kind: 'report_json', stored: true, declared_sha256: digest }],
@@ -42,8 +43,74 @@ describe('reconcileDeliveredRun', () => {
       await pendingState(dir, target);
       const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) });
       await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('reconciled');
-      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ attempt: 4, round: 3, deliveryPending: false, hardFailure: true });
+      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ attempt: 4, round: 3,
+        deliveryPending: false, hardFailure: true, deliveryReconciliation: { version: 1, runId,
+          reportJsonSha256: digest, headSha: head, inputSha256: 'b'.repeat(64), attempt: 4, round: 3,
+          claimPid: process.pid, cycleId: null } });
     } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  it('authentically upgrades an exact legacy reconciliation without reopening delivery', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
+    try {
+      await pendingState(dir, target);
+      const state = (await loadConvergeRunState(dir, target))!;
+      state.lastLaunch!.deliveryPending = false; state.lastLaunch!.exitCode = 4;
+      await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
+      const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) });
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('reconciled');
+      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ deliveryPending: false,
+        hardFailure: true, deliveryReconciliation: { runId, reportJsonSha256: digest, attempt: 4, round: 3 } });
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('unchanged');
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+  it('leaves markerless legacy reconciliation unchanged when the server binding differs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
+    try {
+      await pendingState(dir,target);
+      const state = (await loadConvergeRunState(dir,target))!;
+      state.lastLaunch!.deliveryPending = false; state.lastLaunch!.exitCode = 4;
+      await withNativeTarget(dir,target,owner => writeState(dir,state,owner));
+      const detail = matchingDetail(target); detail.target.head_sha = 'd'.repeat(40);
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('unchanged');
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it.each([undefined,0,1])('does not upgrade a markerless legacy launch with exit code %s', async exitCode => {
+    const dir = await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      await pendingState(dir,target); const state=(await loadConvergeRunState(dir,target))!;
+      state.lastLaunch!.deliveryPending=false; state.lastLaunch!.exitCode=exitCode;
+      await withNativeTarget(dir,target,owner=>writeState(dir,state,owner));
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:matchingDetail(target)})})).resolves.toBe('unchanged');
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it.each([undefined,'019921a0-0000-7000-8000-000000000098'])('does not upgrade a cycle-bound legacy launch with server cycle %s', async cycleId => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      await pendingState(dir,target); const state=(await loadConvergeRunState(dir,target))!;
+      state.version=2; state.cycle={id:'019921a0-0000-7000-8000-000000000099',operationId:'019921a0-0000-7000-8000-000000000097',
+        previousCycleId:null,repo:'owner/repo',prNumber:17,url:'https://github.com/owner/repo/pull/17',
+        archivePath:'archive.json',archiveSha256:'e'.repeat(64),history:{attempts:0,rounds:0}};
+      state.lastLaunch!.deliveryPending=false; state.lastLaunch!.exitCode=4;
+      await writeFile(convergeRunStatePath(dir,target),JSON.stringify(state));
+      const detail={...matchingDetail(target),cycle_id:cycleId,target:{...matchingDetail(target).target,repo:'owner/repo',pr_number:17}};
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('unchanged');
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it.each(['matching','conflicting','unstored'] as const)('rejects duplicate report_json server artifacts: %s', async kind => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      await pendingState(dir,target); const detail=matchingDetail(target);
+      detail.artifacts.push({kind:'report_json',stored:kind!=='unstored',declared_sha256:kind==='conflicting'?'d'.repeat(64):digest});
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('unchanged');
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch!.deliveryPending).toBe(true);
+    } finally { await rm(dir,{recursive:true,force:true}); }
   });
   it.each([
     ['a mismatched head', (detail: ReturnType<typeof matchingDetail>) => { detail.target.head_sha = 'd'.repeat(40); }],
@@ -71,7 +138,9 @@ describe('reconcileDeliveredRun', () => {
 
   it.each([
     ['a non-completed launch', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.status = 'failed'; }],
-    ['a launch without pending delivery', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.deliveryPending = false; }],
+    ['a successful launch without pending delivery', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.deliveryPending = false; state!.lastLaunch!.hardFailure = false;
+    }],
     ['a launch for another run', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.runId = '019921a0-0000-7000-8000-000000000002'; }],
     ['a launch without a report digest', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.reportJsonSha256 = undefined as never; }],
     ['a launch without a head or round', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => { state!.lastLaunch!.headSha = undefined as never; state!.lastLaunch!.round = undefined as never; }],

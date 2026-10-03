@@ -581,6 +581,7 @@ program
   .option('--report <path>', 'Original completed, healthy, delivered report JSON')
   .option('--report-sha256 <sha256>', 'Original immutable report digest')
   .option('--reason <text>', 'Source-backed reason this report became materially stale, at most 500 characters')
+  .option('--retry-reason <text>', 'Bounded retry reason; required only for an authentically reconciled hard-failure report')
   .option('--json')
   .action(async (opts: Record<string,string|boolean|undefined>) => {
     try {
@@ -591,11 +592,12 @@ program
         if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
         if (![opts.target,opts.head,opts.inputSha256,opts.report,opts.reportSha256,opts.reason].every(v => typeof v === 'string')) throw new Error('stale_report_preview_arguments_required');
         const manifest = await previewStaleReport({target:opts.target as string,headSha:opts.head as string,
-          inputSha256:opts.inputSha256 as string,reportPath:opts.report as string,reportSha256:opts.reportSha256 as string,reason:opts.reason as string},common);
+          inputSha256:opts.inputSha256 as string,reportPath:opts.report as string,reportSha256:opts.reportSha256 as string,
+          reason:opts.reason as string,...(typeof opts.retryReason === 'string' ? {retryReason:opts.retryReason} : {})},common);
         await writeExclusive(opts.manifest as string,manifest,16384);
         result = {mode:'preview',manifest,manifestSha256:sha256(serializeRecoveryDocument(manifest))};
       } else {
-        if ([opts.target,opts.head,opts.inputSha256,opts.report,opts.reportSha256,opts.reason].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
+        if ([opts.target,opts.head,opts.inputSha256,opts.report,opts.reportSha256,opts.reason,opts.retryReason].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
         result = {mode:opts.apply?'apply':'resume',result:await applyStaleReport({manifest:opts.manifest as string,
           manifestSha256:opts.manifestSha256 as string,mode:opts.apply?'apply':'resume'},common)};
       }

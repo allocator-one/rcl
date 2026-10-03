@@ -2,23 +2,36 @@ import { z } from 'zod';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { sha256 } from '../telemetry/recovery/files.js';
 import type { ConvergeRunState } from './run-state.js';
+import { deliveryReconciliationSchema, reviewerHealthSchema } from './launch-record.js';
+import { isDeepStrictEqual } from 'node:util';
+import { isCanonicalStaleRetryReason } from './stale-retry-reason.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
-export const staleSelectionSchema = z.object({
+const staleSelectionBaseSchema = z.object({
   target: z.string().min(1).max(200).refine(s => s.trim() === s),
   headSha: z.string().regex(/^[a-f0-9]{40}$/), inputSha256: digest,
   reportPath: z.string().min(1), reportSha256: digest,
   reason: z.string().trim().min(1).max(500),
-}).strict();
-export const staleManifestSchema = staleSelectionSchema.extend({
-  kind: z.literal('rcl-stale-report'), version: z.literal(1),
+});
+export const staleSelectionSchema = z.union([staleSelectionBaseSchema.strict(), staleSelectionBaseSchema.extend({
+  retryReason: z.string().min(1).max(500).refine(isCanonicalStaleRetryReason),
+}).strict()]);
+const staleManifestBaseSchema = staleSelectionBaseSchema.extend({
+  kind: z.literal('rcl-stale-report'),
   operationId: z.string().uuid().refine(s => s === s.toLowerCase()),
   createdAt: z.string().datetime(), gitCommonDir: z.string().min(1),
   stateSha256: digest, attemptSha256: digest,
   runId: z.string().uuid(), attempt: z.number().int().positive().safe(),
   round: z.number().int().positive().max(99),
   previousHeadSha: z.string().regex(/^[a-f0-9]{40}$/), previousInputSha256: digest,
+});
+const ordinaryStaleManifestSchema = staleManifestBaseSchema.extend({version:z.literal(1)}).strict();
+const reconciledHardFailureManifestSchema = staleManifestBaseSchema.extend({
+  version:z.literal(2), outcome:z.literal('reconciled-hard-failure'),
+  retryReason:z.string().min(1).max(500).refine(isCanonicalStaleRetryReason), reconciliation:deliveryReconciliationSchema,
+  reviewerHealth:reviewerHealthSchema, cycleId:z.string().uuid().nullable(),
 }).strict();
+export const staleManifestSchema = z.union([ordinaryStaleManifestSchema,reconciledHardFailureManifestSchema]);
 export type StaleReportSelection = z.infer<typeof staleSelectionSchema>;
 export type StaleReportManifest = z.infer<typeof staleManifestSchema>;
 export const staleEntrySchema = z.object({manifestJson:z.string().max(16384),manifestSha256:digest}).strict();
@@ -69,7 +82,11 @@ export function validateStaleReportAudit(state: ConvergeRunState): void {
       (original !== undefined && (original.runId !== m.runId || original.round !== m.round ||
         original.reportSha256 !== m.reportSha256 || original.attemptSha256 !== m.attemptSha256 ||
         original.gitCommonDir !== m.gitCommonDir ||
-        original.previousHeadSha !== m.previousHeadSha || original.previousInputSha256 !== m.previousInputSha256))) {
+        original.previousHeadSha !== m.previousHeadSha || original.previousInputSha256 !== m.previousInputSha256 ||
+        original.version !== m.version || (original.version === 2 && m.version === 2 &&
+          (original.retryReason !== m.retryReason || original.cycleId !== m.cycleId ||
+            !isDeepStrictEqual(original.reconciliation,m.reconciliation) ||
+            !isDeepStrictEqual(original.reviewerHealth,m.reviewerHealth)))))) {
       throw new StaleReportAuditError();
     }
     operations.add(m.operationId);

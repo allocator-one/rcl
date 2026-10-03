@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.5.2 - 2026-10-03
+
+- Continue a fresh guarded review after an exact legacy delivery failure was
+  authentically reconciled and its completed report became stale. The audited
+  continuation preserves attempts, rounds, findings, receipts and caps, never
+  admits stale findings, and remains bound to the original run, report, blocking
+  health, review cycle and explicit retry reason (RCL-177).
+
 ## 4.5.1 - 2026-10-03
 
 - Stop publishing `review-council`. Every consumer installs
