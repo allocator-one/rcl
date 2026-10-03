@@ -20,8 +20,17 @@ from pathlib import Path
 from typing import Callable, Sequence
 from urllib.parse import unquote, urlsplit
 
-PACKAGE = "review-council"
-LATEST_PACKAGE = "review-council@latest"
+PACKAGE = "@allocator-one/rcl"
+LATEST_PACKAGE = f"{PACKAGE}@latest"
+# Review Council's npm name before it moved into the @allocator-one scope. Both
+# packages declare the `rcl` bin, so npm refuses (EEXIST) to install PACKAGE
+# globally over it; the installer removes it from the prefix first.
+LEGACY_PACKAGE = "review-council"
+# The registry serves a scoped tarball as /@scope/name/-/name-<version>.tgz,
+# while `npm pack` writes it as scope-name-<version>.tgz.
+TARBALL_DIRECTORY = f"/{PACKAGE}/-"
+TARBALL_STEM = PACKAGE.rsplit("/", 1)[-1]
+PACK_STEM = PACKAGE.removeprefix("@").replace("/", "-")
 PUBLIC_REGISTRY = "https://registry.npmjs.org/"
 TRUSTED_TEMP_ROOT = Path("/tmp")
 WORKTREE_ROOT = Path(__file__).resolve().parents[1]
@@ -253,13 +262,13 @@ def parse_metadata(payload: str) -> Metadata:
     ):
         raise InstallError("registry tarball URL is not the expected public origin")
     directory, separator, encoded_filename = parsed_url.path.rpartition("/")
-    if separator != "/" or directory != f"/{PACKAGE}/-":
+    if separator != "/" or directory != TARBALL_DIRECTORY:
         raise InstallError("registry tarball URL has an unexpected path")
     try:
         filename = unquote(encoded_filename, errors="strict")
     except UnicodeDecodeError as error:
         raise InstallError("registry tarball URL contains invalid encoding") from error
-    if filename != f"{PACKAGE}-{version}.tgz":
+    if filename != f"{TARBALL_STEM}-{version}.tgz":
         raise InstallError("registry tarball URL does not match its version")
 
     return Metadata(version, integrity, tarball, digest)
@@ -302,7 +311,7 @@ def parse_pack_result(payload: str, metadata: Metadata) -> str:
     if not isinstance(package, dict):
         raise InstallError("npm pack result must be an object")
     filename = package.get("filename")
-    expected_filename = f"{PACKAGE}-{metadata.version}.tgz"
+    expected_filename = f"{PACK_STEM}-{metadata.version}.tgz"
     if filename != expected_filename:
         raise InstallError("npm pack returned an unsafe filename")
     if package.get("version") != metadata.version:
@@ -356,7 +365,11 @@ def verify_tarball(path: Path, metadata: Metadata) -> tuple[int, int, int, int]:
 
 
 def installed_version(
-    node_bin: str, npm_bin: str, approved_prefix: str, runner: Runner
+    node_bin: str,
+    npm_bin: str,
+    approved_prefix: str,
+    runner: Runner,
+    package_name: str = PACKAGE,
 ) -> str | None:
     """Read the globally installed package version without executing RCL."""
 
@@ -365,7 +378,7 @@ def installed_version(
         npm_bin,
         "list",
         "-g",
-        PACKAGE,
+        package_name,
         "--depth=0",
         "--json",
         f"--prefix={approved_prefix}",
@@ -380,7 +393,7 @@ def installed_version(
     except json.JSONDecodeError as error:
         raise InstallError("npm list returned invalid JSON") from error
     dependencies = payload.get("dependencies", {}) if isinstance(payload, dict) else {}
-    package = dependencies.get(PACKAGE) if isinstance(dependencies, dict) else None
+    package = dependencies.get(package_name) if isinstance(dependencies, dict) else None
     version = package.get("version") if isinstance(package, dict) else None
     if result.returncode != 0 and version is not None:
         raise InstallError("npm reports a broken global RCL installation")
@@ -392,9 +405,13 @@ def installed_version(
 
 
 def uninstall_rcl(
-    node_bin: str, npm_bin: str, approved_prefix: str, runner: Runner
+    node_bin: str,
+    npm_bin: str,
+    approved_prefix: str,
+    runner: Runner,
+    package_name: str = PACKAGE,
 ) -> None:
-    """Remove an installation that failed post-install verification."""
+    """Remove an installation that failed verification, or the legacy package."""
 
     run_command(
         runner,
@@ -403,7 +420,7 @@ def uninstall_rcl(
             npm_bin,
             "uninstall",
             "-g",
-            PACKAGE,
+            package_name,
             "--ignore-scripts",
             f"--prefix={approved_prefix}",
             f"--registry={PUBLIC_REGISTRY}",
@@ -434,6 +451,9 @@ def install_latest_rcl(
 
     metadata = query_metadata(node_bin, npm_bin, runner)
     installed_version(node_bin, npm_bin, approved_prefix, runner)
+    legacy_version = installed_version(
+        node_bin, npm_bin, approved_prefix, runner, LEGACY_PACKAGE
+    )
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         if attempt > 1:
@@ -479,6 +499,16 @@ def install_latest_rcl(
                     file=sys.stderr,
                 )
                 continue
+
+            if legacy_version is not None:
+                print(
+                    f"Removing {LEGACY_PACKAGE} {legacy_version}, which now publishes as {PACKAGE}",
+                    file=sys.stderr,
+                )
+                uninstall_rcl(
+                    node_bin, npm_bin, approved_prefix, runner, LEGACY_PACKAGE
+                )
+                legacy_version = None
 
             run_command(
                 runner,

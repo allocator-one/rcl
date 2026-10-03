@@ -26,7 +26,7 @@ allowed-tools:
   - Bash(git push:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm view review-council:*)
+  - Bash(npm view @allocator-one/rcl:*)
   - Bash(npm prefix -g)
   - Bash(npm test:*)
   - Bash(npm run lint:*)

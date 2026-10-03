@@ -15,7 +15,7 @@ allowed-tools:
   - Bash(env -u GIT_EXTERNAL_DIFF git -c diff.noprefix=false -c diff.mnemonicPrefix=false -c color.ui=never diff:*)
   - Bash(harness show:*)
   - Bash(harness list:*)
-  - Bash(npm view review-council:*)
+  - Bash(npm view @allocator-one/rcl:*)
   - Bash(npm prefix -g)
   - Bash(which rcl)
   - Bash(command -v rcl)
@@ -188,8 +188,8 @@ This is the shell's live `PATH` for the remainder of this step **and if you re-r
 Resolve the latest release, its registry integrity and the installed executable's path — without running it yet:
 
 ```bash
-RCL_LATEST=$(npm view review-council@latest version --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null) &&
-  RCL_INTEGRITY=$(npm view "review-council@$RCL_LATEST" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null) &&
+RCL_LATEST=$(npm view @allocator-one/rcl@latest version --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null) &&
+  RCL_INTEGRITY=$(npm view "@allocator-one/rcl@$RCL_LATEST" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null) &&
   echo "latest=$RCL_LATEST integrity=$RCL_INTEGRITY"
 ```
 
@@ -228,15 +228,18 @@ and apply the exact same path/ownership rules above to `$RCL_INTERP`. If the she
 If `rcl` is missing, fails a check, or prints anything other than `<RCL_LATEST>`, install exactly that release without running package lifecycle scripts, and confirm the registry still serves the same artifact:
 
 ```bash
-npm install -g --ignore-scripts "review-council@<RCL_LATEST>" --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null &&
-  test "$(npm view "review-council@<RCL_LATEST>" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"
+npm uninstall -g --ignore-scripts review-council &&
+  npm install -g --ignore-scripts "@allocator-one/rcl@<RCL_LATEST>" --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null &&
+  test "$(npm view "@allocator-one/rcl@<RCL_LATEST>" dist.integrity --registry https://registry.npmjs.org --proxy=null --https-proxy=null --strict-ssl=true --ca=null --cafile=null)" = "<RCL_INTEGRITY>"
 ```
 
-This install is not in `allowed-tools` and is expected to prompt: `<RCL_LATEST>` is already required to be a plain `X.Y.Z` above, but a prefix-matched allowlist entry here (`npm install -g --ignore-scripts review-council@:*`) would also auto-approve `review-council@npm:evil-pkg`, `review-council@github:attacker/repo`, or a trailing `--registry <attacker-url>` — an install command whose package spec was built from this session's own variables, not a fixed literal, is exactly the case an allowlist entry shouldn't rubber-stamp. Confirm the command matches what's shown here — package spec, `--ignore-scripts`, and the trust flags — before approving it.
+Review Council was published as `review-council` before it moved to `@allocator-one/rcl`. Both packages own the global `rcl` executable, and npm refuses (EEXIST) to install one over the other, so the install first removes the old package; when it is not installed, that `npm uninstall` changes nothing and succeeds.
+
+This install is not in `allowed-tools` and is expected to prompt: `<RCL_LATEST>` is already required to be a plain `X.Y.Z` above, but a prefix-matched allowlist entry here (`npm install -g --ignore-scripts @allocator-one/rcl@:*`) would also auto-approve `@allocator-one/rcl@npm:evil-pkg`, `@allocator-one/rcl@github:attacker/repo`, or a trailing `--registry <attacker-url>` — an install command whose package spec was built from this session's own variables, not a fixed literal, is exactly the case an allowlist entry shouldn't rubber-stamp. Confirm the command matches what's shown here — package spec, `--ignore-scripts`, and the trust flags — before approving it.
 
 Then repeat the resolution and checks above, and require `"$RCL_BIN" --version` to print exactly `<RCL_LATEST>`. If `latest` moved in the meantime, start this step again. If the registry is unreachable, the install fails, or the version still differs, stop and report a tooling blocker. Never fall back to an older installed release.
 
-Note: this repo is review-council's own source. Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself). A dogfood link is the one exception to the check above that `rcl` must not resolve inside a checkout, and only when the user asked for it.
+Note: this repo is Review Council's own source (`@allocator-one/rcl`). Reviews default to the published package; to dogfood the working-tree version instead, run `npm run build && npm link` first — but never when the branch under review changes rcl's own review pipeline (a broken build must not review itself). A dogfood link is the one exception to the check above that `rcl` must not resolve inside a checkout, and only when the user asked for it.
 
 ### 4. Parse flags
 

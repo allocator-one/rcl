@@ -109,6 +109,34 @@ class ReleaseNotificationTest(unittest.TestCase):
         with self.assertRaises(n.NotificationError):
             n.validate_attestation(document, 'review-council', '4.1.6', 'allocator-one/rcl', 'a' * 40, '42', 1)
 
+    def test_scoped_attestation_url_and_subject_match_the_registry_format(self):
+        # Formats as served for @sigstore/core@4.0.1: dist.attestations.url and the provenance subject name.
+        self.assertEqual(n.attestation_url('@sigstore/core', '4.0.1'),
+                         'https://registry.npmjs.org/-/npm/v1/attestations/@sigstore%2fcore@4.0.1')
+        self.assertEqual(n.package_url('@sigstore/core', '4.0.1'), 'pkg:npm/%40sigstore/core@4.0.1')
+        self.assertEqual(n.attestation_url('review-council', '4.4.19'),
+                         'https://registry.npmjs.org/-/npm/v1/attestations/review-council@4.4.19')
+        self.assertEqual(n.package_url('review-council', '4.4.19'), 'pkg:npm/review-council@4.4.19')
+
+    def test_scoped_attestation_validates_for_the_rcl_package(self):
+        digest = b'y' * 64
+        payload = {'predicateType': n.SLSA_V1,
+                   'subject': [{'name': 'pkg:npm/%40allocator-one/rcl@4.5.0', 'digest': {'sha512': digest.hex()}}],
+                   'predicate': {'buildDefinition': {'externalParameters': {'workflow': {
+                       'repository': 'https://github.com/allocator-one/rcl', 'path': '.github/workflows/release.yml',
+                       'ref': 'refs/tags/v4.5.0'}}, 'resolvedDependencies': [{'digest': {'gitCommit': 'a' * 40}}]},
+                                 'runDetails': {'metadata': {'invocationId':
+                                     'https://github.com/allocator-one/rcl/actions/runs/42/attempts/1'}}}}
+        document = {'dist': {'integrity': 'sha512-' + base64.b64encode(digest).decode(), 'attestations': {
+            'url': 'https://registry.npmjs.org/-/npm/v1/attestations/@allocator-one%2frcl@4.5.0'}},
+            'attestations': [{'bundle': {'dsseEnvelope': {
+                'payload': base64.b64encode(json.dumps(payload).encode()).decode()}}}]}
+        n.validate_attestation(document, '@allocator-one/rcl', '4.5.0', 'allocator-one/rcl', 'a' * 40, '42', 1)
+        unencoded = {**payload, 'subject': [{**payload['subject'][0], 'name': 'pkg:npm/@allocator-one/rcl@4.5.0'}]}
+        document['attestations'][0]['bundle']['dsseEnvelope']['payload'] = base64.b64encode(json.dumps(unencoded).encode()).decode()
+        with self.assertRaises(n.NotificationError):
+            n.validate_attestation(document, '@allocator-one/rcl', '4.5.0', 'allocator-one/rcl', 'a' * 40, '42', 1)
+
     def test_signature_binds_exact_bytes_and_key_is_product_version_stable(self):
         body = n.encode_payload({'current_version': '4.1.6'})
         headers = n.signed_headers('x' * 43, 'allocator-one/rcl', '4.1.6', body, 123)
@@ -126,9 +154,9 @@ class ReleaseNotificationTest(unittest.TestCase):
                 n.validate_package(publication, 'review-council', '4.1.6', 'a' * 40)
 
     def test_end_to_end_verification_posts_only_after_all_evidence_matches(self):
-        manifest = {'name': 'review-council', 'version': '4.1.6'}
+        manifest = {'name': '@allocator-one/rcl', 'version': '4.1.6'}
         published_manifest = {**manifest, 'gitHead': 'a' * 40}
-        previous_manifest = {'name': 'review-council', 'version': '4.1.5', 'gitHead': 'b' * 40}
+        previous_manifest = {'name': '@allocator-one/rcl', 'version': '4.1.5', 'gitHead': 'b' * 40}
         responses = [self.run_data(), {'sha': 'a' * 40},
                      {'content': base64.b64encode(json.dumps(manifest).encode()).decode()},
                      {'versions': {'4.1.5': previous_manifest, '4.1.6': published_manifest}},

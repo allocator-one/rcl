@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Publish as `@allocator-one/rcl`. The package keeps the `rcl` executable and
+  the `.review-council.{yml,yaml,json}` configuration files. Every release also
+  publishes the same files as `review-council` until consumers have moved;
+  remove `review-council` before installing (`npm uninstall -g review-council`),
+  because both packages own the `rcl` executable. The verified installer and
+  the `/rcl` skill install the new package and remove the old one first. The
+  release announcement now validates provenance for the scoped package, and
+  `engines.node` states the Node 20 the dependencies already require (RCL-170).
+
 ## 4.4.19 - 2026-10-02
 
 - Distinguish terminal local evidence rejection from retryable delivery. Add

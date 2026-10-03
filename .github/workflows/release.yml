@@ -13,6 +13,8 @@ jobs:
     outputs:
       package_filename: ${{ steps.package.outputs.filename }}
       package_sha256: ${{ steps.package.outputs.sha256 }}
+      legacy_filename: ${{ steps.package.outputs.legacy_filename }}
+      legacy_sha256: ${{ steps.package.outputs.legacy_sha256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -62,39 +64,77 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      # The package publishes as @allocator-one/rcl. Until every consumer has
+      # moved off its former name, the same files also publish as
+      # review-council (RCL-169): a second tarball whose package.json differs
+      # only in `name`, which this step proves before anything is uploaded.
       - name: Package and verify
         id: package
         shell: bash
         run: |
           npm pack
           shopt -s nullglob
-          packages=(review-council-*.tgz)
+          packages=(allocator-one-rcl-*.tgz)
           if [ "${#packages[@]}" -ne 1 ]; then
             echo "expected exactly one package artifact, found ${#packages[@]}"
             exit 1
           fi
 
-          PACKED_VERSION=$(tar -xOf "${packages[0]}" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          manifest_field() {
+            tar -xOf "$1" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$2"
+          }
+          PACKED_VERSION=$(manifest_field "${packages[0]}" version)
           if [ "v$PACKED_VERSION" != "$GITHUB_REF_NAME" ]; then
             echo "packed version $PACKED_VERSION does not match tag $GITHUB_REF_NAME — refusing to publish"
             exit 1
           fi
-
-          SMOKE_DIR=$(mktemp -d)
-          npm install --prefix "$SMOKE_DIR" --ignore-scripts --no-audit --no-fund "./${packages[0]}"
-          SMOKE_VERSION=$("$SMOKE_DIR/node_modules/.bin/rcl" --version)
-          if [ "$SMOKE_VERSION" != "$PACKED_VERSION" ]; then
-            echo "packed CLI reports version $SMOKE_VERSION, expected $PACKED_VERSION"
+          if [ "$(manifest_field "${packages[0]}" name)" != "@allocator-one/rcl" ]; then
+            echo "packed package is not @allocator-one/rcl — refusing to publish"
             exit 1
           fi
 
+          LEGACY_SOURCE=$(mktemp -d)
+          tar -xzf "${packages[0]}" -C "$LEGACY_SOURCE"
+          node -e "const fs = require('fs'); const file = process.argv[1]; const manifest = JSON.parse(fs.readFileSync(file, 'utf8')); manifest.name = 'review-council'; fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + '\n');" "$LEGACY_SOURCE/package/package.json"
+          npm pack "$LEGACY_SOURCE/package" --ignore-scripts --pack-destination "$PWD"
+          legacy=(review-council-*.tgz)
+          if [ "${#legacy[@]}" -ne 1 ]; then
+            echo "expected exactly one legacy package artifact, found ${#legacy[@]}"
+            exit 1
+          fi
+
+          COMPARE=$(mktemp -d)
+          mkdir "$COMPARE/scoped" "$COMPARE/legacy"
+          tar -xzf "${packages[0]}" -C "$COMPARE/scoped"
+          tar -xzf "${legacy[0]}" -C "$COMPARE/legacy"
+          if ! diff -r -x package.json "$COMPARE/scoped/package" "$COMPARE/legacy/package"; then
+            echo "legacy package files differ from the scoped package — refusing to publish"
+            exit 1
+          fi
+          node -e "const fs = require('fs'); const [scoped, legacy] = process.argv.slice(1).map((file) => JSON.parse(fs.readFileSync(file, 'utf8'))); if (legacy.name !== 'review-council' || JSON.stringify({ ...legacy, name: scoped.name }) !== JSON.stringify(scoped)) { console.error('legacy manifest differs from the scoped manifest beyond its name'); process.exit(1); }" "$COMPARE/scoped/package/package.json" "$COMPARE/legacy/package/package.json"
+
+          for package in "${packages[0]}" "${legacy[0]}"; do
+            SMOKE_DIR=$(mktemp -d)
+            npm install --prefix "$SMOKE_DIR" --ignore-scripts --no-audit --no-fund "./$package"
+            SMOKE_VERSION=$("$SMOKE_DIR/node_modules/.bin/rcl" --version)
+            if [ "$SMOKE_VERSION" != "$PACKED_VERSION" ]; then
+              echo "$package CLI reports version $SMOKE_VERSION, expected $PACKED_VERSION"
+              exit 1
+            fi
+          done
+
           PACKAGE_SHA256=$(sha256sum "${packages[0]}" | cut -d ' ' -f 1)
+          LEGACY_SHA256=$(sha256sum "${legacy[0]}" | cut -d ' ' -f 1)
           echo "filename=${packages[0]}" >> "$GITHUB_OUTPUT"
           echo "sha256=$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
+          echo "legacy_filename=${legacy[0]}" >> "$GITHUB_OUTPUT"
+          echo "legacy_sha256=$LEGACY_SHA256" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: package
-          path: review-council-*.tgz
+          path: |
+            allocator-one-rcl-*.tgz
+            review-council-*.tgz
           if-no-files-found: error
           retention-days: 1
 
@@ -111,28 +151,56 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-      - name: Resolve package artifact
+      - name: Resolve package artifacts
         id: package
         shell: bash
         env:
           EXPECTED_SHA256: ${{ needs.validate.outputs.package_sha256 }}
           PACKAGE_PATH: ${{ needs.validate.outputs.package_filename }}
+          LEGACY_EXPECTED_SHA256: ${{ needs.validate.outputs.legacy_sha256 }}
+          LEGACY_PATH: ${{ needs.validate.outputs.legacy_filename }}
         run: |
-          if [ ! -f "$PACKAGE_PATH" ]; then
-            echo "expected package artifact $PACKAGE_PATH"
-            exit 1
-          fi
-
-          ACTUAL_SHA256=$(sha256sum "$PACKAGE_PATH" | cut -d ' ' -f 1)
-          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-            echo "package artifact checksum mismatch"
-            exit 1
-          fi
+          verify() {
+            if [ ! -f "$1" ]; then
+              echo "expected package artifact $1"
+              exit 1
+            fi
+            if [ "$(sha256sum "$1" | cut -d ' ' -f 1)" != "$2" ]; then
+              echo "package artifact checksum mismatch: $1"
+              exit 1
+            fi
+          }
+          verify "$PACKAGE_PATH" "$EXPECTED_SHA256"
+          verify "$LEGACY_PATH" "$LEGACY_EXPECTED_SHA256"
 
           echo "path=$PACKAGE_PATH" >> "$GITHUB_OUTPUT"
-      - run: npm publish "$PACKAGE_PATH" --access public --provenance --ignore-scripts
+          echo "legacy_path=$LEGACY_PATH" >> "$GITHUB_OUTPUT"
+      # Scoped first, so the former name never gets a version the new one lacks.
+      # A version npm already holds with these exact bytes is skipped, so the
+      # job can be re-run after a partial publish; different bytes fail.
+      - name: Publish @allocator-one/rcl and review-council
+        shell: bash
         env:
           PACKAGE_PATH: ${{ steps.package.outputs.path }}
+          LEGACY_PATH: ${{ steps.package.outputs.legacy_path }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          publish() {
+            local tarball=$1 name=$2 spec="$2@${VERSION#v}" expected published
+            expected="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w 0)"
+            published=$(npm view "$spec" dist.integrity --registry https://registry.npmjs.org 2>/dev/null || true)
+            if [ -n "$published" ]; then
+              if [ "$published" = "$expected" ]; then
+                echo "$spec is already published with this tarball — skipping"
+                return 0
+              fi
+              echo "$spec is already published with different contents — refusing to continue"
+              return 1
+            fi
+            npm publish "$tarball" --access public --provenance --ignore-scripts
+          }
+          publish "$PACKAGE_PATH" @allocator-one/rcl
+          publish "$LEGACY_PATH" review-council
 
   github-release:
     needs: [validate, publish]
@@ -165,7 +233,7 @@ jobs:
           node scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
           {
             echo
-            echo "npm: https://www.npmjs.com/package/review-council/v/${GITHUB_REF_NAME#v}"
+            echo "npm: https://www.npmjs.com/package/@allocator-one/rcl/v/${GITHUB_REF_NAME#v} (also published under its former name, review-council)"
             echo "Tarball SHA-256: \`$ACTUAL_SHA256\`"
           } >> release-notes.md
 
