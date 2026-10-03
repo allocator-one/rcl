@@ -16,7 +16,7 @@ import { preserved, laterSource, rebind } from '../evidence/recovery-validation/
 import { sampleRunHeader } from '../telemetry/fixtures.js';
 const retentionFault = vi.hoisted(() => ({
   failNextSnapshotWrite: false, collideTemp: false, fired: 0, prefixWritten: 0,
-  rejectReadOnlySync: false, readOnlySyncs: 0,
+  rejectReadOnlySync: false, readOnlySyncs: 0, writeCapableSyncs: [] as string[],
 }));
 vi.mock('node:fs/promises', async importOriginal => {
   const real = await importOriginal<typeof import('node:fs/promises')>();
@@ -24,21 +24,20 @@ vi.mock('node:fs/promises', async importOriginal => {
     const path = String(args[0]);
     if (retentionFault.collideTemp && path.includes('.retain-tmp')) { retentionFault.collideTemp = false; await real.writeFile(path, 'foreign temp bytes', { flag: 'wx', mode: 0o600 }); }
     const handle = await real.open(...args);
-    if (retentionFault.rejectReadOnlySync && path.includes(`.recovery-sources${sep}`) &&
-      typeof args[1] === 'number' && (args[1] & 3) === 0) {
-      return new Proxy(handle, { get(target, property) {
-        if (property === 'sync') return async () => {
-          retentionFault.readOnlySyncs++;
-          throw Object.assign(new Error('Synthetic Windows read-only fsync refusal.'), { code: 'EACCES' });
-        };
-        const value = Reflect.get(target, property, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      } });
-    }
-    if (!retentionFault.failNextSnapshotWrite || !path.includes(`.recovery-sources${sep}`)) return handle;
-    retentionFault.failNextSnapshotWrite = false;
+    if (!path.includes(`.recovery-sources${sep}`)) return handle;
+    const accessMode = typeof args[1] === 'number' ? args[1] & 3 : undefined;
+    const failSnapshotWrite = retentionFault.failNextSnapshotWrite;
+    if (failSnapshotWrite) retentionFault.failNextSnapshotWrite = false;
     return new Proxy(handle, { get(target, property) {
-      if (property === 'writeFile') return async (data: string, ...rest: unknown[]) => {
+      if (property === 'sync' && retentionFault.rejectReadOnlySync && accessMode === 0) return async () => {
+        retentionFault.readOnlySyncs++;
+        throw Object.assign(new Error('Synthetic Windows read-only fsync refusal.'), { code: 'EACCES' });
+      };
+      if (property === 'sync' && accessMode !== undefined && accessMode !== 0) return async () => {
+        await target.sync();
+        retentionFault.writeCapableSyncs.push(path);
+      };
+      if (property === 'writeFile' && failSnapshotWrite) return async (data: string, ...rest: unknown[]) => {
         await target.writeFile(data.slice(0, Math.min(8, data.length)), ...(rest as []));
         retentionFault.fired += 1; retentionFault.prefixWritten += 1;
         const error = Object.assign(new Error('injected partial snapshot write'), { code: 'EIO' }); throw error;
@@ -51,7 +50,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 const directories: string[] = [];
 afterEach(async () => {
   Object.assign(retentionFault, { failNextSnapshotWrite: false, collideTemp: false, fired: 0, prefixWritten: 0,
-    rejectReadOnlySync: false, readOnlySyncs: 0 });
+    rejectReadOnlySync: false, readOnlySyncs: 0, writeCapableSyncs: [] });
   await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 function fixture(refs = [1]) {
@@ -172,6 +171,7 @@ it('retries an existing immutable artifact with a write-capable durability handl
   await expect(withRecoveryTarget(dir, f.input.target,
     ownership => applyNativeRecovery({ gitCommonDir: dir, plan, ownership }))).resolves.toMatchObject({ status: 'applied' });
   expect(retentionFault.readOnlySyncs).toBe(0);
+  expect(retentionFault.writeCapableSyncs.filter(path => path === snapshot)).toHaveLength(1);
   await expect(readFile(snapshot, 'utf8')).resolves.toBe(f.input.sourceJson);
 });
 
