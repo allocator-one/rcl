@@ -1,5 +1,6 @@
 import { resolveGitCommonDir } from './attempt-budget.js';
 import { loadConvergeRunState, writeState } from './run-state.js';
+import { deliveryReconciliationSchema } from './launch-record.js';
 import { withNativeTarget } from './target-ownership.js';
 import type { HarnessSink } from '../telemetry/sink.js';
 import { getRun } from '../evidence/reads.js';
@@ -29,6 +30,11 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
     const legacyReconciledHardFailure = launch?.deliveryPending === false && launch.hardFailure === true &&
       launch.exitCode === 4 && launch.deliveryReconciliation === undefined;
     const reports = detail.artifacts?.filter(artifact => artifact.kind === 'report_json') ?? [];
+    const reconciledAt = new Date().toISOString();
+    const marker = launch?.hardFailure === true ? deliveryReconciliationSchema.safeParse({ version: 1,
+      runId: launch.runId, reportJsonSha256: launch.reportJsonSha256, headSha: launch.headSha,
+      inputSha256: launch.inputSha256, attempt: launch.attempt, round: launch.round,
+      claimPid: launch.pid, cycleId: state?.cycle?.id ?? null, reconciledAt }) : undefined;
     if (!state || !launch || launch.status !== 'completed' ||
       (!launch.deliveryPending && !legacyReconciledHardFailure) || launch.deliveryFailure === 'local-invalid' ||
       typeof launch.runId !== 'string' || typeof launch.reportJsonSha256 !== 'string' ||
@@ -38,16 +44,12 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
       round !== launch.round || attempt !== launch.attempt || headSha !== launch.headSha ||
       reports.length !== 1 || reports[0]!.stored !== true ||
       reports[0]!.declared_sha256 !== launch.reportJsonSha256 ||
-      (legacyReconciledHardFailure && (detail.provenance !== 'live' ||
+      (marker && (!marker.success || detail.provenance !== 'live' ||
         (detail.cycle_id ?? null) !== (state.cycle?.id ?? null) ||
         (state.cycle !== undefined && (detail.target.repo?.toLowerCase() !== state.cycle.repo.toLowerCase() ||
           detail.target.pr_number !== state.cycle.prNumber))))) return 'unchanged';
-    const reconciledAt = new Date().toISOString();
     state.lastLaunch = { ...launch, deliveryPending: false,
-      ...(launch.hardFailure === true ? { deliveryReconciliation: { version: 1 as const, runId: launch.runId,
-        reportJsonSha256: launch.reportJsonSha256, headSha: launch.headSha, inputSha256: launch.inputSha256,
-        attempt: launch.attempt, round: launch.round, claimPid: launch.pid,
-        cycleId: state.cycle?.id ?? null, reconciledAt } } : {}) };
+      ...(marker?.success ? { deliveryReconciliation: marker.data } : {}) };
     state.updatedAt = reconciledAt;
     await writeState(common, state, ownership);
     return 'reconciled';

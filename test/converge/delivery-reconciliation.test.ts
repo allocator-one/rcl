@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { convergeRunStatePath, initialConvergeRunState, loadConvergeRunState, writeState } from '../../src/converge/run-state.js';
+import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { reconcileDeliveredRun, reconcileFlushedRun, shouldReconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
 const runId = '019921a0-0000-7000-8000-000000000001', head = 'a'.repeat(40);
@@ -23,6 +24,22 @@ async function pendingState(dir: string, target: string) {
   const state = initialConvergeRunState(target);
   state.lastLaunch = { status: 'completed', attempt: 4, round: 3, headSha: head, inputSha256: 'b'.repeat(64), startedAt: new Date().toISOString(), pid: process.pid, runId, reportJsonSha256: digest, successfulReviews: 1, totalReviews: 2, deliveryPending: true, hardFailure: true };
   await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
+}
+
+async function pendingCycleState(dir: string, target: string) {
+  let active: {id:string;operation_id:string;previous_cycle_id:string|null;head_sha:string;inserted_at:string}|null = null;
+  const cycleRemote = {repo:'owner/repo',prNumber:17,url:'https://harness.example',
+    current:vi.fn(async()=>active),start:vi.fn(async request => {
+      active={...request,id:'019921a0-0000-7000-8000-000000000099',inserted_at:new Date().toISOString()};
+      return active;
+    })};
+  await guardReviewLaunch({gitCommonDir:dir,target,headSha:head,inputSha256:'b'.repeat(64),startOver:true,cycleRemote,
+    validate:vi.fn(async()=>{}),run:vi.fn(async()=>({runId,reportJsonSha256:digest,successfulReviews:1,totalReviews:2,
+      deliveryPending:true,hardFailure:true,exitCode:4}))});
+  const state=(await loadConvergeRunState(dir,target))!;
+  return {state,detail:{...matchingDetail(target),cycle_id:state.cycle!.id,
+    converge:{target,round:state.lastLaunch!.round,attempt:state.lastLaunch!.attempt},
+    target:{...matchingDetail(target).target,repo:'owner/repo',pr_number:17}}};
 }
 
 async function expectUnchanged(mutator: (detail: ReturnType<typeof matchingDetail>) => void) {
@@ -100,6 +117,60 @@ describe('reconcileDeliveredRun', () => {
       await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
         getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('unchanged');
       expect((await loadConvergeRunState(dir,target))!.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it.each([
+    ['missing live provenance', (detail: ReturnType<typeof matchingDetail>) => { delete detail.provenance; }],
+    ['backfill provenance', (detail: ReturnType<typeof matchingDetail>) => { detail.provenance = 'backfill'; }],
+    ['missing cycle', (detail: ReturnType<typeof matchingDetail>) => { detail.cycle_id = undefined; }],
+    ['mismatched cycle', (detail: ReturnType<typeof matchingDetail>) => {
+      detail.cycle_id = '019921a0-0000-7000-8000-000000000098';
+    }],
+    ['mismatched repository', (detail: ReturnType<typeof matchingDetail>) => { detail.target.repo = 'other/repo'; }],
+    ['mismatched pull request', (detail: ReturnType<typeof matchingDetail>) => { detail.target.pr_number = 18; }],
+  ])('does not reconcile a pending hard failure with %s', async (_label, mutate) => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      const {detail}=await pendingCycleState(dir,target);
+      mutate(detail);
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('unchanged');
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch).toMatchObject({deliveryPending:true});
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it('reconciles a pending hard failure with exact live cycle and pull-request authority', async () => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      const {state,detail}=await pendingCycleState(dir,target);
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('reconciled');
+      expect((await loadConvergeRunState(dir,target))!.lastLaunch).toMatchObject({deliveryPending:false,
+        deliveryReconciliation:{cycleId:state.cycle!.id,runId,reportJsonSha256:digest}});
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it.each([
+    ['a missing input digest', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.inputSha256=undefined as never;
+    }],
+    ['an invalid input digest', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.inputSha256='invalid';
+    }],
+    ['a missing claim PID', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.pid=undefined as never;
+    }],
+    ['an invalid claim PID', (state: Awaited<ReturnType<typeof loadConvergeRunState>>) => {
+      state!.lastLaunch!.pid=0;
+    }],
+  ])('does not mint a hard-failure marker from %s', async (_label, mutate) => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      await pendingState(dir,target); const state=(await loadConvergeRunState(dir,target))!;
+      mutate(state); await withNativeTarget(dir,target,owner=>writeState(dir,state,owner));
+      const statePath=convergeRunStatePath(dir,target),before=await readFile(statePath);
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:matchingDetail(target)})})).resolves.toBe('unchanged');
+      expect(await readFile(statePath)).toEqual(before);
     } finally { await rm(dir,{recursive:true,force:true}); }
   });
   it.each(['matching','conflicting','unstored'] as const)('rejects duplicate report_json server artifacts: %s', async kind => {
