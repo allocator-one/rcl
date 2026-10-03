@@ -178,7 +178,11 @@ export async function inspectProcessIdentity(
     const currentBirth = birthDigest(scope.platform, await processBirth(expected.pid, scope, io));
     return currentBirth === expected.birthSha256 ? 'alive' : 'dead';
   } catch (error) {
-    return nodeError(error, 'ESRCH') ||
-      (scope.platform === 'linux' && nodeError(error, 'ENOENT')) ? 'dead' : 'unverifiable';
+    if (nodeError(error, 'ESRCH')) return 'dead';
+    if (scope.platform === 'linux' && nodeError(error, 'ENOENT')) {
+      try { io.probe(expected.pid); }
+      catch (probeError) { return nodeError(probeError, 'ESRCH') ? 'dead' : 'unverifiable'; }
+    }
+    return 'unverifiable';
   }
 }

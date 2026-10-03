@@ -183,13 +183,33 @@ describe('process identity', () => {
       linuxStat: async () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); },
     }))).resolves.toBe('unverifiable');
     await expect(inspectProcessIdentity(original, io({
-      linuxStat: async () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); },
-    }))).resolves.toBe('dead');
-    await expect(inspectProcessIdentity(original, io({
       probe: () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }); },
     }))).resolves.toBe('unverifiable');
     await expect(inspectProcessIdentity(original, io({
       probe: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
     }))).resolves.toBe('dead');
+  });
+
+  it('keeps a missing Linux process stat unverifiable while the PID still responds', async () => {
+    const original = await captureProcessIdentity(17, io());
+    const probe = vi.fn();
+    await expect(inspectProcessIdentity(original, io({
+      probe,
+      linuxStat: async () => { throw Object.assign(new Error('missing stat'), { code: 'ENOENT' }); },
+    }))).resolves.toBe('unverifiable');
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a missing Linux process stat as death only after the PID disappears', async () => {
+    const original = await captureProcessIdentity(17, io());
+    let probeCount = 0;
+    await expect(inspectProcessIdentity(original, io({
+      probe: () => {
+        probeCount++;
+        if (probeCount === 2) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      },
+      linuxStat: async () => { throw Object.assign(new Error('missing stat'), { code: 'ENOENT' }); },
+    }))).resolves.toBe('dead');
+    expect(probeCount).toBe(2);
   });
 });
