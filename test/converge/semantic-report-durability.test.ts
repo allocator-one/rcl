@@ -153,4 +153,5 @@ it('flushes report bytes and their directory entry before native state may refer
   const fileSyncs = trace.filter(entry => entry.startsWith(`file:${sourcePath}.`));
   expect(fileSyncs).toHaveLength(1);
   expect(fileSyncs[0]).toMatch(/\.pending$/);
+  expect(trace.indexOf(fileSyncs[0]!)).toBeLessThan(trace.indexOf(`directory:${dirname(sourcePath)}`));
 });
