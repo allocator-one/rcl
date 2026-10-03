@@ -194,6 +194,27 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (disposition.headSha !== options.headSha || disposition.inputSha256 !== options.inputSha256) {
       refuse('stale_report_input_mismatch', 'The stale disposition is bound to different current review inputs.');
     }
+    if (disposition.version === 2) {
+      const retryReason = options.retryReason === undefined ? undefined : scrubText(options.retryReason.trim(), 500);
+      if (disposition.outcome !== 'delivered-hard-failure' || previous.hardFailure !== true ||
+        previous.deliveryPending || previous.deliveryFailure === 'local-invalid' ||
+        disposition.cycleId !== (state.cycle?.id ?? null) ||
+        !isDeepStrictEqual(disposition.reviewerHealth, previous.reviewerHealth) ||
+        !previous.deliveryReconciliation ||
+        previous.deliveryReconciliation.runId !== previous.runId ||
+        previous.deliveryReconciliation.reportJsonSha256 !== previous.reportJsonSha256 ||
+        previous.deliveryReconciliation.round !== previous.round ||
+        previous.deliveryReconciliation.attempt !== previous.attempt ||
+        previous.deliveryReconciliation.headSha !== previous.headSha ||
+        !isDeepStrictEqual(disposition.deliveryReconciliation, previous.deliveryReconciliation)) {
+        refuse('stale_report_launch_mismatch', 'The delivered hard-failure recovery binding changed.');
+      }
+      if (retryReason !== disposition.retryReason) {
+        refuse('stale_report_retry_reason_mismatch', 'Use the exact bounded retry reason reviewed in the delivered hard-failure disposition.');
+      }
+    } else if (previous.hardFailure) {
+      refuse('stale_report_launch_mismatch', 'An ordinary stale disposition cannot authorize a delivered hard-failure retry.');
+    }
 
   }
   if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {

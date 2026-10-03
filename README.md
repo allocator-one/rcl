@@ -437,7 +437,7 @@ commands are documented in
 | --- | --- |
 | `rcl converge-report` | Dedupe a round report against earlier rounds, enforce the round cap, classify findings (`new` / `repeat` / `suppressed` / `regating`); refuses inconclusive reviewer health |
 | `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution |
-| `rcl converge-stale` | Audited disposition of a healthy report that became stale before admission |
+| `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
 | `rcl converge-attempt` | Legacy attempt accounting; guarded launches claim their own attempts |

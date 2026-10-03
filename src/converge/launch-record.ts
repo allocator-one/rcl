@@ -23,6 +23,18 @@ export const ordinaryLaunchInputsBindingSchema = z.object({
 
 export type OrdinaryLaunchInputsBinding = z.infer<typeof ordinaryLaunchInputsBindingSchema>;
 
+/** Durable proof that authenticated server evidence cleared one exact pending delivery. */
+export const deliveryReconciliationSchema = z.object({
+  version: z.literal(1),
+  runId: z.string().uuid(),
+  reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  round: z.number().int().positive().safe(),
+  attempt: z.number().int().positive().safe(),
+  headSha: z.string().regex(/^[a-f0-9]{40}$/),
+}).strict();
+
+export type DeliveryReconciliation = z.infer<typeof deliveryReconciliationSchema>;
+
 export const completionSchema = z.object({
   runId: z.string().uuid(),
   reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -62,6 +74,7 @@ export const launchSchema = z.object({
   reportPath: z.string().min(1).optional(),
   reviewerHealth: reviewerHealthSchema.optional(),
   ordinaryInputs: ordinaryLaunchInputsBindingSchema.optional(),
+  deliveryReconciliation: deliveryReconciliationSchema.optional(),
   retainedOriginal: z.object({ version: z.literal(1), runId: z.string().uuid(),
     planDigest: z.string().regex(/^[a-f0-9]{64}$/), capturedInputsSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   pendingResume: z.object({ version: z.literal(1), runId: z.string().uuid(),
