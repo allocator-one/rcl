@@ -581,7 +581,7 @@ program
   .option('--report <path>', 'Original completed, healthy, delivered report JSON')
   .option('--report-sha256 <sha256>', 'Original immutable report digest')
   .option('--reason <text>', 'Source-backed reason this report became materially stale, at most 500 characters')
-  .option('--retry-reason <text>', 'Bounded retry reason; required only for an authentically reconciled hard-failure report')
+  .option('--retry-reason <text>', 'Exact bounded retry reason for a reconciled, healthy delivered hard failure')
   .option('--json')
   .action(async (opts: Record<string,string|boolean|undefined>) => {
     try {

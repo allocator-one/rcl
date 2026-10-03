@@ -196,11 +196,23 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (disposition.headSha !== options.headSha || disposition.inputSha256 !== options.inputSha256) {
       refuse('stale_report_input_mismatch', 'The stale disposition is bound to different current review inputs.');
     }
-    if (previous.hardFailure && (disposition.version !== 2 || disposition.outcome !== 'reconciled-hard-failure' ||
-      disposition.retryReason !== options.retryReason || disposition.cycleId !== (state.cycle?.id ?? null) ||
-      !isDeepStrictEqual(disposition.reconciliation, previous.deliveryReconciliation) ||
-      !isDeepStrictEqual(disposition.reviewerHealth, previous.reviewerHealth))) {
-      refuse('stale_report_continuation_mismatch', 'The audited stale disposition does not authorize this exact reconciled hard-failure retry.');
+    if (previous.hardFailure) {
+      const reconciliation = previous.deliveryReconciliation;
+      const shared = disposition.version !== 1 && disposition.outcome === 'delivered-hard-failure' &&
+        disposition.retryReason === options.retryReason && disposition.cycleId === (state.cycle?.id ?? null) &&
+        isDeepStrictEqual(disposition.reviewerHealth,previous.reviewerHealth) && reconciliation?.version === 2;
+      const binding = shared && (disposition.version === 3
+        ? isDeepStrictEqual(disposition.deliveryReconciliation,reconciliation)
+        : disposition.deliveryReconciliation.version === 1 &&
+          disposition.deliveryReconciliation.runId === reconciliation.runId &&
+          disposition.deliveryReconciliation.reportJsonSha256 === reconciliation.reportJsonSha256 &&
+          disposition.deliveryReconciliation.headSha === reconciliation.headSha &&
+          disposition.deliveryReconciliation.attempt === reconciliation.attempt &&
+          disposition.deliveryReconciliation.round === reconciliation.round);
+      if (!binding) refuse('stale_report_continuation_mismatch',
+        'The audited stale disposition does not authorize this exact delivered hard-failure retry.');
+    } else if (disposition.version !== 1) {
+      refuse('stale_report_launch_mismatch', 'A delivered hard-failure disposition cannot authorize ordinary stale work.');
     }
 
   }

@@ -33,13 +33,22 @@ async function pendingCycleState(dir: string, target: string) {
       active={...request,id:'019921a0-0000-7000-8000-000000000099',inserted_at:new Date().toISOString()};
       return active;
     })};
+  const run=vi.fn(async()=>({runId,reportJsonSha256:digest,successfulReviews:1,totalReviews:2,
+    deliveryPending:true,hardFailure:true,exitCode:4}));
   await guardReviewLaunch({gitCommonDir:dir,target,headSha:head,inputSha256:'b'.repeat(64),startOver:true,cycleRemote,
-    validate:vi.fn(async()=>{}),run:vi.fn(async()=>({runId,reportJsonSha256:digest,successfulReviews:1,totalReviews:2,
-      deliveryPending:true,hardFailure:true,exitCode:4}))});
+    validate:vi.fn(async()=>{}),run});
   const state=(await loadConvergeRunState(dir,target))!;
-  return {state,detail:{...matchingDetail(target),cycle_id:state.cycle!.id,
+  return {state,run,detail:{...matchingDetail(target),cycle_id:state.cycle!.id,
     converge:{target,round:state.lastLaunch!.round,attempt:state.lastLaunch!.attempt},
     target:{...matchingDetail(target).target,repo:'owner/repo',pr_number:17}}};
+}
+
+async function publishedMarkerState(dir: string, target: string) {
+  const fixture=await pendingCycleState(dir,target),state=fixture.state;
+  state.lastLaunch={...state.lastLaunch!,deliveryPending:false,deliveryReconciliation:{version:1,runId,
+    reportJsonSha256:digest,headSha:head,attempt:state.lastLaunch!.attempt,round:state.lastLaunch!.round}};
+  await withNativeTarget(dir,target,owner=>writeState(dir,state,owner));
+  return fixture;
 }
 
 async function expectUnchanged(mutator: (detail: ReturnType<typeof matchingDetail>) => void) {
@@ -61,7 +70,7 @@ describe('reconcileDeliveredRun', () => {
       const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: matchingDetail(target) });
       await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('reconciled');
       expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({ attempt: 4, round: 3,
-        deliveryPending: false, hardFailure: true, deliveryReconciliation: { version: 1, runId,
+        deliveryPending: false, hardFailure: true, deliveryReconciliation: { version: 2, runId,
           reportJsonSha256: digest, headSha: head, inputSha256: 'b'.repeat(64), attempt: 4, round: 3,
           claimPid: process.pid, cycleId: null } });
     } finally { await rm(dir, { recursive: true, force: true }); }
@@ -147,6 +156,40 @@ describe('reconcileDeliveredRun', () => {
         getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('reconciled');
       expect((await loadConvergeRunState(dir,target))!.lastLaunch).toMatchObject({deliveryPending:false,
         deliveryReconciliation:{cycleId:state.cycle!.id,runId,reportJsonSha256:digest}});
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it('upgrades an exact published 4.5.2 marker without changing accounting or provider calls', async () => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      const {state,detail,run}=await publishedMarkerState(dir,target);
+      const before=(await loadConvergeRunState(dir,target))!,beforeRounds=structuredClone(before.rounds);
+      const beforeFindings=structuredClone(before.findings);
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('reconciled');
+      const after=(await loadConvergeRunState(dir,target))!;
+      expect(after.lastLaunch!.deliveryReconciliation).toMatchObject({version:2,runId,reportJsonSha256:digest,
+        headSha:head,inputSha256:'b'.repeat(64),claimPid:before.lastLaunch!.pid,cycleId:state.cycle!.id});
+      expect(after.rounds).toEqual(beforeRounds); expect(after.findings).toEqual(beforeFindings);
+      expect(run).toHaveBeenCalledOnce();
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it.each([
+    ['missing live provenance', (detail: ReturnType<typeof matchingDetail>) => { delete detail.provenance; }],
+    ['backfill provenance', (detail: ReturnType<typeof matchingDetail>) => { detail.provenance='backfill'; }],
+    ['missing cycle', (detail: ReturnType<typeof matchingDetail>) => { detail.cycle_id=undefined; }],
+    ['mismatched cycle', (detail: ReturnType<typeof matchingDetail>) => {
+      detail.cycle_id='019921a0-0000-7000-8000-000000000098';
+    }],
+    ['mismatched repository', (detail: ReturnType<typeof matchingDetail>) => { detail.target.repo='other/repo'; }],
+    ['mismatched pull request', (detail: ReturnType<typeof matchingDetail>) => { detail.target.pr_number=18; }],
+  ])('does not upgrade a published marker with %s', async (_label,mutate) => {
+    const dir=await mkdtemp(join(tmpdir(),'rcl-delivery-reconcile-')),target='fixture';
+    try {
+      const {detail}=await publishedMarkerState(dir,target); mutate(detail);
+      const path=convergeRunStatePath(dir,target),before=await readFile(path);
+      await expect(reconcileDeliveredRun(runId,{} as never,{gitCommonDir:dir,
+        getRun:vi.fn().mockResolvedValue({kind:'ok',value:detail})})).resolves.toBe('unchanged');
+      expect(await readFile(path)).toEqual(before);
     } finally { await rm(dir,{recursive:true,force:true}); }
   });
   it.each([

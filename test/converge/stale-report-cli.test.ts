@@ -1,14 +1,11 @@
-import { expect, it, vi } from 'vitest';
+import { expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { staleFixture } from './stale-report-fixtures.js';
+import { reconciledHardFailureFixture, staleFixture } from './stale-report-fixtures.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
-import { loadConvergeRunState } from '../../src/converge/run-state.js';
-import { reconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
-import { mergedBlockingHealth } from '../../src/converge/legacy-launch-health.js';
 
 // The same test can target an unpacked npm artifact, with no TS loader.
 const packed = process.env.RCL_STALE_PACKED_CLI;
@@ -48,30 +45,25 @@ it('previews, applies, resumes and rejects tampering through the supported CLI w
   expect((await f.bytes()).slice(1)).toEqual(before.slice(1));
 },30000);
 
-it('previews and applies the authenticated reconciled hard-failure continuation through the CLI', async () => {
-  const f = await staleFixture(true), retryReason = 'Authenticated delivery completed; one bounded current-input review.';
-  const report = JSON.parse(await readFile(f.reportPath,'utf8'));
-  for (const seat of report.run.roster) seat.lane = 'blocking';
-  await writeFile(f.reportPath,JSON.stringify(report)); f.selection.reportSha256 = sha256(await readFile(f.reportPath));
-  const state = (await loadConvergeRunState(f.dir,f.target))!;
-  state.lastLaunch = {...state.lastLaunch!,reportJsonSha256:f.selection.reportSha256,deliveryPending:false,
-    hardFailure:true,exitCode:4,reviewerHealth:mergedBlockingHealth(report,2/3)};
-  await writeFile(f.statePath,JSON.stringify(state));
-  await reconcileDeliveredRun(report.run.id,{} as never,{gitCommonDir:f.dir,getRun:vi.fn().mockResolvedValue({kind:'ok',value:{
-    id:report.run.id,provenance:'live',cycle_id:report.run.cycle_id,converge:report.run.converge,target:{kind:'pull_request',head_sha:report.run.target.head_sha},
-    artifacts:[{kind:'report_json',stored:true,declared_sha256:f.selection.reportSha256}],findings:[],calls:[],
-  }})});
+it('previews and applies a reconciled delivered hard failure through the supported CLI without network calls', async () => {
+  const f = await reconciledHardFailureFixture(true), before = await f.bytes();
   const deny = join(f.cwd,'deny-network.mjs');
   await writeFile(deny,`import net from 'node:net';\nnet.Socket.prototype.connect = function(){throw Error('network forbidden');};\nglobalThis.fetch = async()=>{throw Error('network forbidden');};\n`);
   await mkdir(join(f.cwd,'config'));
   const preview = await command(f.cwd,['converge-stale','--preview','--manifest',f.manifestPath,'--target',f.target,
     '--head',f.selection.headSha,'--input-sha256',f.selection.inputSha256,'--report',f.reportPath,
-    '--report-sha256',f.selection.reportSha256,'--reason',f.selection.reason,'--retry-reason',retryReason],deny);
+    '--report-sha256',f.reportSha256,'--reason',f.selection.reason,'--retry-reason',f.retryReason],deny);
   expect(preview.code,preview.stderr).toBe(0);
-  expect(JSON.parse(preview.stdout).manifest).toMatchObject({version:2,outcome:'reconciled-hard-failure',retryReason});
+  expect(JSON.parse(preview.stdout).manifest).toMatchObject({version:3,outcome:'delivered-hard-failure',retryReason:f.retryReason,
+    deliveryReconciliation:{version:2}});
+  expect(await f.bytes()).toEqual(before);
   const digest = sha256(await readFile(f.manifestPath));
-  const applied = await command(f.cwd,['converge-stale','--apply','--manifest',f.manifestPath,'--manifest-sha256',digest],deny);
-  expect(applied.code,applied.stderr).toBe(0); expect(JSON.parse(applied.stdout).result).toBe('applied');
+  for (const mode of ['apply','resume']) {
+    const result = await command(f.cwd,['converge-stale',`--${mode}`,'--manifest',f.manifestPath,'--manifest-sha256',digest],deny);
+    expect(result.code,result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).result).toBe(mode==='apply'?'applied':'resumed');
+  }
+  expect((await f.bytes()).slice(1)).toEqual(before.slice(1));
 },30000);
 
 

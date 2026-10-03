@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
@@ -78,8 +79,8 @@ describe('reconciled hard-failure stale continuation', () => {
 
     const manifest = await previewStaleReport({ ...f.selection, retryReason } as never, f.dir);
     expect(manifest).toMatchObject({
-      version: 2,
-      outcome: 'reconciled-hard-failure',
+      version: 3,
+      outcome: 'delivered-hard-failure',
       runId: report.run.id,
       reportSha256: f.selection.reportSha256,
       retryReason,
@@ -186,14 +187,55 @@ describe('reconciled hard-failure stale continuation', () => {
       manifestSha256:sha256(await readFile(f.manifestPath)),mode:'apply'},f.dir)).resolves.toBe('applied');
   });
 
+  it('keeps a published v2 receipt and applies a second-input v3 continuation after marker upgrade', async () => {
+    const f = await staleFixture();
+    const {report,reviewerHealth} = await makeBlockingHealthConclusive(f);
+    const state = (await loadConvergeRunState(f.dir,f.target))!;
+    state.lastLaunch = {...state.lastLaunch!,reportJsonSha256:f.selection.reportSha256,
+      deliveryPending:false,hardFailure:true,exitCode:4,reviewerHealth,
+      deliveryReconciliation:{version:1,runId:state.lastLaunch!.runId!,
+        reportJsonSha256:f.selection.reportSha256,headSha:state.lastLaunch!.headSha,
+        attempt:state.lastLaunch!.attempt,round:state.lastLaunch!.round}};
+    await writeFile(f.statePath,JSON.stringify(state));
+    const weak = state.lastLaunch.deliveryReconciliation;
+    const legacy = {
+      ...f.selection,kind:'rcl-stale-report',version:2,outcome:'delivered-hard-failure',retryReason,
+      operationId:randomUUID(),createdAt:new Date().toISOString(),gitCommonDir:f.dir,
+      stateSha256:sha256(await readFile(f.statePath)),attemptSha256:sha256(await readFile(f.attemptsPath)),
+      runId:state.lastLaunch.runId,attempt:state.lastLaunch.attempt,round:state.lastLaunch.round,
+      previousHeadSha:state.lastLaunch.headSha,previousInputSha256:state.lastLaunch.inputSha256,
+      cycleId:state.cycle?.id ?? null,reviewerHealth,deliveryReconciliation:weak,
+    };
+    await writeFile(f.manifestPath,JSON.stringify(legacy));
+    await expect(applyStaleReport({manifest:f.manifestPath,
+      manifestSha256:sha256(await readFile(f.manifestPath)),mode:'apply'},f.dir)).resolves.toBe('applied');
+
+    await reconcileFixture(f);
+    expect((await loadConvergeRunState(f.dir,f.target))!.lastLaunch!.deliveryReconciliation)
+      .toMatchObject({version:2,runId:report.run.id,inputSha256:state.lastLaunch.inputSha256,
+        claimPid:state.lastLaunch.pid});
+
+    const second={...f.selection,headSha:'e'.repeat(40),inputSha256:'f'.repeat(64),retryReason};
+    const manifest=await previewStaleReport(second,f.dir);
+    expect(manifest).toMatchObject({version:3,outcome:'delivered-hard-failure',
+      deliveryReconciliation:{version:2}});
+    await writeFile(f.manifestPath,JSON.stringify(manifest));
+    await expect(applyStaleReport({manifest:f.manifestPath,
+      manifestSha256:sha256(await readFile(f.manifestPath)),mode:'apply'},f.dir)).resolves.toBe('applied');
+    expect((await loadConvergeRunState(f.dir,f.target))!.staleReportAudit?.map(entry => JSON.parse(entry.manifestJson).version))
+      .toEqual([2,3]);
+    await expect(guardReviewLaunch({...f.options,...second})).resolves.toMatchObject({attempt:2});
+    expect(f.options.run).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     [`  Reviewed sk-${'q'.repeat(40)} recovery.  `,'credential redaction'],
     [`  ${'x'.repeat(500)}  `,'trimmed 500-character bound'],
   ])('uses one canonical retry reason for preview and launch: %s', async (raw) => {
     const f = await reconciledSpecial();
     const manifest = await previewStaleReport({...f.selection,retryReason:raw},f.dir);
-    expect(manifest.version).toBe(2);
-    if (manifest.version !== 2) throw new Error('expected special manifest');
+    expect(manifest.version).toBe(3);
+    if (manifest.version !== 3) throw new Error('expected special manifest');
     if (raw.includes('sk-')) expect(manifest.retryReason).toContain('[redacted]');
     else expect(manifest.retryReason).toHaveLength(500);
     expect(manifest.retryReason).not.toContain('sk-');

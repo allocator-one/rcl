@@ -437,10 +437,20 @@ commands are documented in
 | --- | --- |
 | `rcl converge-report` | Dedupe a round report against earlier rounds, enforce the round cap, classify findings (`new` / `repeat` / `suppressed` / `regating`); refuses inconclusive reviewer health |
 | `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution |
-| `rcl converge-stale` | Audited disposition of a healthy report that became stale before admission |
+| `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
 | `rcl converge-attempt` | Legacy attempt accounting; guarded launches claim their own attempts |
+
+Delivered hard-failure continuation requires RCL 4.5.3 or later. Re-run
+`rcl telemetry flush --run <run-id>` to authenticate or upgrade the durable
+reconciliation marker before previewing `converge-stale`. The strong marker is
+bound to the exact run, report, head, input digest, attempt, round, claim PID,
+cycle, reconciliation time and live repository/pull-request authority. New
+stale dispositions are version 3; published 4.5.2 version 2 receipts remain
+verifiable and can be
+followed by a changed-input version 3 disposition only after that exact marker
+upgrade.
 
 ---
 

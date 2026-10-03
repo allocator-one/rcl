@@ -54,20 +54,23 @@ function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validated
   if (round > 1 && (!resolveRoundResolution(state,round-1) || resolveRoundResolution(state,round-1)?.status === 'unresolved')) throw new Error('triage_required');
   if (previous.status !== 'completed' || previous.deliveryPending || previous.deliveryFailure ||
     !hasHealthyGuardedLaunch(previous)) throw new Error('stale_report_outcome_ineligible');
-  const reconciledHardFailure = 'retryReason' in s;
-  if (reconciledHardFailure && previous.hardFailure !== true) throw new Error('stale_report_continuation_ineligible');
-  if (reconciledHardFailure) {
+  const deliveredHardFailure = 'retryReason' in s;
+  const version = 'version' in s ? s.version : undefined;
+  if (deliveredHardFailure && previous.hardFailure !== true) throw new Error('stale_report_continuation_ineligible');
+  if (deliveredHardFailure) {
     const reconciliation = previous.deliveryReconciliation;
     if (!reconciliation || !previous.reviewerHealth) throw new Error('stale_report_outcome_ineligible');
-    if (reconciliation.claimPid !== previous.pid || reconciliation.cycleId !== (state.cycle?.id ?? null)) {
+    if ((version === 2 && reconciliation.version !== 1) ||
+      (version !== 2 && (reconciliation.version !== 2 || reconciliation.claimPid !== previous.pid ||
+        reconciliation.cycleId !== (state.cycle?.id ?? null)))) {
       throw new Error('stale_report_reconciliation_mismatch');
     }
   }
-  if (!reconciledHardFailure && previous.hardFailure === true) throw new Error('stale_report_outcome_ineligible');
+  if (!deliveredHardFailure && previous.hardFailure === true) throw new Error('stale_report_outcome_ineligible');
   const claim = attempts.attempts.find(a => a.attempt === previous.attempt && a.source === 'claim');
   if (attempts.attemptsUsed !== previous.attempt || !claim ||
-    (reconciledHardFailure && claim.pid !== previous.pid)) throw new Error('stale_report_attempt_mismatch');
-  if (s.inputSha256 === previous.inputSha256 && (reconciledHardFailure ||
+    (deliveredHardFailure && claim.pid !== previous.pid)) throw new Error('stale_report_attempt_mismatch');
+  if (s.inputSha256 === previous.inputSha256 && (deliveredHardFailure ||
     !state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt))) throw new Error('inputs_unchanged');
   if (previous.reportJsonSha256 !== s.reportSha256 || report.run.id !== previous.runId ||
     report.run.target.head_sha !== previous.headSha || report.run.converge?.target !== s.target ||
@@ -75,13 +78,17 @@ function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validated
     report.stats.totalReviews !== previous.totalReviews || report.stats.successfulReviews !== previous.successfulReviews ||
     report.reviews.length !== previous.totalReviews || successfulReviews !== previous.successfulReviews ||
     ![0,1].includes(report.run.ci_exit_code)) throw new Error('stale_report_binding_mismatch');
-  if (reconciledHardFailure) {
+  if (deliveredHardFailure) {
+    const reconciliation = previous.deliveryReconciliation!;
+    if (reconciliation.runId !== previous.runId || reconciliation.reportJsonSha256 !== previous.reportJsonSha256 ||
+      reconciliation.round !== previous.round || reconciliation.attempt !== previous.attempt ||
+      reconciliation.headSha !== previous.headSha) throw new Error('stale_report_reconciliation_binding_mismatch');
     if (report.run.provenance === 'backfill' || report.run.gating.mode !== 'verified-consensus' ||
       !isDeepStrictEqual(mergedBlockingHealth(report,previous.reviewerHealth!.policy.fraction),previous.reviewerHealth)) {
       throw new Error('stale_report_health_binding_mismatch');
     }
-    if ('version' in s && (s.version !== 2 || s.outcome !== 'reconciled-hard-failure' ||
-      s.cycleId !== (state.cycle?.id ?? null) || !isDeepStrictEqual(s.reconciliation,previous.deliveryReconciliation) ||
+    if ('version' in s && (![2,3].includes(s.version) || s.outcome !== 'delivered-hard-failure' ||
+      s.cycleId !== (state.cycle?.id ?? null) || !isDeepStrictEqual(s.deliveryReconciliation,previous.deliveryReconciliation) ||
       !isDeepStrictEqual(s.reviewerHealth,previous.reviewerHealth))) throw new Error('stale_report_manifest_binding_mismatch');
   }
   return previous;
@@ -109,8 +116,8 @@ export async function previewStaleReport(input: StaleReportSelection, gitCommonD
     operationId:randomUUID(),createdAt:new Date().toISOString(),gitCommonDir:common,
     stateSha256:native.sha256,attemptSha256:attempts.sha256,runId:previous.runId,attempt:previous.attempt,round:previous.round,
     previousHeadSha:previous.headSha,previousInputSha256:previous.inputSha256};
-  const manifest = staleManifestSchema.parse('retryReason' in s ? {...shared,version:2,outcome:'reconciled-hard-failure',
-    reconciliation:previous.deliveryReconciliation,reviewerHealth:previous.reviewerHealth,cycleId:state.cycle?.id ?? null}
+  const manifest = staleManifestSchema.parse('retryReason' in s ? {...shared,version:3,outcome:'delivered-hard-failure',
+    deliveryReconciliation:previous.deliveryReconciliation,reviewerHealth:previous.reviewerHealth,cycleId:state.cycle?.id ?? null}
     : {...shared,version:1});
   await selected(convergeRunStatePath(common,s.target),native.sha256);
   await selected(convergeAttemptStatePath(common,s.target),attempts.sha256);

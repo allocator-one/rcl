@@ -2,13 +2,27 @@
 
 ## Unreleased
 
+## 4.5.3 - 2026-10-04
+
+- Strengthen delivered hard-failure reconciliation with a versioned marker
+  bound to the exact input digest, claim PID, review cycle and reconciliation
+  time. Every hard-failure marker now requires live server provenance and exact
+  server/native cycle, repository and pull-request authority. Existing 4.5.2
+  markers and stale audit receipts remain readable and can be authenticated
+  forward without changing attempts, rounds, findings or provider calls
+  (RCL-177).
+
 ## 4.5.2 - 2026-10-03
 
-- Continue a fresh guarded review after an exact legacy delivery failure was
-  authentically reconciled and its completed report became stale. The audited
-  continuation preserves attempts, rounds, findings, receipts and caps, never
-  admits stale findings, and remains bound to the original run, report, blocking
-  health, review cycle and explicit retry reason (RCL-177).
+- Continue a guarded review when an old-head report retained `hardFailure`
+  after its exact evidence delivery was reconciled and its blocking reviewer
+  health was conclusive. Authenticated delivery reconciliation records an exact
+  durable marker, including a guarded backfill for 4.5.1 delivery failures.
+  The audited `converge-stale` variant preserves the original report and
+  accounting, binds the replacement inputs and explicit retry reason, and
+  claims only the next attempt and native round. Pending,
+  local-invalid, unhealthy, same-input, mismatched and exhausted work remains
+  fail closed (RCL-177).
 
 ## 4.5.1 - 2026-10-03
 

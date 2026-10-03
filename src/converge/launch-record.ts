@@ -23,8 +23,19 @@ export const ordinaryLaunchInputsBindingSchema = z.object({
 
 export type OrdinaryLaunchInputsBinding = z.infer<typeof ordinaryLaunchInputsBindingSchema>;
 
-export const deliveryReconciliationSchema = z.object({
+/** Published by 4.5.2; retained so existing native state and audit receipts remain readable. */
+export const legacyDeliveryReconciliationSchema = z.object({
   version: z.literal(1),
+  runId: z.string().uuid(),
+  reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  headSha: z.string().regex(/^[a-f0-9]{40}$/),
+  attempt: z.number().int().positive().safe(),
+  round: z.number().int().positive().safe(),
+}).strict();
+
+/** Exact authenticated server/native binding emitted from 4.5.3 onward. */
+export const strongDeliveryReconciliationSchema = z.object({
+  version: z.literal(2),
   runId: z.string().uuid(),
   reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/),
   headSha: z.string().regex(/^[a-f0-9]{40}$/),
@@ -35,6 +46,11 @@ export const deliveryReconciliationSchema = z.object({
   cycleId: z.string().uuid().nullable(),
   reconciledAt: z.string().datetime(),
 }).strict();
+
+export const deliveryReconciliationSchema = z.discriminatedUnion('version', [
+  legacyDeliveryReconciliationSchema,
+  strongDeliveryReconciliationSchema,
+]);
 
 export type DeliveryReconciliation = z.infer<typeof deliveryReconciliationSchema>;
 
@@ -107,9 +123,10 @@ export const launchSchema = z.object({
       value.runId === value.deliveryReconciliation.runId &&
       value.reportJsonSha256 === value.deliveryReconciliation.reportJsonSha256 &&
       value.headSha === value.deliveryReconciliation.headSha &&
-      value.inputSha256 === value.deliveryReconciliation.inputSha256 &&
       value.attempt === value.deliveryReconciliation.attempt && value.round === value.deliveryReconciliation.round &&
-      value.pid === value.deliveryReconciliation.claimPid),
+      (value.deliveryReconciliation.version === 1 ||
+        (value.inputSha256 === value.deliveryReconciliation.inputSha256 &&
+          value.pid === value.deliveryReconciliation.claimPid))),
   'Delivery reconciliation must bind the exact completed hard-failure launch');
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
