@@ -500,6 +500,10 @@ function validateRoundReportInput(options: ProcessRoundOptions) {
   if (!Number.isSafeInteger(options.round) || options.round < 1) {
     throw new ConvergeRunStateError('round must be a positive integer.');
   }
+  if (options.lineWindow !== undefined &&
+    (!Number.isSafeInteger(options.lineWindow) || options.lineWindow < 0)) {
+    throw new ConvergeRunStateError('lineWindow must be a nonnegative safe integer.');
+  }
   if (options.findings.some((finding) => !DEFAULT_SEVERITY_ORDER.includes(finding.severity))) {
     throw new ConvergeRunStateError('Invalid finding severity: expected critical, important, minor, or nitpick.');
   }
