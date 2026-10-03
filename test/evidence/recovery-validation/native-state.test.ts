@@ -9,6 +9,7 @@ import { legacyFixture, recoveredFixture, semanticFixture, sha, target, uuid } f
 import { setup } from '../parent-r9-projection-fixture.js';
 import { laterSource } from './occurrence-fixtures.js';
 import { retainedRecoveredDismissalsByRound } from '../../../src/converge/semantic-state.js';
+import { prepareVerdicts } from '../../../src/converge/run-state.js';
 
 it('retains recovered dismissals from every preceding source round', () => {
   const dismissals = new Map([
@@ -319,6 +320,26 @@ it('preserves an unchanged implicit legacy verdict severity without a retained s
   const explicitSeverity = structuredClone(original);
   explicitSeverity.findings[f.key].verdictSeverity = 'critical';
   expect(() => validateSightinglessLegacyEvolution(explicitSeverity, original))
+    .toThrow('native_recovery_source_conflict');
+});
+
+it('accepts a newly recorded native-v1 verdict against a round without a severity ledger', () => {
+  const f = legacyFixture();
+  const original = structuredClone(f.state) as any;
+  original.findings[f.key].pendingRound = 1;
+  delete original.rounds[0].severities;
+
+  const prepared = prepareVerdicts(original, { target, round: 1,
+    recordedAt: '2026-09-22T01:00:00.000Z', verdicts: [{ key: f.key, verdict: 'fixed' }] });
+  expect(prepared.state.findings[f.key]).toMatchObject({
+    verdict: 'fixed', verdictRound: 1, verdictSeverity: 'important',
+  });
+  expect(prepared.state.findings[f.key].pendingRound).toBeUndefined();
+  expect(() => validateSightinglessLegacyEvolution(prepared.state, original)).not.toThrow();
+
+  const forged = structuredClone(prepared.state);
+  forged.findings[f.key]!.verdictSeverity = 'critical';
+  expect(() => validateSightinglessLegacyEvolution(forged, original))
     .toThrow('native_recovery_source_conflict');
 });
 

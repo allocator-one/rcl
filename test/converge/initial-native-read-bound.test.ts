@@ -4,13 +4,33 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
-const reads = vi.hoisted(() => ({ fullFile: 0 }));
+const reads = vi.hoisted(() => ({ fullFile: 0, handleFullFile: 0, handleChunk: 0 }));
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...fs, readFile: (...args: Parameters<typeof fs.readFile>) => {
-    reads.fullFile += 1;
-    return fs.readFile(...args);
-  } };
+  return {
+    ...fs,
+    readFile: (...args: Parameters<typeof fs.readFile>) => {
+      reads.fullFile += 1;
+      return fs.readFile(...args);
+    },
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === 'readFile') return (...readArgs: unknown[]) => {
+            reads.handleFullFile += 1;
+            return Reflect.apply(target.readFile, target, readArgs);
+          };
+          if (property === 'read') return (...readArgs: unknown[]) => {
+            reads.handleChunk += 1;
+            return Reflect.apply(target.read, target, readArgs);
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+  };
 });
 
 import { convergeRunStatePath, initialConvergeRunState, loadConvergeRunStateEvidence, writeState } from '../../src/converge/run-state.js';
@@ -33,9 +53,11 @@ it('refuses an oversized current document before an unbounded whole-file read', 
   const file = await open(f.path, 'wx', 0o600);
   await file.truncate(64 * 1024 * 1024 + 1);
   await file.close();
-  reads.fullFile = 0;
+  reads.fullFile = 0; reads.handleFullFile = 0; reads.handleChunk = 0;
   const result = await loadConvergeRunStateEvidence(f.commonDir, f.target).catch(error => error);
   expect(reads.fullFile).toBe(0);
+  expect(reads.handleFullFile).toBe(0);
+  expect(reads.handleChunk).toBe(0);
   expect(result).toMatchObject({ cause: { message: 'oversized' } });
   const retained = await open(f.path, 'r');
   try { expect((await retained.stat()).size).toBe(64 * 1024 * 1024 + 1); }

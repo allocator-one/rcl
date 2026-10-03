@@ -1005,7 +1005,8 @@ export function prepareVerdicts(
   }
 
   const pendingBeforeTriage = admittedActionableBeforeTriage(state, options.round);
-  if (state.lastAnnotations?.round === options.round && state.lastAnnotations.actionableBeforeTriage === undefined) {
+  if (state.sightings !== undefined && state.lastAnnotations?.round === options.round &&
+      state.lastAnnotations.actionableBeforeTriage === undefined) {
     state.lastAnnotations.actionableBeforeTriage = pendingBeforeTriage;
   }
   const updated: FindingEntry[] = [];

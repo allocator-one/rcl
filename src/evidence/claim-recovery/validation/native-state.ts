@@ -155,8 +155,13 @@ export function validateSightinglessLegacyEvolution(state: ConvergeRunState, ori
       const reviewed = state.rounds.find(round => round.round === entry.verdictRound);
       const unchangedImplicitSeverity = prior.verdict === entry.verdict && prior.verdictRound === entry.verdictRound &&
         prior.verdictSeverity === undefined && entry.verdictSeverity === undefined;
-      requireSource(reviewed !== undefined && (unchangedImplicitSeverity || reviewed.severities?.[key] !== undefined));
-      requireSource(unchangedImplicitSeverity || entry.verdictSeverity === reviewed?.severities?.[key]);
+      const reviewedSeverities = reviewed?.severities;
+      requireSource(reviewed !== undefined);
+      if (!unchangedImplicitSeverity) {
+        requireSource(reviewedSeverities === undefined
+          ? entry.verdictSeverity === entry.severity
+          : reviewedSeverities[key] !== undefined && entry.verdictSeverity === reviewedSeverities[key]);
+      }
     }
     const clearsPrior = prior.pendingRound !== undefined && entry.verdict !== undefined &&
       verdictClearsPending(state, key, prior.pendingRound, entry.verdictRound!, entry.verdictSeverity);
