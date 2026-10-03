@@ -68,15 +68,22 @@ jobs:
         run: |
           npm pack
           shopt -s nullglob
-          packages=(review-council-*.tgz)
+          packages=(allocator-one-rcl-*.tgz)
           if [ "${#packages[@]}" -ne 1 ]; then
             echo "expected exactly one package artifact, found ${#packages[@]}"
             exit 1
           fi
 
-          PACKED_VERSION=$(tar -xOf "${packages[0]}" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          manifest_field() {
+            tar -xOf "$1" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$2"
+          }
+          PACKED_VERSION=$(manifest_field "${packages[0]}" version)
           if [ "v$PACKED_VERSION" != "$GITHUB_REF_NAME" ]; then
             echo "packed version $PACKED_VERSION does not match tag $GITHUB_REF_NAME — refusing to publish"
+            exit 1
+          fi
+          if [ "$(manifest_field "${packages[0]}" name)" != "@allocator-one/rcl" ]; then
+            echo "packed package is not @allocator-one/rcl — refusing to publish"
             exit 1
           fi
 
@@ -94,7 +101,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: package
-          path: review-council-*.tgz
+          path: allocator-one-rcl-*.tgz
           if-no-files-found: error
           retention-days: 1
 
@@ -111,7 +118,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
-      - name: Resolve package artifact
+      - name: Resolve package artifacts
         id: package
         shell: bash
         env:
@@ -122,17 +129,45 @@ jobs:
             echo "expected package artifact $PACKAGE_PATH"
             exit 1
           fi
-
-          ACTUAL_SHA256=$(sha256sum "$PACKAGE_PATH" | cut -d ' ' -f 1)
-          if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
-            echo "package artifact checksum mismatch"
+          if [ "$(sha256sum "$PACKAGE_PATH" | cut -d ' ' -f 1)" != "$EXPECTED_SHA256" ]; then
+            echo "package artifact checksum mismatch: $PACKAGE_PATH"
             exit 1
           fi
 
           echo "path=$PACKAGE_PATH" >> "$GITHUB_OUTPUT"
-      - run: npm publish "$PACKAGE_PATH" --access public --provenance --ignore-scripts
+      # A version npm already holds with these exact bytes is skipped, so the
+      # job can be re-run after a failed release; different bytes fail.
+      - name: Publish @allocator-one/rcl
+        shell: bash
         env:
           PACKAGE_PATH: ${{ steps.package.outputs.path }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          publish() {
+            local tarball=$1 spec="$2@${VERSION#v}" expected published lookup_error
+            expected="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w 0)"
+            lookup_error=$(mktemp)
+            # npm answers E404 for an unpublished version and for a package
+            # that does not exist yet; any other failure stops the publish.
+            if ! published=$(npm view "$spec" dist.integrity --registry https://registry.npmjs.org 2>"$lookup_error"); then
+              if ! grep -q E404 "$lookup_error"; then
+                cat "$lookup_error"
+                echo "could not determine whether $spec is published — refusing to continue"
+                return 1
+              fi
+              published=""
+            fi
+            if [ -n "$published" ]; then
+              if [ "$published" = "$expected" ]; then
+                echo "$spec is already published with this tarball — skipping"
+                return 0
+              fi
+              echo "$spec is already published with different contents — refusing to continue"
+              return 1
+            fi
+            npm publish "$tarball" --access public --provenance --ignore-scripts
+          }
+          publish "$PACKAGE_PATH" @allocator-one/rcl
 
   github-release:
     needs: [validate, publish]
@@ -165,7 +200,7 @@ jobs:
           node scripts/release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
           {
             echo
-            echo "npm: https://www.npmjs.com/package/review-council/v/${GITHUB_REF_NAME#v}"
+            echo "npm: https://www.npmjs.com/package/@allocator-one/rcl/v/${GITHUB_REF_NAME#v}"
             echo "Tarball SHA-256: \`$ACTUAL_SHA256\`"
           } >> release-notes.md
 

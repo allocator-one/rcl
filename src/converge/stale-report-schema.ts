@@ -1,24 +1,60 @@
 import { z } from 'zod';
+import { isDeepStrictEqual } from 'node:util';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { sha256 } from '../telemetry/recovery/files.js';
 import type { ConvergeRunState } from './run-state.js';
+import { legacyDeliveryReconciliationSchema, reviewerHealthSchema, strongDeliveryReconciliationSchema } from './launch-record.js';
+import { isCanonicalStaleRetryReason } from './stale-retry-reason.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
-export const staleSelectionSchema = z.object({
+const staleSelectionBaseSchema = z.object({
   target: z.string().min(1).max(200).refine(s => s.trim() === s),
   headSha: z.string().regex(/^[a-f0-9]{40}$/), inputSha256: digest,
   reportPath: z.string().min(1), reportSha256: digest,
   reason: z.string().trim().min(1).max(500),
+});
+const ordinaryStaleSelectionSchema = staleSelectionBaseSchema.strict();
+const deliveredHardFailureSelectionSchema = staleSelectionBaseSchema.extend({
+  retryReason: z.string().min(1).max(500).refine(isCanonicalStaleRetryReason),
 }).strict();
-export const staleManifestSchema = staleSelectionSchema.extend({
-  kind: z.literal('rcl-stale-report'), version: z.literal(1),
+export const staleSelectionSchema = z.union([
+  ordinaryStaleSelectionSchema,
+  deliveredHardFailureSelectionSchema,
+]);
+const staleManifestBaseSchema = staleSelectionBaseSchema.extend({
+  kind: z.literal('rcl-stale-report'),
   operationId: z.string().uuid().refine(s => s === s.toLowerCase()),
   createdAt: z.string().datetime(), gitCommonDir: z.string().min(1),
   stateSha256: digest, attemptSha256: digest,
   runId: z.string().uuid(), attempt: z.number().int().positive().safe(),
   round: z.number().int().positive().max(99),
   previousHeadSha: z.string().regex(/^[a-f0-9]{40}$/), previousInputSha256: digest,
+});
+const ordinaryStaleManifestSchema = staleManifestBaseSchema.extend({
+  version: z.literal(1),
 }).strict();
+/** Published by 4.5.2; decoded forever so retained audit receipts remain verifiable. */
+const legacyDeliveredHardFailureManifestSchema = staleManifestBaseSchema.extend({
+  version: z.literal(2),
+  outcome: z.literal('delivered-hard-failure'),
+  retryReason: z.string().trim().min(1).max(500),
+  cycleId: z.string().uuid().nullable(),
+  reviewerHealth: reviewerHealthSchema,
+  deliveryReconciliation: legacyDeliveryReconciliationSchema,
+}).strict();
+const deliveredHardFailureManifestSchema = staleManifestBaseSchema.extend({
+  version: z.literal(3),
+  outcome: z.literal('delivered-hard-failure'),
+  retryReason: z.string().min(1).max(500).refine(isCanonicalStaleRetryReason),
+  cycleId: z.string().uuid().nullable(),
+  reviewerHealth: reviewerHealthSchema,
+  deliveryReconciliation: strongDeliveryReconciliationSchema,
+}).strict();
+export const staleManifestSchema = z.union([
+  ordinaryStaleManifestSchema,
+  legacyDeliveredHardFailureManifestSchema,
+  deliveredHardFailureManifestSchema,
+]);
 export type StaleReportSelection = z.infer<typeof staleSelectionSchema>;
 export type StaleReportManifest = z.infer<typeof staleManifestSchema>;
 export const staleEntrySchema = z.object({manifestJson:z.string().max(16384),manifestSha256:digest}).strict();
@@ -42,6 +78,22 @@ export function staleManifest(entry: StaleReportEntry): StaleReportManifest {
     manifests.set(entry,{json:entry.manifestJson,digest:entry.manifestSha256,manifest});
     return manifest;
   } catch (cause) { throw new StaleReportAuditError(undefined,{cause}); }
+}
+
+function sameVersionedContinuation(original: StaleReportManifest, current: StaleReportManifest): boolean {
+  if (original.version === 1 || current.version === 1) return original.version === current.version;
+  const sameDeliveredHardFailure = original.outcome === current.outcome &&
+    original.retryReason === current.retryReason && original.cycleId === current.cycleId &&
+    isDeepStrictEqual(original.reviewerHealth,current.reviewerHealth);
+  if (!sameDeliveredHardFailure) return false;
+  if (original.version === current.version) {
+    return isDeepStrictEqual(original.deliveryReconciliation,current.deliveryReconciliation);
+  }
+  if (original.version !== 2 || current.version !== 3) return false;
+  const legacy = original.deliveryReconciliation, strong = current.deliveryReconciliation;
+  return legacy.runId === strong.runId &&
+    legacy.reportJsonSha256 === strong.reportJsonSha256 && legacy.headSha === strong.headSha &&
+    legacy.attempt === strong.attempt && legacy.round === strong.round;
 }
 
 export function validateStaleReportAudit(state: ConvergeRunState): void {
@@ -69,7 +121,8 @@ export function validateStaleReportAudit(state: ConvergeRunState): void {
       (original !== undefined && (original.runId !== m.runId || original.round !== m.round ||
         original.reportSha256 !== m.reportSha256 || original.attemptSha256 !== m.attemptSha256 ||
         original.gitCommonDir !== m.gitCommonDir ||
-        original.previousHeadSha !== m.previousHeadSha || original.previousInputSha256 !== m.previousInputSha256))) {
+        original.previousHeadSha !== m.previousHeadSha || original.previousInputSha256 !== m.previousInputSha256 ||
+        !sameVersionedContinuation(original,m)))) {
       throw new StaleReportAuditError();
     }
     operations.add(m.operationId);

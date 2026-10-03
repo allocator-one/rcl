@@ -59,9 +59,13 @@ npm pack --dry-run
 
 ## Release
 
-`review-council` publishes to npm through `.github/workflows/release.yml`.
-The npm package trusts that exact GitHub Actions workflow through OIDC, so no
-long-lived npm token belongs in this repository.
+`@allocator-one/rcl` publishes to npm through `.github/workflows/release.yml`.
+The package trusts that exact GitHub Actions workflow through OIDC, so no
+long-lived npm token belongs in this repository. It published as
+`review-council` through 4.4.19 and under both names in 4.5.0, while
+consumers moved (epic RCL-169); the former name is deprecated and gets no new
+versions. Both declare the `rcl` executable, so npm will not install one
+over the other; installers remove `review-council` first.
 
 1. Bump `package.json`, `package-lock.json`, and `CHANGELOG.md` on a branch.
 2. Validate and merge the protected PR with green `ci`.
@@ -72,7 +76,8 @@ long-lived npm token belongs in this repository.
    through OIDC. To let someone release, give them the Maintain role on the
    repository; nothing else is required.
 4. Monitor the Release workflow, then verify npm's exact version and dist-tag
-   and reinstall the published CLI before checking `rcl --version`.
+   for `@allocator-one/rcl`, and reinstall the published CLI before checking
+   `rcl --version`.
 5. Confirm the GitHub Release `vX.Y.Z` exists with the CHANGELOG notes and the
    tarball attached (`gh release view vX.Y.Z`). The workflow creates it; if
    that job failed, create it by hand from `node scripts/release-notes.mjs`.
@@ -80,8 +85,10 @@ long-lived npm token belongs in this repository.
 The workflow accepts stable annotated tags only when their commit is on
 `main` and the tag matches `package.json`. A tokenless job reruns lint, build,
 and tests and creates the package tarball. A separate minimal job receives only
-that tarball and publishes it with npm trusted publishing and provenance; npm
-install and package lifecycle scripts never receive OIDC publishing authority.
+the tarball and publishes it with npm trusted publishing and provenance,
+skipping a version npm already holds with identical bytes so a failed release
+can be re-run; npm install and package lifecycle scripts never receive OIDC
+publishing authority.
 A final job, after publish, creates the GitHub Release for the tag with notes
 extracted from the matching `CHANGELOG.md` section and the tarball attached.
 Every `CHANGELOG.md` release needs a `## X.Y.Z` heading or that job fails.

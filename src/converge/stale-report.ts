@@ -13,12 +13,14 @@ import { prepareLockRoot, inspectRecoveryDirectory } from '../evidence/original-
 import { convergeAttemptStatePath, validateConvergeAttemptState } from './attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState, resolveRoundResolution, validateRoundCap, writeState, type ConvergeRunState } from './run-state.js';
 import { launchSchema, hasHealthyGuardedLaunch } from './launch-guard.js';
+import { mergedBlockingHealth } from './legacy-launch-health.js';
 import { withRecoveryTarget } from './target-ownership.js';
 import { staleManifest, staleManifestSchema, staleSelectionSchema, validateStaleReportAudit, StaleReportAuditError,
   type StaleReportEntry, type StaleReportManifest, type StaleReportSelection } from './stale-report-schema.js';
 import { selectedStaleFile as selected, retainStaleFile as retain, retainStaleObject,
   retainStaleSnapshot, StaleHistoryReader } from './stale-report-storage.js';
 import { scrubText } from '../telemetry/scrub.js';
+import { canonicalStaleRetryReason } from './stale-retry-reason.js';
 
 const parse = (s: Awaited<ReturnType<typeof readStable>>) => decodeOriginalReport(s.text).value;
 function validatedEvidence(attemptsRaw: unknown, reportRaw: unknown, target: string) {
@@ -40,7 +42,7 @@ class ValidatedStaleHistoryReader extends StaleHistoryReader {
   }
 }
 
-function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validatedEvidence>, s: StaleReportSelection, auditValidated = false) {
+function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validatedEvidence>, s: StaleReportSelection | StaleReportManifest, auditValidated = false) {
   if (!validCycleVersion(state, 1) || state.target !== s.target || !Array.isArray(state.rounds) || !state.findings || Array.isArray(state.findings)) throw new Error('stale_report_unsupported_state');
   validateRoundCap(state.roundCap); if (!auditValidated) validateStaleReportAudit(state);
   const previous = launchSchema.parse(state.lastLaunch);
@@ -50,22 +52,53 @@ function eligible(state: ConvergeRunState, evidence: ReturnType<typeof validated
   if (!Number.isSafeInteger(round) || round > state.roundCap || previous.round !== round ||
     state.rounds.some(r => r.runId === previous.runId)) throw new Error('stale_report_not_unadmitted');
   if (round > 1 && (!resolveRoundResolution(state,round-1) || resolveRoundResolution(state,round-1)?.status === 'unresolved')) throw new Error('triage_required');
-  if (previous.status !== 'completed' || previous.deliveryPending || previous.hardFailure ||
+  if (previous.status !== 'completed' || previous.deliveryPending || previous.deliveryFailure ||
     !hasHealthyGuardedLaunch(previous)) throw new Error('stale_report_outcome_ineligible');
-  if (attempts.attemptsUsed !== previous.attempt || !attempts.attempts.some(a => a.attempt === previous.attempt && a.source === 'claim')) throw new Error('stale_report_attempt_mismatch');
-  if (s.inputSha256 === previous.inputSha256 && !state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt)) throw new Error('inputs_unchanged');
+  const deliveredHardFailure = 'retryReason' in s;
+  const version = 'version' in s ? s.version : undefined;
+  if (deliveredHardFailure && previous.hardFailure !== true) throw new Error('stale_report_continuation_ineligible');
+  if (deliveredHardFailure) {
+    const reconciliation = previous.deliveryReconciliation;
+    if (!reconciliation || !previous.reviewerHealth) throw new Error('stale_report_outcome_ineligible');
+    if ((version === 2 && reconciliation.version !== 1) ||
+      (version !== 2 && (reconciliation.version !== 2 || reconciliation.claimPid !== previous.pid ||
+        reconciliation.cycleId !== (state.cycle?.id ?? null)))) {
+      throw new Error('stale_report_reconciliation_mismatch');
+    }
+  }
+  if (!deliveredHardFailure && previous.hardFailure === true) throw new Error('stale_report_outcome_ineligible');
+  const claim = attempts.attempts.find(a => a.attempt === previous.attempt && a.source === 'claim');
+  if (attempts.attemptsUsed !== previous.attempt || !claim ||
+    (deliveredHardFailure && claim.pid !== previous.pid)) throw new Error('stale_report_attempt_mismatch');
+  if (s.inputSha256 === previous.inputSha256 && (deliveredHardFailure ||
+    !state.staleReportAudit?.some(e => staleManifest(e).attempt === previous.attempt))) throw new Error('inputs_unchanged');
   if (previous.reportJsonSha256 !== s.reportSha256 || report.run.id !== previous.runId ||
     report.run.target.head_sha !== previous.headSha || report.run.converge?.target !== s.target ||
     report.run.converge?.round !== previous.round || report.run.converge?.attempt !== previous.attempt ||
     report.stats.totalReviews !== previous.totalReviews || report.stats.successfulReviews !== previous.successfulReviews ||
     report.reviews.length !== previous.totalReviews || successfulReviews !== previous.successfulReviews ||
     ![0,1].includes(report.run.ci_exit_code)) throw new Error('stale_report_binding_mismatch');
+  if (deliveredHardFailure) {
+    const reconciliation = previous.deliveryReconciliation!;
+    if (reconciliation.runId !== previous.runId || reconciliation.reportJsonSha256 !== previous.reportJsonSha256 ||
+      reconciliation.round !== previous.round || reconciliation.attempt !== previous.attempt ||
+      reconciliation.headSha !== previous.headSha) throw new Error('stale_report_reconciliation_binding_mismatch');
+    if (report.run.provenance === 'backfill' || report.run.gating.mode !== 'verified-consensus' ||
+      !isDeepStrictEqual(mergedBlockingHealth(report,previous.reviewerHealth!.policy.fraction),previous.reviewerHealth)) {
+      throw new Error('stale_report_health_binding_mismatch');
+    }
+    if ('version' in s && (![2,3].includes(s.version) || s.outcome !== 'delivered-hard-failure' ||
+      s.cycleId !== (state.cycle?.id ?? null) || !isDeepStrictEqual(s.deliveryReconciliation,previous.deliveryReconciliation) ||
+      !isDeepStrictEqual(s.reviewerHealth,previous.reviewerHealth))) throw new Error('stale_report_manifest_binding_mismatch');
+  }
   return previous;
 }
 
 /** Read-only evidence selection; it never admits findings or claims an attempt. */
 export async function previewStaleReport(input: StaleReportSelection, gitCommonDir: string): Promise<StaleReportManifest> {
-  const s = staleSelectionSchema.parse(input), common = await realpath(resolve(gitCommonDir));
+  const normalized = 'retryReason' in input
+    ? {...input,retryReason:canonicalStaleRetryReason(input.retryReason)} : input;
+  const s = staleSelectionSchema.parse(normalized), common = await realpath(resolve(gitCommonDir));
   await assertNoPendingFreshReview(common,s.target);
   const native = await readStable(convergeRunStatePath(common,s.target));
   const attempts = await readStable(convergeAttemptStatePath(common,s.target));
@@ -79,10 +112,13 @@ export async function previewStaleReport(input: StaleReportSelection, gitCommonD
     const prior = staleManifest(e);
     return prior.attempt === previous.attempt && prior.headSha === s.headSha && prior.inputSha256 === s.inputSha256;
   })) throw new Error('stale_report_already_disposed');
-  const manifest = staleManifestSchema.parse({...s,reportPath:platformPath(s.reportPath),reason:scrubText(s.reason,500),
-    kind:'rcl-stale-report',version:1,operationId:randomUUID(),createdAt:new Date().toISOString(),gitCommonDir:common,
+  const shared = {...s,reportPath:platformPath(s.reportPath),reason:scrubText(s.reason,500),kind:'rcl-stale-report' as const,
+    operationId:randomUUID(),createdAt:new Date().toISOString(),gitCommonDir:common,
     stateSha256:native.sha256,attemptSha256:attempts.sha256,runId:previous.runId,attempt:previous.attempt,round:previous.round,
-    previousHeadSha:previous.headSha,previousInputSha256:previous.inputSha256});
+    previousHeadSha:previous.headSha,previousInputSha256:previous.inputSha256};
+  const manifest = staleManifestSchema.parse('retryReason' in s ? {...shared,version:3,outcome:'delivered-hard-failure',
+    deliveryReconciliation:previous.deliveryReconciliation,reviewerHealth:previous.reviewerHealth,cycleId:state.cycle?.id ?? null}
+    : {...shared,version:1});
   await selected(convergeRunStatePath(common,s.target),native.sha256);
   await selected(convergeAttemptStatePath(common,s.target),attempts.sha256);
   return manifest;

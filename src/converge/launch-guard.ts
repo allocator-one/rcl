@@ -23,6 +23,7 @@ import {
 import type { ConvergeContext } from '../report/run-header.js';
 import { staleManifest, StaleReportAuditError } from './stale-report-schema.js';
 import { verifyStaleReportReceipts } from './stale-report.js';
+import { canonicalStaleRetryReason } from './stale-retry-reason.js';
 import { scrubText } from '../telemetry/scrub.js';
 import { verifyBoundFixRecovery, type BoundFixRecoverySelection } from './bound-fix-recovery.js';
 import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
@@ -101,8 +102,9 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   if (!/^[a-f0-9]{40}$/.test(options.headSha) || !/^[a-f0-9]{64}$/.test(options.inputSha256)) {
     refuse('invalid_input_identity', 'A guarded launch needs an exact head and effective-input SHA256.');
   }
-  if (options.retryReason !== undefined && (options.retryReason.trim() === '' || options.retryReason.length > 500)) {
-    refuse('invalid_retry_reason', 'An explicit bounded retry needs a nonempty reason of at most 500 characters.');
+  if (options.retryReason !== undefined) {
+    try { options.retryReason = canonicalStaleRetryReason(options.retryReason); }
+    catch { refuse('invalid_retry_reason', 'An explicit bounded retry needs a nonempty reason of at most 500 characters.'); }
   }
   const round = nextRound(state);
   if (options.round !== undefined && options.round !== round) {
@@ -195,6 +197,24 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     if (disposition.headSha !== options.headSha || disposition.inputSha256 !== options.inputSha256) {
       refuse('stale_report_input_mismatch', 'The stale disposition is bound to different current review inputs.');
     }
+    if (previous.hardFailure) {
+      const reconciliation = previous.deliveryReconciliation;
+      const shared = disposition.version !== 1 && disposition.outcome === 'delivered-hard-failure' &&
+        disposition.retryReason === options.retryReason && disposition.cycleId === (state.cycle?.id ?? null) &&
+        isDeepStrictEqual(disposition.reviewerHealth,previous.reviewerHealth) && reconciliation?.version === 2;
+      const binding = shared && (disposition.version === 3
+        ? isDeepStrictEqual(disposition.deliveryReconciliation,reconciliation)
+        : disposition.deliveryReconciliation.version === 1 &&
+          disposition.deliveryReconciliation.runId === reconciliation.runId &&
+          disposition.deliveryReconciliation.reportJsonSha256 === reconciliation.reportJsonSha256 &&
+          disposition.deliveryReconciliation.headSha === reconciliation.headSha &&
+          disposition.deliveryReconciliation.attempt === reconciliation.attempt &&
+          disposition.deliveryReconciliation.round === reconciliation.round);
+      if (!binding) refuse('stale_report_continuation_mismatch',
+        'The audited stale disposition does not authorize this exact delivered hard-failure retry.');
+    } else if (disposition.version !== 1) {
+      refuse('stale_report_launch_mismatch', 'A delivered hard-failure disposition cannot authorize ordinary stale work.');
+    }
 
   }
   if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
@@ -232,7 +252,12 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
     original.nowMs !== undefined && typeof original.nowMs !== 'function')) {
     refuse('invalid_original_preflight', 'Original launch preflight must be callable.');
   }
-  const options = { ...input, target: input.target.trim(), originalLaunch: original === undefined ? undefined : {
+  let retryReason = input.retryReason;
+  if (retryReason !== undefined) {
+    try { retryReason = canonicalStaleRetryReason(retryReason); }
+    catch { refuse('invalid_retry_reason', 'An explicit bounded retry needs a nonempty reason of at most 500 characters.'); }
+  }
+  const options = { ...input, retryReason, target: input.target.trim(), originalLaunch: original === undefined ? undefined : {
     input: structuredClone(original.input), beforeClaim: original.beforeClaim, nowMs: original.nowMs,
   },
     ...(input.legacyRetry ? { legacyRetry: { ...structuredClone(input.legacyRetry), reportPath: resolve(input.legacyRetry.reportPath) } } : {}) };

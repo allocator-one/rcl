@@ -168,6 +168,7 @@ export interface RunDetail {
   repo_verified?: boolean;
   is_cross_repository?: boolean;
   provenance?: string;
+  cycle_id?: string | null;
   historical_source?: { original_run_id: string; report_sha256: string } | null;
   rcl_version?: string;
   runner?: Record<string, unknown> | null;
@@ -279,6 +280,8 @@ export function isRunDetail(value: unknown, id: string): value is RunDetail {
     optional(value['target']['head_sha'], isString) &&
     optional(value['repo_verified'], isBoolean) &&
     optional(value['is_cross_repository'], isBoolean) &&
+    optional(value['provenance'], isString) &&
+    optional(value['cycle_id'], isString) &&
     nullableRecord(value['runner']) &&
     nullableRecord(value['stats']) &&
     (value['converge'] === null || value['converge'] === undefined || (isRecord(value['converge']) && isString(value['converge']['target']))) &&

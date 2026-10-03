@@ -104,6 +104,35 @@ function barrier() {
 
 describe('owned attempt launch metadata', () => {
   it.runIf(process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32')(
+    'retains process birth identity alongside strong delivery reconciliation', async () => {
+      const claim = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 4 });
+      const launch = pending(claim);
+      await persist(launch);
+      const complete = completed(launch);
+      complete.hardFailure = true;
+      complete.deliveryReconciliation = {
+        version: 2,
+        runId: complete.runId!,
+        reportJsonSha256: complete.reportJsonSha256!,
+        headSha: complete.headSha,
+        inputSha256: complete.inputSha256,
+        attempt: complete.attempt,
+        round: complete.round,
+        claimPid: complete.pid,
+        cycleId: null,
+        reconciledAt: new Date().toISOString(),
+      };
+
+      await persist(complete);
+
+      expect((await loadConvergeAttemptState(directory, target))!.lastLaunch).toMatchObject({
+        processIdentity: claim.processIdentity,
+        deliveryReconciliation: { version: 2, claimPid: process.pid },
+      });
+    },
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32')(
     'refuses completion by a reused PID with a different process birth identity', async () => {
       const owner = processIdentityFault.current!;
       const claim = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 4 });

@@ -3,7 +3,7 @@ name: Sync skills
 # After every successful Release, render the vendored rcl and rcl-converge
 # skills from the released tag and open or update one sync pull request in each
 # repository listed in skills/consumers.json. Consumers therefore only ever
-# receive skills that match a published review-council.
+# receive skills that match a published @allocator-one/rcl.
 on:
   workflow_run:
     workflows: [Release]

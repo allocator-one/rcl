@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## 4.5.3 - 2026-10-04
+
+- Strengthen delivered hard-failure reconciliation with a versioned marker
+  bound to the exact input digest, claim PID, review cycle and reconciliation
+  time. Every hard-failure marker now requires live server provenance and exact
+  server/native cycle, repository and pull-request authority. Existing 4.5.2
+  markers and stale audit receipts remain readable and can be authenticated
+  forward without changing attempts, rounds, findings or provider calls
+  (RCL-177).
+
+## 4.5.2 - 2026-10-03
+
+- Continue a guarded review when an old-head report retained `hardFailure`
+  after its exact evidence delivery was reconciled and its blocking reviewer
+  health was conclusive. Authenticated delivery reconciliation records an exact
+  durable marker, including a guarded backfill for 4.5.1 delivery failures.
+  The audited `converge-stale` variant preserves the original report and
+  accounting, binds the replacement inputs and explicit retry reason, and
+  claims only the next attempt and native round. Pending,
+  local-invalid, unhealthy, same-input, mismatched and exhausted work remains
+  fail closed (RCL-177).
+
+## 4.5.1 - 2026-10-03
+
+- Stop publishing `review-council`. Every consumer installs
+  `@allocator-one/rcl`, and the former name is deprecated on npm with a pointer
+  to it; installers still remove an existing `review-council` first (RCL-175).
+
+## 4.5.0 - 2026-10-03
+
+- Publish as `@allocator-one/rcl`. The package keeps the `rcl` executable and
+  the `.review-council.{yml,yaml,json}` configuration files. Every release also
+  publishes the same files as `review-council` until consumers have moved;
+  remove `review-council` before installing (`npm uninstall -g review-council`),
+  because both packages own the `rcl` executable. The verified installer and
+  the `/rcl` skill install the new package and remove the old one first. The
+  release announcement now validates provenance for the scoped package, and
+  `engines.node` states the Node 20 the dependencies already require (RCL-170).
+- Rewrite the README for the new package name: install and migration from
+  `review-council`, provider keys, commands, configuration, exit codes and the
+  Harness evidence gate, with the convergence and recovery runbooks moved to
+  `docs/` (RCL-172).
+
 ## 4.4.19 - 2026-10-02
 
 - Distinguish terminal local evidence rejection from retryable delivery. Add
