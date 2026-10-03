@@ -22,7 +22,7 @@ import { promisify } from 'node:util';
 import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { RegistryCleanupError } from '../coordination/registry-lock.js';
-import { captureProcessIdentity, inspectProcessIdentity, processIdentitySchema,
+import { captureCurrentProcessIdentity, inspectProcessIdentity, processIdentitySchema,
   type ProcessIdentity } from './process-identity.js';
 
 export const DEFAULT_CONVERGE_ATTEMPT_CAP = 20;
@@ -714,7 +714,7 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
   const recordPid = options.recordPid ?? process.pid;
   const recordProcessIdentity = recordPid === process.pid &&
     (process.platform === 'linux' || process.platform === 'darwin')
-    ? await captureProcessIdentity()
+    ? await captureCurrentProcessIdentity()
     : undefined;
   const lockOwner: AttemptLockOwner = {
     pid: process.pid,
@@ -931,7 +931,7 @@ export async function recordConvergeAttemptRecoveryResume(
   const next = launchSchema.parse(input.next);
   const source = { nativeSha256: input.nativeSha256, cycleId: input.cycleId };
   let currentIdentity;
-  try { currentIdentity = await captureProcessIdentity(); }
+  try { currentIdentity = await captureCurrentProcessIdentity(); }
   catch (error) { throw new ConvergeAttemptStateError('recovery_resume_owner_unverifiable', { cause: error }); }
   const binding = (launch: GuardedLaunchState) => {
     const { status: _status, reportJsonSha256: _report, successfulReviews: _success, totalReviews: _total,

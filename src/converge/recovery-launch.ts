@@ -38,7 +38,7 @@ import {
 import { retainedLaunchInputSha256 } from "./retained-report.js";
 import { stableStringify } from "../report/run-header.js";
 import { withNativeTarget, type NativeTargetOwnership } from "./target-ownership.js";
-import { captureProcessIdentity, inspectProcessIdentity, type ProcessIdentity } from './process-identity.js';
+import { captureCurrentProcessIdentity, inspectProcessIdentity, type ProcessIdentity } from './process-identity.js';
 
 /** Exact canonical operation; the callback grants no authority by itself. */
 export interface BoundRecoveryOperation {
@@ -318,7 +318,7 @@ export async function guardReviewerRecoveryLaunch(
   let failure: unknown;
   let claim: ConvergeAttemptClaim;
   let ownerIdentity: ProcessIdentity;
-  try { ownerIdentity = await captureProcessIdentity(); }
+  try { ownerIdentity = await captureCurrentProcessIdentity(); }
   catch { fail('owner_unverifiable'); }
   try {
     claim = await claimConvergeAttempt({
@@ -636,7 +636,7 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     // Health describes completed evidence only; the immutable report and claims
     // remain bound above, and finish derives health again from the saved lineage.
     let currentIdentity: ProcessIdentity;
-    try { currentIdentity = await captureProcessIdentity(); }
+    try { currentIdentity = await captureCurrentProcessIdentity(); }
     catch { fail('resume_owner_unverifiable'); }
     const mutableLaunch = { ...launch };
     delete mutableLaunch.reviewerHealth;

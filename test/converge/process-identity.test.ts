@@ -34,14 +34,51 @@ describe('process identity', () => {
   });
 
   it('uses the bounded fixed-environment system command for the Darwin birth marker', async () => {
-    const command = vi.fn(async () => 'Thu Oct  2 12:34:56 2026\n');
+    const command = vi.fn(async () => [
+      'Process:         node [17]',
+      'Date/Time:       2026-10-02 12:35:00.000 +0200',
+      'Launch Time:     2026-10-02 12:34:56.123 +0200',
+      'Report Version:  7',
+      '',
+    ].join('\n'));
     const darwinScope = { platform: 'darwin' as const, boot: scope.boot, namespace: 'native' as const };
     const identity = await captureProcessIdentity(17, {
       platform: 'darwin', scope: async () => darwinScope, probe: () => {}, command,
     });
-    expect(command).toHaveBeenCalledWith('/bin/ps', ['-p', '17', '-o', 'lstart=']);
+    expect(command).toHaveBeenCalledWith('/usr/bin/vmmap', ['-summary', '17']);
     expect(identity.birthSha256).toBe(createHash('sha256')
-      .update('darwin\0darwin:Thu Oct  2 12:34:56 2026').digest('hex'));
+      .update('darwin\0darwin:2026-10-02 12:34:56.123 +0200').digest('hex'));
+  });
+
+  it('distinguishes Darwin PID reuse within the same wall-clock second', async () => {
+    const darwinScope = { platform: 'darwin' as const, boot: scope.boot, namespace: 'native' as const };
+    const output = (launch: string) => `Process: node [17]\nLaunch Time: ${launch}\nReport Version: 7\n`;
+    const original = await captureProcessIdentity(17, {
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {},
+      command: async () => output('2026-10-02 12:34:56.123 +0200'),
+    });
+    await expect(inspectProcessIdentity(original, {
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {},
+      command: async () => output('2026-10-02 12:34:56.987 +0200'),
+    })).resolves.toBe('dead');
+    await expect(inspectProcessIdentity(original, {
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {},
+      command: async () => output('2026-10-02 12:34:56.123 +0200'),
+    })).resolves.toBe('alive');
+  });
+
+  it('rejects missing, duplicate and malformed Darwin launch markers', async () => {
+    const darwinScope = { platform: 'darwin' as const, boot: scope.boot, namespace: 'native' as const };
+    const capture = (output: string) => captureProcessIdentity(17, {
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {}, command: async () => output,
+    });
+    await expect(capture('Process: node [17]\n')).rejects.toThrow('invalid_darwin_process_birth');
+    await expect(capture([
+      'Launch Time: 2026-10-02 12:34:56.123 +0200',
+      'Launch Time: 2026-10-02 12:34:56.123 +0200',
+    ].join('\n'))).rejects.toThrow('invalid_darwin_process_birth');
+    await expect(capture('Launch Time: Thu Oct 2 12:34:56 2026\n'))
+      .rejects.toThrow('invalid_darwin_process_birth');
   });
 
   it('distinguishes a reused PID from the original live process', async () => {
@@ -53,15 +90,15 @@ describe('process identity', () => {
     await expect(inspectProcessIdentity(original, io())).resolves.toBe('alive');
   });
 
-  it('does not treat a missing Darwin ps executable as proof that the owner died', async () => {
+  it('does not treat a missing Darwin process-inspection executable as proof that the owner died', async () => {
     const darwinScope = { platform: 'darwin' as const, boot: scope.boot, namespace: 'native' as const };
     const original = await captureProcessIdentity(17, {
       platform: 'darwin', scope: async () => darwinScope, probe: () => {},
-      command: async () => 'Thu Oct  2 12:34:56 2026\n',
+      command: async () => 'Launch Time: 2026-10-02 12:34:56.123 +0200\n',
     });
     await expect(inspectProcessIdentity(original, {
       platform: 'darwin', scope: async () => darwinScope, probe: () => {},
-      command: async () => { throw Object.assign(new Error('missing ps'), { code: 'ENOENT' }); },
+      command: async () => { throw Object.assign(new Error('missing vmmap'), { code: 'ENOENT' }); },
     })).resolves.toBe('unverifiable');
   });
 

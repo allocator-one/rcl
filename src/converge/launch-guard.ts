@@ -28,7 +28,7 @@ import { verifyBoundFixRecovery, type BoundFixRecoverySelection } from './bound-
 import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
 import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
-import { captureProcessIdentity } from './process-identity.js';
+import { captureCurrentProcessIdentity } from './process-identity.js';
 
 /** Canonical original descriptor prepared under target ownership, before its claim is spent. */
 export interface PreparedOriginalLaunch {
@@ -290,7 +290,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
     await assertNoPendingFreshReview(options.gitCommonDir, options.target);
   }
   const processIdentity = process.platform === 'linux' || process.platform === 'darwin'
-    ? await captureProcessIdentity()
+    ? await captureCurrentProcessIdentity()
     : undefined;
   const claim = await claimConvergeAttempt({
     gitCommonDir: options.gitCommonDir,

@@ -66,8 +66,13 @@ function linuxBirth(raw: string, pid: number): string {
 
 async function processBirth(pid: number, scope: LockScope, io: ProcessIdentityIO): Promise<string> {
   if (scope.platform === 'linux') return linuxBirth(await io.linuxStat(pid), pid);
-  const started = (await io.command('/bin/ps', ['-p', String(pid), '-o', 'lstart='])).trim();
-  if (!started || started.length > 224 || /[\r\n]/.test(started)) throw new Error('invalid_darwin_process_birth');
+  const output = await io.command('/usr/bin/vmmap', ['-summary', String(pid)]);
+  const launchLines = output.split('\n').filter(line => line.startsWith('Launch Time:'));
+  const match = launchLines.length === 1
+    ? /^Launch Time:[ \t]+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [+-]\d{4})$/.exec(launchLines[0]!)
+    : null;
+  const started = match?.[1];
+  if (!started) throw new Error('invalid_darwin_process_birth');
   return `darwin:${started}`;
 }
 
@@ -87,6 +92,17 @@ export async function captureProcessIdentity(
   io.probe(pid);
   return processIdentitySchema.parse({ version: 1, pid, scope,
     birthSha256: birthDigest(scope.platform, await processBirth(pid, scope, io)) });
+}
+
+let currentProcessIdentity: Promise<ProcessIdentity> | undefined;
+
+/** Capture this immutable process identity once; arbitrary PID captures remain fresh. */
+export function captureCurrentProcessIdentity(): Promise<ProcessIdentity> {
+  currentProcessIdentity ??= captureProcessIdentity().catch(error => {
+    currentProcessIdentity = undefined;
+    throw error;
+  });
+  return currentProcessIdentity;
 }
 
 /** Determine whether the exact saved process still exists; uncertainty never proves death. */
