@@ -33,6 +33,14 @@ describe('process identity', () => {
     });
   });
 
+  it('accepts zero as a valid Linux process start tick', async () => {
+    const zeroBirth = io({
+      linuxStat: async () => '17 (node worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 0 20',
+    });
+    const identity = await captureProcessIdentity(17, zeroBirth);
+    await expect(inspectProcessIdentity(identity, zeroBirth)).resolves.toBe('alive');
+  });
+
   it('uses the bounded fixed-environment system command for the Darwin birth marker', async () => {
     const command = vi.fn(async () => [
       'Process:         node [17]',

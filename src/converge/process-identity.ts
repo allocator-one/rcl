@@ -60,7 +60,7 @@ function linuxBirth(raw: string, pid: number): string {
   // Fields after comm start at field 3; process start time is field 22.
   const fields = raw.slice(closing + 1).trim().split(/\s+/);
   const startTicks = fields[19];
-  if (!startTicks || !/^[1-9]\d*$/.test(startTicks)) throw new Error('invalid_linux_process_birth');
+  if (!startTicks || !/^\d+$/.test(startTicks)) throw new Error('invalid_linux_process_birth');
   return `linux:${startTicks}`;
 }
 
