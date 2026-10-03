@@ -1279,3 +1279,41 @@ it('cold resume preserves an interrupted intent before dispatching the alternate
   expect(after.records.filter(row => row.type === 'uncertain').map(row => row.cell)).toEqual(['s1:0']);
   expect(lineage.runs[0]!.terminal.reportBytes).toBe(sourceBefore);
 });
+
+it('launches and resumes reviewer recovery with a qualified Windows process identity', async () => {
+  const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const systemRoot = process.env.SystemRoot;
+  const command = vi.fn(async (_file: string, args: string[]) =>
+    args.at(-1)?.includes('Win32_OperatingSystem') ? '638950000000000000\r\n' : '638950123456789000\r\n');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  process.env.SystemRoot = String.raw`C:\Windows`;
+  vi.resetModules();
+  vi.doMock('../../src/evidence/original-run/lock-scope.js', async importOriginal => ({
+    ...await importOriginal<typeof import('../../src/evidence/original-run/lock-scope.js')>(),
+    lockSystemCommand: command,
+  }));
+  try {
+    const recovery = await import('../../src/converge/recovery-launch.js');
+    value.run = async () => { throw new Error('windows launch reached callback'); };
+    await expect(recovery.guardReviewerRecoveryLaunch(value)).rejects.toThrow('windows launch reached callback');
+    const failedLaunch = (await runState(fixture))!.lastLaunch!;
+    const spent = (await state(fixture))!.attempts.at(-1)!;
+    expect(failedLaunch).toMatchObject({ status: 'failed',
+      processIdentity: { scope: { platform: 'win32' } } });
+    expect({ attempt: spent.attempt, pid: spent.pid, processIdentity: spent.processIdentity })
+      .toEqual({ attempt: failedLaunch.attempt, pid: failedLaunch.pid, processIdentity: failedLaunch.processIdentity });
+
+    await expect(recovery.guardReviewerRecoveryResume({ ...resumeOptions(value),
+      run: async () => { throw new Error('windows resume reached callback'); } }))
+      .rejects.toThrow('windows resume reached callback');
+    expect(command.mock.calls.some(([, args]) => args.at(-1)?.includes('Win32_OperatingSystem'))).toBe(true);
+    expect(command.mock.calls.some(([, args]) => args.at(-1)?.includes('Get-Process -Id'))).toBe(true);
+  } finally {
+    vi.doUnmock('../../src/evidence/original-run/lock-scope.js');
+    vi.resetModules();
+    Object.defineProperty(process, 'platform', platform);
+    if (systemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = systemRoot;
+  }
+});

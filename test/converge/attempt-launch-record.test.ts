@@ -8,10 +8,19 @@ import {
 } from '../../src/converge/attempt-budget.js';
 import { withNativeTarget, withOwnedNativeOperation } from '../../src/converge/target-ownership.js';
 import type { GuardedLaunchState } from '../../src/converge/launch-record.js';
+import type { ProcessIdentity } from '../../src/converge/process-identity.js';
 
 const fault = vi.hoisted(() => ({
   file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
 }));
+const processIdentityFault = vi.hoisted(() => ({ current: undefined as ProcessIdentity | undefined }));
+vi.mock('../../src/converge/process-identity.js', async importOriginal => {
+  const identity = await importOriginal<typeof import('../../src/converge/process-identity.js')>();
+  return {
+    ...identity,
+    captureCurrentProcessIdentity: async () => processIdentityFault.current ?? identity.captureCurrentProcessIdentity(),
+  };
+});
 vi.mock('node:fs/promises', async importOriginal => {
   const fs = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -51,8 +60,20 @@ vi.mock('node:fs/promises', async importOriginal => {
 
 let directory: string;
 const target = 'synthetic-launch-record';
-beforeEach(async () => { directory = await realpath(await mkdtemp(join(tmpdir(), 'rcl-attempt-launch-'))); });
+function testOwner(): ProcessIdentity {
+  const scope: ProcessIdentity['scope'] = process.platform === 'win32'
+    ? { platform: 'win32', bootSha256: 'a'.repeat(64), namespace: 'native' }
+    : process.platform === 'darwin'
+      ? { platform: 'darwin', boot: '11111111-1111-4111-8111-111111111111', namespace: 'native' }
+      : { platform: 'linux', boot: '11111111-1111-4111-8111-111111111111', namespace: '1:123' };
+  return { version: 1, pid: process.pid, scope, birthSha256: 'e'.repeat(64) };
+}
+beforeEach(async () => {
+  directory = await realpath(await mkdtemp(join(tmpdir(), 'rcl-attempt-launch-')));
+  processIdentityFault.current = testOwner();
+});
 afterEach(async () => {
+  processIdentityFault.current = undefined;
   Object.assign(fault, {
     file: '', directory: '', renamed: false, fail: false, failures: 0, synced: 0, readOnlySyncs: 0,
   });
@@ -82,6 +103,26 @@ function barrier() {
 }
 
 describe('owned attempt launch metadata', () => {
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32')(
+    'refuses completion by a reused PID with a different process birth identity', async () => {
+      const owner = processIdentityFault.current!;
+      const claim = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 4 });
+      expect(claim.processIdentity).toEqual(owner);
+      const launch = pending(claim);
+      await persist(launch);
+      const path = convergeAttemptStatePath(directory, target);
+      const before = await readFile(path, 'utf8');
+
+      processIdentityFault.current = { ...claim.processIdentity!, birthSha256: 'f'.repeat(64) };
+      await expect(persist(completed(launch))).rejects.toThrow(/process identity|attempt owner/i);
+      expect(await readFile(path, 'utf8')).toBe(before);
+
+      processIdentityFault.current = claim.processIdentity;
+      await persist(completed(launch));
+      expect((await loadConvergeAttemptState(directory, target))!.lastLaunch?.status).toBe('completed');
+    },
+  );
+
   it.each(['pending', 'completed'] as const)('pins %s input before an earlier owned operation finishes', async status => {
     const claim = await claimConvergeAttempt({ gitCommonDir: directory, target, maxAttempts: 4 });
     const first = pending(claim);

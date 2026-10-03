@@ -713,7 +713,7 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
   const now = options.now ?? (() => new Date());
   const recordPid = options.recordPid ?? process.pid;
   const recordProcessIdentity = recordPid === process.pid &&
-    (process.platform === 'linux' || process.platform === 'darwin')
+    (process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32')
     ? await captureCurrentProcessIdentity()
     : undefined;
   const lockOwner: AttemptLockOwner = {
@@ -874,6 +874,16 @@ export async function recordConvergeAttemptLaunch(
       if ((attemptOwner !== undefined || incoming.processIdentity !== undefined) &&
         !isDeepStrictEqual(attemptOwner, incoming.processIdentity)) {
         throw new ConvergeAttemptStateError('Guarded launch process identity does not match its attempt owner.');
+      }
+      if (mutation === 'completion' && attemptOwner !== undefined) {
+        let currentOwner: ProcessIdentity;
+        try { currentOwner = await captureCurrentProcessIdentity(); }
+        catch (error) {
+          throw new ConvergeAttemptStateError('Guarded launch current process identity is unverifiable.', { cause: error });
+        }
+        if (!isDeepStrictEqual(attemptOwner, currentOwner)) {
+          throw new ConvergeAttemptStateError('Guarded launch current process identity does not match its attempt owner.');
+        }
       }
       const { assertReviewCyclePair } = await import('./fresh-review.js');
       await assertReviewCyclePair(commonDir, target, state.cycle);

@@ -24,6 +24,67 @@ function io(overrides: Partial<ProcessIdentityIO> = {}): Partial<ProcessIdentity
 }
 
 describe('process identity', () => {
+  it('binds Windows identity to bounded boot and process birth markers', async () => {
+    const powershell = String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`;
+    const command = vi.fn(async (_file: string, args: string[]) =>
+      args.at(-1)?.includes('Win32_OperatingSystem') ? '638950000000000000\r\n' : '638950123456789000\r\n');
+    const identity = await captureProcessIdentity(17, {
+      platform: 'win32', probe: () => {}, command, windowsPowerShell: powershell,
+    });
+    expect(identity).toEqual({
+      version: 1,
+      pid: 17,
+      scope: {
+        platform: 'win32',
+        namespace: 'native',
+        bootSha256: createHash('sha256').update('win32\0' + '638950000000000000').digest('hex'),
+      },
+      birthSha256: createHash('sha256').update('win32\0win32:638950123456789000').digest('hex'),
+    });
+    expect(command).toHaveBeenCalledTimes(2);
+    expect(command.mock.calls.every(([file]) => file === powershell)).toBe(true);
+    expect(command.mock.calls.every(([, args]) => args.slice(0, 3).join(' ') === '-NoLogo -NoProfile -NonInteractive')).toBe(true);
+    expect(command.mock.calls.every(([, , timeout]) => timeout === 5_000)).toBe(true);
+  });
+
+  it('resolves the default Windows PowerShell path from an ordinary SystemRoot', async () => {
+    const previous = process.env.SystemRoot;
+    process.env.SystemRoot = String.raw`C:\Windows`;
+    const command = vi.fn(async (_file: string, args: string[]) =>
+      args.at(-1)?.includes('Win32_OperatingSystem') ? '638950000000000000\r\n' : '638950123456789000\r\n');
+    try {
+      await expect(captureProcessIdentity(17, { platform: 'win32', probe: () => {}, command })).resolves.toMatchObject({
+        scope: { platform: 'win32' },
+      });
+      expect(command.mock.calls.map(([file]) => file)).toEqual([
+        String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+        String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = previous;
+    }
+  });
+
+  it('distinguishes Windows PID reuse and fails closed on ambiguous birth output', async () => {
+    const powershell = String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`;
+    const windowsScope = {
+      platform: 'win32' as const,
+      namespace: 'native' as const,
+      bootSha256: 'a'.repeat(64),
+    };
+    const overrides = (output: string): Partial<ProcessIdentityIO> => ({
+      platform: 'win32', scope: async () => windowsScope, probe: () => {}, windowsPowerShell: powershell,
+      command: async () => output,
+    });
+    const original = await captureProcessIdentity(17, overrides('638950123456789000\r\n'));
+    await expect(inspectProcessIdentity(original, overrides('638950123456789000\r\n'))).resolves.toBe('alive');
+    await expect(inspectProcessIdentity(original, overrides('638950123456789001\r\n'))).resolves.toBe('dead');
+    await expect(inspectProcessIdentity(original, overrides('RCL_PROCESS_MISSING\r\n'))).resolves.toBe('dead');
+    await expect(inspectProcessIdentity(original, overrides('638950123456789000\r\nextra\r\n')))
+      .resolves.toBe('unverifiable');
+  });
+
   it('binds a PID to the current boot, PID namespace and kernel birth marker', async () => {
     await expect(captureProcessIdentity(17, io())).resolves.toEqual({
       version: 1,
@@ -53,7 +114,7 @@ describe('process identity', () => {
     const identity = await captureProcessIdentity(17, {
       platform: 'darwin', scope: async () => darwinScope, probe: () => {}, command,
     });
-    expect(command).toHaveBeenCalledWith('/usr/bin/vmmap', ['-summary', '17']);
+    expect(command).toHaveBeenCalledWith('/usr/bin/vmmap', ['-summary', '17'], 5_000);
     expect(identity.birthSha256).toBe(createHash('sha256')
       .update('darwin\0darwin:2026-10-02 12:34:56.123 +0200').digest('hex'));
   });

@@ -1,19 +1,28 @@
 import { open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { win32 } from 'node:path';
 import { z } from 'zod';
 
 import {
   localLockScope,
   lockScopeSchema,
   lockSystemCommand,
-  type LockScope,
 } from '../evidence/original-run/lock-scope.js';
+
+const windowsProcessScopeSchema = z.object({
+  platform: z.literal('win32'),
+  bootSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  namespace: z.literal('native'),
+}).strict();
+
+const processIdentityScopeSchema = z.union([lockScopeSchema, windowsProcessScopeSchema]);
+type ProcessIdentityScope = z.infer<typeof processIdentityScopeSchema>;
 
 export const processIdentitySchema = z.object({
   version: z.literal(1),
   pid: z.number().int().positive().safe(),
-  scope: lockScopeSchema,
+  scope: processIdentityScopeSchema,
   birthSha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
@@ -22,10 +31,11 @@ export type ProcessIdentityStatus = 'alive' | 'dead' | 'unverifiable';
 
 export interface ProcessIdentityIO {
   platform: string;
-  scope: () => Promise<LockScope>;
+  scope: () => Promise<ProcessIdentityScope>;
   probe: (pid: number) => void;
   linuxStat: (pid: number) => Promise<string>;
   command: typeof lockSystemCommand;
+  windowsPowerShell: string;
 }
 
 function nodeError(error: unknown, code: string): boolean {
@@ -33,14 +43,47 @@ function nodeError(error: unknown, code: string): boolean {
 }
 
 function defaults(overrides: Partial<ProcessIdentityIO>): ProcessIdentityIO {
+  const platform = overrides.platform ?? process.platform;
+  const command = overrides.command ?? lockSystemCommand;
+  const windowsPowerShell = overrides.windowsPowerShell ??
+    (platform === 'win32' ? defaultWindowsPowerShell() : '');
   return {
-    platform: process.platform,
-    scope: localLockScope,
+    platform,
+    scope: () => localProcessScope(platform, command, windowsPowerShell),
     probe: pid => process.kill(pid, 0),
     linuxStat: readLinuxStat,
-    command: lockSystemCommand,
+    command,
+    windowsPowerShell,
     ...overrides,
   };
+}
+
+function defaultWindowsPowerShell(): string {
+  const root = process.env.SystemRoot;
+  if (!root || !win32.isAbsolute(root) || /[<>"|?*\r\n]/.test(root)) {
+    throw new Error('unsupported_windows_process_identity');
+  }
+  return win32.join(win32.normalize(root), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
+function windowsTicks(raw: string, error: string): string {
+  const lines = raw.split(/\r?\n/).filter(line => line.length > 0);
+  if (lines.length !== 1 || !/^(?:0|[1-9]\d{0,19})$/.test(lines[0]!)) throw new Error(error);
+  return lines[0]!;
+}
+
+function windowsArgs(script: string): string[] {
+  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script];
+}
+
+async function localProcessScope(platform: string, command: typeof lockSystemCommand,
+  windowsPowerShell: string): Promise<ProcessIdentityScope> {
+  if (platform !== 'win32') return localLockScope();
+  const ticks = windowsTicks(await command(windowsPowerShell, windowsArgs(
+    '(Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().Ticks',
+  ), 5_000), 'invalid_windows_boot_identity');
+  return windowsProcessScopeSchema.parse({ platform: 'win32', namespace: 'native',
+    bootSha256: createHash('sha256').update(`win32\0${ticks}`, 'utf8').digest('hex') });
 }
 
 async function readLinuxStat(pid: number): Promise<string> {
@@ -64,9 +107,17 @@ function linuxBirth(raw: string, pid: number): string {
   return `linux:${startTicks}`;
 }
 
-async function processBirth(pid: number, scope: LockScope, io: ProcessIdentityIO): Promise<string> {
+async function processBirth(pid: number, scope: ProcessIdentityScope, io: ProcessIdentityIO): Promise<string> {
   if (scope.platform === 'linux') return linuxBirth(await io.linuxStat(pid), pid);
-  const output = await io.command('/usr/bin/vmmap', ['-summary', String(pid)]);
+  if (scope.platform === 'win32') {
+    const marker = 'RCL_PROCESS_MISSING';
+    const raw = await io.command(io.windowsPowerShell, windowsArgs(
+      `$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;if($null -eq $p){'${marker}'}else{$p.StartTime.ToUniversalTime().Ticks}`,
+    ), 5_000);
+    if (raw.trim() === marker) throw Object.assign(new Error('windows_process_missing'), { code: 'ESRCH' });
+    return `win32:${windowsTicks(raw, 'invalid_windows_process_birth')}`;
+  }
+  const output = await io.command('/usr/bin/vmmap', ['-summary', String(pid)], 5_000);
   const launchLines = output.split('\n').filter(line => line.startsWith('Launch Time:'));
   const match = launchLines.length === 1
     ? /^Launch Time:[ \t]+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [+-]\d{4})$/.exec(launchLines[0]!)
@@ -76,7 +127,7 @@ async function processBirth(pid: number, scope: LockScope, io: ProcessIdentityIO
   return `darwin:${started}`;
 }
 
-function birthDigest(platform: LockScope['platform'], birth: string): string {
+function birthDigest(platform: ProcessIdentityScope['platform'], birth: string): string {
   return createHash('sha256').update(`${platform}\0${birth}`, 'utf8').digest('hex');
 }
 
@@ -114,7 +165,7 @@ export async function inspectProcessIdentity(
   if (!parsed.success) return 'unverifiable';
   const expected = parsed.data;
   const io = defaults(overrides);
-  let scope: LockScope;
+  let scope: ProcessIdentityScope;
   try { scope = await io.scope(); }
   catch { return 'unverifiable'; }
   if (io.platform !== scope.platform || !isDeepStrictEqual(scope, expected.scope)) return 'unverifiable';

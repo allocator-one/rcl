@@ -12,10 +12,13 @@ export const lockScopeSchema = z.discriminatedUnion('platform', [
 export type LockScope = z.infer<typeof lockScopeSchema>;
 
 /** Absolute system utilities only; no shell, caller environment or unbounded output. */
-export async function lockSystemCommand(file: string, args: string[]): Promise<string> {
+export async function lockSystemCommand(file: string, args: string[], timeoutMs = 1_000): Promise<string> {
+  const env = process.platform === 'win32' && process.env.SystemRoot
+    ? { SystemRoot: process.env.SystemRoot, WINDIR: process.env.SystemRoot }
+    : { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' };
   const { stdout } = await exec(file, args, {
-    encoding: 'utf8', timeout: 1000, maxBuffer: 1024 * 1024,
-    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' },
+    encoding: 'utf8', timeout: timeoutMs, maxBuffer: 1024 * 1024,
+    env,
   });
   return stdout;
 }
