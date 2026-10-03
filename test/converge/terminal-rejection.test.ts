@@ -21,6 +21,23 @@ import { serializeRecoveryDocument } from '../../src/evidence/original-run/journ
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import type { ReviewCycleReceipt } from '../../src/converge/review-cycle.js';
 
+vi.mock('../../src/converge/process-identity.js', async importOriginal => {
+  const identity = await importOriginal<typeof import('../../src/converge/process-identity.js')>();
+  return {
+    ...identity,
+    captureCurrentProcessIdentity: async () => ({
+      version: 1 as const,
+      pid: process.pid,
+      scope: process.platform === 'win32'
+        ? { platform: 'win32' as const, bootSha256: 'a'.repeat(64), namespace: 'native' as const }
+        : process.platform === 'darwin'
+          ? { platform: 'darwin' as const, boot: '11111111-1111-4111-8111-111111111111', namespace: 'native' as const }
+          : { platform: 'linux' as const, boot: '11111111-1111-4111-8111-111111111111', namespace: '1:123' },
+      birthSha256: 'e'.repeat(64),
+    }),
+  };
+});
+
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 async function fixture(legacy = true, cap = 20) {
