@@ -119,15 +119,15 @@ export const launchSchema = z.object({
   recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),
 }).strict().refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined)
   .refine(value => value.deliveryReconciliation === undefined ||
-    (value.status === 'completed' && value.deliveryPending === false && value.hardFailure === true &&
+    (value.status === 'completed' && value.deliveryPending === false &&
       value.runId === value.deliveryReconciliation.runId &&
       value.reportJsonSha256 === value.deliveryReconciliation.reportJsonSha256 &&
       value.headSha === value.deliveryReconciliation.headSha &&
       value.attempt === value.deliveryReconciliation.attempt && value.round === value.deliveryReconciliation.round &&
       (value.deliveryReconciliation.version === 1 ||
-        (value.inputSha256 === value.deliveryReconciliation.inputSha256 &&
+        (value.hardFailure === true && value.inputSha256 === value.deliveryReconciliation.inputSha256 &&
           value.pid === value.deliveryReconciliation.claimPid))),
-  'Delivery reconciliation must bind the exact completed hard-failure launch');
+  'Delivery reconciliation must bind the exact completed launch');
 
 export type GuardedLaunchState = z.infer<typeof launchSchema>;
 export type GuardedLaunchCompletion = z.infer<typeof completionSchema>;

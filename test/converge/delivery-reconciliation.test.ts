@@ -89,6 +89,31 @@ describe('reconcileDeliveredRun', () => {
       await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir, getRun })).resolves.toBe('unchanged');
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
+  it('keeps a published v1 marker on an ordinary reconciled launch readable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
+    try {
+      await pendingState(dir, target);
+      const state = (await loadConvergeRunState(dir, target))!;
+      state.lastLaunch = {
+        ...state.lastLaunch!,
+        deliveryPending: false,
+        hardFailure: false,
+        deliveryReconciliation: {
+          version: 1,
+          runId,
+          reportJsonSha256: digest,
+          headSha: head,
+          attempt: state.lastLaunch!.attempt,
+          round: state.lastLaunch!.round,
+        },
+      };
+      await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
+      expect((await loadConvergeRunState(dir, target))!.lastLaunch).toMatchObject({
+        hardFailure: false,
+        deliveryReconciliation: { version: 1, runId },
+      });
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
   it('leaves markerless legacy reconciliation unchanged when the server binding differs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
     try {
