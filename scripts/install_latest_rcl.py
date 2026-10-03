@@ -500,6 +500,8 @@ def install_latest_rcl(
                 )
                 continue
 
+            # The verified artifact goes in right after this. If that install
+            # fails, the prefix holds neither package and a rerun installs fresh.
             if legacy_version is not None:
                 print(
                     f"Removing {LEGACY_PACKAGE} {legacy_version}, which now publishes as {PACKAGE}",

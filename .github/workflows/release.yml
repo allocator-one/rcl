@@ -107,11 +107,13 @@ jobs:
           mkdir "$COMPARE/scoped" "$COMPARE/legacy"
           tar -xzf "${packages[0]}" -C "$COMPARE/scoped"
           tar -xzf "${legacy[0]}" -C "$COMPARE/legacy"
-          if ! diff -r -x package.json "$COMPARE/scoped/package" "$COMPARE/legacy/package"; then
+          node -e "const fs = require('fs'); const [scoped, legacy] = process.argv.slice(1).map((file) => JSON.parse(fs.readFileSync(file, 'utf8'))); if (legacy.name !== 'review-council' || JSON.stringify({ ...legacy, name: scoped.name }) !== JSON.stringify(scoped)) { console.error('legacy manifest differs from the scoped manifest beyond its name'); process.exit(1); }" "$COMPARE/scoped/package/package.json" "$COMPARE/legacy/package/package.json"
+          # With the root manifests compared above, every other file must be identical.
+          rm "$COMPARE/scoped/package/package.json" "$COMPARE/legacy/package/package.json"
+          if ! diff -r "$COMPARE/scoped/package" "$COMPARE/legacy/package"; then
             echo "legacy package files differ from the scoped package — refusing to publish"
             exit 1
           fi
-          node -e "const fs = require('fs'); const [scoped, legacy] = process.argv.slice(1).map((file) => JSON.parse(fs.readFileSync(file, 'utf8'))); if (legacy.name !== 'review-council' || JSON.stringify({ ...legacy, name: scoped.name }) !== JSON.stringify(scoped)) { console.error('legacy manifest differs from the scoped manifest beyond its name'); process.exit(1); }" "$COMPARE/scoped/package/package.json" "$COMPARE/legacy/package/package.json"
 
           for package in "${packages[0]}" "${legacy[0]}"; do
             SMOKE_DIR=$(mktemp -d)
@@ -186,9 +188,19 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           publish() {
-            local tarball=$1 name=$2 spec="$2@${VERSION#v}" expected published
+            local tarball=$1 spec="$2@${VERSION#v}" expected published lookup_error
             expected="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w 0)"
-            published=$(npm view "$spec" dist.integrity --registry https://registry.npmjs.org 2>/dev/null || true)
+            lookup_error=$(mktemp)
+            # npm answers E404 for an unpublished version and for a package
+            # that does not exist yet; any other failure stops the publish.
+            if ! published=$(npm view "$spec" dist.integrity --registry https://registry.npmjs.org 2>"$lookup_error"); then
+              if ! grep -q E404 "$lookup_error"; then
+                cat "$lookup_error"
+                echo "could not determine whether $spec is published — refusing to continue"
+                return 1
+              fi
+              published=""
+            fi
             if [ -n "$published" ]; then
               if [ "$published" = "$expected" ]; then
                 echo "$spec is already published with this tarball — skipping"
