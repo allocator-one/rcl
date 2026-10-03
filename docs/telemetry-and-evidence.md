@@ -33,25 +33,43 @@ the report's `stats`, and — at the default `full` level — the JSON and Markd
 reports exactly as written, digest-checked by the server. The converge commands
 report their events (attempt claims, cap changes, processed rounds, verdicts,
 resolutions) the same way. Never sent: provider API keys, `GITHUB_TOKEN`, the
-Harness credential, environment variables, prompts or raw model answers; every
-free-text field is truncated and scrubbed for key-shaped strings before it
-leaves the process.
+Harness credential, environment variables or prompts. Every free-text field is
+truncated and scrubbed for key-shaped strings before it leaves the process.
+With delivery enabled, `--json-file` and `--markdown` are written from that
+same scrubbed view, so the uploaded reports match the local files byte for
+byte. Raw model answers are not sent either: a parse-failed call is reduced to
+the parser message unless `harness.parseFailures: true` opts in to sending its
+answer with fenced code and key-shaped strings removed, capped at 32 KB.
+Scrubbing is pattern-based; it cannot recognize every secret.
 
 The stored login is the file `harness login` writes:
-`~/.config/harness/credentials.json`, or `$XDG_CONFIG_HOME/harness/credentials.json`
-when `XDG_CONFIG_HOME` is set to an absolute path. An environment token is used only together with `HARNESS_API_URL`; half
-a pair is a configuration error, never a fallback to the stored login.
+`~/.config/harness/credentials.json`, or
+`$XDG_CONFIG_HOME/harness/credentials.json` when `XDG_CONFIG_HOME` is set to an
+absolute path. An environment token is used only together with
+`HARNESS_API_URL`; half a pair is a configuration error, never a fallback to
+the stored login.
 
 The review never blocks on the network. A retryable delivery outage is spooled
 to `~/.rcl/outbox/<run id>/` (under `RCL_DATA_DIR` when set) and retried, with
-its original run id, at the start of every rcl command (bounded to five
-seconds) or by `rcl telemetry flush`. One dim status line says what happened:
-`Evidence recorded: <url>`, `Evidence spooled (Harness unreachable); run rcl
-telemetry flush`, or `Evidence not sent: <host> has not enabled review evidence
-for this organization`. `--evidence-required` exits 4 when the evidence is
+its original run id, by `rcl telemetry flush` or at the start of the next
+ordinary work command — `rcl review`, `review-plan`, `discuss`, `models`,
+`roles`, `converge-attempt`, `converge-report` or `converge-verdict` — bounded
+to five seconds. Evidence reads (`rcl evidence status` / `show`), the recovery
+and audit commands (`converge-stale`, `converge-gap`, `converge-rejected`,
+`evidence recover-run`, `recover-finding`, `retriage-finding`), the
+`telemetry` commands other than `flush`, fresh-cycle reviews, pending-launch
+export and finalize-only operations, and runs with telemetry off never flush
+unrelated evidence.
+
+One dim status line says what happened: `Evidence recorded: <url>`,
+`Evidence spooled (Harness unreachable); run rcl telemetry flush`, or
+`Evidence not sent: <host> has not enabled review evidence for this
+organization`. `--evidence-required` exits 4 when the evidence is
 incomplete: the envelope was spooled or refused, the organization has evidence
-off, or a declared artifact did not land (a patch file then needs `--head-sha`,
-and the flag contradicts `--no-telemetry` / `RCL_TELEMETRY=off`). Only a
+off, or a declared artifact did not land. It is refused up front, before any
+reviewer is paid (exit 1), for a patch file without `--head-sha`, together with
+`--no-telemetry`, `RCL_TELEMETRY=off` or `harness.telemetry: off`, outside a
+Harness-managed repository, and without a Harness credential. Only a
 spooled delivery is worth `rcl telemetry flush --run <id>`; the status line
 says which. Under `--ci` the gate verdict keeps its exit code and the evidence
 failure is printed beside it. The first delivery from a machine prints a

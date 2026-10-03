@@ -703,8 +703,10 @@ In a repository that carries `.harness-cli/config.json`, with a
 `harness login` (or `HARNESS_API_TOKEN` + `HARNESS_API_URL` in CI), every
 review is recorded on [Harness](https://harness.infra.one) after the report is
 written: the run header, findings, reviewer calls, stats and — at the default
-`full` level — both report files. Provider keys, tokens, environment variables,
-prompts and raw model answers are never sent. The review never blocks on the
+`full` level — both report files, scrubbed for key-shaped strings. Provider
+keys, tokens, environment variables and prompts are never sent, and raw model
+answers only when `harness.parseFailures: true` opts in for parse-failed calls.
+The review never blocks on the
 network: an outage spools the evidence to `~/.rcl/outbox/` for
 `rcl telemetry flush`. One status line reports the outcome, and
 `--evidence-required` turns a missing acknowledgment into exit 4. Opt out with
