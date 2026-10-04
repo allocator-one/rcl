@@ -437,6 +437,7 @@ commands are documented in
 | --- | --- |
 | `rcl converge-report` | Dedupe a round report against earlier rounds, enforce the round cap, classify findings (`new` / `repeat` / `suppressed` / `regating`); refuses inconclusive reviewer health |
 | `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution |
+| `rcl converge-reconcile-history` | Authenticate and append a reconciliation receipt for an exact historical guarded launch after `lastLaunch` advanced |
 | `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
@@ -451,6 +452,14 @@ stale dispositions are version 3; published 4.5.2 version 2 receipts remain
 verifiable and can be
 followed by a changed-input version 3 disposition only after that exact marker
 upgrade.
+
+If a published version 1 marker belongs to a retained version 2 stale receipt
+but a later launch has already replaced `lastLaunch`, use
+`converge-reconcile-history`. Preview prints one reviewed manifest to stdout and
+its SHA-256 to stderr. Apply accepts only those pinned bytes, re-reads every
+local source and the complete live server projection under the target lock,
+and appends a historical audit receipt. It never admits findings, claims an
+attempt or calls a reviewer.
 
 ---
 
