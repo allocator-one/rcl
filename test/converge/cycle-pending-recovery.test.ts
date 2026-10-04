@@ -8,7 +8,7 @@ import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { exportOrdinaryPendingPackage } from '../../src/converge/ordinary-pending-export.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch } from '../../src/converge/pending-legacy-resume.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
-import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
+import { guardedInputSha256, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { asyncTargetKey, consumeBoundAsyncHistory } from '../../src/dispatch/async-lane.js';
 
 async function cyclePendingFixture() {
@@ -156,6 +156,20 @@ it('terminalizes a dead cycle attempt with unattributed async history and permit
     fixture.options.retainedAsyncSha256, 16);
   await expect((await import('node:fs/promises')).readdir(fixture.asyncStoreDir)).resolves.toEqual([]);
 
+  const attemptsBeforeSuccessor = await readFile(convergeAttemptStatePath(fixture.common, fixture.target));
+  const sameInputValidate = vi.fn(async () => {});
+  const sameInputSuccessor = vi.fn(async () => ({ runId: randomUUID(), reportJsonSha256: '2'.repeat(64),
+    successfulReviews: 2, totalReviews: 2, deliveryPending: false }));
+  await expect(guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: fixture.headSha, inputSha256: fixture.inputSha256,
+    retryReason: 'Repeat the exact inputs after terminalizing A29.',
+    cycleRemote: fixture.cycleRemote, validate: sameInputValidate, run: sameInputSuccessor }))
+    .rejects.toThrow('cycle_pending_inputs_unchanged');
+  expect(sameInputValidate).not.toHaveBeenCalled();
+  expect(sameInputSuccessor).not.toHaveBeenCalled();
+  expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target)))
+    .toEqual(attemptsBeforeSuccessor);
+
   const successor = vi.fn(async () => ({ runId: randomUUID(), reportJsonSha256: '2'.repeat(64),
     successfulReviews: 2, totalReviews: 2, deliveryPending: false }));
   await guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
@@ -175,6 +189,46 @@ it('terminalizes a dead cycle attempt with unattributed async history and permit
     migrationPackage: fixture.options.migrationPackage, ownerAlive: () => false,
     cycleRemote: fixture.cycleRemote, loadRetainedAsync: fixture.options.loadRetainedAsync,
   })).resolves.toMatchObject({ reusedReceipt: true, receipt: finalized.receipt });
+});
+
+it('rejects a recomputed cycle receipt and mutated attempt cap before validating or claiming a successor', async () => {
+  const fixture = await cyclePendingFixture();
+  const preview = await previewOrdinaryPendingLaunch({ ...fixture.options, previewMode: 'finalize-only' });
+  const finalized = await finalizeOrdinaryPendingLaunch({
+    gitCommonDir: fixture.common, target: fixture.target, headSha: fixture.headSha,
+    baseSha: fixture.baseSha, pendingInputSha256: fixture.inputSha256,
+    nativeStateSha256: preview.nativeStateSha256, attemptStateSha256: preview.attemptStateSha256,
+    retainedAsyncSha256: fixture.options.retainedAsyncSha256, maxAttempts: 35,
+    migrationPackage: fixture.options.migrationPackage, ownerAlive: () => false,
+    cycleRemote: fixture.cycleRemote, loadRetainedAsync: fixture.options.loadRetainedAsync,
+  });
+  const attemptPath = convergeAttemptStatePath(fixture.common, fixture.target);
+  const attempts = JSON.parse((await readFile(attemptPath)).toString('utf8'));
+  attempts.cap = 36;
+  const mutatedAttemptBytes = Buffer.from(`${JSON.stringify(attempts, null, 2)}\n`);
+  await writeFile(attemptPath, mutatedAttemptBytes);
+
+  const receiptPath = join(fixture.common, 'rcl-converge-pending-finalizations',
+    finalized.receipt.migrationPackageSha256, 'receipt.json');
+  const receipt = JSON.parse((await readFile(receiptPath)).toString('utf8'));
+  receipt.cap = 36;
+  receipt.attemptCap = 36;
+  receipt.sourceAttemptStateSha256 = sha256Hex(mutatedAttemptBytes);
+  const { receiptDigest: _oldDigest, ...body } = receipt;
+  receipt.receiptDigest = sha256Hex(stableStringify(body));
+  await writeFile(receiptPath, stableStringify(receipt));
+
+  const validate = vi.fn(async () => {});
+  const run = vi.fn(async () => ({ runId: randomUUID(), reportJsonSha256: '2'.repeat(64),
+    successfulReviews: 2, totalReviews: 2, deliveryPending: false }));
+  const attemptsBefore = await readFile(attemptPath);
+  await expect(guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: 'f'.repeat(40), inputSha256: '1'.repeat(64), maxAttempts: 36,
+    retryReason: 'Current exact head after A29.', cycleRemote: fixture.cycleRemote,
+    validate, run })).rejects.toThrow('cycle_pending_recovery_required');
+  expect(validate).not.toHaveBeenCalled();
+  expect(run).not.toHaveBeenCalled();
+  expect(await readFile(attemptPath)).toEqual(attemptsBefore);
 });
 
 it('refuses cycle, cap, and server membership drift before any recovery write', async () => {

@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import type { GuardedLaunchState } from './launch-record.js';
+import { launchSchema, type GuardedLaunchState } from './launch-record.js';
 import type { ConvergeRunState } from './run-state.js';
-import { convergeAttemptStatePath } from './attempt-budget.js';
+import { convergeAttemptStatePath, validateConvergeAttemptState } from './attempt-budget.js';
 import { convergeRunStatePath } from './run-state.js';
 import { stableStringify } from '../report/run-header.js';
 import { readStable } from '../telemetry/recovery/files.js';
@@ -57,18 +57,35 @@ export async function verifyCyclePendingFinalization(common: string, state: Conv
         receipt.round !== launch.round || receipt.originalPid !== launch.pid ||
         receipt.attemptsUsed !== launch.attempt || receipt.nextFreeAttempt !== launch.attempt + 1 ||
         receipt.cap !== receipt.attemptCap || receipt.cycleId !== state.cycle.id ||
-        receipt.operationId !== state.cycle.operationId || receipt.repo !== state.cycle.repo ||
+        receipt.operationId !== state.cycle.operationId || receipt.repo.toLowerCase() !== state.cycle.repo ||
         receipt.prNumber !== state.cycle.prNumber || receipt.roundCap !== state.roundCap ||
         receipt.sourceNativeStateSha256 !== recovery.nativeStateSha256 ||
         receipt.sourceAttemptStateSha256 !== recovery.attemptStateSha256 ||
+        receipt.retainedAsyncSha256.join(',') !== [...recovery.retainedAsyncSha256].sort().join(',') ||
         new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length) return false;
-    const [native, attempts, manifest] = await Promise.all([
+    const retainedRoot = join(common, 'rcl-converge-pending-finalizations', packageDigest);
+    const [native, attempts, manifest, retainedAttempts, retainedNative] = await Promise.all([
       readStable(convergeRunStatePath(common, state.target)),
       readStable(convergeAttemptStatePath(common, state.target)),
       readStable(join(common, 'rcl-converge-pending-recovery', recovery.sourceDigest, 'manifest.json')),
+      readStable(join(retainedRoot, 'source-attempt-state.json')),
+      readStable(join(retainedRoot, 'finalized-native-state.json')),
     ]);
     if (native.sha256 !== receipt.finalizedNativeStateSha256 ||
-        attempts.sha256 !== receipt.sourceAttemptStateSha256) return false;
+        attempts.sha256 !== receipt.sourceAttemptStateSha256 ||
+        retainedAttempts.sha256 !== receipt.sourceAttemptStateSha256 ||
+        retainedNative.sha256 !== receipt.finalizedNativeStateSha256) return false;
+    const sourceAttempts = validateConvergeAttemptState(
+      JSON.parse(retainedAttempts.text), state.target, 'retained cycle pending attempt state');
+    const finalizedState = JSON.parse(retainedNative.text) as ConvergeRunState;
+    const finalizedLaunch = launchSchema.safeParse(finalizedState.lastLaunch);
+    if (sourceAttempts.cap !== receipt.cap || sourceAttempts.attemptsUsed !== receipt.attemptsUsed ||
+        !isDeepStrictEqual(sourceAttempts.cycle, state.cycle) ||
+        sourceAttempts.attempts.at(-1)?.attempt !== receipt.finalizedAttempt ||
+        sourceAttempts.attempts.at(-1)?.pid !== receipt.originalPid ||
+        finalizedState.target !== state.target || finalizedState.roundCap !== receipt.roundCap ||
+        !isDeepStrictEqual(finalizedState.cycle, state.cycle) || !finalizedLaunch.success ||
+        !isDeepStrictEqual(finalizedLaunch.data, launch)) return false;
     const expectedManifest = { version: 1, sourceDigest: recovery.sourceDigest,
       blockingOutcome: 'unknown', artifacts: receipt.retainedAsyncSha256.map(sha256 => ({ sha256 })).sort((a, b) =>
         a.sha256.localeCompare(b.sha256)) };

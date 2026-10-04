@@ -170,6 +170,10 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
         refuse('cycle_pending_recovery_required',
           'The previous cycle dispatch is not terminal. Authenticate and finalize its pending recovery before launching a successor.');
       }
+      if (previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
+        refuse('cycle_pending_inputs_unchanged',
+          'The recovered dispatch remains unknown; its successor must use materially changed exact review inputs.');
+      }
       if (!options.retryReason) {
         refuse('dispatch_unknown', 'The recovered dispatch remains spent; supply a bounded retry reason for its successor.');
       }

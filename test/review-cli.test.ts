@@ -302,6 +302,46 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
     });
   });
+
+  it('refuses a cycle package in combined resume mode before provider or native mutation', async () => {
+    await withGuardedFixture(async fixture => {
+      const configPath = join(fixture.repo, 'config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8'));
+      config.harness.telemetry = 'full';
+      writeFileSync(configPath, JSON.stringify(config));
+      mkdirSync(join(fixture.repo, '.harness-cli'));
+      writeFileSync(join(fixture.repo, '.harness-cli', 'config.json'), '{}');
+      const packagePath = join(fixture.repo, 'cycle-pending.json');
+      const headSha = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
+      const retained = 'f'.repeat(64);
+      writeFileSync(packagePath, JSON.stringify({
+        version: 2, target: 'guarded-fixture', headSha, baseSha: headSha,
+        attempt: 1, round: 1, pid: 999_999, attemptCap: 20, roundCap: 15, attemptsUsed: 1,
+        asyncAttribution: 'cycle-history-unattributed',
+        cycle: { id: '00000000-0000-4000-8000-000000000001',
+          operationId: '00000000-0000-4000-8000-000000000002', previousCycleId: null,
+          repo: 'allocator-one/rcl', prNumber: 146, url: 'https://harness.example',
+          archivePath: '/private/tmp/cycle.archive.json', archiveSha256: 'a'.repeat(64),
+          history: { attempts: 0, rounds: 0 } },
+        retainedAsyncSha256: [retained], retainedAsync: [{ sha256: retained,
+          model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }],
+        guardedInput: { head: headSha, kind: 'patch', repo: 'allocator-one/rcl', pr: 146,
+          diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [{ model: 'openai/async',
+            role: 'general', provider: 'openai', lane: 'async' }], prompts: [],
+          asyncRoles: [{ name: 'general' }] },
+      }));
+      const args = fixture.args.filter(argument => argument !== '--no-telemetry');
+      const result = await runRclAsync([...args, '--resume-pending',
+        '--ordinary-pending-package', packagePath, '--resume-async-sha256', retained,
+        '--retry-reason', 'Terminalize the unknown launch before any successor.',
+        '--max-attempts', '20', '--evidence-required'], fixture.repo, fixture.env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('cycle_pending_finalize_only');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+      expect(await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  });
 });
 
 describe('rcl review — ordinary pending package export (RCL-166)', () => {
