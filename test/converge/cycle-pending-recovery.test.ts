@@ -10,6 +10,7 @@ import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch } from '../
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { guardedInputSha256, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { asyncTargetKey, consumeBoundAsyncHistory } from '../../src/dispatch/async-lane.js';
+import { ordinaryPendingGuardedInput } from '../../src/converge/ordinary-pending-package.js';
 
 async function cyclePendingFixture(fixtureOptions: { retainedCount?: number; identicalResults?: boolean } = {}) {
   const common = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-pending-')));
@@ -155,9 +156,8 @@ it('authenticates historical cycle results against the retained roster after the
     asyncDescriptors: [{ model: 'anthropic/current-seat', role: 'general', provider: 'anthropic' }],
     path: outputPath, preview: false });
   expect(result.retainedAsyncSha256).toEqual(fixture.options.retainedAsyncSha256.slice().sort());
-  expect(JSON.parse(await readFile(outputPath, 'utf8'))).toMatchObject({
-    guardedInput: fixture.guardedInput,
-  });
+  expect(ordinaryPendingGuardedInput(JSON.parse(await readFile(outputPath, 'utf8'))))
+    .toEqual(fixture.guardedInput);
 });
 
 it('rejects cycle results outside the authenticated historical roster', async () => {

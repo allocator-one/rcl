@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.5.6 - 2026-10-04
+
+- Retain guarded review inputs with a canonical string table so large patches
+  repeated across reviewer prompts no longer exceed the preclaim recovery
+  packet limit. Recovery still authenticates the exact expanded input, accepts
+  existing raw captures and rejects oversized unique work before spending an
+  attempt (RCL-180).
+
 ## 4.5.5 - 2026-10-04
 
 - Recover a dead launcher inside an active review cycle by authenticating its

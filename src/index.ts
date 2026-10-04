@@ -169,7 +169,7 @@ import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
-import { type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
+import { ordinaryPendingGuardedInput, type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
 import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from './converge/ordinary-pending-export.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
@@ -2280,6 +2280,8 @@ async function executeCouncil(
       const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
         (await readStable(opts.ordinaryPendingPackage)).text
       ) as OrdinaryPendingPackage;
+      const migrationGuardedInput = migrationPackage
+        ? ordinaryPendingGuardedInput(migrationPackage) : undefined;
       if (migrationPackage?.version !== 2 && (expectedAsyncSha256.length === 0 ||
           new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length)) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
@@ -2319,7 +2321,7 @@ async function executeCouncil(
         return [...found.values()].sort((a, b) => a.sha256.localeCompare(b.sha256));
       };
       if (opts.previewPending && migrationPackage) {
-        const inputSha256 = guardedInputSha256(migrationPackage.guardedInput);
+        const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
           pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256,
@@ -2335,7 +2337,7 @@ async function executeCouncil(
         })); return undefined;
       }
       if (opts.finalizePendingOnly && migrationPackage) {
-        const inputSha256 = guardedInputSha256(migrationPackage.guardedInput);
+        const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const result = await finalizeOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
           baseSha: extra.target.baseSha ?? '', pendingInputSha256: inputSha256,
@@ -2381,7 +2383,7 @@ async function executeCouncil(
       const pendingClaimAsyncPrompts = await Promise.all(pendingClaimAsyncChunks.map(({ assignment, chunk }) =>
         buildPrompt(chunk, assignment.role, { contextDocs: pendingClaimContext, plan: planContext })));
       const claimedInputSha256 = migrationPackage
-        ? guardedInputSha256(migrationPackage.guardedInput)
+        ? guardedInputSha256(migrationGuardedInput!)
         : guardedInputSha256({
           head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
           diff: diffDigest(diff.files), config: configDigest(config), roster: pendingClaimRoster,

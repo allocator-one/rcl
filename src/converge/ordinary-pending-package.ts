@@ -1,6 +1,7 @@
 import { guardedInputSha256, stableStringify } from '../report/run-header.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { NativeReviewCycle } from './review-cycle.js';
+import { restoreGuardedInput, type StoredGuardedInput } from './guarded-input-retention.js';
 
 export interface OrdinaryPendingPackage {
   version?: 2;
@@ -17,7 +18,7 @@ export interface OrdinaryPendingPackage {
   asyncAttribution?: 'cycle-history-unattributed';
   retainedAsyncSha256: string[];
   retainedAsync: { sha256: string; model: string; role: string; provider: string; lane: 'async' }[];
-  guardedInput: Record<string, unknown>;
+  guardedInput: StoredGuardedInput;
 }
 export interface PendingLaunchIdentity {
   target: string;
@@ -34,8 +35,15 @@ export interface PendingLaunchIdentity {
   attemptsUsed?: number;
 }
 
+export function ordinaryPendingGuardedInput(value: OrdinaryPendingPackage): Record<string, unknown> {
+  return restoreGuardedInput(value.guardedInput);
+}
+
 export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, expected: PendingLaunchIdentity): OrdinaryPendingPackage {
-  const input = value?.guardedInput;
+  let input: Record<string, unknown> | undefined;
+  try { input = value ? ordinaryPendingGuardedInput(value) : undefined; } catch {
+    throw new Error('ordinary_pending_package_mismatch');
+  }
   const specPresent = !!input && Object.hasOwn(input, 'spec');
   const keys = ['asyncRoles','config','diff','head','kind','pr','prompts','repo','roster',
     ...(specPresent ? ['spec'] : [])];

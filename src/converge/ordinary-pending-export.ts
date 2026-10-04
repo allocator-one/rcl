@@ -11,6 +11,7 @@ import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument, writeExclusive } from '../evidence/original-run/journal.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import { assertReviewCyclePair } from './fresh-review.js';
+import { retainGuardedInput, restoreGuardedInput } from './guarded-input-retention.js';
 
 // Leave room for the recovery package's retained-async descriptors beneath
 // the shared recovery reader ceiling (25 MiB). Apply this before any claim.
@@ -33,10 +34,12 @@ function retainedInputsPath(options: Pick<OrdinaryLaunchInputs, 'gitCommonDir' |
   return join(options.gitCommonDir, 'rcl-ordinary-inputs', `${namespace}-attempt-${options.attempt}-${options.packetSha256}.json`);
 }
 
-function retainedInputs(options: OrdinaryLaunchInputs) {
-  return { version: 1, target: options.target, headSha: options.headSha, baseSha: options.baseSha,
+function retainedInputs(options: OrdinaryLaunchInputs, representation: 'raw' | 'retained' = 'retained') {
+  return { version: representation === 'raw' ? 1 : 2,
+    target: options.target, headSha: options.headSha, baseSha: options.baseSha,
     attempt: options.attempt, round: options.round, ...(options.cycleId ? { cycleId: options.cycleId } : {}),
-    inputSha256: guardedInputSha256(options.guardedInput), guardedInput: options.guardedInput };
+    inputSha256: guardedInputSha256(options.guardedInput),
+    guardedInput: representation === 'raw' ? options.guardedInput : retainGuardedInput(options.guardedInput) };
 }
 
 export interface RetainedOrdinaryInputs {
@@ -48,21 +51,31 @@ export interface RetainedOrdinaryInputs {
 /** Called under native target ownership before spending the claim or dispatching. */
 export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs): Promise<RetainedOrdinaryInputs> {
   const common = await realpath(options.gitCommonDir);
-  const packet = retainedInputs(options);
-  const bytes = serializeRecoveryDocument(packet, MAX_RETAINED_INPUT_BYTES);
-  const descriptors = options.asyncDescriptors ?? [];
-  // Recovery repeats the async reviewer identifiers alongside the guarded
-  // roster. Bound that actual envelope before claim, including its future
-  // fixed-length hashes and the largest permitted PID representation.
-  const projectedRecovery: OrdinaryPendingPackage = {
-    target: options.target, headSha: options.headSha, baseSha: options.baseSha ?? 'f'.repeat(40),
-    attempt: options.attempt, round: options.round, pid: Number.MAX_SAFE_INTEGER,
-    retainedAsyncSha256: descriptors.map(() => 'f'.repeat(64)),
-    retainedAsync: descriptors.map(descriptor => ({ model: descriptor.model, role: descriptor.role,
-      provider: descriptor.provider, lane: 'async', sha256: 'f'.repeat(64) })),
-    guardedInput: options.guardedInput,
-  };
-  serializeRecoveryDocument(projectedRecovery, MAX_REPORT_BYTES);
+  let packet: ReturnType<typeof retainedInputs>;
+  let bytes: string;
+  try {
+    packet = retainedInputs(options);
+    bytes = serializeRecoveryDocument(packet, MAX_RETAINED_INPUT_BYTES);
+    const descriptors = options.asyncDescriptors ?? [];
+    // Recovery repeats the async reviewer identifiers alongside the guarded
+    // roster. Bound that actual envelope before claim, including its future
+    // fixed-length hashes and the largest permitted PID representation.
+    const projectedRecovery: OrdinaryPendingPackage = {
+      target: options.target, headSha: options.headSha, baseSha: options.baseSha ?? 'f'.repeat(40),
+      attempt: options.attempt, round: options.round, pid: Number.MAX_SAFE_INTEGER,
+      retainedAsyncSha256: descriptors.map(() => 'f'.repeat(64)),
+      retainedAsync: descriptors.map(descriptor => ({ model: descriptor.model, role: descriptor.role,
+        provider: descriptor.provider, lane: 'async', sha256: 'f'.repeat(64) })),
+      guardedInput: packet.guardedInput,
+    };
+    serializeRecoveryDocument(projectedRecovery, MAX_REPORT_BYTES);
+  } catch (error) {
+    if (error instanceof Error && (error.message === 'recovery_document_too_large' ||
+        error.message === 'guarded_input_archive_expands_too_large')) {
+      throw new Error('retained_review_work_too_large: retained prompts exceed the recovery limit; split the diff or reduce prompt context or the reviewer roster before retrying');
+    }
+    throw error;
+  }
 
   const packetSha256 = sha256Hex(bytes);
   // A preclaim crash leaves the ordinal unspent. Include the full packet so
@@ -124,13 +137,15 @@ function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
   try { value = JSON.parse(text); } catch { refuse('retained_input_mismatch'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) refuse('retained_input_mismatch');
   const packet = value as Record<string, unknown>;
-  const guardedInput = packet.guardedInput;
-  if (!guardedInput || typeof guardedInput !== 'object' || Array.isArray(guardedInput)) refuse('retained_input_mismatch');
-  const expected = retainedInputs({ ...options, guardedInput: guardedInput as Record<string, unknown> });
+  if (packet.version !== 1 && packet.version !== 2) refuse('retained_input_mismatch');
+  let guardedInput: Record<string, unknown>;
+  try { guardedInput = restoreGuardedInput(packet.guardedInput as Record<string, unknown>); }
+  catch { refuse('retained_input_mismatch'); }
+  const expected = retainedInputs({ ...options, guardedInput }, packet.version === 1 ? 'raw' : 'retained');
   if (sha256Hex(text) !== packetSha256 || text !== serializeRecoveryDocument(expected, MAX_RETAINED_INPUT_BYTES)) {
     refuse('retained_input_mismatch');
   }
-  return guardedInput as Record<string, unknown>;
+  return guardedInput;
 }
 
 /**
@@ -174,11 +189,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     packetSha256: binding.packetSha256 }) : undefined;
   const retainedBefore = retainedPath ? await readStable(retainedPath, MAX_RETAINED_INPUT_BYTES) : undefined;
   if (binding && (!retainedBefore || retainedBefore.sha256 !== binding.packetSha256)) refuse('retained_input_mismatch');
-  if (binding && !cycleBacked && retainedBefore!.text !== serializeRecoveryDocument(retainedInputs({
-    gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
-    attempt: launch.attempt, round: launch.round, guardedInput: options.guardedInput,
-  }), MAX_RETAINED_INPUT_BYTES)) refuse('retained_input_mismatch');
-  const historicalInput = binding && cycleBacked ? retainedHistoricalInput(retainedBefore!.text, {
+  const historicalInput = binding ? retainedHistoricalInput(retainedBefore!.text, {
     gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
     attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
     guardedInput: options.guardedInput,
@@ -212,7 +223,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     asyncAttribution: 'cycle-history-unattributed' as const } : {}),
     target: options.target, headSha: launch.headSha,
     baseSha: options.baseSha, attempt: launch.attempt, round: launch.round, pid: launch.pid,
-    retainedAsyncSha256, retainedAsync, guardedInput: historicalInput };
+    retainedAsyncSha256, retainedAsync, guardedInput: retainGuardedInput(historicalInput) };
   // Canonical JSON drops undefined optional properties exactly as the original
   // guarded-input hash did; it never adds an artificial null spec binding.
   const packet = validateOrdinaryPendingPackage(JSON.parse(JSON.stringify(candidate)) as OrdinaryPendingPackage,

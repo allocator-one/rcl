@@ -30,6 +30,8 @@ import { chunkDiff } from '../src/prepare/chunker.js';
 import { buildPrompt } from '../src/prepare/prompt-builder.js';
 import { retainOrdinaryLaunchInputs } from '../src/converge/ordinary-pending-export.js';
 import { guardReviewLaunch } from '../src/converge/launch-guard.js';
+import { restoreGuardedInput } from '../src/converge/guarded-input-retention.js';
+import { ordinaryPendingGuardedInput } from '../src/converge/ordinary-pending-package.js';
 
 // Global setup builds dist unless an installed package entrypoint is selected.
 const cliEntrypoint = process.env['RCL_TEST_PACKAGED_CLI'] || process.env['RCL_TEST_REVIEW_ENTRYPOINT'] || fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -429,10 +431,10 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
         const path = join(root, names[0]!);
         const capture = JSON.parse(readFileSync(path, 'utf8'));
         const launch = (await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture'))!.lastLaunch!;
-        expect(capture).toMatchObject({ version: 1, target: 'guarded-fixture', attempt: 1, round: 1,
+        expect(capture).toMatchObject({ version: 2, target: 'guarded-fixture', attempt: 1, round: 1,
           headSha: launch.headSha, baseSha: fixture.args[fixture.args.indexOf('--base-sha') + 1],
           inputSha256: launch.inputSha256 });
-        expect(guardedInputSha256(capture.guardedInput)).toBe(launch.inputSha256);
+        expect(guardedInputSha256(restoreGuardedInput(capture.guardedInput))).toBe(launch.inputSha256);
         expect(launch.ordinaryInputs).toEqual({ version: 1, packetSha256: sha256Hex(readFileSync(path, 'utf8')),
           baseSha: capture.baseSha });
         expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -533,7 +535,8 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
       expect(exported.status, exported.stderr).toBe(0);
       expect(JSON.parse(exported.stdout)).toMatchObject({ mode: 'pending-package-export', path: packagePath });
       const packet = JSON.parse(readFileSync(packagePath, 'utf8'));
-      expect(packet).toMatchObject({ guardedInput, retainedAsyncSha256: [sha256Hex(retainedBytes)] });
+      expect(packet).toMatchObject({ retainedAsyncSha256: [sha256Hex(retainedBytes)] });
+      expect(ordinaryPendingGuardedInput(packet)).toEqual(guardedInput);
       expect(statSync(packagePath).mode & 0o777).toBe(0o600);
       const duplicate = await runRclAsync(args, fixture.repo, fixture.env);
       expect(duplicate.status).toBe(1);

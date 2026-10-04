@@ -6,6 +6,8 @@ import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from '../../
 import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
 import { claimConvergeAttempt, convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { convergeRunStatePath } from '../../src/converge/run-state.js';
+import { retainGuardedInput, restoreGuardedInput } from '../../src/converge/guarded-input-retention.js';
+import { ordinaryPendingGuardedInput } from '../../src/converge/ordinary-pending-package.js';
 
 const fault = vi.hoisted(() => ({ partialWrite: false, directoryMode: null as number | null, windowsDirectoryOpen: false, windowsFileFlags: false }));
 vi.mock('node:fs', async original => {
@@ -71,7 +73,9 @@ describe('ordinary launch input retention', () => {
     fault.windowsFileFlags = true;
     const retained = await retainOrdinaryLaunchInputs(options);
     const bytes = await readFile(retained.path, 'utf8');
-    expect(JSON.parse(bytes).guardedInput).toEqual(options.guardedInput);
+    const packet = JSON.parse(bytes);
+    expect(packet.version).toBe(2);
+    expect(restoreGuardedInput(packet.guardedInput)).toEqual(options.guardedInput);
     expect(retained.sha256).toBe(sha256Hex(bytes));
     expect(await retainOrdinaryLaunchInputs(options)).toEqual(retained);
     expect(await readFile(retained.path, 'utf8')).toBe(bytes);
@@ -138,33 +142,78 @@ describe('ordinary launch input retention', () => {
       baseSha: 'b'.repeat(40), guardedInput, attempt: 1, round: 1,
       // One async seat reviewing two chunks repeats its identifier in two artifacts.
       asyncDescriptors: [descriptor, descriptor] };
-    const retainedBytes = JSON.stringify({ version: 1, target: options.target, headSha: options.headSha,
+    const retainedBytes = JSON.stringify({ version: 2, target: options.target, headSha: options.headSha,
       baseSha: options.baseSha, attempt: 1, round: 1, inputSha256: guardedInputSha256(guardedInput),
-      guardedInput }, null, 2) + '\n';
+      guardedInput: retainGuardedInput(guardedInput) }, null, 2) + '\n';
     expect(Buffer.byteLength(retainedBytes, 'utf8')).toBeLessThan(20 * 1024 * 1024);
-    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('recovery_document_too_large');
+    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('retained_review_work_too_large');
     expect(await readdir(gitCommonDir)).toEqual([]);
   }, 20_000);
 
+  it('exports a legacy v1 raw retained capture into the compact pending-package format', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ordinary-legacy-capture-')); dirs.push(root);
+    const gitCommonDir = join(root, 'native');
+    await mkdir(gitCommonDir);
+    const target = 'owner-repo-1', headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+    const descriptor = { model: 'openai/async', role: 'general', provider: 'openai' };
+    const guardedInput = { head: headSha, kind: 'pr', repo: 'owner/repo', pr: 1,
+      diff: 'c'.repeat(64), config: 'd'.repeat(64),
+      roster: [{ ...descriptor, lane: 'async' }], prompts: [], asyncRoles: [{ name: 'general' }] };
+    const inputSha256 = guardedInputSha256(guardedInput);
+    await claimConvergeAttempt({ gitCommonDir, target, recordPid: 999_999 });
+
+    const legacyPacket = { version: 1, target, headSha, baseSha, attempt: 1, round: 1,
+      inputSha256, guardedInput };
+    const legacyBytes = JSON.stringify(legacyPacket, null, 2) + '\n';
+    const packetSha256 = sha256Hex(legacyBytes);
+    const captureDir = join(gitCommonDir, 'rcl-ordinary-inputs');
+    await mkdir(captureDir, { mode: 0o700 });
+    const namespace = sha256Hex(JSON.stringify([target, null]));
+    await writeFile(join(captureDir, `${namespace}-attempt-1-${packetSha256}.json`), legacyBytes,
+      { mode: 0o600 });
+
+    await mkdir(join(gitCommonDir, 'rcl-converge-runs'));
+    await writeFile(convergeRunStatePath(gitCommonDir, target), JSON.stringify({ version: 1, target,
+      roundCap: 15, rounds: [], findings: {}, updatedAt: '2026-10-04T00:00:00.000Z',
+      lastLaunch: { status: 'pending', attempt: 1, round: 1, headSha, inputSha256,
+        startedAt: '2026-10-04T00:00:00.000Z', pid: 999_999,
+        ordinaryInputs: { version: 1, packetSha256, baseSha } } }));
+
+    const asyncStoreDir = join(root, 'async');
+    await mkdir(asyncStoreDir);
+    const retainedBytes = JSON.stringify({ ...descriptor, status: 'success', findings: [], raw: '',
+      durationMs: 1, async: true });
+    await writeFile(join(asyncStoreDir, 'result-legacy-fixture.json'), retainedBytes);
+    const outputPath = join(root, 'pending.json');
+    const result = await exportOrdinaryPendingPackage({ gitCommonDir, target, headSha, baseSha,
+      expectedBaseSha: baseSha, guardedInput, asyncStoreDir, asyncTargetKey: 'legacy',
+      asyncDescriptors: [descriptor], path: outputPath, preview: false });
+
+    expect(result.baseBinding).toBe('retained-launch-inputs');
+    const exported = JSON.parse(await readFile(outputPath, 'utf8'));
+    expect(ordinaryPendingGuardedInput(exported)).toEqual(guardedInput);
+    expect(exported.guardedInput).toEqual(retainGuardedInput(guardedInput));
+  });
+
   it('accepts the 20 MiB byte boundary and refuses one extra byte before publishing any capture', async () => {
     const gitCommonDir = await mkdtemp(join(tmpdir(), 'ordinary-size-boundary-')); dirs.push(gitCommonDir);
-    const guardedInput = { head: 'a'.repeat(40), kind: 'pr', prompts: [{ system: '', user: '' }] };
+    const guardedInput = { head: 'a'.repeat(40), kind: 'pr', prompts: [{ system: '', user: '€' }] };
     const options = { gitCommonDir, target: 'owner-repo-1', headSha: guardedInput.head,
       baseSha: 'b'.repeat(40), guardedInput, attempt: 1, round: 1 };
-    const emptyPacket = JSON.stringify({ version: 1, target: options.target, headSha: options.headSha,
+    const probePacket = JSON.stringify({ version: 2, target: options.target, headSha: options.headSha,
       baseSha: options.baseSha, attempt: 1, round: 1, inputSha256: guardedInputSha256(guardedInput),
-      guardedInput }, null, 2) + '\n';
+      guardedInput: retainGuardedInput(guardedInput) }, null, 2) + '\n';
     const limit = 20 * 1024 * 1024;
-    const available = limit - Buffer.byteLength(emptyPacket, 'utf8');
+    const available = limit - Buffer.byteLength(probePacket, 'utf8');
     // A byte limit must account for UTF-8, not the shorter JS string length.
-    guardedInput.prompts[0]!.user = '€'.repeat(Math.floor(available / 3)) + 'x'.repeat(available % 3);
+    guardedInput.prompts[0]!.user += '€'.repeat(Math.floor(available / 3)) + 'x'.repeat(available % 3);
     const retained = await retainOrdinaryLaunchInputs(options);
     expect((await stat(retained.path)).size).toBe(limit);
     expect(await retainOrdinaryLaunchInputs(options)).toEqual(retained);
     const directory = join(gitCommonDir, 'rcl-ordinary-inputs');
     const before = await readdir(directory);
     guardedInput.prompts[0]!.user += 'x';
-    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('recovery_document_too_large');
+    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('retained_review_work_too_large');
     expect(await readdir(directory)).toEqual(before);
     expect((await stat(retained.path)).size).toBe(limit);
   }, 20_000);
@@ -193,7 +242,8 @@ describe('ordinary launch input retention', () => {
     const interrupted = await readdir(directory);
     expect(interrupted.filter(name => name.endsWith('.json'))).toEqual([]);
     const { path } = await retainOrdinaryLaunchInputs(options);
-    expect(JSON.parse(await readFile(path, 'utf8')).guardedInput).toEqual(options.guardedInput);
+    expect(restoreGuardedInput(JSON.parse(await readFile(path, 'utf8')).guardedInput))
+      .toEqual(options.guardedInput);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
@@ -227,9 +277,9 @@ describe('ordinary launch input retention', () => {
       baseSha: 'b'.repeat(40), guardedInput, attempt: 1, round: 1 };
     const { path } = await retainOrdinaryLaunchInputs(options);
     const bytes = await readFile(path, 'utf8');
-    expect(JSON.parse(bytes)).toEqual({ version: 1, target: options.target, headSha: options.headSha,
+    expect(JSON.parse(bytes)).toEqual({ version: 2, target: options.target, headSha: options.headSha,
       baseSha: options.baseSha, attempt: 1, round: 1, inputSha256: guardedInputSha256(guardedInput),
-      guardedInput: { head: guardedInput.head, kind: 'pr' } });
+      guardedInput: retainGuardedInput({ head: guardedInput.head, kind: 'pr' }) });
     expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(await retainOrdinaryLaunchInputs(options)).toEqual({ path, sha256: sha256Hex(bytes), baseSha: options.baseSha });
     await writeFile(path, 'preserved conflicting capture');
