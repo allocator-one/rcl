@@ -284,9 +284,9 @@ health was inconclusive continues at the next native round. Its original
 admission, findings, verdicts and spent claims remain unchanged. The new claim
 retains the source bytes and binding; no history or budget is reset.
 
-### Ordinary pending launches with a dead coordinator
+### Pending launches with a dead coordinator
 
-For an ordinary pending launch whose coordinator is provably dead, supply an
+For a pending launch whose coordinator is provably dead, supply an
 immutable package that binds the original target, head, base, guarded input,
 attempt, round, PID and retained async artifact descriptors. RCL recomputes its
 production guarded-input digest and checks every binding under the target lock
@@ -304,8 +304,8 @@ rcl review owner/repo#123 --guarded-converge --converge-target repo-123 \
 
 Pass the original preparation flags so the guarded-input digest matches, plus
 `--expect-base-sha` naming the current base commit; the export refuses unless
-the resolved base equals it. Export applies only to the latest ordinary
-(non-cycle) pending launch of the target: its recorded coordinator must be
+the resolved base equals it. Export applies only to the latest pending launch
+of the target: its recorded coordinator must be
 gone, and its head, round and guarded-input digest must match the reconstructed
 inputs. When the launch retained its inputs before the claim, the package binds
 those retained bytes and their base; otherwise it binds the current review
@@ -321,6 +321,14 @@ Export refuses launch, recovery, output and evidence flags (`--start-over`,
 `--staged`, `--working-tree`). `--expect-base-sha` is accepted only with
 `--export-pending-package`.
 
+For an active review cycle, the package additionally binds the cycle and
+operation IDs, repository and pull request, unchanged attempt and round caps,
+and exact attempt accounting. Export archives every completed artifact in the
+cycle namespace as unattributed history; duplicate reviewer identities across
+attempts are expected and those bytes are never admitted as findings. Preview
+and apply require the same live server cycle. A cycle package supports
+finalize-only recovery: uncertain blocking calls are never replayed.
+
 **Preview.** Use `--preview-pending` with either `--resume-pending` or
 `--finalize-pending-only` and `--ordinary-pending-package <path>` to
 authenticate that package with zero state, output or provider writes.
@@ -333,7 +341,8 @@ attempt under its explicitly bounded cap. It requires `--retry-reason`,
 
 **Finalize only.** Use `--finalize-pending-only` when recovery must stop at
 that failed/unknown finalization. Like `--resume-pending`, it takes the
-retained async digests with `--resume-async-sha256`. Pass the unchanged cap
+retained async digests with `--resume-async-sha256` (`none` represents an
+authenticated cycle with no completed async artifacts). Pass the unchanged cap
 plus the exact
 `nativeStateSha256` and `attemptStateSha256` returned by its preview as
 `--pending-native-sha256` and `--pending-attempt-sha256`. Apply archives the
@@ -344,11 +353,15 @@ a successor claim, checkpoint, reviewer callback or provider call. Receipt
 readback validates either the exact finalized state or a monotonic successor
 against retained source snapshots. An exact legacy receipt without those
 snapshots is upgraded idempotently before a successor proceeds, without
-changing native state or accounting. A later guarded convergence process may
-claim the next attempt independently.
+changing native state or accounting. A cycle recovery also removes only the
+exact archived artifacts from the live async namespace after publishing its
+terminal receipt. A later guarded convergence process may claim the next
+attempt independently; the launch guard authenticates that receipt and archive
+before allowing the successor.
 
-Ordinary guarded launches retain their inputs before spending the claim, so an
-interrupted launch has a durable, digest-bound recovery source.
+Normal guarded launches, including fresh and existing cycles, retain their
+inputs before spending the claim, so an interrupted launch has a durable,
+digest-bound recovery source.
 
 ### Bound fix recovery
 

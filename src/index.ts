@@ -56,6 +56,7 @@ import {
   MAX_ASYNC_CALLS_PER_ROUND,
   type AsyncResultReference,
   snapshotAsyncResults,
+  snapshotAsyncHistory,
   consumeBoundAsyncResults,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
@@ -359,12 +360,12 @@ program
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
   .option('--retry-report <path>', 'Original legacy report proving an inconclusive launch; the new inputs may differ; requires --retry-reason')
   .option('--resume-pending', 'Finalize an unobservable pending legacy dispatch, then claim one fresh checkpointed retry under its target lock')
-  .option('--finalize-pending-only', 'Finalize one authenticated ordinary pending launch without claiming or dispatching its successor')
+  .option('--finalize-pending-only', 'Finalize one authenticated pending launch without claiming or dispatching its successor')
   .option('--pending-native-sha256 <digest>', 'Finalize-only: exact native state digest returned by --preview-pending')
   .option('--pending-attempt-sha256 <digest>', 'Finalize-only: exact attempt state digest returned by --preview-pending')
-  .option('--export-pending-package <path>', 'Export authenticated ordinary pending inputs to an exclusive private file without provider calls or native writes')
+  .option('--export-pending-package <path>', 'Export authenticated pending inputs to an exclusive private file without provider calls or native writes')
   .option('--expect-base-sha <sha>', 'Pending package export: require the resolved current base to equal this SHA')
-  .option('--ordinary-pending-package <path>', 'Immutable ordinary pending-launch package; requires --resume-pending or --finalize-pending-only and replaces --retry-report')
+  .option('--ordinary-pending-package <path>', 'Immutable pending-launch package; requires --resume-pending or --finalize-pending-only and replaces --retry-report')
   .option('--preview-pending', 'Authenticate pending recovery or preview a pending package export without provider calls')
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
@@ -2239,13 +2240,15 @@ async function executeCouncil(
     let completion: GuardedLaunchCompletion | undefined;
     const common = await resolveGitCommonDir();
     if (opts.exportPendingPackage) {
+      const pendingNative = await loadConvergeRunState(common, prepared.converge!.target);
       const receipt = await exportOrdinaryPendingPackage({ gitCommonDir: common,
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
         guardedInput, path: opts.exportPendingPackage,
         preview: opts.previewPending === true, asyncStoreDir: await resolveExistingAsyncStoreDir(),
         asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
-          extra.target.kind === 'patch' ? prepared.converge!.target : undefined),
+          extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
+          pendingNative?.cycle?.id),
         asyncDescriptors: ordinaryAsyncDescriptors });
       spinner.stop(); console.log(JSON.stringify(receipt)); return undefined;
     }
@@ -2267,17 +2270,37 @@ async function executeCouncil(
       cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber, extra.target.headSha ?? '');
     }
     if (opts.resumePending || opts.finalizePendingOnly) {
-      const expectedAsyncSha256 = opts.resumeAsyncSha256!.split(',').map(value => value.trim());
-      if (expectedAsyncSha256.length === 0 || expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-        new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length) {
-        throw new ReviewLaunchRefused('pending_async_binding_invalid', 'Retained async SHA-256 bindings must be unique lowercase 64-character digests.');
+      const asyncBinding = opts.resumeAsyncSha256!.trim();
+      const expectedAsyncSha256 = asyncBinding === 'none'
+        ? [] : asyncBinding.split(',').map(value => value.trim());
+      if (expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value))) {
+        throw new ReviewLaunchRefused('pending_async_binding_invalid',
+          'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" for an empty cycle history.');
       }
       const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
         (await readStable(opts.ordinaryPendingPackage)).text
       ) as OrdinaryPendingPackage;
+      if (migrationPackage?.version !== 2 && (expectedAsyncSha256.length === 0 ||
+          new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length)) {
+        throw new ReviewLaunchRefused('pending_async_binding_invalid',
+          'Ordinary retained async SHA-256 bindings must be non-empty and unique.');
+      }
+      if (migrationPackage?.version === 2 && opts.resumePending) {
+        throw new ReviewLaunchRefused('cycle_pending_finalize_only',
+          'Cycle-backed packages can only terminalize the unknown original attempt. Launch a later successor normally after its terminal receipt verifies.');
+      }
       const loadMigrationRetainedAsync = async (): Promise<AsyncResultReference[]> => {
         if (!migrationPackage) throw new ReviewLaunchRefused('pending_async_missing', 'An ordinary package is required.');
         const store = await resolveExistingAsyncStoreDir();
+        if (migrationPackage.version === 2) {
+          const key = asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
+            extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
+            migrationPackage.cycle!.id);
+          const snapshot = await snapshotAsyncHistory(store, key,
+            (migrationPackage.attemptsUsed! + 1) * MAX_ASYNC_CALLS_PER_ROUND,
+            expectedAsyncSha256);
+          return snapshot.artifacts;
+        }
         const wanted = new Map(migrationPackage.retainedAsync.map(item => [item.sha256, item]));
         const found = new Map<string, AsyncResultReference>();
         for (const name of await readdir(store)) {
@@ -2305,6 +2328,7 @@ async function executeCouncil(
           migrationPackage, maxAttempts: Number(opts.maxAttempts), maxPhysicalCalls: 1, maxAttemptsPerCell: 1,
           maxDurationMs: 1, validate: async () => {}, loadRetainedAsync: loadMigrationRetainedAsync,
           run: async () => { throw new Error('preview_must_not_run'); }, preview: true,
+          cycleRemote,
           previewMode: opts.finalizePendingOnly ? 'finalize-only' : 'combined' });
         spinner.stop(); console.log(JSON.stringify({
           mode: opts.finalizePendingOnly ? 'finalize-only-preview' : 'preview', ...preview,
@@ -2317,7 +2341,15 @@ async function executeCouncil(
           baseSha: extra.target.baseSha ?? '', pendingInputSha256: inputSha256,
           nativeStateSha256: opts.pendingNativeSha256!, attemptStateSha256: opts.pendingAttemptSha256!,
           retainedAsyncSha256: expectedAsyncSha256, migrationPackage,
-          maxAttempts: Number(opts.maxAttempts), loadRetainedAsync: loadMigrationRetainedAsync });
+          maxAttempts: Number(opts.maxAttempts), cycleRemote,
+          loadRetainedAsync: loadMigrationRetainedAsync,
+          ...(migrationPackage.version === 2 ? { cycleHistory: {
+            resolveStoreDir: resolveExistingAsyncStoreDir,
+            targetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
+              extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
+              migrationPackage.cycle!.id),
+            maxResults: (migrationPackage.attemptsUsed! + 1) * MAX_ASYNC_CALLS_PER_ROUND,
+          } } : {}) });
         spinner.stop(); console.log(JSON.stringify({ mode: 'finalize-only', ...result })); return undefined;
       }
       // An ordinary migration package authenticates the old launch itself. The

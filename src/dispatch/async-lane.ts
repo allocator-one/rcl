@@ -386,6 +386,81 @@ export async function snapshotAsyncResults(
   return { reviews, reviewBytes, artifacts };
 }
 
+/**
+ * Snapshot unattributed history from one authenticated cycle namespace.
+ * Duplicate reviewer identities are expected across attempts, so these bytes
+ * are archival evidence only and can never be admitted as council findings.
+ */
+export async function snapshotAsyncHistory(
+  storeDir: string,
+  targetKey: string,
+  maxResults: number,
+  expectedSha256?: readonly string[],
+): Promise<{ reviews: ModelReview[]; reviewBytes: string[]; artifacts: AsyncResultReference[] }> {
+  await assertSafeAsyncOpinionDirectory(storeDir);
+  if (!Number.isSafeInteger(maxResults) || maxResults < 1) throw new Error('async_history_result_limit');
+  const directoryNames = await readdir(storeDir);
+  if (directoryNames.some(name => name.startsWith(`pending-${targetKey}-`) && name.endsWith('.json'))) {
+    throw new Error('async_resume_worker_pending');
+  }
+  const resultPrefix = `result-${targetKey}-`;
+  const names = directoryNames.filter(name => name.startsWith(resultPrefix) &&
+    (name.endsWith('.json') || /\.json(?:\.consumed-[A-Za-z0-9-]+)+$/.test(name))).sort();
+  if (names.length > maxResults) throw new Error('async_history_result_limit');
+  const reviews: ModelReview[] = [], reviewBytes: string[] = [], artifacts: AsyncResultReference[] = [];
+  let totalBytes = 0;
+  for (const name of names) {
+    const path = join(storeDir, name);
+    const bytes = await readStableAsyncResult(path);
+    if ((totalBytes += bytes.length) > 20 * 1024 * 1024) throw new Error('async_resume_result_invalid');
+    let parsed: unknown;
+    try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('async_resume_result_invalid'); }
+    if (!isReviewShape(parsed) || parsed.async !== true) throw new Error('async_resume_result_invalid');
+    reviews.push(structuredClone(parsed));
+    reviewBytes.push(bytes.toString('utf8'));
+    artifacts.push({ path, sha256: createHash('sha256').update(bytes).digest('hex'),
+      bytesBase64: bytes.toString('base64') });
+  }
+  if (expectedSha256 !== undefined) {
+    const expected = [...expectedSha256].sort();
+    const actual = artifacts.map(artifact => artifact.sha256).sort();
+    if (expected.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
+        expected.length !== actual.length || expected.some((value, index) => value !== actual[index])) {
+      throw new Error('async_resume_result_binding_mismatch');
+    }
+  }
+  return { reviews, reviewBytes, artifacts };
+}
+
+/** Remove only the exact archived cycle-history files after a terminal receipt exists. */
+export async function consumeBoundAsyncHistory(storeDir: string, targetKey: string,
+  expectedSha256: readonly string[], maxResults: number): Promise<void> {
+  const snapshot = await snapshotAsyncHistory(storeDir, targetKey, maxResults);
+  const expected = [...expectedSha256].sort();
+  const actual = snapshot.artifacts.map(item => item.sha256).sort();
+  const remaining = new Map<string, number>();
+  for (const digest of expected) remaining.set(digest, (remaining.get(digest) ?? 0) + 1);
+  for (const digest of actual) {
+    const count = remaining.get(digest) ?? 0;
+    if (count === 0) throw new Error('async_resume_result_binding_mismatch');
+    remaining.set(digest, count - 1);
+  }
+  for (const artifact of snapshot.artifacts) {
+    const retained = `${artifact.path}.consumed-${randomUUID()}`;
+    await rename(artifact.path, retained);
+    try {
+      const bytes = await readStableAsyncResult(retained);
+      if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) {
+        throw new Error('async_resume_result_changed');
+      }
+      await rm(retained, { force: true });
+    } catch (error) {
+      try { await rename(retained, artifact.path); } catch { /* preserve the original error */ }
+      throw error;
+    }
+  }
+}
+
 /** Consume only the exact reviewed async artifacts after terminal recovery. */
 export async function consumeBoundAsyncResults(
   storeDir: string,
