@@ -34,7 +34,15 @@ SLSA_V1 = 'https://slsa.dev/provenance/v1'
 
 
 class NotificationError(Exception):
-    """A failure safe to print without credentials or upstream response bodies."""
+    """A failure safe to print without credentials or upstream response bodies.
+
+    `transient` marks failures that a later identical request can clear: a
+    missing resource, rate limiting, a server error or a network failure.
+    """
+
+    def __init__(self, message, *, transient=False):
+        super().__init__(message)
+        self.transient = transient
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -51,8 +59,11 @@ def request(url, *, headers=None, body=None):
                 raise NotificationError('Response exceeds the size limit')
             return data
     except urllib.error.HTTPError as error:
-        raise NotificationError(f'Request failed with HTTP {error.code}') from None
-    except (OSError, ValueError):
+        raise NotificationError(f'Request failed with HTTP {error.code}',
+                                transient=error.code in (404, 429) or error.code >= 500) from None
+    except OSError:
+        raise NotificationError('Request failed or timed out', transient=True) from None
+    except ValueError:
         raise NotificationError('Request failed or timed out') from None
 
 
@@ -97,8 +108,9 @@ def previous_version(metadata, version):
 def published_release(name, version):
     """Return the npm metadata and attestations once the registry lists the release.
 
-    Failed lookups and a missing version are retried until NPM_VISIBILITY_SECONDS
-    have passed; identity and provenance checks run afterwards and fail closed.
+    A missing version and transient lookup failures are retried until
+    NPM_VISIBILITY_SECONDS have passed. Any other failure, and the identity and
+    provenance checks that run afterwards, fail closed at once.
     """
     registry = f'{NPM_REGISTRY}/{urllib.parse.quote(name, safe="")}'
     deadline = time.monotonic() + NPM_VISIBILITY_SECONDS
@@ -109,12 +121,13 @@ def published_release(name, version):
             versions = metadata.get('versions')
             package = versions.get(version) if isinstance(versions, dict) else None
             if not isinstance(package, dict):
-                raise NotificationError('Release version is not published on npm')
+                raise NotificationError('Release version is not published on npm', transient=True)
+            # Releases published without gitHead are verified through their npm provenance attestation.
             attestation = json_response(attestation_url(name, version)) if package.get('gitHead') is None else {}
             return metadata, attestation
         except NotificationError as error:
             delay = NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)]
-            if time.monotonic() + delay > deadline:
+            if not error.transient or time.monotonic() + delay > deadline:
                 raise
             print(f'npm does not serve {name}@{version} yet ({error}); retrying in {delay}s.', file=sys.stderr)
             time.sleep(delay)

@@ -9,6 +9,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+import urllib.error
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'release_notification.py'
 spec = importlib.util.spec_from_file_location('notification', SCRIPT)
@@ -195,7 +196,7 @@ class ReleaseNotificationTest(unittest.TestCase):
     def test_waits_for_npm_to_serve_a_fresh_publish(self):
         published = {'versions': {'4.1.5': {}, '4.1.6': {'gitHead': 'a' * 40}}}
         clock = FakeClock()
-        replies = [n.NotificationError('Request failed with HTTP 404'), {'versions': {'4.1.5': {}}}, published]
+        replies = [n.NotificationError('Request failed with HTTP 404', transient=True), {'versions': {'4.1.5': {}}}, published]
         with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=replies) as lookup, \
                 contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(n.published_release('@allocator-one/rcl', '4.1.6'), (published, {}))
@@ -207,7 +208,7 @@ class ReleaseNotificationTest(unittest.TestCase):
         published = {'versions': {'4.1.6': {'name': '@allocator-one/rcl', 'version': '4.1.6'}}}
         attestation = {'attestations': []}
         clock = FakeClock()
-        replies = [published, n.NotificationError('Request failed with HTTP 404'), published, attestation]
+        replies = [published, n.NotificationError('Request failed with HTTP 404', transient=True), published, attestation]
         with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=replies) as lookup, \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(n.published_release('@allocator-one/rcl', '4.1.6'), (published, attestation))
@@ -225,6 +226,30 @@ class ReleaseNotificationTest(unittest.TestCase):
         self.assertEqual(set(clock.sleeps[3:]), {60})
         self.assertLessEqual(sum(clock.sleeps), n.NPM_VISIBILITY_SECONDS)
         self.assertGreater(sum(clock.sleeps) + 60, n.NPM_VISIBILITY_SECONDS)
+
+    def test_npm_wait_retries_only_transient_failures(self):
+        for permanent in [n.NotificationError('Request failed with HTTP 403'), n.NotificationError('Invalid JSON response')]:
+            clock = FakeClock()
+            with self.subTest(error=str(permanent)), patch.object(n, 'time', clock), \
+                    patch.object(n, 'json_response', side_effect=[permanent]), \
+                    self.assertRaisesRegex(n.NotificationError, str(permanent)):
+                n.published_release('@allocator-one/rcl', '4.1.6')
+            self.assertEqual(clock.sleeps, [])
+
+    def test_request_marks_lag_like_failures_transient(self):
+        def failure(code):
+            return urllib.error.HTTPError('https://registry.npmjs.org/x', code, 'error', {}, None)
+
+        for code, transient in [(404, True), (429, True), (500, True), (503, True), (401, False), (403, False)]:
+            with self.subTest(code=code), patch.object(n.urllib.request, 'build_opener') as opener, \
+                    self.assertRaises(n.NotificationError) as raised:
+                opener.return_value.open.side_effect = failure(code)
+                n.request('https://registry.npmjs.org/x')
+            self.assertEqual(raised.exception.transient, transient)
+        with patch.object(n.urllib.request, 'build_opener') as opener, self.assertRaises(n.NotificationError) as raised:
+            opener.return_value.open.side_effect = TimeoutError()
+            n.request('https://registry.npmjs.org/x')
+        self.assertTrue(raised.exception.transient)
 
     def test_visible_release_with_wrong_identity_fails_without_waiting(self):
         manifest = {'name': '@allocator-one/rcl', 'version': '4.1.6'}
