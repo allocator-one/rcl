@@ -349,6 +349,7 @@ program
   .option('--head-sha <sha>', 'Exact head commit a patch file was taken from (patch files only)')
   .option('--base-sha <sha>', 'Exact base commit a patch file was taken from (patch files only)')
   .option('--expect-head-sha <sha>', 'Fail fast unless the resolved head commit equals this SHA')
+  .option('--expect-pr-head-sha <sha>', 'Finalize-only cycle recovery: fail unless the live pull request remains open at this current head')
   .option('--spec-source <source>', 'Where --spec came from: flag | repo_file | harness_issue:<ID>')
   .option('--converge-target <key>', 'Converge target this round belongs to (or RCL_CONVERGE_TARGET)')
   .option('--for-pr <owner/repo#N>', 'The pull request a patch-file review is evidence for (or RCL_FOR_PR): Harness verifies its head against that pull request')
@@ -363,6 +364,7 @@ program
   .option('--finalize-pending-only', 'Finalize one authenticated pending launch without claiming or dispatching its successor')
   .option('--pending-native-sha256 <digest>', 'Finalize-only: exact native state digest returned by --preview-pending')
   .option('--pending-attempt-sha256 <digest>', 'Finalize-only: exact attempt state digest returned by --preview-pending')
+  .option('--pending-preview-sha256 <digest>', 'Changed-head cycle finalize-only: exact preview binding returned by --preview-pending')
   .option('--export-pending-package <path>', 'Export authenticated pending inputs to an exclusive private file without provider calls or native writes')
   .option('--expect-base-sha <sha>', 'Pending package export: require the resolved current base to equal this SHA')
   .option('--ordinary-pending-package <path>', 'Immutable pending-launch package; requires --resume-pending or --finalize-pending-only and replaces --retry-report')
@@ -1603,6 +1605,8 @@ interface CouncilCliOpts {
   baseSha?: string;
   /** Fail fast when the resolved head is not the one the caller expects. */
   expectHeadSha?: string;
+  /** Current live PR head, distinct from a historical pending launch head. */
+  expectPrHeadSha?: string;
   /** flag | repo_file | harness_issue:<ID> — recorded in the run header. */
   specSource?: string;
   /** Converge context, or the RCL_CONVERGE_* environment the skill exports. */
@@ -1623,6 +1627,7 @@ interface CouncilCliOpts {
   finalizePendingOnly?: boolean;
   pendingNativeSha256?: string;
   pendingAttemptSha256?: string;
+  pendingPreviewSha256?: string;
   ordinaryPendingPackage?: string;
   exportPendingPackage?: string;
   expectBaseSha?: string;
@@ -1979,7 +1984,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     const finalizeOnlyIgnoredReviewFlags = opts.retryReason !== undefined || opts.maxRounds !== undefined ||
       opts.round !== undefined || opts.attempt !== undefined || opts.post || opts.json ||
       opts.jsonFile !== undefined || opts.markdown !== undefined || opts.ci || opts.evidenceRequired ||
-      opts.forPr !== undefined || opts.role !== undefined || opts.roles !== undefined ||
+      opts.role !== undefined || opts.roles !== undefined ||
       opts.models !== undefined || opts.secondaryModels !== undefined || opts.asyncModels !== undefined ||
       (opts.reviewer?.length ?? 0) > 0 || (opts.context?.length ?? 0) > 0 ||
       opts.spec !== undefined || opts.focus !== undefined;
@@ -1988,12 +1993,17 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       opts.retryReport !== undefined || !opts.resumeAsyncSha256 || opts.maxAttempts === undefined ||
       (!opts.previewPending && (!opts.pendingNativeSha256 || !opts.pendingAttemptSha256)) ||
       (opts.previewPending && (opts.pendingNativeSha256 !== undefined || opts.pendingAttemptSha256 !== undefined)) ||
+      (opts.expectPrHeadSha !== undefined && !opts.previewPending && !opts.pendingPreviewSha256) ||
+      (opts.pendingPreviewSha256 !== undefined && opts.expectPrHeadSha === undefined) ||
+      (opts.expectPrHeadSha !== undefined && opts.forPr === undefined) ||
+      (opts.previewPending && opts.pendingPreviewSha256 !== undefined) ||
       opts.startOver || opts.boundFixRecovery || opts.attest || opts.launchIntent !== undefined ||
       finalizeOnlyIgnoredReviewFlags || finalizeOnlySourceFlags)) {
       throw new ReviewLaunchRefused('pending_finalize_incompatible', '--finalize-pending-only accepts only guarded target/head/base/config bindings, one ordinary pending package, an explicit unchanged attempt cap, retained async result digests and, for apply, both exact state digests from preview; do not combine it with review, output, evidence or retry flags.');
     }
     if (!opts.finalizePendingOnly &&
-      (opts.pendingNativeSha256 !== undefined || opts.pendingAttemptSha256 !== undefined)) {
+      (opts.pendingNativeSha256 !== undefined || opts.pendingAttemptSha256 !== undefined ||
+        opts.pendingPreviewSha256 !== undefined || opts.expectPrHeadSha !== undefined)) {
       throw new ReviewLaunchRefused('pending_finalize_incompatible', 'Pending native and attempt state digests apply only to --finalize-pending-only.');
     }
     if (!opts.resumePending && !opts.finalizePendingOnly &&
@@ -2056,6 +2066,15 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     if (opts.headSha !== undefined) validateSha(opts.headSha, '--head-sha');
     if (opts.baseSha !== undefined) validateSha(opts.baseSha, '--base-sha');
     if (opts.expectHeadSha !== undefined) validateSha(opts.expectHeadSha, '--expect-head-sha');
+    if (opts.expectPrHeadSha !== undefined) validateSha(opts.expectPrHeadSha, '--expect-pr-head-sha');
+    if (opts.pendingPreviewSha256 !== undefined && !/^[a-f0-9]{64}$/.test(opts.pendingPreviewSha256)) {
+      throw new ReviewLaunchRefused('pending_finalize_incompatible',
+        '--pending-preview-sha256 must be a lowercase SHA-256 digest.');
+    }
+    if (opts.expectPrHeadSha !== undefined && !opts.finalizePendingOnly) {
+      throw new ReviewLaunchRefused('pending_finalize_incompatible',
+        '--expect-pr-head-sha applies only to cycle-backed --finalize-pending-only recovery.');
+    }
     if (opts.evidenceRequired && patchTarget && opts.headSha === undefined) {
       throw new Error(
         '--evidence-required needs --head-sha for a patch file: evidence must bind to the commit it reviewed.'
@@ -2267,7 +2286,8 @@ async function executeCouncil(
       if (!extra.target.repo || !extra.target.prNumber) throw new Error('fresh_review_requires_pr');
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
       if (!runtime.sink || runtime.level !== 'full') throw new Error('Fresh review cycles require full Harness evidence and an actor credential');
-      cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber, extra.target.headSha ?? '');
+      cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber,
+        opts.expectPrHeadSha ?? extra.target.headSha ?? '');
     }
     if (opts.resumePending || opts.finalizePendingOnly) {
       const asyncBinding = opts.resumeAsyncSha256!.trim();
@@ -2280,6 +2300,14 @@ async function executeCouncil(
       const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
         (await readStable(opts.ordinaryPendingPackage)).text
       ) as OrdinaryPendingPackage;
+      if (opts.expectPrHeadSha !== undefined && migrationPackage?.version !== 2) {
+        throw new ReviewLaunchRefused('pending_finalize_incompatible',
+          '--expect-pr-head-sha requires a cycle-backed version-2 pending package.');
+      }
+      if (opts.finalizePendingOnly && opts.forPr !== undefined && migrationPackage?.version !== 2) {
+        throw new ReviewLaunchRefused('pending_finalize_incompatible',
+          '--for-pr finalize-only recovery requires a cycle-backed version-2 pending package.');
+      }
       if (migrationPackage?.version !== 2 && (expectedAsyncSha256.length === 0 ||
           new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length)) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
@@ -2329,6 +2357,7 @@ async function executeCouncil(
           maxDurationMs: 1, validate: async () => {}, loadRetainedAsync: loadMigrationRetainedAsync,
           run: async () => { throw new Error('preview_must_not_run'); }, preview: true,
           cycleRemote,
+          ...(opts.expectPrHeadSha === undefined ? {} : { currentPrHeadSha: opts.expectPrHeadSha }),
           previewMode: opts.finalizePendingOnly ? 'finalize-only' : 'combined' });
         spinner.stop(); console.log(JSON.stringify({
           mode: opts.finalizePendingOnly ? 'finalize-only-preview' : 'preview', ...preview,
@@ -2342,6 +2371,9 @@ async function executeCouncil(
           nativeStateSha256: opts.pendingNativeSha256!, attemptStateSha256: opts.pendingAttemptSha256!,
           retainedAsyncSha256: expectedAsyncSha256, migrationPackage,
           maxAttempts: Number(opts.maxAttempts), cycleRemote,
+          ...(opts.expectPrHeadSha === undefined ? {} : {
+            currentPrHeadSha: opts.expectPrHeadSha, previewSha256: opts.pendingPreviewSha256!,
+          }),
           loadRetainedAsync: loadMigrationRetainedAsync,
           ...(migrationPackage.version === 2 ? { cycleHistory: {
             resolveStoreDir: resolveExistingAsyncStoreDir,

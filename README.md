@@ -186,6 +186,7 @@ Untracked files are invisible to `git diff` and therefore not reviewed.
 | `--ci` | Exit 1 when the review is a CI failure (see [`--ci`](#--ci)) |
 | `--head-sha <sha>` / `--base-sha <sha>` | Exact head/base commit a patch file was taken from (patch files only) |
 | `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
+| `--expect-pr-head-sha <sha>` / `--pending-preview-sha256 <digest>` | Cycle finalize-only recovery: bind the live PR's current head separately from the historical `--head-sha`, then require apply to present the exact digest returned by preview |
 | `--for-pr <owner/repo#N>` | Bind a patch-file review to the pull request it was taken from (needs `--head-sha`) |
 | `--no-telemetry` | Do not deliver this review as evidence to Harness |
 | `--evidence-required` | Exit 4 unless Harness acknowledged the evidence |
@@ -217,7 +218,7 @@ recovery operations, documented in
 | `--preview-pending` | Authenticate a pending recovery or preview a package export without writes or provider calls |
 | `--ordinary-pending-package <path>` | Immutable pending-launch package for `--resume-pending` or `--finalize-pending-only`; cycle packages are finalize-only |
 | `--resume-pending` / `--resume-async-sha256 <hashes>` | Finalize a dead pending launch and claim one checkpointed retry, retaining the exact async results; cycle recovery accepts `none` for no completed async artifacts |
-| `--finalize-pending-only` / `--pending-native-sha256 <digest>` / `--pending-attempt-sha256 <digest>` | Finalize the previewed pending attempt as failed/unknown without claiming a successor |
+| `--finalize-pending-only` / `--pending-native-sha256 <digest>` / `--pending-attempt-sha256 <digest>` | Finalize the previewed pending attempt as failed/unknown without claiming a successor; cycle recovery after PR movement also requires `--for-pr`, `--expect-pr-head-sha`, and the returned `--pending-preview-sha256` |
 
 **Reports.** Every report carries a `run` header: a client run id (UUIDv7),
 the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub

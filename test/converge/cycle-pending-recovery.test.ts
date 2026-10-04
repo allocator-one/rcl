@@ -544,3 +544,48 @@ it('refuses cycle, cap, and server membership drift before any recovery write', 
   expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target))).toEqual(attemptsBefore);
   expect(fixture.options.loadRetainedAsync).not.toHaveBeenCalled();
 });
+
+it('revalidates live cycle membership immediately before the first recovery write', async () => {
+  const fixture = await cyclePendingFixture({ retainedCount: 1 });
+  const options = await cycleFinalizeOptions(fixture);
+  const nativeBefore = await readFile(fixture.nativePath);
+  const attemptsBefore = await readFile(convergeAttemptStatePath(fixture.common, fixture.target));
+  const asyncBefore = await readdir(fixture.asyncStoreDir);
+  const active = structuredClone(fixture.state.cycle!);
+  fixture.cycleRemote.current.mockReset();
+  fixture.cycleRemote.current
+    .mockResolvedValueOnce(active)
+    .mockResolvedValueOnce({ ...active, id: randomUUID() });
+
+  await expect(finalizeOrdinaryPendingLaunch(options))
+    .rejects.toThrow('pending_legacy_resume_cycle_superseded');
+
+  expect(fixture.cycleRemote.current).toHaveBeenCalledTimes(2);
+  expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
+  expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target))).toEqual(attemptsBefore);
+  expect(await readdir(fixture.asyncStoreDir)).toEqual(asyncBefore);
+  await expect(readdir(join(fixture.common, 'rcl-converge-pending-recovery')))
+    .rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('revalidates live cycle membership before an exact receipt replay can mutate state', async () => {
+  const fixture = await cyclePendingFixture({ retainedCount: 1 });
+  const options = await cycleFinalizeOptions(fixture);
+  await finalizeOrdinaryPendingLaunch(options);
+  const nativeBefore = await readFile(fixture.nativePath);
+  const attemptsBefore = await readFile(convergeAttemptStatePath(fixture.common, fixture.target));
+  const consumeCycleHistory = vi.fn<typeof consumeBoundAsyncHistory>();
+  const active = structuredClone(fixture.state.cycle!);
+  fixture.cycleRemote.current.mockReset();
+  fixture.cycleRemote.current
+    .mockResolvedValueOnce(active)
+    .mockResolvedValueOnce({ ...active, id: randomUUID() });
+
+  await expect(finalizeOrdinaryPendingLaunch({ ...options, consumeCycleHistory }))
+    .rejects.toThrow('pending_legacy_resume_cycle_superseded');
+
+  expect(fixture.cycleRemote.current).toHaveBeenCalledTimes(2);
+  expect(consumeCycleHistory).not.toHaveBeenCalled();
+  expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
+  expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target))).toEqual(attemptsBefore);
+});
