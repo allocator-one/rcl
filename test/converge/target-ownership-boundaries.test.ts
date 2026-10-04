@@ -76,13 +76,27 @@ it('refuses recovery timing overrides before acquiring a target lock', async () 
 it('preserves ordinary attempt and round operations in the Windows platform branch', async () => {
   // Branch simulation, not Windows filesystem qualification. Existing attempt
   // durability explicitly skips directory fsync on Windows.
+  const systemRoot = process.env.SystemRoot;
+  process.env.SystemRoot = String.raw`C:\Windows`;
+  const command = lockScope.lockSystemCommand;
+  vi.spyOn(lockScope, 'lockSystemCommand').mockImplementation(async (file, args, timeout) => {
+    if (file.endsWith('powershell.exe')) {
+      return args.at(-1)?.includes('Win32_OperatingSystem') ? '638950000000000000\r\n' : '638950123456789000\r\n';
+    }
+    return command(file, args, timeout);
+  });
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
-  await expect(claimConvergeAttempt({ gitCommonDir: dir, target })).resolves.toMatchObject({ attempt: 1 });
-  await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
-  expect((await loadConvergeRunState(dir, target))?.rounds).toHaveLength(1);
-  const recovery = vi.fn();
-  await expect(withRecoveryTarget(dir, target, recovery)).rejects.toThrow('unsupported_recovery_lock_scope');
-  expect(recovery).not.toHaveBeenCalled();
+  try {
+    await expect(claimConvergeAttempt({ gitCommonDir: dir, target })).resolves.toMatchObject({ attempt: 1 });
+    await expect(processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [] })).resolves.toMatchObject({ roundCap: 15 });
+    expect((await loadConvergeRunState(dir, target))?.rounds).toHaveLength(1);
+    const recovery = vi.fn();
+    await expect(withRecoveryTarget(dir, target, recovery)).rejects.toThrow('unsupported_recovery_lock_scope');
+    expect(recovery).not.toHaveBeenCalled();
+  } finally {
+    if (systemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = systemRoot;
+  }
 });
 
 it.runIf(process.platform !== 'win32').each([0o775, 0o777])('refuses an existing group/other-writable convergence state directory (%o)', async mode => {
@@ -198,6 +212,40 @@ it('pins attempt ownership inputs before waiting for a target lock', async () =>
   } finally {
     release.resolve();
     await Promise.allSettled([holder, claim]);
+  }
+});
+
+it('validates bound report evidence only after acquiring target ownership', async () => {
+  const entered = barrier(), release = barrier();
+  const contended = barrier(), retry = barrier();
+  const holder = withNativeTarget(dir, target, async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+  faults.ownershipWait = async () => { contended.resolve(); await retry.promise; };
+  const admission = processRoundReport({
+    gitCommonDir: dir,
+    target,
+    round: 1,
+    runId: '00000000-0000-7000-8000-000000000001',
+    findings: [],
+    evidence: { reportJson: '{invalid' },
+  });
+  void admission.catch(() => {});
+  try {
+    const beforeOwnership = await Promise.race([
+      contended.promise.then(() => 'contended'),
+      admission.then(() => 'resolved', error => error),
+    ]);
+    expect(beforeOwnership).toBe('contended');
+    release.resolve();
+    await holder;
+    retry.resolve();
+    await expect(admission).rejects.toThrow('Invalid immutable report JSON.');
+  } finally {
+    release.resolve(); retry.resolve();
+    await Promise.allSettled([holder, admission]);
   }
 });
 

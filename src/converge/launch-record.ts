@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveQuorumPolicy } from '../dispatch/quorum.js';
+import { processIdentitySchema } from './process-identity.js';
 
 const quorumPolicySchema = z.object({
   version: z.literal(1), fraction: z.number().finite(),
@@ -81,6 +82,7 @@ export const launchSchema = z.object({
   inputSha256: z.string().regex(/^[a-f0-9]{64}$/),
   startedAt: z.string().datetime(),
   pid: z.number().int().positive().safe(),
+  processIdentity: processIdentitySchema.optional(),
   retryReason: z.string().min(1).max(500).optional(),
   runId: z.string().uuid().optional(),
   reportJsonSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
@@ -116,8 +118,14 @@ export const launchSchema = z.object({
     retainedAsyncSha256: z.array(z.string().regex(/^[a-f0-9]{64}$/)),
     migrationPackageSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).strict().optional(),
-  recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),
-}).strict().refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined)
+  recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), processIdentity: processIdentitySchema.optional(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),
+}).strict()
+  .refine(value => value.processIdentity === undefined || value.processIdentity.pid === value.pid,
+    'Launch process identity must match its PID')
+  .refine(value => value.recovery?.resume?.processIdentity === undefined ||
+    value.recovery.resume.processIdentity.pid === value.recovery.resume.pid,
+  'Resume process identity must match its PID')
+  .refine(value => value.status === 'completed' ? completionSchema.safeParse(value).success : value.reviewerHealth === undefined)
   .refine(value => value.deliveryReconciliation === undefined ||
     (value.status === 'completed' && value.deliveryPending === false &&
       value.runId === value.deliveryReconciliation.runId &&

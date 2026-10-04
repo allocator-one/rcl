@@ -38,6 +38,40 @@ afterEach(async () => {
 
 describe('native guarded review launch', () => {
 
+  it('binds a Windows guarded launch claim and completion to one process identity', async () => {
+    const options = await fixture();
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const systemRoot = process.env.SystemRoot;
+    process.env.SystemRoot = String.raw`C:\Windows`;
+    const command = vi.fn(async (_file: string, args: string[], timeout?: number) => {
+      expect(timeout).toBe(5_000);
+      return args.at(-1)?.includes('Win32_OperatingSystem')
+        ? '638950000000000000\r\n'
+        : '638950123456789000\r\n';
+    });
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    vi.resetModules();
+    vi.doMock('../../src/evidence/original-run/lock-scope.js', async importOriginal => ({
+      ...await importOriginal<typeof import('../../src/evidence/original-run/lock-scope.js')>(),
+      lockSystemCommand: command,
+    }));
+
+    try {
+      const guarded = await import('../../src/converge/launch-guard.js');
+      await guarded.guardReviewLaunch(options);
+    } finally {
+      vi.doUnmock('../../src/evidence/original-run/lock-scope.js');
+      vi.resetModules();
+      Object.defineProperty(process, 'platform', platform);
+      if (systemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = systemRoot;
+    }
+    const attempt = (await loadConvergeAttemptState(options.gitCommonDir, target))!.attempts[0]!;
+    const launch = (await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch!;
+    expect(attempt.processIdentity).toMatchObject({ pid: process.pid, scope: { platform: 'win32' } });
+    expect(launch).toMatchObject({ processIdentity: attempt.processIdentity });
+  });
+
   it('rejects completion whose blocking failures exceed aggregate failures while retaining the spent claim', async () => {
     const options = await fixture();
     options.run = vi.fn().mockResolvedValue({ ...completion, successfulReviews: 17, totalReviews: 18,

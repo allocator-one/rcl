@@ -30,6 +30,7 @@ import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bou
 import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
 import { verifyCyclePendingFinalization } from './pending-finalization-receipt.js';
+import { captureCurrentProcessIdentity } from './process-identity.js';
 
 /** Canonical original descriptor prepared under target ownership, before its claim is spent. */
 export interface PreparedOriginalLaunch {
@@ -328,6 +329,9 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
   } else {
     await assertNoPendingFreshReview(options.gitCommonDir, options.target);
   }
+  const processIdentity = process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32'
+    ? await captureCurrentProcessIdentity()
+    : undefined;
   const claim = await claimConvergeAttempt({
     gitCommonDir: options.gitCommonDir,
     target: options.target,
@@ -390,6 +394,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
         startedAt: new Date().toISOString(), pid: process.pid,
+        ...(processIdentity ? { processIdentity } : {}),
         ...(ordinaryInputs ? { ordinaryInputs } : {}),
         ...(preparedOriginal ? { retainedOriginal: { version: 1 as const, runId: preparedOriginal.launch.runId,
           planDigest: preparedOriginal.launch.planDigest, capturedInputsSha256: preparedOriginal.launch.capturedInputsSha256 } } : {}),

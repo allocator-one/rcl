@@ -3,7 +3,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { claimDescriptorSchema, compareClaims } from './claims.js';
 import { decodeOriginalReport, decodeRecoveryDocument } from '../../original-run/decode.js';
-import { recoveryAnchors } from './native-state.js';
+import { effectivePendingIdentities, recoveryAnchors } from './native-state.js';
+import { occurrencePendingIdentities } from './native-occurrences.js';
 import { ConvergeRunStateError, findingGatingReason, migratedLegacyPendingRound, verdictClearsPending } from './obligations.js';
 import { DEFAULT_SEVERITY_ORDER } from '../../../config/defaults.js';
 import type { ConsensusFinding } from '../../../consensus/types.js';
@@ -12,6 +13,32 @@ import type { RetainedSources } from './sources.js';
 import { semanticCacheMatches } from './semantic-cache.js';
 import { object } from './primitives.js';
 const sha = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+/** Index immutable sightings once so every validator shares linear traversal. */
+export function indexSemanticSightings<T extends { round: number; canonicalIdentity: string }>(sightings: readonly T[]) {
+  const byRound = new Map<number, T[]>();
+  const byIdentity = new Map<string, T[]>();
+  const byIdentityAndRound = new Map<string, Map<number, T[]>>();
+  for (const sighting of sightings) {
+    const { round, canonicalIdentity } = sighting;
+    const roundMembers = byRound.get(round) ?? [];
+    roundMembers.push(sighting); byRound.set(round, roundMembers);
+    const identityMembers = byIdentity.get(canonicalIdentity) ?? [];
+    identityMembers.push(sighting); byIdentity.set(canonicalIdentity, identityMembers);
+    const identityRounds = byIdentityAndRound.get(canonicalIdentity) ?? new Map<number, T[]>();
+    const identityRoundMembers = identityRounds.get(round) ?? [];
+    identityRoundMembers.push(sighting); identityRounds.set(round, identityRoundMembers);
+    byIdentityAndRound.set(canonicalIdentity, identityRounds);
+  }
+  return { byRound, byIdentity, byIdentityAndRound };
+}
+
+/** Use an authenticated admission snapshot, or fall back to the validated current obligations. */
+export function admittedActionableBeforeTriage(state: ConvergeRunState, round = state.lastAnnotations?.round): string[] {
+  const reviewedRound = state.rounds.find(row => row.round === round);
+  const retained = reviewedRound?.admission?.actionableIdentities;
+  return retained ? [...retained] : effectivePendingIdentities(state);
+}
 
 export function verifyRoundBinding(binding: ReportBinding, target: string, round: number, runId: string, raw: string): RetainedReport {
   const bytes = Buffer.from(raw);
@@ -71,20 +98,9 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
   requireIntegrity(Array.isArray(state.sightings));
   const sightings = state.sightings!;
   const originalTitles = new Map<typeof sightings[number], string>();
-  const sightingsByRound = new Map<number, typeof sightings>();
-  const sightingsByIdentity = new Map<string, typeof sightings>();
-  const sightingsByIdentityAndRound = new Map<string, Map<number, typeof sightings>>();
   requireIntegrity(sightings.every(s => sightingSchema.safeParse(s).success));
-  for (const sighting of sightings) {
-    const roundMembers = sightingsByRound.get(sighting.round) ?? [];
-    roundMembers.push(sighting); sightingsByRound.set(sighting.round, roundMembers);
-    const identityMembers = sightingsByIdentity.get(sighting.canonicalIdentity) ?? [];
-    identityMembers.push(sighting); sightingsByIdentity.set(sighting.canonicalIdentity, identityMembers);
-    const identityRounds = sightingsByIdentityAndRound.get(sighting.canonicalIdentity) ?? new Map<number, typeof sightings>();
-    const identityRoundMembers = identityRounds.get(sighting.round) ?? [];
-    identityRoundMembers.push(sighting); identityRounds.set(sighting.round, identityRoundMembers);
-    sightingsByIdentityAndRound.set(sighting.canonicalIdentity, identityRounds);
-  }
+  const { byRound: sightingsByRound, byIdentity: sightingsByIdentity,
+    byIdentityAndRound: sightingsByIdentityAndRound } = indexSemanticSightings(sightings);
   for (const anchor of recoveryAnchors(state)) {
     requireIntegrity((sightingsByIdentity.get(anchor.identity) ?? []).every(sighting =>
       sighting.file === anchor.source.file && sighting.category === anchor.source.category &&
@@ -114,6 +130,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     }
   }
   const rounds = new Set<number>();
+  const reportsByRound = new Map<number, RetainedReport>();
   for (const round of state.rounds) {
     requireIntegrity(!!round && Number.isSafeInteger(round.round) && round.round > 0 && !rounds.has(round.round));
     rounds.add(round.round);
@@ -131,6 +148,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     requireIntegrity(bindingSchema.safeParse(round.reportBinding).success && round.runId === round.reportBinding?.runId);
     const binding = round.reportBinding!;
     const report = readBoundReport(binding, state.target, round.round, round.runId!, sources);
+    reportsByRound.set(round.round, report);
     // Later semantic rounds must agree with the native cycle (including none).
     // Original legacy rounds remain bounded by their exact predecessor bytes.
     const cycleRun: unknown = report.run;
@@ -222,7 +240,7 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
     let latestGatedRound: number | null = null;
     let latestGatedRoundAfterVerdict: number | null = null;
     for (const [round, group] of [...byRound].sort(([a], [b]) => a - b)) {
-      if (group.some(s => s.gating !== 'none')) {
+      if (group.some(s => s.gating !== 'none' && s.status !== 'suppressed')) {
         latestGatedRound = round;
         if (entry.verdict === undefined || !verdictClearsPending(state, key, round, entry.verdictRound!, entry.verdictSeverity)) {
           latestGatedRoundAfterVerdict = round;
@@ -230,7 +248,9 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       }
       requireIntegrity(group.every(s => s.pendingRound === group[0]!.pendingRound));
       const capturedPending = group[0]!.pendingRound;
-      requireIntegrity(capturedPending === null || byRound.get(capturedPending)?.some(s => s.gating !== 'none') === true);
+      requireIntegrity(capturedPending === null || byRound.get(capturedPending)?.some(s =>
+        s.gating !== 'none' && s.status !== 'suppressed') === true);
+      if (group.every(s => s.status === 'suppressed')) continue;
       // A verdict is recorded after its round's sightings, so it can clear the
       // obligation carried by later sightings without rewriting that round's
       // immutable capture. A weaker verdict cannot clear a critical source.
@@ -243,10 +263,67 @@ function validateSemanticMembership(state: ConvergeRunState, sources: RetainedSo
       !(entry.verdict !== undefined && verdictClearsPending(state, key, latestPending, entry.verdictRound!, entry.verdictSeverity)) ? latestPending : undefined;
     requireIntegrity(entry.pendingRound === expectedPending);
   }
+  for (const roundEntry of state.rounds) {
+    const admission = roundEntry.admission;
+    if (!admission) continue;
+    requireIntegrity(admission.version === 1 && Number.isSafeInteger(admission.recoveryOperationCount) &&
+      admission.recoveryOperationCount >= 0 && admission.recoveryOperationCount <= (state.recovery?.operations.length ?? 0));
+    const retainedSet = new Set(admission.actionableIdentities);
+    const roundSightings = sightingsByRound.get(roundEntry.round) ?? [];
+    const report = reportsByRound.get(roundEntry.round);
+    const recoverySource = report?.run?.converge?.recovery_source;
+    requireIntegrity(recoverySource?.version === 1 && recoverySource.native_sha256 === admission.sourceStateSha256);
+    const predecessorRaw = sources.snapshots.get(admission.sourceStateSha256);
+    requireIntegrity(predecessorRaw !== undefined && sha(predecessorRaw!) === admission.sourceStateSha256);
+    const predecessor = decodeRecoveryDocument(predecessorRaw!) as ConvergeRunState;
+    requireIntegrity(predecessor.target === state.target && predecessor.version === 3 &&
+      admission.recoveryOperationCount === predecessor.recovery?.operations.length);
+    const expectedAdmission = new Set(effectivePendingIdentities(predecessor));
+    for (const sighting of roundSightings) {
+      if (sighting.gating !== 'none' && sighting.status !== 'suppressed' && sighting.pendingRound !== null) {
+        expectedAdmission.add(sighting.canonicalIdentity);
+      }
+    }
+    requireIntegrity(isDeepStrictEqual(admission.actionableIdentities, [...expectedAdmission].sort()));
+    sources.pathRequirements.push({ kind: 'native-predecessor', sha256: admission.sourceStateSha256,
+      nativePathSuffix: `.recovery-sources/${admission.sourceStateSha256}.json` });
+    requireIntegrity(roundSightings.every(sighting =>
+      sighting.pendingRound === null || retainedSet.has(sighting.canonicalIdentity)));
+    requireIntegrity(Object.values(state.findings).every(entry => entry.firstRound > roundEntry.round ||
+      entry.pendingRound === undefined || entry.pendingRound > roundEntry.round || retainedSet.has(entry.key)));
+    const admittedOperations = state.recovery?.operations.slice(0, admission.recoveryOperationCount) ?? [];
+    const operationPending = new Set(admittedOperations.flatMap(operation => [
+      ...operation.anchors.filter(anchor => anchor.source.gating !== 'none').map(anchor => anchor.identity),
+      ...occurrencePendingIdentities(operation.occurrences),
+      ...(operation.material?.pendingIdentities ?? []),
+    ]));
+    requireIntegrity(admission.actionableIdentities.every(identity => {
+      const entry = state.findings[identity];
+      const latestSighting = (sightingsByIdentity.get(identity) ?? [])
+        .filter(sighting => sighting.round <= roundEntry.round).at(-1);
+      const legacyEntry = legacy?.findings[identity];
+      return operationPending.has(identity) ||
+        legacyEntry !== undefined && migratedLegacyPendingRound(legacyEntry, legacy!) !== undefined ||
+        latestSighting !== undefined && latestSighting.pendingRound !== null;
+    }));
+  }
   const latest = Math.max(0, ...rounds);
   if (latest && !legacy?.rounds.some(r => r.round === latest)) {
-    requireIntegrity(isDeepStrictEqual(state.lastAnnotations, { round: latest, identities: (sightingsByRound.get(latest) ?? [])
-      .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) }));
+    const expected = { round: latest, identities: (sightingsByRound.get(latest) ?? [])
+      .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) };
+    requireIntegrity(state.lastAnnotations !== undefined && state.lastAnnotations.round === expected.round &&
+      isDeepStrictEqual(state.lastAnnotations.identities, expected.identities));
+    const admission = state.rounds.find(row => row.round === latest)?.admission;
+    if (admission) requireIntegrity(state.lastAnnotations!.actionableBeforeTriage !== undefined &&
+      isDeepStrictEqual(admission.actionableIdentities, state.lastAnnotations!.actionableBeforeTriage));
+    if (state.lastAnnotations!.actionableBeforeTriage !== undefined) {
+      const retained = state.lastAnnotations!.actionableBeforeTriage;
+      const retainedSet = new Set(retained);
+      requireIntegrity((sightingsByRound.get(latest) ?? []).every(sighting =>
+        sighting.pendingRound === null || retainedSet.has(sighting.canonicalIdentity)));
+      requireIntegrity(state.lastAnnotations!.identities.every(row =>
+        row.gating === 'none' || row.status === 'suppressed' || retainedSet.has(row.identity)));
+    }
   }
 }
 
@@ -300,10 +377,14 @@ function validateSightingClassification(state: ConvergeRunState,
     const firstRound = Math.min(...byRound.keys());
     for (const [round, group] of byRound) {
       const ordinaryVerdict = (entry.verdictRound ?? Infinity) < round;
+      const verdictRecordedForThisSightingOrLater = entry.verdict !== undefined && entry.verdictRound! >= round;
       const recoveryDismissal = recoveryDismissalsForRound(round, key);
-      const recoveredEscalation = !ordinaryVerdict && group.some(row => row.severity === 'critical') &&
+      const overwrittenRecoveredEscalation = verdictRecordedForThisSightingOrLater &&
+        group.some(row => row.severity === 'critical') && recoveryDismissal !== undefined && recoveryDismissal !== 'critical';
+      const recoveredEscalation = entry.verdict === undefined && group.some(row => row.severity === 'critical') &&
         recoveryDismissal !== undefined && recoveryDismissal !== 'critical';
       const expectedStatus = state.version === 2 ? round === firstRound ? 'new' : undefined
+        : overwrittenRecoveredEscalation ? undefined
         : recoveredEscalation ? 'regating' : round === firstRound
           ? anchored.has(key) ? 'repeat' : 'new'
           : entry.verdict === undefined ? 'repeat'

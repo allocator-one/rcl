@@ -45,14 +45,19 @@ async function cyclePendingFixture(fixtureOptions: { retainedCount?: number; ide
   const state = (await loadConvergeRunState(common, target))!;
   const attempts = (await loadConvergeAttemptState(common, target))!;
   const nativePath = convergeRunStatePath(common, target);
+  const deadProcessIdentity = state.lastLaunch?.processIdentity
+    ? { ...state.lastLaunch.processIdentity, pid: 999_999, birthSha256: '0'.repeat(64) }
+    : undefined;
   const pending = {
     ...state,
     lastLaunch: { status: 'pending' as const, attempt: 1, round: 1, headSha, inputSha256,
-      startedAt: at, pid: 999_999 },
+      startedAt: at, pid: 999_999,
+      ...(deadProcessIdentity ? { processIdentity: deadProcessIdentity } : {}) },
     updatedAt: at,
   };
   await writeFile(nativePath, `${JSON.stringify(pending, null, 2)}\n`);
   attempts.attempts[0]!.pid = 999_999;
+  attempts.attempts[0]!.processIdentity = deadProcessIdentity;
   await writeFile(convergeAttemptStatePath(common, target), `${JSON.stringify(attempts, null, 2)}\n`);
   const retained = Array.from({ length: fixtureOptions.retainedCount ?? 16 }, (_, index) => {
     const bytes = JSON.stringify({ model: 'openrouter/moonshotai/kimi-k3', role: 'general',

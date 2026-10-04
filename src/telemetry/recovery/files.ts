@@ -18,16 +18,26 @@ export function platformPath(path: string): string {
 
 /** Stable, bounded, regular-file read. Ordinary Windows capture reuse may opt into its native file checks. */
 export async function readStable(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean; allowMissingSafeFlagsOnWindows?: boolean } = {}): Promise<{ text: string; raw: Buffer; sha256: string; mtime: string }> {
-  if ((constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined) &&
-      !(options.allowMissingSafeFlagsOnWindows && process.platform === 'win32')) throw new Error('safe_file_flags_unavailable');
+  return readStableFile(path, limit, options, true);
+}
+
+/** Ordinary native storage preserves platform compatibility; it does not qualify recovery inputs. */
+export function readOrdinaryNativeFile(path: string, limit = MAX_REPORT_BYTES, options: { sync?: boolean } = {}): ReturnType<typeof readStable> {
+  return readStableFile(path, limit, options, false);
+}
+
+async function readStableFile(path: string, limit: number, options: { sync?: boolean; allowMissingSafeFlagsOnWindows?: boolean }, strict: boolean): ReturnType<typeof readStable> {
+  const missingSafeFlags = constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined;
+  const windowsCompatible = process.platform === 'win32' && (!strict || options.allowMissingSafeFlagsOnWindows);
+  if (missingSafeFlags && !windowsCompatible) throw new Error('safe_file_flags_unavailable');
   const canonical = platformPath(path);
   if (await realpath(dirname(canonical)) !== dirname(canonical)) throw new Error('symlink_directory');
   const entry = await lstat(canonical);
   if (!entry.isFile()) throw new Error(entry.isSymbolicLink() ? 'symlink_file' : 'not_regular');
   // Windows requires a writable descriptor for FlushFileBuffers. POSIX permits
   // fsync on this read descriptor, preserving ordinary read-only recovery.
-  const access = options.sync && process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY;
-  const handle = await open(canonical, access | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  const flags = options.sync && process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY;
+  const handle = await open(canonical, flags | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
     const before = await handle.stat();
     if (!before.isFile()) throw new Error('not_regular');
@@ -51,7 +61,9 @@ export async function readStable(path: string, limit = MAX_REPORT_BYTES, options
         await realpath(dirname(canonical)) !== dirname(canonical)) throw new Error('changing_source');
     const raw = buffer.subarray(0, length);
     let text: string;
-    try { text = new TextDecoder('utf-8', { fatal: true }).decode(raw); } catch { throw new Error('invalid_utf8'); }
+    // Ordinary legacy readers retain their replacement-decoding compatibility and raw-byte digest.
+    // Recovery evidence always requires exact UTF-8 before it can confer authority.
+    try { text = strict ? new TextDecoder('utf-8', { fatal: true }).decode(raw) : raw.toString('utf8'); } catch { throw new Error('invalid_utf8'); }
     return { raw, text, sha256: sha256(raw), mtime: before.mtime.toISOString() };
   } finally {
     await handle.close();
