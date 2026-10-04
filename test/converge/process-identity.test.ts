@@ -116,7 +116,7 @@ describe('process identity', () => {
     });
     expect(command).toHaveBeenCalledWith('/usr/bin/vmmap', ['-summary', '17'], 5_000);
     expect(identity.birthSha256).toBe(createHash('sha256')
-      .update('darwin\0darwin:2026-10-02 12:34:56.123 +0200').digest('hex'));
+      .update(`darwin\0darwin:${Date.UTC(2026, 9, 2, 10, 34, 56, 123)}`).digest('hex'));
   });
 
   it('distinguishes Darwin PID reuse within the same wall-clock second', async () => {
@@ -134,6 +134,20 @@ describe('process identity', () => {
       platform: 'darwin', scope: async () => darwinScope, probe: () => {},
       command: async () => output('2026-10-02 12:34:56.123 +0200'),
     })).resolves.toBe('alive');
+  });
+
+  it('keeps a live Darwin owner stable across caller timezones', async () => {
+    const darwinScope = { platform: 'darwin' as const, boot: scope.boot, namespace: 'native' as const };
+    const output = (launch: string) => `Process: node [17]\nLaunch Time: ${launch}\nReport Version: 7\n`;
+    const overrides = (launch: string): Partial<ProcessIdentityIO> => ({
+      platform: 'darwin', scope: async () => darwinScope, probe: () => {},
+      command: async () => output(launch),
+    });
+    const identity = await captureProcessIdentity(17, overrides('2026-10-02 10:34:56.123 +0000'));
+    await expect(inspectProcessIdentity(identity, overrides('2026-10-02 00:34:56.123 -1000')))
+      .resolves.toBe('alive');
+    await expect(inspectProcessIdentity(identity, overrides('2026-10-02 12:34:56.123 +0200')))
+      .resolves.toBe('alive');
   });
 
   it('rejects missing, duplicate and malformed Darwin launch markers', async () => {

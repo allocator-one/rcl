@@ -107,6 +107,25 @@ function linuxBirth(raw: string, pid: number): string {
   return `linux:${startTicks}`;
 }
 
+function darwinBirth(started: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{3}) ([+-])(\d{2})(\d{2})$/.exec(started);
+  if (!match) throw new Error('invalid_darwin_process_birth');
+  const [year, month, day, hour, minute, second, millisecond, offsetHour, offsetMinute] =
+    [1, 2, 3, 4, 5, 6, 7, 9, 10].map(index => Number(match[index]));
+  const localUtc = Date.UTC(year!, month! - 1, day, hour, minute, second, millisecond);
+  const canonical = new Date(localUtc);
+  if (year! < 1970 || month! < 1 || month! > 12 || day! < 1 ||
+      canonical.getUTCFullYear() !== year || canonical.getUTCMonth() !== month! - 1 || canonical.getUTCDate() !== day ||
+      canonical.getUTCHours() !== hour || canonical.getUTCMinutes() !== minute || canonical.getUTCSeconds() !== second ||
+      canonical.getUTCMilliseconds() !== millisecond || offsetHour! > 23 || offsetMinute! > 59) {
+    throw new Error('invalid_darwin_process_birth');
+  }
+  const direction = match[8] === '+' ? 1 : -1;
+  const epoch = localUtc - direction * (offsetHour! * 60 + offsetMinute!) * 60_000;
+  if (!Number.isSafeInteger(epoch)) throw new Error('invalid_darwin_process_birth');
+  return `darwin:${epoch}`;
+}
+
 async function processBirth(pid: number, scope: ProcessIdentityScope, io: ProcessIdentityIO): Promise<string> {
   if (scope.platform === 'linux') return linuxBirth(await io.linuxStat(pid), pid);
   if (scope.platform === 'win32') {
@@ -124,7 +143,7 @@ async function processBirth(pid: number, scope: ProcessIdentityScope, io: Proces
     : null;
   const started = match?.[1];
   if (!started) throw new Error('invalid_darwin_process_birth');
-  return `darwin:${started}`;
+  return darwinBirth(started);
 }
 
 function birthDigest(platform: ProcessIdentityScope['platform'], birth: string): string {
