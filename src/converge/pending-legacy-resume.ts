@@ -593,6 +593,10 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
         await readArchivedAsync(options.gitCommonDir, existingReceipt.sourceDigest,
           existingReceipt.retainedAsyncSha256), packet);
       const snapshotsPresent = await finalizationSnapshotsPresent(options.gitCommonDir, existingReceipt);
+      // Revalidate at the last supported boundary before replay can publish
+      // missing snapshots or consume retained cycle history.
+      await assertCycleRecovery(options, currentRun, currentAttempts,
+        packet.version === 2 ? { ...packet, attemptsUsed: currentAttempts.attemptsUsed } : packet);
       if (!snapshotsPresent) {
         if (!state.exact) fail('finalization_receipt_state_mismatch');
         await retainFinalizationSnapshots(options.gitCommonDir, existingReceipt,
@@ -688,6 +692,9 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
     // Every fallible authentication and accounting check above precedes the
     // first durable write. Archive publication is idempotent if this process
     // stops before the native failed/unknown state or receipt is published.
+    // Revalidate remote cycle membership after those reads and immediately
+    // before archive publication so live PR or cycle drift fails closed.
+    await assertCycleRecovery(options, state, attempts, packet);
     await archiveAsync(options.gitCommonDir, source, artifacts, packet);
     if (current.status === 'pending') {
       await (options.writeFinalizedState ?? writeState)(options.gitCommonDir, state, ownership);
