@@ -22,9 +22,11 @@ import { readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument } from '../evidence/original-run/journal.js';
 import { prepareLockRoot } from '../evidence/original-run/lock-path.js';
 import { retainStaleFile } from './stale-report-storage.js';
-import { createPendingRecoverySource, createOrdinaryMigrationSource, pendingRecoverySourceSchema,
+import { createPendingRecoverySource, createOrdinaryMigrationSource, createCycleMigrationSource, pendingRecoverySourceSchema,
   type PendingRecoverySource } from './pending-recovery-source.js';
 import { validateOrdinaryPendingPackage, type OrdinaryPendingPackage } from './ordinary-pending-package.js';
+import { assertReviewCyclePair } from './fresh-review.js';
+import type { ReviewCycleRemote } from './review-cycle.js';
 
 export interface PendingLegacyResumeExecution {
   context: { target: string; attempt: number; round: number };
@@ -59,6 +61,7 @@ export interface PendingLegacyResumeOptions {
   migrationPackage?: OrdinaryPendingPackage;
   preview?: boolean;
   previewMode?: 'combined' | 'finalize-only';
+  cycleRemote?: ReviewCycleRemote;
 }
 
 export interface PendingLegacyResumeResult {
@@ -91,6 +94,7 @@ export interface OrdinaryPendingFinalizeOptions {
   loadRetainedAsync: () => Promise<AsyncResultReference[]>;
   /** Fault-injection boundary for proving archive-complete/native-write recovery. */
   writeFinalizedState?: typeof writeState;
+  cycleRemote?: ReviewCycleRemote;
 }
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -115,9 +119,28 @@ const ordinaryPendingFinalizationReceiptBodySchema = z.object({
   sourceAttemptStateSha256: digestSchema,
   finalizedNativeStateSha256: digestSchema,
 }).strict();
-const ordinaryPendingFinalizationReceiptSchema = ordinaryPendingFinalizationReceiptBodySchema.extend({
-  receiptDigest: digestSchema,
-}).strict().superRefine((receipt, context) => {
+const cyclePendingFinalizationReceiptBodySchema = ordinaryPendingFinalizationReceiptBodySchema.omit({
+  version: true,
+  operation: true,
+}).extend({
+  version: z.literal(2),
+  operation: z.literal('cycle-pending-finalize-only'),
+  cycleId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  repo: z.string().min(1),
+  prNumber: z.number().int().positive().safe(),
+  attemptCap: z.number().int().positive().safe(),
+  roundCap: z.number().int().positive().safe(),
+  asyncAttribution: z.literal('cycle-history-unattributed'),
+}).strict();
+const pendingFinalizationReceiptBodySchema = z.union([
+  ordinaryPendingFinalizationReceiptBodySchema,
+  cyclePendingFinalizationReceiptBodySchema,
+]);
+const ordinaryPendingFinalizationReceiptSchema = z.union([
+  ordinaryPendingFinalizationReceiptBodySchema.extend({ receiptDigest: digestSchema }).strict(),
+  cyclePendingFinalizationReceiptBodySchema.extend({ receiptDigest: digestSchema }).strict(),
+]).superRefine((receipt, context) => {
   const { receiptDigest, ...body } = receipt;
   if (receiptDigest !== createHash('sha256').update(stableStringify(body)).digest('hex')) {
     context.addIssue({ code: 'custom', message: 'Pending finalization receipt digest is invalid' });
@@ -126,6 +149,9 @@ const ordinaryPendingFinalizationReceiptSchema = ordinaryPendingFinalizationRece
       receipt.attemptsUsed !== receipt.finalizedAttempt || receipt.attemptsUsed > receipt.cap ||
       new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length) {
     context.addIssue({ code: 'custom', message: 'Pending finalization accounting is inconsistent' });
+  }
+  if (receipt.version === 2 && (receipt.attemptCap !== receipt.cap || receipt.round > receipt.roundCap)) {
+    context.addIssue({ code: 'custom', message: 'Cycle pending finalization accounting is inconsistent' });
   }
 });
 
@@ -168,12 +194,18 @@ function sourceFromFinalized(target: string, launch: GuardedLaunchState,
     if (!migrationPackage) fail('migration_package_required');
     const migrationPackageSha256 = createHash('sha256').update(stableStringify(migrationPackage)).digest('hex');
     if (migrationPackageSha256 !== recovery.migrationPackageSha256) fail('finalization_mismatch');
-    const source = createOrdinaryMigrationSource({ version: 1, target, headSha: launch.headSha,
+    const common = { target, headSha: launch.headSha,
       inputSha256: launch.inputSha256, pendingAttempt: launch.attempt, round: launch.round,
       originalPid: launch.pid, startedAt: launch.startedAt, blockingOutcome: recovery.blockingOutcome,
       reason: recovery.reason, nativeStateSha256: recovery.nativeStateSha256,
       attemptStateSha256: recovery.attemptStateSha256, retainedAsyncSha256: recovery.retainedAsyncSha256,
-      migrationPackageSha256 });
+      migrationPackageSha256 } as const;
+    const source = migrationPackage.version === 2
+      ? createCycleMigrationSource({ version: 2, ...common, cycle: migrationPackage.cycle!,
+        cycleId: migrationPackage.cycle!.id, operationId: migrationPackage.cycle!.operationId,
+        attemptCap: migrationPackage.attemptCap!, roundCap: migrationPackage.roundCap!,
+        attemptsUsed: migrationPackage.attemptsUsed!, asyncAttribution: 'cycle-history-unattributed' })
+      : createOrdinaryMigrationSource({ version: 1, ...common });
     if (source.digest !== recovery.sourceDigest) fail('finalization_mismatch');
     return source;
   }
@@ -187,6 +219,34 @@ function sourceFromFinalized(target: string, launch: GuardedLaunchState,
     retainedAsyncSha256: recovery.retainedAsyncSha256, retrySource: claim.retrySource,
     digest: recovery.sourceDigest,
   });
+}
+
+function packageExpected(state: ConvergeRunState, attempts: ConvergeAttemptState,
+  current: GuardedLaunchState, input: { target: string; baseSha?: string; retainedAsyncSha256: readonly string[] }) {
+  return {
+    target: input.target, headSha: current.headSha, inputSha256: current.inputSha256,
+    baseSha: input.baseSha!, attempt: current.attempt, round: current.round, pid: current.pid,
+    retainedAsyncSha256: input.retainedAsyncSha256,
+    ...(state.cycle ? { cycle: state.cycle, attemptCap: attempts.cap,
+      roundCap: state.roundCap, attemptsUsed: attempts.attemptsUsed } : {}),
+  };
+}
+
+async function assertCycleRecovery(options: { gitCommonDir: string; target: string;
+  cycleRemote?: ReviewCycleRemote }, state: ConvergeRunState, attempts: ConvergeAttemptState,
+  packet: OrdinaryPendingPackage): Promise<void> {
+  if (!state.cycle) {
+    if (packet.version === 2) fail('cycle_mismatch');
+    return;
+  }
+  await assertReviewCyclePair(options.gitCommonDir, options.target, state.cycle);
+  if (packet.version !== 2 || !isDeepStrictEqual(packet.cycle, state.cycle)) fail('cycle_mismatch');
+  const remote = options.cycleRemote;
+  if (!remote || remote.repo.toLowerCase() !== state.cycle.repo ||
+      remote.prNumber !== state.cycle.prNumber || remote.url !== state.cycle.url) fail('cycle_remote_mismatch');
+  if ((await remote.current())?.id !== state.cycle.id) fail('cycle_superseded');
+  if (attempts.cap !== packet.attemptCap || state.roundCap !== packet.roundCap ||
+      attempts.attemptsUsed !== packet.attemptsUsed) fail('cycle_accounting_mismatch');
 }
 
 function validateOptions(input: PendingLegacyResumeOptions): void {
@@ -358,8 +418,8 @@ async function assertFinalizedStateMatchesReceipt(common: string,
   return { native: native.raw, attempts: attempts.raw, exact: false };
 }
 
-function createFinalizationReceipt(input: z.input<typeof ordinaryPendingFinalizationReceiptBodySchema>): OrdinaryPendingFinalizationReceipt {
-  const body = ordinaryPendingFinalizationReceiptBodySchema.parse(input);
+function createFinalizationReceipt(input: z.input<typeof pendingFinalizationReceiptBodySchema>): OrdinaryPendingFinalizationReceipt {
+  const body = pendingFinalizationReceiptBodySchema.parse(input);
   return ordinaryPendingFinalizationReceiptSchema.parse({
     ...body,
     receiptDigest: createHash('sha256').update(stableStringify(body)).digest('hex'),
@@ -376,10 +436,15 @@ function assertReceiptMatchesInput(receipt: OrdinaryPendingFinalizationReceipt,
       receipt.retainedAsyncSha256.join(',') !== [...input.retainedAsyncSha256].sort().join(',')) {
     fail('finalization_receipt_mismatch');
   }
+  if (receipt.version === 2 && (input.migrationPackage.cycle?.id !== receipt.cycleId ||
+      input.migrationPackage.cycle.operationId !== receipt.operationId)) fail('finalization_receipt_mismatch');
   return validateOrdinaryPendingPackage(input.migrationPackage, {
     target: receipt.target, headSha: receipt.headSha, inputSha256: receipt.inputSha256,
     baseSha: receipt.baseSha, attempt: receipt.finalizedAttempt, round: receipt.round,
     pid: receipt.originalPid, retainedAsyncSha256: receipt.retainedAsyncSha256,
+    ...(receipt.version === 2 ? { cycle: input.migrationPackage.cycle,
+      attemptCap: receipt.attemptCap, roundCap: receipt.roundCap,
+      attemptsUsed: receipt.attemptsUsed } : {}),
   });
 }
 
@@ -422,6 +487,13 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
     if (existingReceipt) {
       const packet = assertReceiptMatchesInput(existingReceipt, options, migrationPackageSha256);
       const state = await assertFinalizedStateMatchesReceipt(options.gitCommonDir, existingReceipt);
+      const [currentRun, currentAttempts] = await Promise.all([
+        loadConvergeRunState(options.gitCommonDir, options.target),
+        previewConvergeAttemptState(options.gitCommonDir, options.target),
+      ]);
+      if (!currentRun || !currentAttempts) fail('finalization_receipt_state_mismatch');
+      await assertCycleRecovery(options, currentRun, currentAttempts,
+        packet.version === 2 ? { ...packet, attemptsUsed: currentAttempts.attemptsUsed } : packet);
       validateAsyncArtifacts({ retainedAsyncSha256: existingReceipt.retainedAsyncSha256 },
         await readArchivedAsync(options.gitCommonDir, existingReceipt.sourceDigest,
           existingReceipt.retainedAsyncSha256), packet);
@@ -445,11 +517,9 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
         current.inputSha256 !== options.pendingInputSha256 || !['pending', 'failed'].includes(current.status)) {
       fail('launch_mismatch');
     }
-    const packet = validateOrdinaryPendingPackage(options.migrationPackage, {
-      target: options.target, headSha: current.headSha, inputSha256: current.inputSha256,
-      baseSha: options.baseSha, attempt: current.attempt, round: current.round, pid: current.pid,
-      retainedAsyncSha256: options.retainedAsyncSha256,
-    });
+    const packet = validateOrdinaryPendingPackage(options.migrationPackage,
+      packageExpected(state, attempts, current, options));
+    await assertCycleRecovery(options, state, attempts, packet);
     let source: PendingRecoverySource;
     let sourceAttemptStateBytes: Buffer | undefined;
     if (current.status === 'pending') {
@@ -459,12 +529,18 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
         readStable(convergeAttemptStatePath(options.gitCommonDir, options.target)),
       ]);
       sourceAttemptStateBytes = attemptBytes.raw;
-      source = createOrdinaryMigrationSource({ version: 1, target: options.target,
+      const commonSource = { target: options.target,
         headSha: current.headSha, inputSha256: current.inputSha256, pendingAttempt: current.attempt,
         round: current.round, originalPid: current.pid, startedAt: current.startedAt,
         blockingOutcome: 'unknown', reason: 'coordinator_exited_without_durable_blocking_receipts',
         nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
-        retainedAsyncSha256: options.retainedAsyncSha256, migrationPackageSha256 });
+        retainedAsyncSha256: options.retainedAsyncSha256, migrationPackageSha256 } as const;
+      source = packet.version === 2
+        ? createCycleMigrationSource({ version: 2, ...commonSource, cycle: state.cycle!,
+          cycleId: state.cycle!.id, operationId: state.cycle!.operationId,
+          attemptCap: attempts.cap, roundCap: state.roundCap, attemptsUsed: attempts.attemptsUsed,
+          asyncAttribution: 'cycle-history-unattributed' })
+        : createOrdinaryMigrationSource({ version: 1, ...commonSource });
     } else {
       source = sourceFromFinalized(options.target, current, attempts, packet);
     }
@@ -491,7 +567,7 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
     // Construct and validate the exact receipt before the first write. The
     // native serializer is shared with writeState, so its post-state digest is
     // known without publishing a partially validated operation.
-    const receipt = createFinalizationReceipt({ version: 1, operation: 'ordinary-pending-finalize-only',
+    const receiptCommon = {
       target: options.target, headSha: current.headSha, baseSha: options.baseSha,
       inputSha256: current.inputSha256, sourceDigest: source.digest, migrationPackageSha256,
       finalizedAttempt: current.attempt, round: current.round, originalPid: current.pid,
@@ -499,7 +575,14 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
       blockingOutcome: 'unknown', retainedAsyncSha256: options.retainedAsyncSha256,
       sourceNativeStateSha256: source.nativeStateSha256,
       sourceAttemptStateSha256: source.attemptStateSha256,
-      finalizedNativeStateSha256 });
+      finalizedNativeStateSha256 } as const;
+    const receipt = packet.version === 2
+      ? createFinalizationReceipt({ version: 2, operation: 'cycle-pending-finalize-only', ...receiptCommon,
+        cycleId: state.cycle!.id, operationId: state.cycle!.operationId,
+        repo: state.cycle!.repo, prNumber: state.cycle!.prNumber,
+        attemptCap: attempts.cap, roundCap: state.roundCap,
+        asyncAttribution: 'cycle-history-unattributed' })
+      : createFinalizationReceipt({ version: 1, operation: 'ordinary-pending-finalize-only', ...receiptCommon });
 
     if (current.status === 'pending') {
       await preflightConvergeRunStateWrite(options.gitCommonDir, state, ownership);
@@ -566,23 +649,27 @@ export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOpt
       fail('attempt_cap_exhausted');
     }
     if ((options.ownerAlive ?? defaultOwnerAlive)(current.pid)) fail('owner_alive');
-    const packet = validateOrdinaryPendingPackage(options.migrationPackage!, {
-      target: options.target, headSha: current.headSha, inputSha256: current.inputSha256,
-      baseSha: options.baseSha!, attempt: current.attempt, round: current.round, pid: current.pid,
-      retainedAsyncSha256: options.retainedAsyncSha256,
-    });
+    const packet = validateOrdinaryPendingPackage(options.migrationPackage!,
+      packageExpected(state, attempts, current, options));
+    await assertCycleRecovery(options, state, attempts, packet);
     const [nativeBytes, attemptBytes] = await Promise.all([
       readStable(convergeRunStatePath(options.gitCommonDir, options.target)),
       readStable(convergeAttemptStatePath(options.gitCommonDir, options.target)),
     ]);
-    const source = createOrdinaryMigrationSource({ version: 1, target: options.target,
+    const commonSource = { target: options.target,
       headSha: current.headSha, inputSha256: current.inputSha256, pendingAttempt: current.attempt,
       round: current.round, originalPid: current.pid, startedAt: current.startedAt,
       blockingOutcome: 'unknown', reason: 'coordinator_exited_without_durable_blocking_receipts',
       nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
       retainedAsyncSha256: options.retainedAsyncSha256,
       migrationPackageSha256: createHash('sha256').update(stableStringify(packet)).digest('hex'),
-    });
+    } as const;
+    const source = packet.version === 2
+      ? createCycleMigrationSource({ version: 2, ...commonSource, cycle: state.cycle!,
+        cycleId: state.cycle!.id, operationId: state.cycle!.operationId,
+        attemptCap: attempts.cap, roundCap: state.roundCap, attemptsUsed: attempts.attemptsUsed,
+        asyncAttribution: 'cycle-history-unattributed' })
+      : createOrdinaryMigrationSource({ version: 1, ...commonSource });
     validateAsyncArtifacts(source, await options.loadRetainedAsync(), packet);
     return { source, nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
       attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextAttempt: current.attempt + 1 };

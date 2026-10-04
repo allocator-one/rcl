@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.5.5 - 2026-10-04
+
+- Recover a dead launcher inside an active review cycle by authenticating its
+  exact input, cycle, attempt, round, caps and retained async history. The
+  finalize-only transition archives unattributed async bytes, records the
+  blocking outcome as unknown, preserves findings and accounting, and permits
+  a later current-head attempt only after its terminal receipt verifies. New
+  cycle launches retain their guarded input before spending the claim
+  (RCL-146).
+
 ## 4.5.4 - 2026-10-04
 
 - Add preview/apply historical delivered-review reconciliation for a named

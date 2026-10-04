@@ -305,7 +305,7 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
 });
 
 describe('rcl review — ordinary pending package export (RCL-166)', () => {
-  it('launches start-over and existing-cycle reviews without ordinary input retention', async () => {
+  it('retains ordinary input packets for start-over and existing-cycle reviews', async () => {
     await withGuardedFixture(async fixture => {
       const common = join(fixture.repo, '.git');
       const headSha = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
@@ -315,10 +315,7 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
       const config = JSON.parse(readFileSync(configPath, 'utf8'));
       config.harness.telemetry = 'full';
       writeFileSync(configPath, JSON.stringify(config));
-      // Ordinary capture cannot succeed. These modes have their own recovery
-      // protocol and must not acquire its storage or document-size requirement.
       const ordinaryPath = join(common, 'rcl-ordinary-inputs');
-      writeFileSync(ordinaryPath, 'unrelated preserved path');
       const shim = join(fixture.repo, 'cycle-network.mjs');
       const cyclePath = join(fixture.repo, 'fixture-cycle.json');
       writeFileSync(shim, `import { createHash, randomUUID } from 'node:crypto';
@@ -362,8 +359,8 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
           ...(fresh ? ['--start-over'] : [])], fixture.repo, env);
         expect(result.status, result.stderr).toBe(0);
         const native = (await loadConvergeRunState(common, 'guarded-fixture'))!;
-        expect(native.lastLaunch).not.toHaveProperty('ordinaryInputs');
-        expect(readFileSync(ordinaryPath, 'utf8')).toBe('unrelated preserved path');
+        expect(native.lastLaunch).toHaveProperty('ordinaryInputs');
+        expect(readdirSync(ordinaryPath)).toHaveLength(fresh ? 1 : 2);
         if (fresh) {
           const bytes = readFileSync(join(fixture.repo, reportName), 'utf8');
           const report = JSON.parse(bytes);
