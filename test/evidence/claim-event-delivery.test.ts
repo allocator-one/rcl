@@ -54,7 +54,7 @@ async function fixture(requestBudget?: RecoveryRequestBudget) {
       const journal = await openJournal(join(dir, 'journal'), manifestSha256, operationId, mode,
         async phase => { if (phase === failPhase) throw new Error('synthetic checkpoint failure'); });
       return deliverPreparedClaimEvent({ gitCommonDir: dir, target, ownership, operationId, manifestSha256,
-        packetPath: join(dir, 'event.json'), mode, scope, actor, eventJson, sink, journal,
+        packetPath: join(dir, 'event.json'), mode, allowPost: true, scope, actor, eventJson, sink, journal,
         verifyContext: async () => { checks.push('fresh'); }, ...changes });
     });
   return { dir, scope, actor, target, event, eventJson, receipt, calls, bodies, checks, execute,
@@ -112,6 +112,20 @@ describe('durable claim event delivery', () => {
     const f = await fixture(); f.accept();
     expect(await f.execute()).toEqual(f.receipt());
     expect(f.calls).toEqual(['GET']);
+  });
+
+  it('does not treat omitted POST authorization as permission to create an event', async () => {
+    const f = await fixture();
+    await expect(f.execute('apply', { allowPost: undefined })).rejects.toThrow('claim_adopted_receipt_unavailable');
+    expect(f.calls).toEqual(['GET']);
+    expect(f.bodies).toEqual([]);
+  });
+
+  it('accepts an existing adopted receipt without POST authorization', async () => {
+    const f = await fixture(); f.accept();
+    expect(await f.execute('apply', { allowPost: false })).toEqual(f.receipt());
+    expect(f.calls).toEqual(['GET']);
+    expect(f.bodies).toEqual([]);
   });
 
   it('refuses an existing selected receipt without server chronology before POST', async () => {

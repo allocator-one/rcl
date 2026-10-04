@@ -20,7 +20,7 @@ export interface ClaimEventDeliveryOptions {
   packetPath: string;
   mode: 'apply' | 'resume';
   /** An adopted receipt is read-only: its disappearance never authorizes POST. */
-  allowPost?: boolean;
+  allowPost: boolean;
   scope: EventReceiptScope;
   actor: string;
   /** Already prepared assertion; recovery must never regenerate its UUID/time. */
@@ -36,7 +36,7 @@ export function deliverPreparedClaimEvent(options: ClaimEventDeliveryOptions): P
   // Pin caller-owned objects before the first await. Every replay compares the
   // retained packet, not a newly generated event or an acknowledgment counter.
   const scope = structuredClone(options.scope);
-  const { actor, eventJson, operationId, manifestSha256, target, mode, gitCommonDir, sink, journal, verifyContext } = options;
+  const { actor, eventJson, operationId, manifestSha256, target, mode, gitCommonDir, sink, journal, verifyContext, allowPost } = options;
   const path = platformPath(options.packetPath);
   return withOwnedNativeOperation(options.ownership, gitCommonDir, target, async ownership => {
     await assertRecoveryTargetOwnership(ownership, gitCommonDir, target);
@@ -84,7 +84,7 @@ export function deliverPreparedClaimEvent(options: ClaimEventDeliveryOptions): P
     };
     let receipt = await readReceipt();
     if (!receipt) {
-      if(options.allowPost===false) throw new Error('claim_adopted_receipt_unavailable');
+      if(!allowPost) throw new Error('claim_adopted_receipt_unavailable');
       await journal.append('claim_event_post_intent', audit);
       // Any quota wait precedes the final authenticated source/packet proof.
       const permit = await sink.reserveRecoveryWrite();
