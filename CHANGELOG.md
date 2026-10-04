@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 4.5.6 - 2026-10-04
+
+- Separate the historical launch head from the current live pull-request head
+  when finalizing a cycle-backed pending launch. `--head-sha` continues to
+  authenticate the captured launch and package, while
+  `--expect-pr-head-sha` fails closed unless the open PR remains at the exact
+  current head, and apply requires the exact two-head binding returned by
+  preview. This permits safe recovery after the PR advances without
+  weakening cycle membership, state, accounting or retained-artifact checks
+  (RCL-181).
+
 ## 4.5.5 - 2026-10-04
 
 - Recover a dead launcher inside an active review cycle by authenticating its
