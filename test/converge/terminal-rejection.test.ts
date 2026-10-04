@@ -21,6 +21,23 @@ import { serializeRecoveryDocument } from '../../src/evidence/original-run/journ
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import type { ReviewCycleReceipt } from '../../src/converge/review-cycle.js';
 
+vi.mock('../../src/converge/process-identity.js', async importOriginal => {
+  const identity = await importOriginal<typeof import('../../src/converge/process-identity.js')>();
+  return {
+    ...identity,
+    captureCurrentProcessIdentity: async () => ({
+      version: 1 as const,
+      pid: process.pid,
+      scope: process.platform === 'win32'
+        ? { platform: 'win32' as const, bootSha256: 'a'.repeat(64), namespace: 'native' as const }
+        : process.platform === 'darwin'
+          ? { platform: 'darwin' as const, boot: '11111111-1111-4111-8111-111111111111', namespace: 'native' as const }
+          : { platform: 'linux' as const, boot: '11111111-1111-4111-8111-111111111111', namespace: '1:123' },
+      birthSha256: 'e'.repeat(64),
+    }),
+  };
+});
+
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 async function fixture(legacy = true, cap = 20) {
@@ -57,7 +74,10 @@ async function fixture(legacy = true, cap = 20) {
   // Model the now-exited coordinator without killing or consulting any real task.
   const nativePath = convergeRunStatePath(common, target), attemptsPath = convergeAttemptStatePath(common, target);
   const state = JSON.parse(await readFile(nativePath, 'utf8')), attempts = JSON.parse(await readFile(attemptsPath, 'utf8'));
-  state.lastLaunch.pid = 99999999; attempts.attempts[2].pid = 99999999;
+  state.lastLaunch.pid = 99999999;
+  if (state.lastLaunch.processIdentity) state.lastLaunch.processIdentity.pid = 99999999;
+  attempts.attempts[2].pid = 99999999;
+  if (attempts.attempts[2].processIdentity) attempts.attempts[2].processIdentity.pid = 99999999;
   await writeFile(nativePath, JSON.stringify(state)); await writeFile(attemptsPath, JSON.stringify(attempts));
   const selection = { target, runId: result.run!.id, reportPath, reportSha256: sha256(await readFile(reportPath)), reason: 'Original strict-fallback labels rejected locally; fix verified before bounded retry.' };
   const preview = () => previewTerminalRejection(selection, common, dataDir);

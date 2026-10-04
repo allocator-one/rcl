@@ -1,6 +1,7 @@
 import { checkpointRecoveryCells, requireReviewerLaneBinding } from '../dispatch/checkpoint.js';
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from 'node:util';
 import {
   claimConvergeAttempt,
   convergeAttemptStatePath,
@@ -37,6 +38,7 @@ import {
 import { retainedLaunchInputSha256 } from "./retained-report.js";
 import { stableStringify } from "../report/run-header.js";
 import { withNativeTarget, type NativeTargetOwnership } from "./target-ownership.js";
+import { captureCurrentProcessIdentity, inspectProcessIdentity, type ProcessIdentity } from './process-identity.js';
 
 /** Exact canonical operation; the callback grants no authority by itself. */
 export interface BoundRecoveryOperation {
@@ -229,6 +231,8 @@ async function loadSource(
     launch.totalReviews !== health.policy.seatCount ||
     stableStringify(launch.reviewerHealth) !== stableStringify(expectedHealth) ||
     attempts?.attemptsUsed !== sourceClaim.attempt || !spent || spent.pid !== launch.pid ||
+    (spent.processIdentity !== undefined || launch.processIdentity !== undefined) &&
+      !isDeepStrictEqual(spent.processIdentity, launch.processIdentity) ||
     state.rounds.some(round => round.round === requiredRound)) fail("source_not_current");
   if (latest.kind === "successor") {
     const parent = lineage.runs.at(-2)!.inspected;
@@ -313,6 +317,9 @@ export async function guardReviewerRecoveryLaunch(
   let operationBytes: string | undefined;
   let failure: unknown;
   let claim: ConvergeAttemptClaim;
+  let ownerIdentity: ProcessIdentity;
+  try { ownerIdentity = await captureCurrentProcessIdentity(); }
+  catch { fail('owner_unverifiable'); }
   try {
     claim = await claimConvergeAttempt({
       gitCommonDir: options.gitCommonDir,
@@ -404,6 +411,7 @@ export async function guardReviewerRecoveryLaunch(
           inputSha256: options.inputSha256,
           startedAt: new Date().toISOString(),
           pid: process.pid,
+          processIdentity: ownerIdentity,
           recovery: {
             operationId: operation.operationId,
             sourceRunId: options.sourceRunId,
@@ -502,14 +510,11 @@ export interface ReviewerRecoveryResumeResult {
   reusedTerminal: boolean;
 }
 
-function requireDeadOwner(pid: number): void {
-  try { process.kill(pid, 0); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-    // Lack of permission or an unknown process error is not proof of death.
-    fail("resume_owner_unverifiable");
-  }
-  fail("resume_owner_alive");
+async function requireDeadOwner(identity: ProcessIdentity | undefined): Promise<void> {
+  if (!identity) fail('resume_owner_unverifiable');
+  const status = await inspectProcessIdentity(identity);
+  if (status === 'unverifiable') fail('resume_owner_unverifiable');
+  if (status === 'alive') fail('resume_owner_alive');
 }
 
 /**
@@ -538,7 +543,9 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     if (!state || !launch || !recovery || launch.runId !== options.successorRunId || !recovery.operationId) fail("resume_missing_launch");
     if (launch.headSha !== options.headSha || launch.inputSha256 !== options.inputSha256) fail("resume_input_mismatch");
     const spent = attempts?.attempts.find(item => item.attempt === launch.attempt);
-    if (!attempts || !spent || spent.pid !== launch.pid || attempts.attemptsUsed !== launch.attempt) fail("resume_claim_mismatch");
+    if (!attempts || !spent || spent.pid !== launch.pid || attempts.attemptsUsed !== launch.attempt ||
+      (spent.processIdentity !== undefined || launch.processIdentity !== undefined) &&
+        !isDeepStrictEqual(spent.processIdentity, launch.processIdentity)) fail("resume_claim_mismatch");
     validateRoundCap(state.roundCap);
     if (state.rounds.some(item => !Number.isSafeInteger(item.round) || item.round < 1)) fail("invalid_round_state");
     const maxRound = state.rounds.reduce((last, item) => Math.max(last, item.round), 0);
@@ -546,8 +553,9 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     if (launch.round > state.roundCap || (admitted
       ? admitted.runId !== options.successorRunId || maxRound !== launch.round || launch.status !== "completed"
       : maxRound + 1 !== launch.round)) fail("resume_round_mismatch");
-    if (launch.status === "pending") requireDeadOwner(recovery.resume?.phase === "running" ? recovery.resume.pid : launch.pid);
-    else if (recovery.resume?.phase === "running") requireDeadOwner(recovery.resume.pid);
+    if (launch.status === "pending") await requireDeadOwner(recovery.resume?.phase === "running"
+      ? recovery.resume.processIdentity : launch.processIdentity);
+    else if (recovery.resume?.phase === "running") await requireDeadOwner(recovery.resume.processIdentity);
 
     const readJournal = await CheckpointJournal.inspectRead(checkpointPath(options.gitCommonDir, options.target, options.successorRunId));
     requireReviewerLaneBinding(readJournal.getPlan());
@@ -627,9 +635,13 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     }
     // Health describes completed evidence only; the immutable report and claims
     // remain bound above, and finish derives health again from the saved lineage.
+    let currentIdentity: ProcessIdentity;
+    try { currentIdentity = await captureCurrentProcessIdentity(); }
+    catch { fail('resume_owner_unverifiable'); }
     const mutableLaunch = { ...launch };
     delete mutableLaunch.reviewerHealth;
-    state.lastLaunch = { ...mutableLaunch, status: "pending", recovery: { ...recovery, resume: { pid: process.pid, phase: "running" } } };
+    state.lastLaunch = { ...mutableLaunch, status: "pending", recovery: { ...recovery,
+      resume: { pid: process.pid, processIdentity: currentIdentity, phase: "running" } } };
     state.updatedAt = new Date().toISOString();
     await writeState(options.gitCommonDir, state, ownership);
     try {
@@ -638,12 +650,14 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
       if (!priorTerminal) await options.run({ journal, operation, claim, ownership });
       const completion = await finish(journal);
       state.lastLaunch = { ...launch, ...completion, status: "completed", deliveryPending: launch.deliveryPending ?? false,
-        hardFailure: launch.hardFailure ?? false, recovery: { ...recovery, resume: { pid: process.pid, phase: "finished" } } };
+        hardFailure: launch.hardFailure ?? false, recovery: { ...recovery,
+          resume: { pid: process.pid, processIdentity: currentIdentity, phase: "finished" } } };
       state.updatedAt = new Date().toISOString();
       await writeState(options.gitCommonDir, state, ownership);
       return { kind: "resumed", claim, operation, reusedTerminal: priorTerminal !== undefined };
     } catch (error) {
-      state.lastLaunch = { ...mutableLaunch, status: "failed", recovery: { ...recovery, resume: { pid: process.pid, phase: "finished" } } };
+      state.lastLaunch = { ...mutableLaunch, status: "failed", recovery: { ...recovery,
+        resume: { pid: process.pid, processIdentity: currentIdentity, phase: "finished" } } };
       state.updatedAt = new Date().toISOString();
       await writeState(options.gitCommonDir, state, ownership);
       throw error;

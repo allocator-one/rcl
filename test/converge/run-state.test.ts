@@ -420,6 +420,32 @@ describe('grouped verdict severity (RCL-48)', () => {
   });
 });
 
+describe('round matching input validation', () => {
+  it('refuses a negative line window without splitting an existing claim', async () => {
+    await processRoundReport({ gitCommonDir: dir, target: 'invalid-window', round: 1,
+      findings: [finding({ startLine: 10, endLine: 10 })] });
+    const statePath = convergeRunStatePath(dir, 'invalid-window');
+    const before = await readFile(statePath);
+
+    await expect(processRoundReport({ gitCommonDir: dir, target: 'invalid-window', round: 2,
+      lineWindow: -1, findings: [finding({ startLine: 10, endLine: 10 })] })).rejects.toThrow(/lineWindow/);
+    expect(await readFile(statePath)).toEqual(before);
+
+    const accepted = await processRoundReport({ gitCommonDir: dir, target: 'invalid-window', round: 2,
+      lineWindow: 0, findings: [finding({ startLine: 10, endLine: 10 })] });
+    expect(accepted.findings[0]!.status).toBe('repeat');
+  });
+
+  it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'refuses non-integer line window %s before creating state', async (lineWindow) => {
+      const target = `invalid-window-${String(lineWindow)}`;
+      await expect(processRoundReport({ gitCommonDir: dir, target, round: 1,
+        lineWindow, findings: [finding()] })).rejects.toThrow(/lineWindow/);
+      await expect(readFile(convergeRunStatePath(dir, target))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+});
+
 describe('cross-round identity and suppression (RCL-24)', () => {
   it('classifies first sightings as new and later sightings as repeat', async () => {
     const r1 = await processRoundReport({

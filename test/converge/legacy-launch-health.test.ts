@@ -490,7 +490,10 @@ describe('bound legacy launch health recovery', () => {
     ['round', (r: any) => { r.run.converge.round++; }],
     ['round beyond admitted history', (r: any, n: any) => { r.run.converge.round++; n.lastLaunch.round++; }],
     ['attempt', (r: any) => { r.run.converge.attempt++; }],
-    ['claim owner', (_r: any, n: any) => { n.lastLaunch.pid++; }],
+    ['claim owner', (_r: any, n: any) => {
+      n.lastLaunch.pid++;
+      if (n.lastLaunch.processIdentity) n.lastLaunch.processIdentity.pid = n.lastLaunch.pid;
+    }],
     ['cycle', (r: any) => { r.run.cycle_id = '01a0e4ac-58d9-7cc5-a722-0b50ed087b7a'; }],
     ['config', (r: any) => { r.run.config_sha256 = 'f'.repeat(64); }],
     ['roster', (r: any) => { r.run.roster[0].provider = 'foreign'; }],

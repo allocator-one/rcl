@@ -85,7 +85,10 @@ async function historicalFixture(deadPid = 999_999, git = false,
   state.rounds=Array.from({length:13},(_,index)=>({round:index+1,
     counts:{new:0,repeat:0,suppressed:0,regating:0}}));
   state.lastAnnotations={round:13,identities:[]};
-  state.lastLaunch={...state.lastLaunch!,pid:deadPid,reportJsonSha256:f.selection.reportSha256,
+  const originalProcessIdentity=state.lastLaunch!.processIdentity;
+  state.lastLaunch={...state.lastLaunch!,pid:deadPid,
+    ...(originalProcessIdentity?{processIdentity:{...originalProcessIdentity,pid:deadPid}}:{}),
+    reportJsonSha256:f.selection.reportSha256,
     attempt:25,round:14,deliveryPending:false,hardFailure:true,exitCode:4,reviewerHealth};
   const weak={version:1,runId:state.lastLaunch.runId!,reportJsonSha256:state.lastLaunch.reportJsonSha256!,
     headSha:state.lastLaunch.headSha,attempt:state.lastLaunch.attempt,round:state.lastLaunch.round};
@@ -106,7 +109,9 @@ async function historicalFixture(deadPid = 999_999, git = false,
   const {deliveryReconciliation:_weak,...priorLaunch}=disposed.lastLaunch!;
   const successorRunId=randomUUID();
   disposed.lastLaunch={...priorLaunch,status:'completed',attempt:26,round:14,headSha:'e'.repeat(40),
-    inputSha256:'f'.repeat(64),pid:999_998,startedAt:new Date().toISOString(),runId:successorRunId,
+    inputSha256:'f'.repeat(64),pid:999_998,
+    ...(priorLaunch.processIdentity?{processIdentity:{...priorLaunch.processIdentity,pid:999_998}}:{}),
+    startedAt:new Date().toISOString(),runId:successorRunId,
     reportJsonSha256:'9'.repeat(64),successfulReviews:2,totalReviews:2,deliveryPending:false,
     hardFailure:false,exitCode:0,reviewerHealth};
   await writeFile(f.statePath,JSON.stringify(disposed));
