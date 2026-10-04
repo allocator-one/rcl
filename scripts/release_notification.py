@@ -26,6 +26,10 @@ STABLE = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
 MAX_PAYLOAD = 256 * 1024
 MAX_RESPONSE = 16 * 1024 * 1024
 NPM_REGISTRY = 'https://registry.npmjs.org'
+# The registry and its CDN can serve a fresh publish's metadata minutes after the
+# tarball, so a release that is not visible yet is retried for a bounded window.
+NPM_VISIBILITY_SECONDS = 600
+NPM_RETRY_DELAYS = (10, 20, 30, 60)
 SLSA_V1 = 'https://slsa.dev/provenance/v1'
 
 
@@ -88,6 +92,33 @@ def previous_version(metadata, version):
     current = tuple(map(int, version.split('.')))
     earlier = [v for v in versions if STABLE.fullmatch(v) and tuple(map(int, v.split('.'))) < current]
     return max(earlier, key=lambda value: tuple(map(int, value.split('.')))) if earlier else None
+
+
+def published_release(name, version):
+    """Return the npm metadata and attestations once the registry lists the release.
+
+    Failed lookups and a missing version are retried until NPM_VISIBILITY_SECONDS
+    have passed; identity and provenance checks run afterwards and fail closed.
+    """
+    registry = f'{NPM_REGISTRY}/{urllib.parse.quote(name, safe="")}'
+    deadline = time.monotonic() + NPM_VISIBILITY_SECONDS
+    attempt = 0
+    while True:
+        try:
+            metadata = json_response(registry)
+            versions = metadata.get('versions')
+            package = versions.get(version) if isinstance(versions, dict) else None
+            if not isinstance(package, dict):
+                raise NotificationError('Release version is not published on npm')
+            attestation = json_response(attestation_url(name, version)) if package.get('gitHead') is None else {}
+            return metadata, attestation
+        except NotificationError as error:
+            delay = NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)]
+            if time.monotonic() + delay > deadline:
+                raise
+            print(f'npm does not serve {name}@{version} yet ({error}); retrying in {delay}s.', file=sys.stderr)
+            time.sleep(delay)
+            attempt += 1
 
 
 def validate_package(package, name, version, sha):
@@ -277,16 +308,10 @@ def main():
     except (KeyError, ValueError, UnicodeError):
         raise NotificationError('Could not decode the release package manifest') from None
     validate_package(source_package, package_name, version, sha)
-    registry = f'{NPM_REGISTRY}/{urllib.parse.quote(package_name, safe="")}'
-    metadata = json_response(registry)
+    metadata, current_attestation = published_release(package_name, version)
     previous = previous_version(metadata, version)
-    versions = metadata.get('versions', {})
-    if not isinstance(versions, dict):
-        raise NotificationError('Release version is not published on npm')
-    current_package = versions.get(version)
-    if not isinstance(current_package, dict):
-        raise NotificationError('Release version is not published on npm')
-    current_attestation = json_response(attestation_url(package_name, version)) if current_package.get('gitHead') is None else {}
+    versions = metadata['versions']
+    current_package = versions[version]
     validate_published_package(current_package, current_attestation, package_name, version, repository, sha, run_id, run_attempt)
     comparison = {'total_commits': 0, 'commits': [], 'files': []}
     if previous:

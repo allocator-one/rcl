@@ -16,6 +16,24 @@ n = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(n)
 
 
+class FakeClock:
+    """Stands in for the time module so npm retries advance a virtual clock."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def time(self):
+        return 1_700_000_000 + self.now
+
+
 class ReleaseNotificationTest(unittest.TestCase):
     def run_data(self, **overrides):
         return {'id': 42, 'path': '.github/workflows/release.yml', 'event': 'push',
@@ -173,6 +191,56 @@ class ReleaseNotificationTest(unittest.TestCase):
         self.assertNotIn('Authorization', post.call_args.kwargs['headers'])
         self.assertEqual(json.loads(post.call_args.kwargs['body'])['current_version'], '4.1.6')
         self.assertEqual(post.call_args.kwargs['headers']['Idempotency-Key'], 'rcl-npm-v4.1.6')
+
+    def test_waits_for_npm_to_serve_a_fresh_publish(self):
+        published = {'versions': {'4.1.5': {}, '4.1.6': {'gitHead': 'a' * 40}}}
+        clock = FakeClock()
+        replies = [n.NotificationError('Request failed with HTTP 404'), {'versions': {'4.1.5': {}}}, published]
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=replies) as lookup, \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(n.published_release('@allocator-one/rcl', '4.1.6'), (published, {}))
+        self.assertEqual(clock.sleeps, [10, 20])
+        self.assertEqual({call.args[0] for call in lookup.call_args_list}, {'https://registry.npmjs.org/%40allocator-one%2Frcl'})
+        self.assertIn('npm does not serve @allocator-one/rcl@4.1.6 yet (Release version is not published on npm)', stderr.getvalue())
+
+    def test_waits_for_npm_attestations_of_a_fresh_publish(self):
+        published = {'versions': {'4.1.6': {'name': '@allocator-one/rcl', 'version': '4.1.6'}}}
+        attestation = {'attestations': []}
+        clock = FakeClock()
+        replies = [published, n.NotificationError('Request failed with HTTP 404'), published, attestation]
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=replies) as lookup, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(n.published_release('@allocator-one/rcl', '4.1.6'), (published, attestation))
+        self.assertEqual(clock.sleeps, [10])
+        self.assertEqual(lookup.call_args_list[-1].args[0],
+                         'https://registry.npmjs.org/-/npm/v1/attestations/@allocator-one%2frcl@4.1.6')
+
+    def test_npm_wait_is_bounded_and_fails_closed(self):
+        clock = FakeClock()
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', return_value={'versions': {'4.1.5': {}}}), \
+                contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaisesRegex(n.NotificationError, 'Release version is not published on npm'):
+            n.published_release('@allocator-one/rcl', '4.1.6')
+        self.assertEqual(clock.sleeps[:4], [10, 20, 30, 60])
+        self.assertEqual(set(clock.sleeps[3:]), {60})
+        self.assertLessEqual(sum(clock.sleeps), n.NPM_VISIBILITY_SECONDS)
+        self.assertGreater(sum(clock.sleeps) + 60, n.NPM_VISIBILITY_SECONDS)
+
+    def test_visible_release_with_wrong_identity_fails_without_waiting(self):
+        manifest = {'name': '@allocator-one/rcl', 'version': '4.1.6'}
+        responses = [self.run_data(), {'sha': 'a' * 40},
+                     {'content': base64.b64encode(json.dumps(manifest).encode()).decode()},
+                     {'versions': {'4.1.6': {**manifest, 'gitHead': 'b' * 40}}}]
+        env = {'GITHUB_REPOSITORY': 'allocator-one/rcl', 'RELEASE_RUN_ID': '42', 'GH_TOKEN': 'private-github-token',
+               'INFRA_ONE_RELEASE_WEBHOOK_URL': 'https://venture.infra.one/api/webhooks/automations/56840af9-aa90-4afe-98cf-45fcd42bd0fe',
+               'INFRA_ONE_RELEASE_WEBHOOK_SECRET': 'x' * 43}
+        clock = FakeClock()
+        with patch.dict(os.environ, env, clear=True), patch.object(n, 'time', clock), \
+                patch.object(n, 'json_response', side_effect=responses), patch.object(n, 'request') as post, \
+                self.assertRaisesRegex(n.NotificationError, 'identity does not match'):
+            n.main()
+        self.assertEqual(clock.sleeps, [])
+        post.assert_not_called()
 
     def test_failed_run_and_moved_tag_never_send_to_webhook(self):
         env = {'GITHUB_REPOSITORY': 'allocator-one/rcl', 'RELEASE_RUN_ID': '42', 'GH_TOKEN': 'private-github-token',
