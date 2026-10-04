@@ -6,6 +6,8 @@ import { retainAssemblyRefusal } from './output/assembly-refusal.js';
 import { createReviewCycleRemote } from './converge/cycle-remote.js';
 import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
+import { previewHistoricalDeliveryReconciliation,
+  applyHistoricalDeliveryReconciliation } from './converge/historical-delivery-reconciliation.js';
 import { Command, InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import chalk from 'chalk';
@@ -203,7 +205,7 @@ program.hook('preAction', async (_thisCommand, actionCommand) => {
   if (name === 'review') return; // Review flushes after detecting explicit/pending cycles.
   // Reads and explicit repairs must not flush unrelated evidence, even in preview.
   if (actionCommand.parent?.name() === 'evidence' && (name === 'show' || name === 'status')) return;
-  if (name === 'converge-rejected' || name === 'converge-stale' || name === 'converge-gap' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
+  if (name === 'converge-rejected' || name === 'converge-stale' || name === 'converge-gap' || name === 'converge-reconcile-history' || name === 'recover-run' || name === 'recover-finding' || name === 'retriage-finding' || name === 'telemetry' || actionCommand.parent?.name() === 'telemetry' || name.includes('worker')) return;
   const flags = actionCommand.opts<{ telemetry?: boolean }>();
   if (flags.telemetry === false || (process.env['RCL_TELEMETRY'] ?? '').trim().toLowerCase() === 'off') return;
   try {
@@ -569,6 +571,43 @@ program
   });
 
 // Cross-round finding identity + machine-enforced round cap (RCL-24).
+program
+  .command('converge-reconcile-history')
+  .description('Preview or apply an exact historical delivery reconciliation after lastLaunch advanced')
+  .option('--preview').option('--apply')
+  .option('--manifest <path>', 'Exact reviewed preview output for apply')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest digest for apply')
+  .option('--target <target>').option('--run <uuid>')
+  .action(async (opts: Record<string,string|boolean|undefined>) => {
+    try {
+      if ([opts.preview,opts.apply].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_historical_reconciliation_mode');
+      const common = await resolveGitCommonDir();
+      const opened = await openReadSink({rclVersion:RCL_VERSION});
+      if (!opened.sink) throw new Error(`historical_delivery_reconciliation_credential_unavailable: ${opened.note}`);
+      if (opts.preview) {
+        if (opts.manifest !== undefined || opts.manifestSha256 !== undefined ||
+          typeof opts.target !== 'string' || typeof opts.run !== 'string') {
+          throw new Error('historical_delivery_reconciliation_preview_arguments_invalid');
+        }
+        const manifest = await previewHistoricalDeliveryReconciliation({target:opts.target,runId:opts.run},common,opened.sink);
+        const bytes = serializeRecoveryDocument(manifest);
+        process.stderr.write(`manifest-sha256 ${sha256(bytes)}\n`);
+        process.stdout.write(bytes);
+      } else {
+        if (opts.target !== undefined || opts.run !== undefined || typeof opts.manifest !== 'string' ||
+          typeof opts.manifestSha256 !== 'string') throw new Error('apply_uses_only_pinned_manifest');
+        const result = await applyHistoricalDeliveryReconciliation({manifest:opts.manifest,
+          manifestSha256:opts.manifestSha256},common,opened.sink);
+        console.log(JSON.stringify({mode:'apply',result,accounting:'unchanged',
+          scope:'historical local authority receipt only; no admission, provider calls or approval'}));
+      }
+    } catch (error) {
+      console.error(JSON.stringify({error:{code:'RCL_CONVERGE_RECONCILE_HISTORY',
+        message:error instanceof Error?error.message:String(error)}}));
+      process.exitCode=3;
+    }
+  });
+
 program
   .command('converge-stale')
   .description('Preview/apply/resume an audited stale unadmitted report disposition; preserves reports, attempts and findings')

@@ -137,34 +137,44 @@ async function retained(common: string, entry: StaleReportEntry, reader: Validat
   const {state,body} = await reader.snapshot(join(dir,'native-before.json'),m.stateSha256);
   const prefix = reader.prefix;
   if (!isDeepStrictEqual(state.staleReportAudit ?? [],prefix)) throw new Error('stale_report_audit_prefix_mismatch');
-  const previous = eligible(state,await reader.validated(m),m,true);
+  const evidence = await reader.validated(m);
+  const previous = eligible(state,evidence,m,true);
   if (previous.attempt !== m.attempt || previous.round !== m.round || previous.runId !== m.runId ||
     previous.headSha !== m.previousHeadSha || previous.inputSha256 !== m.previousInputSha256) throw new Error('stale_report_manifest_binding_mismatch');
   const afterSha256 = reader.afterDigest(body,entry,m.createdAt);
-  return {m,dir,afterSha256};
+  return {entry,m,dir,afterSha256,state,previous,evidence};
 }
 
 /** Receipt inspection is read-only and cannot repair or fabricate a disposition. */
-async function verifyStaleReportReceipt(common: string, entry: StaleReportEntry, reader: ValidatedStaleHistoryReader): Promise<void> {
-  const {m,dir,afterSha256} = await retained(common,entry,reader);
+async function verifyStaleReportReceipt(common: string, entry: StaleReportEntry, reader: ValidatedStaleHistoryReader) {
+  const retainedEvidence = await retained(common,entry,reader);
+  const {m,dir,afterSha256} = retainedEvidence;
   const expected = {kind:'rcl-stale-report-receipt',version:1,operationId:m.operationId,manifestSha256:entry.manifestSha256,
     beforeStateSha256:m.stateSha256,afterStateSha256:afterSha256};
   await selected(join(dir,'complete.json'),sha256(serializeRecoveryDocument(expected)));
+  return retainedEvidence;
 }
 
-/** Verify the complete ordered history, including every earlier replacement input. */
-export async function verifyStaleReportReceipts(common: string, entries: StaleReportEntry[]): Promise<void> {
-  if (entries.length === 0) return;
+/** Inspect the complete ordered history, including every retained source object and receipt. */
+export async function inspectVerifiedStaleReportReceipts(common: string, entries: StaleReportEntry[]) {
+  if (entries.length === 0) return [];
   try {
     const root = join(common,'rcl-stale-report-audits');
     await inspectRecoveryDirectory(root,true);
     await inspectRecoveryDirectory(join(root,'objects'),true);
     const reader = new ValidatedStaleHistoryReader(common);
+    const verified = [];
     for (const entry of entries) {
-      await verifyStaleReportReceipt(common,entry,reader);
+      verified.push(await verifyStaleReportReceipt(common,entry,reader));
       reader.append(entry);
     }
+    return verified;
   } catch (cause) { throw new StaleReportAuditError('stale_report_audit_invalid',{cause}); }
+}
+
+/** Verify the complete ordered history, including every earlier replacement input. */
+export async function verifyStaleReportReceipts(common: string, entries: StaleReportEntry[]): Promise<void> {
+  await inspectVerifiedStaleReportReceipts(common,entries);
 }
 
 /** Add only an audited disposition under the same native writer lock used by launches. */
