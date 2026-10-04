@@ -42,6 +42,7 @@ import { sanitizeForDelivery } from "../../src/telemetry/envelope.js";
 import { applyReviewerRecovery, resumeReviewerRecovery, type ReviewerRecoveryPreflight } from "../../src/evidence/reviewer-recovery.js";
 import { processReviewerRoundReport } from "../../src/converge/retained-report.js";
 import { loadReviewerLineage } from "../../src/evidence/reviewer-lineage.js";
+import { installTriagedRecoveredProduction } from "../fixtures/guarded-recovered-production.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -51,7 +52,7 @@ afterEach(async () => {
   );
 });
 
-const target = "allocator-one/rcl#105";
+const target = "synthetic-retained-target";
 const head = "a".repeat(40);
 const role = {
   name: "general",
@@ -97,9 +98,16 @@ function review(
 }
 
 async function sealed(successes: number, failure: SourceFailure = "timeout", seats = 17,
-  extra: { async?: boolean; asyncUnknown?: boolean; gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string; supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
+  extra: { async?: boolean; asyncUnknown?: boolean; recovered?: boolean;
+    gatingMode?: 'all-findings' | 'verified-consensus'; verificationModel?: string;
+    supplementalAsync?: ReturnType<typeof captureSupplementalAsync> } = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "rcl-recovery-")));
   roots.push(dir);
+  const recovered = extra.recovered ? await installTriagedRecoveredProduction(dir) : undefined;
+  const recoveredBytes = recovered ? await readFile(recovered.path, 'utf8') : undefined;
+  const recoverySource = recoveredBytes ? { version: 1 as const, native_sha256: sha256Hex(recoveredBytes) } : undefined;
+  const sourceRound = recovered ? Math.max(...recovered.state.rounds.map(row => row.round)) + 1 : 1;
+  const sourceAttempt = recovered ? ((await loadConvergeAttemptState(dir, target))?.attemptsUsed ?? 0) + 1 : 1;
   const diff: any = {
     source: "local",
     files: [
@@ -221,7 +229,8 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     contextFiles: [],
     runner: { kind: "agent" },
     startedAt: new Date(1000),
-    converge: { target, round: 1, attempt: 1 },
+    converge: { target, round: sourceRound, attempt: sourceAttempt,
+      ...(recoverySource ? { recovery_source: recoverySource } : {}) },
   };
   let sourceProof: any;
   let sourceTerminal: any;
@@ -235,6 +244,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     headSha: head,
     inputSha256: retainedLaunchInputSha256(captured.digest, run),
     maxAttempts: 3,
+    ...(recoverySource ? { recoverySource } : {}),
     validate: async () => {},
     run: async (_, ownership) => {
       const journal = await CheckpointJournal.create({
@@ -250,7 +260,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
           createOriginalLaunch({
             runId: id,
             target,
-            originalNativeClaim: { attempt: 1, round: 1 },
+            originalNativeClaim: { attempt: sourceAttempt, round: sourceRound },
             capturedInputsSha256: captured.digest,
             planDigest: plan.digest,
             startedAtMs: clock,
@@ -351,7 +361,7 @@ async function sealed(successes: number, failure: SourceFailure = "timeout", sea
     },
   });
   if (extra.async || extra.asyncUnknown) vi.useRealTimers();
-  return { dir, plan, captured, id, sourceProof, sourceTerminal, run };
+  return { dir, plan, captured, id, sourceProof, sourceTerminal, run, recovered, recoveredBytes };
 }
 
 function opts(fixture: Fixture, overrides: Record<string, unknown> = {}) {
@@ -430,7 +440,7 @@ async function sealSuccessor(
   const run = {
     ...source.assembly.run,
     id: value.operation.successorRunId,
-    converge: { target, round: 1, attempt: value.claim.attempt },
+    converge: { target, round: value.operation.successorNativeClaim?.round ?? 1, attempt: value.claim.attempt },
   };
   const assembly: any = {
     ...source.assembly,
@@ -890,6 +900,49 @@ function resumeOptions(value: ReturnType<typeof opts>) {
 }
 
 describe('same-operation guarded reviewer recovery resume', () => {
+  it('launches and resumes an interrupted recovered-v3 source through the attempt ledger only', async () => {
+    const fixture = await sealed(1, 'timeout', 3, { recovered: true });
+    const value: any = opts(fixture);
+    const nativeBefore = await readFile(convergeRunStatePath(fixture.dir, target), 'utf8');
+    const attemptPath = convergeAttemptStatePath(fixture.dir, target);
+    const preclaimed = JSON.parse(await readFile(attemptPath, 'utf8'));
+    const sourceClaim = preclaimed.attempts.at(-1);
+    sourceClaim.pid = 99_999_999;
+    sourceClaim.processIdentity = { ...sourceClaim.processIdentity, pid: sourceClaim.pid,
+      birthSha256: 'f'.repeat(64) };
+    sourceClaim.handoff = { version: 1, acceptedAt: new Date().toISOString(),
+      pid: preclaimed.lastLaunch.pid, processIdentity: preclaimed.lastLaunch.processIdentity };
+    await writeFile(attemptPath, JSON.stringify(preclaimed));
+    const sourceAttempts = (await state(fixture))!;
+    expect(sourceAttempts).toMatchObject({ attemptsUsed: 2,
+      lastLaunch: { status: 'completed', attempt: 2, round: 3, runId: fixture.id } });
+    expect(sourceAttempts.cycle).toEqual(fixture.recovered!.state.cycle);
+    expect((await loadReviewerLineage({ commonDir: fixture.dir, target, runId: fixture.id }))
+      .latest.inspected.assembly.run.converge?.recovery_source)
+      .toEqual(fixture.run.converge.recovery_source);
+    value.run = async () => { throw new Error('interrupted recovered-v3 successor'); };
+    await expect(guardReviewerRecoveryLaunch(value)).rejects.toThrow('interrupted recovered-v3 successor');
+    expect(await readFile(convergeRunStatePath(fixture.dir, target), 'utf8')).toBe(nativeBefore);
+    const interrupted = (await state(fixture))!;
+    expect(interrupted).toMatchObject({ attemptsUsed: 3,
+      lastLaunch: { status: 'failed', attempt: 3, round: 3, recovery: { sourceRunId: fixture.id } } });
+    expect(interrupted.cycle).toEqual(fixture.recovered!.state.cycle);
+
+    const run = vi.fn(async (context: any) => {
+      await sealSuccessor(fixture, context, [{ cell: 's1:0' }]);
+    });
+    await expect(guardReviewerRecoveryResume({ ...resumeOptions(value), run }))
+      .resolves.toMatchObject({ kind: 'resumed', reusedTerminal: false, claim: { attempt: 3 } });
+    expect(run).toHaveBeenCalledOnce();
+    expect(await readFile(convergeRunStatePath(fixture.dir, target), 'utf8')).toBe(nativeBefore);
+    const completed = (await state(fixture))!;
+    expect(completed).toMatchObject({ attemptsUsed: 3, cap: sourceAttempts.cap,
+      lastLaunch: { status: 'completed', attempt: 3, round: 3,
+        recovery: { resume: { phase: 'finished' } } } });
+    expect(completed.cycle).toEqual(sourceAttempts.cycle);
+    expect(completed.attempts).toHaveLength(sourceAttempts.attempts.length + 1);
+  });
+
   it('refuses a readable lane-less saved journal before resume preflight or native mutation', async () => {
     const fixture = await sealed(1, 'timeout', 3), value: any = opts(fixture);
     value.run = async () => { throw new Error('interrupted before dispatch'); };

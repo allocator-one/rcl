@@ -973,7 +973,7 @@ describe('rcl review — guarded native launch', () => {
     { args: ['--spec', 'missing-spec.md'], error: /unreadable_spec/i },
     { args: ['--config', 'missing-config.json'], error: /ConfigError/i },
     { args: ['--markdown', 'report.json'], error: /output_collision/i },
-    { args: ['--attempt', '1'], error: /incompatible_launch/i },
+    { args: ['--attempt', '1'], error: /preclaimed_attempt_ineligible/i },
     { args: ['--role', 'general'], error: /insufficient_reviewers/i },
     { args: ['--reviewer', 'openai-compat/fixture:general', '--reviewer', 'openai-compat/fixture:missing-role'], error: /invalid_reviewers/i },
     { args: ['--launch-intent', 'stop-review'], error: /review_stopped/i },

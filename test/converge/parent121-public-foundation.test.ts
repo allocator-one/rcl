@@ -11,6 +11,7 @@ import { loadConvergeRunState, processRoundReport, writeStateIfUnchanged } from 
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { loadConvergeAttemptState, recordConvergeAttemptLaunch } from '../../src/converge/attempt-budget.js';
 import { processSemanticRound } from '../../src/converge/semantic-state.js';
+import { recordHealthyRecoveredLaunch } from '../fixtures/guarded-recovered-production.js';
 
 // Genuine unchanged public writer in each fixture's own canonical root. The
 // external cycle issuer and reviewer callback are the public fixture's fakes.
@@ -205,6 +206,8 @@ it.each(['cycle', 'run', 'digest', 'health'] as const)('keeps the public %s admi
   const f = await fixture(); await f.apply();
   const { processRoundReport } = await import('../../src/converge/run-state.js');
   const report = JSON.parse(f.selection.reportJson);
+  await recordHealthyRecoveredLaunch({ gitCommonDir: f.root, target: f.plan.target, round: 1,
+    runId: report.run.id, reportJson: f.selection.reportJson });
   const options = { gitCommonDir: f.root, target: f.plan.target, round: 1, runId: report.run.id,
     cycleId: f.native.cycle.id, reportSha256: sha(f.selection.reportJson),
     findings: [...report.findings, ...report.belowThresholdFindings] };
@@ -212,13 +215,14 @@ it.each(['cycle', 'run', 'digest', 'health'] as const)('keeps the public %s admi
   if (fault === 'run') options.runId = uuid(900);
   if (fault === 'digest') options.reportSha256 = 'e'.repeat(64);
   if (fault === 'health') {
-    const state = JSON.parse(await readFile(f.runPath, 'utf8')); state.lastLaunch.successfulReviews = 0;
-    await writeFile(f.runPath, JSON.stringify(state));
+    const attempts = JSON.parse(await readFile(f.attemptPath, 'utf8')); attempts.lastLaunch.successfulReviews = 0;
+    await writeFile(f.attemptPath, JSON.stringify(attempts));
   }
   const before = await readFile(f.runPath, 'utf8');
+  const attemptsBefore = await readFile(f.attemptPath, 'utf8');
   await expect(processRoundReport(options)).rejects.toThrow(fault === 'cycle' ? /review_cycle_mismatch/ : /review_cycle_launch_mismatch/);
   expect(await readFile(f.runPath, 'utf8')).toBe(before);
-  expect(await readFile(f.attemptPath, 'utf8')).toBe(f.attemptsJson);
+  expect(await readFile(f.attemptPath, 'utf8')).toBe(attemptsBefore);
 });
 
 it('preserves current-public exact-run verdicts for ordinary cycle2 and refuses wrong recovered run attribution', async () => {
@@ -243,14 +247,18 @@ it.each(['stale', 'gap'] as const)('preserves the %s refusal on recovered state 
   // receipt: valid structural audit fields ensure the intended public guard
   // refuses before any unavailable receipt could become authority.
   const state = JSON.parse(await readFile(f.runPath, 'utf8'));
-  const runId = uuid(920), digest = 'd'.repeat(64), at = '2026-09-26T14:00:00.000Z';
-  state.lastLaunch = { ...state.lastLaunch, round: 2, runId, reportJsonSha256: digest };
+  const runId = uuid(920), refusedReportJson = JSON.stringify({ run: { id: runId }, findings: [] });
+  const digest = sha(refusedReportJson), at = '2026-09-26T14:00:00.000Z';
+  await recordHealthyRecoveredLaunch({ gitCommonDir: f.root, target: f.plan.target, round: 2,
+    runId, reportJson: refusedReportJson });
+  const attemptJson = await readFile(f.attemptPath, 'utf8');
+  const launch = JSON.parse(attemptJson).lastLaunch;
   const base = { version: 1, operationId: uuid(921), createdAt: at, gitCommonDir: f.root, target: f.plan.target,
-    runId, reportSha256: digest, stateSha256: sha(f.plan.resultJson), attemptSha256: sha(f.attemptsJson) };
+    runId, reportSha256: digest, stateSha256: sha(f.plan.resultJson), attemptSha256: sha(attemptJson) };
   if (kind === 'stale') {
     const m = { ...base, kind: 'rcl-stale-report', headSha: 'c'.repeat(40), inputSha256: 'e'.repeat(64),
-      previousHeadSha: state.lastLaunch.headSha, previousInputSha256: state.lastLaunch.inputSha256,
-      reportPath: join(f.root, 'refused-report.json'), reason: 'Synthetic refused request.', attempt: 1, round: 2 };
+      previousHeadSha: launch.headSha, previousInputSha256: launch.inputSha256,
+      reportPath: join(f.root, 'refused-report.json'), reason: 'Synthetic refused request.', attempt: launch.attempt, round: 2 };
     const manifestJson = JSON.stringify(m); state.staleReportAudit = [{ manifestJson, manifestSha256: sha(manifestJson) }]; state.staleReportAuditCount = 1;
   } else {
     const incomplete = 'e'.repeat(64), file = (name: string, hash: string) => ({ path: join(f.root, name), sha256: hash, bytes: 1 });
@@ -267,7 +275,7 @@ it.each(['stale', 'gap'] as const)('preserves the %s refusal on recovered state 
     cycleId: f.native.cycle.id, reportSha256: digest, findings: [] })).rejects.toThrow(kind === 'stale'
     ? /stale_report_cannot_be_admitted/ : /round_gap_requires_explicit_original_evidence_recovery/);
   expect(await readFile(f.runPath, 'utf8')).toBe(raw);
-  expect(await readFile(f.attemptPath, 'utf8')).toBe(f.attemptsJson);
+  expect(await readFile(f.attemptPath, 'utf8')).toBe(attemptJson);
 });
 
 for (const stage of ['record', 'replay'] as const) {

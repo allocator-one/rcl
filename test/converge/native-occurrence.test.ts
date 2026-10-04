@@ -14,6 +14,7 @@ import { accepted, projectionFixture, roundInput, inventory, carrier } from '../
 import { legacyFixture, sha, uuid } from '../evidence/recovery-validation/fixtures.js';
 import { preserved, laterSource, rebind } from '../evidence/recovery-validation/occurrence-fixtures.js';
 import { sampleRunHeader } from '../telemetry/fixtures.js';
+import { recordHealthyRecoveredLaunch } from '../fixtures/guarded-recovered-production.js';
 const retentionFault = vi.hoisted(() => ({
   failNextSnapshotWrite: false, collideTemp: false, fired: 0, prefixWritten: 0,
   rejectReadOnlySync: false, readOnlySyncs: 0, writeCapableSyncs: [] as string[],
@@ -206,8 +207,11 @@ it('keeps receipt-time confirmation unresolved after a numeric later empty ordin
   const run = sampleRunHeader({ id: uuid(9991), converge: { target: f.input.target, round: 2,
     recovery_source: { version: 1, native_sha256: plan.resultSha256 } } });
   run.gating.bound_classification_protocol = 1;
+  const reportJson = JSON.stringify({ run, findings: [] });
+  await recordHealthyRecoveredLaunch({ gitCommonDir: dir, target: f.input.target, round: 2,
+    runId: run.id, reportJson });
   const result = await processRoundReport({ gitCommonDir: dir, target: f.input.target, round: 2, runId: run.id, findings: [],
-    evidence: { reportJson: JSON.stringify({ run, findings: [] }) } });
+    reportSha256: sha(reportJson), evidence: { reportJson } });
   expect(result.actionableIdentities).toContain(f.anchors[0]!.identity);
   const verdict = await recordVerdicts({ gitCommonDir: dir, target: f.input.target, round: 2, verdicts: [] });
   expect(verdict.resolution).toMatchObject({ status: 'unresolved' });

@@ -1,13 +1,14 @@
 import { createServer } from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile,spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp,mkdir,writeFile,realpath,rm } from 'node:fs/promises';
+import { mkdtemp,mkdir,writeFile,readFile,realpath,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname,join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fixture as occurrenceFixture } from './recovery-validation/occurrence-fixtures.js';
 import { convergeRunStatePath } from '../../src/converge/run-state.js';
 import { sha,uuid } from './recovery-validation/fixtures.js';
-export async function publicLoopback(input=occurrenceFixture()) {
+export async function publicLoopback(input=occurrenceFixture(),commandTimeout=25000) {
   const root=await realpath(await mkdtemp(join(tmpdir(),'rcl-public-mode-b-')));
   const repo=join(root,'repo');
   await mkdir(repo,{ mode: 0o700 });
@@ -181,13 +182,25 @@ export async function publicLoopback(input=occurrenceFixture()) {
   for(const key of ['NODE_OPTIONS','RCL_GUARD_LOG','RCL_GUARD_LOOPBACK'])
     if(process.env[key])
       Object.assign(env,{ [key]: process.env[key] });
+  const entry=process.env.RCL_TEST_PACKAGED_CLI??fileURLToPath(new URL('../../dist/index.js',import.meta.url));
+  async function command(args: string[]) {
+    return new Promise<{ exit: number|null; stdout: string; stderr: string }>(resolve => {
+      const child=spawn(process.execPath,[entry,'evidence','recover-claim',...args],{ cwd: repo,env,timeout: commandTimeout,stdio: ['ignore','pipe','pipe'] });
+      let stdout='',stderr='';
+      child.stdout.on('data',b => stdout+=b);
+      child.stderr.on('data',b => stderr+=b);
+      child.on('close',exit => resolve({ exit,stdout,stderr }));
+    });
+  }
   return {
-    root,repo,env,source,original,selection,replaceOriginal,addReceipt: (receipt: any) => { receipts.push({ ...receipt,sequence: ++sequence }); },addSource: (value: typeof source) => { value.scope.base_url=url; rows.push({ source: value,receipts: [value.classification,...value.corrections] }); },selectionPath,manifest,statePath,calls,receipts,
+    root,repo,env,source,original,selection,replaceOriginal,addReceipt: (receipt: any) => { receipts.push({ ...receipt,sequence: ++sequence }); },addSource: (value: typeof source) => { value.scope.base_url=url; rows.push({ source: value,receipts: [value.classification,...value.corrections] }); },selectionPath,manifest,statePath,calls,receipts,command,
     addSourceReceipt: (runId: string,receipt: any) => {
       const row=rows.find(item => item.source.scope.run_id===runId);
       if(!row) throw new Error('unknown synthetic source');
       row.receipts.push({ ...receipt,sequence: Math.max(0,...row.receipts.map(item => item.sequence))+1 });
     },
+    preview: () => command(['--preview','--selection',selectionPath,'--manifest',manifest,'--json']),
+    execute: async (mode='apply') => command([`--${mode}`,'--manifest',manifest,'--manifest-sha256',sha(await readFile(manifest,'utf8')),'--json']),
     loseAck: () => { loseAck=true; },deferPostAt: (count:number) => {deferPostCount=count;},hideAfterPost: (value=true,count=1) => {
       hideAfterPost=value;hideAfterPostCount=count; if(!value)
         omitReceipts=false;

@@ -178,6 +178,32 @@ it('resumes in an actual new process and replays exact completion without anothe
   await expect(delivery(f, { ...after.lastLaunch!, deliveryPending: false }, 'completion')).rejects.toThrow(/this process/);
 }, 20000);
 
+it('resumes a recovered-v3 launch through its authenticated preclaim handoff without another attempt', async () => {
+  const f = await primitiveFixture(await root());
+  await spendAndRecord(f.root, f.target, 'pending');
+  const stored = JSON.parse(await readFile(f.attemptPath, 'utf8'));
+  const latest = stored.attempts.at(-1);
+  latest.pid = 99_999_999;
+  latest.processIdentity = { ...latest.processIdentity, pid: latest.pid, birthSha256: 'f'.repeat(64) };
+  const producerIdentity = { ...selfIdentity, pid: 88_888_888, birthSha256: 'e'.repeat(64) };
+  latest.handoff = { version: 1, acceptedAt: new Date().toISOString(), pid: producerIdentity.pid,
+    processIdentity: producerIdentity };
+  stored.lastLaunch.pid = producerIdentity.pid;
+  stored.lastLaunch.processIdentity = producerIdentity;
+  await writeFile(f.attemptPath, JSON.stringify(stored));
+  const before = (await loadConvergeAttemptState(f.root, f.target))!;
+  const native = await protectedBytes(f);
+  const pending = running(before.lastLaunch!);
+  await resume({ ...f, before } as any, before.lastLaunch!, pending);
+  await resume({ ...f, before } as any, pending, finished(pending));
+  const after = (await loadConvergeAttemptState(f.root, f.target))!;
+  expect(after.lastLaunch).toMatchObject({ status: 'completed', pid: producerIdentity.pid,
+    recovery: { resume: { pid: process.pid, phase: 'finished' } } });
+  expect(after.attempts.at(-1)?.handoff).toEqual(latest.handoff);
+  expect(accounting(after)).toEqual(accounting(before));
+  expect(await protectedBytes(f)).toEqual(native);
+});
+
 it('refuses resume binding substitutions before changing the original spent ledger', async () => {
   const f = await fixture(), expected = f.before.lastLaunch!, retained = await readFile(f.attemptPath, 'utf8');
   const mutations: Record<string, (v: any) => void> = {

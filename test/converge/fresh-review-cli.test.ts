@@ -10,8 +10,8 @@ import { expect, it } from 'vitest';
 import { Outbox } from '../../src/telemetry/outbox.js';
 import { buildRunEnvelope } from '../../src/telemetry/envelope.js';
 import { sampleResult } from '../telemetry/fixtures.js';
-import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
-import { loadConvergeRunState } from '../../src/converge/run-state.js';
+import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import type { ReviewCycleReceipt } from '../../src/converge/review-cycle.js';
 
 const cli = process.env.RCL_TEST_PACKAGED_CLI || fileURLToPath(new URL('../../dist/index.js', import.meta.url));
@@ -149,5 +149,47 @@ it('runs a bare explicit fresh PR review, retains outputs, binds admission, and 
         }
       }
     }
+  });
+}, 60_000);
+
+it('refuses an explicit attempt on an ordinary active cycle before providers, cycle creation or accounting', async () => {
+  await fixture(async f => {
+    const first = await f.run(['review', 'fixture/repo#42', '--start-over']);
+    expect(first.code, first.output).toBe(0);
+    const common = join(f.root, '.git');
+    const nativePath = convergeRunStatePath(common, 'repo-42');
+    const attemptPath = convergeAttemptStatePath(common, 'repo-42');
+    const nativeBefore = await readFile(nativePath, 'utf8');
+    const attemptsBefore = await readFile(attemptPath, 'utf8');
+    const requestsBefore = [...f.requests];
+    const refused = await f.run(['review', 'fixture/repo#42', '--guarded-converge', '--attempt', '2']);
+    expect(refused.code).not.toBe(0);
+    expect(refused.output).toContain('A fresh review assigns its own ordinals');
+    expect(f.calls()).toBe(2);
+    expect(f.cycles).toHaveLength(1);
+    expect(f.requests).toEqual(requestsBefore);
+    expect(await readFile(nativePath, 'utf8')).toBe(nativeBefore);
+    expect(await readFile(attemptPath, 'utf8')).toBe(attemptsBefore);
+  });
+}, 60_000);
+
+it('refuses an explicit attempt on a fresh cycle request before providers, cycle creation or accounting', async () => {
+  await fixture(async f => {
+    const first = await f.run(['review', 'fixture/repo#42', '--start-over']);
+    expect(first.code, first.output).toBe(0);
+    const common = join(f.root, '.git');
+    const nativePath = convergeRunStatePath(common, 'repo-42');
+    const attemptPath = convergeAttemptStatePath(common, 'repo-42');
+    const nativeBefore = await readFile(nativePath, 'utf8');
+    const attemptsBefore = await readFile(attemptPath, 'utf8');
+    const requestsBefore = [...f.requests];
+    const refused = await f.run(['review', 'fixture/repo#42', '--start-over', '--guarded-converge', '--attempt', '2']);
+    expect(refused.code).not.toBe(0);
+    expect(refused.output).toContain('A fresh review assigns its own ordinals');
+    expect(f.calls()).toBe(2);
+    expect(f.cycles).toHaveLength(1);
+    expect(f.requests).toEqual(requestsBefore);
+    expect(await readFile(nativePath, 'utf8')).toBe(nativeBefore);
+    expect(await readFile(attemptPath, 'utf8')).toBe(attemptsBefore);
   });
 }, 60_000);

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add preview/apply/resume claim recovery on the existing native target, with
+  explicit adoption of interrupted operations and read-only refresh of claim
+  history. Preserve original evidence, attribution, unresolved findings and
+  review accounting while requiring compatible backend support (RCL-76,
+  RCL-123).
+- Bind recovered review production and admission to the retained predecessor,
+  exact standalone attempt claim and existing review cycle. Preserve ordinary
+  continuation and require independent native, enforced and CI gates after
+  recovery (RCL-123).
+
 ## 4.5.8 - 2026-10-04
 
 - Retain guarded review inputs with a canonical string table so large patches

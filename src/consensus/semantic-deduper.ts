@@ -1,24 +1,25 @@
 import type { Finding, ModelReview, DeduplicatedGroup } from './types.js';
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import { compareClaims, describeClaim } from './claim-identity.js';
-import { linesOverlap } from './deduper.js';
+import { linesOverlap, type DedupeOrdering } from './deduper.js';
 
 interface TaggedFinding {
   finding: Finding;
   model: string;
   role: string;
+  contribution?: { reviewIndex: number; findingIndex: number };
 }
 
 // The producer selects this path only after validating recovered native proof.
 // Ordinary reviews retain the legacy deduper and its configuration semantics.
 const SEVERITY_ORDER = { critical: 0, important: 1, minor: 2, nitpick: 3 };
 
-function compareMembers(a: TaggedFinding, b: TaggedFinding): number {
+function compareMembers(a: TaggedFinding, b: TaggedFinding, compareText: (left: string, right: string) => number): number {
   const severity = SEVERITY_ORDER[a.finding.severity] - SEVERITY_ORDER[b.finding.severity];
   if (severity !== 0) return severity;
   const detail = b.finding.description.length - a.finding.description.length;
   if (detail !== 0) return detail;
-  const location = a.finding.file.localeCompare(b.finding.file) ||
+  const location = compareText(a.finding.file, b.finding.file) ||
     a.finding.startLine - b.finding.startLine || a.finding.endLine - b.finding.endLine;
   if (location !== 0) return location;
   const key = (member: TaggedFinding) => {
@@ -45,11 +46,18 @@ export function deduplicateSemanticFindings(
   reviews: ModelReview[],
   _jaccardThreshold: number = DEFAULT_THRESHOLDS.jaccardThreshold,
   lineWindow: number = DEFAULT_THRESHOLDS.dedupeLineWindow,
-  _minConsensusScore: number = DEFAULT_THRESHOLDS.minConsensusScore
+  _minConsensusScore: number = DEFAULT_THRESHOLDS.minConsensusScore,
+  collectContributions = false,
+  ordering: DedupeOrdering = 'legacy'
 ): DeduplicatedGroup[] {
-  const members = reviews.filter(review => review.status === 'success')
-    .flatMap(review => review.findings.map(finding => ({ finding, model: review.model, role: review.role })))
-    .sort(compareMembers);
+  if (ordering !== 'legacy' && ordering !== 'utf16') throw new Error('deduper_invalid_ordering');
+  const compareText = ordering === 'utf16'
+    ? (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0
+    : (left: string, right: string) => left.localeCompare(right);
+  const members: TaggedFinding[] = reviews.flatMap((review, reviewIndex) => review.status !== 'success' ? [] :
+    review.findings.map((finding, findingIndex) => ({ finding, model: review.model, role: review.role,
+      ...(collectContributions ? { contribution: { reviewIndex, findingIndex } } : {}),
+    }))).sort((a, b) => compareMembers(a, b, compareText));
   const descriptors = new Map(members.map(member => [member.finding, describeClaim(member.finding)]));
   const groups: TaggedFinding[][] = [];
   for (const member of members) {
@@ -69,11 +77,16 @@ export function deduplicateSemanticFindings(
       // from a reviewer without dropping a stronger version of this claim.
       if (!distinct.has(key)) distinct.set(key, member);
     }
-    return { representative: group[0]!.finding, members: [...distinct.values()] };
+    return {
+      representative: group[0]!.finding,
+      members: [...distinct.values()].map(({ finding, model, role }) => ({ finding, model, role })),
+      ...(collectContributions ? { contributions: group.map(member => member.contribution!)
+        .sort((a, b) => a.reviewIndex - b.reviewIndex || a.findingIndex - b.findingIndex) } : {}),
+    };
   });
   return result.sort((a, b) => SEVERITY_ORDER[a.representative.severity] - SEVERITY_ORDER[b.representative.severity] ||
-    a.representative.file.localeCompare(b.representative.file) ||
+    compareText(a.representative.file, b.representative.file) ||
     a.representative.startLine - b.representative.startLine ||
-    a.representative.title.localeCompare(b.representative.title) ||
-    a.representative.id.localeCompare(b.representative.id));
+    compareText(a.representative.title, b.representative.title) ||
+    compareText(a.representative.id, b.representative.id));
 }

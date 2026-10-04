@@ -13,6 +13,7 @@ import { buildRunHeader, type RunHeader, type RunHeaderInput } from './run-heade
 import { uuidv7 } from './uuid.js';
 import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
 import { deriveConsensusAssembly, type ConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
+import type { RecoveredProduction } from '../converge/recovered-production.js';
 
 export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
@@ -24,6 +25,7 @@ export interface CompletedReviewInput {
   diff: Diff;
   gatingConfig: ResolvedGatingConfig;
   modelWeights?: Map<string, number>;
+  recoveredProduction?: RecoveredProduction;
   dedupeOrdering?: DedupeOrdering;
   /** Validated original-seat health for proof-bearing reports; never deserialized counts. */
   reviewerHealth?: ReviewerHealth;
@@ -74,6 +76,7 @@ export async function assembleCompletedReview(
     runId, chunkReviews, arrivedAsync, roleMap, thresholds: config.thresholds, modelWeights,
     collectContributions: dependencies.onFindingContributions !== undefined,
     dedupeOrdering: input.dedupeOrdering,
+    recoveredProduction: input.recoveredProduction,
   });
 
   // Convergence gating (RCL-23): annotate every kept finding with why it

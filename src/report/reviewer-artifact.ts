@@ -24,6 +24,7 @@ import { decodeSupplementalAsync, type SupplementalAsync } from './supplemental-
 import { describeReviewerEvidence, isInspectedReviewerReport, validateInspectedReviewerArtifactChain, MAX_REVIEWER_LINEAGE_DEPTH, type InspectedReviewerReport, type ReviewerEvidenceDescriptor } from './reviewer-evidence.js';
 import type { ReviewerHealth } from './reviewer-health.js';
 import { buildRunHeader, parseSpecSource, sha256Hex, stableStringify, type RunHeader } from './run-header.js';
+import { recoverySourceSchema } from './recovery-source.js';
 
 export interface ReviewerArtifactContext {
   /** Reconstructed with the existing validated proof/async decoders; never a deserialized cast. */
@@ -95,7 +96,8 @@ const metadataSchema = z.object({
     plan: z.object({ focus: z.string() }).strict().optional(),
     runner: z.object({ kind: z.enum(['agent', 'ci', 'human']), agent: z.string().optional(), ci_run_id: z.string().optional(), host: z.string().optional() }).strict(),
     startedAt: z.iso.datetime(),
-    converge: z.object({ target: z.string(), attempt: integer.positive().optional(), round: integer.positive().optional() }).strict().optional(),
+    converge: z.object({ target: z.string(), attempt: integer.positive().optional(), round: integer.positive().optional(),
+      recovery_source: recoverySourceSchema.optional() }).strict().optional(),
   }).strict(),
 }).strict();
 const patchSchema = z.array(z.object({ filename: z.string(), status: z.enum(['added', 'modified', 'deleted', 'renamed']),

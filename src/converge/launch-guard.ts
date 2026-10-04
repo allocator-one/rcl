@@ -13,14 +13,15 @@ import { convergeAttemptStatePath } from './attempt-budget.js';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import {
-  claimConvergeAttempt, previewConvergeAttemptState, ConvergeAttemptBudgetExceededError,
+  claimConvergeAttempt, previewConvergeAttemptState, recordConvergeAttemptLaunch, ConvergeAttemptBudgetExceededError,
   type ConvergeAttemptClaim,
 } from './attempt-budget.js';
 import {
-  initialConvergeRunState, loadConvergeRunState, resolveRoundResolution, validateRoundCap,
+  initialConvergeRunState, loadConvergeRunState, loadConvergeRunStateEvidence, resolveRoundResolution, validateRoundCap,
   writeState, ConvergeRoundCapError, type ConvergeRunState,
 } from './run-state.js';
 import type { ConvergeContext } from '../report/run-header.js';
+import { recoverySourceSchema } from '../report/recovery-source.js';
 import { staleManifest, StaleReportAuditError } from './stale-report-schema.js';
 import { verifyStaleReportReceipts } from './stale-report.js';
 import { canonicalStaleRetryReason } from './stale-retry-reason.js';
@@ -49,8 +50,11 @@ export interface GuardedLaunchOptions {
   target: string;
   headSha: string;
   inputSha256: string;
+  recoverySource?: NonNullable<ConvergeContext['recovery_source']>;
   round?: number;
   maxAttempts?: number;
+  /** Exact standalone public claim to authenticate without incrementing accounting. */
+  consumeAttempt?: number;
   maxRounds?: number;
   intent?: 'review' | 'stop-upstream' | 'stop-review' | 'retry-delivery';
   retryReason?: string;
@@ -89,7 +93,8 @@ function nextRound(state: ConvergeRunState): number {
   return state.rounds.reduce((latest, entry) => Math.max(latest, entry.round), 0) + 1;
 }
 
-async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number): Promise<{
+async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number,
+  recordedLaunch: GuardedLaunchState | undefined = state.lastLaunch): Promise<{
   round: number;
   retryProof?: Awaited<ReturnType<typeof inspectLegacyRetry>>;
   boundFixRecoverySource?: BoundFixRecoverySource;
@@ -116,7 +121,7 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   if (round > 1 && (!resolution || resolution.status === 'unresolved')) {
     refuse('triage_required', 'Resolve the existing native gating findings before another launch.');
   }
-  const previous = state.lastLaunch === undefined ? undefined : launchSchema.parse(state.lastLaunch);
+  const previous = recordedLaunch === undefined ? undefined : launchSchema.parse(recordedLaunch);
   const terminalRejected = previous?.status === 'completed' && await terminalRejectionForLaunch(options.gitCommonDir, state);
   if (previous?.deliveryFailure === 'local-invalid' && !terminalRejected) {
     refuse('terminal_rejection_proof_required', 'Inspect the original quarantine and preview rcl converge-rejected; a local-invalid marker is not recovery proof.');
@@ -272,7 +277,11 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
     try { retryReason = canonicalStaleRetryReason(retryReason); }
     catch { refuse('invalid_retry_reason', 'An explicit bounded retry needs a nonempty reason of at most 500 characters.'); }
   }
-  const options = { ...input, retryReason, target: input.target.trim(), originalLaunch: original === undefined ? undefined : {
+  const recoverySource = input.recoverySource === undefined ? undefined : recoverySourceSchema.parse(input.recoverySource);
+  if (input.startOver && recoverySource) {
+    refuse('recovery_fresh_review', 'A retained recovery predecessor cannot identify a newly requested review cycle.');
+  }
+  const options = { ...input, retryReason, recoverySource, target: input.target.trim(), originalLaunch: original === undefined ? undefined : {
     input: structuredClone(original.input), beforeClaim: original.beforeClaim, nowMs: original.nowMs,
   },
     ...(input.legacyRetry ? { legacyRetry: { ...structuredClone(input.legacyRetry), reportPath: resolve(input.legacyRetry.reportPath) } } : {}) };
@@ -303,6 +312,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
     }
   };
   let state: ConvergeRunState;
+  let recovered = false;
   let failure: { error: unknown } | undefined;
   let freshOperation: string | undefined;
   if (options.startOver) {
@@ -336,11 +346,20 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
     gitCommonDir: options.gitCommonDir,
     target: options.target,
     maxAttempts: options.maxAttempts,
+    consumeAttempt: options.consumeAttempt,
     ownership,
     freshReviewOperation: freshOperation,
     beforeClaim: async () => {
       try {
-        state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
+        const native = await loadConvergeRunStateEvidence(options.gitCommonDir, options.target);
+        state = native?.state ?? initialConvergeRunState(options.target);
+        recovered = state.version === 3;
+        if (recovered && (!options.recoverySource || native?.sha256 !== options.recoverySource.native_sha256)) {
+          refuse('recovery_source_changed', 'The selected native recovery predecessor is missing or changed; select its exact bytes before dispatch.');
+        }
+        if (!recovered && options.recoverySource) {
+          refuse('unexpected_recovery_source', 'A recovery source requires a validated recovered-v3 target.');
+        }
         await verifyStaleReportReceipts(options.gitCommonDir,state.staleReportAudit ?? []);
         const { verifyHistoricalDeliveryReconciliations } = await import('./historical-delivery-reconciliation.js');
         await verifyHistoricalDeliveryReconciliations(options.gitCommonDir,state);
@@ -350,8 +369,18 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         if (!(error instanceof StaleReportAuditError)) throw error;
         refuse('stale_report_audit_invalid','Retained stale-report evidence is missing or inconsistent; no attempt was claimed.');
       }
-      if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
+      if (options.maxRounds !== undefined) {
+        const cap = validateRoundCap(options.maxRounds);
+        if (recovered && cap !== state.roundCap) {
+          refuse('recovery_round_cap', 'A recovered launch must preserve its retained round cap.');
+        }
+        state.roundCap = cap;
+      }
       const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
+      const preclaimed = options.consumeAttempt !== undefined;
+      if (preclaimed && (!recovered || !attempts || options.consumeAttempt !== attempts.attemptsUsed)) {
+        refuse('preclaimed_attempt_mismatch', 'Recovered production requires the exact latest standalone attempt claim.');
+      }
       const recovery = options.boundFixRecovery;
       if (recovery && attempts?.attempts.some(({ boundFixRecoverySource: source }) =>
         source && source.target === options.target && source.repo.toLowerCase() === recovery.repo.toLowerCase() &&
@@ -367,15 +396,18 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         }
         if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
       }
-      const { round, retryProof, boundFixRecoverySource } = await requireLaunch(options, state, attempts?.attemptsUsed ?? 0);
+      const guardedAttemptsUsed = preclaimed ? attempts!.attemptsUsed - 1 : attempts?.attemptsUsed ?? 0;
+      const { round, retryProof, boundFixRecoverySource } = await requireLaunch(options, state, guardedAttemptsUsed,
+        recovered ? attempts?.lastLaunch : state.lastLaunch);
       const cap = options.maxAttempts ?? attempts?.cap;
-      if (cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
+      if (!preclaimed && cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
       }
+      const claimAttempt = preclaimed ? options.consumeAttempt! : (attempts?.attemptsUsed ?? 0) + 1;
       if (!options.startOver) await options.validate();
       if (options.originalLaunch) {
         const launch = createOriginalLaunch({ ...options.originalLaunch.input, target: options.target,
-          originalNativeClaim: { attempt: (attempts?.attemptsUsed ?? 0) + 1, round } });
+          originalNativeClaim: { attempt: claimAttempt, round } });
         preparedOriginal = Object.freeze({ launch, launchBytes: encodeOriginalLaunch(launch) });
         assertOriginalLive();
         await options.originalLaunch.beforeClaim(preparedOriginal, ownership);
@@ -385,13 +417,13 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       // original/retry recovery modes keep their own immutable input contract.
       const ordinaryLaunch = !options.originalLaunch && !options.legacyRetry && !options.boundFixRecovery;
       const retained = ordinaryLaunch ? await options.beforeClaim?.(Object.freeze({ target: options.target, round,
-        attempt: (attempts?.attemptsUsed ?? 0) + 1,
+        attempt: claimAttempt,
         ...(state.cycle ? { cycleId: state.cycle.id } : {}) }), ownership) : undefined;
       const ordinaryInputs = retained === undefined ? undefined : ordinaryLaunchInputsBindingSchema.parse(retained.ordinaryInputs);
       if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);
       assertOriginalLive();
       state.lastLaunch = {
-        status: 'pending', attempt: (attempts?.attemptsUsed ?? 0) + 1, round,
+        status: 'pending', attempt: claimAttempt, round,
         headSha: options.headSha, inputSha256: options.inputSha256,
         startedAt: new Date().toISOString(), pid: process.pid,
         ...(processIdentity ? { processIdentity } : {}),
@@ -410,11 +442,19 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         refuse('original_launch_claim_mismatch', 'The spent claim differs from the prepared original launch.');
       }
       state.lastLaunch!.attempt = claimed.attempt;
-      await writeState(options.gitCommonDir, state, ownership);
+      const persistLaunch = async () => {
+        if (recovered) {
+          await recordConvergeAttemptLaunch(options.gitCommonDir, options.target, state.lastLaunch!, ownership);
+        } else {
+          await writeState(options.gitCommonDir, state, ownership);
+        }
+      };
+      await persistLaunch();
       try {
-        await options.onClaim?.(claimed);
+        if (!claimed.preclaimed) await options.onClaim?.(claimed);
         const context = { target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
-          ...(state.cycle ? { cycleId: state.cycle.id } : {}) };
+          ...(state.cycle ? { cycleId: state.cycle.id } : {}),
+          ...(options.recoverySource ? { recovery_source: options.recoverySource } : {}) };
         const completion = completionSchema.parse(await (preparedOriginal
           ? options.run(context, ownership, preparedOriginal) : options.run(context, ownership)));
         if (preparedOriginal && completion.runId !== preparedOriginal.launch.runId) {
@@ -426,7 +466,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         failure = { error };
       }
       state.updatedAt = new Date().toISOString();
-      await writeState(options.gitCommonDir, state, ownership);
+      await persistLaunch();
       if (freshOperation) await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
     },
   }).catch(async (error: unknown) => {

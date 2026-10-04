@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { convergeRunStatePath, initialConvergeRunState, loadConvergeRunState, writeState } from '../../src/converge/run-state.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { reconcileDeliveredRun, reconcileFlushedRun, shouldReconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
+import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { primitiveFixture, spendAndRecord } from '../fixtures/attempt-recovery-owner-child.js';
 const runId = '019921a0-0000-7000-8000-000000000001', head = 'a'.repeat(40);
 const digest = 'c'.repeat(64);
 
@@ -63,6 +65,38 @@ async function expectUnchanged(mutator: (detail: ReturnType<typeof matchingDetai
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 describe('reconcileDeliveredRun', () => {
+  it('clears a recovered-v3 pending delivery only in the attempt ledger', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-v3-')));
+    try {
+      const fixture = await primitiveFixture(dir);
+      await spendAndRecord(dir, fixture.target, 'completed');
+      const stored = (await loadConvergeAttemptState(dir, fixture.target))!;
+      const launch = stored.lastLaunch!;
+      stored.lastLaunch = { ...launch, runId, reportJsonSha256: digest, headSha: head,
+        deliveryPending: true, hardFailure: true, exitCode: 4 };
+      await writeFile(fixture.attemptPath, JSON.stringify(stored));
+      const nativeBefore = await readFile(fixture.runPath, 'utf8');
+      const accountingBefore = structuredClone(stored);
+      delete accountingBefore.lastLaunch;
+      delete (accountingBefore as { updatedAt?: string }).updatedAt;
+      const detail = { ...matchingDetail(fixture.target), cycle_id: fixture.native.cycle.id,
+        converge: { target: fixture.target, round: launch.round, attempt: launch.attempt },
+        target: { ...matchingDetail(fixture.target).target, repo: fixture.native.cycle.repo,
+          pr_number: fixture.native.cycle.prNumber } };
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir,
+        getRun: vi.fn().mockResolvedValue({ kind: 'ok', value: detail }) })).resolves.toBe('reconciled');
+      const after = (await loadConvergeAttemptState(dir, fixture.target))!;
+      expect(after.lastLaunch).toMatchObject({ deliveryPending: false,
+        deliveryReconciliation: { version: 2, runId, reportJsonSha256: digest,
+          cycleId: fixture.native.cycle.id } });
+      const accountingAfter = structuredClone(after);
+      delete accountingAfter.lastLaunch;
+      delete (accountingAfter as { updatedAt?: string }).updatedAt;
+      expect(accountingAfter).toEqual(accountingBefore);
+      expect(await readFile(fixture.runPath, 'utf8')).toBe(nativeBefore);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   it('clears only a matching completed pending delivery', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
     try {
