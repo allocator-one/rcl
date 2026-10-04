@@ -20,7 +20,7 @@ import type { AcceptedOccurrenceTransfer } from './claim-recovery/validation/car
 import type { AcceptedClaimDisposition } from './claim-recovery/validation/native-occurrences.js';
 import { projectOccurrenceCarrier } from './claim-recovery/validation/carrier-projection.js';
 import { readClaimTargetHistory,claimHistoryContent,sameClaimHistoryEvidence,type ClaimHistoryContent } from './claim-recovery/carrier-inventory.js';
-import { publicClaimSelectionSchema,historySource,historyContext,claimCarriers,assertHistoryExtension,assertUnusedClaimIdentity,type PublicClaimSelection } from './claim-recovery/public-model.js';
+import { publicClaimSelectionSchema,historySource,historyContext,claimRunHistory,claimCarriers,assertHistoryExtension,assertUnusedClaimIdentity,type PublicClaimSelection } from './claim-recovery/public-model.js';
 import { deliverPreparedClaimEvent } from './claim-recovery/delivery.js';
 import { decodeRecoveryDocument,decodeOriginalReport } from './original-run/decode.js';
 import { inspectRecoveryDirectory } from './original-run/lock-path.js';
@@ -435,7 +435,7 @@ function validateDispositionIntent(selection: PublicClaimSelection,history: Clai
 }
 function dispositionInput(selection: PublicClaimSelection,history: ClaimHistoryContent,split: AcceptedSplitEvidence,eventId: string,occurredAt: string,actorUserId: string): ClaimDispositionInput {
   const request=selection.disposition!;
-  const rows=history.histories.find(h => h.runId===selection.source.scope.run_id)!.receipts;
+  const rows=claimRunHistory(history,selection.source).receipts;
   const prior=rows.filter(r => r.kind==='finding_claim_disposition'&&r.payload.claim_identity===selection.identity).at(-1);
   const original=request.originalVerdictEventId? rows.find(r => r.id===request.originalVerdictEventId):undefined;
   return {

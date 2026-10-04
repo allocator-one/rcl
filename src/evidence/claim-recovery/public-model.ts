@@ -42,10 +42,14 @@ export function historySource(content: ClaimHistoryContent,selection: Occurrence
   return source;
 }
 export function historyContext(content: ClaimHistoryContent,selection: OccurrenceRunSelector): OccurrenceContext {
+  const row=claimRunHistory(content,selection);
+  return { ...runSelector(selection),actorUserId: content.actorUserId,eventSequence: row.eventSequence };
+}
+export function claimRunHistory(content: ClaimHistoryContent,selection: OccurrenceRunSelector): ClaimHistoryContent['histories'][number] {
   const rows=content.histories.filter(h => h.runId===selection.scope.run_id);
   if(rows.length!==1)
     throw new Error('claim_context_unavailable');
-  return { ...runSelector(selection),actorUserId: content.actorUserId,eventSequence: rows[0]!.eventSequence };
+  return rows[0]!;
 }
 export function claimCarriers(content: ClaimHistoryContent,selection: PublicClaimSelection): OccurrenceCarrierSelector[] {
   const carriers: OccurrenceCarrierSelector[]=[];

@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { deliverPreparedClaimEvent, type ClaimEventDeliveryOptions } from '../../src/evidence/claim-recovery/delivery.js';
 import type { ClaimHistoryContent } from '../../src/evidence/claim-recovery/carrier-inventory.js';
-import { assertUnusedClaimIdentity } from '../../src/evidence/claim-recovery/public-model.js';
+import { assertUnusedClaimIdentity, claimRunHistory } from '../../src/evidence/claim-recovery/public-model.js';
+import type { OccurrenceRunSelector } from '../../src/evidence/claim-recovery/validation/carrier-types.js';
 import type { StoredEventReceipt } from '../../src/evidence/event-receipts.js';
 import { openJournal } from '../../src/evidence/original-run/journal.js';
 import { HarnessSink } from '../../src/telemetry/sink.js';
@@ -72,6 +73,13 @@ describe('durable claim event delivery', () => {
     } as unknown as ClaimHistoryContent;
 
     expect(() => assertUnusedClaimIdentity(history, '2222222222222222')).toThrow('claim_identity_already_used');
+  });
+
+  it('refuses receipt selection without exactly one matching run history', () => {
+    const history = { histories: [] } as unknown as ClaimHistoryContent;
+    const selection = { scope: { run_id: uuid(2) } } as OccurrenceRunSelector;
+
+    expect(() => claimRunHistory(history, selection)).toThrow('claim_context_unavailable');
   });
 
   it('retains exact prepared bytes before POST and accepts only a complete matching receipt', async () => {
