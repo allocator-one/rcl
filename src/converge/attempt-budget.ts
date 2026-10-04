@@ -889,7 +889,8 @@ export async function recordConvergeAttemptLaunch(
       await assertReviewCyclePair(commonDir, target, state.cycle);
       const previous = state.lastLaunch;
       if (mutation === 'delivery' && (!previous || previous.status !== 'completed' ||
-        !isDeepStrictEqual({ ...previous, deliveryPending: incoming.deliveryPending }, incoming))) {
+        incoming.deliveryPending !== false ||
+        !isDeepStrictEqual({ ...previous, deliveryPending: false }, incoming))) {
         throw new ConvergeAttemptStateError('Delivery recording may change only the exact completed launch delivery flag.');
       }
       if (isDeepStrictEqual(previous, incoming)) {

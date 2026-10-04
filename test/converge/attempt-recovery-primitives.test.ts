@@ -135,6 +135,8 @@ it('cold delivery retains the original claimant, configured M and all immutable 
   const bytes = await readFile(f.attemptPath, 'utf8'), inode = (await stat(f.attemptPath)).ino;
   await delivery(f, next);
   expect(await readFile(f.attemptPath, 'utf8')).toBe(bytes); expect((await stat(f.attemptPath)).ino).toBe(inode);
+  await expect(delivery(f, { ...next, deliveryPending: true })).rejects.toThrow(/delivery flag/);
+  expect(await readFile(f.attemptPath, 'utf8')).toBe(bytes);
   const after = (await loadConvergeAttemptState(f.root, f.target))!;
   expect(after.lastLaunch).toEqual(next); expect(accounting(after)).toEqual(accounting(f.before));
   expect(await protectedBytes(f)).toEqual(beforeNative);
