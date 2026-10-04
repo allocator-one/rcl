@@ -7,9 +7,10 @@
 - Recover a dead launcher inside an active review cycle by authenticating its
   exact input, cycle, attempt, round, caps and retained async history. The
   finalize-only transition archives unattributed async bytes, records the
-  blocking outcome as unknown, preserves findings and accounting, and permits
-  a later current-head attempt only after its terminal receipt verifies. New
-  cycle launches retain their guarded input before spending the claim. Cycle
+  blocking outcome as unknown and preserves findings and accounting. A later
+  attempt is allowed only after its terminal receipt verifies and the exact
+  review inputs materially change; identical head and input remain refused.
+  New cycle launches retain their guarded input before spending the claim. Cycle
   history is occurrence-bound, including duplicate-byte results and cycles
   with no completed async artifacts (RCL-146).
 

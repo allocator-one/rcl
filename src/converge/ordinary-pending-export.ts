@@ -118,6 +118,21 @@ function ownerAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
+function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
+  packetSha256: string): Record<string, unknown> {
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { refuse('retained_input_mismatch'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) refuse('retained_input_mismatch');
+  const packet = value as Record<string, unknown>;
+  const guardedInput = packet.guardedInput;
+  if (!guardedInput || typeof guardedInput !== 'object' || Array.isArray(guardedInput)) refuse('retained_input_mismatch');
+  const expected = retainedInputs({ ...options, guardedInput: guardedInput as Record<string, unknown> });
+  if (sha256Hex(text) !== packetSha256 || text !== serializeRecoveryDocument(expected, MAX_RETAINED_INPUT_BYTES)) {
+    refuse('retained_input_mismatch');
+  }
+  return guardedInput as Record<string, unknown>;
+}
+
 /**
  * Authenticate reconstructed ordinary inputs without locks, claims or native writes.
  * Historical launch digests did not include base: the receipt explicitly limits
@@ -139,14 +154,15 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   ]);
   if (!state?.lastLaunch || !attempts) refuse('ordinary_launch_required');
   await assertReviewCyclePair(common, options.target, state.cycle);
+  const cycleBacked = state.cycle !== undefined;
   const launch = launchSchema.parse(state.lastLaunch);
   const record = attempts.attempts.find(item => item.attempt === launch.attempt);
   if (launch.status !== 'pending' || launch.pendingResume || launch.retainedOriginal || launch.recovery ||
       launch.pendingRecovery || !record || record.pid !== launch.pid || record.retrySource ||
       record.boundFixRecoverySource || record.pendingRecoverySource ||
       launch.attempt !== attempts.attemptsUsed || launch.headSha !== options.headSha ||
-      (options.expectedRound !== undefined && launch.round !== options.expectedRound) ||
-      launch.inputSha256 !== guardedInputSha256(options.guardedInput)) refuse('input_mismatch');
+      (!cycleBacked && launch.inputSha256 !== guardedInputSha256(options.guardedInput)) ||
+      (options.expectedRound !== undefined && launch.round !== options.expectedRound)) refuse('input_mismatch');
   if (ownerAlive(launch.pid)) refuse('owner_alive');
   // Only a native marker proves which full packet preceded this claim.
   // Unmarked historical launches retain their explicit current-base limitation,
@@ -157,21 +173,29 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     attempt: launch.attempt, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
     packetSha256: binding.packetSha256 }) : undefined;
   const retainedBefore = retainedPath ? await readStable(retainedPath, MAX_RETAINED_INPUT_BYTES) : undefined;
-  if (binding && (!retainedBefore || retainedBefore.sha256 !== binding.packetSha256 ||
-      retainedBefore.text !== serializeRecoveryDocument(retainedInputs({
-        gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
-        attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
-        guardedInput: options.guardedInput,
-      }), MAX_RETAINED_INPUT_BYTES))) refuse('retained_input_mismatch');
+  if (binding && (!retainedBefore || retainedBefore.sha256 !== binding.packetSha256)) refuse('retained_input_mismatch');
+  if (binding && !cycleBacked && retainedBefore!.text !== serializeRecoveryDocument(retainedInputs({
+    gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
+    attempt: launch.attempt, round: launch.round, guardedInput: options.guardedInput,
+  }), MAX_RETAINED_INPUT_BYTES)) refuse('retained_input_mismatch');
+  const historicalInput = binding && cycleBacked ? retainedHistoricalInput(retainedBefore!.text, {
+    gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
+    attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
+    guardedInput: options.guardedInput,
+  }, binding.packetSha256) : options.guardedInput;
+  if (launch.inputSha256 !== guardedInputSha256(historicalInput)) refuse('input_mismatch');
 
-  const cycleBacked = state.cycle !== undefined;
   const snapshot = cycleBacked
     ? await snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
       Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND))
     : await snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey);
   const identity = (item: { model: string; role: string; provider?: string }) =>
     JSON.stringify([item.model, item.role, item.provider]);
-  const expected = options.asyncDescriptors.map(identity).sort();
+  const historicalRoster = Array.isArray(historicalInput.roster)
+    ? historicalInput.roster.filter(item => item && typeof item === 'object' &&
+      (item as Record<string, unknown>).lane === 'async') as Array<{ model: string; role: string; provider?: string }>
+    : [];
+  const expected = (cycleBacked ? historicalRoster : options.asyncDescriptors).map(identity).sort();
   const actual = snapshot.reviews.map(identity).sort();
   if (cycleBacked
     ? actual.some(item => !expected.includes(item))
@@ -188,7 +212,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     asyncAttribution: 'cycle-history-unattributed' as const } : {}),
     target: options.target, headSha: launch.headSha,
     baseSha: options.baseSha, attempt: launch.attempt, round: launch.round, pid: launch.pid,
-    retainedAsyncSha256, retainedAsync, guardedInput: options.guardedInput };
+    retainedAsyncSha256, retainedAsync, guardedInput: historicalInput };
   // Canonical JSON drops undefined optional properties exactly as the original
   // guarded-input hash did; it never adds an artificial null spec binding.
   const packet = validateOrdinaryPendingPackage(JSON.parse(JSON.stringify(candidate)) as OrdinaryPendingPackage,

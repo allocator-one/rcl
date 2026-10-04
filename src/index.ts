@@ -58,7 +58,6 @@ import {
   snapshotAsyncResults,
   snapshotAsyncHistory,
   consumeBoundAsyncResults,
-  consumeFinalizedCycleAsyncHistory,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { resolveQuorumPolicy } from './dispatch/quorum.js';
@@ -2343,14 +2342,14 @@ async function executeCouncil(
           nativeStateSha256: opts.pendingNativeSha256!, attemptStateSha256: opts.pendingAttemptSha256!,
           retainedAsyncSha256: expectedAsyncSha256, migrationPackage,
           maxAttempts: Number(opts.maxAttempts), cycleRemote,
-          loadRetainedAsync: loadMigrationRetainedAsync });
-        if (migrationPackage.version === 2) {
-          await consumeFinalizedCycleAsyncHistory(result.reusedReceipt,
-            asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
+          loadRetainedAsync: loadMigrationRetainedAsync,
+          ...(migrationPackage.version === 2 ? { cycleHistory: {
+            resolveStoreDir: resolveExistingAsyncStoreDir,
+            targetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
               extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
-              migrationPackage.cycle!.id), expectedAsyncSha256,
-            (migrationPackage.attemptsUsed! + 1) * MAX_ASYNC_CALLS_PER_ROUND);
-        }
+              migrationPackage.cycle!.id),
+            maxResults: (migrationPackage.attemptsUsed! + 1) * MAX_ASYNC_CALLS_PER_ROUND,
+          } } : {}) });
         spinner.stop(); console.log(JSON.stringify({ mode: 'finalize-only', ...result })); return undefined;
       }
       // An ordinary migration package authenticates the old launch itself. The

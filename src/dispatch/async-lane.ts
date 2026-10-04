@@ -399,7 +399,8 @@ export async function snapshotAsyncHistory(
     throw new Error('async_resume_worker_pending');
   }
   const resultPrefix = `result-${targetKey}-`;
-  const names = directoryNames.filter(name => name.startsWith(resultPrefix) && name.endsWith('.json')).sort();
+  const names = directoryNames.filter(name => name.startsWith(resultPrefix) &&
+    (name.endsWith('.json') || /\.json(?:\.consumed-[A-Za-z0-9-]+)+$/.test(name))).sort();
   if (names.length > maxResults) throw new Error('async_history_result_limit');
   const reviews: ModelReview[] = [], reviewBytes: string[] = [], artifacts: AsyncResultReference[] = [];
   let totalBytes = 0;
@@ -458,18 +459,6 @@ export async function consumeBoundAsyncHistory(storeDir: string, targetKey: stri
       throw error;
     }
   }
-}
-
-/** Consume a newly finalized cycle's live history; receipt replays need no live store. */
-export async function consumeFinalizedCycleAsyncHistory(
-  reusedReceipt: boolean,
-  targetKey: string,
-  expectedSha256: readonly string[],
-  maxResults: number,
-  resolveStoreDir: () => Promise<string> = resolveExistingAsyncStoreDir,
-): Promise<void> {
-  if (reusedReceipt) return;
-  await consumeBoundAsyncHistory(await resolveStoreDir(), targetKey, expectedSha256, maxResults);
 }
 
 /** Consume only the exact reviewed async artifacts after terminal recovery. */

@@ -14,7 +14,8 @@ import { bindOriginalCouncil } from '../dispatch/original-execution.js';
 import { createOriginalLaunch, type OriginalLaunch } from '../dispatch/original-launch.js';
 import type { CapturedPreparedCouncil } from '../dispatch/capture-council.js';
 import type { CheckpointJournal } from '../dispatch/checkpoint.js';
-import type { AsyncResultReference } from '../dispatch/async-lane.js';
+import { consumeBoundAsyncHistory, snapshotAsyncHistory,
+  type AsyncResultReference } from '../dispatch/async-lane.js';
 import { uuidv7 } from '../report/uuid.js';
 import { captureSupplementalAsync } from '../report/supplemental-async.js';
 import { stableStringify } from '../report/run-header.js';
@@ -94,6 +95,14 @@ export interface OrdinaryPendingFinalizeOptions {
   loadRetainedAsync: () => Promise<AsyncResultReference[]>;
   /** Fault-injection boundary for proving archive-complete/native-write recovery. */
   writeFinalizedState?: typeof writeState;
+  cycleHistory?: {
+    storeDir?: string;
+    resolveStoreDir?: () => Promise<string>;
+    targetKey: string;
+    maxResults: number;
+  };
+  /** Fault-injection boundary for proving idempotent history consumption. */
+  consumeCycleHistory?: typeof consumeBoundAsyncHistory;
   cycleRemote?: ReviewCycleRemote;
 }
 
@@ -279,6 +288,9 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
 function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   const cycleBacked = input?.migrationPackage?.version === 2;
+  const hasStoreDir = typeof input?.cycleHistory?.storeDir === 'string' &&
+    input.cycleHistory.storeDir.trim().length > 0;
+  const hasStoreResolver = typeof input?.cycleHistory?.resolveStoreDir === 'function';
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
     !/^[a-f0-9]{40}$/.test(input.headSha ?? '') || !/^[a-f0-9]{40}$/.test(input.baseSha ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
@@ -288,9 +300,35 @@ function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
     (!cycleBacked && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
     typeof input.loadRetainedAsync !== 'function' ||
     (input.writeFinalizedState !== undefined && typeof input.writeFinalizedState !== 'function') ||
+    (input.consumeCycleHistory !== undefined && typeof input.consumeCycleHistory !== 'function') ||
+    (cycleBacked && (!input.cycleHistory || hasStoreDir === hasStoreResolver ||
+      typeof input.cycleHistory.targetKey !== 'string' || !input.cycleHistory.targetKey.trim() ||
+      !Number.isSafeInteger(input.cycleHistory.maxResults) || input.cycleHistory.maxResults < 1)) ||
     !input.migrationPackage || !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1) {
     fail('invalid_input');
   }
+}
+
+type CycleHistoryReconciliation = 'new-receipt' | 'exact-replay' | 'advanced-replay';
+
+async function reconcileFinalizedCycleHistory(options: OrdinaryPendingFinalizeOptions,
+  mode: CycleHistoryReconciliation): Promise<void> {
+  if (options.migrationPackage.version !== 2) return;
+  const history = options.cycleHistory!;
+  let storeDir: string;
+  try {
+    storeDir = history.storeDir ?? await history.resolveStoreDir!();
+  } catch (error) {
+    if (mode !== 'new-receipt' && (error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (mode === 'advanced-replay') {
+    const live = await snapshotAsyncHistory(storeDir, history.targetKey, history.maxResults);
+    if (live.artifacts.length > 0) fail('cycle_history_ambiguous_after_successor');
+    return;
+  }
+  await (options.consumeCycleHistory ?? consumeBoundAsyncHistory)(storeDir, history.targetKey,
+    options.retainedAsyncSha256, history.maxResults);
 }
 
 async function archiveAsync(common: string, source: PendingRecoverySource,
@@ -511,6 +549,7 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
         await retainFinalizationSnapshots(options.gitCommonDir, existingReceipt,
           state.attempts, state.native);
       }
+      await reconcileFinalizedCycleHistory(options, state.exact ? 'exact-replay' : 'advanced-replay');
       return { receipt: existingReceipt, reusedReceipt: true,
         snapshotBindingUpgraded: !snapshotsPresent };
     }
@@ -609,6 +648,10 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
     sourceAttemptStateBytes ??= finalizedAttempts.raw;
     await retainFinalizationSnapshots(options.gitCommonDir, receipt,
       sourceAttemptStateBytes, finalizedNative.raw);
+    // Cycle history is consumed while the target remains recovery-locked and
+    // before the terminal receipt makes a successor eligible. Partial cleanup
+    // is safe to retry because consumption validates occurrence subsets.
+    await reconcileFinalizedCycleHistory(options, 'new-receipt');
     await retainFinalizationReceipt(options.gitCommonDir, receipt);
     return { receipt, reusedReceipt: false, snapshotBindingUpgraded: false };
   });
