@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   chunkDiff,
+  DEFAULT_REVIEW_CAPACITY,
+  MAX_REVIEW_CAPACITY,
+  validateReviewCapacity,
+  type ReviewCapacity,
   formatChunkForPrompt,
 } from '../../src/prepare/chunker.js';
 import { parseUnifiedDiff } from '../../src/prepare/unified-diff.js';
@@ -427,6 +431,107 @@ describe('chunkDiff', () => {
     expect(fragments[1]!.patch).toBe(`+line 1998\n${marker}`);
     expect(fragments.map((fragment) => fragment.patch).join('')).toBe(original.patch);
     expect(formatChunkForPrompt(chunks[1]!)).toContain('@@ -0,0 +1999,1 @@ generated');
+  });
+});
+
+describe('review capacity', () => {
+  it('preserves the default source and chunk limits', () => {
+    expect(DEFAULT_REVIEW_CAPACITY).toEqual({
+      maxChunks: 32,
+      maxSourceFiles: 640,
+      maxSourcePatchLines: 64_000,
+      maxSourcePatchBytes: 4 * 1024 * 1024,
+    });
+    const files = Array.from({ length: 641 }, (_, index) => makeFile(`f${index}.ts`, 1));
+    expect(() => chunkDiff(files)).toThrow(/640 files before expansion/);
+  });
+
+  it('reviews a representative 1629-file, 350k-line, 14 MiB patch losslessly when opted in', () => {
+    const files = Array.from({ length: 1629 }, (_, index) => ({
+      ...makeAddedFile(`f${index}.ts`, 214),
+      patch: ['@@ -0,0 +1,214 @@', ...Array<string>(214).fill(`+${'x'.repeat(40)}`)].join('\n'),
+    }));
+    const chunks = chunkDiff(files, MAX_REVIEW_CAPACITY);
+
+    expect(chunks.length).toBeGreaterThan(32);
+    expect(chunks.flatMap((chunk) => chunk.files)).toEqual(files);
+    expect(chunks.every((chunk) => chunk.files.length <= 20 && chunk.totalLines <= 2000)).toBe(true);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+  });
+
+  it('enforces opted-in source bounds before expansion', () => {
+    const capacity = { ...DEFAULT_REVIEW_CAPACITY, maxChunks: 64 };
+    expect(() => chunkDiff([makeAddedFile('large.ts', 64_000)], capacity)).toThrow(
+      /64,000 patch lines.*before expansion/
+    );
+    const oversizedBytes = {
+      ...makeFile('large.ts', 1),
+      patch: 'x'.repeat(4 * 1024 * 1024 + 1),
+    };
+    expect(() => chunkDiff([oversizedBytes], capacity)).toThrow(
+      /4,194,304 patch bytes.*before expansion/
+    );
+  });
+
+  it('still enforces an opted-in paid-call fanout limit', () => {
+    const files = Array.from({ length: 34 }, (_, index) => makeFile(`f${index}.ts`, 1800));
+    expect(() => chunkDiff(files, { ...MAX_REVIEW_CAPACITY, maxChunks: 33 })).toThrow(
+      /requires 34 review chunks.*safety limit of 33/
+    );
+  });
+
+  it('reserves three-digit chunk labels during fragment allocation', () => {
+    const file = { ...makeFile('wide-label.ts', 2), patch: '@@ -0,0 +1,2 @@\n+a\n+b' };
+    const twoDigitProbe = { files: [file], totalLines: 3, index: 31, total: 32 };
+    const padding = MAX_SECURED_DIFF_BYTES - securedDiffBytes(twoDigitProbe);
+    file.patch = `@@ -0,0 +1,2 @@\n+a${'x'.repeat(Math.floor(padding / 2))}\n+b${'x'.repeat(Math.ceil(padding / 2))}`;
+    const files = Array.from({ length: 100 }, () => ({ ...file }));
+    const chunks = chunkDiff(files, MAX_REVIEW_CAPACITY);
+
+    expect(chunks.length).toBeGreaterThanOrEqual(100);
+    expect(chunks.every((chunk) => securedDiffBytes(chunk) <= MAX_SECURED_DIFF_BYTES)).toBe(true);
+    expect(chunks.flatMap((chunk) => chunk.files).map((entry) => entry.patch).join('')).toBe(
+      files.map((entry) => entry.patch).join('')
+    );
+  });
+
+  it('does not relax the per-chunk byte limit with a larger capacity', () => {
+    const file = {
+      ...makeFile('huge-line.ts', 1),
+      patch: `@@ -0,0 +1,1 @@\n+${'x'.repeat(MAX_SECURED_DIFF_BYTES)}`,
+    };
+    expect(() => chunkDiff([file], MAX_REVIEW_CAPACITY)).toThrow(/smallest valid fragment/);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER, '64', undefined])(
+    'rejects an invalid capacity field %s before accepting an empty diff',
+    (value) => {
+      for (const field of Object.keys(DEFAULT_REVIEW_CAPACITY)) {
+        const capacity = { ...DEFAULT_REVIEW_CAPACITY, [field]: value } as ReviewCapacity;
+        expect(() => chunkDiff([], capacity)).toThrow(/review capacity/i);
+      }
+    }
+  );
+
+  it('rejects hard-cap overflow and unknown capacity fields', () => {
+    for (const field of Object.keys(MAX_REVIEW_CAPACITY) as Array<keyof ReviewCapacity>) {
+      expect(() => validateReviewCapacity({
+        ...MAX_REVIEW_CAPACITY,
+        [field]: MAX_REVIEW_CAPACITY[field] + 1,
+      })).toThrow(/review capacity/i);
+    }
+    expect(() => validateReviewCapacity({
+      ...DEFAULT_REVIEW_CAPACITY,
+      unlimited: true,
+    } as ReviewCapacity)).toThrow(/review capacity/i);
+    expect(() => validateReviewCapacity(null as unknown as ReviewCapacity)).toThrow(/review capacity/i);
+  });
+
+  it('returns an independent validated capacity snapshot', () => {
+    const capacity = { ...MAX_REVIEW_CAPACITY };
+    const validated = validateReviewCapacity(capacity);
+    capacity.maxChunks = 0;
+    expect(validated).toEqual(MAX_REVIEW_CAPACITY);
   });
 });
 

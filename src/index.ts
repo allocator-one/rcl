@@ -29,11 +29,13 @@ import {
 } from './config/defaults.js';
 import { resolveProviderConcurrency } from './config/provider-concurrency.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
+import { resolvePRCapacity, type PRCapacityAuthorization } from './resolver/pr-capacity-authority.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
 import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
-import { chunkDiff } from './prepare/chunker.js';
+import { chunkDiff, DEFAULT_REVIEW_CAPACITY, MAX_REVIEW_CAPACITY, validateReviewCapacity, type ReviewCapacity } from './prepare/chunker.js';
+import { CAPTURED_INPUT_HARD_LIMITS, type CapturedInputCapacity } from './dispatch/captured-inputs.js';
 import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, findProjectRulesFile } from './roles/loader.js';
@@ -71,6 +73,7 @@ import {
   assertReviewWorkWithinLimit,
   buildCouncilRunPlan,
   CouncilProgressReporter,
+  DEFAULT_MAX_BLOCKING_CALLS,
   formatCouncilRunPlan,
 } from './output/progress.js';
 import {
@@ -173,7 +176,9 @@ import { loadConvergeRunState } from './converge/run-state.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
 import { ordinaryPendingGuardedInput, type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
-import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from './converge/ordinary-pending-export.js';
+import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs,
+  MAX_ORDINARY_PENDING_PACKAGE_BYTES, ordinaryPendingPackageByteLimit } from './converge/ordinary-pending-export.js';
+import { MAX_GUARDED_INPUT_CAPACITY, type GuardedInputCapacity } from './converge/guarded-input-retention.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
 import { resolveFinalizedAsyncExecution } from './dispatch/checkpoint-async-store.js';
@@ -376,6 +381,8 @@ program
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
+  .option('--max-review-chunks <n>', 'Explicit full-patch capacity, up to 512 lossless chunks (default 32)')
+  .option('--max-blocking-calls <n>', 'Explicit paid-work capacity, up to 8192 blocking calls (default 512)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
   .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
   .option('--config <path>', 'Path to config file')
@@ -392,6 +399,8 @@ program
   .command('review-plan <file>')
   .description('Council-review an implementation plan document before code exists')
   .option('--focus <mode>', `Focus the review: ${PLAN_FOCUS_MODES.join(' | ')} (default: comprehensive)`)
+  .option('--max-review-chunks <n>', 'Explicit full-patch capacity, up to 512 lossless chunks (default 32)')
+  .option('--max-blocking-calls <n>', 'Explicit paid-work capacity, up to 8192 blocking calls (default 512)')
   .option('--role <name>', 'Use a single named role')
   .option('--roles <names>', 'Comma-separated list of roles')
   .option(
@@ -1698,6 +1707,8 @@ interface CouncilCliOpts {
   resumeAsyncSha256?: string;
   maxAttempts?: string;
   maxRounds?: string;
+  maxReviewChunks?: string;
+  maxBlockingCalls?: string;
   /** commander: `--no-telemetry` sets this false. */
   telemetry?: boolean;
   /** Exit 4 unless the evidence envelope was acknowledged. */
@@ -2185,6 +2196,23 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     await assertEvidenceDeliverable(opts, config, attestation?.credential);
 
     spinner.text = `Resolving diff for: ${target ?? `--${gitMode}`}`;
+    const prTarget = !gitMode && !patchTarget ? parseGitHubTarget(target!) : undefined;
+    let prCapacity: PRCapacityAuthorization | undefined;
+    if (prTarget) {
+      prCapacity = await resolvePRCapacity(prTarget, config.githubToken);
+      if (prCapacity) {
+        if ((opts.maxReviewChunks !== undefined && opts.maxReviewChunks !== String(prCapacity.maxReviewChunks)) ||
+            (opts.maxBlockingCalls !== undefined && opts.maxBlockingCalls !== String(prCapacity.maxBlockingCalls))) {
+          throw new Error('CLI review capacity conflicts with the authorized exact-head PR capacity label.');
+        }
+        opts = {
+          ...opts,
+          maxReviewChunks: String(prCapacity.maxReviewChunks),
+          maxBlockingCalls: String(prCapacity.maxBlockingCalls),
+        };
+      }
+    }
+    const explicitDiffCapacity = reviewBounds(opts).reviewCapacity?.maxSourcePatchBytes;
 
     // Resolve diff. Git modes bracket the read with two HEAD resolutions: a
     // commit landing between them would bind the diff to a commit it was
@@ -2193,7 +2221,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     let gitHeads: Awaited<ReturnType<typeof resolveGitHeads>> | undefined;
     if (gitMode) {
       gitHeads = await resolveGitHeads();
-      diff = await loadGitDiff(gitMode);
+      diff = await loadGitDiff(gitMode, process.cwd(), explicitDiffCapacity);
       // Both ends of the binding must hold still: HEAD (what the diff is
       // relative to) and the merge-base (what the header records as base).
       // Index or worktree edits during the read are not guarded — the
@@ -2218,8 +2246,13 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
         throw err;
       }
     } else {
-      const prTarget = parseGitHubTarget(target!);
-      diff = await fetchPRDiff(prTarget, config.githubToken);
+      diff = await fetchPRDiff(prTarget!, config.githubToken, undefined, {
+        ...(explicitDiffCapacity === undefined ? {} : { maxDiffBytes: explicitDiffCapacity }),
+      });
+    }
+
+    if (prCapacity && diff.metadata?.headSha !== prCapacity.headSha) {
+      throw new Error('PR head changed after exact-head review capacity authorization.');
     }
 
     // Resolve the head BEFORE the empty-diff exit so --expect-head-sha is
@@ -2266,6 +2299,15 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       ? `${diff.metadata.owner}/${diff.metadata.repo}#${diff.metadata.number}`
       : (target ?? `git-${gitMode}-${await currentBranchLabel()}`);
 
+    if (prCapacity && prTarget) {
+      const currentCapacity = await resolvePRCapacity(prTarget, config.githubToken);
+      if (!currentCapacity || currentCapacity.headSha !== prCapacity.headSha ||
+          currentCapacity.maxReviewChunks !== prCapacity.maxReviewChunks ||
+          currentCapacity.maxBlockingCalls !== prCapacity.maxBlockingCalls) {
+        throw new Error('Exact-head PR capacity authorization changed before review dispatch.');
+      }
+    }
+
     await executeCouncil(spinner, prepared, diff, opts, {
       command: 'review',
       target: runTarget,
@@ -2286,6 +2328,44 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
  * Shared back half of every council command: chunking, prompt building,
  * dispatch, consensus, and every output surface.
  */
+function reviewBounds(opts: CouncilCliOpts): {
+  reviewCapacity?: ReviewCapacity;
+  captureCapacity?: CapturedInputCapacity;
+  guardedInputCapacity?: GuardedInputCapacity;
+  maxBlockingCalls: number;
+} {
+  const explicit = opts.maxReviewChunks !== undefined || opts.maxBlockingCalls !== undefined;
+  const parse = (raw: string | undefined, fallback: number, name: string): number => {
+    if (raw === undefined) return fallback;
+    if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      throw new Error(`Invalid ${name}: expected a positive decimal integer.`);
+    }
+    return Number(raw);
+  };
+  const maxChunks = parse(opts.maxReviewChunks, DEFAULT_REVIEW_CAPACITY.maxChunks, '--max-review-chunks');
+  const maxBlockingCalls = parse(opts.maxBlockingCalls, DEFAULT_MAX_BLOCKING_CALLS, '--max-blocking-calls');
+  assertReviewWorkWithinLimit(0, 0, maxBlockingCalls);
+  if (!explicit) return { maxBlockingCalls };
+  const reviewCapacity = validateReviewCapacity({
+    maxChunks,
+    maxSourceFiles: maxChunks * 20,
+    maxSourcePatchLines: maxChunks * 2000,
+    maxSourcePatchBytes: Math.min(MAX_REVIEW_CAPACITY.maxSourcePatchBytes,
+      Math.max(DEFAULT_REVIEW_CAPACITY.maxSourcePatchBytes, maxChunks * 65_536)),
+  });
+  return {
+    reviewCapacity,
+    maxBlockingCalls,
+    guardedInputCapacity: { ...MAX_GUARDED_INPUT_CAPACITY },
+    captureCapacity: {
+      bytes: CAPTURED_INPUT_HARD_LIMITS.bytes,
+      cells: maxBlockingCalls,
+      seats: CAPTURED_INPUT_HARD_LIMITS.seats,
+      chunks: maxChunks,
+    },
+  };
+}
+
 async function prepareCouncilWork(
   spinner: Spinner,
   prepared: PreparedCouncil,
@@ -2294,8 +2374,9 @@ async function prepareCouncilWork(
   focus?: PlanFocus
 ) {
   const { assignments, contextFiles } = prepared;
-  const chunks = chunkDiff(diff.files);
-  assertReviewWorkWithinLimit(chunks.length, assignments.length);
+  const bounds = reviewBounds(opts);
+  const chunks = chunkDiff(diff.files, bounds.reviewCapacity);
+  assertReviewWorkWithinLimit(chunks.length, assignments.length, bounds.maxBlockingCalls);
   spinner.text = `Building prompts (${chunks.length} chunk(s), ${assignments.length} reviewer(s))...`;
   const chunkAssignments = chunks.flatMap(chunk => assignments.map(assignment => ({ assignment, chunk })));
   const { docs: contextDocs, skipped } = await loadPromptContextDocs(contextFiles);
@@ -2307,7 +2388,7 @@ async function prepareCouncilWork(
     contextDocs,
     plan: focus === undefined ? undefined : { focus },
   })));
-  return { chunks, chunkAssignments, contextDocs, prompts };
+  return { chunks, chunkAssignments, contextDocs, prompts, bounds };
 }
 
 async function executeCouncil(
@@ -2329,7 +2410,7 @@ async function executeCouncil(
   const { config, roleMap, assignments, asyncAssignments } = prepared;
   const planContext = extra.focus !== undefined ? { focus: extra.focus } : undefined;
   const work = preparedWork ?? await prepareCouncilWork(spinner, prepared, diff, opts, extra.focus);
-  const { chunks, chunkAssignments, contextDocs, prompts } = work;
+  const { chunks, chunkAssignments, contextDocs, prompts, bounds } = work;
   if (opts.guardedConverge) {
     const roster = buildRoster({ assignments, asyncAssignments, coreModels: prepared.coreModels,
       explicit: prepared.explicit, gating: prepared.gatingConfig });
@@ -2348,7 +2429,7 @@ async function executeCouncil(
       const receipt = await exportOrdinaryPendingPackage({ gitCommonDir: common,
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
-        guardedInput, path: opts.exportPendingPackage,
+        guardedInput, guardedInputCapacity: bounds.guardedInputCapacity, path: opts.exportPendingPackage,
         preview: opts.previewPending === true, asyncStoreDir: await resolveExistingAsyncStoreDir(),
         asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
           extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
@@ -2382,9 +2463,14 @@ async function executeCouncil(
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
           'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" for an empty cycle history.');
       }
-      const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
-        (await readStable(opts.ordinaryPendingPackage)).text
-      ) as OrdinaryPendingPackage;
+      const migrationPackageBytes = opts.ordinaryPendingPackage === undefined ? undefined
+        : (await readStable(opts.ordinaryPendingPackage, MAX_ORDINARY_PENDING_PACKAGE_BYTES)).text;
+      const migrationPackage = migrationPackageBytes === undefined ? undefined
+        : JSON.parse(migrationPackageBytes) as OrdinaryPendingPackage;
+      if (migrationPackage && Buffer.byteLength(migrationPackageBytes!, 'utf8') >
+          ordinaryPendingPackageByteLimit(migrationPackage.guardedInput)) {
+        throw new ReviewLaunchRefused('pending_package_too_large', 'The pending package exceeds its authenticated review capacity.');
+      }
       const migrationGuardedInput = migrationPackage
         ? ordinaryPendingGuardedInput(migrationPackage) : undefined;
       if (opts.expectPrHeadSha !== undefined && migrationPackage?.version !== 2) {
@@ -2522,6 +2608,8 @@ async function executeCouncil(
         assignments,
         lanes: assignments.map(item => assignmentLane(item.model, prepared.coreModels, prepared.explicit)),
         chunks, prompts, config, specBytes: prepared.specContent ?? '', contextDocs,
+        ...(bounds.reviewCapacity === undefined ? {} : { reviewCapacity: bounds.reviewCapacity }),
+        ...(bounds.captureCapacity === undefined ? {} : { captureCapacity: bounds.captureCapacity }),
         compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: AGGREGATION_ALGORITHM },
         aggregationInputs,
         ...(pendingClaimAsyncChunks.length ? { async: {
@@ -2630,7 +2718,8 @@ async function executeCouncil(
         const retained = await retainOrdinaryLaunchInputs({ gitCommonDir: common, target: context.target,
           attempt: context.attempt!, round: context.round!, ...(context.cycleId ? { cycleId: context.cycleId } : {}),
           headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? null,
-          guardedInput, asyncDescriptors: ordinaryAsyncDescriptors });
+          guardedInput, guardedInputCapacity: bounds.guardedInputCapacity,
+          asyncDescriptors: ordinaryAsyncDescriptors });
         return { ordinaryInputs: { version: 1 as const, packetSha256: retained.sha256,
           baseSha: retained.baseSha } };
       },
@@ -2733,6 +2822,7 @@ async function executeCouncil(
   const providerConcurrency = resolveProviderConcurrency(config.providerConcurrency);
   const runPlan = buildCouncilRunPlan({
     totalCalls,
+    maxBlockingCalls: bounds.maxBlockingCalls,
     reviewers: assignments.length,
     chunks: chunks.length,
     concurrency,

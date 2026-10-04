@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { retainOrdinaryLaunchInputs } from '../../src/converge/ordinary-pending-export.js';
-import { retainGuardedInput, restoreGuardedInput } from '../../src/converge/guarded-input-retention.js';
+import { retainGuardedInput, restoreGuardedInput, DEFAULT_GUARDED_INPUT_CAPACITY,
+  MAX_GUARDED_INPUT_CAPACITY, validateGuardedInputCapacity, type GuardedInputCapacity } from '../../src/converge/guarded-input-retention.js';
 import { validateOrdinaryPendingPackage } from '../../src/converge/ordinary-pending-package.js';
-import { guardedInputSha256 } from '../../src/report/run-header.js';
+import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
 
 const directories: string[] = [];
 
@@ -85,6 +86,80 @@ describe('guarded launch input retention', () => {
       headSha: guardedInput.head, baseSha: 'd'.repeat(40), guardedInput, attempt: 9, round: 5 }))
       .rejects.toThrow('retained_review_work_too_large');
     expect(await readdir(gitCommonDir)).toEqual([]);
+  });
+
+  it('retains and restores an opted-in 240-chunk, 17-seat prompt matrix with its exact capacity', async () => {
+    const gitCommonDir = await mkdtemp(join(tmpdir(), 'rcl-full-patch-retention-'));
+    directories.push(gitCommonDir);
+    const prompts = Array.from({ length: 240 }, (_, chunk) => {
+      const userPrompt = `chunk:${chunk}\n${'x'.repeat(62_000)}`;
+      return Array.from({ length: 17 }, (_, seat) => ({ systemPrompt: `role:${seat}`, userPrompt }));
+    }).flat();
+    const guardedInput = { head: 'a'.repeat(40), kind: 'pr', prompts };
+    const options = { gitCommonDir, target: 'owner-repo-1', headSha: guardedInput.head,
+      baseSha: 'b'.repeat(40), guardedInput, attempt: 1, round: 1 };
+    await expect(retainOrdinaryLaunchInputs(options)).rejects.toThrow('retained_review_work_too_large');
+    expect(await readdir(gitCommonDir)).toEqual([]);
+    const retained = await retainOrdinaryLaunchInputs({ ...options,
+      guardedInputCapacity: MAX_GUARDED_INPUT_CAPACITY });
+    const bytes = await readFile(retained.path, 'utf8');
+    const packet = JSON.parse(bytes);
+    expect(packet.guardedInput.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
+    expect(retained.sha256).toBe(sha256Hex(bytes));
+    const restored = restoreGuardedInput(packet.guardedInput);
+    const restoredPrompts = restored.prompts as typeof prompts;
+    expect(restoredPrompts).toHaveLength(4080);
+    for (let index = 0; index < prompts.length; index++) {
+      expect(restoredPrompts[index]!.userPrompt).toBe(prompts[index]!.userPrompt);
+      expect(restoredPrompts[index]!.systemPrompt).toBe(prompts[index]!.systemPrompt);
+    }
+    expect(await retainOrdinaryLaunchInputs({ ...options,
+      guardedInputCapacity: MAX_GUARDED_INPUT_CAPACITY })).toEqual(retained);
+  }, 30_000);
+
+  it('keeps the default decoded ceiling and enforces an explicitly selected smaller ceiling', () => {
+    expect(DEFAULT_GUARDED_INPUT_CAPACITY).toEqual({
+      decodedBytes: 128 * 1024 * 1024, retainedBytes: 20 * 1024 * 1024,
+    });
+    const raw = { prompts: ['x'.repeat(100), 'x'.repeat(100)] };
+    const capacity = { ...DEFAULT_GUARDED_INPUT_CAPACITY, decodedBytes: 128 };
+    expect(() => retainGuardedInput(raw, capacity)).toThrow('guarded_input_archive_expands_too_large');
+    const archive = retainGuardedInput(raw, MAX_GUARDED_INPUT_CAPACITY);
+    archive.capacity!.decodedBytes = 128;
+    expect(() => restoreGuardedInput(archive)).toThrow('guarded_input_archive_expands_too_large');
+  });
+
+  it('enforces the opted decoded hard cap without expanding repeated strings', () => {
+    const raw = { prompts: Array<string>(58).fill('x'.repeat(9 * 1024 * 1024)) };
+    expect(() => retainGuardedInput(raw, MAX_GUARDED_INPUT_CAPACITY))
+      .toThrow('guarded_input_archive_expands_too_large');
+  });
+
+  it.each([0, -1, 1.5, Infinity, NaN, '512', undefined])(
+    'rejects invalid retention capacity values %s', value => {
+      for (const field of ['decodedBytes', 'retainedBytes']) {
+        const capacity = { ...DEFAULT_GUARDED_INPUT_CAPACITY, [field]: value } as GuardedInputCapacity;
+        expect(() => retainGuardedInput({}, capacity)).toThrow('guarded_input_capacity_invalid');
+        const archive = { ...retainGuardedInput({}), capacity };
+        expect(() => restoreGuardedInput(archive)).toThrow('guarded_input_capacity_invalid');
+      }
+    }
+  );
+
+  it('rejects unknown or excessive capacity and snapshots the selected limits', () => {
+    for (const field of ['decodedBytes', 'retainedBytes'] as const) {
+      expect(() => validateGuardedInputCapacity({ ...MAX_GUARDED_INPUT_CAPACITY,
+        [field]: MAX_GUARDED_INPUT_CAPACITY[field] + 1 })).toThrow('guarded_input_capacity_invalid');
+    }
+    expect(() => validateGuardedInputCapacity({ ...MAX_GUARDED_INPUT_CAPACITY,
+      unlimited: true } as GuardedInputCapacity)).toThrow('guarded_input_capacity_invalid');
+    expect(() => validateGuardedInputCapacity(null as unknown as GuardedInputCapacity))
+      .toThrow('guarded_input_capacity_invalid');
+    const capacity = { ...MAX_GUARDED_INPUT_CAPACITY };
+    const archive = retainGuardedInput({}, capacity);
+    capacity.decodedBytes = 1;
+    expect(archive.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
+    expect(retainGuardedInput({})).not.toHaveProperty('capacity');
   });
 
   it('round-trips canonical JSON exactly while interning repeated keys and values', () => {

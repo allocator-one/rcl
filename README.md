@@ -186,6 +186,7 @@ Untracked files are invisible to `git diff` and therefore not reviewed.
 | `--ci` | Exit 1 when the review is a CI failure (see [`--ci`](#--ci)) |
 | `--head-sha <sha>` / `--base-sha <sha>` | Exact head/base commit a patch file was taken from (patch files only) |
 | `--expect-head-sha <sha>` | Fail fast unless the resolved head commit equals this SHA |
+| `--max-review-chunks <n>` / `--max-blocking-calls <n>` | Explicit bounded review capacity; defaults remain 32 chunks and 512 blocking calls |
 | `--expect-pr-head-sha <sha>` / `--pending-preview-sha256 <digest>` | Cycle finalize-only recovery: bind the live PR's current head separately from the historical `--head-sha`, then require apply to present the exact digest returned by preview |
 | `--for-pr <owner/repo#N>` | Bind a patch-file review to the pull request it was taken from (needs `--head-sha`) |
 | `--no-telemetry` | Do not deliver this review as evidence to Harness |
@@ -778,6 +779,18 @@ The workflow contract, as in this repository's
   request never checked out;
 - the latest release installed by the verified installer, which checks the
   package against the registry's SHA-512 integrity before installing.
+
+For a PR above the default capacity, a repository collaborator with current
+write, maintain, or admin permission can apply one label named
+`rcl-cap/<current-head-sha>` with a description such as
+`chunks=256;calls=4096`. The CLI verifies the label's latest application
+event and actor permission, binds the grant to the exact reviewed head, and
+rechecks it before dispatch. Invalid, stale, or conflicting capacity labels
+refuse the review. Explicit capacity reads the complete pinned Git diff; it
+needs a GitHub token in `githubToken` or `GITHUB_TOKEN` when the exact objects
+are unavailable locally. The hard limits are 512 chunks and 8,192 blocking
+calls. PRs without a capacity label keep the default limits, including in the
+hosted attested gate.
 
 Abridged:
 

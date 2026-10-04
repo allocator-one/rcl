@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { originalRawFindingSchema } from '../telemetry/recovery/source.js';
 import { MAX_ARTIFACT_BYTES } from '../telemetry/envelope-validation.js';
 import { MAX_VERIFICATION_PHASE_RECORDS } from './checkpoint-phase-limits.js';
+import { CAPTURED_INPUT_HARD_LIMITS, decodeCapturedInputs } from './captured-inputs.js';
 import { syncNativeDirectory } from '../converge/native-lock.js';
 import { verificationContextFromValidatedCheckpoint } from './checkpoint-verification-context.js';
 import {
@@ -25,6 +26,7 @@ import {
 const VERSION = 1;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_CHECKPOINT_PROOF_BYTES = 25 * 1024 * 1024;
+export const MAX_CHECKPOINT_HARD_PROOF_BYTES = 128 * 1024 * 1024;
 // Ordinary reads may retain more than a portable proof, but never unbounded
 // results. Count original file bytes, including whitespace, before allocation.
 const MAX_CHECKPOINT_READ_BYTES = 64 * 1024 * 1024;
@@ -354,9 +356,22 @@ function validateResult(result: CheckpointResult, cell: CheckpointCell): void {
 }
 
 
-function boundedOpaqueBytes(bytes: string): void {
-  boundedBytes(bytes);
+function boundedOpaqueBytes(bytes: string, maxBytes = MAX_FILE_BYTES): void {
+  boundedBytes(bytes, maxBytes);
   if (Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('checkpoint_invalid_bytes');
+}
+
+function bindingByteLimit(name: CheckpointBindingName): number {
+  return name === 'captured-inputs' ? CAPTURED_INPUT_HARD_LIMITS.bytes : MAX_FILE_BYTES;
+}
+
+/** Larger bindings must contain a complete, explicitly bounded capture for this exact plan. */
+function validateBindingBytes(name: CheckpointBindingName, bytes: string, plan: FrozenCheckpointPlan): number {
+  boundedOpaqueBytes(bytes, bindingByteLimit(name));
+  if (Buffer.byteLength(bytes, 'utf8') <= MAX_FILE_BYTES) return 0;
+  const captured = decodeCapturedInputs(bytes, plan);
+  if (captured.capacity === undefined) throw new Error('checkpoint_invalid_capture_capacity');
+  return captured.capacity.bytes;
 }
 
 function validateRecordChain(input: unknown[], plan: FrozenCheckpointPlan): JournalRecord[] {
@@ -374,10 +389,11 @@ function validateRecordChain(input: unknown[], plan: FrozenCheckpointPlan): Jour
 }
 
 /** One semantic validator for both private files and portable proof bytes. */
-function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], resultBytes: Map<string, string>, suppliedBindings: CheckpointBindings): { state: CheckpointState; bindings: CheckpointBindings } {
+function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], resultBytes: Map<string, string>, suppliedBindings: CheckpointBindings): { state: CheckpointState; bindings: CheckpointBindings; captureAllowance: number } {
   const cells = new Set(plan.cells.map(cell => cell.id));
   const intents = new Map<string, PaidAttempt>(), terminalAttempts = new Map<string, JournalRecord>(), outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }> = [], successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }> = [];
   const successfulCells = new Set<string>(), attemptIds = new Set<string>(), bindings: CheckpointBindings = {}; let finalized = false;
+  let captureAllowance = 0;
   for (let index = 0; index < records.length; index++) {
     const record = records[index]!;
     if (record.type === 'binding') {
@@ -388,8 +404,9 @@ function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], r
       if (Object.hasOwn(bindings, binding.name)) throw new Error('checkpoint_duplicate_binding');
       const bytes = suppliedBindings[binding.name];
       if (typeof bytes !== 'string') throw new Error('checkpoint_missing_binding');
-      boundedOpaqueBytes(bytes);
+      boundedOpaqueBytes(bytes, bindingByteLimit(binding.name));
       if (sha256(bytes) !== binding.sha256) throw new Error('checkpoint_binding_tampered');
+      captureAllowance = Math.max(captureAllowance, validateBindingBytes(binding.name, bytes, plan));
       bindings[binding.name] = bytes;
       continue;
     }
@@ -416,7 +433,7 @@ function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], r
   }
   const uncertain = [...intents.entries()].filter(([key]) => !terminalAttempts.has(key)).map(([key, paidAttempt]) => ({ cell: key.split('\0')[0]!, paidAttempt }));
   if (Object.keys(bindings).length !== Object.keys(suppliedBindings).length || terminalAttempts.size !== resultBytes.size) throw new Error('checkpoint_unreferenced_bytes');
-  return { state: { records, outcomes, successes, uncertain, finalized }, bindings };
+  return { state: { records, outcomes, successes, uncertain, finalized }, bindings, captureAllowance };
 }
 
 /** Structural integrity only: this brand does not attest providers or source authority. */
@@ -427,9 +444,10 @@ export function isCheckpointProof(value: unknown): value is CheckpointProof {
 /** Decode canonical portable bytes using the same plan, chain and outcome validation as disk reads. */
 export function decodeCheckpointProof(bytes: string, expectedPlan?: FrozenCheckpointPlan | CheckpointProof['plan']): CheckpointProof {
   if (typeof bytes !== 'string') throw new Error('checkpoint_invalid_proof');
-  if (Buffer.byteLength(bytes, 'utf8') > MAX_CHECKPOINT_PROOF_BYTES) throw new Error('checkpoint_proof_too_large');
+  const byteLength = Buffer.byteLength(bytes, 'utf8');
+  if (byteLength > MAX_CHECKPOINT_HARD_PROOF_BYTES) throw new Error('checkpoint_proof_too_large');
   let value: unknown;
-  try { value = JSON.parse(bytes); } catch { throw new Error('checkpoint_invalid_proof'); }
+  try { value = JSON.parse(bytes); } catch { throw new Error(byteLength > MAX_CHECKPOINT_PROOF_BYTES ? 'checkpoint_proof_too_large' : 'checkpoint_invalid_proof'); }
   const parsed = proofWireSchema.safeParse(value);
   if (!parsed.success) throw new Error('checkpoint_invalid_proof');
   const wire = parsed.data;
@@ -448,7 +466,8 @@ export function decodeCheckpointProof(bytes: string, expectedPlan?: FrozenCheckp
     if (references[index]!.result!.resultFile !== outcome.resultFile || resultBytes.has(outcome.resultFile)) throw new Error('checkpoint_proof_outcomes_mismatch');
     resultBytes.set(outcome.resultFile, outcome.reviewBytes);
   }
-  const { state, bindings } = validateHistory(plan, records, resultBytes, wire.bindings);
+  const { state, bindings, captureAllowance } = validateHistory(plan, records, resultBytes, wire.bindings);
+  if (!captureAllowance && byteLength > MAX_CHECKPOINT_PROOF_BYTES) throw new Error('checkpoint_proof_too_large');
   if (!state.finalized) throw new Error('checkpoint_proof_unsealed');
   if (canonical(wire as unknown as Json) !== bytes) throw new Error('checkpoint_proof_noncanonical');
   const proof: CheckpointProof = deepFreeze({ version: 1 as const, bytes, digest: sha256(bytes), plan, state, bindings });
@@ -928,13 +947,32 @@ export class CheckpointJournal {
     return decodeCheckpointProof(bytes, this.plan);
   }
 
-  private async readValidated(maxReadBytes = MAX_CHECKPOINT_READ_BYTES): Promise<{ state: CheckpointState; bindings: CheckpointBindings; bytesRead: number }> {
+  private async readValidated(maxReadBytes = MAX_CHECKPOINT_READ_BYTES): Promise<{ state: CheckpointState; bindings: CheckpointBindings; bytesRead: number; captureAllowance: number }> {
     await inspectDirectory(this.path); await inspectDirectory(join(this.path, 'events')); await inspectDirectory(join(this.path, 'results'));
     const budget: ReadBudget = { remaining: maxReadBytes, error: maxReadBytes === MAX_CHECKPOINT_PROOF_BYTES ? 'checkpoint_proof_too_large' : 'checkpoint_journal_too_large' };
     const actual = decodePlan((await readSafe(join(this.path, 'plan.json'), false, { budget })).trim());
     if (!matchingPlan(actual, this.plan)) throw new Error('checkpoint_plan_mismatch');
     const names = (await readdir(join(this.path, 'events'))).sort();
     const rawRecords: unknown[] = [];
+    const resultBytes = new Map<string, string>(), suppliedBindings: CheckpointBindings = {};
+    let captureAllowance = 0;
+    const readBinding = async (binding: NonNullable<JournalRecord['binding']>) => {
+      const { name, file, sha256: expectedDigest } = binding;
+      if (Object.hasOwn(suppliedBindings, name)) throw new Error('checkpoint_duplicate_binding');
+      // Inspect a capture under a separate hard ceiling before granting any
+      // additional journal budget. Its hash and exact plan must both match.
+      const bindingBudget = name === 'captured-inputs'
+        ? { ...budget, remaining: budget.remaining + CAPTURED_INPUT_HARD_LIMITS.bytes } : budget;
+      const bytes = await readSafe(join(this.path, file), true, { budget: bindingBudget, maxBytes: bindingByteLimit(name) });
+      if (sha256(bytes) !== expectedDigest) throw new Error('checkpoint_binding_tampered');
+      const allowance = validateBindingBytes(name, bytes, this.plan);
+      if (name === 'captured-inputs') {
+        captureAllowance = allowance;
+        budget.remaining += allowance - Buffer.byteLength(bytes, 'utf8');
+        if (budget.remaining < 0) throw new Error(budget.error);
+      }
+      suppliedBindings[name] = bytes;
+    };
     for (let i = 0; i < names.length; i++) {
       if (names[i] !== eventFile(i + 1)) throw new Error('checkpoint_sequence_gap');
       let bytes = '';
@@ -950,14 +988,19 @@ export class CheckpointJournal {
       try { record = JSON.parse(bytes); }
       catch { throw new Error('checkpoint_invalid_record'); }
       rawRecords.push(record);
+      const candidate = journalRecordSchema.safeParse(record);
+      if (candidate.success && candidate.data.type === 'binding' && candidate.data.binding.name === 'captured-inputs') {
+        const prefix = validateRecordChain(rawRecords, this.plan);
+        if (prefix.some(row => row.type !== 'binding')) throw new Error('checkpoint_binding_closed');
+        await readBinding(candidate.data.binding);
+      }
     }
     const records = validateRecordChain(rawRecords, this.plan);
-    const resultBytes = new Map<string, string>(), suppliedBindings: CheckpointBindings = {};
     for (const record of records) {
-      if (record.binding) suppliedBindings[record.binding.name] = await readSafe(join(this.path, record.binding.file), true, { budget });
+      if (record.binding && record.binding.name !== 'captured-inputs') await readBinding(record.binding);
       if (record.result) resultBytes.set(record.result.resultFile, await readSafe(join(this.path, 'results', record.result.resultFile), true, { budget }));
     }
-    return { ...validateHistory(this.plan, records, resultBytes, suppliedBindings), bytesRead: maxReadBytes - budget.remaining };
+    return { ...validateHistory(this.plan, records, resultBytes, suppliedBindings), bytesRead: maxReadBytes + captureAllowance - budget.remaining };
   }
 
   private async write<T>(ownership: NativeTargetOwnership, operation: (active: NativeTargetOwnership) => Promise<T>): Promise<T> {
@@ -975,9 +1018,11 @@ export class CheckpointJournal {
   }
   private async syncRecord(record: JournalRecord): Promise<void> {
     if (record.binding) {
-      const path = join(this.path, record.binding.file), bytes = await readSafe(path, true);
+      const options = { maxBytes: bindingByteLimit(record.binding.name) };
+      const path = join(this.path, record.binding.file), bytes = await readSafe(path, true, options);
       if (sha256(bytes) !== record.binding.sha256) throw new Error('checkpoint_binding_tampered');
-      await syncExisting(path, bytes, true);
+      validateBindingBytes(record.binding.name, bytes, this.plan);
+      await syncExisting(path, bytes, true, options);
     }
     if (record.result) {
       const path = join(this.path, 'results', record.result.resultFile), bytes = await readSafe(path, true);
@@ -990,7 +1035,7 @@ export class CheckpointJournal {
     await syncExisting(join(this.path, 'plan.json'), `${canonical(this.plan as unknown as Json)}\n`);
     for (const record of state.records) await this.syncRecord(record);
   }
-  private async append(record: Omit<JournalRecord, 'sequence' | 'previousDigest' | 'digest'>, snapshot: { state: CheckpointState; bytesRead: number }): Promise<void> {
+  private async append(record: Omit<JournalRecord, 'sequence' | 'previousDigest' | 'digest'>, snapshot: { state: CheckpointState; bytesRead: number; captureAllowance: number }): Promise<void> {
     const { state, bytesRead } = snapshot;
     const previousDigest = state.records.at(-1)?.digest ?? this.plan.digest;
     const unsigned = { ...record, sequence: state.records.length + 1, previousDigest } as Omit<JournalRecord, 'digest'>;
@@ -998,7 +1043,7 @@ export class CheckpointJournal {
     const bytes = `${canonical(complete as unknown as Json)}\n`;
     const addedFile = record.binding ? join(this.path, record.binding.file) : record.result ? join(this.path, 'results', record.result.resultFile) : undefined;
     const addedBytes = addedFile ? (await lstat(addedFile)).size : 0;
-    if (bytesRead + addedBytes + Buffer.byteLength(bytes, 'utf8') > MAX_CHECKPOINT_READ_BYTES) throw new Error('checkpoint_journal_too_large');
+    if (bytesRead + addedBytes + Buffer.byteLength(bytes, 'utf8') > MAX_CHECKPOINT_READ_BYTES + snapshot.captureAllowance) throw new Error('checkpoint_journal_too_large');
     await publishEventExclusive(this.path, eventFile(complete.sequence), bytes);
   }
   private cell(cell: string): void { if (!this.plan.cells.some(candidate => candidate.id === cell)) throw new Error('checkpoint_unknown_cell'); }
@@ -1007,8 +1052,9 @@ export class CheckpointJournal {
   async bind(name: CheckpointBindingName, bytes: string, ownership: NativeTargetOwnership): Promise<void> {
     const parsed = bindingNameSchema.safeParse(name);
     if (!parsed.success || typeof bytes !== 'string') throw new Error('checkpoint_invalid_binding');
-    boundedBytes(bytes);
     if (Buffer.from(bytes, 'utf8').toString('utf8') !== bytes) throw new Error('checkpoint_invalid_binding');
+    const captureAllowance = validateBindingBytes(parsed.data, bytes, this.plan);
+    const maxBytes = bindingByteLimit(parsed.data);
     const binding = { name: parsed.data, file: bindingFile(parsed.data), sha256: sha256(bytes) };
     return this.write(ownership, async () => {
       const snapshot = await this.readValidated(); const { state, bindings } = snapshot;
@@ -1021,15 +1067,15 @@ export class CheckpointJournal {
       if (state.finalized) throw new Error('checkpoint_finalized');
       if (state.records.some(record => record.type === 'intent')) throw new Error('checkpoint_binding_closed');
       const path = join(this.path, binding.file);
-      try { await publishExclusive(this.path, path, bytes); }
+      try { await publishExclusive(this.path, path, bytes, maxBytes); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         await recoverPublications(async pending => {
-          if (await readPublished(path, this.path, { singleLink: true }, pending) !== bytes) throw new Error('checkpoint_binding_conflict');
+          if (await readPublished(path, this.path, { singleLink: true, maxBytes }, pending) !== bytes) throw new Error('checkpoint_binding_conflict');
         });
-        await syncExisting(path, bytes, true, { singleLink: true });
+        await syncExisting(path, bytes, true, { singleLink: true, maxBytes });
       }
-      await this.append({ type: 'binding', binding }, snapshot);
+      await this.append({ type: 'binding', binding }, { ...snapshot, captureAllowance: Math.max(snapshot.captureAllowance, captureAllowance) });
     });
   }
 

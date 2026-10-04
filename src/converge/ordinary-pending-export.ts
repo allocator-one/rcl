@@ -13,10 +13,20 @@ import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument, writeExclusiveBytes } from '../evidence/original-run/journal.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import { assertReviewCyclePair } from './fresh-review.js';
+import { DEFAULT_GUARDED_INPUT_CAPACITY, MAX_GUARDED_INPUT_CAPACITY,
+  retainedGuardedInputCapacity, validateGuardedInputCapacity,
+  type GuardedInputCapacity, type StoredGuardedInput } from './guarded-input-retention.js';
 
-// Leave room for the recovery package's retained-async descriptors beneath
-// the shared recovery reader ceiling (25 MiB). Apply this before any claim.
-const MAX_RETAINED_INPUT_BYTES = 20 * 1024 * 1024;
+// Reserve the same 5 MiB for retained-async descriptors in every recovery
+// envelope. Default inputs retain the historical 25 MiB package ceiling.
+const RECOVERY_ENVELOPE_BYTES = MAX_REPORT_BYTES - DEFAULT_GUARDED_INPUT_CAPACITY.retainedBytes;
+export const MAX_ORDINARY_PENDING_PACKAGE_BYTES =
+  MAX_GUARDED_INPUT_CAPACITY.retainedBytes + RECOVERY_ENVELOPE_BYTES;
+
+/** Read under the hard ceiling, then enforce this archive's selected envelope bound. */
+export function ordinaryPendingPackageByteLimit(input: StoredGuardedInput): number {
+  return retainedGuardedInputCapacity(input).retainedBytes + RECOVERY_ENVELOPE_BYTES;
+}
 
 interface OrdinaryLaunchInputs {
   gitCommonDir: string;
@@ -24,6 +34,7 @@ interface OrdinaryLaunchInputs {
   headSha: string;
   baseSha: string | null;
   guardedInput: Record<string, unknown>;
+  guardedInputCapacity?: GuardedInputCapacity;
   attempt: number;
   round: number;
   cycleId?: string;
@@ -36,7 +47,7 @@ function retainedInputsPath(options: Pick<OrdinaryLaunchInputs, 'gitCommonDir' |
 }
 
 function retainedInputs(options: OrdinaryLaunchInputs, representation: 'raw' | 'retained' = 'retained',
-  prepared = prepareOrdinaryPendingGuardedInput(options.guardedInput)) {
+  prepared = prepareOrdinaryPendingGuardedInput(options.guardedInput, options.guardedInputCapacity)) {
   // Validate recursive bounds before guardedInputSha256 reaches stableStringify.
   // Version 1 keeps its historical raw wire representation; only version 2
   // stores the validated compact archive.
@@ -55,12 +66,15 @@ export interface RetainedOrdinaryInputs {
 
 /** Called under native target ownership before spending the claim or dispatching. */
 export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs): Promise<RetainedOrdinaryInputs> {
+  const capacity = validateGuardedInputCapacity(
+    options.guardedInputCapacity === undefined
+      ? DEFAULT_GUARDED_INPUT_CAPACITY : options.guardedInputCapacity);
   const common = await realpath(options.gitCommonDir);
   let packet: ReturnType<typeof retainedInputs>;
   let bytes: string;
   try {
     packet = retainedInputs(options);
-    bytes = serializeRecoveryDocument(packet, MAX_RETAINED_INPUT_BYTES);
+    bytes = serializeRecoveryDocument(packet, capacity.retainedBytes);
     const descriptors = options.asyncDescriptors ?? [];
     // Recovery repeats the async reviewer identifiers alongside the guarded
     // roster. Bound that actual envelope before claim, including its future
@@ -74,7 +88,7 @@ export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs):
         provider: descriptor.provider, lane: 'async', sha256: 'f'.repeat(64) })),
       guardedInput: packet.guardedInput,
     };
-    serializeRecoveryDocument(projectedRecovery, MAX_REPORT_BYTES);
+    serializeRecoveryDocument(projectedRecovery, ordinaryPendingPackageByteLimit(packet.guardedInput));
   } catch (error) {
     if (error instanceof Error && (error.message === 'recovery_document_too_large' ||
         error.message === 'guarded_input_archive_expands_too_large')) {
@@ -104,10 +118,10 @@ export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs):
   try { await link(temporary, path); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if ((await readStable(path, MAX_RETAINED_INPUT_BYTES, { allowMissingSafeFlagsOnWindows: true })).text !== bytes) {
+    if ((await readStable(path, capacity.retainedBytes, { allowMissingSafeFlagsOnWindows: true })).text !== bytes) {
       throw new Error('ordinary_retained_input_mismatch');
     }
-    await readStable(path, MAX_RETAINED_INPUT_BYTES, { sync: true, allowMissingSafeFlagsOnWindows: true });
+    await readStable(path, capacity.retainedBytes, { sync: true, allowMissingSafeFlagsOnWindows: true });
   }
   await syncNativeDirectory(directory);
   await unlink(temporary);
@@ -124,6 +138,7 @@ interface OrdinaryPendingExportOptions {
   expectedBaseSha: string;
   expectedRound?: number;
   guardedInput: Record<string, unknown>;
+  guardedInputCapacity?: GuardedInputCapacity;
   asyncStoreDir: string;
   asyncTargetKey: string;
   asyncDescriptors: Array<{ model: string; role: string; provider: string }>;
@@ -153,7 +168,7 @@ function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
   catch { refuse('retained_input_mismatch'); }
   const expected = retainedInputs({ ...options, guardedInput: prepared.input },
     packet.version === 1 ? 'raw' : 'retained', prepared);
-  if (sha256Hex(text) !== packetSha256 || text !== serializeRecoveryDocument(expected, MAX_RETAINED_INPUT_BYTES)) {
+  if (sha256Hex(text) !== packetSha256 || text !== serializeRecoveryDocument(expected, retainedGuardedInputCapacity(prepared.retained).retainedBytes)) {
     refuse('retained_input_mismatch');
   }
   return prepared;
@@ -169,7 +184,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   if (!/^[a-f0-9]{40}$/.test(options.baseSha) || options.baseSha !== options.expectedBaseSha) refuse('base_mismatch');
   // Current caller input participates in hashes and canonical comparisons
   // below, so bound its recursion before either operation.
-  const currentInput = prepareOrdinaryPendingGuardedInput(options.guardedInput);
+  const currentInput = prepareOrdinaryPendingGuardedInput(options.guardedInput, options.guardedInputCapacity);
   const common = await realpath(options.gitCommonDir);
   const outputPath = resolve(options.path);
   const outputParent = await realpath(dirname(outputPath));
@@ -201,7 +216,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const retainedPath = binding ? retainedInputsPath({ gitCommonDir: common, target: options.target,
     attempt: launch.attempt, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
     packetSha256: binding.packetSha256 }) : undefined;
-  const retainedBefore = retainedPath ? await readStable(retainedPath, MAX_RETAINED_INPUT_BYTES) : undefined;
+  const retainedBefore = retainedPath ? await readStable(retainedPath, MAX_GUARDED_INPUT_CAPACITY.retainedBytes) : undefined;
   if (binding && (!retainedBefore || retainedBefore.sha256 !== binding.packetSha256)) refuse('retained_input_mismatch');
   const historicalInput = binding ? retainedHistoricalInput(retainedBefore!.text, {
     gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
@@ -257,8 +272,8 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   ]);
   if (nativeAfter.sha256 !== nativeBefore.sha256 || attemptsAfter.sha256 !== attemptsBefore.sha256 ||
       asyncAfter.artifacts.some((item, index) => item.path !== snapshot.artifacts[index]?.path) || ownerAlive(launch.pid)) refuse('state_changed');
-  if (retainedBefore && (await readStable(retainedPath!, MAX_RETAINED_INPUT_BYTES)).sha256 !== retainedBefore.sha256) refuse('state_changed');
-  const bytes = serializeRecoveryDocument(packet, MAX_REPORT_BYTES);
+  if (retainedBefore && (await readStable(retainedPath!, MAX_GUARDED_INPUT_CAPACITY.retainedBytes)).sha256 !== retainedBefore.sha256) refuse('state_changed');
+  const bytes = serializeRecoveryDocument(packet, ordinaryPendingPackageByteLimit(packet.guardedInput));
   if (!options.preview) await writeExclusiveBytes(outputPath, bytes);
   return { mode: options.preview ? 'pending-package-preview' : 'pending-package-export', path: outputPath,
     packageSha256: sha256Hex(bytes), target: options.target, headSha: launch.headSha, baseSha: options.baseSha,

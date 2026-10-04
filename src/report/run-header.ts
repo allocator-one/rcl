@@ -175,7 +175,57 @@ export function stableStringify(value: unknown): string {
 }
 
 export function guardedInputSha256(value: Record<string, unknown>): string {
-  return sha256Hex(stableStringify(value));
+  // A guarded matrix repeats each chunk's prompt for every reviewer. Stream
+  // the exact stableStringify spelling without retaining the expanded matrix.
+  // Frames bound traversal memory by nesting/keys rather than serialized size;
+  // ancestor tracking rejects cycles but permits shared prompt objects.
+  type Frame =
+    | { kind: 'array'; value: unknown[]; index: number; length: number }
+    | { kind: 'object'; value: object; index: number; entries: [string, unknown][] };
+  const hash = createHash('sha256');
+  const frames: Frame[] = [];
+  const ancestors = new WeakSet<object>();
+  function enter(item: unknown): void {
+    if (typeof item !== 'object' || item === null) {
+      hash.update(JSON.stringify(item) ?? 'null');
+      return;
+    }
+    if (ancestors.has(item)) throw new TypeError('Circular guarded review input');
+    ancestors.add(item);
+    if (Array.isArray(item)) {
+      hash.update('[');
+      frames.push({ kind: 'array', value: item, index: 0, length: item.length });
+    } else {
+      const entries = Object.entries(item)
+        .filter(([, child]) => child !== undefined)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      hash.update('{');
+      frames.push({ kind: 'object', value: item, index: 0, entries });
+    }
+  }
+  enter(value);
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1]!;
+    const length = frame.kind === 'array' ? frame.length : frame.entries.length;
+    if (frame.index === length) {
+      hash.update(frame.kind === 'array' ? ']' : '}');
+      ancestors.delete(frame.value);
+      frames.pop();
+      continue;
+    }
+    const index = frame.index++;
+    if (index > 0) hash.update(',');
+    if (frame.kind === 'array') {
+      // Preserve stableStringify's map/join spelling for sparse array holes.
+      if (index in frame.value) enter(frame.value[index]);
+    } else {
+      const [key, child] = frame.entries[index]!;
+      hash.update(JSON.stringify(key));
+      hash.update(':');
+      enter(child);
+    }
+  }
+  return hash.digest('hex');
 }
 
 /**

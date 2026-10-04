@@ -1,0 +1,118 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Octokit } from '@octokit/rest';
+import { fetchPRDiff } from '../../src/resolver/github.js';
+import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from '../../src/resolver/git.js';
+import type { FileChange } from '../../src/resolver/types.js';
+
+vi.mock('../../src/resolver/git.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/resolver/git.js')>(),
+  loadPinnedGitDiff: vi.fn(), loadHostedPinnedGitDiff: vi.fn(),
+}));
+
+const target = { owner: 'o', repo: 'r', number: 1 };
+const base = 'a'.repeat(40), head = 'b'.repeat(40), mergeBase = 'c'.repeat(40);
+const complete: FileChange = { filename: 'a.ex', status: 'modified', additions: 1, deletions: 1,
+  patch: '@@ -1 +1 @@\n-old\n+new', language: 'elixir' };
+function fixture(files: object[] = [complete]) {
+  const pr = { title: 'Review', body: '', user: { login: 'author' },
+    base: { ref: 'main', sha: base }, head: { ref: 'feature', sha: head },
+    html_url: 'https://github.com/o/r/pull/1', labels: [], draft: false, changed_files: files.length };
+  const get = vi.fn().mockResolvedValue({ data: pr });
+  const compare = vi.fn().mockResolvedValue({ data: { files, merge_base_commit: { sha: mergeBase } } });
+  const paginate = vi.fn().mockResolvedValue(files);
+  const client = { pulls: { get, listFiles: {} }, repos: { compareCommitsWithBasehead: compare }, paginate } as unknown as Octokit;
+  return { pr, get, compare, paginate, client };
+}
+beforeEach(() => {
+  vi.mocked(loadPinnedGitDiff).mockReset();
+  vi.mocked(loadHostedPinnedGitDiff).mockReset();
+  vi.mocked(loadPinnedGitDiff).mockResolvedValue({ source: 'local', files: [complete],
+    rawDiff: 'full pinned patch', mergeBaseSha: mergeBase });
+  vi.mocked(loadHostedPinnedGitDiff).mockResolvedValue({ source: 'local', files: [complete],
+    rawDiff: 'hosted pinned patch', mergeBaseSha: mergeBase });
+});
+
+describe('authoritative PR patch acquisition', () => {
+  it('uses pinned local objects for explicit capacity even when the API could return patches', async () => {
+    const f = fixture();
+    const diff = await fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024, cwd: '/repo' });
+    expect(loadPinnedGitDiff).toHaveBeenCalledWith({ owner: 'o', repo: 'r', baseSha: base, headSha: head,
+      maxBytes: 16 * 1024 * 1024, cwd: '/repo', expectedMergeBaseSha: mergeBase });
+    expect(f.compare).toHaveBeenCalledWith({ owner: 'o', repo: 'r', basehead: `${base}...${head}` });
+    expect(f.paginate).not.toHaveBeenCalled();
+    expect(loadHostedPinnedGitDiff).not.toHaveBeenCalled();
+    expect(f.get).toHaveBeenCalledTimes(2);
+    expect(diff).toMatchObject({ source: 'github', rawDiff: 'full pinned patch',
+      metadata: { headSha: head, baseSha: base, mergeBaseSha: mergeBase } });
+  });
+
+  it('recovers changed text whose API patch and all line counts were omitted', async () => {
+    const f = fixture([{ filename: 'a.ex', status: 'modified', additions: 0, deletions: 0 }]);
+    const diff = await fetchPRDiff(target, undefined, f.client);
+    expect(diff.files[0]).toMatchObject({ patch: complete.patch, additions: 1, deletions: 1 });
+    expect(loadPinnedGitDiff).toHaveBeenCalledOnce();
+  });
+
+  it('recovers a nonempty but truncated API patch', async () => {
+    const f = fixture([{ ...complete, additions: 2 }]);
+    await fetchPRDiff(target, undefined, f.client);
+    expect(loadPinnedGitDiff).toHaveBeenCalledOnce();
+  });
+
+  it('retains remote-only compatibility for structurally complete API patches', async () => {
+    const f = fixture();
+    await fetchPRDiff(target, undefined, f.client);
+    expect(loadPinnedGitDiff).not.toHaveBeenCalled();
+  });
+
+  it('never falls back to incomplete API patches when pinned local acquisition fails', async () => {
+    const f = fixture([{ filename: 'a.ex', status: 'modified', additions: 0, deletions: 0 }]);
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new Error('Pinned PR repository mismatch'));
+    await expect(fetchPRDiff(target, undefined, f.client)).rejects.toThrow('complete PR patch');
+  });
+
+  it('rejects PR movement while loading exact local objects', async () => {
+    const f = fixture();
+    f.get.mockResolvedValueOnce({ data: f.pr }).mockResolvedValue({ data: { ...f.pr, head: { ...f.pr.head, sha: 'd'.repeat(40) } } });
+    await expect(fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024 })).rejects.toThrow('moved');
+  });
+
+  it('rejects an incomplete local parse before returning review inputs', async () => {
+    const f = fixture([complete, { ...complete, filename: 'b.ex' }]);
+    await expect(fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024 })).rejects.toThrow('incomplete');
+  });
+
+  it('uses hosted exact objects only when explicit capacity lacks local objects', async () => {
+    const f = fixture();
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    const diff = await fetchPRDiff(target, 'test-token', f.client, { maxDiffBytes: 16 * 1024 * 1024 });
+    expect(loadHostedPinnedGitDiff).toHaveBeenCalledWith({ owner: 'o', repo: 'r', baseSha: base,
+      headSha: head, expectedMergeBaseSha: mergeBase, maxBytes: 16 * 1024 * 1024, token: 'test-token' });
+    expect(diff.rawDiff).toBe('hosted pinned patch');
+    expect(f.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires an authoritative comparison before either object reader runs', async () => {
+    const f = fixture();
+    f.compare.mockResolvedValue({ data: { files: [complete] } });
+    await expect(fetchPRDiff(target, 'test-token', f.client, { maxDiffBytes: 16 * 1024 * 1024 })).rejects.toThrow('merge base');
+    expect(loadPinnedGitDiff).not.toHaveBeenCalled();
+    expect(loadHostedPinnedGitDiff).not.toHaveBeenCalled();
+  });
+
+  it('does not retry hosted acquisition for a malformed or oversized local patch', async () => {
+    const f = fixture();
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new Error('output bound'));
+    await expect(fetchPRDiff(target, 'test-token', f.client, { maxDiffBytes: 16 * 1024 * 1024 })).rejects.toThrow('output bound');
+    expect(loadHostedPinnedGitDiff).not.toHaveBeenCalled();
+  });
+
+  it('rejects movement and mismatched hosted comparison inputs', async () => {
+    const f = fixture();
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    vi.mocked(loadHostedPinnedGitDiff).mockResolvedValue({ source: 'local', files: [complete], mergeBaseSha: base });
+    await expect(fetchPRDiff(target, 'test-token', f.client, { maxDiffBytes: 16 * 1024 * 1024 })).rejects.toThrow('merge base disagrees');
+    f.get.mockResolvedValueOnce({ data: f.pr }).mockResolvedValue({ data: { ...f.pr, head: { ...f.pr.head, sha: 'd'.repeat(40) } } });
+    await expect(fetchPRDiff(target, 'test-token', f.client, { maxDiffBytes: 16 * 1024 * 1024 })).rejects.toThrow('moved');
+  });
+});

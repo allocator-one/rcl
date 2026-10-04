@@ -1,12 +1,16 @@
 import type { ModelReview } from '../consensus/types.js';
 import { MODEL_PROVIDER_SET } from '../config/providers.js';
 
-// The active lossless dogfood review is 18 chunks × 17 reviewers = 306
-// blocking calls. Keep useful headroom while refusing accidental or hostile
-// fanout before prompts are built or any paid provider call is launched.
-const MAX_BLOCKING_CALLS_PER_REVIEW = 512;
+// Larger full-patch reviews require an explicit bounded allocation before
+// prompts are built or any paid provider call is launched.
+export const DEFAULT_MAX_BLOCKING_CALLS = 512;
+export const MAX_BLOCKING_CALLS_HARD_LIMIT = 8_192;
 
-export function assertReviewWorkWithinLimit(chunks: number, reviewers: number): void {
+export function assertReviewWorkWithinLimit(
+  chunks: number,
+  reviewers: number,
+  maxBlockingCalls = DEFAULT_MAX_BLOCKING_CALLS,
+): void {
   const totalCalls = chunks * reviewers;
   if (
     !Number.isSafeInteger(chunks) ||
@@ -17,17 +21,24 @@ export function assertReviewWorkWithinLimit(chunks: number, reviewers: number): 
   ) {
     throw new Error(`Invalid review work dimensions: ${chunks} chunks × ${reviewers} reviewers`);
   }
-  if (totalCalls > MAX_BLOCKING_CALLS_PER_REVIEW) {
+  if (!Number.isSafeInteger(maxBlockingCalls) || maxBlockingCalls < 1 || maxBlockingCalls > MAX_BLOCKING_CALLS_HARD_LIMIT) {
+    throw new Error(
+      `Invalid maximum blocking calls: ${maxBlockingCalls}; ` +
+        `expected a safe integer from 1 to ${MAX_BLOCKING_CALLS_HARD_LIMIT}.`,
+    );
+  }
+  if (totalCalls > maxBlockingCalls) {
     throw new Error(
       `Review requires ${totalCalls} blocking calls (${chunks} chunks × ${reviewers} reviewers), ` +
-        `exceeding the paid-work safety limit of ${MAX_BLOCKING_CALLS_PER_REVIEW}. ` +
-        'Split the diff or reduce the blocking reviewer roster.'
+        `exceeding the paid-work safety limit of ${maxBlockingCalls}. ` +
+        `Explicitly increase --max-blocking-calls up to ${MAX_BLOCKING_CALLS_HARD_LIMIT} or reduce scheduled work.`
     );
   }
 }
 
 export interface CouncilRunPlan {
   totalCalls: number;
+  maxBlockingCalls: number;
   reviewers: number;
   chunks: number;
   concurrency: number;
@@ -42,11 +53,19 @@ export function buildCouncilRunPlan(options: {
   chunks: number;
   concurrency: number;
   timeoutMs: number;
+  /** Explicit bounded allocation, retained with the execution configuration. */
+  maxBlockingCalls?: number;
   /** One provider per scheduled synchronous call, captured for retained originals. */
   providers?: readonly string[];
   providerConcurrency?: Readonly<Record<string, number>>;
 }): CouncilRunPlan {
-  assertReviewWorkWithinLimit(options.chunks, options.reviewers);
+  const maxBlockingCalls = options.maxBlockingCalls === undefined
+    ? DEFAULT_MAX_BLOCKING_CALLS
+    : options.maxBlockingCalls;
+  assertReviewWorkWithinLimit(options.chunks, options.reviewers, maxBlockingCalls);
+  if (!Number.isSafeInteger(options.totalCalls) || options.totalCalls !== options.chunks * options.reviewers) {
+    throw new Error('Invalid review total calls: expected chunks × reviewers');
+  }
   if (!Number.isFinite(options.concurrency)) throw new Error('Invalid review concurrency');
   const concurrency = Math.max(1, Math.floor(options.concurrency));
   let waves: number;
@@ -91,6 +110,7 @@ export function buildCouncilRunPlan(options: {
   // timeout-bound queue estimate.
   return {
     totalCalls: options.totalCalls,
+    maxBlockingCalls,
     reviewers: options.reviewers,
     chunks: options.chunks,
     timeoutMs: options.timeoutMs,

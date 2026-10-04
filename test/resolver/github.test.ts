@@ -24,7 +24,7 @@ function changedFile(i: number) {
     filename: `src/file-${i}.ts`,
     status: 'modified',
     additions: 1,
-    deletions: 0,
+    deletions: 1,
     patch: `@@ -1 +1 @@\n-old\n+new-${i}`,
   };
 }
@@ -158,14 +158,14 @@ describe('fetchPRDiff', () => {
     );
   });
 
-  it('carries the blob id of every file so patchless changes stay bound to their content', async () => {
+  it('refuses patchless API changes when authoritative local commits are unavailable', async () => {
     const pr = fakePr(1);
     const compare = vi.fn(async () => ({
       data: { files: [{ filename: 'app.bin', status: 'modified', additions: 0, deletions: 0, sha: 'blob123' }] },
     }));
     const octokit = { pulls: { get: vi.fn().mockResolvedValue(pr) }, repos: { compareCommitsWithBasehead: compare } } as unknown as Octokit;
-    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
-    expect(diff.files[0]).toMatchObject({ filename: 'app.bin', patch: '', blobSha: 'blob123' });
+    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit))
+      .rejects.toThrow(/complete PR patch|exact commits/);
   });
 
   it('skips the compare for PRs above the cap and brackets the paged listing with PR reads', async () => {

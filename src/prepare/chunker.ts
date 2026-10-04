@@ -29,13 +29,53 @@ export interface Chunk {
 
 const MAX_CHUNK_LINES = 2000;
 const MAX_CHUNK_FILES = 20;
-// Every blocking reviewer receives every chunk. This leaves ample headroom
-// above the 18-chunk lossless dogfood case without letting an adversarial
-// 10MB patch create an unbounded paid-call fanout.
-const MAX_CHUNKS_PER_REVIEW = 32;
-const MAX_SOURCE_PATCH_LINES = MAX_CHUNK_LINES * MAX_CHUNKS_PER_REVIEW;
-const MAX_SOURCE_FILES = MAX_CHUNK_FILES * MAX_CHUNKS_PER_REVIEW;
-const MAX_SOURCE_PATCH_BYTES = 4 * 1024 * 1024;
+
+/** Explicit source and paid-work limits; per-chunk safety limits stay fixed. */
+export interface ReviewCapacity {
+  maxChunks: number;
+  maxSourceFiles: number;
+  maxSourcePatchLines: number;
+  maxSourcePatchBytes: number;
+}
+
+export const DEFAULT_REVIEW_CAPACITY: Readonly<ReviewCapacity> = Object.freeze({
+  maxChunks: 32,
+  maxSourceFiles: 640,
+  maxSourcePatchLines: 64_000,
+  maxSourcePatchBytes: 4 * 1024 * 1024,
+});
+
+// Every blocking reviewer receives every chunk. Even an explicit opt-in must
+// bound source expansion and paid-call fanout before parsing or rendering.
+export const MAX_REVIEW_CAPACITY: Readonly<ReviewCapacity> = Object.freeze({
+  maxChunks: 512,
+  maxSourceFiles: 10_240,
+  maxSourcePatchLines: 1_024_000,
+  maxSourcePatchBytes: 32 * 1024 * 1024,
+});
+
+/** Validate all limits and return a snapshot independent of the caller. */
+export function validateReviewCapacity(capacity: ReviewCapacity): ReviewCapacity {
+  if (capacity === null || typeof capacity !== 'object' || Array.isArray(capacity)) {
+    throw new Error('Invalid review capacity: expected an object with explicit bounded limits.');
+  }
+  const fields = Object.keys(DEFAULT_REVIEW_CAPACITY) as Array<keyof ReviewCapacity>;
+  if (Object.keys(capacity).some((field) => !fields.includes(field as keyof ReviewCapacity))) {
+    throw new Error('Invalid review capacity: unknown limit.');
+  }
+  const validated = {} as ReviewCapacity;
+  for (const field of fields) {
+    const value = capacity[field];
+    if (!Number.isSafeInteger(value) || value < 1 || value > MAX_REVIEW_CAPACITY[field]) {
+      throw new Error(
+        `Invalid review capacity: ${field} must be an integer between 1 and ` +
+          `${MAX_REVIEW_CAPACITY[field]}.`
+      );
+    }
+    validated[field] = value;
+  }
+  return validated;
+}
 
 function countDiffLines(patch: string): number {
   if (patch.length === 0) return 0;
@@ -47,10 +87,13 @@ function countDiffLines(patch: string): number {
   return patch.endsWith('\n') ? count - 1 : count;
 }
 
-function assertSourceFitsExpansionBounds(files: readonly FileChange[]): void {
-  if (files.length > MAX_SOURCE_FILES) {
+function assertSourceFitsExpansionBounds(
+  files: readonly FileChange[],
+  capacity: ReviewCapacity
+): void {
+  if (files.length > capacity.maxSourceFiles) {
     throw new Error(
-      `Diff source exceeds the lossless safety capacity of ${MAX_SOURCE_FILES} files before ` +
+      `Diff source exceeds the lossless safety capacity of ${capacity.maxSourceFiles} files before ` +
         `expansion. Split the diff into smaller review targets.`
     );
   }
@@ -59,19 +102,19 @@ function assertSourceFitsExpansionBounds(files: readonly FileChange[]): void {
   let sourceBytes = 0;
   for (const file of files) {
     sourceLines += countDiffLines(file.patch);
-    if (sourceLines > MAX_SOURCE_PATCH_LINES) {
+    if (sourceLines > capacity.maxSourcePatchLines) {
       throw new Error(
         `Diff source exceeds the lossless safety capacity of ` +
-          `${MAX_SOURCE_PATCH_LINES.toLocaleString('en-US')} patch lines before expansion. ` +
+          `${capacity.maxSourcePatchLines.toLocaleString('en-US')} patch lines before expansion. ` +
           `Split the diff into smaller review targets.`
       );
     }
 
     sourceBytes += Buffer.byteLength(file.patch, 'utf8');
-    if (sourceBytes > MAX_SOURCE_PATCH_BYTES) {
+    if (sourceBytes > capacity.maxSourcePatchBytes) {
       throw new Error(
         `Diff source exceeds the lossless safety capacity of ` +
-          `${MAX_SOURCE_PATCH_BYTES.toLocaleString('en-US')} patch bytes before expansion. ` +
+          `${capacity.maxSourcePatchBytes.toLocaleString('en-US')} patch bytes before expansion. ` +
           `Split the diff into smaller review targets.`
       );
     }
@@ -149,19 +192,19 @@ function promptDiffLines(file: ChunkFile): number {
   return countDiffLines(file.patchFragment?.promptPatch ?? file.patch);
 }
 
-function probeChunk(files: ChunkFile[]): Chunk {
+function probeChunk(files: ChunkFile[], capacity: ReviewCapacity): Chunk {
   return {
     files,
     totalLines: files.reduce((sum, file) => sum + promptDiffLines(file), 0),
     // Reserve the widest legal chunk label while sizing. Accepted reviews can
     // never use an index or total above this bound.
-    index: MAX_CHUNKS_PER_REVIEW - 1,
-    total: MAX_CHUNKS_PER_REVIEW,
+    index: capacity.maxChunks - 1,
+    total: capacity.maxChunks,
   };
 }
 
-function securedDiffBytes(files: ChunkFile[]): number {
-  return securedDiffByteLength(formatChunkForPrompt(probeChunk(files)));
+function securedDiffBytes(files: ChunkFile[], capacity: ReviewCapacity): number {
+  return securedDiffByteLength(formatChunkForPrompt(probeChunk(files, capacity)));
 }
 
 function probeFragment(
@@ -208,15 +251,17 @@ function fragmentCandidate(
   start: number,
   end: number,
   fragmentIndex: number,
-  totalDigits: number
+  totalDigits: number,
+  capacity: ReviewCapacity
 ): FragmentCandidate {
   const promptPatch = formatFragmentPatch(lines, positions, start, end);
   return {
     end,
     promptPatch,
-    securedBytes: securedDiffBytes([
-      probeFragment(file, promptPatch, fragmentIndex, totalDigits),
-    ]),
+    securedBytes: securedDiffBytes(
+      [probeFragment(file, promptPatch, fragmentIndex, totalDigits)],
+      capacity
+    ),
   };
 }
 
@@ -227,7 +272,8 @@ function largestFittingFragment(
   start: number,
   legalEnds: number[],
   fragmentIndex: number,
-  totalDigits: number
+  totalDigits: number,
+  capacity: ReviewCapacity
 ): FragmentCandidate | undefined {
   let low = 0;
   let high = legalEnds.length - 1;
@@ -244,7 +290,8 @@ function largestFittingFragment(
       start,
       legalEnds[middle]!,
       fragmentIndex,
-      totalDigits
+      totalDigits,
+      capacity
     );
     if (candidate.securedBytes <= MAX_SECURED_DIFF_BYTES) {
       best = candidate;
@@ -267,7 +314,8 @@ function allocatePatchRanges(
   file: FileChange,
   lines: string[],
   positions: Array<UnifiedDiffLine | undefined>,
-  totalDigits: number
+  totalDigits: number,
+  capacity: ReviewCapacity
 ): PatchRange[] {
   const ranges: Array<{ start: number; end: number; promptPatch: string }> = [];
   let start = 0;
@@ -297,7 +345,8 @@ function allocatePatchRanges(
       start,
       legalEnds,
       ranges.length,
-      totalDigits
+      totalDigits,
+      capacity
     );
     if (!selected) {
       const smallest = fragmentCandidate(
@@ -307,7 +356,8 @@ function allocatePatchRanges(
         start,
         legalEnds[0]!,
         ranges.length,
-        totalDigits
+        totalDigits,
+        capacity
       );
       invalidOversizedPatch(
         file,
@@ -324,9 +374,9 @@ function allocatePatchRanges(
       end,
       promptPatch,
     });
-    if (ranges.length > MAX_SOURCE_FILES) {
+    if (ranges.length > capacity.maxChunks * MAX_CHUNK_FILES) {
       throw new Error(
-        `Diff requires more than ${MAX_SOURCE_FILES} file fragments, exceeding the paid-work ` +
+        `Diff requires more than ${capacity.maxChunks * MAX_CHUNK_FILES} file fragments, exceeding the paid-work ` +
           `safety capacity. Split the diff into smaller review targets.`
       );
     }
@@ -336,7 +386,7 @@ function allocatePatchRanges(
   return ranges;
 }
 
-function splitPatch(file: FileChange): ChunkFile[] {
+function splitPatch(file: FileChange, capacity: ReviewCapacity): ChunkFile[] {
   const parsed = parseUnifiedDiff(file.patch);
   if (!parsed.ok) invalidOversizedPatch(file, parsed.line, parsed.reason);
   const { lines, trailingNewline, positions } = parsed.diff;
@@ -348,7 +398,8 @@ function splitPatch(file: FileChange): ChunkFile[] {
       file,
       lines,
       positions,
-      totalDigits
+      totalDigits,
+      capacity
     );
     const requiredDigits = ranges.length.toString().length;
     if (requiredDigits <= totalDigits) break;
@@ -367,13 +418,15 @@ function splitPatch(file: FileChange): ChunkFile[] {
   }));
 }
 
-export function chunkDiff(files: FileChange[]): Chunk[] {
+export function chunkDiff(
+  files: FileChange[],
+  requestedCapacity: ReviewCapacity = DEFAULT_REVIEW_CAPACITY
+): Chunk[] {
+  const capacity = validateReviewCapacity(requestedCapacity);
   if (files.length === 0) return [];
-  // More source lines/files than every allowed chunk can hold cannot possibly
-  // pass the final exact packing check. Reject that lower bound before the
-  // strict parser and fragment renderer amplify it into per-line objects and
-  // duplicate strings.
-  assertSourceFitsExpansionBounds(files);
+  // Reject source limits before the strict parser and fragment renderer
+  // amplify the patch into per-line objects and duplicate strings.
+  assertSourceFitsExpansionBounds(files, capacity);
 
   const sourceLines = files.reduce((sum, file) => sum + countDiffLines(file.patch), 0);
   if (files.length <= MAX_CHUNK_FILES && sourceLines <= MAX_CHUNK_LINES) {
@@ -391,7 +444,10 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
   const expandedFiles: ChunkFile[] = [];
   for (const file of files) {
     const fileLines = countDiffLines(file.patch);
-    if (fileLines <= MAX_CHUNK_LINES && securedDiffBytes([file]) <= MAX_SECURED_DIFF_BYTES) {
+    if (
+      fileLines <= MAX_CHUNK_LINES &&
+      securedDiffBytes([file], capacity) <= MAX_SECURED_DIFF_BYTES
+    ) {
       expandedFiles.push(file);
     } else if (file.patch.length === 0) {
       throw new Error(
@@ -399,12 +455,12 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
           `${MAX_SECURED_DIFF_BYTES.toLocaleString('en-US')} secured diff bytes limit.`
       );
     } else {
-      expandedFiles.push(...splitPatch(file));
+      expandedFiles.push(...splitPatch(file, capacity));
     }
 
-    if (expandedFiles.length > MAX_SOURCE_FILES) {
+    if (expandedFiles.length > capacity.maxChunks * MAX_CHUNK_FILES) {
       throw new Error(
-        `Diff expands to more than ${MAX_SOURCE_FILES} file entries, exceeding the paid-work ` +
+        `Diff expands to more than ${capacity.maxChunks * MAX_CHUNK_FILES} file entries, exceeding the paid-work ` +
           `safety capacity. Split the diff into smaller review targets.`
       );
     }
@@ -415,7 +471,7 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
 
   for (const file of expandedFiles) {
     const fileLines = promptDiffLines(file);
-    const singleFileBytes = securedDiffBytes([file]);
+    const singleFileBytes = securedDiffBytes([file], capacity);
     if (fileLines > MAX_CHUNK_LINES || singleFileBytes > MAX_SECURED_DIFF_BYTES) {
       throw new Error(
         `Cannot safely review ${file.filename}: one file entry requires ` +
@@ -427,7 +483,7 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
       currentChunk.length >= MAX_CHUNK_FILES ||
       (currentLines + fileLines > MAX_CHUNK_LINES && currentChunk.length > 0) ||
       (currentChunk.length > 0 &&
-        securedDiffBytes([...currentChunk, file]) > MAX_SECURED_DIFF_BYTES)
+        securedDiffBytes([...currentChunk, file], capacity) > MAX_SECURED_DIFF_BYTES)
     ) {
       chunks.push(currentChunk);
       currentChunk = [];
@@ -440,10 +496,10 @@ export function chunkDiff(files: FileChange[]): Chunk[] {
 
   if (currentChunk.length > 0) chunks.push(currentChunk);
 
-  if (chunks.length > MAX_CHUNKS_PER_REVIEW) {
+  if (chunks.length > capacity.maxChunks) {
     throw new Error(
       `Diff requires ${chunks.length} review chunks, exceeding the paid-work safety limit of ` +
-        `${MAX_CHUNKS_PER_REVIEW}. Split the diff into smaller review targets.`
+        `${capacity.maxChunks}. Split the diff into smaller review targets.`
     );
   }
 

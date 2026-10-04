@@ -2,6 +2,8 @@ import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
+import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from './git.js';
+import { parseUnifiedDiff } from '../prepare/unified-diff.js';
 
 export interface GitHubTarget {
   owner: string;
@@ -166,7 +168,7 @@ export async function fetchPRDiff(
   target: GitHubTarget,
   token?: string,
   octokitClient?: Octokit,
-  options: { requireMergeBase?: boolean } = {}
+  options: { requireMergeBase?: boolean; maxDiffBytes?: number; cwd?: string } = {}
 ): Promise<Diff> {
   const octokit = octokitClient ?? await createGitHubClient(token);
   const pr = (await getGitHubPullRequest(octokit, target)).data;
@@ -174,7 +176,61 @@ export async function fetchPRDiff(
   // Exact-head binding: the files come from a compare pinned to the base and
   // head object ids this very response named (see fetchChangedFiles for the
   // large-PR fallback and its bracket), so the patches belong to `head_sha`.
-  const { files, mergeBaseSha } = await fetchChangedFiles(octokit, target, pr, options.requireMergeBase === true);
+  let files: ChangedFile[] = [];
+  let mergeBaseSha: string | undefined;
+  if (options.maxDiffBytes === undefined) {
+    ({ files, mergeBaseSha } = await fetchChangedFiles(octokit, target, pr, options.requireMergeBase === true));
+  } else {
+    // Only this immutable comparison may supply ancestry for a depth-one
+    // hosted object database; the paginated file list cannot establish it.
+    if (![pr.base.sha, pr.head.sha].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
+      throw new Error('A complete PR patch requires exact GitHub comparison commits.');
+    }
+    const comparison = await octokit.repos.compareCommitsWithBasehead({
+      owner: target.owner, repo: target.repo, basehead: `${pr.base.sha}...${pr.head.sha}`,
+    });
+    mergeBaseSha = comparison.data.merge_base_commit?.sha;
+    if (typeof mergeBaseSha !== 'string' || !/^[a-f0-9]{40}$/.test(mergeBaseSha)) {
+      throw new Error('The exact PR comparison did not provide a valid effective merge base.');
+    }
+  }
+  // GitHub can omit a changed text file's patch AND report zero changes while
+  // still listing the file. A blob digest binds that omission, not its review.
+  // Explicit full-patch capacity therefore always requires pinned Git objects;
+  // ordinary remote targets may use only structurally complete API patches.
+  let authoritative: Awaited<ReturnType<typeof loadPinnedGitDiff>> | undefined;
+  if (options.maxDiffBytes !== undefined || files.some(file => !completeApiPatch(file))) {
+    try {
+      const pinned = { owner: target.owner, repo: target.repo,
+        baseSha: pr.base.sha, headSha: pr.head.sha,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(mergeBaseSha === undefined ? {} : { expectedMergeBaseSha: mergeBaseSha }),
+        ...(options.maxDiffBytes === undefined ? {} : { maxBytes: options.maxDiffBytes }) };
+      try {
+        authoritative = await loadPinnedGitDiff(pinned);
+      } catch (error) {
+        // A malformed/oversized/binary patch or an ancestry mismatch remains a
+        // refusal. Hosted retrieval only repairs missing local object storage.
+        if (!(error instanceof PinnedGitObjectsUnavailableError) || options.maxDiffBytes === undefined || !mergeBaseSha) throw error;
+        const hostedToken = token?.trim() || process.env['GITHUB_TOKEN']?.trim();
+        if (!hostedToken) throw new Error('Hosted PR object acquisition needs GITHUB_TOKEN or githubToken.');
+        authoritative = await loadHostedPinnedGitDiff({ ...pinned, expectedMergeBaseSha: mergeBaseSha, token: hostedToken });
+      }
+    } catch (error) {
+      throw new Error(`Cannot acquire a complete PR patch: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const recheck = (await getGitHubPullRequest(octokit, target)).data;
+    if (recheck.head.sha !== pr.head.sha || recheck.base.sha !== pr.base.sha) {
+      throw new Error(`PR #${target.number} moved while its pinned diff was read — rerun the review.`);
+    }
+    if (authoritative.files.length !== pr.changed_files || recheck.changed_files !== pr.changed_files) {
+      throw new Error(`Pinned PR patch is incomplete: expected ${pr.changed_files} files, read ${authoritative.files.length}.`);
+    }
+    if (mergeBaseSha !== undefined && mergeBaseSha !== authoritative.mergeBaseSha) {
+      throw new Error('Pinned PR merge base disagrees with the exact GitHub comparison.');
+    }
+    mergeBaseSha = authoritative.mergeBaseSha;
+  }
 
   const metadata: PRMetadata = {
     owner: target.owner,
@@ -206,8 +262,19 @@ export async function fetchPRDiff(
   }));
 
   return {
-    files: fileChanges,
+    files: authoritative?.files ?? fileChanges,
     metadata,
     source: 'github',
+    ...(authoritative?.rawDiff === undefined ? {} : { rawDiff: authoritative.rawDiff }),
   };
+}
+
+function completeApiPatch(file: ChangedFile): boolean {
+  if (typeof file.patch !== 'string' || file.patch.length === 0 || !parseUnifiedDiff(file.patch).ok) return false;
+  let additions = 0, deletions = 0;
+  for (const line of file.patch.split('\n')) {
+    if (line.startsWith('+')) additions++;
+    if (line.startsWith('-')) deletions++;
+  }
+  return additions === file.additions && deletions === file.deletions;
 }
