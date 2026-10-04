@@ -190,9 +190,28 @@ describe('ordinary launch input retention', () => {
       asyncDescriptors: [descriptor], path: outputPath, preview: false });
 
     expect(result.baseBinding).toBe('retained-launch-inputs');
-    const exported = JSON.parse(await readFile(outputPath, 'utf8'));
+    const exportedBytes = await readFile(outputPath, 'utf8');
+    const exported = JSON.parse(exportedBytes);
+    expect(result.packageSha256).toBe(sha256Hex(exportedBytes));
+    expect(exported.guardedInputRepresentation)
+      .toEqual({ version: 1, encoding: 'json-string-table-v1' });
     expect(ordinaryPendingGuardedInput(exported)).toEqual(guardedInput);
     expect(exported.guardedInput).toEqual(retainGuardedInput(guardedInput));
+
+    const changedInput = { ...guardedInput, config: 'e'.repeat(64) };
+    const changedPacket = { ...legacyPacket, inputSha256: guardedInputSha256(changedInput),
+      guardedInput: changedInput };
+    const changedBytes = JSON.stringify(changedPacket, null, 2) + '\n';
+    const changedSha256 = sha256Hex(changedBytes);
+    await writeFile(join(captureDir, `${namespace}-attempt-1-${changedSha256}.json`), changedBytes,
+      { mode: 0o600 });
+    const native = JSON.parse(await readFile(convergeRunStatePath(gitCommonDir, target), 'utf8'));
+    native.lastLaunch.ordinaryInputs.packetSha256 = changedSha256;
+    await writeFile(convergeRunStatePath(gitCommonDir, target), JSON.stringify(native));
+    await expect(exportOrdinaryPendingPackage({ gitCommonDir, target, headSha, baseSha,
+      expectedBaseSha: baseSha, guardedInput, asyncStoreDir, asyncTargetKey: 'legacy',
+      asyncDescriptors: [descriptor], path: join(root, 'changed-pending.json'), preview: true }))
+      .rejects.toThrow('pending_export_retained_input_mismatch');
   });
 
   it('accepts the 20 MiB byte boundary and refuses one extra byte before publishing any capture', async () => {

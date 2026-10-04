@@ -8,7 +8,9 @@
   repeated across reviewer prompts no longer exceed the preclaim recovery
   packet limit. Recovery still authenticates the exact expanded input, accepts
   existing raw captures and rejects oversized unique work before spending an
-  attempt (RCL-180).
+  attempt. New exports identify the compact guarded input with
+  `guardedInputRepresentation`; unmarked raw ordinary and cycle packages remain
+  readable (RCL-180).
 
 ## 4.5.5 - 2026-10-04
 

@@ -101,6 +101,58 @@ describe('guarded launch input retention', () => {
     expect(retainGuardedInput(restoreGuardedInput(retained))).toEqual(retained);
   });
 
+  it('rejects deeply nested guarded input with a controlled error before exhausting the stack', () => {
+    let guardedInput: Record<string, unknown> = { leaf: 'value' };
+    for (let depth = 0; depth < 300; depth++) guardedInput = { child: guardedInput };
+
+    expect(() => retainGuardedInput(guardedInput)).toThrow('guarded_input_too_deep');
+    try {
+      retainGuardedInput(guardedInput);
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(RangeError);
+    }
+  });
+
+  it('rejects deeply nested fresh launch input before hashing or publishing a capture', async () => {
+    const gitCommonDir = await mkdtemp(join(tmpdir(), 'rcl-guarded-input-'));
+    directories.push(gitCommonDir);
+    let guardedInput: Record<string, unknown> = { leaf: 'value' };
+    for (let depth = 0; depth < 20_000; depth++) guardedInput = { child: guardedInput };
+
+    const error = await retainOrdinaryLaunchInputs({
+      gitCommonDir,
+      target: 'allocator-one-9889',
+      headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      guardedInput,
+      attempt: 9,
+      round: 5,
+    }).then(() => undefined, reason => reason as unknown);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(RangeError);
+    expect((error as Error).message).toBe('guarded_input_too_deep');
+    expect(await readdir(gitCommonDir)).toEqual([]);
+  });
+
+  it('rejects a deeply nested archive with a controlled error before exhausting the stack', () => {
+    let root: unknown = ['v', null];
+    for (let depth = 0; depth < 300; depth++) root = ['o', [[0, root]]];
+    const retained = {
+      version: 1 as const,
+      encoding: 'json-string-table-v1' as const,
+      strings: ['child'],
+      root,
+    } as ReturnType<typeof retainGuardedInput>;
+
+    expect(() => restoreGuardedInput(retained)).toThrow('guarded_input_too_deep');
+    try {
+      restoreGuardedInput(retained);
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(RangeError);
+    }
+  });
+
   it.each([
     ['an unreferenced string', (value: ReturnType<typeof retainGuardedInput>) => value.strings.push('unused')],
     ['an out-of-range reference', (value: ReturnType<typeof retainGuardedInput>) => {
@@ -154,5 +206,37 @@ describe('guarded launch input retention', () => {
       retainedAsync: [{ ...descriptor, sha256: hash }], guardedInput };
 
     expect(validateOrdinaryPendingPackage(legacy, expected)).toEqual(legacy);
+  });
+
+  it('rejects deeply nested legacy raw pending input before hashing it', () => {
+    let deepPrompt: unknown = 'value';
+    for (let depth = 0; depth < 20_000; depth++) deepPrompt = { child: deepPrompt };
+    const descriptor = { model: 'openai/test', role: 'general', provider: 'openai', lane: 'async' as const };
+    const guardedInput = {
+      head: 'a'.repeat(40), kind: 'pr', repo: 'owner/repo', pr: 1,
+      diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [descriptor],
+      prompts: [deepPrompt], asyncRoles: [{ name: 'general' }],
+    };
+    const hash = 'd'.repeat(64);
+    const legacy = {
+      target: 'owner-repo-1', headSha: guardedInput.head, baseSha: 'e'.repeat(40),
+      attempt: 1, round: 1, pid: 999_999, retainedAsyncSha256: [hash],
+      retainedAsync: [{ ...descriptor, sha256: hash }], guardedInput,
+    };
+    const expected = {
+      target: legacy.target, headSha: legacy.headSha, inputSha256: 'f'.repeat(64),
+      baseSha: legacy.baseSha, attempt: 1, round: 1, pid: 999_999,
+      retainedAsyncSha256: [hash],
+    };
+
+    let error: unknown;
+    try {
+      validateOrdinaryPendingPackage(legacy, expected);
+    } catch (reason) {
+      error = reason;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(RangeError);
+    expect((error as Error).message).toBe('ordinary_pending_package_mismatch');
   });
 });

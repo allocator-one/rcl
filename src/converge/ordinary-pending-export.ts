@@ -6,7 +6,7 @@ import { convergeRunStatePath, loadConvergeRunState } from './run-state.js';
 import { launchSchema } from './launch-record.js';
 import { validateOrdinaryPendingPackage, type OrdinaryPendingPackage } from './ordinary-pending-package.js';
 import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults } from '../dispatch/async-lane.js';
-import { guardedInputSha256, sha256Hex } from '../report/run-header.js';
+import { guardedInputSha256, sha256Hex, stableStringify } from '../report/run-header.js';
 import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument, writeExclusive } from '../evidence/original-run/journal.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
@@ -35,11 +35,15 @@ function retainedInputsPath(options: Pick<OrdinaryLaunchInputs, 'gitCommonDir' |
 }
 
 function retainedInputs(options: OrdinaryLaunchInputs, representation: 'raw' | 'retained' = 'retained') {
+  // Validate recursive bounds before guardedInputSha256 reaches stableStringify.
+  // Version 1 keeps its historical raw wire representation; only version 2
+  // stores the validated compact archive.
+  const retainedGuardedInput = retainGuardedInput(options.guardedInput);
   return { version: representation === 'raw' ? 1 : 2,
     target: options.target, headSha: options.headSha, baseSha: options.baseSha,
     attempt: options.attempt, round: options.round, ...(options.cycleId ? { cycleId: options.cycleId } : {}),
     inputSha256: guardedInputSha256(options.guardedInput),
-    guardedInput: representation === 'raw' ? options.guardedInput : retainGuardedInput(options.guardedInput) };
+    guardedInput: representation === 'raw' ? options.guardedInput : retainedGuardedInput };
 }
 
 export interface RetainedOrdinaryInputs {
@@ -61,6 +65,7 @@ export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs):
     // roster. Bound that actual envelope before claim, including its future
     // fixed-length hashes and the largest permitted PID representation.
     const projectedRecovery: OrdinaryPendingPackage = {
+      guardedInputRepresentation: { version: 1, encoding: 'json-string-table-v1' },
       target: options.target, headSha: options.headSha, baseSha: options.baseSha ?? 'f'.repeat(40),
       attempt: options.attempt, round: options.round, pid: Number.MAX_SAFE_INTEGER,
       retainedAsyncSha256: descriptors.map(() => 'f'.repeat(64)),
@@ -156,6 +161,9 @@ function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
  */
 export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExportOptions) {
   if (!/^[a-f0-9]{40}$/.test(options.baseSha) || options.baseSha !== options.expectedBaseSha) refuse('base_mismatch');
+  // Current caller input participates in hashes and canonical comparisons
+  // below, so bound its recursion before either operation.
+  retainGuardedInput(options.guardedInput);
   const common = await realpath(options.gitCommonDir);
   const outputPath = resolve(options.path);
   const outputParent = await realpath(dirname(outputPath));
@@ -194,6 +202,10 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
     guardedInput: options.guardedInput,
   }, binding.packetSha256) : options.guardedInput;
+  if (binding && !cycleBacked &&
+      stableStringify(historicalInput) !== stableStringify(options.guardedInput)) {
+    refuse('retained_input_mismatch');
+  }
   if (launch.inputSha256 !== guardedInputSha256(historicalInput)) refuse('input_mismatch');
 
   const snapshot = cycleBacked
@@ -218,7 +230,9 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     provider: review.provider!, lane: 'async' as const,
   }));
   const retainedAsyncSha256 = retainedAsync.map(item => item.sha256).sort();
-  const candidate: OrdinaryPendingPackage = { ...(cycleBacked ? { version: 2 as const, cycle: state.cycle,
+  const candidate: OrdinaryPendingPackage = {
+    guardedInputRepresentation: { version: 1, encoding: 'json-string-table-v1' },
+    ...(cycleBacked ? { version: 2 as const, cycle: state.cycle,
     attemptCap: attempts.cap, roundCap: state.roundCap, attemptsUsed: attempts.attemptsUsed,
     asyncAttribution: 'cycle-history-unattributed' as const } : {}),
     target: options.target, headSha: launch.headSha,

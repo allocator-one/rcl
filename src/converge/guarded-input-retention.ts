@@ -1,6 +1,10 @@
 const ENCODING = 'json-string-table-v1' as const;
 const MAX_DECODED_GUARDED_INPUT_BYTES = 128 * 1024 * 1024;
 const MAX_GUARDED_INPUT_NODES = 1_000_000;
+// Recursive codec frames and the archive's tuple wrappers both consume V8 stack.
+// 256 leaves ample headroom for callers and JSON serialization while exceeding
+// any expected prompt, roster, or recovery-package structure.
+const MAX_GUARDED_INPUT_DEPTH = 256;
 
 type Scalar = null | boolean | number;
 type EncodedNode = ['s', number] | ['v', Scalar] | ['a', EncodedNode[]] |
@@ -47,7 +51,8 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
     }
   };
 
-  const encode = (item: unknown): EncodedNode => {
+  const encode = (item: unknown, depth: number): EncodedNode => {
+    if (depth > MAX_GUARDED_INPUT_DEPTH) throw new Error('guarded_input_too_deep');
     nodes++;
     if (nodes > MAX_GUARDED_INPUT_NODES) throw new Error('guarded_input_too_complex');
     if (typeof item === 'string') {
@@ -69,7 +74,7 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
     }
     if (Array.isArray(item)) {
       addExpandedBytes(2 + Math.max(0, item.length - 1));
-      return ['a', Array.from({ length: item.length }, (_, index) => encode(item[index]))];
+      return ['a', Array.from({ length: item.length }, (_, index) => encode(item[index], depth + 1))];
     }
     if (plainRecord(item)) {
       const entries = Object.entries(item).filter(([, child]) => child !== undefined)
@@ -77,13 +82,13 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
       addExpandedBytes(2 + Math.max(0, entries.length - 1));
       return ['o', entries.map(([key, child]) => {
         addExpandedBytes(Buffer.byteLength(JSON.stringify(key), 'utf8') + 1);
-        return [interned(strings, indices, key), encode(child)];
+        return [interned(strings, indices, key), encode(child, depth + 1)];
       })];
     }
     throw new Error('guarded_input_invalid');
   };
 
-  return { version: 1, encoding: ENCODING, strings, root: encode(value) };
+  return { version: 1, encoding: ENCODING, strings, root: encode(value, 0) };
 }
 
 function isRetained(value: unknown): value is RetainedGuardedInput {
@@ -94,6 +99,9 @@ function isRetained(value: unknown): value is RetainedGuardedInput {
 export function restoreGuardedInput(value: StoredGuardedInput): Record<string, unknown> {
   if (!isRetained(value)) {
     if (!plainRecord(value)) throw new Error('guarded_input_invalid');
+    // Legacy pending packages retain raw JSON. Traverse it with the same
+    // recovery bounds before callers authenticate it with recursive hashing.
+    retainGuardedInput(value);
     return value;
   }
   if (Object.keys(value).sort().join(',') !== 'encoding,root,strings,version' ||
@@ -126,7 +134,8 @@ export function restoreGuardedInput(value: StoredGuardedInput): Record<string, u
     }
     return value.strings[resolved]!;
   };
-  const decode = (node: unknown): unknown => {
+  const decode = (node: unknown, depth: number): unknown => {
+    if (depth > MAX_GUARDED_INPUT_DEPTH) throw new Error('guarded_input_too_deep');
     nodes++;
     if (nodes > MAX_GUARDED_INPUT_NODES) throw new Error('guarded_input_too_complex');
     if (!Array.isArray(node) || typeof node[0] !== 'string') {
@@ -145,7 +154,7 @@ export function restoreGuardedInput(value: StoredGuardedInput): Record<string, u
     }
     if (node[0] === 'a' && node.length === 2 && Array.isArray(node[1])) {
       addExpandedBytes(2 + Math.max(0, node[1].length - 1));
-      return node[1].map(decode);
+      return node[1].map(child => decode(child, depth + 1));
     }
     if (node[0] === 'o' && node.length === 2 && Array.isArray(node[1])) {
       const result: Record<string, unknown> = {};
@@ -158,7 +167,7 @@ export function restoreGuardedInput(value: StoredGuardedInput): Record<string, u
         previousKey = key;
         addExpandedBytes(encodedStringBytes[entry[0] as number]! + 1);
         Object.defineProperty(result, key, {
-          value: decode(entry[1]),
+          value: decode(entry[1], depth + 1),
           enumerable: true,
           configurable: true,
           writable: true,
@@ -169,7 +178,7 @@ export function restoreGuardedInput(value: StoredGuardedInput): Record<string, u
     throw new Error('guarded_input_archive_invalid');
   };
 
-  const restored = decode(value.root);
+  const restored = decode(value.root, 0);
   if (!plainRecord(restored) || nextFirstStringIndex !== value.strings.length) {
     throw new Error('guarded_input_archive_invalid');
   }

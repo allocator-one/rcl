@@ -5,6 +5,10 @@ import { restoreGuardedInput, type StoredGuardedInput } from './guarded-input-re
 
 export interface OrdinaryPendingPackage {
   version?: 2;
+  guardedInputRepresentation?: {
+    version: 1;
+    encoding: 'json-string-table-v1';
+  };
   target: string;
   headSha: string;
   baseSha: string;
@@ -36,6 +40,15 @@ export interface PendingLaunchIdentity {
 }
 
 export function ordinaryPendingGuardedInput(value: OrdinaryPendingPackage): Record<string, unknown> {
+  const representation = value?.guardedInputRepresentation;
+  const compact = !!value?.guardedInput &&
+    (value.guardedInput as Record<string, unknown>).encoding === 'json-string-table-v1';
+  const representationValid = representation === undefined
+    ? !compact
+    : !!representation && typeof representation === 'object' && !Array.isArray(representation) &&
+      representation.version === 1 && representation.encoding === 'json-string-table-v1' &&
+      Object.keys(representation).sort().join(',') === 'encoding,version' && compact;
+  if (!representationValid) throw new Error('ordinary_pending_package_mismatch');
   return restoreGuardedInput(value.guardedInput);
 }
 
