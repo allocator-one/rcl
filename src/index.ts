@@ -58,7 +58,7 @@ import {
   snapshotAsyncResults,
   snapshotAsyncHistory,
   consumeBoundAsyncResults,
-  consumeBoundAsyncHistory,
+  consumeFinalizedCycleAsyncHistory,
 } from './dispatch/async-lane.js';
 import { evaluateCiGate } from './ci.js';
 import { resolveQuorumPolicy } from './dispatch/quorum.js';
@@ -2345,7 +2345,7 @@ async function executeCouncil(
           maxAttempts: Number(opts.maxAttempts), cycleRemote,
           loadRetainedAsync: loadMigrationRetainedAsync });
         if (migrationPackage.version === 2) {
-          await consumeBoundAsyncHistory(await resolveExistingAsyncStoreDir(),
+          await consumeFinalizedCycleAsyncHistory(result.reusedReceipt,
             asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
               extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
               migrationPackage.cycle!.id), expectedAsyncSha256,

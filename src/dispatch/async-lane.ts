@@ -460,6 +460,18 @@ export async function consumeBoundAsyncHistory(storeDir: string, targetKey: stri
   }
 }
 
+/** Consume a newly finalized cycle's live history; receipt replays need no live store. */
+export async function consumeFinalizedCycleAsyncHistory(
+  reusedReceipt: boolean,
+  targetKey: string,
+  expectedSha256: readonly string[],
+  maxResults: number,
+  resolveStoreDir: () => Promise<string> = resolveExistingAsyncStoreDir,
+): Promise<void> {
+  if (reusedReceipt) return;
+  await consumeBoundAsyncHistory(await resolveStoreDir(), targetKey, expectedSha256, maxResults);
+}
+
 /** Consume only the exact reviewed async artifacts after terminal recovery. */
 export async function consumeBoundAsyncResults(
   storeDir: string,

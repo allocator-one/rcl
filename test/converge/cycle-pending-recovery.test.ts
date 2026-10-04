@@ -9,7 +9,8 @@ import { exportOrdinaryPendingPackage } from '../../src/converge/ordinary-pendin
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch } from '../../src/converge/pending-legacy-resume.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { guardedInputSha256, sha256Hex, stableStringify } from '../../src/report/run-header.js';
-import { asyncTargetKey, consumeBoundAsyncHistory } from '../../src/dispatch/async-lane.js';
+import { asyncTargetKey, consumeBoundAsyncHistory,
+  consumeFinalizedCycleAsyncHistory } from '../../src/dispatch/async-lane.js';
 
 async function cyclePendingFixture(fixtureOptions: { retainedCount?: number; identicalResults?: boolean } = {}) {
   const common = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-pending-')));
@@ -144,9 +145,16 @@ it('preserves duplicate-byte cycle artifacts as an exact multiset through finali
     cycleRemote: fixture.cycleRemote, loadRetainedAsync: fixture.options.loadRetainedAsync,
   });
   expect(finalized.receipt.retainedAsyncSha256).toHaveLength(2);
-  await consumeBoundAsyncHistory(fixture.asyncStoreDir, fixture.asyncKey,
-    fixture.options.retainedAsyncSha256, 16);
+  await consumeFinalizedCycleAsyncHistory(finalized.reusedReceipt, fixture.asyncKey,
+    fixture.options.retainedAsyncSha256, 16, async () => fixture.asyncStoreDir);
   await expect((await import('node:fs/promises')).readdir(fixture.asyncStoreDir)).resolves.toEqual([]);
+});
+
+it('replays a finalized receipt without resolving an already removed live async store', async () => {
+  const resolveStoreDir = vi.fn(async () => { throw new Error('live async store no longer exists'); });
+  await expect(consumeFinalizedCycleAsyncHistory(true, 'retired-cycle', ['a'.repeat(64)], 16,
+    resolveStoreDir)).resolves.toBeUndefined();
+  expect(resolveStoreDir).not.toHaveBeenCalled();
 });
 
 it('terminalizes a cycle with zero completed async artifacts', async () => {
