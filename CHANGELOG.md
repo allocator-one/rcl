@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.5.7 - 2026-10-04
+
+- Retry Anthropic streams when the SDK wraps a terminated stream around a
+  bounded transient transport cause. Permanent TLS failures, unclassified
+  terminated errors and user aborts remain terminal (RCL-161).
+
 ## 4.5.6 - 2026-10-04
 
 - Separate the historical launch head from the current live pull-request head
