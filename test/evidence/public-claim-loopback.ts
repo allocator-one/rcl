@@ -184,12 +184,19 @@ export async function publicLoopback(input=occurrenceFixture(),commandTimeout=25
       Object.assign(env,{ [key]: process.env[key] });
   const entry=process.env.RCL_TEST_PACKAGED_CLI??fileURLToPath(new URL('../../dist/index.js',import.meta.url));
   async function command(args: string[]) {
-    return new Promise<{ exit: number|null; stdout: string; stderr: string }>(resolve => {
+    return new Promise<{ exit: number; stdout: string; stderr: string }>((resolve,reject) => {
       const child=spawn(process.execPath,[entry,'evidence','recover-claim',...args],{ cwd: repo,env,timeout: commandTimeout,stdio: ['ignore','pipe','pipe'] });
       let stdout='',stderr='';
       child.stdout.on('data',b => stdout+=b);
       child.stderr.on('data',b => stderr+=b);
-      child.on('close',exit => resolve({ exit,stdout,stderr }));
+      child.once('error',reject);
+      child.on('close',(exit,signal) => {
+        if(signal || exit === null) {
+          reject(new Error(`recover-claim command terminated by ${signal ?? 'an unknown signal'}: ${stderr}`));
+          return;
+        }
+        resolve({ exit,stdout,stderr });
+      });
     });
   }
   return {

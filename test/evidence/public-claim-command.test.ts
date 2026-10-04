@@ -11,6 +11,13 @@ afterEach(async () => {
 });
 async function fixture() { const f=await publicLoopback(); cleanups.push(f.cleanup); return f; }
 describe('actual public Mode B command',{ timeout: 45000 },() => {
+  it('fails a terminated loopback command instead of accepting a null exit as a refusal', async () => {
+    const f = await publicLoopback(undefined, 1);
+    cleanups.push(f.cleanup);
+
+    await expect(f.preview()).rejects.toThrow('terminated by SIGTERM');
+    expect(f.calls.filter(call => call.method === 'POST')).toEqual([]);
+  });
   it.each(['finding', 'verdict', 'split', 'classification'])('refuses a new claim key with prior %s history before creating a manifest or event', async kind => {
     const input = originalFixture();
     const f = await publicLoopback(input);

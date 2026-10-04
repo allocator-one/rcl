@@ -1,13 +1,14 @@
-import { mkdtemp, readFile, readdir, rm, writeFile, rename, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, rename, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, expect, it } from 'vitest';
 import { selectCurrentRecoveredProduction, selectRecoveredProduction, materializeRecoveredClaims } from '../../src/converge/recovered-production.js';
+import { convergeRunStatePath } from '../../src/converge/run-state.js';
 import { installRecoveredProduction } from '../fixtures/recovered-production.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
-import { sha } from '../evidence/recovery-validation/fixtures.js';
+import { semanticFixture, sha } from '../evidence/recovery-validation/fixtures.js';
 const roots: string[] = [];
 const exec=promisify(execFile);
 async function root() { const p = await mkdtemp(join(tmpdir(), 'rcl-recovered-producer-')); roots.push(p); return p; }
@@ -42,6 +43,23 @@ it('leaves absent and v1 targets on the unchanged ordinary producer', async () =
   expect(await readFile(f.path, 'utf8')).toBe(f.sourceJson);
   const findings = [sampleFinding()];
   expect(materializeRecoveredClaims(findings, undefined)).toBe(findings);
+});
+it('refuses a validated v2 semantic target without a review cycle before ordinary production', async () => {
+  const dir = await root();
+  const fixture = semanticFixture();
+  const path = convergeRunStatePath(dir, fixture.state.target);
+  const reportSha256 = sha(fixture.reportJson);
+  const reportPath = `${path}.evidence/${reportSha256}.json`;
+
+  fixture.state.rounds[0]!.reportBinding!.sourcePath = reportPath;
+  await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 });
+  await writeFile(reportPath, fixture.reportJson, { mode: 0o600 });
+  const native = `${JSON.stringify(fixture.state)}\n`;
+  await writeFile(path, native, { mode: 0o600 });
+
+  await expect(selectRecoveredProduction(dir, { target: fixture.state.target, round: 2 }))
+    .rejects.toThrow('Semantic continuation requires supported recovery');
+  expect(await readFile(path, 'utf8')).toBe(native);
 });
 it.each(['predecessor', 'original', 'receipt', 'target'] as const)('refuses changed %s proof before selecting provider mode', async missing => {
   const dir = await root(); const f = await installRecoveredProduction(dir);
