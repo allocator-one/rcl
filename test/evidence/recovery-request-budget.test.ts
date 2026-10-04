@@ -50,7 +50,7 @@ describe('public recovery request budget', { timeout: 45000 }, () => {
     expect(await runPublicClaimRecovery({ resume: true, manifest: f.manifest, manifestSha256: sha(manifestBytes.toString()) }, deps())).toBe(0);
     const posts = f.calls.filter(call => call.method === 'POST').flatMap(call => (call.body as any).events);
     expect(posts.map(event => event.id).sort()).toEqual(manifest.stages.map((stage: any) => stage.id).sort());
-    expect(new Set(posts.map(event => event.id))).toHaveLength(manifest.stages.length);
+    expect(new Set(posts.map(event => event.id)).size).toBe(manifest.stages.length);
     const after = await readFile(f.statePath); const native = JSON.parse(after.toString());
     expect(after).not.toEqual(before);
     expect(native.rounds).toEqual(JSON.parse(before.toString()).rounds);
