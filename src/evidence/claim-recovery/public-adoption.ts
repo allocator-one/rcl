@@ -76,6 +76,7 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
   // and selected read must agree about presence and the complete receipt.
   for(const stage of old.stages) {
     const scope=stage.kind==='transfer'?oldCarriers[stage.carrierIndex!]!.scope:selection.source.scope;
+    const target=stage.kind==='transfer'?oldCarriers[stage.carrierIndex!]!.target:selection.source.target;
     const answer=await readEventReceipts(o.sink,scope,[stage.id]);
     if(answer.kind!=='ok') throw new Error('claim_adoption_receipt_unanswered');
     const receipt=answer.value.receipts[0];
@@ -95,7 +96,7 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
     }
     if(packetPin.sha256) {
       const packet=decodeRecoveryDocument((await readStable(packetPath,MAX_RECOVERY_DOCUMENT_BYTES)).text) as Record<string,unknown>;
-      const expected={kind:'rcl-prepared-claim-event',version:1,operation_id:old.operationId,manifest_sha256:o.manifestSha,destination:scope,actor_user_id:old.actorUserId,target:selection.source.target,event_json:eventJson,event_sha256:eventJson? sha256(eventJson):undefined};
+      const expected={kind:'rcl-prepared-claim-event',version:1,operation_id:old.operationId,manifest_sha256:o.manifestSha,destination:scope,actor_user_id:old.actorUserId,target,event_json:eventJson,event_sha256:eventJson? sha256(eventJson):undefined};
       if(!isDeepStrictEqual(packet,expected)) throw new Error('claim_event_packet_conflict');
     }
     if(receipt&&(!preparation||!eventJson||(!packetPin.sha256&&!inherited)||!matchesPreparedEventReceipt(receipt,eventJson!,scope,old.actorUserId))) throw new Error('claim_adoption_receipt_conflict');
@@ -105,7 +106,7 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
   const owned=new Map(rows.flatMap(row=>row.eventJson?[[row.stage.id,row.eventJson] as const]:[]));
   const acceptedReceipts=rows.flatMap(row=>row.receipt?[row.receipt]:[]);
   const sources=material.history.sources.map(source=>{
-    const currentSource=current.sources.find(s=>s.selector.scope.run_id===source.selector.scope.run_id);
+    const currentSource=current.sources.find(s=>isDeepStrictEqual(s.selector,source.selector));
     assertOwnedSplitSourceExtension(source,currentSource,acceptedReceipts,owned,old.actorUserId);
     return currentSource!;
   });

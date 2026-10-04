@@ -129,7 +129,7 @@ export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions
         const adoption=await prepareClaimAdoption({path:oldPath!,manifest:oldManifest,manifestSha:oldRaw!.sha256,current:history,stages,sink,validate:validatePreparation,splitEvidence});
         material.adoption=adoption.proof; stages=adoption.stages;
       }
-      const adoptedSplit=material.adoption?.accepted.find(s => s.id===stages[0]?.id);
+      const adoptedSplit=stages[0]?.kind==='split' ? material.adoption?.accepted.find(s => s.id===stages[0]?.id) : undefined;
       const prepared=adoptedSplit? prepareClaimSplit(adoptedSplit.preparation as ClaimSplitInput):selection.action==='split'? prepareClaimSplit(splitInput(selection,material,{ stages,createdAt },history)):
         prepareClaimSplit(existingSplit(selection,material,history).selection);
       if(adoptedSplit&&selection.disposition&&!material.adoption?.accepted.some(a=>a.id===stages.at(-1)?.id))
@@ -175,7 +175,7 @@ export async function runPublicClaimRecovery(options: PublicClaimRecoveryOptions
     const selection=manifest.selection;
     if(Boolean(material.adoption)!==(manifest.version===3)) throw new Error('claim_adoption_version_conflict');
     if(material.adoption) await verifyAdoptionFiles(material.adoption);
-    const adoptedSplit=material.adoption?.accepted.find(s=>s.id===manifest.stages[0]?.id);
+    const adoptedSplit=manifest.stages[0]?.kind==='split' ? material.adoption?.accepted.find(s=>s.id===manifest.stages[0]?.id) : undefined;
     if (selection.action === 'split'&&!adoptedSplit) assertUnusedClaimIdentity(material.history, selection.identity);
     const carriers=claimCarriers(material.history,selection);
     const expectedKinds=[...(selection.action==='split'? ['split',...carriers.map(() => 'transfer')]:[]),...(selection.disposition? ['disposition']:[])];
