@@ -12,7 +12,7 @@ import type { EventReceipt } from './receipts.js';
 import { decodeRecoveryOriginal as decodeOriginalReport } from './recovery-json.js';
 import { object, uuidSchema } from './primitives.js';
 import type { ConvergeRunState, FindingEntry } from './types.js';
-import { migratedLegacyPendingRound } from './obligations.js';
+import { migratedLegacyPendingRound, verdictClearsPending } from './obligations.js';
 import { validateSemanticState } from './semantic-validation.js';
 import type { RetainedSources, SourcePathRequirement } from './sources.js';
 
@@ -71,7 +71,20 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     requireSource(round.runId === undefined || uuid(round.runId));
     requireSource(round.severities === undefined || object(round.severities) && Object.entries(round.severities).every(([key, value]) =>
       identity(key) && ['critical', 'important', 'minor', 'nitpick'].includes(value as string)));
+    requireSource(round.admission === undefined || object(round.admission) && round.admission.version === 1 &&
+      Number.isSafeInteger(round.admission.recoveryOperationCount) && (round.admission.recoveryOperationCount as number) >= 0 &&
+      digest(round.admission.sourceStateSha256) &&
+      Array.isArray(round.admission.actionableIdentities) && round.admission.actionableIdentities.every(identity) &&
+      isDeepStrictEqual(round.admission.actionableIdentities,
+        [...new Set(round.admission.actionableIdentities as string[])].sort()));
     requireSource(!cycleOrigin || round.reportBinding === undefined);
+  }
+  const recoveryOperationCount = state.version === 3 && object(state.recovery) &&
+    Array.isArray(state.recovery.operations) ? state.recovery.operations.length : 0;
+  for (const round of rounds) {
+    const admission = round.admission;
+    requireSource(admission === undefined || object(admission) &&
+      (admission.recoveryOperationCount as number) <= recoveryOperationCount);
   }
   for (const [key, rawEntry] of Object.entries(state.findings as Record<string, unknown>)) {
     requireSource(identity(key) && object(rawEntry)); const entry = rawEntry as Record<string, unknown>;
@@ -97,6 +110,10 @@ function nativeSource(raw: string, target: string): ConvergeRunState {
     requireSource(positive(annotations.round) && seen.has(annotations.round) && Array.isArray(annotations.identities) &&
       annotations.identities.every(row => object(row) && identity(row.identity) && Object.hasOwn(state.findings as object, row.identity) &&
         ['new', 'repeat', 'suppressed', 'regating'].includes(row.status as string) && typeof row.gating === 'string'));
+    const actionableBeforeTriage = annotations.actionableBeforeTriage;
+    requireSource(actionableBeforeTriage === undefined || Array.isArray(actionableBeforeTriage) &&
+      actionableBeforeTriage.every(identity) &&
+      isDeepStrictEqual(actionableBeforeTriage, [...new Set(actionableBeforeTriage)].sort()));
   }
   return state as unknown as ConvergeRunState;
 }
@@ -116,6 +133,42 @@ function retainedFindingIdentity(current: FindingEntry, predecessor: FindingEntr
 function retainedRounds(current: ConvergeRunState, predecessor: ConvergeRunState): boolean {
   const rounds = new Map(current.rounds.map(round => [round.round, round]));
   return predecessor.rounds.every(round => isDeepStrictEqual(rounds.get(round.round), round));
+}
+
+/** @internal Validate the only mutations ordinary verdict recording can make without a semantic sighting ledger. */
+export function validateSightinglessLegacyEvolution(state: ConvergeRunState, original: ConvergeRunState): void {
+  requireSource(isDeepStrictEqual(state.rounds, original.rounds));
+  requireSource(isDeepStrictEqual(Object.keys(state.findings).sort(), Object.keys(original.findings).sort()));
+  requireSource(isDeepStrictEqual(state.lastAnnotations, original.lastAnnotations));
+  const mutable = new Set(['pendingRound', 'verdict', 'verdictRound', 'verdictSeverity', 'verdictReason']);
+  const fixed = (entry: FindingEntry) => Object.fromEntries(Object.entries(entry).filter(([field]) => !mutable.has(field)));
+  const verdictTuple = (entry: FindingEntry) => ({ verdict: entry.verdict, verdictRound: entry.verdictRound,
+    verdictSeverity: entry.verdictSeverity, verdictReason: entry.verdictReason });
+  for (const [key, entry] of Object.entries(state.findings)) {
+    const prior = original.findings[key]!;
+    requireSource(isDeepStrictEqual(fixed(entry), fixed(prior)));
+    const unchangedVerdict = isDeepStrictEqual(verdictTuple(entry), verdictTuple(prior));
+    requireSource(entry.verdict === undefined ? entry.verdictReason === prior.verdictReason :
+      entry.verdictReason === undefined || typeof entry.verdictReason === 'string');
+    if (prior.verdict !== undefined) requireSource(entry.verdict !== undefined && entry.verdictRound! >= prior.verdictRound!);
+    if (entry.verdict !== undefined) {
+      const reviewed = state.rounds.find(round => round.round === entry.verdictRound);
+      const unchangedImplicitSeverity = prior.verdict === entry.verdict && prior.verdictRound === entry.verdictRound &&
+        prior.verdictSeverity === undefined && entry.verdictSeverity === undefined;
+      const reviewedSeverities = reviewed?.severities;
+      requireSource(reviewed !== undefined);
+      if (!unchangedImplicitSeverity) {
+        requireSource(reviewedSeverities === undefined
+          ? entry.verdictSeverity === entry.severity
+          : reviewedSeverities[key] !== undefined && entry.verdictSeverity === reviewedSeverities[key]);
+      }
+    }
+    const clearsPrior = prior.pendingRound !== undefined && entry.verdict !== undefined &&
+      verdictClearsPending(state, key, prior.pendingRound, entry.verdictRound!, entry.verdictSeverity);
+    const expectedPending = prior.pendingRound !== undefined && !clearsPrior ? prior.pendingRound : undefined;
+    requireSource(unchangedVerdict ? entry.pendingRound === prior.pendingRound || clearsPrior && entry.pendingRound === undefined :
+      entry.pendingRound === expectedPending);
+  }
 }
 
 export function verifyNativeRecoveryLineage(sourceJson: string, target: string, nativeSourceJsons: string[] = []): {
@@ -162,10 +215,11 @@ export function verifyNativeRecoveryLineage(sourceJson: string, target: string, 
           Object.hasOwn(current.findings, key) && retainedFindingIdentity(current.findings[key]!, finding)));
       current = predecessor;
     }
-    // Every sighting-less v3 link is admissible only when its exact walked root
-    // is an authentic released cycle-v2 snapshot. The link checks above retain
-    // the cycle byte-for-byte through every recovery operation.
-    if (requiresReleasedCycleRoot) requireSource(current.version === 2 && current.cycle !== undefined &&
+    // A sighting-less recovery can start at either exact legacy boundary:
+    // native-v1, or the released cycle-v2 format that also predates semantic
+    // sightings. The snapshot walk above retains that root byte-for-byte.
+    if (requiresReleasedCycleRoot) requireSource(current.version === 1 ||
+      current.version === 2 && current.cycle !== undefined &&
       current.sightings === undefined && current.migration === undefined);
     let legacy = current.version === 1 ? current : undefined;
     if (current.version === 2 && current.migration) {
@@ -219,6 +273,14 @@ function validateAnchors(input: NativeRecoveryInput, source: ConvergeRunState): 
     requireSource(!members.has(member)); members.add(member);
   }
   requireSource(usedReports.size === reports.size && usedReceipts.size === receipts.size);
+}
+
+/** Validate one proposed additive operation without requiring retained files
+ * for already-qualified predecessor operations. The effectful adapter validates
+ * the complete resulting lineage before publication. */
+export function validateNativeRecoveryOperationInput(input: NativeRecoveryInput): void {
+  const source = verifyNativeRecoveryLineage(input.sourceJson, input.target, input.nativeSourceJsons).state;
+  validateAnchors(input, source);
 }
 
 /** @internal Validate one new identity batch against retained anchors in linear time. */
@@ -288,6 +350,7 @@ export interface RetainedNativeEvidence {
   target: string;
   reports: string[];
   nativeSourceJsons?: string[];
+  admissionSourceJsons?: string[];
   recoveryMaterials?: RecoveryMaterial[];
 }
 export interface LegacyClaimEvidence {
@@ -321,7 +384,8 @@ const contentCache=new Map<string,{value:ContentValidatedNative;bytes:number}>()
 function contentKey(input:RetainedNativeEvidence):string {
   const contentHash=(text:string)=>createHash('sha256').update(text,'utf16le').digest('hex');
   return sha(JSON.stringify({version:1,target:input.target,source:contentHash(input.sourceJson),reports:input.reports.map(contentHash),
-    ancestors:(input.nativeSourceJsons??[]).map(contentHash),materials:(input.recoveryMaterials??[]).map(row=>[row.sha256,contentHash(row.text)])}));
+    ancestors:(input.nativeSourceJsons??[]).map(contentHash),admissions:(input.admissionSourceJsons??[]).map(contentHash),
+    materials:(input.recoveryMaterials??[]).map(row=>[row.sha256,contentHash(row.text)])}));
 }
 export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): ContentValidatedNative {
   try {
@@ -329,6 +393,15 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
     if(cached){contentCache.delete(cacheKey);contentCache.set(cacheKey,cached);return structuredClone(cached.value);}
 
     requireSource(Array.isArray(input.reports));
+    requireSource(Array.isArray(input.admissionSourceJsons ?? []));
+    let admissionSourceBytes = 0;
+    const admissionSnapshots = new Map((input.admissionSourceJsons ?? []).map(raw => {
+      requireSource(typeof raw === 'string');
+      admissionSourceBytes += Buffer.byteLength(raw);
+      requireSource(admissionSourceBytes <= MAX_BYTES);
+      return [sha(raw), raw] as const;
+    }));
+    requireSource(admissionSnapshots.size === (input.admissionSourceJsons ?? []).length);
     const lineage = verifyNativeRecoveryLineage(input.sourceJson, input.target, input.nativeSourceJsons);
     const state = lineage.state;
     const reports = new Map(input.reports.map(raw => {
@@ -336,7 +409,12 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
       return [sha(raw), raw] as const;
     }));
     requireSource(reports.size === input.reports.length);
-    const snapshots = new Map((input.nativeSourceJsons ?? []).map(raw => [sha(raw), raw]));
+    const snapshots = new Map([...(input.nativeSourceJsons ?? []), ...admissionSnapshots.values()]
+      .map(raw => [sha(raw), raw] as const));
+    const referencedAdmissionSources = new Set(state.rounds.flatMap(round =>
+      round.admission ? [round.admission.sourceStateSha256] : []));
+    requireSource(referencedAdmissionSources.size === admissionSnapshots.size &&
+      [...referencedAdmissionSources].every(digest => admissionSnapshots.has(digest)));
     const sources: RetainedSources = { reports, snapshots, usedReports: new Set(), pathRequirements: [] };
     // Released cycle-v2 has ordinary legacy rounds, not a semantic ledger.
     // nativeSource rejects semantic fields in that disjoint producer format.
@@ -375,8 +453,15 @@ export function validateRetainedNativeEvidence(input: RetainedNativeEvidence): C
       if (!legacyOrigin) validateSemanticState(lineage.original, sources);
       // Only exact predecessor rounds are legacy; added rounds still require
       // the full immutable report, sighting membership and cache validation.
-      validateSemanticState(state, sources, legacyOrigin ? lineage.original : undefined,
-        recoveredDismissalsByRound(state, input.recoveryMaterials ?? [], snapshots));
+      // Released cycle-v2 roots have no semantic sightings or report bindings.
+      // Their exact predecessor bytes, anchors, receipts and reports were
+      // validated above; descendants do not invent a semantic ledger merely
+      // to cross the recovery boundary.
+      if (legacyOrigin && state.sightings === undefined) validateSightinglessLegacyEvolution(state, lineage.original);
+      if (!legacyOrigin || state.sightings !== undefined) {
+        validateSemanticState(state, sources, legacyOrigin ? lineage.original : undefined,
+          recoveredDismissalsByRound(state, input.recoveryMaterials ?? [], snapshots));
+      }
     }
     requireSource(sources.usedReports.size === reports.size);
     const legacyClaims: LegacyClaimEvidence[] = Object.values(state.findings).filter(entry => entry.claimDescriptor === undefined).map(entry => {

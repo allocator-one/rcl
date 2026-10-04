@@ -268,9 +268,9 @@ describe('reconciled hard-failure stale continuation', () => {
     }],
   ])('blocks %s before any claim or provider call', async (_label,mutate) => {
     const f = await reconciledSpecial(); await mutate(f);
-    const before = await loadConvergeAttemptState(f.dir,f.target);
+    const before = await readFile(f.attemptsPath);
     await expect(previewStaleReport({...f.selection,retryReason},f.dir)).rejects.toThrow();
-    expect(await loadConvergeAttemptState(f.dir,f.target)).toEqual(before);
+    expect(await readFile(f.attemptsPath)).toEqual(before);
     expect(f.options.run).toHaveBeenCalledOnce();
   });
 
