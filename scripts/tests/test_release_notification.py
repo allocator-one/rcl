@@ -255,13 +255,15 @@ class ReleaseNotificationTest(unittest.TestCase):
         limited = n.NotificationError('Request failed with HTTP 429', transient=True,
                                       retry_after=n.NPM_VISIBILITY_SECONDS + 1)
         with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=[limited]), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
                 self.assertRaisesRegex(n.NotificationError, 'HTTP 429'):
             n.published_release('@allocator-one/rcl', '4.1.6')
         self.assertEqual(clock.sleeps, [])
+        self.assertIn(f'npm asked to wait {n.NPM_VISIBILITY_SECONDS + 1}s', stderr.getvalue())
 
     def test_request_reads_retry_after(self):
         clock = FakeClock()
-        cases = [('120', 120), (' 7 ', 7), ('0', 0), ('9' * 40, 10 ** 9),
+        cases = [('120', 120), (' 7 ', 7), ('0', 0), ('000', 0), ('0000000001', 1), ('9' * 40, 10 ** 9),
                  (email.utils.formatdate(clock.time() + 90, usegmt=True), 90),
                  (email.utils.formatdate(clock.time() - 90, usegmt=True), 0),
                  ('soon', None), ('-5', None), ('1.5', None), (None, None)]

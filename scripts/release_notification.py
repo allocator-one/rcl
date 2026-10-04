@@ -81,8 +81,9 @@ def retry_after_seconds(headers):
         return None
     value = value.strip()
     if re.fullmatch(r'[0-9]+', value):
+        digits = value.lstrip('0') or '0'
         # Longer values are far past any wait we accept; this also keeps int() inside its digit limit.
-        return int(value) if len(value) <= 9 else 10 ** 9
+        return int(digits) if len(digits) <= 9 else 10 ** 9
     try:
         when = email.utils.parsedate_to_datetime(value)
         if when.tzinfo is None:
@@ -154,6 +155,9 @@ def published_release(name, version):
         except NotificationError as error:
             delay = max(NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)], error.retry_after or 0)
             if not error.transient or time.monotonic() + delay > deadline:
+                if error.transient and error.retry_after:
+                    print(f'npm asked to wait {error.retry_after}s before retrying {name}@{version}, '
+                          'past the npm visibility window; giving up.', file=sys.stderr)
                 raise
             print(f'npm does not serve {name}@{version} yet ({error}); retrying in {delay}s.', file=sys.stderr)
             time.sleep(delay)
