@@ -58,6 +58,7 @@ const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * are dropped (the lane is a bonus, never load-bearing).
  */
 export const MAX_ASYNC_CALLS_PER_ROUND = 8;
+const MAX_ASYNC_RESULT_BYTES = 8 * 1024 * 1024;
 
 /** Split assignments so async models never sit on the blocking path. */
 export function partitionAsyncAssignments<A extends { model: string }>(
@@ -331,6 +332,18 @@ export interface AsyncResultReference {
   bytesBase64: string;
 }
 
+async function readStableAsyncResult(path: string): Promise<Buffer> {
+  try {
+    return (await readStable(path, MAX_ASYNC_RESULT_BYTES)).raw;
+  } catch (error) {
+    if ((error as Error).message === 'changing_source' ||
+        (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('async_resume_result_changed');
+    }
+    throw new Error('async_resume_result_invalid');
+  }
+}
+
 /** Immutable read-only snapshot for a target-locked interrupted-launch resume. */
 export async function snapshotAsyncResults(
   storeDir: string,
@@ -351,16 +364,7 @@ export async function snapshotAsyncResults(
   const reviews: ModelReview[] = [], reviewBytes: string[] = [], artifacts: AsyncResultReference[] = [];
   for (const name of names) {
     const path = join(storeDir, name);
-    const before = await lstat(path);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > 8 * 1024 * 1024) {
-      throw new Error('async_resume_result_invalid');
-    }
-    const bytes = await readFile(path);
-    const after = await lstat(path);
-    if (before.ino !== after.ino || before.dev !== after.dev || before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
-      throw new Error('async_resume_result_changed');
-    }
+    const bytes = await readStableAsyncResult(path);
     let parsed: unknown;
     try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('async_resume_result_invalid'); }
     if (!isReviewShape(parsed) || parsed.async !== true) throw new Error('async_resume_result_invalid');
@@ -407,7 +411,7 @@ export async function snapshotAsyncHistory(
   let totalBytes = 0;
   for (const name of names) {
     const path = join(storeDir, name);
-    const bytes = await readStableAsyncHistoryResult(path);
+    const bytes = await readStableAsyncResult(path);
     if ((totalBytes += bytes.length) > 20 * 1024 * 1024) throw new Error('async_resume_result_invalid');
     let parsed: unknown;
     try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('async_resume_result_invalid'); }
@@ -428,16 +432,6 @@ export async function snapshotAsyncHistory(
   return { reviews, reviewBytes, artifacts };
 }
 
-async function readStableAsyncHistoryResult(path: string): Promise<Buffer> {
-  try {
-    return (await readStable(path, 8 * 1024 * 1024)).raw;
-  } catch (error) {
-    if ((error as Error).message === 'changing_source' ||
-        (error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('async_resume_result_changed');
-    throw new Error('async_resume_result_invalid');
-  }
-}
-
 /** Remove only the exact archived cycle-history files after a terminal receipt exists. */
 export async function consumeBoundAsyncHistory(storeDir: string, targetKey: string,
   expectedSha256: readonly string[], maxResults: number): Promise<void> {
@@ -455,7 +449,7 @@ export async function consumeBoundAsyncHistory(storeDir: string, targetKey: stri
     const retained = `${artifact.path}.consumed-${randomUUID()}`;
     await rename(artifact.path, retained);
     try {
-      const bytes = await readStableAsyncHistoryResult(retained);
+      const bytes = await readStableAsyncResult(retained);
       if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) {
         throw new Error('async_resume_result_changed');
       }
@@ -488,9 +482,8 @@ export async function consumeBoundAsyncResults(
     const retained = `${artifact.path}.consumed-${randomUUID()}`;
     await rename(artifact.path, retained);
     try {
-      const bytes = await readFile(retained);
+      const bytes = await readStableAsyncResult(retained);
       if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) {
-        await rename(retained, artifact.path);
         throw new Error('async_resume_result_changed');
       }
       await rm(retained, { force: true });
