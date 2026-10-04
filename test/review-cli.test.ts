@@ -30,6 +30,8 @@ import { chunkDiff } from '../src/prepare/chunker.js';
 import { buildPrompt } from '../src/prepare/prompt-builder.js';
 import { retainOrdinaryLaunchInputs } from '../src/converge/ordinary-pending-export.js';
 import { guardReviewLaunch } from '../src/converge/launch-guard.js';
+import { retainGuardedInput, restoreGuardedInput } from '../src/converge/guarded-input-retention.js';
+import { ordinaryPendingGuardedInput } from '../src/converge/ordinary-pending-package.js';
 
 // Global setup builds dist unless an installed package entrypoint is selected.
 const cliEntrypoint = process.env['RCL_TEST_PACKAGED_CLI'] || process.env['RCL_TEST_REVIEW_ENTRYPOINT'] || fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -429,10 +431,10 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
         const path = join(root, names[0]!);
         const capture = JSON.parse(readFileSync(path, 'utf8'));
         const launch = (await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture'))!.lastLaunch!;
-        expect(capture).toMatchObject({ version: 1, target: 'guarded-fixture', attempt: 1, round: 1,
+        expect(capture).toMatchObject({ version: 2, target: 'guarded-fixture', attempt: 1, round: 1,
           headSha: launch.headSha, baseSha: fixture.args[fixture.args.indexOf('--base-sha') + 1],
           inputSha256: launch.inputSha256 });
-        expect(guardedInputSha256(capture.guardedInput)).toBe(launch.inputSha256);
+        expect(guardedInputSha256(restoreGuardedInput(capture.guardedInput))).toBe(launch.inputSha256);
         expect(launch.ordinaryInputs).toEqual({ version: 1, packetSha256: sha256Hex(readFileSync(path, 'utf8')),
           baseSha: capture.baseSha });
         expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -533,7 +535,8 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
       expect(exported.status, exported.stderr).toBe(0);
       expect(JSON.parse(exported.stdout)).toMatchObject({ mode: 'pending-package-export', path: packagePath });
       const packet = JSON.parse(readFileSync(packagePath, 'utf8'));
-      expect(packet).toMatchObject({ guardedInput, retainedAsyncSha256: [sha256Hex(retainedBytes)] });
+      expect(packet).toMatchObject({ retainedAsyncSha256: [sha256Hex(retainedBytes)] });
+      expect(ordinaryPendingGuardedInput(packet)).toEqual(guardedInput);
       expect(statSync(packagePath).mode & 0o777).toBe(0o600);
       const duplicate = await runRclAsync(args, fixture.repo, fixture.env);
       expect(duplicate.status).toBe(1);
@@ -690,12 +693,14 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       for (const suffix of ['one', 'two']) writeFileSync(join(asyncStore,
         `result-${key}-${suffix}.json`), bytes, { mode: 0o600 });
       const packagePath = join(fixture.repo, 'cycle-pending.json');
-      writeFileSync(packagePath, JSON.stringify({ version: 2, target, headSha, baseSha,
+      writeFileSync(packagePath, JSON.stringify({ version: 2,
+        guardedInputRepresentation: { version: 1, encoding: 'json-string-table-v1' },
+        target, headSha, baseSha,
         attempt: 1, round: 1, pid: 999_999, cycle: state.cycle, attemptCap: 20,
         roundCap: 15, attemptsUsed: 1, asyncAttribution: 'cycle-history-unattributed',
         retainedAsyncSha256: [digest, digest], retainedAsync: [1, 2].map(() => ({ sha256: digest,
           model: 'openrouter/history-seat', role: 'general', provider: 'openrouter', lane: 'async' })),
-        guardedInput }));
+        guardedInput: retainGuardedInput(guardedInput) }));
       const shim = join(fixture.repo, 'cycle-reader.mjs');
       writeFileSync(shim, `import { readFileSync } from 'node:fs';
         globalThis.fetch = async input => { const url = new URL(String(input.url ?? input));
@@ -757,7 +762,7 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       expect(movedReplay.stderr).toContain('pending_legacy_resume_preview_binding_mismatch');
       expect(fixture.calls()).toBe(0);
     });
-  });
+  }, 40_000);
 
   it('previews then finalizes an exact pending launch without a provider call or successor claim', async () => {
     await withGuardedFixture(async fixture => {

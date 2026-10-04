@@ -10,6 +10,7 @@ import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch } from '../
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { guardedInputSha256, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { asyncTargetKey, consumeBoundAsyncHistory } from '../../src/dispatch/async-lane.js';
+import { ordinaryPendingGuardedInput } from '../../src/converge/ordinary-pending-package.js';
 
 async function cyclePendingFixture(fixtureOptions: { retainedCount?: number; identicalResults?: boolean } = {}) {
   const common = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-pending-')));
@@ -155,9 +156,24 @@ it('authenticates historical cycle results against the retained roster after the
     asyncDescriptors: [{ model: 'anthropic/current-seat', role: 'general', provider: 'anthropic' }],
     path: outputPath, preview: false });
   expect(result.retainedAsyncSha256).toEqual(fixture.options.retainedAsyncSha256.slice().sort());
-  expect(JSON.parse(await readFile(outputPath, 'utf8'))).toMatchObject({
-    guardedInput: fixture.guardedInput,
+  const compactPackage = JSON.parse(await readFile(outputPath, 'utf8'));
+  expect(compactPackage.guardedInputRepresentation)
+    .toEqual({ version: 1, encoding: 'json-string-table-v1' });
+  expect(ordinaryPendingGuardedInput(compactPackage)).toEqual(fixture.guardedInput);
+
+  const preview = await previewOrdinaryPendingLaunch({ ...fixture.options,
+    migrationPackage: compactPackage, previewMode: 'finalize-only' });
+  const finalized = await finalizeOrdinaryPendingLaunch({
+    gitCommonDir: fixture.common, target: fixture.target, headSha: fixture.headSha,
+    baseSha: fixture.baseSha, pendingInputSha256: fixture.inputSha256,
+    nativeStateSha256: preview.nativeStateSha256, attemptStateSha256: preview.attemptStateSha256,
+    retainedAsyncSha256: fixture.options.retainedAsyncSha256, maxAttempts: 35,
+    migrationPackage: compactPackage, ownerAlive: () => false,
+    cycleRemote: fixture.cycleRemote, loadRetainedAsync: fixture.options.loadRetainedAsync,
+    cycleHistory: fixture.cycleHistory,
   });
+  expect(finalized.receipt).toMatchObject({ version: 2, finalizedAttempt: 1,
+    cycleId: fixture.state.cycle!.id });
 });
 
 it('rejects cycle results outside the authenticated historical roster', async () => {

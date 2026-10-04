@@ -302,6 +302,13 @@ rcl review owner/repo#123 --guarded-converge --converge-target repo-123 \
   [--preview-pending] [original --spec/--roles/--models/--config flags]
 ```
 
+New exports retain guarded input in a compact string table and identify that
+representation with
+`"guardedInputRepresentation":{"version":1,"encoding":"json-string-table-v1"}`.
+Historical unmarked packages with raw guarded input remain accepted. The
+package's top-level `version: 2` continues to identify review-cycle history; it
+does not identify the compact encoding.
+
 Pass the original preparation flags so the guarded-input digest matches, plus
 `--expect-base-sha` naming the current base commit; the export refuses unless
 the resolved base equals it. Export applies only to the latest pending launch
