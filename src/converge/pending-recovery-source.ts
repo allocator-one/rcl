@@ -62,8 +62,9 @@ export function createOrdinaryMigrationSource(input: z.input<typeof ordinaryBody
   return ordinaryMigrationSourceSchema.parse({ ...body, digest: createHash('sha256').update(stableStringify(body)).digest('hex') });
 }
 
-const cycleBodySchema = ordinaryBodySchema.omit({ version: true }).extend({
+const cycleBodySchema = ordinaryBodySchema.omit({ version: true, retainedAsyncSha256: true }).extend({
   version: z.literal(2),
+  retainedAsyncSha256: z.array(digest),
   cycle: nativeReviewCycleSchema,
   cycleId: z.string().uuid(),
   operationId: z.string().uuid(),

@@ -341,7 +341,8 @@ attempt under its explicitly bounded cap. It requires `--retry-reason`,
 
 **Finalize only.** Use `--finalize-pending-only` when recovery must stop at
 that failed/unknown finalization. Like `--resume-pending`, it takes the
-retained async digests with `--resume-async-sha256`. Pass the unchanged cap
+retained async digests with `--resume-async-sha256` (`none` represents an
+authenticated cycle with no completed async artifacts). Pass the unchanged cap
 plus the exact
 `nativeStateSha256` and `attemptStateSha256` returned by its preview as
 `--pending-native-sha256` and `--pending-attempt-sha256`. Apply archives the

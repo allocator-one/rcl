@@ -56,6 +56,7 @@ import {
   MAX_ASYNC_CALLS_PER_ROUND,
   type AsyncResultReference,
   snapshotAsyncResults,
+  snapshotAsyncHistory,
   consumeBoundAsyncResults,
   consumeBoundAsyncHistory,
 } from './dispatch/async-lane.js';
@@ -2270,14 +2271,21 @@ async function executeCouncil(
       cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber, extra.target.headSha ?? '');
     }
     if (opts.resumePending || opts.finalizePendingOnly) {
-      const expectedAsyncSha256 = opts.resumeAsyncSha256!.split(',').map(value => value.trim());
-      if (expectedAsyncSha256.length === 0 || expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-        new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length) {
-        throw new ReviewLaunchRefused('pending_async_binding_invalid', 'Retained async SHA-256 bindings must be unique lowercase 64-character digests.');
+      const asyncBinding = opts.resumeAsyncSha256!.trim();
+      const expectedAsyncSha256 = asyncBinding === 'none'
+        ? [] : asyncBinding.split(',').map(value => value.trim());
+      if (expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value))) {
+        throw new ReviewLaunchRefused('pending_async_binding_invalid',
+          'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" for an empty cycle history.');
       }
       const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
         (await readStable(opts.ordinaryPendingPackage)).text
       ) as OrdinaryPendingPackage;
+      if (migrationPackage?.version !== 2 && (expectedAsyncSha256.length === 0 ||
+          new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length)) {
+        throw new ReviewLaunchRefused('pending_async_binding_invalid',
+          'Ordinary retained async SHA-256 bindings must be non-empty and unique.');
+      }
       if (migrationPackage?.version === 2 && opts.resumePending) {
         throw new ReviewLaunchRefused('cycle_pending_finalize_only',
           'Cycle-backed packages can only terminalize the unknown original attempt. Launch a later successor normally after its terminal receipt verifies.');
@@ -2285,6 +2293,15 @@ async function executeCouncil(
       const loadMigrationRetainedAsync = async (): Promise<AsyncResultReference[]> => {
         if (!migrationPackage) throw new ReviewLaunchRefused('pending_async_missing', 'An ordinary package is required.');
         const store = await resolveExistingAsyncStoreDir();
+        if (migrationPackage.version === 2) {
+          const key = asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
+            extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
+            migrationPackage.cycle!.id);
+          const snapshot = await snapshotAsyncHistory(store, key,
+            (migrationPackage.attemptsUsed! + 1) * MAX_ASYNC_CALLS_PER_ROUND,
+            expectedAsyncSha256);
+          return snapshot.artifacts;
+        }
         const wanted = new Map(migrationPackage.retainedAsync.map(item => [item.sha256, item]));
         const found = new Map<string, AsyncResultReference>();
         for (const name of await readdir(store)) {

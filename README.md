@@ -216,7 +216,7 @@ recovery operations, documented in
 | `--expect-base-sha <sha>` | With `--export-pending-package` only: require the resolved current base to equal this SHA |
 | `--preview-pending` | Authenticate a pending recovery or preview a package export without writes or provider calls |
 | `--ordinary-pending-package <path>` | Immutable pending-launch package for `--resume-pending` or `--finalize-pending-only`; cycle packages are finalize-only |
-| `--resume-pending` / `--resume-async-sha256 <hashes>` | Finalize a dead pending launch and claim one checkpointed retry, retaining the exact async results |
+| `--resume-pending` / `--resume-async-sha256 <hashes>` | Finalize a dead pending launch and claim one checkpointed retry, retaining the exact async results; cycle recovery accepts `none` for no completed async artifacts |
 | `--finalize-pending-only` / `--pending-native-sha256 <digest>` / `--pending-attempt-sha256 <digest>` | Finalize the previewed pending attempt as failed/unknown without claiming a successor |
 
 **Reports.** Every report carries a `run` header: a client run id (UUIDv7),

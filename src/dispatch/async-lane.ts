@@ -423,7 +423,7 @@ export async function snapshotAsyncHistory(
   if (expectedSha256 !== undefined) {
     const expected = [...expectedSha256].sort();
     const actual = artifacts.map(artifact => artifact.sha256).sort();
-    if (expected.length !== new Set(expected).size || expected.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
+    if (expected.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
         expected.length !== actual.length || expected.some((value, index) => value !== actual[index])) {
       throw new Error('async_resume_result_binding_mismatch');
     }
@@ -437,7 +437,13 @@ export async function consumeBoundAsyncHistory(storeDir: string, targetKey: stri
   const snapshot = await snapshotAsyncHistory(storeDir, targetKey, maxResults);
   const expected = [...expectedSha256].sort();
   const actual = snapshot.artifacts.map(item => item.sha256).sort();
-  if (actual.some(digest => !expected.includes(digest))) throw new Error('async_resume_result_binding_mismatch');
+  const remaining = new Map<string, number>();
+  for (const digest of expected) remaining.set(digest, (remaining.get(digest) ?? 0) + 1);
+  for (const digest of actual) {
+    const count = remaining.get(digest) ?? 0;
+    if (count === 0) throw new Error('async_resume_result_binding_mismatch');
+    remaining.set(digest, count - 1);
+  }
   for (const artifact of snapshot.artifacts) {
     const retained = `${artifact.path}.consumed-${randomUUID()}`;
     await rename(artifact.path, retained);

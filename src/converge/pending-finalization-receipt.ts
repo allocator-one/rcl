@@ -33,7 +33,7 @@ const receiptSchema = z.object({
   attemptCap: z.number().int().positive().safe(),
   roundCap: z.number().int().positive().safe(),
   asyncAttribution: z.literal('cycle-history-unattributed'),
-  retainedAsyncSha256: z.array(digest).min(1),
+  retainedAsyncSha256: z.array(digest),
   sourceNativeStateSha256: digest,
   finalizedNativeStateSha256: digest,
   sourceAttemptStateSha256: digest,
@@ -61,8 +61,7 @@ export async function verifyCyclePendingFinalization(common: string, state: Conv
         receipt.prNumber !== state.cycle.prNumber || receipt.roundCap !== state.roundCap ||
         receipt.sourceNativeStateSha256 !== recovery.nativeStateSha256 ||
         receipt.sourceAttemptStateSha256 !== recovery.attemptStateSha256 ||
-        receipt.retainedAsyncSha256.join(',') !== [...recovery.retainedAsyncSha256].sort().join(',') ||
-        new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length) return false;
+        receipt.retainedAsyncSha256.join(',') !== [...recovery.retainedAsyncSha256].sort().join(',')) return false;
     const retainedRoot = join(common, 'rcl-converge-pending-finalizations', packageDigest);
     const [native, attempts, manifest, retainedAttempts, retainedNative] = await Promise.all([
       readStable(convergeRunStatePath(common, state.target)),

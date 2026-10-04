@@ -122,9 +122,11 @@ const ordinaryPendingFinalizationReceiptBodySchema = z.object({
 const cyclePendingFinalizationReceiptBodySchema = ordinaryPendingFinalizationReceiptBodySchema.omit({
   version: true,
   operation: true,
+  retainedAsyncSha256: true,
 }).extend({
   version: z.literal(2),
   operation: z.literal('cycle-pending-finalize-only'),
+  retainedAsyncSha256: z.array(digestSchema),
   cycleId: z.string().uuid(),
   operationId: z.string().uuid(),
   repo: z.string().min(1),
@@ -147,7 +149,8 @@ const ordinaryPendingFinalizationReceiptSchema = z.union([
   }
   if (receipt.nextFreeAttempt !== receipt.finalizedAttempt + 1 ||
       receipt.attemptsUsed !== receipt.finalizedAttempt || receipt.attemptsUsed > receipt.cap ||
-      new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length) {
+      (receipt.version === 1 && (receipt.retainedAsyncSha256.length === 0 ||
+        new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length))) {
     context.addIssue({ code: 'custom', message: 'Pending finalization accounting is inconsistent' });
   }
   if (receipt.version === 2 && (receipt.attemptCap !== receipt.cap || receipt.round > receipt.roundCap)) {
@@ -251,14 +254,17 @@ async function assertCycleRecovery(options: { gitCommonDir: string; target: stri
 
 function validateOptions(input: PendingLegacyResumeOptions): void {
   const hashes = input?.retainedAsyncSha256;
+  const cycleFinalizePreview = input?.migrationPackage?.version === 2 &&
+    input.previewMode === 'finalize-only';
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
     !/^[a-f0-9]{40}$/.test(input.headSha ?? '') ||
     (input.migrationPackage && !/^[a-f0-9]{40}$/.test(input.baseSha ?? '')) ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.recoveryInputSha256 ?? '') ||
     typeof input.retryReason !== 'string' || !input.retryReason.trim() || input.retryReason.length > 500 ||
-    !Array.isArray(hashes) || hashes.length === 0 || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-    new Set(hashes).size !== hashes.length || typeof input.validate !== 'function' ||
+    !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
+    (!cycleFinalizePreview && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
+    typeof input.validate !== 'function' ||
     typeof input.run !== 'function' || typeof input.loadRetainedAsync !== 'function' ||
     (!input.migrationPackage && !input.legacyRetry) ||
     !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 ||
@@ -272,13 +278,15 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
 
 function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
   const hashes = input?.retainedAsyncSha256;
+  const cycleBacked = input?.migrationPackage?.version === 2;
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
     !/^[a-f0-9]{40}$/.test(input.headSha ?? '') || !/^[a-f0-9]{40}$/.test(input.baseSha ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.nativeStateSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.attemptStateSha256 ?? '') ||
-    !Array.isArray(hashes) || hashes.length === 0 || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-    new Set(hashes).size !== hashes.length || typeof input.loadRetainedAsync !== 'function' ||
+    !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
+    (!cycleBacked && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
+    typeof input.loadRetainedAsync !== 'function' ||
     (input.writeFinalizedState !== undefined && typeof input.writeFinalizedState !== 'function') ||
     !input.migrationPackage || !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1) {
     fail('invalid_input');
@@ -613,15 +621,23 @@ function validateAsyncArtifacts(source: Pick<PendingRecoverySource, 'retainedAsy
   if (expected.length !== actual.length || expected.some((item, index) => item !== actual[index])) {
     fail('async_binding_mismatch');
   }
+  const actualDescriptors: string[] = [];
   for (const artifact of artifacts) {
     const bytes = Buffer.from(artifact.bytesBase64, 'base64');
     if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) fail('async_binding_mismatch');
     if (packet) {
-      const descriptor = packet.retainedAsync.find(item => item.sha256 === artifact.sha256);
       let row: { model?: unknown; role?: unknown; provider?: unknown };
       try { row = JSON.parse(bytes.toString('utf8')) as typeof row; } catch { fail('async_binding_mismatch'); }
-      if (!descriptor || row.model !== descriptor.model || row.role !== descriptor.role ||
-          row.provider !== descriptor.provider) fail('async_binding_mismatch');
+      actualDescriptors.push(JSON.stringify([artifact.sha256, row.model, row.role, row.provider]));
+    }
+  }
+  if (packet) {
+    const expectedDescriptors = packet.retainedAsync.map(item =>
+      JSON.stringify([item.sha256, item.model, item.role, item.provider])).sort();
+    actualDescriptors.sort();
+    if (expectedDescriptors.length !== actualDescriptors.length ||
+        expectedDescriptors.some((item, index) => item !== actualDescriptors[index])) {
+      fail('async_binding_mismatch');
     }
   }
 }

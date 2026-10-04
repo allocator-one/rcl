@@ -9,8 +9,9 @@
   finalize-only transition archives unattributed async bytes, records the
   blocking outcome as unknown, preserves findings and accounting, and permits
   a later current-head attempt only after its terminal receipt verifies. New
-  cycle launches retain their guarded input before spending the claim
-  (RCL-146).
+  cycle launches retain their guarded input before spending the claim. Cycle
+  history is occurrence-bound, including duplicate-byte results and cycles
+  with no completed async artifacts (RCL-146).
 
 ## 4.5.4 - 2026-10-04
 

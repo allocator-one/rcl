@@ -11,7 +11,7 @@ import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/r
 import { guardedInputSha256, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { asyncTargetKey, consumeBoundAsyncHistory } from '../../src/dispatch/async-lane.js';
 
-async function cyclePendingFixture() {
+async function cyclePendingFixture(fixtureOptions: { retainedCount?: number; identicalResults?: boolean } = {}) {
   const common = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-pending-')));
   onTestFinished(() => rm(common, { recursive: true, force: true }));
   const target = 'allocator-one-9897';
@@ -54,9 +54,10 @@ async function cyclePendingFixture() {
   await writeFile(nativePath, `${JSON.stringify(pending, null, 2)}\n`);
   attempts.attempts[0]!.pid = 999_999;
   await writeFile(convergeAttemptStatePath(common, target), `${JSON.stringify(attempts, null, 2)}\n`);
-  const retained = Array.from({ length: 16 }, (_, index) => {
+  const retained = Array.from({ length: fixtureOptions.retainedCount ?? 16 }, (_, index) => {
     const bytes = JSON.stringify({ model: 'openrouter/moonshotai/kimi-k3', role: 'general',
-      provider: 'openrouter', status: 'success', findings: [], durationMs: index + 1, async: true });
+      provider: 'openrouter', status: 'success', findings: [],
+      durationMs: fixtureOptions.identicalResults ? 1 : index + 1, async: true });
     return { path: join(common, `async-${index}.json`), sha256: sha256Hex(bytes),
       bytesBase64: Buffer.from(bytes).toString('base64') };
   });
@@ -112,6 +113,68 @@ it('exports every cycle artifact as unattributed history without requiring a leg
     cap: 35, roundCap: 30, cycleId: fixture.state.cycle!.id,
     operationId: fixture.state.cycle!.operationId });
   expect(result.retainedAsyncSha256).toHaveLength(16);
+});
+
+it('preserves duplicate-byte cycle artifacts as an exact multiset through finalization and cleanup', async () => {
+  const fixture = await cyclePendingFixture({ retainedCount: 2, identicalResults: true });
+  const outputDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-package-')));
+  onTestFinished(() => rm(outputDir, { recursive: true, force: true }));
+  const result = await exportOrdinaryPendingPackage({ gitCommonDir: fixture.common,
+    target: fixture.target, headSha: fixture.headSha, baseSha: fixture.baseSha,
+    expectedBaseSha: fixture.baseSha, expectedRound: 1, guardedInput: fixture.guardedInput,
+    asyncStoreDir: fixture.asyncStoreDir, asyncTargetKey: fixture.asyncKey,
+    asyncDescriptors: [{ model: 'openrouter/moonshotai/kimi-k3', role: 'general', provider: 'openrouter' }],
+    path: join(outputDir, 'pending.json'), preview: true });
+  expect(result.retainedAsyncSha256).toEqual([
+    fixture.options.retainedAsyncSha256[0], fixture.options.retainedAsyncSha256[0],
+  ]);
+
+  const preview = await previewOrdinaryPendingLaunch({ ...fixture.options, previewMode: 'finalize-only' });
+  const finalized = await finalizeOrdinaryPendingLaunch({
+    gitCommonDir: fixture.common, target: fixture.target, headSha: fixture.headSha,
+    baseSha: fixture.baseSha, pendingInputSha256: fixture.inputSha256,
+    nativeStateSha256: preview.nativeStateSha256, attemptStateSha256: preview.attemptStateSha256,
+    retainedAsyncSha256: fixture.options.retainedAsyncSha256, maxAttempts: 35,
+    migrationPackage: fixture.options.migrationPackage, ownerAlive: () => false,
+    cycleRemote: fixture.cycleRemote, loadRetainedAsync: fixture.options.loadRetainedAsync,
+  });
+  expect(finalized.receipt.retainedAsyncSha256).toHaveLength(2);
+  await consumeBoundAsyncHistory(fixture.asyncStoreDir, fixture.asyncKey,
+    fixture.options.retainedAsyncSha256, 16);
+  await expect((await import('node:fs/promises')).readdir(fixture.asyncStoreDir)).resolves.toEqual([]);
+});
+
+it('terminalizes a cycle with zero completed async artifacts', async () => {
+  const fixture = await cyclePendingFixture({ retainedCount: 0 });
+  const outputDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-package-')));
+  onTestFinished(() => rm(outputDir, { recursive: true, force: true }));
+  const exported = await exportOrdinaryPendingPackage({ gitCommonDir: fixture.common,
+    target: fixture.target, headSha: fixture.headSha, baseSha: fixture.baseSha,
+    expectedBaseSha: fixture.baseSha, expectedRound: 1, guardedInput: fixture.guardedInput,
+    asyncStoreDir: fixture.asyncStoreDir, asyncTargetKey: fixture.asyncKey,
+    asyncDescriptors: [{ model: 'openrouter/moonshotai/kimi-k3', role: 'general', provider: 'openrouter' }],
+    path: join(outputDir, 'pending.json'), preview: true });
+  expect(exported.retainedAsyncSha256).toEqual([]);
+
+  const preview = await previewOrdinaryPendingLaunch({ ...fixture.options, previewMode: 'finalize-only' });
+  const finalized = await finalizeOrdinaryPendingLaunch({
+    gitCommonDir: fixture.common, target: fixture.target, headSha: fixture.headSha,
+    baseSha: fixture.baseSha, pendingInputSha256: fixture.inputSha256,
+    nativeStateSha256: preview.nativeStateSha256, attemptStateSha256: preview.attemptStateSha256,
+    retainedAsyncSha256: [], maxAttempts: 35,
+    migrationPackage: fixture.options.migrationPackage, ownerAlive: () => false,
+    cycleRemote: fixture.cycleRemote, loadRetainedAsync: fixture.options.loadRetainedAsync,
+  });
+  expect(finalized.receipt.retainedAsyncSha256).toEqual([]);
+  await consumeBoundAsyncHistory(fixture.asyncStoreDir, fixture.asyncKey, [], 16);
+  await expect((await import('node:fs/promises')).readdir(fixture.asyncStoreDir)).resolves.toEqual([]);
+  const successor = vi.fn(async () => ({ runId: randomUUID(), reportJsonSha256: '2'.repeat(64),
+    successfulReviews: 2, totalReviews: 2, deliveryPending: false }));
+  await guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: 'f'.repeat(40), inputSha256: '1'.repeat(64),
+    retryReason: 'Continue at the current exact head after empty-history finalization.',
+    cycleRemote: fixture.cycleRemote, validate: async () => {}, run: successor });
+  expect(successor).toHaveBeenCalledOnce();
 });
 
 it('terminalizes a dead cycle attempt with unattributed async history and permits only a later successor', async () => {

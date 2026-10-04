@@ -313,7 +313,6 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
       writeFileSync(join(fixture.repo, '.harness-cli', 'config.json'), '{}');
       const packagePath = join(fixture.repo, 'cycle-pending.json');
       const headSha = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
-      const retained = 'f'.repeat(64);
       writeFileSync(packagePath, JSON.stringify({
         version: 2, target: 'guarded-fixture', headSha, baseSha: headSha,
         attempt: 1, round: 1, pid: 999_999, attemptCap: 20, roundCap: 15, attemptsUsed: 1,
@@ -323,8 +322,7 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
           repo: 'allocator-one/rcl', prNumber: 146, url: 'https://harness.example',
           archivePath: '/private/tmp/cycle.archive.json', archiveSha256: 'a'.repeat(64),
           history: { attempts: 0, rounds: 0 } },
-        retainedAsyncSha256: [retained], retainedAsync: [{ sha256: retained,
-          model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }],
+        retainedAsyncSha256: [], retainedAsync: [],
         guardedInput: { head: headSha, kind: 'patch', repo: 'allocator-one/rcl', pr: 146,
           diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [{ model: 'openai/async',
             role: 'general', provider: 'openai', lane: 'async' }], prompts: [],
@@ -332,7 +330,7 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
       }));
       const args = fixture.args.filter(argument => argument !== '--no-telemetry');
       const result = await runRclAsync([...args, '--resume-pending',
-        '--ordinary-pending-package', packagePath, '--resume-async-sha256', retained,
+        '--ordinary-pending-package', packagePath, '--resume-async-sha256', 'none',
         '--retry-reason', 'Terminalize the unknown launch before any successor.',
         '--max-attempts', '20', '--evidence-required'], fixture.repo, {
           ...fixture.env, HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture',
