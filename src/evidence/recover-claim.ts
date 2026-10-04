@@ -370,7 +370,7 @@ function existingSplit(selection: PublicClaimSelection,material: Material,histor
   let sourceState=decode(nativeJson) as Record<string,any>;
   const seen=new Set<string>();
   for(;;) {
-    const digest=sourceState.version===3? sourceState.recovery.operations.at(-1).sourceSha256:sourceState.version===2? sourceState.migration?.sourceSha256:undefined;
+    const digest=sourceState.version===3? sourceState.recovery?.operations?.at(-1)?.sourceSha256:sourceState.version===2? sourceState.migration?.sourceSha256:undefined;
     if(!digest)
       break;
     const text=snapshotMap.get(digest);

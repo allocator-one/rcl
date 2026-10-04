@@ -107,9 +107,8 @@ export function assertHistoryExtension(before: ClaimHistoryContent,after: ClaimH
  * additive foreign history; it never discards original or derived fields. */
 export function assertOwnedSplitSourceExtension(source: CarrierSourceInventory,current: CarrierSourceInventory|undefined,
   acceptedSplits: StoredEventReceipt[],owned: Map<string,string>,actor: string): void {
-    if(isDeepStrictEqual(source,current)) return;
-    const expected=structuredClone(source);
-    for(const receipt of acceptedSplits.filter(r=>r.kind==='finding_claim_split'&&r.run_id===source.selector.scope.run_id)) {
+  const expected=structuredClone(source);
+  for(const receipt of acceptedSplits.filter(r=>r.kind==='finding_claim_split'&&r.run_id===source.selector.scope.run_id)) {
       const event=owned.get(receipt.id);
       if(!event||!matchesPreparedEventReceipt(receipt,event,source.selector.scope,actor)) throw new Error('claim_receipt_conflict');
       const payload=receipt.payload;
@@ -136,7 +135,7 @@ export function assertOwnedSplitSourceExtension(source: CarrierSourceInventory,c
       // cannot follow it. Other kinds of verdict changes remain unexplained.
       if(Object.hasOwn(findings[0],'verdict')) findings[0].verdict=null;
     }
-    if(!isDeepStrictEqual(expected,current)) throw new Error('claim_history_changed_since_preview');
+  if(!isDeepStrictEqual(expected,current)) throw new Error('claim_history_changed_since_preview');
 }
 export function uniqueReceipts(rows: StoredEventReceipt[]): StoredEventReceipt[] {
   const result=new Map<string,StoredEventReceipt>();
