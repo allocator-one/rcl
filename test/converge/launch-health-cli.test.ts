@@ -139,7 +139,7 @@ async function fixture(work: (f: { dir: string; common: string; args: string[]; 
 }
 
 describe('ordinary launch health through the public CLI', () => {
-  it('previews and applies an ordinary dead-owner package through the public CLI', async () => {
+  it('previews and applies a version-1 dead-owner package with explicit PR attribution', async () => {
     await fixture(async f => {
       const input = { head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.dir, encoding: 'utf8' }).trim(),
         kind: 'patch', repo: 'allocator-one/rcl', pr: 1, diff: 'a'.repeat(64), config: 'b'.repeat(64),
@@ -170,6 +170,7 @@ describe('ordinary launch health through the public CLI', () => {
       const attemptPath = convergeAttemptStatePath(f.common, 'health-fixture');
       const before = [await readFile(nativePath), await readFile(attemptPath), asyncBytes];
       const args = f.args.filter(arg => arg !== '--no-telemetry').concat(['--resume-pending', '--ordinary-pending-package', 'ordinary.json', '--preview-pending', '--resume-async-sha256', asyncSha, '--retry-reason', 'dead owner', '--max-attempts', '2', '--evidence-required']);
+      expect(args).toContain('--for-pr');
       const telemetryEnv = { RCL_TELEMETRY: 'full', HARNESS_API_TOKEN: 'aone_SYNTHETIC_TEST_TOKEN', HARNESS_API_URL: f.harnessUrl };
       const result = await f.run(args, telemetryEnv);
       expect(result.status, result.stderr).toBe(0); expect(f.calls()).toBe(0);

@@ -18,6 +18,14 @@ it('requires scoped capability and exact current head before accepting active me
   expect(requests[0].url).toBe('https://harness.example/api/v1/reviews/prs/allocator-one/rcl/42');
 });
 it.each([
+  { liveHead: 'b'.repeat(40), merged: false },
+  { liveHead: head, merged: true },
+])('refuses changed or merged PR membership before returning the active cycle', async ({ liveHead, merged }) => {
+  const { remote } = fixture(() => ({ status: 200, body: { data: { repo: 'allocator-one/rcl', pr_number: 42,
+    cycle_protocol: 1, active_cycle: receipt, head: { sha: liveHead, merged } } } }));
+  await expect(remote.current()).rejects.toThrow('fresh_review_head_changed');
+});
+it.each([
   { repo: 'other/rcl', pr_number: 42, cycle_protocol: 1 },
   { repo: 'allocator-one/rcl', pr_number: 43, cycle_protocol: 1 },
   { repo: 'allocator-one/rcl', pr_number: 42 },

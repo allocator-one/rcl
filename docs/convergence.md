@@ -355,7 +355,14 @@ plus the exact
 `--pending-native-sha256` and `--pending-attempt-sha256`. Apply archives the
 retained async artifacts idempotently and returns a source-bound receipt while
 leaving the attempt counter, cap, round history and next-free ordinal
-unchanged. Repeating the command reads back the same receipt; it never creates
+unchanged. If a cycle-backed launch is historical and the pull request has
+advanced, keep `--head-sha` and `--expect-head-sha` bound to the historical
+launch and pass the exact current open pull-request head separately as
+`--expect-pr-head-sha`, with `--for-pr` naming that PR. Preview returns a
+`previewSha256` that binds both heads and all authenticated recovery inputs;
+apply must pass it as `--pending-preview-sha256`. A changed flag or PR head
+requires a new preview. Both bindings are checked before recovery writes.
+Repeating the command reads back the same receipt; it never creates
 a successor claim, checkpoint, reviewer callback or provider call. Receipt
 readback validates either the exact finalized state or a monotonic successor
 against retained source snapshots. An exact legacy receipt without those

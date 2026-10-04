@@ -288,6 +288,47 @@ describe('spool → worker → collect round trip', () => {
     await expect(snapshotAsyncResults(dir, targetKey)).rejects.toThrow('async_resume_result_limit');
   });
 
+  it('bounds a legacy result that grows after directory discovery', async () => {
+    const targetKey = asyncTargetKey('repo#bounded-legacy-snapshot');
+    const path = join(dir, `result-${targetKey}-one.json`);
+    await writeFile(path, JSON.stringify({
+      model: spec.model, role: spec.role, provider: spec.provider,
+      status: 'success', findings: [], durationMs: 1, async: true,
+    }));
+    const actualFiles = await vi.importActual<typeof import('../../src/telemetry/recovery/files.js')>(
+      '../../src/telemetry/recovery/files.js');
+    vi.mocked(recoveryFiles.readStable).mockImplementationOnce(async (...args) => {
+      await writeFile(path, Buffer.alloc(8 * 1024 * 1024 + 1));
+      return actualFiles.readStable(...args);
+    });
+
+    await expect(snapshotAsyncResults(dir, targetKey))
+      .rejects.toThrow('async_resume_result_invalid');
+    expect(recoveryFiles.readStable).toHaveBeenCalledWith(path, 8 * 1024 * 1024);
+  });
+
+  it('bounds the legacy artifact reread and restores exact bytes after cleanup refusal', async () => {
+    const targetKey = asyncTargetKey('repo#bounded-legacy-cleanup');
+    const bytes = JSON.stringify({
+      model: spec.model, role: spec.role, provider: spec.provider,
+      status: 'success', findings: [], durationMs: 1, async: true,
+    });
+    const path = join(dir, `result-${targetKey}-one.json`);
+    await writeFile(path, bytes);
+    const snapshot = await snapshotAsyncResults(dir, targetKey);
+    const actualFiles = await vi.importActual<typeof import('../../src/telemetry/recovery/files.js')>(
+      '../../src/telemetry/recovery/files.js');
+    vi.mocked(recoveryFiles.readStable)
+      .mockImplementationOnce(actualFiles.readStable)
+      .mockRejectedValueOnce(new Error('oversized'));
+
+    await expect(consumeBoundAsyncResults(dir, targetKey,
+      snapshot.artifacts.map(artifact => artifact.sha256)))
+      .rejects.toThrow('async_resume_result_invalid');
+    expect(await readFile(path, 'utf8')).toBe(bytes);
+    expect((await readdir(dir)).filter(name => name.includes('.consumed-'))).toEqual([]);
+  });
+
   it('bounds each historical result while reading retained cycle evidence', async () => {
     const targetKey = asyncTargetKey('repo#bounded-cycle-history');
     await writeFile(join(dir, `result-${targetKey}-oversized.json`), Buffer.alloc(8 * 1024 * 1024 + 1));
