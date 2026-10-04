@@ -334,7 +334,9 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
       const result = await runRclAsync([...args, '--resume-pending',
         '--ordinary-pending-package', packagePath, '--resume-async-sha256', retained,
         '--retry-reason', 'Terminalize the unknown launch before any successor.',
-        '--max-attempts', '20', '--evidence-required'], fixture.repo, fixture.env);
+        '--max-attempts', '20', '--evidence-required'], fixture.repo, {
+          ...fixture.env, HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture',
+        });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('cycle_pending_finalize_only');
       expect(fixture.calls()).toBe(0);
