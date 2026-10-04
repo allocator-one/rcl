@@ -1,5 +1,7 @@
 import base64
 import contextlib
+import email.message
+import email.utils
 import io
 import os
 from unittest.mock import patch
@@ -228,13 +230,78 @@ class ReleaseNotificationTest(unittest.TestCase):
         self.assertGreater(sum(clock.sleeps) + 60, n.NPM_VISIBILITY_SECONDS)
 
     def test_npm_wait_retries_only_transient_failures(self):
-        for permanent in [n.NotificationError('Request failed with HTTP 403'), n.NotificationError('Invalid JSON response')]:
+        for permanent in [n.NotificationError('Request failed with HTTP 403', retry_after=5),
+                          n.NotificationError('Invalid JSON response')]:
             clock = FakeClock()
             with self.subTest(error=str(permanent)), patch.object(n, 'time', clock), \
                     patch.object(n, 'json_response', side_effect=[permanent]), \
                     self.assertRaisesRegex(n.NotificationError, str(permanent)):
                 n.published_release('@allocator-one/rcl', '4.1.6')
             self.assertEqual(clock.sleeps, [])
+
+    def test_npm_wait_honors_a_longer_retry_after(self):
+        published = {'versions': {'4.1.6': {'gitHead': 'a' * 40}}}
+        for retry_after, sleeps in [(45, [45]), (3, [10]), (None, [10])]:
+            clock = FakeClock()
+            limited = n.NotificationError('Request failed with HTTP 429', transient=True, retry_after=retry_after)
+            with self.subTest(retry_after=retry_after), patch.object(n, 'time', clock), \
+                    patch.object(n, 'json_response', side_effect=[limited, published]), \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(n.published_release('@allocator-one/rcl', '4.1.6'), (published, {}))
+            self.assertEqual(clock.sleeps, sleeps)
+            self.assertIn(f'retrying in {sleeps[0]}s', stderr.getvalue())
+
+    def test_retry_after_past_the_npm_window_fails_closed_at_once(self):
+        clock = FakeClock()
+        limited = n.NotificationError('Request failed with HTTP 429', transient=True,
+                                      retry_after=n.NPM_VISIBILITY_SECONDS + 1)
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=[limited]), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaisesRegex(n.NotificationError, 'HTTP 429'):
+            n.published_release('@allocator-one/rcl', '4.1.6')
+        self.assertEqual(clock.sleeps, [])
+        self.assertIn(f'npm asked to wait {n.NPM_VISIBILITY_SECONDS + 1}s', stderr.getvalue())
+
+    def test_a_short_retry_after_is_not_blamed_when_the_window_runs_out(self):
+        # Five seconds remain: the scheduled 10 s wait, not npm's 3 s, ends the window.
+        clock = FakeClock()
+        limited = n.NotificationError('Request failed with HTTP 429', transient=True, retry_after=3)
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=[limited]), \
+                patch.object(n, 'NPM_VISIBILITY_SECONDS', 5), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaisesRegex(n.NotificationError, 'HTTP 429'):
+            n.published_release('@allocator-one/rcl', '4.1.6')
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(stderr.getvalue(), '')
+        # Nor when npm asks for longer but the schedule had already run out.
+        limited.retry_after = 30
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=[limited]), \
+                patch.object(n, 'NPM_VISIBILITY_SECONDS', 5), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaisesRegex(n.NotificationError, 'HTTP 429'):
+            n.published_release('@allocator-one/rcl', '4.1.6')
+        self.assertEqual(stderr.getvalue(), '')
+
+    def test_request_reads_retry_after(self):
+        clock = FakeClock()
+        cases = [('120', 120), (' 7 ', 7), ('0', 0), ('000', 0), ('0000000001', 1), ('9' * 40, 10 ** 9),
+                 (email.utils.formatdate(clock.time() + 90, usegmt=True), 90),
+                 (email.utils.formatdate(clock.time() - 90, usegmt=True), 0),
+                 (email.utils.formatdate(clock.time() + 60), 60),  # '-0000': no zone, read as UTC
+                 ('Fri, 31 Dec 99999 23:59:59 GMT', None),
+                 ('soon', None), ('-5', None), ('1.5', None), (None, None)]
+        for value, expected in cases:
+            headers = email.message.Message()
+            if value is not None:
+                headers['Retry-After'] = value
+            failure = urllib.error.HTTPError('https://registry.npmjs.org/x', 429, 'error', headers, None)
+            with self.subTest(value=value), patch.object(n, 'time', clock), \
+                    patch.object(n.urllib.request, 'build_opener') as opener, \
+                    self.assertRaises(n.NotificationError) as raised:
+                opener.return_value.open.side_effect = failure
+                n.request('https://registry.npmjs.org/x')
+            self.assertEqual(raised.exception.retry_after, expected)
+            self.assertTrue(raised.exception.transient)
 
     def test_request_marks_lag_like_failures_transient(self):
         def failure(code):

@@ -7,9 +7,12 @@ No third-party Python dependencies and no release/package code execution.
 from __future__ import annotations
 
 import base64
+import datetime
+import email.utils
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import sys
@@ -28,6 +31,7 @@ MAX_RESPONSE = 16 * 1024 * 1024
 NPM_REGISTRY = 'https://registry.npmjs.org'
 # The registry and its CDN can serve a fresh publish's metadata minutes after the
 # tarball, so a release that is not visible yet is retried for a bounded window.
+# A Retry-After from the registry lengthens the next wait but never the window.
 NPM_VISIBILITY_SECONDS = 600
 NPM_RETRY_DELAYS = (10, 20, 30, 60)
 SLSA_V1 = 'https://slsa.dev/provenance/v1'
@@ -38,11 +42,13 @@ class NotificationError(Exception):
 
     `transient` marks failures that a later identical request can clear: a
     missing resource, rate limiting, a server error or a network failure.
+    `retry_after` is the wait in seconds the server asked for, if any.
     """
 
-    def __init__(self, message, *, transient=False):
+    def __init__(self, message, *, transient=False, retry_after=None):
         super().__init__(message)
         self.transient = transient
+        self.retry_after = retry_after
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -60,11 +66,31 @@ def request(url, *, headers=None, body=None):
             return data
     except urllib.error.HTTPError as error:
         raise NotificationError(f'Request failed with HTTP {error.code}',
-                                transient=error.code in (404, 429) or error.code >= 500) from None
+                                transient=error.code in (404, 429) or error.code >= 500,
+                                retry_after=retry_after_seconds(error.headers)) from None
     except OSError:
         raise NotificationError('Request failed or timed out', transient=True) from None
     except ValueError:
         raise NotificationError('Request failed or timed out') from None
+
+
+def retry_after_seconds(headers):
+    """Return the wait a Retry-After header asks for, or None when absent or unreadable."""
+    value = headers.get('Retry-After') if headers is not None else None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if re.fullmatch(r'[0-9]+', value):
+        digits = value.lstrip('0') or '0'
+        # Longer values are far past any wait we accept; this also keeps int() inside its digit limit.
+        return int(digits) if len(digits) <= 9 else 10 ** 9
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        return max(0, math.ceil(when.timestamp() - time.time()))
+    except Exception:  # The header is untrusted; older Pythons raise more than ValueError on bad dates.
+        return None
 
 
 def json_response(url, *, headers=None):
@@ -109,7 +135,8 @@ def published_release(name, version):
     """Return the npm metadata and attestations once the registry lists the release.
 
     A missing version and transient lookup failures are retried until
-    NPM_VISIBILITY_SECONDS have passed. Any other failure, and the identity and
+    NPM_VISIBILITY_SECONDS have passed, waiting at least as long as a
+    Retry-After header asks. Any other failure, and the identity and
     provenance checks that run afterwards, fail closed at once.
     """
     registry = f'{NPM_REGISTRY}/{urllib.parse.quote(name, safe="")}'
@@ -126,8 +153,12 @@ def published_release(name, version):
             attestation = json_response(attestation_url(name, version)) if package.get('gitHead') is None else {}
             return metadata, attestation
         except NotificationError as error:
-            delay = NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)]
+            scheduled = NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)]
+            delay = max(scheduled, error.retry_after or 0)
             if not error.transient or time.monotonic() + delay > deadline:
+                if error.transient and time.monotonic() + scheduled <= deadline:
+                    print(f'npm asked to wait {delay}s before retrying {name}@{version}, '
+                          'past the npm visibility window; giving up.', file=sys.stderr)
                 raise
             print(f'npm does not serve {name}@{version} yet ({error}); retrying in {delay}s.', file=sys.stderr)
             time.sleep(delay)
