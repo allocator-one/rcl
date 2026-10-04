@@ -10,6 +10,7 @@ import type { ReviewAdapter } from './adapter.js';
 import type { ReasoningEffort } from '../config/schema.js';
 import { defaultAdapterFactory } from './runner.js';
 import { resolveGitCommonDir } from '../converge/attempt-budget.js';
+import { readStable } from '../telemetry/recovery/files.js';
 
 /**
  * Async review lane (RCL-25). Async models are fired with the round but never
@@ -406,13 +407,15 @@ export async function snapshotAsyncHistory(
   let totalBytes = 0;
   for (const name of names) {
     const path = join(storeDir, name);
-    const before = await lstat(path);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > 8 * 1024 * 1024 ||
-        (totalBytes += before.size) > 20 * 1024 * 1024) throw new Error('async_resume_result_invalid');
-    const bytes = await readFile(path);
-    const after = await lstat(path);
-    if (before.ino !== after.ino || before.dev !== after.dev || before.size !== after.size ||
-        before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error('async_resume_result_changed');
+    let bytes: Buffer;
+    try {
+      bytes = (await readStable(path, 8 * 1024 * 1024)).raw;
+    } catch (error) {
+      if ((error as Error).message === 'changing_source' ||
+          (error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('async_resume_result_changed');
+      throw new Error('async_resume_result_invalid');
+    }
+    if ((totalBytes += bytes.length) > 20 * 1024 * 1024) throw new Error('async_resume_result_invalid');
     let parsed: unknown;
     try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('async_resume_result_invalid'); }
     if (!isReviewShape(parsed) || parsed.async !== true) throw new Error('async_resume_result_invalid');

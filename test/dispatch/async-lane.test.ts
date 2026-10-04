@@ -15,6 +15,7 @@ import {
   runAsyncWorker,
   collectAsyncResults,
   snapshotAsyncResults,
+  snapshotAsyncHistory,
   consumeBoundAsyncResults,
   publishAsyncReview,
   workerEnv,
@@ -282,6 +283,14 @@ describe('spool → worker → collect round trip', () => {
     }
 
     await expect(snapshotAsyncResults(dir, targetKey)).rejects.toThrow('async_resume_result_limit');
+  });
+
+  it('bounds each historical result while reading retained cycle evidence', async () => {
+    const targetKey = asyncTargetKey('repo#bounded-cycle-history');
+    await writeFile(join(dir, `result-${targetKey}-oversized.json`), Buffer.alloc(8 * 1024 * 1024 + 1));
+
+    await expect(snapshotAsyncHistory(dir, targetKey, 8))
+      .rejects.toThrow('async_resume_result_invalid');
   });
 
   it('consumes only the exact reviewed async result set after terminal recovery', async () => {
