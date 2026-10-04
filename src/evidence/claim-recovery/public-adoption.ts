@@ -69,6 +69,8 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
   const pins=[...(material.adoption?.pins??[]),await pin(o.path),materialPin];
   if(pins.at(-2)!.sha256!==o.manifestSha) throw new Error('manifest_digest_mismatch');
   const proofRoots=[...(material.adoption?.proofRoots??[]),{path:o.path+'.material',pool:o.path+'.proofs'}];
+  const receiptsById=new Map(current.histories.flatMap(history =>
+    history.receipts.map(receipt => [receipt.id,receipt] as const)));
   const rows:Array<{stage:Manifest['stages'][number];scope:import('../event-receipts.js').EventReceiptScope;receipt:StoredEventReceipt|undefined;preparation:Preparation|undefined;eventJson:string|undefined;inherited:AdoptedStage|undefined}>=[];
   // Query every allocated stage, even if no packet was published. The index
   // and selected read must agree about presence and the complete receipt.
@@ -77,7 +79,7 @@ export async function prepareClaimAdoption(o:Options):Promise<{proof:ClaimAdopti
     const answer=await readEventReceipts(o.sink,scope,[stage.id]);
     if(answer.kind!=='ok') throw new Error('claim_adoption_receipt_unanswered');
     const receipt=answer.value.receipts[0];
-    const indexed=current.histories.flatMap(h=>h.receipts).find(r=>r.id===stage.id);
+    const indexed=receiptsById.get(stage.id);
     if(!isDeepStrictEqual(receipt,indexed)) throw new Error('claim_adoption_receipt_conflict');
     const inputPath=`${o.path}.${stage.id}.input`,packetPath=`${o.path}.${stage.id}.packet`;
     const inputPin=await pin(inputPath),packetPin=await pin(packetPath);
