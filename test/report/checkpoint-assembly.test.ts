@@ -294,15 +294,12 @@ describe('proof-bound checkpoint assembly', () => {
       await expect(assembleCheckpointReview(input(f, await proof(f, rowsFor(f, ['s0', 's1'], 'source')), await proof(f, [])), { ask }))
         .rejects.toThrow();
     }
-    const f = fixture(), source = await proof(f, rowsFor(f, ['s0', 's1'], 'source'));
-    const malformed = await proof(f, [], '{}');
-    await expect(assembleCheckpointReview(input(f, source, malformed), { ask })).rejects.toThrow();
-    const malformedSource = await proof(f, rowsFor(f, ['s0', 's1'], 'invalid-capture'), '{}');
-    await expect(assembleCheckpointReview(input(f, malformedSource, malformed), { ask })).rejects.toThrow();
+    const f = fixture();
+    await expect(proof(f, [], '{}')).rejects.toThrow();
+    await expect(proof(f, rowsFor(f, ['s0', 's1'], 'invalid-capture'), '{}')).rejects.toThrow();
     const changed = JSON.parse(f.capture.bytes) as { blobs: Record<string, string> };
     changed.blobs['f'.repeat(64)] = 'unreferenced';
-    const foreignCapture = await proof(f, [], stableStringify(changed));
-    await expect(assembleCheckpointReview(input(f, source, foreignCapture), { ask })).rejects.toThrow();
+    await expect(proof(f, [], stableStringify(changed))).rejects.toThrow();
     expect(ask).not.toHaveBeenCalled();
   });
 

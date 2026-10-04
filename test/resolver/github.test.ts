@@ -158,14 +158,19 @@ describe('fetchPRDiff', () => {
     );
   });
 
-  it('refuses patchless API changes when authoritative local commits are unavailable', async () => {
+  it('retains the blob binding for ordinary patchless remote changes', async () => {
     const pr = fakePr(1);
-    const compare = vi.fn(async () => ({
-      data: { files: [{ filename: 'app.bin', status: 'modified', additions: 0, deletions: 0, sha: 'blob123' }] },
-    }));
+    pr.data.base.sha = 'a'.repeat(40);
+    pr.data.head.sha = 'b'.repeat(40);
+    const compare = vi.fn().mockResolvedValueOnce({
+      data: { files: [{ filename: 'app.bin', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }] },
+    }).mockResolvedValueOnce({ data: new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(Buffer.from('diff --git a/app.bin b/app.bin\nindex eeeeeee..ddddddd 100644\nBinary files a/app.bin and b/app.bin differ\n'));
+      controller.close();
+    } }) });
     const octokit = { pulls: { get: vi.fn().mockResolvedValue(pr) }, repos: { compareCommitsWithBasehead: compare } } as unknown as Octokit;
-    await expect(fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit))
-      .rejects.toThrow(/complete PR patch|exact commits/);
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);
+    expect(diff.files).toEqual([expect.objectContaining({ filename: 'app.bin', patch: '', blobSha: 'd'.repeat(40) })]);
   });
 
   it('skips the compare for PRs above the cap and brackets the paged listing with PR reads', async () => {

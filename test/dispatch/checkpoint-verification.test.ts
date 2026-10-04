@@ -1,3 +1,4 @@
+import { minimalCheckpointCapture } from './checkpoint-capture-fixture.js';
 import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,7 +12,7 @@ vi.mock('../../src/report/run-header.js', async original => {
   };
 });
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
-import { CheckpointJournal, checkpointPath, freezeCheckpointPlan } from '../../src/dispatch/checkpoint.js';
+import { CheckpointJournal, checkpointPath } from '../../src/dispatch/checkpoint.js';
 import { appendVerificationRecord, appendVerificationRecordToValidatedRecords, appendVerificationRecordWithSuccessor, decodeVerificationProof, snapshotVerificationEvent,
   validateVerificationRecordsForAppend, validateVerificationRecords } from '../../src/dispatch/checkpoint-verification.js';
 import { planGating } from '../../src/consensus/gating.js';
@@ -57,13 +58,13 @@ const answer = (extra = {}) => JSON.stringify({ model: 'openai/verifier', provid
 const outcome = (batchIndex = 0) => ({ batchIndex, attemptId: `verifier-${batchIndex}`, finishedAtMs: 300, answerBytes: answer() });
 async function fixture(sealed = true) {
   const commonDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-verification-'))); roots.push(commonDir);
-  const plan = freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: 'c'.repeat(64), configSha256: 'd'.repeat(64), specSha256: 'e'.repeat(64), contextSha256: '3'.repeat(64), toolsSha256: '4'.repeat(64), parser: { name: 'findings-json', version: 1 },
-    roster: [{ seat: 'general', model: 'openai/reviewer', role: 'general', route: 'openai' }], chunks: [{ index: 0, total: 1, digest: hash('chunk') }], prompts: [{ seat: 'general', chunk: 0, systemSha256: hash('system'), userSha256: hash('user') }] });
-  const launch = createOriginalLaunch({ runId, target, planDigest: plan.digest, capturedInputsSha256: hash('opaque capture'), originalNativeClaim: { round: 1, attempt: 1 }, startedAtMs: 100, expiresAtMs: 1000, maxPhysicalCalls: 1, maxAttemptsPerCell: 1 });
+  const captured = minimalCheckpointCapture({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: 'c'.repeat(64), configSha256: 'd'.repeat(64), specSha256: 'e'.repeat(64), contextSha256: '3'.repeat(64), toolsSha256: '4'.repeat(64), parser: { name: 'findings-json', version: 1 },
+    roster: [{ seat: 'general', model: 'openai/reviewer', role: 'general', route: 'openai' }], chunks: [{ index: 0, total: 1, digest: hash('chunk') }], prompts: [{ seat: 'general', chunk: 0, systemSha256: hash('system'), userSha256: hash('user') }] }); const plan = captured.plan;
+  const launch = createOriginalLaunch({ runId, target, planDigest: plan.digest, capturedInputsSha256: captured.digest, originalNativeClaim: { round: 1, attempt: 1 }, startedAtMs: 100, expiresAtMs: 1000, maxPhysicalCalls: 1, maxAttemptsPerCell: 1 });
   let journal!: CheckpointJournal, expired!: NativeTargetOwnership;
   await withNativeTarget(commonDir, target, async owner => {
     expired = owner; journal = await CheckpointJournal.create({ commonDir, namespace, plan, ownership: owner });
-    await journal.bind('captured-inputs', 'opaque capture', owner); await journal.bind('launch', encodeOriginalLaunch(launch), owner);
+    await journal.bind('captured-inputs', captured.bytes, owner); await journal.bind('launch', encodeOriginalLaunch(launch), owner);
     await journal.recordIntent('general:0', { id: 'reviewer-0', kind: 'unknown' }, owner);
     if (sealed) await journal.finalize(owner);
   });

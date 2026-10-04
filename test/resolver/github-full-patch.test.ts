@@ -13,12 +13,20 @@ const target = { owner: 'o', repo: 'r', number: 1 };
 const base = 'a'.repeat(40), head = 'b'.repeat(40), mergeBase = 'c'.repeat(40);
 const complete: FileChange = { filename: 'a.ex', status: 'modified', additions: 1, deletions: 1,
   patch: '@@ -1 +1 @@\n-old\n+new', language: 'elixir' };
-function fixture(files: object[] = [complete]) {
+function diffStream(rawDiff: string) {
+  return new ReadableStream<Uint8Array>({ start(controller) {
+    controller.enqueue(Buffer.from(rawDiff));
+    controller.close();
+  } });
+}
+function fixture(files: object[] = [complete], rawDiff?: string) {
   const pr = { title: 'Review', body: '', user: { login: 'author' },
     base: { ref: 'main', sha: base }, head: { ref: 'feature', sha: head },
     html_url: 'https://github.com/o/r/pull/1', labels: [], draft: false, changed_files: files.length };
   const get = vi.fn().mockResolvedValue({ data: pr });
   const compare = vi.fn().mockResolvedValue({ data: { files, merge_base_commit: { sha: mergeBase } } });
+  if (rawDiff !== undefined) compare.mockResolvedValueOnce({ data: { files, merge_base_commit: { sha: mergeBase } } })
+    .mockResolvedValueOnce({ data: diffStream(rawDiff) });
   const paginate = vi.fn().mockResolvedValue(files);
   const client = { pulls: { get, listFiles: {} }, repos: { compareCommitsWithBasehead: compare }, paginate } as unknown as Octokit;
   return { pr, get, compare, paginate, client };
@@ -47,7 +55,8 @@ describe('authoritative PR patch acquisition', () => {
   });
 
   it('recovers changed text whose API patch and all line counts were omitted', async () => {
-    const f = fixture([{ filename: 'a.ex', status: 'modified', additions: 0, deletions: 0 }]);
+    const f = fixture([{ filename: 'a.ex', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }],
+      'diff --git a/a.ex b/a.ex\nindex eeeeeee..ddddddd 100644\n--- a/a.ex\n+++ b/a.ex\n@@ -1 +1 @@\n-old\n+new\n');
     const diff = await fetchPRDiff(target, undefined, f.client);
     expect(diff.files[0]).toMatchObject({ patch: complete.patch, additions: 1, deletions: 1 });
     expect(loadPinnedGitDiff).toHaveBeenCalledOnce();
@@ -63,6 +72,66 @@ describe('authoritative PR patch acquisition', () => {
     const f = fixture();
     await fetchPRDiff(target, undefined, f.client);
     expect(loadPinnedGitDiff).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { filename: 'logo.png', status: 'modified', raw: 'index eeeeeee..ddddddd 100644\nBinary files a/logo.png and b/logo.png differ\n' },
+    { filename: 'renamed.ex', previous_filename: 'original.ex', status: 'renamed', raw: 'similarity index 100%\nrename from original.ex\nrename to renamed.ex\n' },
+    { filename: 'script.sh', status: 'modified', raw: 'old mode 100644\nnew mode 100755\n' },
+  ])('keeps patchless zero-line $filename changes remotely reviewable with blob binding', async ({ raw, ...file }) => {
+    const sha = 'd'.repeat(40);
+    const f = fixture([{ ...file, additions: 0, deletions: 0, sha }],
+      `diff --git a/${file.previous_filename ?? file.filename} b/${file.filename}\n${raw}`);
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    const diff = await fetchPRDiff(target, undefined, f.client);
+    expect(diff.files[0]).toMatchObject({ filename: file.filename, status: file.status,
+      additions: 0, deletions: 0, patch: '', blobSha: sha });
+    if ('previous_filename' in file) expect(diff.files[0]?.previousFilename).toBe(file.previous_filename);
+    expect(loadPinnedGitDiff).not.toHaveBeenCalled();
+    expect(loadHostedPinnedGitDiff).not.toHaveBeenCalled();
+    expect(f.get).toHaveBeenCalledTimes(1);
+    expect(f.compare).toHaveBeenLastCalledWith(expect.objectContaining({ owner: 'o', repo: 'r',
+      basehead: `${base}...${head}`, mediaType: { format: 'diff' },
+      request: expect.objectContaining({ parseSuccessResponseBody: false }) }));
+  });
+
+  it.each([
+    'diff --git a/other.png b/other.png\nindex eeeeeee..ddddddd 100644\nBinary files a/other.png and b/other.png differ\n',
+    'diff --git a/logo.png b/logo.png\nindex eeeeeee..ffffff0 100644\nBinary files a/logo.png and b/logo.png differ\n',
+    'diff --git a/logo.png b/logo.png\nold mode 100644\nnew mode 100755\n@@ -1 +1 @@\n-old\n+new\n',
+    'diff --git a/logo.png b/logo.png\nindex eeeeeee..ddddddd 100644\nBinary files a/logo.png and b/logo.png differ',
+  ])('does not certify ambiguous or mismatched patchless comparison blocks (%#)', async rawDiff => {
+    const f = fixture([{ filename: 'logo.png', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }], rawDiff);
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    await expect(fetchPRDiff(target, undefined, f.client)).rejects.toThrow('complete PR patch');
+  });
+
+  it('cancels oversized raw comparisons and refuses patchless fallback', async () => {
+    const file = { filename: 'logo.png', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) };
+    const f = fixture([file]);
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new Uint8Array(10 * 1024 * 1024 + 1));
+    }, cancel });
+    f.compare.mockResolvedValueOnce({ data: { files: [file] } }).mockResolvedValueOnce({ data: stream });
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    await expect(fetchPRDiff(target, undefined, f.client)).rejects.toThrow('complete PR patch');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('recovers missing textual patches even when a blob SHA is present', async () => {
+    const f = fixture([{ filename: 'a.ex', status: 'modified', additions: 1, deletions: 1, sha: 'd'.repeat(40) }]);
+    const diff = await fetchPRDiff(target, undefined, f.client);
+    expect(diff.files[0]?.patch).toBe(complete.patch);
+    expect(loadPinnedGitDiff).toHaveBeenCalledOnce();
+  });
+
+  it('requires pinned objects for patchless blob-bound files with explicit capacity', async () => {
+    const f = fixture([{ filename: 'logo.png', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }]);
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new Error('binary patch cannot be reviewed exhaustively'));
+    await expect(fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024 }))
+      .rejects.toThrow('binary patch cannot be reviewed exhaustively');
+    expect(loadPinnedGitDiff).toHaveBeenCalledOnce();
   });
 
   it('never falls back to incomplete API patches when pinned local acquisition fails', async () => {

@@ -5,6 +5,7 @@ import { join, sep } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget, type NativeTargetOwnership } from '../../src/converge/target-ownership.js';
 import { CheckpointJournal, checkpointPath, freezeCheckpointPlan, type CheckpointPlanInput } from '../../src/dispatch/checkpoint.js';
+import { minimalCheckpointCapture } from './checkpoint-capture-fixture.js';
 
 const durability = vi.hoisted(() => ({ failPath: '', synced: [] as string[], opened: [] as string[], pauseStagedWrite: false, stagedWriteStarted: undefined as (() => void) | undefined, stagedWriteRelease: undefined as Promise<void> | undefined, stagedWriteUsed: false }));
 vi.mock('node:fs/promises', async original => {
@@ -390,12 +391,14 @@ describe('immutable checkpoint metadata bindings', () => {
   });
 
   it('serializes all closed names and identical concurrent replays into one immutable record each', async () => {
-    await withStore(async (store, ownership, commonDir) => {
-      let args = { name: 'captured-inputs' as const, bytes: 'captured exact bytes\n' };
+    const commonDir = await root(), captured = minimalCheckpointCapture(plan());
+    await withNativeTarget(commonDir, target, async ownership => {
+      const store = await CheckpointJournal.create({ commonDir, namespace, plan: captured.plan, ownership });
+      let args = { name: 'captured-inputs' as const, bytes: captured.bytes };
       const first = store.bind(args.name, args.bytes, ownership);
       args = { name: 'captured-inputs', bytes: 'changed caller value' };
       await Promise.all([first, store.bind('source', '', ownership), store.bind('operation', '\uFEFFoperation bytes', ownership), store.bind('source', '', ownership)]);
-      expect(await store.readBindings()).toEqual({ 'captured-inputs': 'captured exact bytes\n', source: '', operation: '\uFEFFoperation bytes' });
+      expect(await store.readBindings()).toEqual({ 'captured-inputs': captured.bytes, source: '', operation: '\uFEFFoperation bytes' });
       const state = await store.read();
       expect(state.records.map(row => row.type)).toEqual(['binding', 'binding', 'binding']);
       expect(state.records[0]!.previousDigest).toBe(store.getPlan().digest);
@@ -468,8 +471,8 @@ describe('immutable checkpoint metadata bindings', () => {
       expect(await store.readBindings()).toEqual({});
       expect(await readdir(checkpointPath(commonDir, target, namespace))).toEqual(before);
       const bytes = 'x'.repeat(8 * 1024 * 1024);
-      await store.bind('captured-inputs', bytes, ownership);
-      expect((await store.readBindings())['captured-inputs']).toBe(bytes);
+      await store.bind('source', bytes, ownership);
+      expect((await store.readBindings()).source).toBe(bytes);
     });
   });
 

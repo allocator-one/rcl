@@ -365,13 +365,12 @@ function bindingByteLimit(name: CheckpointBindingName): number {
   return name === 'captured-inputs' ? CAPTURED_INPUT_HARD_LIMITS.bytes : MAX_FILE_BYTES;
 }
 
-/** Larger bindings must contain a complete, explicitly bounded capture for this exact plan. */
+/** Validate every capture against its exact plan before granting declared capacity. */
 function validateBindingBytes(name: CheckpointBindingName, bytes: string, plan: FrozenCheckpointPlan): number {
   boundedOpaqueBytes(bytes, bindingByteLimit(name));
-  if (Buffer.byteLength(bytes, 'utf8') <= MAX_FILE_BYTES) return 0;
+  if (name !== 'captured-inputs') return 0;
   const captured = decodeCapturedInputs(bytes, plan);
-  if (captured.capacity === undefined) throw new Error('checkpoint_invalid_capture_capacity');
-  return captured.capacity.bytes;
+  return captured.capacity?.bytes ?? 0;
 }
 
 function validateRecordChain(input: unknown[], plan: FrozenCheckpointPlan): JournalRecord[] {
