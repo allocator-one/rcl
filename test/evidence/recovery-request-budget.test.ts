@@ -17,6 +17,15 @@ function clock(onSleep = () => {}) {
 }
 
 describe('public recovery request budget', { timeout: 45000 }, () => {
+  it('persists a replaced original report digest before returning the helper', async () => {
+    const f = await publicLoopback(); cleanups.push(f.cleanup);
+    const report = { ...JSON.parse(f.source.reportJson), replacement: true };
+
+    await f.replaceOriginal(report);
+
+    expect(JSON.parse(await readFile(f.selectionPath, 'utf8')).source.reportSha256).toBe(sha(f.source.reportJson));
+  });
+
   it('resumes an interrupted whole operation without reposting accepted stages or changing native accounting early', async () => {
     const input = fixture(); const f = await publicLoopback(input); cleanups.push(f.cleanup);
     f.addSource(emptySource(input.transfer, 2, true));

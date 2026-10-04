@@ -160,10 +160,11 @@ export async function publicLoopback(input=occurrenceFixture(),commandTimeout=25
   const selectionPath=join(operation,'selection.json');
   await writeFile(selectionPath,JSON.stringify(selection),{ mode: 0o600 });
   const manifest=join(operation,'manifest.json');
-  function replaceOriginal(report: any) {
+  async function replaceOriginal(report: any) {
     source.reportJson=JSON.stringify(report);
     original.reportJson=source.reportJson;
     selection.source.reportSha256=sha(source.reportJson);
+    await writeFile(selectionPath,JSON.stringify(selection),{ mode: 0o600 });
     const all=[...report.findings,...report.belowThresholdFindings];
     source.storedRun.artifacts=[{ kind: 'report_json',declared_sha256: sha(source.reportJson),declared_bytes: Buffer.byteLength(source.reportJson),stored: true }];
     (source.storedRun.findings as any[]).forEach((row,i) => { row.claim_descriptor=all[i].claimDescriptor??null; });
