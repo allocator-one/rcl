@@ -27,7 +27,7 @@ import { rejectionManifest, rejectionManifestSchema, rejectionSelectionSchema, v
 
 const parse = (file: Awaited<ReturnType<typeof readStable>>) => decodeOriginalReport(file.text).value;
 function refuse(code: string): never { throw new Error(`terminal_rejection_${code}`); }
-function deadOwner(pid: number): void {
+export function assertDeadOwner(pid: number): void {
   try { process.kill(pid, 0); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; }
   refuse('owner_live_or_uncertain');
@@ -118,7 +118,7 @@ export async function previewTerminalRejection(input: RejectionSelection, gitCom
   await verifyTerminalRejections(common, state);
   if (state.terminalRejections?.some(e => rejectionManifest(e).runId === s.runId)) refuse('already_disposed');
   const evidence = await proof(state, attempts, s, dataDir);
-  deadOwner(evidence.launch.pid); await noDelivery(dataDir, s.runId);
+  assertDeadOwner(evidence.launch.pid); await noDelivery(dataDir, s.runId);
   const m = rejectionManifestSchema.parse({ ...s, reportPath: await realpath(resolve(s.reportPath)),
     kind: 'rcl-terminal-rejection', version: 1, operationId: randomUUID(), createdAt: new Date().toISOString(),
     gitCommonDir: common, dataDir, stateSha256: native.sha256, attemptSha256: attempts.sha256,
@@ -149,7 +149,7 @@ export async function applyTerminalRejection(input: { manifest: string; manifest
       const before = parse(await selected(join(directory(common, m), 'native-before.json'), m.stateSha256)) as ConvergeRunState;
       if (!isDeepStrictEqual(state, nextState(before, entry, m))) refuse('state_changed');
       await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
-      deadOwner(state.lastLaunch!.pid); await noDelivery(m.dataDir, m.runId);
+      assertDeadOwner(state.lastLaunch!.pid); await noDelivery(m.dataDir, m.runId);
       return 'unchanged';
     }
     if (state.terminalRejections?.some(e => {
@@ -161,7 +161,7 @@ export async function applyTerminalRejection(input: { manifest: string; manifest
     const evidence = await proof(state, attempts, m, m.dataDir);
     bound(m, state, evidence.launch);
     if (evidence.manifest.sha256 !== m.quarantineSha256) refuse('quarantine_changed');
-    deadOwner(evidence.launch.pid); await noDelivery(m.dataDir, m.runId);
+    assertDeadOwner(evidence.launch.pid); await noDelivery(m.dataDir, m.runId);
     const dir = directory(common, m);
     await prepareLockRoot(dirname(dir)); await syncDirectory(common);
     await prepareLockRoot(dir); await syncDirectory(dirname(dir));
@@ -183,7 +183,7 @@ export async function applyTerminalRejection(input: { manifest: string; manifest
     if (final.manifest.sha256 !== m.quarantineSha256) refuse('quarantine_changed');
     await selected(convergeRunStatePath(common, m.target), m.stateSha256);
     await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
-    deadOwner(evidence.launch.pid); await noDelivery(m.dataDir, m.runId);
+    assertDeadOwner(evidence.launch.pid); await noDelivery(m.dataDir, m.runId);
     await writeState(common, nextState(state, entry, m), ownership);
     return 'applied';
   });
@@ -226,6 +226,6 @@ export async function terminalRejectionForLaunch(common: string, state: Converge
     refuse('launch_changed');
   }
   await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
-  deadOwner(launch!.pid); await noDelivery(m.dataDir, m.runId);
+  assertDeadOwner(launch!.pid); await noDelivery(m.dataDir, m.runId);
   return true;
 }

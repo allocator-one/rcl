@@ -323,6 +323,8 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       try {
         state = await loadConvergeRunState(options.gitCommonDir, options.target) ?? initialConvergeRunState(options.target);
         await verifyStaleReportReceipts(options.gitCommonDir,state.staleReportAudit ?? []);
+        const { verifyHistoricalDeliveryReconciliations } = await import('./historical-delivery-reconciliation.js');
+        await verifyHistoricalDeliveryReconciliations(options.gitCommonDir,state);
         await verifyTerminalRejections(options.gitCommonDir, state);
       }
       catch (error) {
