@@ -86,10 +86,14 @@ export function assertHistoryExtension(before: ClaimHistoryContent,after: ClaimH
     const current=after.histories.find(h => h.runId===old.runId);
     if(!current||current.eventSequence<old.eventSequence)
       throw new Error('claim_history_changed_since_preview');
+    const currentReceiptsById=new Map<string,StoredEventReceipt>();
+    for(const receipt of current.receipts)
+      if(!currentReceiptsById.has(receipt.id)) currentReceiptsById.set(receipt.id,receipt);
+    const oldReceiptIds=new Set(old.receipts.map(receipt=>receipt.id));
     for(const receipt of old.receipts)
-      if(!isDeepStrictEqual(receipt,current.receipts.find(r => r.id===receipt.id)))
+      if(!isDeepStrictEqual(receipt,currentReceiptsById.get(receipt.id)))
         throw new Error('claim_history_changed_since_preview');
-    const extra=current.receipts.filter(r => !old.receipts.some(o => o.id===r.id));
+    const extra=current.receipts.filter(receipt => !oldReceiptIds.has(receipt.id));
     if(extra.some(r => !owned.has(r.id)))
       throw new Error('claim_history_changed_since_preview');
     const sources=before.sources.filter(source=>source.selector.scope.run_id===old.runId);
