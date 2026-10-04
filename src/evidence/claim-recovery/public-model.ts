@@ -154,7 +154,10 @@ export function assertUnusedClaimIdentity(content: ClaimHistoryContent, identity
   const includesKey = (rows: unknown, field: string): boolean => Array.isArray(rows) &&
     rows.some(row => row !== null && typeof row === 'object' && !Array.isArray(row) &&
       (row as Record<string, unknown>)[field] === identity);
-  const finding = content.sources.some(source => includesKey(source.storedRun?.findings, 'identity_key'));
+  const finding = content.sources.some(source =>
+    includesKey(source.storedRun?.findings, 'identity_key') ||
+      includesKey(source.storedRun?.findings, 'claim_identity')
+  );
   const event = content.histories.some(history => history.receipts.some(receipt => {
     if (receipt.kind === 'finding_claim_split') return receipt.payload.matched_identity === identity;
     if (receipt.kind === 'verdicts_recorded') return includesKey(receipt.payload.verdicts, 'identity_key');
