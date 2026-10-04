@@ -127,6 +127,10 @@ asks the production Ori agent to summarize the published version in
 `#infra-one-releases`. Publishing and notification have separate results.
 The notifier reads source evidence through GitHub's API and verifies npm;
 it never executes the released package or checks out release-controlled code.
+npm can serve a fresh version's metadata minutes after its tarball, so the
+notifier retries a missing version, HTTP 404/429/5xx or a network failure for
+about 10 minutes before failing. Other errors and the identity and provenance
+checks fail at once.
 
 Configure `INFRA_ONE_RELEASE_WEBHOOK_URL` (variable) and
 `INFRA_ONE_RELEASE_WEBHOOK_SECRET` (secret) in the `release-announcements`
