@@ -416,17 +416,16 @@ function validateDispositionIntent(selection: PublicClaimSelection,history: Clai
   const member=source.members.find(m => m.ref===selection.findingRef);
   if(!member||member.unresolvedReason)
     throw new Error('claim_original_mapping_unavailable');
+  if(request.mode==='fresh'&&request.originalVerdictEventId)
+    throw new Error('fresh_disposition_has_original_verdict');
   if(selection.action!=='split') {
     prepareClaimDisposition(dispositionInput(selection,history,existingSplit(selection,material,history),eventId!,occurredAt,history.actorUserId));
     return;
   }
   if(member.severity==='critical'&&member.gating!=='none'&&request.severity!=='critical')
     throw new Error('claim_critical_disposition_required');
-  if(request.mode==='fresh') {
-    if(request.originalVerdictEventId)
-      throw new Error('fresh_disposition_has_original_verdict');
+  if(request.mode==='fresh')
     return;
-  }
   const receipt=history.histories.find(h => h.runId===selection.source.scope.run_id)?.receipts.find(r => r.id===request.originalVerdictEventId);
   validatePreservedDispositionSubject({
     source,member,descriptor: selection.descriptor,eventId: eventId!,verdict: request.verdict,
