@@ -230,7 +230,8 @@ class ReleaseNotificationTest(unittest.TestCase):
         self.assertGreater(sum(clock.sleeps) + 60, n.NPM_VISIBILITY_SECONDS)
 
     def test_npm_wait_retries_only_transient_failures(self):
-        for permanent in [n.NotificationError('Request failed with HTTP 403'), n.NotificationError('Invalid JSON response')]:
+        for permanent in [n.NotificationError('Request failed with HTTP 403', retry_after=5),
+                          n.NotificationError('Invalid JSON response')]:
             clock = FakeClock()
             with self.subTest(error=str(permanent)), patch.object(n, 'time', clock), \
                     patch.object(n, 'json_response', side_effect=[permanent]), \
@@ -260,6 +261,18 @@ class ReleaseNotificationTest(unittest.TestCase):
             n.published_release('@allocator-one/rcl', '4.1.6')
         self.assertEqual(clock.sleeps, [])
         self.assertIn(f'npm asked to wait {n.NPM_VISIBILITY_SECONDS + 1}s', stderr.getvalue())
+
+    def test_a_short_retry_after_is_not_blamed_when_the_window_runs_out(self):
+        # Five seconds remain: the scheduled 10 s wait, not npm's 3 s, ends the window.
+        clock = FakeClock()
+        limited = n.NotificationError('Request failed with HTTP 429', transient=True, retry_after=3)
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=[limited]), \
+                patch.object(n, 'NPM_VISIBILITY_SECONDS', 5), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaisesRegex(n.NotificationError, 'HTTP 429'):
+            n.published_release('@allocator-one/rcl', '4.1.6')
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(stderr.getvalue(), '')
 
     def test_request_reads_retry_after(self):
         clock = FakeClock()

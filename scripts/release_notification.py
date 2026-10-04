@@ -153,10 +153,11 @@ def published_release(name, version):
             attestation = json_response(attestation_url(name, version)) if package.get('gitHead') is None else {}
             return metadata, attestation
         except NotificationError as error:
-            delay = max(NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)], error.retry_after or 0)
+            scheduled = NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)]
+            delay = max(scheduled, error.retry_after or 0)
             if not error.transient or time.monotonic() + delay > deadline:
-                if error.transient and error.retry_after:
-                    print(f'npm asked to wait {error.retry_after}s before retrying {name}@{version}, '
+                if error.transient and delay > scheduled:
+                    print(f'npm asked to wait {delay}s before retrying {name}@{version}, '
                           'past the npm visibility window; giving up.', file=sys.stderr)
                 raise
             print(f'npm does not serve {name}@{version} yet ({error}); retrying in {delay}s.', file=sys.stderr)
