@@ -360,10 +360,9 @@ async function validateSemanticMembership(state: ConvergeRunState, gitCommonDir:
       .map(s => ({ identity: s.canonicalIdentity, status: s.status, gating: s.gating })) };
     requireIntegrity(state.lastAnnotations !== undefined && state.lastAnnotations.round === expected.round &&
       isDeepStrictEqual(state.lastAnnotations.identities, expected.identities));
-    if (state.lastAnnotations!.actionableBeforeTriage !== undefined) {
-      const retained = state.lastAnnotations!.actionableBeforeTriage;
-      requireIntegrity(isDeepStrictEqual(retained, admittedActionableBeforeTriage(state)));
-    }
+    const admission = state.rounds.find(row => row.round === latest)?.admission;
+    if (admission) requireIntegrity(state.lastAnnotations!.actionableBeforeTriage !== undefined &&
+      isDeepStrictEqual(admission.actionableIdentities, state.lastAnnotations!.actionableBeforeTriage));
   }
 }
 

@@ -33,13 +33,10 @@ export function indexSemanticSightings<T extends { round: number; canonicalIdent
   return { byRound, byIdentity, byIdentityAndRound };
 }
 
-/** Reconstruct the exact obligations present when the latest round was admitted, before its verdicts could clear them. */
+/** Use an authenticated admission snapshot, or fall back to the validated current obligations. */
 export function admittedActionableBeforeTriage(state: ConvergeRunState, round = state.lastAnnotations?.round): string[] {
-  const annotations = state.lastAnnotations;
   const reviewedRound = state.rounds.find(row => row.round === round);
-  const retainedAnnotations = annotations && annotations.round === round
-    ? annotations.actionableBeforeTriage : undefined;
-  const retained = reviewedRound?.admission?.actionableIdentities ?? retainedAnnotations;
+  const retained = reviewedRound?.admission?.actionableIdentities;
   return retained ? [...retained] : effectivePendingIdentities(state);
 }
 

@@ -8,7 +8,7 @@ import { correctionAnchor } from '../../src/converge/correction-anchors.js';
 import { deriveNativeRecovery, validateNativeRecoveryState, verifyNativeRecoveryLineage } from '../../src/converge/recovery-state.js';
 import { convergeRunStatePath, loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { prepareClaimSplit } from '../../src/evidence/claim-recovery/validation/claim-split.js';
-import { validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
+import { effectivePendingIdentities, validateRetainedNativeEvidence } from '../../src/evidence/claim-recovery/validation/native-state.js';
 import { admittedActionableBeforeTriage } from '../../src/evidence/claim-recovery/validation/semantic-validation.js';
 import { indexSemanticPriorByFileCategory } from '../../src/converge/semantic-state.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, uuid, target } from '../evidence/recovery-validation/fixtures.js';
@@ -415,6 +415,17 @@ it('accepts recovered anchors before they have semantic sightings', async () => 
   expect(validateRetainedNativeEvidence({ sourceJson: f.plan.resultJson, target, reports: f.reports,
     nativeSourceJsons: [f.sourceJson], admissionSourceJsons: f.admissionSourceJsons }).state)
     .toEqual(state);
+});
+
+it('ignores an unadmitted pre-triage annotation when projecting recovered obligations', () => {
+  const state = recoveredFixture(2).state;
+  const forged = 'ffffffffffffffff';
+  const expected = effectivePendingIdentities(state);
+  expect(expected).toContain(state.recovery.operations[0]!.anchors[0]!.identity);
+  state.lastAnnotations = { ...state.lastAnnotations!, actionableBeforeTriage: [forged] };
+
+  expect(admittedActionableBeforeTriage(state)).toEqual(expected);
+  expect(admittedActionableBeforeTriage(state)).not.toContain(forged);
 });
 
 it('retains an exact stale report before refusing changed recovery state without admission', async () => {
