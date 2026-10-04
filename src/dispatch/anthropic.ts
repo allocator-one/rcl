@@ -32,7 +32,8 @@ function isRetryableReview(err: unknown, stream: boolean): boolean {
       (err.type === 'overloaded_error' || err.type === 'api_error' ||
         err.type === 'rate_limit_error' || err.type === 'timeout_error')) return true;
   return err instanceof Anthropic.AnthropicError &&
-      (err.message === 'stream ended without producing a Message with role=assistant' ||
+      (isRetryableConnectionError(err) ||
+        err.message === 'stream ended without producing a Message with role=assistant' ||
         err.message === 'request ended without sending any chunks');
 }
 
