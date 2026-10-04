@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 4.5.7 - 2026-10-04
+## 4.5.8 - 2026-10-04
 
 - Retain guarded review inputs with a canonical string table so large patches
   repeated across reviewer prompts no longer exceed the preclaim recovery
@@ -11,6 +11,12 @@
   attempt. New exports identify the compact guarded input with
   `guardedInputRepresentation`; unmarked raw ordinary and cycle packages remain
   readable (RCL-180).
+
+## 4.5.7 - 2026-10-04
+
+- Retry Anthropic streams when the SDK wraps a terminated stream around a
+  bounded transient transport cause. Permanent TLS failures, unclassified
+  terminated errors and user aborts remain terminal (RCL-161).
 
 ## 4.5.6 - 2026-10-04
 
