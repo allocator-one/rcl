@@ -273,12 +273,22 @@ class ReleaseNotificationTest(unittest.TestCase):
             n.published_release('@allocator-one/rcl', '4.1.6')
         self.assertEqual(clock.sleeps, [])
         self.assertEqual(stderr.getvalue(), '')
+        # Nor when npm asks for longer but the schedule had already run out.
+        limited.retry_after = 30
+        with patch.object(n, 'time', clock), patch.object(n, 'json_response', side_effect=[limited]), \
+                patch.object(n, 'NPM_VISIBILITY_SECONDS', 5), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaisesRegex(n.NotificationError, 'HTTP 429'):
+            n.published_release('@allocator-one/rcl', '4.1.6')
+        self.assertEqual(stderr.getvalue(), '')
 
     def test_request_reads_retry_after(self):
         clock = FakeClock()
         cases = [('120', 120), (' 7 ', 7), ('0', 0), ('000', 0), ('0000000001', 1), ('9' * 40, 10 ** 9),
                  (email.utils.formatdate(clock.time() + 90, usegmt=True), 90),
                  (email.utils.formatdate(clock.time() - 90, usegmt=True), 0),
+                 (email.utils.formatdate(clock.time() + 60), 60),  # '-0000': no zone, read as UTC
+                 ('Fri, 31 Dec 99999 23:59:59 GMT', None),
                  ('soon', None), ('-5', None), ('1.5', None), (None, None)]
         for value, expected in cases:
             headers = email.message.Message()

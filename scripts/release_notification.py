@@ -89,7 +89,7 @@ def retry_after_seconds(headers):
         if when.tzinfo is None:
             when = when.replace(tzinfo=datetime.timezone.utc)
         return max(0, math.ceil(when.timestamp() - time.time()))
-    except (TypeError, ValueError, OverflowError):
+    except Exception:  # The header is untrusted; older Pythons raise more than ValueError on bad dates.
         return None
 
 
@@ -156,7 +156,7 @@ def published_release(name, version):
             scheduled = NPM_RETRY_DELAYS[min(attempt, len(NPM_RETRY_DELAYS) - 1)]
             delay = max(scheduled, error.retry_after or 0)
             if not error.transient or time.monotonic() + delay > deadline:
-                if error.transient and delay > scheduled:
+                if error.transient and time.monotonic() + scheduled <= deadline:
                     print(f'npm asked to wait {delay}s before retrying {name}@{version}, '
                           'past the npm visibility window; giving up.', file=sys.stderr)
                 raise
