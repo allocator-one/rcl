@@ -204,9 +204,9 @@ recovery operations, documented in
 
 | Flag | Purpose |
 | --- | --- |
-| `--guarded-converge` | Validate and claim one attempt inside this process; derive the round from native state |
+| `--guarded-converge` | Validate and claim one attempt inside this process; recovered-v3 can instead consume the exact `converge-attempt` claim named by `--attempt` |
 | `--converge-target <key>` | Convergence target this round belongs to (or `RCL_CONVERGE_TARGET`) |
-| `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_ROUND` / `RCL_CONVERGE_ATTEMPT`); guarded launches derive these themselves |
+| `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_ROUND` / `RCL_CONVERGE_ATTEMPT`); guarded launches derive these except the explicit recovered-v3 handoff |
 | `--start-over` | Start an explicitly requested fresh review cycle with a new normal budget; preserves prior spending and evidence |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed, unknown or inconclusive launch; preserves spent attempts |
@@ -419,6 +419,7 @@ and the recovery runbooks are in
 | `rcl evidence status <pr> [--enforced]` | Gate status Harness computed for a pull request; exit 0 only when the judged projection is `converged` |
 | `rcl evidence show <run-id>` | One recorded run: header, reviewer health, artifacts, findings with identity, gating reason and verdict |
 | `rcl evidence recover-run` | Preview, apply or resume delivery of one original asserted run |
+| `rcl evidence recover-claim` | Preview, apply, resume, adopt or refresh one selected semantic claim on its existing native target |
 | `rcl evidence recover-finding` | Preview or submit a correction of one recorded finding identity |
 | `rcl evidence retriage-finding` | Preview or submit a fresh dismissal of one finding at its recorded severity |
 | `rcl telemetry status` | Telemetry level, credential source and spooled deliveries |
@@ -442,7 +443,7 @@ commands are documented in
 | `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
-| `rcl converge-attempt` | Legacy attempt accounting; guarded launches claim their own attempts |
+| `rcl converge-attempt` | Claim one durable attempt; recovered-v3 continuation hands the exact claim to its guarded producer with `--attempt` |
 
 Delivered hard-failure continuation requires RCL 4.5.3 or later. Re-run
 `rcl telemetry flush --run <run-id>` to authenticate or upgrade the durable

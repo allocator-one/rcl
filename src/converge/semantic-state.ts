@@ -422,8 +422,14 @@ function validateSightingClassification(state: ConvergeRunState,
   }
 }
 
+function semanticRoundActionableIdentities(state: ConvergeRunState, binding: ReportBinding): string[] {
+  const admission = state.rounds.find(round => round.round === binding.round && round.runId === binding.runId &&
+    round.reportBinding?.reportSha256 === binding.reportSha256)?.admission;
+  return admission ? [...admission.actionableIdentities] : effectivePendingIdentities(state);
+}
+
 function semanticRoundBinding(state: ConvergeRunState, binding: ReportBinding) {
-  const pending = new Set(effectivePendingIdentities(state));
+  const pending = new Set(semanticRoundActionableIdentities(state, binding));
   const legacyPendingIdentities = Object.values(state.findings).filter(e => e.claimDescriptor === undefined && pending.has(e.key)).map(e => e.key).sort();
   return { reportBinding: binding, classificationVersion: 1 as const,
     ...(recoveryProjectionFreshness(state) ? { recoveryProjection: recoveryProjectionFreshness(state) } : {}),
@@ -490,7 +496,8 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     await verifyRoundBinding(old.reportBinding, binding.target, options.round, binding.runId);
     const sightings = state.sightings.filter(s => s.round === options.round);
     if (sightings.length !== findings.length) throw new ConvergeRunStateError('Incomplete immutable sighting ledger.');
-    return { ...semanticRoundBinding(state, binding), roundCap: state.roundCap, counts: old.counts, actionableIdentities: pending(state), findings: findings.map((finding, i) => {
+    return { ...semanticRoundBinding(state, binding), roundCap: state.roundCap, counts: old.counts,
+      actionableIdentities: semanticRoundActionableIdentities(state, binding), findings: findings.map((finding, i) => {
       const sighting = sightings[i]!;
       return { identity: sighting.canonicalIdentity, status: sighting.status, suppressReason: sighting.suppressReason, finding, sighting };
     }) };
@@ -511,6 +518,7 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
     await retainReportEvidence(options.evidence!.reportJson, binding);
     throw new ConvergeRunStateError('Native recovery state changed during review; original report retained without native admission.');
   }
+  const predecessorActionableIdentities = pending(state);
   if (options.maxRounds !== undefined) state.roundCap = validateRoundCap(options.maxRounds);
   if (options.round > state.roundCap || options.round > HARD_CONVERGE_ROUND_CAP) throw new ConvergeRoundCapError(binding.target, options.round, state.roundCap);
   const max = Math.max(0, ...state.rounds.map(r => r.round));
@@ -627,8 +635,14 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   }
   state.sightings.push(...annotations.map(a => a.sighting!));
   await retainNativeRecoverySource(options.gitCommonDir, binding.target, predecessorJson);
+  const actionableAtAdmission = new Set(predecessorActionableIdentities);
+  for (const sighting of annotations.map(annotation => annotation.sighting!)) {
+    if (sighting.gating !== 'none' && sighting.status !== 'suppressed' && sighting.pendingRound !== null) {
+      actionableAtAdmission.add(sighting.canonicalIdentity);
+    }
+  }
   const admission = { version: 1 as const, recoveryOperationCount: state.recovery!.operations.length,
-    sourceStateSha256: predecessor.native_sha256, actionableIdentities: pending(state) };
+    sourceStateSha256: predecessor.native_sha256, actionableIdentities: [...actionableAtAdmission].sort() };
   state.rounds.push({ round: options.round, counts, severities, runId: binding.runId, reportBinding: binding, admission });
   state.lastAnnotations = { round: options.round,
     identities: annotations.map(a => ({ identity: a.identity, status: a.status, gating: a.sighting!.gating })),
@@ -636,7 +650,8 @@ async function processSemanticRoundOwned(options: ProcessRoundOptions, binding: 
   state.updatedAt = new Date().toISOString();
   await retainReportEvidence(options.evidence!.reportJson, binding);
   await writeStateIfUnchanged(options.gitCommonDir, predecessor.native_sha256, state, ownership);
-  return { ...semanticRoundBinding(state, binding), roundCap: state.roundCap, counts, findings: annotations, actionableIdentities: pending(state) };
+  return { ...semanticRoundBinding(state, binding), roundCap: state.roundCap, counts, findings: annotations,
+    actionableIdentities: semanticRoundActionableIdentities(state, binding) };
 }
 
 /** Historical attribution may add an escalation obligation, never clear one.

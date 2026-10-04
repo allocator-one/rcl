@@ -196,6 +196,7 @@ export interface RoundReport {
   reportBinding?: ReportBinding;
   classificationVersion?: 1;
   legacyPendingIdentities?: string[];
+  recoveryProjection?: RecoveryProjectionFreshness;
   findings: AnnotatedRoundFinding[];
 }
 
@@ -431,6 +432,7 @@ export interface ReportIdentityMapping {
   status: FindingStatus;
   suppressReason?: string;
   finding: { identity?: string };
+  sighting?: SemanticSighting;
 }
 
 /** Refuse ambiguous legacy report keys before persisting or publishing classifications. */
@@ -561,6 +563,10 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const gitCommonDir = await ownedNativeTargetCommonDir(ownership, options.gitCommonDir, options.target);
   options = { ...options, gitCommonDir };
   const { target, runId, binding, gating } = validateRoundReportInput(options);
+  if (binding && options.reportSha256 !== undefined && options.reportSha256 !== binding.reportSha256) {
+    throw new ConvergeRunStateError('report_digest_mismatch');
+  }
+  const reportSha256 = binding?.reportSha256 ?? options.reportSha256;
   const lineWindow = options.lineWindow ?? DEFAULT_LINE_WINDOW;
 
   const state: ConvergeRunState = (await readState(gitCommonDir, target)) ?? initialConvergeRunState(target);
@@ -574,22 +580,31 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const attempts = state.version === 3
     ? await (await import('./attempt-budget.js')).loadConvergeAttemptState(gitCommonDir, target)
     : undefined;
-  const launch = attempts?.lastLaunch ?? state.lastLaunch;
+  const launch = state.version === 3 ? attempts?.lastLaunch : state.lastLaunch;
+  if (state.cycle) {
+    if (!launch || launch.status !== 'completed' || !hasHealthyGuardedLaunch(launch) ||
+      launch.runId !== runId || launch.reportJsonSha256 !== reportSha256 || launch.round !== options.round) {
+      throw new ConvergeRunStateError('review_cycle_launch_mismatch');
+    }
+  }
+  if (state.version === 3) {
+    if (!launch || launch.status !== 'completed') {
+      throw new ConvergeRunStateError('recovery_launch_required');
+    }
+    if (launch.runId !== runId || launch.reportJsonSha256 !== reportSha256 || launch.round !== options.round) {
+      throw new ConvergeRunStateError('recovery_launch_mismatch');
+    }
+    if (!hasHealthyGuardedLaunch(launch)) throw new ConvergeRunStateError('report_health_inconclusive');
+  }
   if (launch && launch.runId === runId && launch.deliveryFailure === 'local-invalid') throw new ConvergeRunStateError('terminal_rejection_cannot_be_admitted');
   if (launch?.status === 'completed' && launch.reviewerHealth !== undefined && launch.runId === runId) {
     // The run's own report bytes and round, or nothing: a rewritten copy is not admissible evidence.
-    if (launch.round !== options.round || launch.reportJsonSha256 !== options.reportSha256) {
+    if (launch.round !== options.round || launch.reportJsonSha256 !== reportSha256) {
       throw new ConvergeRunStateError('report_launch_mismatch');
     }
     if (!hasHealthyGuardedLaunch(launch)) throw new ConvergeRunStateError('report_health_inconclusive');
   }
-  if (state.cycle) {
-    if (!launch || launch.status !== 'completed' || !hasHealthyGuardedLaunch(launch) ||
-      launch.runId !== runId || launch.reportJsonSha256 !== options.reportSha256 || launch.round !== options.round) {
-      throw new ConvergeRunStateError('review_cycle_launch_mismatch');
-    }
-  }
-  if (state.staleReportAudit?.some(entry => staleManifest(entry).runId === runId || staleManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('stale_report_cannot_be_admitted');
+  if (state.staleReportAudit?.some(entry => staleManifest(entry).runId === runId || staleManifest(entry).reportSha256 === reportSha256)) throw new ConvergeRunStateError('stale_report_cannot_be_admitted');
   if (state.staleReportAudit?.length) {
     const { verifyStaleReportReceipts } = await import('./stale-report.js');
     await verifyStaleReportReceipts(gitCommonDir, state.staleReportAudit);
@@ -598,7 +613,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     const { verifyHistoricalDeliveryReconciliations } = await import('./historical-delivery-reconciliation.js');
     await verifyHistoricalDeliveryReconciliations(gitCommonDir,state);
   }
-  if (state.terminalRejections?.some(entry => rejectionManifest(entry).runId === runId || rejectionManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('terminal_rejection_cannot_be_admitted');
+  if (state.terminalRejections?.some(entry => rejectionManifest(entry).runId === runId || rejectionManifest(entry).reportSha256 === reportSha256)) throw new ConvergeRunStateError('terminal_rejection_cannot_be_admitted');
   if (state.terminalRejections) {
     const { verifyTerminalRejections } = await import('./terminal-rejection.js');
     await verifyTerminalRejections(gitCommonDir, state);
@@ -607,7 +622,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   if (gapEntries.some(entry => gapManifest(entry).gapRound === options.round)) throw new ConvergeRunStateError('round_gap_requires_explicit_original_evidence_recovery');
   for (const entry of gapEntries.filter(e => gapManifest(e).admittingRound === options.round)) {
     const m = gapManifest(entry);
-    if (m.runId !== runId || m.reportSha256 !== options.reportSha256) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
+    if (m.runId !== runId || m.reportSha256 !== reportSha256) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
     const { verifyRoundGapReceipt } = await import('./round-gap.js');
     const original = await verifyRoundGapReceipt(gitCommonDir, entry);
     if (!isDeepStrictEqual(original.findings, options.findings)) throw new ConvergeRunStateError('round_gap_original_report_mismatch');
@@ -629,7 +644,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   const gaps = Array.from({ length: Math.max(0, options.round - maxRecorded - 1) }, (_, i) => maxRecorded + i + 1);
   const admittedThroughGap = gaps.length === 1 && gaps.every(gapRound => gapEntries.some(entry => {
     const m = gapManifest(entry);
-    return m.gapRound === gapRound && m.admittingRound === options.round && m.runId === runId && m.reportSha256 === options.reportSha256;
+    return m.gapRound === gapRound && m.admittingRound === options.round && m.runId === runId && m.reportSha256 === reportSha256;
   }));
   if (maxRecorded > 0 && (options.round < maxRecorded || (options.round > maxRecorded + 1 && !admittedThroughGap))) {
     throw new ConvergeRunStateError(

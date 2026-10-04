@@ -641,14 +641,20 @@ before the later guarded claim. It never treats a server/transport refusal as
 that proof. Historical audits use their retained copies, so ordinary temporary
 source cleanup does not break subsequent review and admission.
 
-## `rcl converge-attempt` (legacy accounting)
+## `rcl converge-attempt`
 
-Low-level accounting command retained for legacy callers. The `rcl-converge`
-skill instead uses `review --guarded-converge`; do not preclaim an attempt for
-that path. Each call atomically and durably consumes one per-target attempt
-under the repository's common Git directory, so the budget survives sessions,
-linked worktrees, and abrupt system restarts. New targets default to twenty
-attempts, but an explicit invocation can set any positive cap with
+Each call atomically and durably consumes one per-target attempt under the
+repository's common Git directory, so the budget survives sessions, linked
+worktrees, and abrupt system restarts. Ordinary guarded launches claim inside
+their own process. A recovered-v3 continuation instead uses the public Mode B
+handoff: run `converge-attempt`, let that command exit, then pass its exact
+ordinal to `review --guarded-converge --converge-target <target> --attempt <n>`.
+The producer authenticates and consumes that latest unused standalone claim
+without incrementing the budget or emitting another attempt event. Other
+explicit guarded attempts, live claimants, prior launches, recovery modes and
+mismatched targets or ordinals refuse before provider calls.
+
+New targets default to twenty attempts, but an explicit invocation can set any positive cap with
 `--max-attempts`. Omitting the flag on resume preserves the persisted cap. At
 the boundary, RCL refuses before provider calls and directs the workflow to ask
 the user; an approved continuation explicitly supplies a higher cap.

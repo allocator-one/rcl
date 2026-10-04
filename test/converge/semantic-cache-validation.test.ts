@@ -13,6 +13,7 @@ import { admittedActionableBeforeTriage } from '../../src/evidence/claim-recover
 import { indexSemanticPriorByFileCategory } from '../../src/converge/semantic-state.js';
 import { legacyFixture, recoveredFixture, semanticFixture, sha, uuid, target } from '../evidence/recovery-validation/fixtures.js';
 import { sampleFinding } from '../telemetry/fixtures.js';
+import { recordHealthyRecoveredLaunch } from '../fixtures/guarded-recovered-production.js';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -39,7 +40,9 @@ async function fixture(version: 1 | 2 = 2) {
       ...(predecessor ? { recovery_source: { version: 1, native_sha256: sha(predecessor) } } : {}) },
       target: { kind: 'pr', repo: 'synthetic/recovery', pr_number: 7, head_sha: 'a'.repeat(40) },
       gating: { bound_classification_protocol: 1 } }, findings: rows });
-    const result = await processRoundReport({ gitCommonDir: root, target, round: number, runId, findings: rows, evidence: { reportJson } });
+    await recordHealthyRecoveredLaunch({ gitCommonDir: root, target, round: number, runId, reportJson });
+    const result = await processRoundReport({ gitCommonDir: root, target, round: number, runId, findings: rows,
+      reportSha256: sha(reportJson), evidence: { reportJson } });
     if (predecessor) admissionSourceJsons.push(predecessor);
     reports.push(reportJson);
     return { result, rows, reportJson };
@@ -439,8 +442,10 @@ it('retains an exact stale report before refusing changed recovery state without
     recovery_source: { version: 1, native_sha256: sha(predecessor) } },
   target: { kind: 'pr', repo: 'synthetic/recovery', pr_number: 7, head_sha: 'a'.repeat(40) },
   gating: { bound_classification_protocol: 1 } }, findings: rows });
+  await recordHealthyRecoveredLaunch({ gitCommonDir: f.root, target, round: 2, runId, reportJson });
   await expect(processRoundReport({ gitCommonDir: f.root, target, round: 2, runId, findings: rows,
-    evidence: { reportJson } })).rejects.toThrow('original report retained without native admission');
+    reportSha256: sha(reportJson), evidence: { reportJson } }))
+    .rejects.toThrow('original report retained without native admission');
   expect(await readFile(`${f.path}.evidence/${sha(reportJson)}.json`, 'utf8')).toBe(reportJson);
   expect(await readFile(f.path, 'utf8')).toBe(changed);
 });

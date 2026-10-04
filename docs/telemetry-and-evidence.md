@@ -17,6 +17,7 @@ the [README](https://github.com/allocator-one/rcl#harness-evidence-and-gate).
 - [`--attest`: attested reviews from the gate workflow](#--attest-attested-reviews-from-the-gate-workflow)
 - [`rcl evidence status` and `rcl evidence show`](#rcl-evidence-status-and-rcl-evidence-show)
 - [`rcl evidence recover-run`](#rcl-evidence-recover-run)
+- [`rcl evidence recover-claim`](#rcl-evidence-recover-claim)
 - [`rcl evidence recover-finding`](#rcl-evidence-recover-finding)
 - [`rcl evidence retriage-finding`](#rcl-evidence-retriage-finding)
 - [`rcl telemetry backfill`](#rcl-telemetry-backfill)
@@ -56,7 +57,8 @@ ordinary work command — `rcl review`, `review-plan`, `discuss`, `models`,
 `roles`, `converge-attempt`, `converge-report` or `converge-verdict` — bounded
 to five seconds. Evidence reads (`rcl evidence status` / `show`), the recovery
 and audit commands (`converge-stale`, `converge-gap`, `converge-rejected`,
-`evidence recover-run`, `recover-finding`, `retriage-finding`), the
+`evidence recover-run`, `recover-claim`, `recover-finding`,
+`retriage-finding`), the
 `telemetry` commands other than `flush`, fresh-cycle reviews, pending-launch
 export and finalize-only operations, and runs with telemetry off never flush
 unrelated evidence.
@@ -423,6 +425,133 @@ evidence or journal bindings; `5` means local durable journal/lock persistence
 failed. JSON diagnostics include the stage and next step. Even successful
 delivery does not establish current-head review freshness, convergence,
 attestation or historical accounting repair.
+
+## `rcl evidence recover-claim`
+
+Recover one explicitly selected semantic claim on its existing native convergence
+target. This requires ordinary authenticated review access and a backend that
+advertises the complete `claim_recovery_version: 1` contract. Run/artifact
+delivery through `recover-run` does not enable claim recovery by itself.
+
+Run the command from the original repository. Create a private operation directory
+(mode 0700) on the [supported local storage](#rcl-evidence-recover-run), then prepare
+a selection using the exact original report and authenticated source evidence:
+
+```json
+{
+  "version": 1,
+  "action": "split",
+  "source": {
+    "scope": {
+      "base_url": "https://harness.infra.one",
+      "org_id": "<organization UUID>",
+      "run_id": "<original run UUID>",
+      "repo": "owner/repository",
+      "pr_number": 123
+    },
+    "target": "existing-native-target",
+    "round": 2,
+    "headSha": "<original Git head>",
+    "reportSha256": "<original report SHA-256>"
+  },
+  "findingRef": "f026",
+  "previousIdentity": "<original 16 lowercase hexadecimal digits>",
+  "identity": "<unused 16 lowercase hexadecimal digits>",
+  "descriptor": {
+    "version": 1,
+    "operation": "src/cache.ts :: read",
+    "invariant": "Expired entries must not be returned.",
+    "evidence": ["The selected original branch returns an expired entry."]
+  },
+  "reason": "Separate this original claim from the shared historical key."
+}
+```
+
+`findingRef` is positional across kept findings followed by the appendix; use the
+API's ref, not a reviewer's embedded ID or a location suffix. The destination
+identity must be unused. The descriptor is an explicit correction anchor, never
+an original producer sighting. This selection leaves the new claim untriaged.
+
+```sh
+rcl evidence recover-claim --preview --selection selection.json \
+  --manifest "$RECOVERY_DIR/claim.json" --json
+
+# Inspect the source, affected later reviews and remaining unresolved findings.
+# Set MANIFEST_SHA256 to the exact digest returned by this preview.
+rcl evidence recover-claim --apply --manifest "$RECOVERY_DIR/claim.json" \
+  --manifest-sha256 "$MANIFEST_SHA256" --json
+
+# After interruption or an uncertain acknowledgement, reuse the same operation.
+rcl evidence recover-claim --resume --manifest "$RECOVERY_DIR/claim.json" \
+  --manifest-sha256 "$MANIFEST_SHA256" --json
+```
+
+Preview makes authenticated reads and creates exclusive preparation files. Apply
+journals exact event IDs, timestamps and payloads before posting. Resume verifies
+accepted receipts instead of posting them again. Preserve the manifest and all
+adjacent material, `.proofs`, packets, native plan and journal; every load checks
+their retained bytes. A nonzero apply can follow accepted remote events, so keep
+the original operation and inspect its diagnostics before resuming. Changes to
+the actor, original source, native snapshot or unplanned server history refuse.
+
+If unrelated target history advances after an interrupted split, explicitly
+preview adoption of that operation without changing its selection:
+
+```sh
+rcl evidence recover-claim --preview \
+  --adopt-manifest "$RECOVERY_DIR/claim.json" \
+  --adopt-manifest-sha256 "$MANIFEST_SHA256" \
+  --manifest "$RECOVERY_DIR/adopted.json" --json
+# Inspect the new preview, then apply adopted.json with its own printed digest.
+```
+
+Adoption retains accepted event IDs, timestamps, payloads and attribution. Only a
+stage proven absent through complete authenticated reads receives a replacement
+ID linked to its predecessor. A late old receipt blocks that replacement; inspect
+it and re-preview the original operation. Retain every prior manifest and its
+referenced files. Adoption does not waive source, native-state or server checks.
+
+Optional `disposition` has `mode: "fresh"`, `verdict: "fixed"` or `"dismissed"`,
+the claim's actual `severity`, and a source-backed `reason`. `mode: "preserved"`
+also requires `originalVerdictEventId` and matching original, stored and classified
+descriptors for every affected member of the old shared key, including original
+actor, reason, severity and outcome. Ambiguous or descriptorless old verdicts
+need fresh triage. A fixed claim stays pending until an eligible conclusive higher
+round started after the server received that assertion. Other members of the old
+key and unverifiable historical obligations remain unresolved.
+
+For an existing exact correction anchor, `action: "disposition"` requires a new
+explicit disposition; `action: "refresh"` forbids one. Refresh reads the complete
+pinned claim history and receipts, posts no event, and updates the local snapshot.
+Newly arrived source evidence can reopen unresolved obligations. The snapshot's
+read window is not current server approval; the enforced gate independently
+recomputes current obligations.
+
+Recovery preserves original reports, findings, rounds, review cycles and spent
+attempts. It calls no reviewers and does not flush unrelated evidence. JSON and
+artifact reads and writes share a limit of 240 requests per rolling minute; large
+histories wait without dropping proof checks. Valid HTTP 429 `Retry-After` values
+allow at most three waits of up to 60 seconds per operation. Sustained contention
+refuses safely; a write is never blindly retried after an uncertain result.
+
+Recovered targets use native version 3 with recovery metadata version 2; older
+readers refuse unsupported formats. Keep the original target and complete
+retained material. Continue on that target by claiming the next durable attempt with
+`converge-attempt`, then pass the returned ordinal to `review --guarded-converge`
+with `--converge-target` and `--attempt`. The guarded producer consumes exactly
+that authenticated claim without incrementing the budget again. Admit with
+`converge-report --target` using the same target. Before dispatch, RCL
+pins the verified predecessor in `run.converge.recovery_source`, preserves
+`run.cycle_id`, and declares bound classification before serializing the
+report. Admission verifies these bindings under target ownership; a changed
+predecessor or mismatched cycle refuses while retaining the completed report.
+Use `--start-over` only for an explicitly requested new review, not recovery.
+
+Exit codes: `0` means prepared or acknowledged, `2` means invalid local input,
+`3` means ordinary authentication is unavailable, and `4`/`5` indicate remote,
+proof or durable checkpoint refusal. Successful recovery supplies no review,
+attestation or merge approval. Fresh conclusive native review, the matching
+enforced gate and required CI still govern delivery.
 
 ## `rcl evidence recover-finding`
 

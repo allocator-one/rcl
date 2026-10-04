@@ -480,6 +480,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(input.gating.verificationReasoningEffort ? { verification_reasoning_effort: input.gating.verificationReasoningEffort } : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
       verification_pass_timeout_ms: input.gating.verificationPassTimeoutMs,
+      ...(input.converge?.recovery_source ? { bound_classification_protocol: 1 as const } : {}),
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),
@@ -494,6 +495,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       target: input.converge.target,
       ...(input.converge.round !== undefined ? { round: input.converge.round } : {}),
       ...(input.converge.attempt !== undefined ? { attempt: input.converge.attempt } : {}),
+      ...(input.converge.recovery_source ? { recovery_source: { ...input.converge.recovery_source } } : {}),
     } } : {}),
   };
 }

@@ -21,6 +21,21 @@ import { serializeRecoveryDocument } from '../../src/evidence/original-run/journ
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import type { ReviewCycleReceipt } from '../../src/converge/review-cycle.js';
 
+vi.mock('../../src/evidence/original-run/lock-scope.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/evidence/original-run/lock-scope.js')>();
+  return {
+    ...original,
+    lockSystemCommand: vi.fn(async (file: string) => {
+      if (file === '/bin/ls') return 'drwx------ 2 owner staff 64 Oct 4 00:00 synthetic\n';
+      if (file === '/bin/df') return JSON.stringify({ 'storage-system-information': { filesystem: [
+        { name: '/dev/synthetic', 'mounted-on': '/' },
+      ] } });
+      if (file === '/sbin/mount') return '/dev/synthetic on / (apfs, local, journaled)\n';
+      throw new Error(`unexpected lock-system command: ${file}`);
+    }),
+  };
+});
+
 vi.mock('../../src/converge/process-identity.js', async importOriginal => {
   const identity = await importOriginal<typeof import('../../src/converge/process-identity.js')>();
   return {

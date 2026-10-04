@@ -47,6 +47,8 @@ export interface ConvergeAttemptRecord {
   retrySource?: RetrySource;
   boundFixRecoverySource?: BoundFixRecoverySource;
   pendingRecoverySource?: PendingRecoverySource;
+  /** One authenticated producer may take over a standalone public claim after its claimant exits. */
+  handoff?: { version: 1; acceptedAt: string; pid: number; processIdentity: ProcessIdentity };
 }
 
 export interface ConvergeAttemptState {
@@ -70,6 +72,8 @@ export interface ConvergeAttemptClaim {
   warning?: string;
   cycle?: NativeReviewCycle;
   processIdentity?: ProcessIdentity;
+  /** This process authenticated an already-spent public claim instead of incrementing accounting. */
+  preclaimed?: true;
 }
 
 export class ConvergeAttemptBudgetExceededError extends Error {
@@ -136,6 +140,8 @@ interface ClaimOptions {
   afterClaim?: (claim: ConvergeAttemptClaim, ownership: NativeTargetOwnership) => Promise<void>;
   ownership?: NativeTargetOwnership;
   freshReviewOperation?: string;
+  /** Consume this exact latest standalone claim without incrementing accounting. */
+  consumeAttempt?: number;
 }
 
 interface AttemptLockOwner {
@@ -209,6 +215,11 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
         !Number.isInteger(record.pid) ||
         (record.processIdentity !== undefined &&
           (!processIdentitySchema.safeParse(record.processIdentity).success || record.processIdentity.pid !== record.pid)) ||
+        (record.handoff !== undefined &&
+          (record.handoff.version !== 1 || typeof record.handoff.acceptedAt !== 'string' ||
+            !Number.isSafeInteger(record.handoff.pid) || record.handoff.pid < 1 ||
+            !processIdentitySchema.safeParse(record.handoff.processIdentity).success ||
+            record.handoff.processIdentity.pid !== record.handoff.pid)) ||
         record.source !== 'claim' ||
         (record.retrySource !== undefined && (!retrySourceSchema.safeParse(record.retrySource).success ||
           record.retrySource.attempt !== record.attempt - 1)) ||
@@ -231,13 +242,13 @@ export function validateConvergeAttemptState(value: unknown, expectedTarget: str
 
   if (state.lastLaunch !== undefined) {
     const launch = launchSchema.safeParse(state.lastLaunch);
-    if (!launch.success || !attempts.some(record =>
-      record.attempt === launch.data.attempt && record.pid === launch.data.pid)) {
+    const launchAttempt = launch.success ? attempts.find(record => record.attempt === launch.data.attempt) : undefined;
+    const launchOwner = launchAttempt?.handoff ?? launchAttempt;
+    if (!launch.success || !launchOwner || launchOwner.pid !== launch.data.pid) {
       throw new ConvergeAttemptStateError(`Invalid guarded launch in convergence attempt state: ${stateFile}`);
     }
-    const launchAttempt = attempts.find(record => record.attempt === launch.data.attempt);
-    if ((launchAttempt?.processIdentity !== undefined || launch.data.processIdentity !== undefined) &&
-      !isDeepStrictEqual(launchAttempt?.processIdentity, launch.data.processIdentity)) {
+    if ((launchOwner.processIdentity !== undefined || launch.data.processIdentity !== undefined) &&
+      !isDeepStrictEqual(launchOwner.processIdentity, launch.data.processIdentity)) {
       throw new ConvergeAttemptStateError(`Guarded launch process identity does not match its attempt owner: ${stateFile}`);
     }
   }
@@ -646,6 +657,7 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
     ownership: options.ownership,
     freshReviewOperation: options.freshReviewOperation,
     pendingRecoverySource: options.pendingRecoverySource,
+    consumeAttempt: options.consumeAttempt,
   };
   if (claimOptions.freshReviewOperation && !claimOptions.ownership) throw new Error('fresh_review_owner_required');
   // Use one canonical directory for both target ownership and state paths.
@@ -654,6 +666,10 @@ export async function claimConvergeAttempt(options: ClaimOptions): Promise<Conve
   claimOptions.gitCommonDir = await realpath(resolve(claimOptions.gitCommonDir));
   const { gitCommonDir, target } = claimOptions;
   if (claimOptions.maxAttempts !== undefined) validateAttemptCap(claimOptions.maxAttempts);
+  if (claimOptions.consumeAttempt !== undefined &&
+    (!Number.isSafeInteger(claimOptions.consumeAttempt) || claimOptions.consumeAttempt < 1)) {
+    throw new ConvergeAttemptStateError('Consumed convergence attempt must be a positive safe integer.');
+  }
   let committed: ConvergeAttemptClaim | undefined;
   try {
     const work = async (ownership: NativeTargetOwnership) => {
@@ -748,6 +764,34 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
     // Supplying it is an explicit invocation-time override: it can raise or
     // lower the persisted boundary after the workflow has obtained approval.
     const effectiveCap = requestedCap ?? previous?.cap ?? DEFAULT_CONVERGE_ATTEMPT_CAP;
+    if (options.consumeAttempt !== undefined) {
+      if (!stored || options.recordPid !== undefined || options.freshReviewOperation !== undefined ||
+        options.retrySource !== undefined || options.boundFixRecoverySource !== undefined ||
+        options.pendingRecoverySource !== undefined || options.consumeAttempt !== attemptsUsed ||
+        requestedCap !== undefined && requestedCap !== stored.cap) {
+        throw new ConvergeAttemptStateError('Preclaimed producer handoff does not match the exact latest standalone claim.');
+      }
+      const latest = stored.attempts.at(-1);
+      if (!latest || latest.attempt !== options.consumeAttempt || latest.handoff || !latest.processIdentity ||
+        latest.retrySource || latest.boundFixRecoverySource || latest.pendingRecoverySource ||
+        stored.lastLaunch?.attempt === options.consumeAttempt) {
+        throw new ConvergeAttemptStateError('Preclaimed producer handoff requires one unused standalone claim.');
+      }
+      if (await inspectProcessIdentity(latest.processIdentity) !== 'dead') {
+        throw new ConvergeAttemptStateError('Preclaimed producer handoff requires the exact standalone claimant to have exited.');
+      }
+      if (!recordProcessIdentity) {
+        throw new ConvergeAttemptStateError('Preclaimed producer handoff requires a verifiable producer identity.');
+      }
+      const handoff = { version: 1 as const, acceptedAt: timestamp, pid: recordPid,
+        processIdentity: recordProcessIdentity };
+      await writeStateAtomically(stateFile, { ...stored,
+        attempts: stored.attempts.map(record => record.attempt === options.consumeAttempt
+          ? { ...record, handoff } : record), updatedAt: timestamp });
+      claim = { target, attempt: options.consumeAttempt, attemptsUsed, cap: stored.cap, stateFile,
+        processIdentity: recordProcessIdentity, preclaimed: true,
+        ...(stored.cycle ? { cycle: stored.cycle } : {}) };
+    } else {
     if (attemptsUsed >= effectiveCap) {
       // Persist a migrated ledger even when it already exhausts the cap, so
       // later processes do not depend on reparsing mutable prose. Also
@@ -797,6 +841,7 @@ async function claimConvergeAttemptOwned(options: ClaimOptions): Promise<Converg
     claim = { target, attempt, attemptsUsed: attempt, cap: effectiveCap, stateFile,
       ...(recordProcessIdentity ? { processIdentity: recordProcessIdentity } : {}),
       ...(state.cycle ? { cycle: state.cycle } : {}) };
+    }
   } catch (err) {
     claimError = err;
   }
@@ -866,32 +911,45 @@ export async function recordConvergeAttemptLaunch(
     let failure: unknown;
     try {
       const state = await readState(stateFile, target);
-      if (!state || state.attemptsUsed !== incoming.attempt || state.attempts.at(-1)?.pid !== incoming.pid ||
+      const latestAttempt = state?.attempts.at(-1);
+      const attemptOwner = latestAttempt?.handoff ?? latestAttempt;
+      if (!state || state.attemptsUsed !== incoming.attempt || attemptOwner?.pid !== incoming.pid ||
         mutation === 'completion' && incoming.pid !== process.pid) {
         throw new ConvergeAttemptStateError('Guarded launch requires this process\'s latest durable attempt claim.');
       }
-      const attemptOwner = state.attempts.at(-1)?.processIdentity;
-      if ((attemptOwner !== undefined || incoming.processIdentity !== undefined) &&
-        !isDeepStrictEqual(attemptOwner, incoming.processIdentity)) {
+      const ownerIdentity = attemptOwner?.processIdentity;
+      if ((ownerIdentity !== undefined || incoming.processIdentity !== undefined) &&
+        !isDeepStrictEqual(ownerIdentity, incoming.processIdentity)) {
         throw new ConvergeAttemptStateError('Guarded launch process identity does not match its attempt owner.');
       }
-      if (mutation === 'completion' && attemptOwner !== undefined) {
+      if (mutation === 'completion' && ownerIdentity !== undefined) {
         let currentOwner: ProcessIdentity;
         try { currentOwner = await captureCurrentProcessIdentity(); }
         catch (error) {
           throw new ConvergeAttemptStateError('Guarded launch current process identity is unverifiable.', { cause: error });
         }
-        if (!isDeepStrictEqual(attemptOwner, currentOwner)) {
+        if (!isDeepStrictEqual(ownerIdentity, currentOwner)) {
           throw new ConvergeAttemptStateError('Guarded launch current process identity does not match its attempt owner.');
         }
       }
       const { assertReviewCyclePair } = await import('./fresh-review.js');
       await assertReviewCyclePair(commonDir, target, state.cycle);
       const previous = state.lastLaunch;
-      if (mutation === 'delivery' && (!previous || previous.status !== 'completed' ||
-        incoming.deliveryPending !== false ||
-        !isDeepStrictEqual({ ...previous, deliveryPending: false }, incoming))) {
-        throw new ConvergeAttemptStateError('Delivery recording may change only the exact completed launch delivery flag.');
+      if (mutation === 'delivery') {
+        const previousMarker = previous?.deliveryReconciliation;
+        const incomingMarker = incoming.deliveryReconciliation;
+        const markerAllowed = isDeepStrictEqual(previousMarker, incomingMarker) ||
+          incomingMarker?.version === 2 && incomingMarker.cycleId === (state.cycle?.id ?? null) &&
+          (previousMarker === undefined || previousMarker.version === 1);
+        const previousBinding = previous && { ...previous, deliveryPending: false };
+        if (previousBinding) {
+          if (incomingMarker) previousBinding.deliveryReconciliation = incomingMarker;
+          else delete previousBinding.deliveryReconciliation;
+        }
+        if (!previous || previous.status !== 'completed' || incoming.deliveryPending !== false || !markerAllowed ||
+          !isDeepStrictEqual(previousBinding, incoming)) {
+          throw new ConvergeAttemptStateError('Delivery recording may change only the exact completed launch delivery flag and proof.');
+        }
       }
       if (isDeepStrictEqual(previous, incoming)) {
         const handle = await open(stateFile, 'r+');
@@ -965,7 +1023,9 @@ export async function recordConvergeAttemptRecoveryResume(
     let failure: unknown;
     try {
       const state = await readState(stateFile, target);
-      if (!state || state.attemptsUsed !== expected.attempt || state.attempts.at(-1)?.pid !== expected.pid) {
+      const latestAttempt = state?.attempts.at(-1);
+      const attemptOwner = latestAttempt?.handoff ?? latestAttempt;
+      if (!state || state.attemptsUsed !== expected.attempt || attemptOwner?.pid !== expected.pid) {
         throw new ConvergeAttemptStateError('recovery_resume_claim_mismatch');
       }
       const { assertReviewCyclePair } = await import('./fresh-review.js');

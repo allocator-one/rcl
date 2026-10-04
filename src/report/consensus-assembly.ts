@@ -1,6 +1,8 @@
 import { DEFAULT_THRESHOLDS } from '../config/defaults.js';
 import type { Config } from '../config/schema.js';
 import { deduplicateFindings, type DedupeOrdering } from '../consensus/deduper.js';
+import { deduplicateSemanticFindings } from '../consensus/semantic-deduper.js';
+import { materializeRecoveredClaims, type RecoveredProduction } from '../converge/recovered-production.js';
 import type { ConsensusFinding, ModelReview } from '../consensus/types.js';
 import { applyReportThresholds, computeConsensus } from '../consensus/voter.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
@@ -15,6 +17,7 @@ export interface ConsensusAssemblyInput {
   modelWeights?: ReadonlyMap<string, number>;
   collectContributions?: boolean;
   dedupeOrdering?: DedupeOrdering;
+  recoveredProduction?: RecoveredProduction;
 }
 
 export interface ConsensusAssemblyContribution {
@@ -42,7 +45,8 @@ export function deriveConsensusAssembly(input: ConsensusAssemblyInput): Consensu
   const { thresholds } = input;
   const collectContributions = input.collectContributions === true;
   const reviews = mergeChunkReviews([...input.chunkReviews, ...input.arrivedAsync]);
-  const groups = deduplicateFindings(
+  const deduplicate = input.recoveredProduction ? deduplicateSemanticFindings : deduplicateFindings;
+  const groups = deduplicate(
     reviews,
     thresholds?.jaccardThreshold ?? DEFAULT_THRESHOLDS.jaccardThreshold,
     thresholds?.dedupeLineWindow ?? DEFAULT_THRESHOLDS.dedupeLineWindow,
@@ -50,10 +54,10 @@ export function deriveConsensusAssembly(input: ConsensusAssemblyInput): Consensu
     collectContributions,
     input.dedupeOrdering,
   );
-  const consensusFindings = computeConsensus(input.runId, groups, reviews, new Map(input.roleMap), {
+  const consensusFindings = materializeRecoveredClaims(computeConsensus(input.runId, groups, reviews, new Map(input.roleMap), {
     lineWindow: thresholds?.dedupeLineWindow,
     jaccardThreshold: thresholds?.jaccardThreshold,
-  }, input.modelWeights === undefined ? undefined : new Map(input.modelWeights));
+  }, input.modelWeights === undefined ? undefined : new Map(input.modelWeights)), input.recoveredProduction);
   const { kept: reportFindings, dropped: droppedFindings } = applyReportThresholds(consensusFindings, {
     minConfidence: thresholds?.minConfidence,
     minConsensusScore: thresholds?.minConsensusScore,

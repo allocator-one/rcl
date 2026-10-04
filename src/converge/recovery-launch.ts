@@ -6,12 +6,14 @@ import {
   claimConvergeAttempt,
   convergeAttemptStatePath,
   previewConvergeAttemptState,
+  recordConvergeAttemptLaunch,
+  recordConvergeAttemptRecoveryResume,
   type ConvergeAttemptClaim,
   type ConvergeAttemptState,
 } from "./attempt-budget.js";
 import {
   initialConvergeRunState,
-  loadConvergeRunState,
+  loadConvergeRunStateEvidence,
   validateRoundCap,
   writeState,
   type ConvergeRunState,
@@ -92,6 +94,7 @@ type Source = {
   sourceNativeClaim: { attempt: number; round: number };
   policy: QuorumPolicy;
   attempts: RecoveryAttempt[];
+  nativeSha256?: string;
 };
 
 class AlreadyQuorate extends Error {}
@@ -192,6 +195,7 @@ function equalClaim(
 async function loadSource(
   options: ReviewerRecoveryLaunchOptions,
   state: ConvergeRunState,
+  nativeSha256: string | undefined,
   attempts: ConvergeAttemptState | undefined,
   requiredRound: number,
 ): Promise<Source | "already_quorate"> {
@@ -220,9 +224,14 @@ async function loadSource(
   const frozenInput = retainedLaunchInputSha256(inspected.captured.digest, inspected.assembly.run);
   const health = inspected.artifact.health;
   const expectedHealth = { version: 1, policy: health.policy, successfulSeats: health.successfulSeats.length };
-  const launch = state.lastLaunch;
-  if (inspected.assembly.run.cycleId !== state.cycle?.id || inspected.assembly.run.converge?.recovery_source !== undefined) fail("source_recovery_binding_mismatch");
+  const launch = state.version === 3 ? attempts?.lastLaunch : state.lastLaunch;
+  const recoverySource = inspected.assembly.run.converge?.recovery_source;
+  if (inspected.assembly.run.cycleId !== state.cycle?.id ||
+    (state.version === 3
+      ? !nativeSha256 || recoverySource?.version !== 1 || recoverySource.native_sha256 !== nativeSha256
+      : recoverySource !== undefined)) fail("source_recovery_binding_mismatch");
   const spent = attempts?.attempts.find(item => item.attempt === sourceClaim.attempt);
+  const attemptOwner = spent?.handoff ?? spent;
   if (!launch || launch.status !== "completed" || launch.runId !== options.sourceRunId ||
     launch.headSha !== options.headSha || options.inputSha256 !== frozenInput ||
     launch.inputSha256 !== frozenInput || !equalClaim(launch, sourceClaim) ||
@@ -230,9 +239,9 @@ async function loadSource(
     launch.successfulReviews !== health.successfulSeats.length ||
     launch.totalReviews !== health.policy.seatCount ||
     stableStringify(launch.reviewerHealth) !== stableStringify(expectedHealth) ||
-    attempts?.attemptsUsed !== sourceClaim.attempt || !spent || spent.pid !== launch.pid ||
-    (spent.processIdentity !== undefined || launch.processIdentity !== undefined) &&
-      !isDeepStrictEqual(spent.processIdentity, launch.processIdentity) ||
+    attempts?.attemptsUsed !== sourceClaim.attempt || !spent || attemptOwner?.pid !== launch.pid ||
+    (attemptOwner.processIdentity !== undefined || launch.processIdentity !== undefined) &&
+      !isDeepStrictEqual(attemptOwner.processIdentity, launch.processIdentity) ||
     state.rounds.some(round => round.round === requiredRound)) fail("source_not_current");
   if (latest.kind === "successor") {
     const parent = lineage.runs.at(-2)!.inspected;
@@ -256,6 +265,7 @@ async function loadSource(
     sourceNativeClaim: sourceClaim,
     policy: health.policy,
     attempts: [...lineage.attempts],
+    ...(state.version === 3 ? { nativeSha256 } : {}),
   };
 }
 
@@ -326,9 +336,8 @@ export async function guardReviewerRecoveryLaunch(
       target: options.target,
       maxAttempts: options.maxAttempts,
       beforeClaim: async () => {
-        const state =
-          (await loadConvergeRunState(options.gitCommonDir, options.target)) ??
-          initialConvergeRunState(options.target);
+        const native = await loadConvergeRunStateEvidence(options.gitCommonDir, options.target);
+        const state = native?.state ?? initialConvergeRunState(options.target);
         const attempts = await previewConvergeAttemptState(
           options.gitCommonDir,
           options.target,
@@ -344,7 +353,7 @@ export async function guardReviewerRecoveryLaunch(
           state.rounds.reduce((last, item) => Math.max(last, item.round), 0) +
           1;
         if (requiredRound > state.roundCap) fail("round_cap");
-        source = await loadSource(options, state, attempts, requiredRound);
+        source = await loadSource(options, state, native?.sha256, attempts, requiredRound);
         if (source === "already_quorate") throw new AlreadyQuorate();
         if (attempts?.attemptsUsed !== source.sourceNativeClaim.attempt)
           fail("native_attempt_mismatch");
@@ -389,11 +398,14 @@ export async function guardReviewerRecoveryLaunch(
         assertOperationLive(operation, options);
       },
       afterClaim: async (claim, ownership) => {
-        const state = await loadConvergeRunState(
+        const native = await loadConvergeRunStateEvidence(
           options.gitCommonDir,
           options.target,
         );
+        const state = native?.state;
         if (!state || !source || source === "already_quorate")
+          fail("source_not_current");
+        if (state.version === 3 && (!source.nativeSha256 || native.sha256 !== source.nativeSha256))
           fail("source_not_current");
         const requiredRound = source.sourceNativeClaim.round;
         if (
@@ -402,7 +414,7 @@ export async function guardReviewerRecoveryLaunch(
           operation.successorNativeClaim.round !== requiredRound
         )
           fail("claim_mismatch");
-        state.lastLaunch = {
+        const pendingLaunch = {
           status: "pending",
           runId: options.successorRunId,
           attempt: claim.attempt,
@@ -418,8 +430,13 @@ export async function guardReviewerRecoveryLaunch(
             originalNativeClaim: source.originalNativeClaim,
             sourceNativeClaim: source.sourceNativeClaim,
           },
-        };
-        await writeState(options.gitCommonDir, state, ownership);
+        } as const;
+        if (state.version === 3) {
+          await recordConvergeAttemptLaunch(options.gitCommonDir, options.target, pendingLaunch, ownership);
+        } else {
+          state.lastLaunch = pendingLaunch;
+          await writeState(options.gitCommonDir, state, ownership);
+        }
         try {
           const journal = await CheckpointJournal.create({
             commonDir: options.gitCommonDir,
@@ -466,8 +483,8 @@ export async function guardReviewerRecoveryLaunch(
             inspected.operation.successorNativeClaim.round !== requiredRound
           )
             fail("successor_proof_mismatch");
-          state.lastLaunch = {
-            ...state.lastLaunch,
+          const completedLaunch = {
+            ...pendingLaunch,
             status: "completed",
             runId: options.successorRunId,
             reportJsonSha256: terminal.reportSha256,
@@ -480,13 +497,25 @@ export async function guardReviewerRecoveryLaunch(
               policy: health.policy,
               successfulSeats: health.successfulSeats.length,
             },
-          };
+          } as const;
+          if (state.version === 3) {
+            await recordConvergeAttemptLaunch(options.gitCommonDir, options.target, completedLaunch, ownership);
+          } else {
+            state.lastLaunch = completedLaunch;
+          }
         } catch (error) {
-          state.lastLaunch = { ...state.lastLaunch, status: "failed" };
+          const failedLaunch = { ...pendingLaunch, status: "failed" as const };
+          if (state.version === 3) {
+            await recordConvergeAttemptLaunch(options.gitCommonDir, options.target, failedLaunch, ownership);
+          } else {
+            state.lastLaunch = failedLaunch;
+          }
           failure = error;
         }
-        state.updatedAt = new Date().toISOString();
-        await writeState(options.gitCommonDir, state, ownership);
+        if (state.version !== 3) {
+          state.updatedAt = new Date().toISOString();
+          await writeState(options.gitCommonDir, state, ownership);
+        }
       },
     });
   } catch (error) {
@@ -533,19 +562,22 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     snapshot.beforeResume !== undefined && typeof snapshot.beforeResume !== "function") fail("invalid_resume_input");
   const options = { ...snapshot, target: snapshot.target.trim(), gitCommonDir: await realpath(resolve(snapshot.gitCommonDir)) };
   return withNativeTarget(options.gitCommonDir, options.target, async ownership => {
-    const [state, attempts] = await Promise.all([
-      loadConvergeRunState(options.gitCommonDir, options.target),
+    const [native, attempts] = await Promise.all([
+      loadConvergeRunStateEvidence(options.gitCommonDir, options.target),
       previewConvergeAttemptState(options.gitCommonDir, options.target),
     ]);
+    const state = native?.state;
     const { assertReviewCyclePair } = await import('./fresh-review.js');
     await assertReviewCyclePair(options.gitCommonDir, options.target, state?.cycle);
-    const launch = state?.lastLaunch, recovery = launch?.recovery;
+    const launch = state?.version === 3 ? attempts?.lastLaunch : state?.lastLaunch;
+    const recovery = launch?.recovery;
     if (!state || !launch || !recovery || launch.runId !== options.successorRunId || !recovery.operationId) fail("resume_missing_launch");
     if (launch.headSha !== options.headSha || launch.inputSha256 !== options.inputSha256) fail("resume_input_mismatch");
     const spent = attempts?.attempts.find(item => item.attempt === launch.attempt);
-    if (!attempts || !spent || spent.pid !== launch.pid || attempts.attemptsUsed !== launch.attempt ||
-      (spent.processIdentity !== undefined || launch.processIdentity !== undefined) &&
-        !isDeepStrictEqual(spent.processIdentity, launch.processIdentity)) fail("resume_claim_mismatch");
+    const attemptOwner = spent?.handoff ?? spent;
+    if (!attempts || !spent || attemptOwner?.pid !== launch.pid || attempts.attemptsUsed !== launch.attempt ||
+      (attemptOwner.processIdentity !== undefined || launch.processIdentity !== undefined) &&
+        !isDeepStrictEqual(attemptOwner.processIdentity, launch.processIdentity)) fail("resume_claim_mismatch");
     validateRoundCap(state.roundCap);
     if (state.rounds.some(item => !Number.isSafeInteger(item.round) || item.round < 1)) fail("invalid_round_state");
     const maxRound = state.rounds.reduce((last, item) => Math.max(last, item.round), 0);
@@ -593,7 +625,11 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
       policy: inspected.artifact.health.policy, attempts: [...lineage.attempts] };
     const claim: ConvergeAttemptClaim = { target: options.target, attempt: launch.attempt,
       attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, stateFile: convergeAttemptStatePath(options.gitCommonDir, options.target) };
-    if (inspected.assembly.run.cycleId !== state.cycle?.id || inspected.assembly.run.converge?.recovery_source !== undefined) fail("resume_source_recovery_binding_mismatch");
+    const sourceRecovery = inspected.assembly.run.converge?.recovery_source;
+    if (inspected.assembly.run.cycleId !== state.cycle?.id ||
+      (state.version === 3
+        ? sourceRecovery?.version !== 1 || sourceRecovery.native_sha256 !== native!.sha256
+        : sourceRecovery !== undefined)) fail("resume_source_recovery_binding_mismatch");
     const priorTerminal = await readJournal.readTerminalReport();
     if (launch.status === "completed" && !priorTerminal) fail("resume_terminal_missing");
     const priorState = await readJournal.read();
@@ -601,6 +637,19 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     const beforeIntents = stableStringify(priorState.records.filter(record => record.type === "intent"));
     const beforeVerifierIntents = budget.remainingMs === 0
       ? stableStringify((await readJournal.readVerification())?.intents ?? []) : undefined;
+
+    const persistLaunch = async (expected: typeof launch, next: typeof launch) => {
+      if (state.version === 3) {
+        await recordConvergeAttemptRecoveryResume(options.gitCommonDir, options.target, {
+          expected, next, nativeSha256: native!.sha256, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
+        }, ownership);
+        return;
+      }
+      if (!isDeepStrictEqual(state.lastLaunch, expected)) fail('resume_stale_launch');
+      state.lastLaunch = next;
+      state.updatedAt = new Date().toISOString();
+      await writeState(options.gitCommonDir, state, ownership);
+    };
 
     const finish = async (journal: CheckpointJournal) => {
       const completed = await loadReviewerLineage({ commonDir: options.gitCommonDir, target: options.target, runId: options.successorRunId });
@@ -640,26 +689,24 @@ export async function guardReviewerRecoveryResume(input: ReviewerRecoveryResumeO
     catch { fail('resume_owner_unverifiable'); }
     const mutableLaunch = { ...launch };
     delete mutableLaunch.reviewerHealth;
-    state.lastLaunch = { ...mutableLaunch, status: "pending", recovery: { ...recovery,
-      resume: { pid: process.pid, processIdentity: currentIdentity, phase: "running" } } };
-    state.updatedAt = new Date().toISOString();
-    await writeState(options.gitCommonDir, state, ownership);
+    const persistedLaunch = { ...mutableLaunch, status: "pending" as const, recovery: { ...recovery,
+      resume: { pid: process.pid, processIdentity: currentIdentity, phase: "running" as const } } };
+    await persistLaunch(launch, persistedLaunch);
     try {
       const journal = await CheckpointJournal.openWrite({ commonDir: options.gitCommonDir, namespace: options.successorRunId,
         plan: lineage.plan, ownership });
       if (!priorTerminal) await options.run({ journal, operation, claim, ownership });
       const completion = await finish(journal);
-      state.lastLaunch = { ...launch, ...completion, status: "completed", deliveryPending: launch.deliveryPending ?? false,
+      const completedLaunch = { ...launch, ...completion, status: "completed" as const,
+        deliveryPending: launch.deliveryPending ?? false,
         hardFailure: launch.hardFailure ?? false, recovery: { ...recovery,
-          resume: { pid: process.pid, processIdentity: currentIdentity, phase: "finished" } } };
-      state.updatedAt = new Date().toISOString();
-      await writeState(options.gitCommonDir, state, ownership);
+          resume: { pid: process.pid, processIdentity: currentIdentity, phase: "finished" as const } } };
+      await persistLaunch(persistedLaunch, completedLaunch);
       return { kind: "resumed", claim, operation, reusedTerminal: priorTerminal !== undefined };
     } catch (error) {
-      state.lastLaunch = { ...mutableLaunch, status: "failed", recovery: { ...recovery,
-        resume: { pid: process.pid, processIdentity: currentIdentity, phase: "finished" } } };
-      state.updatedAt = new Date().toISOString();
-      await writeState(options.gitCommonDir, state, ownership);
+      const failedLaunch = { ...mutableLaunch, status: "failed" as const, recovery: { ...recovery,
+        resume: { pid: process.pid, processIdentity: currentIdentity, phase: "finished" as const } } };
+      await persistLaunch(persistedLaunch, failedLaunch);
       throw error;
     }
   });

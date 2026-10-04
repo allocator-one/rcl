@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { loadConvergeRunState, processRoundReport, recordVerdicts } from '../../src/converge/run-state.js';
 import { installRecoveredProduction } from '../fixtures/recovered-production.js';
 import { sha, uuid } from '../evidence/recovery-validation/fixtures.js';
+import { recordHealthyRecoveredLaunch } from '../fixtures/guarded-recovered-production.js';
 
 const fault = vi.hoisted(() => ({ path: '', afterRead: undefined as (() => Promise<void>) | undefined,
   syncFile: '', syncDirectory: '' }));
@@ -77,7 +78,9 @@ async function fixture() {
   const reportJson = JSON.stringify({ run: { id: runId, converge: {
     target: recovered.plan.target, round: 2, recovery_source: { version: 1, native_sha256: sha(recovered.plan.resultJson) },
   }, gating: { bound_classification_protocol: 1 } }, findings });
-  const options = { gitCommonDir: alias, target: recovered.plan.target, round: 2, runId, findings, evidence: { reportJson } };
+  await recordHealthyRecoveredLaunch({ gitCommonDir: canonical, target: recovered.plan.target, round: 2, runId, reportJson });
+  const options = { gitCommonDir: alias, target: recovered.plan.target, round: 2, runId, findings,
+    reportSha256: sha(reportJson), evidence: { reportJson } };
   function retargetAfterOwnedRead() {
     fault.path = recovered.path;
     fault.afterRead = async () => { await unlink(alias); await symlink(diverted, alias); };
@@ -117,7 +120,10 @@ it('refuses an unbounded semantic finding batch before allocating the relation g
     identity: `report:${f.options.runId}:${String(index).padStart(16, '0')}`,
   }));
   const report = JSON.parse(f.reportJson); report.findings = findings;
-  await expect(processRoundReport({ ...f.options, findings, evidence: { reportJson: JSON.stringify(report) } }))
+  const reportJson = JSON.stringify(report);
+  await recordHealthyRecoveredLaunch({ gitCommonDir: f.canonical, target: f.options.target,
+    round: 2, runId: f.options.runId, reportJson });
+  await expect(processRoundReport({ ...f.options, findings, reportSha256: sha(reportJson), evidence: { reportJson } }))
     .rejects.toThrow(/at most 2000 findings/);
 });
 

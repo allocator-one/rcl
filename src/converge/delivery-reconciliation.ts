@@ -1,4 +1,4 @@
-import { resolveGitCommonDir } from './attempt-budget.js';
+import { loadConvergeAttemptState, recordConvergeAttemptLaunch, resolveGitCommonDir } from './attempt-budget.js';
 import { loadConvergeRunState, writeState } from './run-state.js';
 import { strongDeliveryReconciliationSchema } from './launch-record.js';
 import { withNativeTarget } from './target-ownership.js';
@@ -25,7 +25,9 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
     return 'unchanged';
   }
   return withNativeTarget(common, target, async ownership => {
-    const state = await loadConvergeRunState(common, target), launch = state?.lastLaunch;
+    const state = await loadConvergeRunState(common, target);
+    const attempts = state?.version === 3 ? await loadConvergeAttemptState(common, target) : undefined;
+    const launch = state?.version === 3 ? attempts?.lastLaunch : state?.lastLaunch;
     const round = detail.converge?.round, attempt = detail.converge?.attempt, headSha = detail.target.head_sha;
     const marker = launch?.deliveryReconciliation;
     const markerlessLegacy = launch?.deliveryPending === false && launch.hardFailure === true &&
@@ -55,10 +57,15 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
         (detail.cycle_id ?? null) !== (state.cycle?.id ?? null) ||
         (state.cycle !== undefined && (detail.target.repo?.toLowerCase() !== state.cycle.repo.toLowerCase() ||
           detail.target.pr_number !== state.cycle.prNumber))))) return 'unchanged';
-    state.lastLaunch = { ...launch, deliveryPending: false,
+    const reconciled = { ...launch, deliveryPending: false,
       ...(strongMarker?.success ? { deliveryReconciliation: strongMarker.data } : {}) };
-    state.updatedAt = reconciledAt;
-    await writeState(common, state, ownership);
+    if (state.version === 3) {
+      await recordConvergeAttemptLaunch(common, target, reconciled, ownership, 'delivery');
+    } else {
+      state.lastLaunch = reconciled;
+      state.updatedAt = reconciledAt;
+      await writeState(common, state, ownership);
+    }
     return 'reconciled';
   });
 }
