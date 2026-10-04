@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { devNull } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { convergeAttemptStatePath } from '../../src/converge/attempt-budget.js';
 import { reviewCycleDirectory } from '../../src/converge/fresh-review.js';
@@ -21,7 +26,11 @@ import { staleFixture } from './stale-report-fixtures.js';
 
 const retryReason = 'Authenticated delivery completed; one bounded current-input review.';
 
-async function installCycle(dir: string, target: string): Promise<NativeReviewCycle> {
+const packedCli = process.env.RCL_HISTORICAL_PACKED_CLI;
+const cli = packedCli ?? fileURLToPath(new URL('../../src/index.ts',import.meta.url));
+
+async function installCycle(dir: string, target: string,
+  url = 'https://harness.example'): Promise<NativeReviewCycle> {
   const operationId = randomUUID();
   const directory = reviewCycleDirectory(dir,target);
   await mkdir(directory,{recursive:true,mode:0o700});
@@ -33,7 +42,7 @@ async function installCycle(dir: string, target: string): Promise<NativeReviewCy
   const archiveBytes = serializeRecoveryDocument(archive);
   await writeFile(archivePath,archiveBytes,{mode:0o600});
   return {id:randomUUID(),operationId,previousCycleId:null,repo:'allocator-one/allocator-one',prNumber:9897,
-    url:'https://harness.example',archivePath,archiveSha256:sha256(archiveBytes),history:archive.history};
+    url,archivePath,archiveSha256:sha256(archiveBytes),history:archive.history};
 }
 
 async function applyLegacyDisposition(f: Awaited<ReturnType<typeof staleFixture>>, head: string, input: string,
@@ -55,9 +64,10 @@ async function applyLegacyDisposition(f: Awaited<ReturnType<typeof staleFixture>
     manifestSha256:sha256(await readFile(f.manifestPath)),mode:'apply'},f.dir);
 }
 
-async function historicalFixture(deadPid = 999_999) {
-  const f = await staleFixture();
-  const cycle = await installCycle(f.dir,f.target);
+async function historicalFixture(deadPid = 999_999, git = false,
+  url = 'https://harness.example') {
+  const f = await staleFixture(git);
+  const cycle = await installCycle(f.dir,f.target,url);
   const report = JSON.parse(await readFile(f.reportPath,'utf8'));
   for (const seat of report.run.roster) seat.lane = 'blocking';
   report.run.cycle_id = cycle.id;
@@ -116,6 +126,26 @@ async function historicalFixture(deadPid = 999_999) {
   };
   const getRun=vi.fn(async () => ({kind:'ok' as const,value:server}));
   return {...f,cycle,weak,successorRunId,server,getRun,sink:{baseUrl:cycle.url} as HarnessSink};
+}
+
+async function runCli(cwd: string, args: string[], url: string) {
+  const inherited = Object.fromEntries(
+    ['PATH','SystemRoot','WINDIR','ComSpec','PATHEXT']
+      .flatMap(key => process.env[key] === undefined ? [] : [[key,process.env[key]!]])
+  );
+  const child = spawn(process.execPath,[...(packedCli ? [] : ['--import',import.meta.resolve('tsx')]),cli,...args],{
+    cwd,timeout:20_000,env:{...inherited,HOME:cwd,XDG_CONFIG_HOME:join(cwd,'config'),
+      RCL_DATA_DIR:join(cwd,'account'),RCL_TELEMETRY:'off',RCL_NO_HARNESS_KEYS:'1',NO_COLOR:'1',
+      NODE_NO_WARNINGS:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:devNull,
+      HARNESS_API_TOKEN:'synthetic-rcl-178',HARNESS_API_URL:url},
+  });
+  let stdout='',stderr='';
+  child.stdout.on('data',chunk=>stdout+=String(chunk));
+  child.stderr.on('data',chunk=>stderr+=String(chunk));
+  const code=await new Promise<number|null>((resolve,reject)=>{
+    child.on('error',reject); child.on('close',resolve);
+  });
+  return {code,stdout,stderr};
 }
 
 describe('historical delivery reconciliation',()=>{
@@ -289,4 +319,51 @@ describe('historical delivery reconciliation',()=>{
     expect(await readFile(f.statePath)).toEqual(beforeState);
     expect(await readFile(f.attemptsPath)).toEqual(beforeAttempts);
   },20_000);
+
+  it('previews and applies through the supported CLI with GET-only server access',async()=>{
+    const requests:string[]=[];
+    let detail:Record<string,unknown>|undefined;
+    const server=createServer((request,response)=>{
+      requests.push(`${request.method} ${request.url}`);
+      response.setHeader('content-type','application/json');
+      if (request.method==='GET' && detail && request.url===`/api/v1/reviews/runs/${detail.id}`) {
+        response.end(JSON.stringify({data:detail,meta:{}}));
+      } else {
+        response.statusCode=405; response.end(JSON.stringify({error:'unexpected_request'}));
+      }
+    });
+    await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+    try {
+      const address=server.address() as AddressInfo;
+      const url=`http://127.0.0.1:${address.port}`;
+      const f=await historicalFixture(999_999,true,url);
+      detail=f.server;
+      const beforeState=await readFile(f.statePath),beforeAttempts=await readFile(f.attemptsPath);
+      const preview=await runCli(f.cwd,['converge-reconcile-history','--preview','--target',f.target,
+        '--run',f.weak.runId],url);
+      expect(preview.code,preview.stderr).toBe(0);
+      const manifest=JSON.parse(preview.stdout);
+      expect(manifest).toMatchObject({runId:f.weak.runId,successor:{runId:f.successorRunId}});
+      expect(preview.stderr).toContain(`manifest-sha256 ${sha256(preview.stdout)}`);
+      expect(await readFile(f.statePath)).toEqual(beforeState);
+      expect(await readFile(f.attemptsPath)).toEqual(beforeAttempts);
+      await expect(access(join(f.cwd,'account'))).rejects.toMatchObject({code:'ENOENT'});
+
+      const manifestPath=join(f.cwd,'reviewed-historical-manifest.json');
+      await writeFile(manifestPath,preview.stdout);
+      const apply=await runCli(f.cwd,['converge-reconcile-history','--apply','--manifest',manifestPath,
+        '--manifest-sha256',sha256(preview.stdout)],url);
+      expect(apply.code,apply.stderr).toBe(0);
+      expect(JSON.parse(apply.stdout)).toMatchObject({mode:'apply',result:'applied',accounting:'unchanged'});
+      expect(await readFile(f.attemptsPath)).toEqual(beforeAttempts);
+      const unchanged=await runCli(f.cwd,['converge-reconcile-history','--apply','--manifest',manifestPath,
+        '--manifest-sha256',sha256(preview.stdout)],url);
+      expect(unchanged.code,unchanged.stderr).toBe(0);
+      expect(JSON.parse(unchanged.stdout).result).toBe('unchanged');
+      expect(requests).toEqual(Array(3).fill(`GET /api/v1/reviews/runs/${f.weak.runId}`));
+      expect(requests.every(request=>request.startsWith('GET '))).toBe(true);
+    } finally {
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    }
+  },30_000);
 });
