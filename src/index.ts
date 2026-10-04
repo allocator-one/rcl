@@ -1994,6 +1994,8 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       (!opts.previewPending && (!opts.pendingNativeSha256 || !opts.pendingAttemptSha256)) ||
       (opts.previewPending && (opts.pendingNativeSha256 !== undefined || opts.pendingAttemptSha256 !== undefined)) ||
       (opts.expectPrHeadSha !== undefined && !opts.previewPending && !opts.pendingPreviewSha256) ||
+      (opts.pendingPreviewSha256 !== undefined && opts.expectPrHeadSha === undefined) ||
+      (opts.expectPrHeadSha !== undefined && opts.forPr === undefined) ||
       (opts.previewPending && opts.pendingPreviewSha256 !== undefined) ||
       opts.startOver || opts.boundFixRecovery || opts.attest || opts.launchIntent !== undefined ||
       finalizeOnlyIgnoredReviewFlags || finalizeOnlySourceFlags)) {

@@ -599,6 +599,7 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
     ['staged source', ['--staged']],
     ['working-tree source', ['--working-tree']],
     ['spec source', ['--spec-source', 'repo_file']],
+    ['live PR head without explicit PR binding', ['--expect-pr-head-sha', 'd'.repeat(40)]],
     ['apply-only digests during preview', ['--pending-native-sha256', 'a'.repeat(64),
       '--pending-attempt-sha256', 'b'.repeat(64)]],
   ])('refuses ignored %s flags before state or provider work', (_label, extra) => {
@@ -609,6 +610,20 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       '--finalize-pending-only', '--preview-pending', '--ordinary-pending-package', 'pending.json',
       '--resume-async-sha256', 'c'.repeat(64), '--max-attempts', '20', ...extra], repo,
     { RCL_DATA_DIR: join(repo, 'rcl-data') });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('pending_finalize_incompatible');
+    expect(existsSync(join(repo, '.git', 'rcl-converge-runs'))).toBe(false);
+  });
+
+  it('refuses a preview digest without its live PR head binding before state or provider work', () => {
+    const repo = tempRepository();
+    writeFileSync(join(repo, 'change.patch'), 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n');
+    const result = runRcl(['review', 'change.patch', '--guarded-converge', '--converge-target',
+      'guarded-fixture', '--head-sha', 'a'.repeat(40), '--base-sha', 'b'.repeat(40),
+      '--finalize-pending-only', '--ordinary-pending-package', 'pending.json',
+      '--resume-async-sha256', 'c'.repeat(64), '--max-attempts', '20',
+      '--pending-native-sha256', 'd'.repeat(64), '--pending-attempt-sha256', 'e'.repeat(64),
+      '--pending-preview-sha256', 'f'.repeat(64)], repo, { RCL_DATA_DIR: join(repo, 'rcl-data') });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('pending_finalize_incompatible');
     expect(existsSync(join(repo, '.git', 'rcl-converge-runs'))).toBe(false);
