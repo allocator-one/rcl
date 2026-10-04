@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { guardedInputSha256 } from '../../src/report/run-header.js';
 import { retainGuardedInput } from '../../src/converge/guarded-input-retention.js';
 import { ordinaryPendingGuardedInput,
+  prepareOrdinaryPendingGuardedInput,
   validateOrdinaryPendingPackage } from '../../src/converge/ordinary-pending-package.js';
 const pr9691Input = JSON.parse(gunzipSync(Buffer.from(readFileSync(
   new URL('../fixtures/pr9691-a2-guarded-input.json.gz.b64', import.meta.url), 'utf8').replace(/\s/g, ''), 'base64'
@@ -28,6 +29,41 @@ describe('ordinary pending migration package', () => {
       guardedInputRepresentation: { version: 1 as const, encoding: 'json-string-table-v1' as const },
       guardedInput: retainGuardedInput(input) };
     expect(ordinaryPendingGuardedInput(validateOrdinaryPendingPackage(compact, expected))).toEqual(input);
+
+    const prepared = prepareOrdinaryPendingGuardedInput(compact.guardedInput);
+    const preparedPacket = { ...compact, guardedInput: prepared.retained };
+    expect(validateOrdinaryPendingPackage(preparedPacket, expected, prepared)).toBeDefined();
+
+    expect(() => { prepared.retained.strings[0] = 'tampered'; }).toThrow(TypeError);
+    expect(() => { (prepared.retained.root as any[])[0] = 'v'; }).toThrow(TypeError);
+    expect(validateOrdinaryPendingPackage(preparedPacket, expected, prepared)).toBeDefined();
+
+    const rawPrepared = prepareOrdinaryPendingGuardedInput(structuredClone(input));
+    rawPrepared.inputSha256();
+    expect(() => {
+      ((rawPrepared.input.roster as Array<Record<string, unknown>>)[0]!).model = 'tampered/model';
+    }).toThrow(TypeError);
+    const rawPreparedPacket = { ...compact, guardedInput: rawPrepared.retained };
+    expect(validateOrdinaryPendingPackage(rawPreparedPacket, expected, rawPrepared)).toBeDefined();
+
+    const forged = { ...prepared };
+    expect(() => validateOrdinaryPendingPackage(preparedPacket, expected, forged))
+      .toThrow('ordinary_pending_package_mismatch');
+
+    const replacedArchive = { ...preparedPacket,
+      guardedInput: structuredClone(prepared.retained) };
+    expect(() => validateOrdinaryPendingPackage(replacedArchive, expected, prepared))
+      .toThrow('ordinary_pending_package_mismatch');
+
+    const preparedWithoutMarker = { ...preparedPacket } as any;
+    delete preparedWithoutMarker.guardedInputRepresentation;
+    expect(() => validateOrdinaryPendingPackage(preparedWithoutMarker, expected, prepared))
+      .toThrow('ordinary_pending_package_mismatch');
+
+    const preparedWithWrongMarker = { ...preparedPacket,
+      guardedInputRepresentation: { version: 2, encoding: 'json-string-table-v1' } } as any;
+    expect(() => validateOrdinaryPendingPackage(preparedWithWrongMarker, expected, prepared))
+      .toThrow('ordinary_pending_package_mismatch');
 
     const unmarkedCompact = structuredClone(compact) as any;
     delete unmarkedCompact.guardedInputRepresentation;

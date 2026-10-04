@@ -23,11 +23,13 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function interned(strings: string[], indices: Map<string, number>, value: string): number {
+function interned(strings: string[], encodedStringBytes: number[],
+  indices: Map<string, number>, value: string): number {
   const existing = indices.get(value);
   if (existing !== undefined) return existing;
   const index = strings.length;
   strings.push(value);
+  encodedStringBytes.push(Buffer.byteLength(JSON.stringify(value), 'utf8'));
   indices.set(value, index);
   return index;
 }
@@ -41,6 +43,7 @@ function interned(strings: string[], indices: Map<string, number>, value: string
 export function retainGuardedInput(value: Record<string, unknown>): RetainedGuardedInput {
   if (!plainRecord(value)) throw new Error('guarded_input_invalid');
   const strings: string[] = [];
+  const encodedStringBytes: number[] = [];
   const indices = new Map<string, number>();
   let nodes = 0;
   let expandedBytes = 0;
@@ -56,8 +59,9 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
     nodes++;
     if (nodes > MAX_GUARDED_INPUT_NODES) throw new Error('guarded_input_too_complex');
     if (typeof item === 'string') {
-      addExpandedBytes(Buffer.byteLength(JSON.stringify(item), 'utf8'));
-      return ['s', interned(strings, indices, item)];
+      const index = interned(strings, encodedStringBytes, indices, item);
+      addExpandedBytes(encodedStringBytes[index]!);
+      return ['s', index];
     }
     if (item === null || typeof item === 'boolean') {
       addExpandedBytes(Buffer.byteLength(JSON.stringify(item), 'utf8'));
@@ -81,8 +85,9 @@ export function retainGuardedInput(value: Record<string, unknown>): RetainedGuar
         .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
       addExpandedBytes(2 + Math.max(0, entries.length - 1));
       return ['o', entries.map(([key, child]) => {
-        addExpandedBytes(Buffer.byteLength(JSON.stringify(key), 'utf8') + 1);
-        return [interned(strings, indices, key), encode(child, depth + 1)];
+        const index = interned(strings, encodedStringBytes, indices, key);
+        addExpandedBytes(encodedStringBytes[index]! + 1);
+        return [index, encode(child, depth + 1)];
       })];
     }
     throw new Error('guarded_input_invalid');

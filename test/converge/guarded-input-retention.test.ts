@@ -18,6 +18,7 @@ describe('guarded launch input retention', () => {
     const gitCommonDir = await mkdtemp(join(tmpdir(), 'rcl-guarded-input-'));
     directories.push(gitCommonDir);
     const patch = 'x'.repeat(1_700_000);
+    const userPrompt = `Review this exact patch:\n${patch}`;
     const guardedInput = {
       head: 'a'.repeat(40),
       kind: 'patch',
@@ -33,7 +34,7 @@ describe('guarded launch input retention', () => {
       })),
       prompts: Array.from({ length: 14 }, (_, index) => ({
         system: `Review as role ${index}`,
-        user: `Review this exact patch:\n${patch}`,
+        user: userPrompt,
       })),
       asyncRoles: [],
     };
@@ -52,7 +53,7 @@ describe('guarded launch input retention', () => {
     expect(bytes.byteLength).toBeLessThan(20 * 1024 * 1024);
     const packet = JSON.parse(bytes.toString());
     expect(restoreGuardedInput(packet.guardedInput)).toEqual(guardedInput);
-    expect(packet.guardedInput.strings.filter((value: string) => value.includes(patch))).toHaveLength(1);
+    expect(packet.guardedInput.strings.filter((value: string) => value === userPrompt)).toHaveLength(1);
   });
 
   it('refuses genuinely unique input above the retained packet ceiling before publishing a capture', async () => {
@@ -182,13 +183,20 @@ describe('guarded launch input retention', () => {
     const expected = { target: 'owner-repo-1', headSha: guardedInput.head,
       inputSha256: guardedInputSha256(guardedInput), baseSha: 'e'.repeat(40),
       attempt: 1, round: 1, pid: 999_999, retainedAsyncSha256: [hash] };
+    const packet = {
+      guardedInputRepresentation: { version: 1 as const, encoding: 'json-string-table-v1' as const },
+      target: expected.target, headSha: expected.headSha, baseSha: expected.baseSha,
+      attempt: 1, round: 1, pid: 999_999, retainedAsyncSha256: [hash],
+      retainedAsync: [{ ...descriptor, sha256: hash }],
+      guardedInput: retainGuardedInput(guardedInput),
+    };
+    expect(validateOrdinaryPendingPackage(packet, expected)).toEqual(packet);
+
     const changed = structuredClone(guardedInput);
     mutate(changed);
-    const packet = { target: expected.target, headSha: expected.headSha, baseSha: expected.baseSha,
-      attempt: 1, round: 1, pid: 999_999, retainedAsyncSha256: [hash],
-      retainedAsync: [{ ...descriptor, sha256: hash }], guardedInput: retainGuardedInput(changed) };
+    const changedPacket = { ...packet, guardedInput: retainGuardedInput(changed) };
 
-    expect(() => validateOrdinaryPendingPackage(packet, expected))
+    expect(() => validateOrdinaryPendingPackage(changedPacket, expected))
       .toThrow('ordinary_pending_package_mismatch');
   });
 
