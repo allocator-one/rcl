@@ -24,4 +24,20 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      - name: Test packed historical reconciliation CLI
+        shell: bash
+        run: |
+          PACK_DIR=$(mktemp -d)
+          INSTALL_DIR=$(mktemp -d)
+          npm pack --pack-destination "$PACK_DIR"
+          shopt -s nullglob
+          packages=("$PACK_DIR"/allocator-one-rcl-*.tgz)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "expected exactly one package artifact, found ${#packages[@]}"
+            exit 1
+          fi
+          npm install --prefix "$INSTALL_DIR" --ignore-scripts --no-audit --no-fund "${packages[0]}"
+          RCL_HISTORICAL_PACKED_CLI="$INSTALL_DIR/node_modules/.bin/rcl" \
+            npm test -- --maxWorkers=1 test/converge/historical-delivery-reconciliation.test.ts \
+              -t "previews and applies through the supported CLI with GET-only server access"
       - run: npm pack --dry-run

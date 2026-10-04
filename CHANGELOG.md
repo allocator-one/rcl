@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.5.4 - 2026-10-04
+
+- Add preview/apply historical delivered-review reconciliation for a named
+  retained predecessor after `lastLaunch` advances. The immutable native
+  state, attempt ledger, retained report, stale-receipt chain and authenticated
+  server projection are bound while preserving the successor launch and all
+  review accounting (RCL-178).
+
 ## 4.5.3 - 2026-10-04
 
 - Strengthen delivered hard-failure reconciliation with a versioned marker

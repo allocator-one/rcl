@@ -6,6 +6,8 @@ import { lstat, mkdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ownedNativeTargetCommonDir, withNativeTarget, withOwnedNativeOperation, type NativeTargetOwnership } from './target-ownership.js';
 import { gapManifest, validateRoundGapAudit, type RoundGapEntry } from './round-gap-schema.js';
+import { validateHistoricalDeliveryReconciliationAudit,
+  type HistoricalDeliveryReconciliationEntry } from './historical-delivery-reconciliation-schema.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
 import { checkDarwinLockACL } from '../evidence/original-run/lock-path.js';
 import { fileFailure, readOrdinaryNativeFile, readStable } from '../telemetry/recovery/files.js';
@@ -158,6 +160,9 @@ export interface ConvergeRunState {
   staleReportAudit?: StaleReportEntry[];
   /** Detect accidental truncation while preserving native state as the local authority. */
   staleReportAuditCount?: number;
+  /** Append-only authority repair for a named retained predecessor after lastLaunch advances. */
+  historicalDeliveryReconciliationAudit?: HistoricalDeliveryReconciliationEntry[];
+  historicalDeliveryReconciliationAuditCount?: number;
   /** Additive local audit only; entries never stand for an admitted round. */
   roundGapAudit?: { version: 1; entries: RoundGapEntry[] };
   /**
@@ -309,6 +314,7 @@ export async function loadConvergeRunStateEvidence(
   }
   validateRoundGapAudit(state as ConvergeRunState);
   validateStaleReportAudit(state as ConvergeRunState);
+  validateHistoricalDeliveryReconciliationAudit(state as ConvergeRunState);
   validateTerminalRejectionAudit(state as ConvergeRunState);
   return { state: state as ConvergeRunState, sha256: createHash('sha256').update(raw).digest('hex') };
 }
@@ -587,6 +593,10 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
   if (state.staleReportAudit?.length) {
     const { verifyStaleReportReceipts } = await import('./stale-report.js');
     await verifyStaleReportReceipts(gitCommonDir, state.staleReportAudit);
+  }
+  if (state.historicalDeliveryReconciliationAudit?.length) {
+    const { verifyHistoricalDeliveryReconciliations } = await import('./historical-delivery-reconciliation.js');
+    await verifyHistoricalDeliveryReconciliations(gitCommonDir,state);
   }
   if (state.terminalRejections?.some(entry => rejectionManifest(entry).runId === runId || rejectionManifest(entry).reportSha256 === options.reportSha256)) throw new ConvergeRunStateError('terminal_rejection_cannot_be_admitted');
   if (state.terminalRejections) {

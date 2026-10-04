@@ -34,6 +34,7 @@ enforced review evidence and CI (see
   - [Ordinary pending launches with a dead coordinator](#ordinary-pending-launches-with-a-dead-coordinator)
   - [Bound fix recovery](#bound-fix-recovery)
   - [Launch intents](#launch-intents)
+  - [`rcl converge-reconcile-history`](#rcl-converge-reconcile-history)
   - [`rcl converge-stale`](#rcl-converge-stale)
   - [`rcl converge-gap`](#rcl-converge-gap)
   - [`rcl converge-rejected`](#rcl-converge-rejected)
@@ -398,6 +399,40 @@ through its retained host handle. Retry evidence with
 `rcl telemetry flush --run <run-id>`, not another council. Intent
 interpretation and finding adjudication remain human/agent decisions;
 native/enforced evidence and CI still gate merging.
+
+### `rcl converge-reconcile-history`
+
+Use this narrow recovery when an exact delivered hard-failure predecessor has
+a published version 1 reconciliation marker and retained version 2 stale
+receipts, but a later completed launch has already replaced it as
+`lastLaunch`. First capture the print-only preview and its separately printed
+digest:
+
+```bash
+rcl converge-reconcile-history --preview \
+  --target <converge-target> --run <historical-run-id> \
+  > historical-reconciliation.json
+# stderr: manifest-sha256 <reviewed-manifest-sha256>
+```
+
+Inspect the manifest before applying it. The historical run, report, head,
+base, diff, input digest, attempt, round, claim PID, reviewer health, cycle,
+repository and pull request must match the retained local chain and the one
+complete live server projection. An intentional stale-head status is retained
+as evidence and does not weaken these identity checks.
+
+```bash
+rcl converge-reconcile-history --apply \
+  --manifest historical-reconciliation.json \
+  --manifest-sha256 <reviewed-manifest-sha256>
+```
+
+Apply takes the native target lock and re-verifies every source before adding
+one append-only historical manifest and receipt. Repeating the same manifest
+returns `unchanged`; another manifest for the same run conflicts. The command
+does not change `lastLaunch`, attempts, rounds, findings, stale receipts,
+cycles, caps, reports or provider accounting, and it neither admits evidence
+nor launches reviewers.
 
 ### `rcl converge-stale`
 
