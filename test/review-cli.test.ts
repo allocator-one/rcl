@@ -583,6 +583,8 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
     const result = runRcl(['review', '--help'], tempRepository());
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('--finalize-pending-only');
+    expect(result.stdout).toContain('--expect-pr-head-sha <sha>');
+    expect(result.stdout).toContain('--pending-preview-sha256 <digest>');
     expect(result.stdout.replace(/\s+/g, ' ')).toContain('without claiming or dispatching its successor');
   });
 
@@ -612,13 +614,17 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
     expect(existsSync(join(repo, '.git', 'rcl-converge-runs'))).toBe(false);
   });
 
-  it('loads and consumes duplicate-byte history from the authenticated cycle namespace', async () => {
+  it('separately binds a stale cycle launch and the current PR head while consuming its history', async () => {
     await withGuardedFixture(async fixture => {
       const common = join(fixture.repo, '.git');
       const target = 'guarded-fixture';
       const headSha = execFileSync('git', ['rev-parse', 'HEAD'], {
         cwd: fixture.repo, env: GIT_ENV, encoding: 'utf8',
       }).trim();
+      const currentPrHeadSha = 'f'.repeat(40);
+      const movedPrHeadSha = 'e'.repeat(40);
+      const currentPrHeadPath = join(fixture.repo, 'current-pr-head');
+      writeFileSync(currentPrHeadPath, currentPrHeadSha);
       const baseSha = headSha;
       const guardedInput = { head: headSha, kind: 'patch', repo: 'owner/repo', pr: 42,
         diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [{ model: 'openrouter/history-seat',
@@ -665,7 +671,7 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
         provider: 'openrouter', status: 'success', findings: [], raw: '', durationMs: 1, async: true });
       const digest = sha256Hex(bytes);
       const asyncStore = join(common, 'rcl-async'); mkdirSync(asyncStore, { mode: 0o700 });
-      const key = asyncTargetKey('owner/repo#42', undefined, state.cycle!.id);
+      const key = asyncTargetKey('change.patch', target, state.cycle!.id);
       for (const suffix of ['one', 'two']) writeFileSync(join(asyncStore,
         `result-${key}-${suffix}.json`), bytes, { mode: 0o600 });
       const packagePath = join(fixture.repo, 'cycle-pending.json');
@@ -676,16 +682,18 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
           model: 'openrouter/history-seat', role: 'general', provider: 'openrouter', lane: 'async' })),
         guardedInput }));
       const shim = join(fixture.repo, 'cycle-reader.mjs');
-      writeFileSync(shim, `globalThis.fetch = async input => { const url = new URL(String(input.url ?? input));
+      writeFileSync(shim, `import { readFileSync } from 'node:fs';
+        globalThis.fetch = async input => { const url = new URL(String(input.url ?? input));
+        const currentPrHeadSha = readFileSync(${JSON.stringify(currentPrHeadPath)}, 'utf8').trim();
         if (url.hostname === 'api.github.com') return Response.json(url.pathname.includes('/compare/')
           ? { files: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
               patch: '@@ -1 +1 @@\\n-a\\n+b' }] }
           : { title: 'Fixture', body: '', user: { login: 'fixture' },
               base: { ref: 'main', sha: ${JSON.stringify(baseSha)} },
-              head: { ref: 'feature', sha: ${JSON.stringify(headSha)} },
+              head: { ref: 'feature', sha: currentPrHeadSha },
               html_url: 'https://github.com/owner/repo/pull/42', labels: [], changed_files: 1 });
         if (url.pathname === '/api/v1/reviews/prs/owner/repo/42') return Response.json({ data: {
-          repo: 'owner/repo', pr_number: 42, head: { sha: ${JSON.stringify(headSha)}, merged: false },
+          repo: 'owner/repo', pr_number: 42, head: { sha: currentPrHeadSha, merged: false },
           cycle_protocol: 1, active_cycle: ${JSON.stringify(active)} } });
         throw new Error('Unexpected network: ' + url); };`);
       const configPath = join(fixture.repo, 'config.json');
@@ -695,21 +703,43 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       const env = { ...fixture.env, NODE_OPTIONS: `--import=${shim}`,
         HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture', RCL_TELEMETRY: 'full' };
       const args = fixture.args.filter((value, index, values) => value !== '--json-file' &&
-        values[index - 1] !== '--json-file' && value !== '--no-telemetry' &&
-        !['--head-sha', '--base-sha'].includes(value) && !['--head-sha', '--base-sha'].includes(values[index - 1]!));
-      args[1] = 'owner/repo#42';
+        values[index - 1] !== '--json-file' && value !== '--no-telemetry');
       args.push('--finalize-pending-only',
         '--ordinary-pending-package', packagePath, '--resume-async-sha256', `${digest},${digest}`,
-        '--max-attempts', '20', '--expect-head-sha', headSha);
-      const preview = await runRclAsync([...args, '--preview-pending'], fixture.repo, env);
+        '--max-attempts', '20', '--expect-head-sha', headSha, '--for-pr', 'owner/repo#42');
+      const staleBinding = await runRclAsync([...args, '--preview-pending'], fixture.repo, env);
+      expect(staleBinding.status).toBe(1);
+      expect(staleBinding.stderr).toContain('fresh_review_head_changed');
+      const currentArgs = [...args, '--expect-pr-head-sha', currentPrHeadSha];
+      const preview = await runRclAsync([...currentArgs, '--preview-pending'], fixture.repo, env);
       expect(preview.status, preview.stderr).toBe(0);
       const receipt = JSON.parse(preview.stdout);
-      const applied = await runRclAsync([...args, '--pending-native-sha256', receipt.nativeStateSha256,
-        '--pending-attempt-sha256', receipt.attemptStateSha256], fixture.repo, env);
+      expect(receipt).toMatchObject({ currentPrHeadSha, previewSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      writeFileSync(currentPrHeadPath, movedPrHeadSha);
+      const movedArgs = currentArgs.map(value => value === currentPrHeadSha ? movedPrHeadSha : value);
+      const movedApply = await runRclAsync([...movedArgs,
+        '--pending-native-sha256', receipt.nativeStateSha256,
+        '--pending-attempt-sha256', receipt.attemptStateSha256,
+        '--pending-preview-sha256', receipt.previewSha256], fixture.repo, env);
+      expect(movedApply.status).toBe(1);
+      expect(movedApply.stderr).toContain('pending_legacy_resume_preview_binding_mismatch');
+      expect(readdirSync(asyncStore)).toHaveLength(2);
+      writeFileSync(currentPrHeadPath, currentPrHeadSha);
+      const applied = await runRclAsync([...currentArgs,
+        '--pending-native-sha256', receipt.nativeStateSha256,
+        '--pending-attempt-sha256', receipt.attemptStateSha256,
+        '--pending-preview-sha256', receipt.previewSha256], fixture.repo, env);
       expect(applied.status, applied.stderr).toBe(0);
       expect(JSON.parse(applied.stdout)).toMatchObject({ mode: 'finalize-only',
-        receipt: { retainedAsyncSha256: [digest, digest] } });
+        receipt: { headSha, retainedAsyncSha256: [digest, digest] } });
       expect(readdirSync(asyncStore)).toEqual([]);
+      writeFileSync(currentPrHeadPath, movedPrHeadSha);
+      const movedReplay = await runRclAsync([...movedArgs,
+        '--pending-native-sha256', receipt.nativeStateSha256,
+        '--pending-attempt-sha256', receipt.attemptStateSha256,
+        '--pending-preview-sha256', receipt.previewSha256], fixture.repo, env);
+      expect(movedReplay.status).toBe(1);
+      expect(movedReplay.stderr).toContain('pending_legacy_resume_preview_binding_mismatch');
       expect(fixture.calls()).toBe(0);
     });
   });
@@ -754,6 +784,10 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       const args = [...finalizeArgs, '--finalize-pending-only', '--ordinary-pending-package', packagePath,
         '--resume-async-sha256', retained, '--max-attempts', '20', '--expect-head-sha', headSha];
       expect(args).toContain('--no-telemetry');
+      const invalidPrBinding = await runRclAsync([...args, '--preview-pending',
+        '--for-pr', 'owner/repo#42', '--expect-pr-head-sha', headSha], fixture.repo, fixture.env);
+      expect(invalidPrBinding.status).toBe(1);
+      expect(invalidPrBinding.stderr).toContain('pending_finalize_incompatible');
       const nativeBefore = readFileSync(nativePath);
       const attemptsBefore = readFileSync(join(common, 'rcl-converge-attempts',
         readdirSync(join(common, 'rcl-converge-attempts')).find(name => name.endsWith('.json'))!));

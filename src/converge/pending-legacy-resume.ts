@@ -63,6 +63,8 @@ export interface PendingLegacyResumeOptions {
   preview?: boolean;
   previewMode?: 'combined' | 'finalize-only';
   cycleRemote?: ReviewCycleRemote;
+  /** Exact live PR head independently authenticated for a historical cycle launch. */
+  currentPrHeadSha?: string;
 }
 
 export interface PendingLegacyResumeResult {
@@ -78,6 +80,8 @@ export interface OrdinaryPendingPreview {
   attemptsUsed: number;
   cap: number;
   nextAttempt: number;
+  currentPrHeadSha?: string;
+  previewSha256?: string;
 }
 
 export interface OrdinaryPendingFinalizeOptions {
@@ -104,6 +108,8 @@ export interface OrdinaryPendingFinalizeOptions {
   /** Fault-injection boundary for proving idempotent history consumption. */
   consumeCycleHistory?: typeof consumeBoundAsyncHistory;
   cycleRemote?: ReviewCycleRemote;
+  currentPrHeadSha?: string;
+  previewSha256?: string;
 }
 
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -175,6 +181,40 @@ export interface OrdinaryPendingFinalizeResult {
 }
 
 function fail(code: string): never { throw new Error(`pending_legacy_resume_${code}`); }
+
+function cyclePendingPreviewSha256(input: {
+  target: string;
+  headSha: string;
+  baseSha: string;
+  currentPrHeadSha: string;
+  pendingInputSha256: string;
+  nativeStateSha256: string;
+  attemptStateSha256: string;
+  retainedAsyncSha256: readonly string[];
+  maxAttempts: number;
+  sourceDigest: string;
+  migrationPackageSha256: string;
+}): string {
+  return createHash('sha256').update(stableStringify({
+    version: 1,
+    operation: 'cycle-pending-finalize-preview',
+    ...input,
+    retainedAsyncSha256: [...input.retainedAsyncSha256].sort(),
+  })).digest('hex');
+}
+
+function assertCyclePendingPreviewBinding(options: OrdinaryPendingFinalizeOptions,
+  sourceDigest: string, migrationPackageSha256: string): void {
+  if (options.currentPrHeadSha === undefined) return;
+  const expected = cyclePendingPreviewSha256({ target: options.target, headSha: options.headSha,
+    baseSha: options.baseSha, currentPrHeadSha: options.currentPrHeadSha,
+    pendingInputSha256: options.pendingInputSha256,
+    nativeStateSha256: options.nativeStateSha256,
+    attemptStateSha256: options.attemptStateSha256,
+    retainedAsyncSha256: options.retainedAsyncSha256, maxAttempts: options.maxAttempts,
+    sourceDigest, migrationPackageSha256 });
+  if (options.previewSha256 !== expected) fail('preview_binding_mismatch');
+}
 function defaultOwnerAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) {
@@ -265,6 +305,8 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   const cycleFinalizePreview = input?.migrationPackage?.version === 2 &&
     input.previewMode === 'finalize-only';
+  const currentPrHeadValid = input?.currentPrHeadSha === undefined ||
+    (cycleFinalizePreview && /^[a-f0-9]{40}$/.test(input.currentPrHeadSha));
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
     !/^[a-f0-9]{40}$/.test(input.headSha ?? '') ||
     (input.migrationPackage && !/^[a-f0-9]{40}$/.test(input.baseSha ?? '')) ||
@@ -280,7 +322,8 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
     !Number.isSafeInteger(input.maxPhysicalCalls) || input.maxPhysicalCalls < 1 ||
     !Number.isSafeInteger(input.maxAttemptsPerCell) || input.maxAttemptsPerCell < 1 ||
     !Number.isSafeInteger(input.maxDurationMs) || input.maxDurationMs < 1 || input.maxDurationMs > 2_147_483_647 ||
-    (input.previewMode !== undefined && !['combined', 'finalize-only'].includes(input.previewMode))) {
+    (input.previewMode !== undefined && !['combined', 'finalize-only'].includes(input.previewMode)) ||
+    !currentPrHeadValid) {
     fail('invalid_input');
   }
 }
@@ -288,6 +331,8 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
 function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   const cycleBacked = input?.migrationPackage?.version === 2;
+  const hasCurrentPrHead = input?.currentPrHeadSha !== undefined;
+  const hasPreviewSha = input?.previewSha256 !== undefined;
   const hasStoreDir = typeof input?.cycleHistory?.storeDir === 'string' &&
     input.cycleHistory.storeDir.trim().length > 0;
   const hasStoreResolver = typeof input?.cycleHistory?.resolveStoreDir === 'function';
@@ -304,7 +349,10 @@ function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
     (cycleBacked && (!input.cycleHistory || hasStoreDir === hasStoreResolver ||
       typeof input.cycleHistory.targetKey !== 'string' || !input.cycleHistory.targetKey.trim() ||
       !Number.isSafeInteger(input.cycleHistory.maxResults) || input.cycleHistory.maxResults < 1)) ||
-    !input.migrationPackage || !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1) {
+    !input.migrationPackage || !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 ||
+    hasCurrentPrHead !== hasPreviewSha ||
+    (hasCurrentPrHead && (!cycleBacked || !/^[a-f0-9]{40}$/.test(input.currentPrHeadSha!) ||
+      !/^[a-f0-9]{64}$/.test(input.previewSha256!)))) {
     fail('invalid_input');
   }
 }
@@ -532,6 +580,7 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
     const existingReceipt = await readFinalizationReceipt(options.gitCommonDir, migrationPackageSha256);
     if (existingReceipt) {
       const packet = assertReceiptMatchesInput(existingReceipt, options, migrationPackageSha256);
+      assertCyclePendingPreviewBinding(options, existingReceipt.sourceDigest, migrationPackageSha256);
       const state = await assertFinalizedStateMatchesReceipt(options.gitCommonDir, existingReceipt);
       const [currentRun, currentAttempts] = await Promise.all([
         loadConvergeRunState(options.gitCommonDir, options.target),
@@ -593,6 +642,7 @@ export async function finalizeOrdinaryPendingLaunch(input: OrdinaryPendingFinali
     }
     if (source.nativeStateSha256 !== options.nativeStateSha256 ||
         source.attemptStateSha256 !== options.attemptStateSha256) fail('source_digest_mismatch');
+    assertCyclePendingPreviewBinding(options, source.digest, migrationPackageSha256);
     // Once the failed/unknown native state exists, archive publication already
     // completed. Resume from those immutable bytes so a lost acknowledgment
     // does not depend on the original async store still being available.
@@ -730,8 +780,19 @@ export async function previewOrdinaryPendingLaunch(input: PendingLegacyResumeOpt
         asyncAttribution: 'cycle-history-unattributed' })
       : createOrdinaryMigrationSource({ version: 1, ...commonSource });
     validateAsyncArtifacts(source, await options.loadRetainedAsync(), packet);
+    const currentPrBinding = options.currentPrHeadSha === undefined ? {} : {
+      currentPrHeadSha: options.currentPrHeadSha,
+      previewSha256: cyclePendingPreviewSha256({ target: options.target, headSha: options.headSha,
+        baseSha: options.baseSha!, currentPrHeadSha: options.currentPrHeadSha,
+        pendingInputSha256: options.pendingInputSha256,
+        nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
+        retainedAsyncSha256: options.retainedAsyncSha256, maxAttempts: options.maxAttempts,
+        sourceDigest: source.digest,
+        migrationPackageSha256: createHash('sha256').update(stableStringify(packet)).digest('hex') }),
+    };
     return { source, nativeStateSha256: nativeBytes.sha256, attemptStateSha256: attemptBytes.sha256,
-      attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextAttempt: current.attempt + 1 };
+      attemptsUsed: attempts.attemptsUsed, cap: attempts.cap, nextAttempt: current.attempt + 1,
+      ...currentPrBinding };
   });
 }
 
