@@ -115,7 +115,7 @@ export const launchSchema = z.object({
     reason: z.literal('coordinator_exited_without_durable_blocking_receipts'),
     nativeStateSha256: z.string().regex(/^[a-f0-9]{64}$/),
     attemptStateSha256: z.string().regex(/^[a-f0-9]{64}$/),
-    retainedAsyncSha256: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1),
+    retainedAsyncSha256: z.array(z.string().regex(/^[a-f0-9]{64}$/)),
     migrationPackageSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).strict().optional(),
   recovery: z.object({ operationId: z.string().uuid().optional(), sourceRunId: z.string().uuid(), originalNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), sourceNativeClaim: z.object({ attempt: z.number().int().positive().safe(), round: z.number().int().positive().safe() }).strict(), resume: z.object({ pid: z.number().int().positive().safe(), processIdentity: processIdentitySchema.optional(), phase: z.enum(['running', 'finished']) }).strict().optional() }).strict().optional(),

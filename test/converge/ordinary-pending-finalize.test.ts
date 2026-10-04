@@ -405,7 +405,7 @@ describe('ordinary pending finalize-only recovery', () => {
       .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('preflights the paired review cycle before archiving evidence', async () => {
+  it('rejects a legacy package when native state claims a cycle before archiving evidence', async () => {
     const fixture = await pendingAttemptSix();
     const native = JSON.parse(await readFile(fixture.nativePath, 'utf8'));
     native.version = 2;
@@ -415,16 +415,8 @@ describe('ordinary pending finalize-only recovery', () => {
       archivePath: join(fixture.common, 'missing-cycle-archive.json'),
       archiveSha256: 'e'.repeat(64), history: { attempts: 0, rounds: 0 } };
     await writeFile(fixture.nativePath, `${JSON.stringify(native, null, 2)}\n`);
-    const preview = await previewOrdinaryPendingLaunch({ ...fixture.options, previewMode: 'finalize-only' });
-
-    await expect(finalizeOrdinaryPendingLaunch({ gitCommonDir: fixture.common, target: fixture.target,
-      headSha: fixture.options.headSha, baseSha: fixture.options.baseSha,
-      pendingInputSha256: fixture.options.pendingInputSha256,
-      nativeStateSha256: preview.nativeStateSha256, attemptStateSha256: preview.attemptStateSha256,
-      retainedAsyncSha256: fixture.options.retainedAsyncSha256, maxAttempts: 20,
-      migrationPackage: fixture.options.migrationPackage, ownerAlive: fixture.options.ownerAlive,
-      loadRetainedAsync: fixture.options.loadRetainedAsync }))
-      .rejects.toThrow('fresh_review_state_pair_mismatch');
+    await expect(previewOrdinaryPendingLaunch({ ...fixture.options, previewMode: 'finalize-only' }))
+      .rejects.toThrow('ordinary_pending_package_mismatch');
     await expect(access(join(fixture.common, 'rcl-converge-pending-recovery')))
       .rejects.toMatchObject({ code: 'ENOENT' });
     await expect(access(join(fixture.common, 'rcl-converge-pending-finalizations')))

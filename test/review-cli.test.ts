@@ -29,6 +29,7 @@ import { loadLocalDiff } from '../src/resolver/local.js';
 import { chunkDiff } from '../src/prepare/chunker.js';
 import { buildPrompt } from '../src/prepare/prompt-builder.js';
 import { retainOrdinaryLaunchInputs } from '../src/converge/ordinary-pending-export.js';
+import { guardReviewLaunch } from '../src/converge/launch-guard.js';
 
 // Global setup builds dist unless an installed package entrypoint is selected.
 const cliEntrypoint = process.env['RCL_TEST_PACKAGED_CLI'] || process.env['RCL_TEST_REVIEW_ENTRYPOINT'] || fileURLToPath(new URL('../dist/index.js', import.meta.url));
@@ -302,10 +303,50 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
     });
   });
+
+  it('refuses a cycle package in combined resume mode before provider or native mutation', async () => {
+    await withGuardedFixture(async fixture => {
+      const configPath = join(fixture.repo, 'config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8'));
+      config.harness.telemetry = 'full';
+      writeFileSync(configPath, JSON.stringify(config));
+      mkdirSync(join(fixture.repo, '.harness-cli'));
+      writeFileSync(join(fixture.repo, '.harness-cli', 'config.json'), '{}');
+      const packagePath = join(fixture.repo, 'cycle-pending.json');
+      const headSha = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
+      writeFileSync(packagePath, JSON.stringify({
+        version: 2, target: 'guarded-fixture', headSha, baseSha: headSha,
+        attempt: 1, round: 1, pid: 999_999, attemptCap: 20, roundCap: 15, attemptsUsed: 1,
+        asyncAttribution: 'cycle-history-unattributed',
+        cycle: { id: '00000000-0000-4000-8000-000000000001',
+          operationId: '00000000-0000-4000-8000-000000000002', previousCycleId: null,
+          repo: 'allocator-one/rcl', prNumber: 146, url: 'https://harness.example',
+          archivePath: '/private/tmp/cycle.archive.json', archiveSha256: 'a'.repeat(64),
+          history: { attempts: 0, rounds: 0 } },
+        retainedAsyncSha256: [], retainedAsync: [],
+        guardedInput: { head: headSha, kind: 'patch', repo: 'allocator-one/rcl', pr: 146,
+          diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [{ model: 'openai/async',
+            role: 'general', provider: 'openai', lane: 'async' }], prompts: [],
+          asyncRoles: [{ name: 'general' }] },
+      }));
+      const args = fixture.args.filter(argument => argument !== '--no-telemetry');
+      const result = await runRclAsync([...args, '--resume-pending',
+        '--ordinary-pending-package', packagePath, '--resume-async-sha256', 'none',
+        '--retry-reason', 'Terminalize the unknown launch before any successor.',
+        '--max-attempts', '20', '--evidence-required'], fixture.repo, {
+          ...fixture.env, HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture',
+        });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('cycle_pending_finalize_only');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+      expect(await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  });
 });
 
 describe('rcl review — ordinary pending package export (RCL-166)', () => {
-  it('launches start-over and existing-cycle reviews without ordinary input retention', async () => {
+  it('retains ordinary input packets for start-over and existing-cycle reviews', async () => {
     await withGuardedFixture(async fixture => {
       const common = join(fixture.repo, '.git');
       const headSha = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
@@ -315,10 +356,7 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
       const config = JSON.parse(readFileSync(configPath, 'utf8'));
       config.harness.telemetry = 'full';
       writeFileSync(configPath, JSON.stringify(config));
-      // Ordinary capture cannot succeed. These modes have their own recovery
-      // protocol and must not acquire its storage or document-size requirement.
       const ordinaryPath = join(common, 'rcl-ordinary-inputs');
-      writeFileSync(ordinaryPath, 'unrelated preserved path');
       const shim = join(fixture.repo, 'cycle-network.mjs');
       const cyclePath = join(fixture.repo, 'fixture-cycle.json');
       writeFileSync(shim, `import { createHash, randomUUID } from 'node:crypto';
@@ -362,8 +400,8 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
           ...(fresh ? ['--start-over'] : [])], fixture.repo, env);
         expect(result.status, result.stderr).toBe(0);
         const native = (await loadConvergeRunState(common, 'guarded-fixture'))!;
-        expect(native.lastLaunch).not.toHaveProperty('ordinaryInputs');
-        expect(readFileSync(ordinaryPath, 'utf8')).toBe('unrelated preserved path');
+        expect(native.lastLaunch).toHaveProperty('ordinaryInputs');
+        expect(readdirSync(ordinaryPath)).toHaveLength(fresh ? 1 : 2);
         if (fresh) {
           const bytes = readFileSync(join(fixture.repo, reportName), 'utf8');
           const report = JSON.parse(bytes);
@@ -572,6 +610,108 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('pending_finalize_incompatible');
     expect(existsSync(join(repo, '.git', 'rcl-converge-runs'))).toBe(false);
+  });
+
+  it('loads and consumes duplicate-byte history from the authenticated cycle namespace', async () => {
+    await withGuardedFixture(async fixture => {
+      const common = join(fixture.repo, '.git');
+      const target = 'guarded-fixture';
+      const headSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: fixture.repo, env: GIT_ENV, encoding: 'utf8',
+      }).trim();
+      const baseSha = headSha;
+      const guardedInput = { head: headSha, kind: 'patch', repo: 'owner/repo', pr: 42,
+        diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [{ model: 'openrouter/history-seat',
+          role: 'general', provider: 'openrouter', lane: 'async' }], prompts: [],
+        asyncRoles: [{ name: 'general' }] };
+      const inputSha256 = guardedInputSha256(guardedInput);
+      let active: { id: string; operation_id: string; previous_cycle_id: null;
+        head_sha: string; inserted_at: string } | null = null;
+      const cycleRemote = { repo: 'owner/repo', prNumber: 42, url: 'http://127.0.0.1:1',
+        current: async () => active,
+        start: async (request: { operation_id: string; previous_cycle_id: null; head_sha: string }) =>
+          (active = { id: '00000000-0000-4000-8000-000000000011',
+            operation_id: request.operation_id, previous_cycle_id: request.previous_cycle_id,
+            head_sha: request.head_sha, inserted_at: '2026-10-04T00:00:00.000Z' }) };
+      await guardReviewLaunch({ gitCommonDir: common, target, headSha, inputSha256,
+        startOver: true, cycleRemote, maxAttempts: 20, maxRounds: 15, validate: async () => {},
+        beforeClaim: async context => {
+          const retained = await retainOrdinaryLaunchInputs({ gitCommonDir: common, target,
+            attempt: context.attempt!, round: context.round!, cycleId: context.cycleId,
+            headSha, baseSha, guardedInput, asyncDescriptors: [{ model: 'openrouter/history-seat',
+              role: 'general', provider: 'openrouter' }] });
+          return { ordinaryInputs: { version: 1 as const, packetSha256: retained.sha256, baseSha } };
+        },
+        run: async () => ({ runId: '00000000-0000-7000-8000-000000000012',
+          reportJsonSha256: 'f'.repeat(64), successfulReviews: 2, totalReviews: 2,
+          deliveryPending: false }) });
+      const state = (await loadConvergeRunState(common, target))!;
+      const attempts = (await loadConvergeAttemptState(common, target))!;
+      const deadProcessIdentity = state.lastLaunch?.processIdentity
+        ? { ...state.lastLaunch.processIdentity, pid: 999_999, birthSha256: '0'.repeat(64) }
+        : undefined;
+      state.lastLaunch = { status: 'pending', attempt: 1, round: 1, headSha, inputSha256,
+        startedAt: '2026-10-04T00:00:00.000Z', pid: 999_999,
+        ordinaryInputs: state.lastLaunch!.ordinaryInputs,
+        ...(deadProcessIdentity ? { processIdentity: deadProcessIdentity } : {}) };
+      attempts.attempts[0]!.pid = 999_999;
+      attempts.attempts[0]!.processIdentity = deadProcessIdentity;
+      writeFileSync(convergeRunStatePath(common, target), `${JSON.stringify(state, null, 2)}\n`);
+      const attemptPath = join(common, 'rcl-converge-attempts',
+        readdirSync(join(common, 'rcl-converge-attempts')).find(name => name.endsWith('.json'))!);
+      writeFileSync(attemptPath, `${JSON.stringify(attempts, null, 2)}\n`);
+
+      const bytes = JSON.stringify({ model: 'openrouter/history-seat', role: 'general',
+        provider: 'openrouter', status: 'success', findings: [], raw: '', durationMs: 1, async: true });
+      const digest = sha256Hex(bytes);
+      const asyncStore = join(common, 'rcl-async'); mkdirSync(asyncStore, { mode: 0o700 });
+      const key = asyncTargetKey('owner/repo#42', undefined, state.cycle!.id);
+      for (const suffix of ['one', 'two']) writeFileSync(join(asyncStore,
+        `result-${key}-${suffix}.json`), bytes, { mode: 0o600 });
+      const packagePath = join(fixture.repo, 'cycle-pending.json');
+      writeFileSync(packagePath, JSON.stringify({ version: 2, target, headSha, baseSha,
+        attempt: 1, round: 1, pid: 999_999, cycle: state.cycle, attemptCap: 20,
+        roundCap: 15, attemptsUsed: 1, asyncAttribution: 'cycle-history-unattributed',
+        retainedAsyncSha256: [digest, digest], retainedAsync: [1, 2].map(() => ({ sha256: digest,
+          model: 'openrouter/history-seat', role: 'general', provider: 'openrouter', lane: 'async' })),
+        guardedInput }));
+      const shim = join(fixture.repo, 'cycle-reader.mjs');
+      writeFileSync(shim, `globalThis.fetch = async input => { const url = new URL(String(input.url ?? input));
+        if (url.hostname === 'api.github.com') return Response.json(url.pathname.includes('/compare/')
+          ? { files: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
+              patch: '@@ -1 +1 @@\\n-a\\n+b' }] }
+          : { title: 'Fixture', body: '', user: { login: 'fixture' },
+              base: { ref: 'main', sha: ${JSON.stringify(baseSha)} },
+              head: { ref: 'feature', sha: ${JSON.stringify(headSha)} },
+              html_url: 'https://github.com/owner/repo/pull/42', labels: [], changed_files: 1 });
+        if (url.pathname === '/api/v1/reviews/prs/owner/repo/42') return Response.json({ data: {
+          repo: 'owner/repo', pr_number: 42, head: { sha: ${JSON.stringify(headSha)}, merged: false },
+          cycle_protocol: 1, active_cycle: ${JSON.stringify(active)} } });
+        throw new Error('Unexpected network: ' + url); };`);
+      const configPath = join(fixture.repo, 'config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8')); config.harness.telemetry = 'full';
+      writeFileSync(configPath, JSON.stringify(config));
+      mkdirSync(join(fixture.repo, '.harness-cli')); writeFileSync(join(fixture.repo, '.harness-cli', 'config.json'), '{}');
+      const env = { ...fixture.env, NODE_OPTIONS: `--import=${shim}`,
+        HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture', RCL_TELEMETRY: 'full' };
+      const args = fixture.args.filter((value, index, values) => value !== '--json-file' &&
+        values[index - 1] !== '--json-file' && value !== '--no-telemetry' &&
+        !['--head-sha', '--base-sha'].includes(value) && !['--head-sha', '--base-sha'].includes(values[index - 1]!));
+      args[1] = 'owner/repo#42';
+      args.push('--finalize-pending-only',
+        '--ordinary-pending-package', packagePath, '--resume-async-sha256', `${digest},${digest}`,
+        '--max-attempts', '20', '--expect-head-sha', headSha);
+      const preview = await runRclAsync([...args, '--preview-pending'], fixture.repo, env);
+      expect(preview.status, preview.stderr).toBe(0);
+      const receipt = JSON.parse(preview.stdout);
+      const applied = await runRclAsync([...args, '--pending-native-sha256', receipt.nativeStateSha256,
+        '--pending-attempt-sha256', receipt.attemptStateSha256], fixture.repo, env);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout)).toMatchObject({ mode: 'finalize-only',
+        receipt: { retainedAsyncSha256: [digest, digest] } });
+      expect(readdirSync(asyncStore)).toEqual([]);
+      expect(fixture.calls()).toBe(0);
+    });
   });
 
   it('previews then finalizes an exact pending launch without a provider call or successor claim', async () => {

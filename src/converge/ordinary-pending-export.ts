@@ -5,11 +5,12 @@ import { convergeAttemptStatePath, loadConvergeAttemptState } from './attempt-bu
 import { convergeRunStatePath, loadConvergeRunState } from './run-state.js';
 import { launchSchema } from './launch-record.js';
 import { validateOrdinaryPendingPackage, type OrdinaryPendingPackage } from './ordinary-pending-package.js';
-import { snapshotAsyncResults } from '../dispatch/async-lane.js';
+import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults } from '../dispatch/async-lane.js';
 import { guardedInputSha256, sha256Hex } from '../report/run-header.js';
 import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument, writeExclusive } from '../evidence/original-run/journal.js';
 import { syncNativeDirectory, writeNativeStateExclusive } from './native-lock.js';
+import { assertReviewCyclePair } from './fresh-review.js';
 
 // Leave room for the recovery package's retained-async descriptors beneath
 // the shared recovery reader ceiling (25 MiB). Apply this before any claim.
@@ -117,6 +118,21 @@ function ownerAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
+function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
+  packetSha256: string): Record<string, unknown> {
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { refuse('retained_input_mismatch'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) refuse('retained_input_mismatch');
+  const packet = value as Record<string, unknown>;
+  const guardedInput = packet.guardedInput;
+  if (!guardedInput || typeof guardedInput !== 'object' || Array.isArray(guardedInput)) refuse('retained_input_mismatch');
+  const expected = retainedInputs({ ...options, guardedInput: guardedInput as Record<string, unknown> });
+  if (sha256Hex(text) !== packetSha256 || text !== serializeRecoveryDocument(expected, MAX_RETAINED_INPUT_BYTES)) {
+    refuse('retained_input_mismatch');
+  }
+  return guardedInput as Record<string, unknown>;
+}
+
 /**
  * Authenticate reconstructed ordinary inputs without locks, claims or native writes.
  * Historical launch digests did not include base: the receipt explicitly limits
@@ -136,15 +152,17 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const [state, attempts] = await Promise.all([
     loadConvergeRunState(common, options.target), loadConvergeAttemptState(common, options.target),
   ]);
-  if (!state?.lastLaunch || !attempts || state.cycle || attempts.cycle) refuse('ordinary_launch_required');
+  if (!state?.lastLaunch || !attempts) refuse('ordinary_launch_required');
+  await assertReviewCyclePair(common, options.target, state.cycle);
+  const cycleBacked = state.cycle !== undefined;
   const launch = launchSchema.parse(state.lastLaunch);
   const record = attempts.attempts.find(item => item.attempt === launch.attempt);
   if (launch.status !== 'pending' || launch.pendingResume || launch.retainedOriginal || launch.recovery ||
       launch.pendingRecovery || !record || record.pid !== launch.pid || record.retrySource ||
       record.boundFixRecoverySource || record.pendingRecoverySource ||
       launch.attempt !== attempts.attemptsUsed || launch.headSha !== options.headSha ||
-      (options.expectedRound !== undefined && launch.round !== options.expectedRound) ||
-      launch.inputSha256 !== guardedInputSha256(options.guardedInput)) refuse('input_mismatch');
+      (!cycleBacked && launch.inputSha256 !== guardedInputSha256(options.guardedInput)) ||
+      (options.expectedRound !== undefined && launch.round !== options.expectedRound)) refuse('input_mismatch');
   if (ownerAlive(launch.pid)) refuse('owner_alive');
   // Only a native marker proves which full packet preceded this claim.
   // Unmarked historical launches retain their explicit current-base limitation,
@@ -152,35 +170,59 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const binding = launch.ordinaryInputs;
   if (binding && binding.baseSha !== options.baseSha) refuse('retained_base_mismatch');
   const retainedPath = binding ? retainedInputsPath({ gitCommonDir: common, target: options.target,
-    attempt: launch.attempt, packetSha256: binding.packetSha256 }) : undefined;
+    attempt: launch.attempt, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
+    packetSha256: binding.packetSha256 }) : undefined;
   const retainedBefore = retainedPath ? await readStable(retainedPath, MAX_RETAINED_INPUT_BYTES) : undefined;
-  if (binding && (!retainedBefore || retainedBefore.sha256 !== binding.packetSha256 ||
-      retainedBefore.text !== serializeRecoveryDocument(retainedInputs({
-        gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
-        attempt: launch.attempt, round: launch.round, guardedInput: options.guardedInput,
-      }), MAX_RETAINED_INPUT_BYTES))) refuse('retained_input_mismatch');
+  if (binding && (!retainedBefore || retainedBefore.sha256 !== binding.packetSha256)) refuse('retained_input_mismatch');
+  if (binding && !cycleBacked && retainedBefore!.text !== serializeRecoveryDocument(retainedInputs({
+    gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
+    attempt: launch.attempt, round: launch.round, guardedInput: options.guardedInput,
+  }), MAX_RETAINED_INPUT_BYTES)) refuse('retained_input_mismatch');
+  const historicalInput = binding && cycleBacked ? retainedHistoricalInput(retainedBefore!.text, {
+    gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
+    attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
+    guardedInput: options.guardedInput,
+  }, binding.packetSha256) : options.guardedInput;
+  if (launch.inputSha256 !== guardedInputSha256(historicalInput)) refuse('input_mismatch');
 
-  const snapshot = await snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey);
+  const snapshot = cycleBacked
+    ? await snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
+      Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND))
+    : await snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey);
   const identity = (item: { model: string; role: string; provider?: string }) =>
     JSON.stringify([item.model, item.role, item.provider]);
-  const expected = options.asyncDescriptors.map(identity).sort();
+  const historicalRoster = Array.isArray(historicalInput.roster)
+    ? historicalInput.roster.filter(item => item && typeof item === 'object' &&
+      (item as Record<string, unknown>).lane === 'async') as Array<{ model: string; role: string; provider?: string }>
+    : [];
+  const expected = (cycleBacked ? historicalRoster : options.asyncDescriptors).map(identity).sort();
   const actual = snapshot.reviews.map(identity).sort();
-  if (expected.length !== actual.length || expected.some((item, index) => item !== actual[index])) refuse('async_identity_mismatch');
+  if (cycleBacked
+    ? actual.some(item => !expected.includes(item))
+    : expected.length !== actual.length || expected.some((item, index) => item !== actual[index])) {
+    refuse('async_identity_mismatch');
+  }
   const retainedAsync = snapshot.reviews.map((review, index) => ({
     sha256: snapshot.artifacts[index]!.sha256, model: review.model, role: review.role,
     provider: review.provider!, lane: 'async' as const,
   }));
   const retainedAsyncSha256 = retainedAsync.map(item => item.sha256).sort();
-  const candidate: OrdinaryPendingPackage = { target: options.target, headSha: launch.headSha,
+  const candidate: OrdinaryPendingPackage = { ...(cycleBacked ? { version: 2 as const, cycle: state.cycle,
+    attemptCap: attempts.cap, roundCap: state.roundCap, attemptsUsed: attempts.attemptsUsed,
+    asyncAttribution: 'cycle-history-unattributed' as const } : {}),
+    target: options.target, headSha: launch.headSha,
     baseSha: options.baseSha, attempt: launch.attempt, round: launch.round, pid: launch.pid,
-    retainedAsyncSha256, retainedAsync, guardedInput: options.guardedInput };
+    retainedAsyncSha256, retainedAsync, guardedInput: historicalInput };
   // Canonical JSON drops undefined optional properties exactly as the original
   // guarded-input hash did; it never adds an artificial null spec binding.
   const packet = validateOrdinaryPendingPackage(JSON.parse(JSON.stringify(candidate)) as OrdinaryPendingPackage,
     { ...candidate, inputSha256: launch.inputSha256 });
   const [nativeAfter, attemptsAfter, asyncAfter] = await Promise.all([
     readStable(nativePath), readStable(attemptPath),
-    snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey, [], retainedAsyncSha256),
+    cycleBacked
+      ? snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
+        Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND), retainedAsyncSha256)
+      : snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey, [], retainedAsyncSha256),
   ]);
   if (nativeAfter.sha256 !== nativeBefore.sha256 || attemptsAfter.sha256 !== attemptsBefore.sha256 ||
       asyncAfter.artifacts.some((item, index) => item.path !== snapshot.artifacts[index]?.path) || ownerAlive(launch.pid)) refuse('state_changed');
@@ -193,5 +235,6 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     asyncBinding: 'retained-bytes-and-reviewer-identity', inputSha256: launch.inputSha256,
     attempt: launch.attempt, round: launch.round, pid: launch.pid, attemptsUsed: attempts.attemptsUsed,
     cap: attempts.cap, nativeStateSha256: nativeBefore.sha256, attemptStateSha256: attemptsBefore.sha256,
-    retainedAsyncSha256 };
+    retainedAsyncSha256, ...(state.cycle ? { cycleId: state.cycle.id,
+      operationId: state.cycle.operationId, roundCap: state.roundCap } : {}) };
 }

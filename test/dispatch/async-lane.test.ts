@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('node:crypto', { spy: true });
+vi.mock('../../src/telemetry/recovery/files.js', { spy: true });
 
 import * as crypto from 'node:crypto';
+import * as recoveryFiles from '../../src/telemetry/recovery/files.js';
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,6 +17,8 @@ import {
   runAsyncWorker,
   collectAsyncResults,
   snapshotAsyncResults,
+  snapshotAsyncHistory,
+  consumeBoundAsyncHistory,
   consumeBoundAsyncResults,
   publishAsyncReview,
   workerEnv,
@@ -282,6 +286,32 @@ describe('spool → worker → collect round trip', () => {
     }
 
     await expect(snapshotAsyncResults(dir, targetKey)).rejects.toThrow('async_resume_result_limit');
+  });
+
+  it('bounds each historical result while reading retained cycle evidence', async () => {
+    const targetKey = asyncTargetKey('repo#bounded-cycle-history');
+    await writeFile(join(dir, `result-${targetKey}-oversized.json`), Buffer.alloc(8 * 1024 * 1024 + 1));
+
+    await expect(snapshotAsyncHistory(dir, targetKey, 8))
+      .rejects.toThrow('async_resume_result_invalid');
+  });
+
+  it('bounds the retained artifact reread after its cleanup rename', async () => {
+    const targetKey = asyncTargetKey('repo#bounded-cycle-cleanup');
+    const bytes = JSON.stringify({ model: spec.model, role: spec.role, provider: spec.provider,
+      status: 'success', findings: [], durationMs: 1, async: true });
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    const path = join(dir, `result-${targetKey}-one.json`);
+    await writeFile(path, bytes);
+    const actualFiles = await vi.importActual<typeof import('../../src/telemetry/recovery/files.js')>(
+      '../../src/telemetry/recovery/files.js');
+    vi.mocked(recoveryFiles.readStable)
+      .mockImplementationOnce(actualFiles.readStable)
+      .mockRejectedValueOnce(new Error('oversized'));
+
+    await expect(consumeBoundAsyncHistory(dir, targetKey, [digest], 8))
+      .rejects.toThrow('async_resume_result_invalid');
+    expect(await readFile(path, 'utf8')).toBe(bytes);
   });
 
   it('consumes only the exact reviewed async result set after terminal recovery', async () => {

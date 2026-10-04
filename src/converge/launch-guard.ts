@@ -29,6 +29,7 @@ import { verifyBoundFixRecovery, type BoundFixRecoverySelection } from './bound-
 import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bound-fix-recovery-source.js';
 import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
+import { verifyCyclePendingFinalization } from './pending-finalization-receipt.js';
 import { captureCurrentProcessIdentity } from './process-identity.js';
 
 /** Canonical original descriptor prepared under target ownership, before its claim is spent. */
@@ -165,6 +166,20 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     return { round };
   }
   if (previous.status !== 'completed') {
+    if (state.cycle && ((previous.status === 'pending' && !previous.runId) || previous.pendingRecovery)) {
+      if (!await verifyCyclePendingFinalization(options.gitCommonDir, state, previous)) {
+        refuse('cycle_pending_recovery_required',
+          'The previous cycle dispatch is not terminal. Authenticate and finalize its pending recovery before launching a successor.');
+      }
+      if (previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
+        refuse('cycle_pending_inputs_unchanged',
+          'The recovered dispatch remains unknown; its successor must use materially changed exact review inputs.');
+      }
+      if (!options.retryReason) {
+        refuse('dispatch_unknown', 'The recovered dispatch remains spent; supply a bounded retry reason for its successor.');
+      }
+      return { round };
+    }
     if (!options.retryReason) refuse('dispatch_unknown', 'Previous dispatch is unknown; no automatic retry. Supply a bounded retry reason only after recovery.');
     return { round };
   }
@@ -366,13 +381,12 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         await options.originalLaunch.beforeClaim(preparedOriginal, ownership);
         assertOriginalLive();
       }
-      // Pending-package export covers ordinary launches only. Special launch
-      // modes keep their own recovery contract and must not inherit this
-      // capture's size or storage requirements.
-      const ordinaryLaunch = !options.startOver && !state.cycle && !options.originalLaunch &&
-        !options.legacyRetry && !options.boundFixRecovery;
+      // Retain normal dispatch inputs, including cycle-backed launches. Bound
+      // original/retry recovery modes keep their own immutable input contract.
+      const ordinaryLaunch = !options.originalLaunch && !options.legacyRetry && !options.boundFixRecovery;
       const retained = ordinaryLaunch ? await options.beforeClaim?.(Object.freeze({ target: options.target, round,
-        attempt: (attempts?.attemptsUsed ?? 0) + 1 }), ownership) : undefined;
+        attempt: (attempts?.attemptsUsed ?? 0) + 1,
+        ...(state.cycle ? { cycleId: state.cycle.id } : {}) }), ownership) : undefined;
       const ordinaryInputs = retained === undefined ? undefined : ordinaryLaunchInputsBindingSchema.parse(retained.ordinaryInputs);
       if (retryProof) await retainLegacyRetry(options.gitCommonDir, retryProof);
       assertOriginalLive();
