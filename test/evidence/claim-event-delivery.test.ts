@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { withNativeTarget, withRecoveryTarget } from '../../src/converge/target-ownership.js';
 import { deliverPreparedClaimEvent, type ClaimEventDeliveryOptions } from '../../src/evidence/claim-recovery/delivery.js';
+import type { ClaimHistoryContent } from '../../src/evidence/claim-recovery/carrier-inventory.js';
+import { assertUnusedClaimIdentity } from '../../src/evidence/claim-recovery/public-model.js';
 import type { StoredEventReceipt } from '../../src/evidence/event-receipts.js';
 import { openJournal } from '../../src/evidence/original-run/journal.js';
 import { HarnessSink } from '../../src/telemetry/sink.js';
@@ -62,6 +64,16 @@ async function fixture(requestBudget?: RecoveryRequestBudget) {
 }
 
 describe('durable claim event delivery', () => {
+  it('rejects a destination already projected as a split claim identity', () => {
+    const history = {
+      readWindow: { startedAt: '2026-09-22T22:00:00Z', completedAt: '2026-09-22T22:00:01Z' },
+      actorUserId: uuid(3), histories: [],
+      sources: [{ storedRun: { findings: [{ identity_key: '1111111111111111', claim_identity: '2222222222222222' }] } }],
+    } as unknown as ClaimHistoryContent;
+
+    expect(() => assertUnusedClaimIdentity(history, '2222222222222222')).toThrow('claim_identity_already_used');
+  });
+
   it('retains exact prepared bytes before POST and accepts only a complete matching receipt', async () => {
     const f = await fixture();
     expect(await f.execute()).toEqual(f.receipt());
