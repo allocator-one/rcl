@@ -8,7 +8,7 @@ import { loadReviewerLineage, type ReviewerLineage } from '../evidence/reviewer-
 import { openJournal, serializeRecoveryDocument, writeExclusive, MAX_RECOVERY_DOCUMENT_BYTES } from '../evidence/original-run/journal.js';
 import { renderReportArtifacts } from '../output/artifacts.js';
 import { buildRunEnvelope, declareReviewerRecovery, type ReviewerRecoverySource } from './envelope.js';
-import type { TelemetryRuntime } from './deliver.js';
+import { deliverRun, noticeBefore, type DeliveryOutcome, type TelemetryRuntime } from './deliver.js';
 import { platformPath, readStable, sha256 } from './recovery/files.js';
 import { ReviewerDeliveryQueue, type RetainedReviewerRecoveryDestination,
   type RetainedReviewerRecoveryPreview, type RetainedReviewerRecoverySelection } from './reviewer-delivery.js';
@@ -44,6 +44,7 @@ export interface TerminalReviewerDeliveryOptions {
 }
 
 export type TerminalReviewerDeliveryResult =
+  | { outcome: DeliveryOutcome; reportSha256: string; reviewerArtifactSha256: string }
   | { status: 'prepared'; manifest: string; manifest_sha256: string; operation_id: string; run_id: string; observation: ActivationManifest['observation']; accounting: string }
   | { status: 'complete'; manifest: string; manifest_sha256: string; operation_id: string; run_id: string; journal: string; recovery_acknowledgement: string; accounting: string };
 
@@ -129,17 +130,34 @@ export async function deliverTerminalReviewerRun(
   runtime: TelemetryRuntime,
   options: TerminalReviewerDeliveryOptions,
 ): Promise<TerminalReviewerDeliveryResult> {
+  const modes = [options.preview, options.apply, options.resume].filter(Boolean).length;
+  const legacy = modes === 0 && options.manifest === undefined && options.manifestSha256 === undefined &&
+    typeof options.target === 'string' && options.target.length > 0 && uuid.safeParse(options.runId).success;
+  const commonDir = options.commonDir ?? await resolveGitCommonDir(options.cwd);
+  if (legacy) {
+    const lineage = await loadReviewerLineage({ commonDir, target: options.target!, runId: options.runId! });
+    const queue = new ReviewerDeliveryQueue(runtime.dataDir);
+    if (await queue.hasEntry(options.runId!)) {
+      throw new Error('reviewer_delivery_explicit_activation_required: retained outboxes require --preview, then --apply or --resume');
+    }
+    const { inspected, terminal } = lineage.latest;
+    const result = JSON.parse(terminal.reportBytes) as ReviewResult;
+    const outcome = await deliverRun(runtime, { result, artifacts: { report_json: terminal.reportBytes },
+      reviewerArtifact: inspected.artifact, evidenceRequired: true });
+    return { outcome, reportSha256: sha256(terminal.reportBytes),
+      reviewerArtifactSha256: sha256(terminal.reviewerArtifactBytes) };
+  }
   const preview = options.preview === true;
-  if ([preview, options.apply, options.resume].filter(Boolean).length !== 1) {
+  if (modes !== 1) {
     throw new Error('choose_exactly_one_recovery_mode: use exactly one of --preview, --apply, or --resume');
   }
   const manifestOption = options.manifest;
   if (!manifestOption) throw new Error('reviewer_delivery_manifest_required');
   const manifestPath = platformPath(manifestOption);
-  const commonDir = options.commonDir ?? await resolveGitCommonDir(options.cwd);
   if (preview) {
     if (!options.target || !options.runId || options.manifestSha256 !== undefined) throw new Error('reviewer_delivery_invalid_preview');
     const { prepared, selection } = await prepare(runtime, commonDir, options.target, options.runId);
+    await noticeBefore(runtime, 'private-reviewers');
     const target = await currentDestination(runtime);
     if (target.host !== prepared.outbox.host || target.credentialKind !== prepared.outbox.credentialKind) {
       throw new Error('reviewer_delivery_destination_mismatch');
@@ -164,6 +182,7 @@ export async function deliverTerminalReviewerRun(
   if (!isDeepStrictEqual(prepared, manifest.prepared) || !isDeepStrictEqual(outbox, manifest.prepared.outbox)) {
     throw new Error('reviewer_delivery_lineage_or_outbox_changed');
   }
+  await noticeBefore(runtime, 'private-reviewers');
   await currentDestination(runtime, manifest.destination);
   const journalPath = `${manifestPath}.journal`;
   const journal = await openJournal(journalPath, retained.sha256, manifest.operation_id, options.apply ? 'apply' : 'resume');

@@ -157,6 +157,7 @@ option does not rerun reviewers.
 rcl telemetry recover-reviewer --preview --manifest <path> --target <convergence-target> --run <run-uuid> [--json]
 rcl telemetry recover-reviewer --apply --manifest <path> --manifest-sha256 <sha256> [--json]
 rcl telemetry recover-reviewer --resume --manifest <path> --manifest-sha256 <sha256> [--json]
+rcl telemetry recover-reviewer --target <convergence-target> --run <run-uuid> [--json]
 ```
 
 Reopens one exact retained terminal reviewer report of a guarded convergence
@@ -172,11 +173,17 @@ records activation intent before the sole permitted run POST; an uncertain
 POST is never repeated. Completion requires exact ordinary and private
 readback, followed by a separate immutable recovery acknowledgement. Generic
 `telemetry flush` deliberately keeps refusing an unknown run.
+The published mode-less target/run form remains available for an authenticated
+terminal report that has no retained private outbox. It preserves the original
+delivery result, JSON fields and exit code. If a private outbox exists, even if
+its files are malformed, mode-less delivery fails before transport and directs
+the operator to preview/apply/resume so it cannot bypass activation journaling.
 A verified-consensus report without finding labels is
 delivered only when its authenticated reviewer artifact proves the sealed
 failed-verification strict fallback with a conservative nonzero CI result;
 generic, altered and completed-verification reports fail closed before
-transport. Preview is read-only. Apply creates the operation journal, while
+transport. Preview makes no server changes and writes only its requested local
+manifest. Apply creates the operation journal, while
 resume requires that same journal. Successful preparation or completion exits
 0; a pair that cannot be reopened or authenticated exits 4.
 

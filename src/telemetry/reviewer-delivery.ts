@@ -182,6 +182,13 @@ export class ReviewerDeliveryQueue {
     catch { return false; }
   }
 
+  /** Presence alone blocks legacy delivery; malformed retained state must fail closed too. */
+  async hasEntry(runId: string): Promise<boolean> {
+    if (!uuid.safeParse(runId).success) return false;
+    try { await lstat(join(this.root, runId.toLowerCase())); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  }
+
   /** Read-only exact activation proposal derived from authenticated local lineage. */
   async previewRecovery(selection: RetainedReviewerRecoverySelection): Promise<RetainedReviewerRecoveryPreview> {
     if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
@@ -388,6 +395,13 @@ export class ReviewerDeliveryQueue {
     }
     if (read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
     if (read.kind === 'ok' && !read.value.bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
+
+    const envelopeReceipt = await sink.getRunReceipt(entry.envelope, entry.envelopeBytes, request());
+    if (envelopeReceipt.kind !== 'recorded') {
+      if (envelopeReceipt.kind === 'unavailable') fail('unavailable');
+      fail(envelopeReceipt.kind === 'absent' ? 'envelope_receipt_absent' : 'envelope_receipt_mismatch');
+    }
+    await appendOnce('envelope_verified', { sha256: m.envelope.sha256, artifacts_declared: entry.envelope.artifacts_declared });
 
     for (const kind of ['report_json', 'report_md'] as const) {
       const bytes = entry.artifacts[kind]; if (bytes === undefined) continue;

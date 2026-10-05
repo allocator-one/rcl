@@ -620,12 +620,19 @@ export class HarnessSink {
    * credential's own live run and signed workflow subject.
    */
   async getAttestedRunReceipt(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    if (this.credentialSource !== 'attest') return { kind: 'rejected' };
+    const prepared = this.preparePostRun(envelope, serializedEnvelope);
+    return prepared.kind === 'ready' ? prepared.receipt(options) : { kind: 'rejected' };
+  }
+
+  /** Exact owner-readable run receipt binding the serialized envelope and every artifact declaration. */
+  async getRunReceipt(envelope: RunEnvelope, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
+    if (this.credentialSource === 'attest') return { kind: 'rejected' };
     const prepared = this.preparePostRun(envelope, serializedEnvelope);
     return prepared.kind === 'ready' ? prepared.receipt(options) : { kind: 'rejected' };
   }
 
   private async getPreparedReceipt(binding: PreparedRunBinding, serializedEnvelope: string, options: RequestOptions = {}): Promise<ReceiptProbe<RunReceipt>> {
-    if (this.credentialSource !== 'attest') return { kind: 'rejected' };
     if (!binding.artifactsDeclared.some(({ kind }) => kind === 'report_json')) return { kind: 'rejected' };
     const result = await this.request('GET', `/api/v1/reviews/runs/${encodeURIComponent(binding.runId)}`, undefined, 'application/json', { ...options, maxResponseBytes: MAX_READ_RESPONSE_BYTES, requireCompleteRead: true });
     if ('failure' in result) return { kind: 'unavailable' };

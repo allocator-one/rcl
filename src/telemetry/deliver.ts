@@ -219,7 +219,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
 // Persistence failures are absorbed inside `ensureNoticeShown` (shown, not
 // recorded — it shows again next time); anything that escapes means the
 // notice itself could not be written, and nothing is transmitted then.
-async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ordinary'): Promise<void> {
+export async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ordinary'): Promise<void> {
   if (!runtime.credential) return;
   await ensureNoticeShown(credentialHost(runtime.credential), runtime.dataDir, runtime.stderr, scope);
 }
