@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.5.10 - 2026-10-05
+
+- Verify the current unmerged GitHub pull request head during guarded review
+  cycle continuation. A stale Harness status projection no longer blocks a
+  review of the exact live head; a changed or merged pull request and an
+  unavailable authoritative read still fail closed. Preserve the original
+  cycle receipt and cumulative review accounting (RCL-185).
+
 ## 4.5.9 - 2026-10-05
 
 - Activate an exact retained private reviewer outbox through the explicit

@@ -384,6 +384,10 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
         const cyclePath = ${JSON.stringify(cyclePath)};
         globalThis.fetch = async (input, options) => {
           const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+          if (url.hostname === 'api.github.com' && url.pathname === '/repos/owner/repo/pulls/42') {
+            return new Response(JSON.stringify({ head: { sha: ${JSON.stringify(headSha)} }, merged: false }), {
+              status: 200, headers: { 'content-type': 'application/json' } });
+          }
           if (url.origin !== 'http://127.0.0.1:1') return original(input, options);
           const path = url.pathname;
           const answer = (data, status = 200) => new Response(JSON.stringify({ data }), {
@@ -728,7 +732,8 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
           : { title: 'Fixture', body: '', user: { login: 'fixture' },
               base: { ref: 'main', sha: ${JSON.stringify(baseSha)} },
               head: { ref: 'feature', sha: currentPrHeadSha },
-              html_url: 'https://github.com/owner/repo/pull/42', labels: [], changed_files: 1 });
+              html_url: 'https://github.com/owner/repo/pull/42', labels: [], changed_files: 1,
+              merged: false });
         if (url.pathname === '/api/v1/reviews/prs/owner/repo/42') return Response.json({ data: {
           repo: 'owner/repo', pr_number: 42, head: { sha: currentPrHeadSha, merged: false },
           cycle_protocol: 1, active_cycle: ${JSON.stringify(active)} } });

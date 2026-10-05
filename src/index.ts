@@ -29,6 +29,7 @@ import {
 } from './config/defaults.js';
 import { resolveProviderConcurrency } from './config/provider-concurrency.js';
 import { parseGitHubTarget, fetchPRDiff, isGitHubTarget } from './resolver/github.js';
+import { createGitHubClient, getGitHubPullRequest } from './resolver/github-client.js';
 import { loadLocalDiff } from './resolver/local.js';
 import { loadGitDiff, resolveGitHeads } from './resolver/git.js';
 import { loadPlanAsDiff } from './resolver/plan.js';
@@ -2383,8 +2384,17 @@ async function executeCouncil(
       if (!extra.target.repo || !extra.target.prNumber) throw new Error('fresh_review_requires_pr');
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION, config, noTelemetry: opts.telemetry === false });
       if (!runtime.sink || runtime.level !== 'full') throw new Error('Fresh review cycles require full Harness evidence and an actor credential');
+      const prTarget = parseGitHubTarget(`${extra.target.repo}#${extra.target.prNumber}`);
       cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber,
-        opts.expectPrHeadSha ?? extra.target.headSha ?? '');
+        opts.expectPrHeadSha ?? extra.target.headSha ?? '', async () => {
+          const client = await createGitHubClient(config.githubToken);
+          const auth = await client.auth();
+          if (typeof auth !== 'object' || auth === null || !('type' in auth) || auth.type !== 'token') {
+            throw new Error('fresh_review_github_auth_unavailable');
+          }
+          const { data: pr } = await getGitHubPullRequest(client, prTarget);
+          return { headSha: pr.head.sha, merged: pr.merged };
+        });
     }
     if (opts.resumePending || opts.finalizePendingOnly) {
       const asyncBinding = opts.resumeAsyncSha256!.trim();

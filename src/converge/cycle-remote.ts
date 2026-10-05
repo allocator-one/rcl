@@ -5,7 +5,10 @@ import { reviewCycleReceiptSchema, type ReviewCycleRemote } from './review-cycle
 /** A server-confirmed noncommit can restore local barriers; uncertain replies cannot. */
 export class ReviewCycleRejected extends Error {}
 
-export function createReviewCycleRemote(sink: HarnessSink, repo: string, prNumber: number, headSha: string): ReviewCycleRemote {
+export type LivePullRequestReader = () => Promise<{ headSha: string; merged: boolean }>;
+
+export function createReviewCycleRemote(sink: HarnessSink, repo: string, prNumber: number, headSha: string,
+  readLivePr: LivePullRequestReader): ReviewCycleRemote {
   if (sink.credentialSource === 'attest') throw new Error('fresh_review_requires_actor_credential');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split('/').some(segment => segment === '.' || segment === '..') || !Number.isSafeInteger(prNumber) || prNumber < 1) throw new Error('fresh_review_requires_pr');
   repo = repo.toLowerCase();
@@ -15,12 +18,20 @@ export function createReviewCycleRemote(sink: HarnessSink, repo: string, prNumbe
     async current() {
       const result = await sink.getJson(path, data => {
         const parsed = z.object({ repo: z.string(), pr_number: z.number(), cycle_protocol: z.literal(1),
-          active_cycle: reviewCycleReceiptSchema.nullable(), head: z.object({ sha: z.string(), merged: z.boolean() }).nullable() }).safeParse(data);
+          active_cycle: reviewCycleReceiptSchema.nullable() }).safeParse(data);
         if (!parsed.success || parsed.data.repo.toLowerCase() !== repo || parsed.data.pr_number !== prNumber) return null;
         return parsed.data;
       });
       if (result.kind !== 'ok') throw new Error(`fresh_review_capability_unavailable: ${result.kind}; Harness must support review cycles`);
-      if (result.value.head ? result.value.head.merged || result.value.head.sha !== headSha : result.value.active_cycle !== null) {
+      let livePr: Awaited<ReturnType<LivePullRequestReader>>;
+      try {
+        livePr = await readLivePr();
+      } catch {
+        throw new Error('fresh_review_github_unavailable');
+      }
+      if (!livePr || typeof livePr.headSha !== 'string' || !/^[a-f0-9]{40}$/.test(livePr.headSha) ||
+        typeof livePr.merged !== 'boolean') throw new Error('fresh_review_github_unavailable');
+      if (livePr.merged || livePr.headSha !== headSha) {
         throw new Error('fresh_review_head_changed');
       }
       return result.value.active_cycle;

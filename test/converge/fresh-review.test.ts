@@ -145,6 +145,55 @@ it('does not replenish the budget on ordinary continuation and rejects a report 
   expect((await loadConvergeRunState(options.gitCommonDir, options.target))!.rounds).toEqual([]);
 });
 
+it('continues a later PR head in the original cycle with the next ordinary ordinals', async () => {
+  const { processRoundReport } = await import('../../src/converge/run-state.js');
+  const options = await freshFixture();
+  const originalHead = 'b'.repeat(40);
+  const nextHead = 'c'.repeat(40);
+  await guardReviewLaunch({ ...options, headSha: originalHead });
+  const first = (await loadConvergeRunState(options.gitCommonDir, options.target))!;
+  await processRoundReport({ gitCommonDir: options.gitCommonDir, target: options.target, round: 1, findings: [],
+    runId: options.completion.runId, reportSha256: options.completion.reportJsonSha256, cycleId: first.cycle!.id });
+
+  const next = await guardReviewLaunch({ ...options, startOver: false, headSha: nextHead,
+    inputSha256: 'c'.repeat(64) });
+
+  expect(next).toMatchObject({ attempt: 2, attemptsUsed: 2, cycle: { id: first.cycle!.id } });
+  expect(options.run).toHaveBeenLastCalledWith({ target: options.target, round: 2, attempt: 2,
+    cycleId: first.cycle!.id }, expect.objectContaining({ target: options.target }));
+  expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
+  expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({
+    attemptsUsed: 2, cycle: { id: first.cycle!.id, history: { attempts: 0, rounds: 0 } },
+  });
+});
+
+it.each(['superseded', 'head-mismatch', 'merged', 'github-unavailable'] as const)(
+  'does not mutate cycle accounting when live membership is %s', async condition => {
+    const { processRoundReport } = await import('../../src/converge/run-state.js');
+    const options = await freshFixture();
+    await guardReviewLaunch({ ...options, headSha: 'b'.repeat(40) });
+    const first = (await loadConvergeRunState(options.gitCommonDir, options.target))!;
+    await processRoundReport({ gitCommonDir: options.gitCommonDir, target: options.target, round: 1, findings: [],
+      runId: options.completion.runId, reportSha256: options.completion.reportJsonSha256, cycleId: first.cycle!.id });
+    const paths = [convergeRunStatePath(options.gitCommonDir, options.target),
+      convergeAttemptStatePath(options.gitCommonDir, options.target)];
+    const before = await Promise.all(paths.map(path => readFile(path)));
+    if (condition === 'superseded') {
+      options.cycleRemote.current.mockResolvedValueOnce({ ...first.cycle!, id: randomUUID() } as never);
+    } else {
+      options.cycleRemote.current.mockRejectedValueOnce(new Error(condition === 'head-mismatch'
+        ? 'fresh_review_head_changed' : condition === 'merged' ? 'fresh_review_head_changed' : 'fresh_review_github_unavailable'));
+    }
+
+    await expect(guardReviewLaunch({ ...options, startOver: false, headSha: 'c'.repeat(40),
+      inputSha256: 'c'.repeat(64) })).rejects.toThrow(condition === 'superseded'
+        ? 'fresh_review_superseded' : condition === 'github-unavailable' ? 'fresh_review_github_unavailable' : 'fresh_review_head_changed');
+    expect(options.run).toHaveBeenCalledTimes(1);
+    expect(options.cycleRemote.start).toHaveBeenCalledTimes(1);
+    expect(await Promise.all(paths.map(path => readFile(path)))).toEqual(before);
+  }
+);
+
 it('requires the current completed launch and its digest for fresh-cycle admission', async () => {
   const { processRoundReport } = await import('../../src/converge/run-state.js');
   const options = await freshFixture();
