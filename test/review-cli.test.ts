@@ -412,6 +412,7 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
         };`);
       const env = { ...fixture.env, NODE_OPTIONS: `--import=${shim}`,
         HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture', RCL_TELEMETRY: 'full',
+        GITHUB_TOKEN: 'fixture',
         RCL_CONVERGE_ROUND: '', RCL_CONVERGE_ATTEMPT: '', RCL_CONVERGE_TARGET: '' };
       const args = [...fixture.args.filter(arg => arg !== '--no-telemetry'), '--for-pr', 'owner/repo#42'];
       for (const fresh of [true, false]) {
@@ -743,7 +744,8 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       writeFileSync(configPath, JSON.stringify(config));
       mkdirSync(join(fixture.repo, '.harness-cli')); writeFileSync(join(fixture.repo, '.harness-cli', 'config.json'), '{}');
       const env = { ...fixture.env, NODE_OPTIONS: `--import=${shim}`,
-        HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture', RCL_TELEMETRY: 'full' };
+        HARNESS_API_URL: 'http://127.0.0.1:1', HARNESS_API_TOKEN: 'fixture', RCL_TELEMETRY: 'full',
+        GITHUB_TOKEN: 'fixture' };
       const args = fixture.args.filter((value, index, values) => value !== '--json-file' &&
         values[index - 1] !== '--json-file' && value !== '--no-telemetry');
       args.push('--finalize-pending-only',

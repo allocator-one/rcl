@@ -59,6 +59,7 @@ it('actual CLI preserves recovery, cycle, artifact and attempt bindings through 
   const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const env = { PATH: process.env.PATH, HOME: root, XDG_CONFIG_HOME: join(root, 'config'), RCL_DATA_DIR: join(root, 'data'),
     GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', RCL_NO_HARNESS_KEYS: '1', HARNESS_API_URL: baseUrl,
+    GITHUB_TOKEN: 'synthetic-only',
     HARNESS_API_TOKEN: 'synthetic-only', OPENAI_COMPAT_BASE_URL: `${baseUrl}/v1`, OPENAI_COMPAT_API_KEY: 'local',
     NO_COLOR: '1', FORCE_COLOR: '0', RCL_RUNNER: 'human', RCL_CONVERGE_ROUND: '13', RCL_CONVERGE_ATTEMPT: '17' };
   try {
@@ -89,6 +90,9 @@ it('actual CLI preserves recovery, cycle, artifact and attempt bindings through 
     const shim = join(root, 'network.mjs');
     await writeFile(shim, `const original = globalThis.fetch; globalThis.fetch = (input, options) => {
       const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      if (url.hostname === 'api.github.com' && url.pathname === '/repos/allocator-one/rcl/pulls/42') {
+        return Response.json({ head: { sha: ${JSON.stringify('9'.repeat(40))} }, merged: false });
+      }
       if (url.origin !== ${JSON.stringify(baseUrl)}) throw new Error('Unexpected external fixture request: ' + url.origin);
       return original(input, options);
     };`);
