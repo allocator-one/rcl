@@ -111,6 +111,12 @@ export interface FlushOptions {
   /** Flush one entry only. */
   runId?: string;
   now?: () => number;
+  /** Coordinator-owned run boundary; holds any cross-outbox lock through the entry transfer. */
+  entryBoundary?: <T>(entry: Pick<OutboxEntry, 'id' | 'meta'>, work: () => Promise<T>) => Promise<T>;
+  /** A batch may retain one fenced entry and continue independent entries. */
+  entryRefusalReason?: (error: unknown) => string | undefined;
+  /** Coordinator-owned notice or authorization boundary for pending loss transmission. */
+  lossBoundary?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 export interface FlushSummary {
@@ -498,10 +504,20 @@ export class Outbox {
         summary.remaining.push(entry.id);
         continue;
       }
-      const result = await this.flushEntry(sink, entry, pastDeadline, request).catch((err: unknown) => {
-        if (err instanceof EntryGone) return { kind: 'delivered' as const };
-        throw err;
-      });
+      let result: Awaited<ReturnType<Outbox['flushEntry']>>;
+      try {
+        const work = () => this.flushEntry(sink, entry, pastDeadline, request);
+        result = options.entryBoundary ? await options.entryBoundary(entry, work) : await work();
+      } catch (error) {
+        if (error instanceof EntryGone) result = { kind: 'delivered' as const };
+        else {
+          const reason = options.entryRefusalReason?.(error);
+          if (reason === undefined) throw error;
+          summary.remaining.push(entry.id);
+          summary.failed.push({ id: entry.id, reason });
+          continue;
+        }
+      }
       switch (result.kind) {
         case 'delivered':
           summary.delivered.push(entry.id);
@@ -526,8 +542,9 @@ export class Outbox {
       }
     }
 
-    if (summary.stopped !== 'unavailable' && options.runId === undefined) {
-      const loss = await this.reportLoss(sink, pastDeadline, request);
+    if (summary.stopped !== 'unavailable' && options.runId === undefined && (await this.pendingLossFiles()).length > 0) {
+      const report = () => this.reportLoss(sink, pastDeadline, request);
+      const loss = options.lossBoundary ? await options.lossBoundary(report) : await report();
       if (loss.kind === 'done' && loss.reported > 0) summary.lossReported = loss.reported;
       if (loss.kind !== 'done' && !summary.stopped) summary.stopped = loss.kind;
       const pending = (await this.pendingLossFiles()).length;

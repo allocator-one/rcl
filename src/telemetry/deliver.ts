@@ -229,13 +229,20 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
   if (!runtime.sink) throw new Error('No Harness credential to flush with.');
   const reviewerQueue = new ReviewerDeliveryQueue(runtime.dataDir);
   const started = performance.now();
-  const flushOrdinary = async () => {
+  const transferBoundary = async <T>(work: () => Promise<T>) => {
     await noticeBefore(runtime);
-    return runtime.outbox.flush(runtime.sink!, options);
+    return work();
   };
-  const ordinary = options.runId === undefined
-    ? await flushOrdinary()
-    : await reviewerQueue.withGenericDeliveryAllowed(options.runId, flushOrdinary);
+  const ordinary = await runtime.outbox.flush(runtime.sink, {
+    ...options,
+    entryBoundary: (entry, work) => entry.meta.kind === 'run'
+      ? reviewerQueue.withGenericDeliveryAllowed(entry.id, () => transferBoundary(work))
+      : transferBoundary(work),
+    ...(options.runId === undefined ? { entryRefusalReason: (error: unknown) =>
+      error instanceof Error && error.message === 'reviewer_delivery_explicit_activation_required'
+        ? error.message : undefined } : {}),
+    lossBoundary: transferBoundary,
+  });
   if (runtime.level !== 'full' || runtime.attested) return ordinary;
   const remaining = options.deadlineMs === undefined ? undefined : Math.max(0, options.deadlineMs - (performance.now() - started));
   const privateResult = await reviewerQueue.flush(
@@ -243,8 +250,10 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
     { ...options, deadlineMs: remaining },
     () => noticeBefore(runtime, 'private-reviewers'),
   );
-  return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...ordinary.remaining, ...privateResult.remaining],
-    failed: [...ordinary.failed, ...privateResult.failed], dropped: [...ordinary.dropped, ...privateResult.dropped],
+  const failed = [...ordinary.failed, ...privateResult.failed]
+    .filter((row, index, rows) => rows.findIndex(candidate => candidate.id === row.id && candidate.reason === row.reason) === index);
+  return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...new Set([...ordinary.remaining, ...privateResult.remaining])],
+    failed, dropped: [...ordinary.dropped, ...privateResult.dropped],
     ...(ordinary.stopped || privateResult.stopped ? { stopped: ordinary.stopped ?? privateResult.stopped } : {}) };
 }
 

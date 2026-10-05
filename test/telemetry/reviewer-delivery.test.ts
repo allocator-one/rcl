@@ -66,7 +66,7 @@ function server(f: DeliveryFixture) {
       if (privateBytes === undefined) return Response.json(posted ? { error: 'reviewer_artifact_pending', data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(f.artifact.bytes) } } : { error: 'not_found' }, { status: 404 });
       return new Response(privateBytes, { headers: { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256(privateBytes), 'cache-control': 'private, no-store', 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff' } });
     }
-    if (route.endsWith('/runs')) { posted = true; postedEnvelope = options.body; if (losePost) { losePost = false; posted = false; throw new Error('lost POST response'); } return Response.json({ data: { id: f.runId, url: 'https://harness.example.test/run', artifacts_expected: JSON.parse(options.body).artifacts_declared.map((row: any) => row.kind) }, meta: { status: 'existing' } }); }
+    if (route.endsWith('/runs')) { posted = true; postedEnvelope = options.body; if (losePost) { losePost = false; posted = false; throw new Error('lost POST response'); } const envelope = JSON.parse(options.body); return Response.json({ data: { id: envelope.run.id, url: 'https://harness.example.test/run', artifacts_expected: envelope.artifacts_declared.map((row: any) => row.kind) }, meta: { status: 'existing' } }); }
     const kind = route.split('/').at(-1)!;
     if (options.method === 'PUT') { generic.set(kind, options.body); return Response.json({ data: { kind, sha256: sha256(options.body) } }, { status: 201 }); }
     const stored = generic.get(kind);
@@ -800,6 +800,59 @@ describe('private immutable reviewer delivery', () => {
     expect(runtime.stderr).not.toHaveBeenCalled();
     expect(remote.requests).toEqual([]);
     expect(await runtime.outbox.list()).toEqual(ordinaryBefore);
+    expect(await readFile(join(directory, 'activation-intent.json'), 'utf8')).toBe('{"activation":true}');
+    await expect(stat(join(directory, 'acknowledged.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('retains an armed run during a bare batch flush before notice, transport, or mutation', async () => {
+    const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
+    await queue.retain({ sink: remote.sink(), envelope: f.envelope, artifacts: f.artifacts, artifact: f.artifact });
+    const directory = join(f.root, 'reviewer-outbox', f.runId);
+    await writeFile(join(directory, 'activation-intent.json'), '{"activation":true}', { mode: 0o600 });
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: f.root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl,
+      stderr: vi.fn() });
+    await runtime.outbox.spoolRun({ runId: f.runId, envelope: f.envelope, artifacts: f.artifacts });
+    const ordinaryBefore = await runtime.outbox.list();
+
+    await expect(flushOutbox(runtime)).resolves.toMatchObject({
+      delivered: [], remaining: [f.runId],
+      failed: [{ id: f.runId, reason: 'reviewer_delivery_explicit_activation_required' }],
+    });
+
+    expect(runtime.stderr).not.toHaveBeenCalled();
+    expect(remote.requests).toEqual([]);
+    expect(await runtime.outbox.list()).toEqual(ordinaryBefore);
+    expect(await readFile(join(directory, 'activation-intent.json'), 'utf8')).toBe('{"activation":true}');
+    await expect(stat(join(directory, 'acknowledged.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('continues unrelated ordinary entries while retaining an armed run during a bare batch flush', async () => {
+    const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
+    await queue.retain({ sink: remote.sink(), envelope: f.envelope, artifacts: f.artifacts, artifact: f.artifact });
+    const directory = join(f.root, 'reviewer-outbox', f.runId);
+    await writeFile(join(directory, 'activation-intent.json'), '{"activation":true}', { mode: 0o600 });
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: f.root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl,
+      stderr: vi.fn() });
+    await runtime.outbox.spoolRun({ runId: f.runId, envelope: f.envelope, artifacts: f.artifacts });
+    const unrelatedId = '00000000-0000-4000-8000-000000000200';
+    const unrelatedResult = structuredClone(f.result);
+    unrelatedResult.run.id = unrelatedId;
+    const unrelatedArtifacts = { ...f.artifacts, report_json: JSON.stringify(unrelatedResult) };
+    const unrelatedEnvelope = buildRunEnvelope(unrelatedResult, unrelatedArtifacts,
+      { level: 'full', delivery: { mode: 'direct' } });
+    await runtime.outbox.spoolRun({ runId: unrelatedId, envelope: unrelatedEnvelope, artifacts: unrelatedArtifacts });
+
+    await expect(flushOutbox(runtime)).resolves.toMatchObject({
+      delivered: [unrelatedId], remaining: [f.runId],
+      failed: [{ id: f.runId, reason: 'reviewer_delivery_explicit_activation_required' }],
+    });
+
+    const postedRuns = remote.requests.filter(row => row.method === 'POST' && row.url.endsWith('/runs'))
+      .map(row => JSON.parse(row.body!).run.id);
+    expect(postedRuns).toEqual([unrelatedId]);
+    expect(await runtime.outbox.list()).toEqual([expect.objectContaining({ id: f.runId })]);
     expect(await readFile(join(directory, 'activation-intent.json'), 'utf8')).toBe('{"activation":true}');
     await expect(stat(join(directory, 'acknowledged.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
