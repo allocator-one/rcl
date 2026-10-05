@@ -227,12 +227,18 @@ export async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope
 /** Flush the outbox through the runtime's sink, the notice shown first. */
 export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptions = {}): Promise<FlushSummary> {
   if (!runtime.sink) throw new Error('No Harness credential to flush with.');
-  await noticeBefore(runtime);
+  const reviewerQueue = new ReviewerDeliveryQueue(runtime.dataDir);
   const started = performance.now();
-  const ordinary = await runtime.outbox.flush(runtime.sink, options);
+  const flushOrdinary = async () => {
+    await noticeBefore(runtime);
+    return runtime.outbox.flush(runtime.sink!, options);
+  };
+  const ordinary = options.runId === undefined
+    ? await flushOrdinary()
+    : await reviewerQueue.withGenericDeliveryAllowed(options.runId, flushOrdinary);
   if (runtime.level !== 'full' || runtime.attested) return ordinary;
   const remaining = options.deadlineMs === undefined ? undefined : Math.max(0, options.deadlineMs - (performance.now() - started));
-  const privateResult = await new ReviewerDeliveryQueue(runtime.dataDir).flush(
+  const privateResult = await reviewerQueue.flush(
     runtime.sink,
     { ...options, deadlineMs: remaining },
     () => noticeBefore(runtime, 'private-reviewers'),

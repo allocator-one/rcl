@@ -66,6 +66,19 @@ export interface RetainedReviewerRecoveryPreparation {
   envelopeBytes: string;
   reportMarkdownBytes?: string;
 }
+const outcomePhases = new Set(['activation_post_outcome', 'report_json_put_outcome',
+  'report_md_put_outcome', 'reviewer_put_outcome']);
+const operationPhases = new Set(['prepared', 'activation_post_intent', ...outcomePhases, 'activation_post_uncertain',
+  'envelope_verified', 'report_json_put_intent', 'report_json_verified',
+  'report_md_put_intent', 'report_md_verified', 'reviewer_put_intent',
+  'reviewer_verified', 'recovery_acknowledged', 'complete']);
+const outcomeSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('ok'), http_status: z.number().int() }).strict(),
+  z.object({ kind: z.literal('disabled') }).strict(),
+  z.object({ kind: z.literal('conflict') }).strict(),
+  z.object({ kind: z.literal('rejected'), http_status: z.number().int(), error: z.string() }).strict(),
+  z.object({ kind: z.literal('unavailable'), http_status: z.number().int().optional() }).strict(),
+]);
 const files = { report_json: 'report.json', report_md: 'report.md' } as const;
 const ref = (text: string) => ({ sha256: sha256(text), bytes: Buffer.byteLength(text) });
 function fail(reason: string): never { throw new Error(`reviewer_delivery_${reason}`); }
@@ -202,6 +215,14 @@ export class ReviewerDeliveryQueue {
     }
   }
 
+  /** Hold the run lock across a selected generic transmission so activation cannot race it. */
+  async withGenericDeliveryAllowed<T>(runId: string, work: () => Promise<T>): Promise<T> {
+    return this.lock(runId, async () => {
+      await this.assertGenericDeliveryAllowed(runId);
+      return work();
+    });
+  }
+
   /** Read-only exact activation proposal derived from authenticated local lineage. */
   async previewRecovery(selection: RetainedReviewerRecoverySelection): Promise<RetainedReviewerRecoveryPreview> {
     return (await this.prepareRecovery(selection)).preview;
@@ -214,6 +235,31 @@ export class ReviewerDeliveryQueue {
       const entry = await this.load(selection.runId);
       return { preview: this.recoveryPreview(entry, selection), envelopeBytes: entry.envelopeBytes,
         ...(entry.artifacts.report_md === undefined ? {} : { reportMarkdownBytes: entry.artifacts.report_md }) };
+    });
+  }
+
+  /** Reject conflicting local acknowledgements before notice, journal creation, or transport. */
+  async preflightRecoveryAcknowledgements(
+    selection: RetainedReviewerRecoverySelection,
+    preview: RetainedReviewerRecoveryPreview,
+    operation?: RetainedReviewerRecoveryOperation,
+  ): Promise<void> {
+    if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
+    await this.lock(selection.runId, async () => {
+      const entry = await this.load(selection.runId);
+      if (!isDeepStrictEqual(this.recoveryPreview(entry, selection), preview)) fail('recovery_selection_mismatch');
+      if (operation === undefined) {
+        await this.assertOrdinaryAcknowledgement(entry);
+        if (await this.optionalPrivateRead(join(entry.directory, 'recovery-acknowledged.json'), 4096) !== undefined) {
+          fail('immutable_conflict');
+        }
+        return;
+      }
+      this.validateRecoveryOperation(entry, operation);
+      const activationIntent = this.activationIntent(entry, operation);
+      const recoveryAck = this.recoveryAcknowledgement(entry, operation, activationIntent);
+      this.assertRecoveryJournalAcknowledgements(operation, recoveryAck);
+      await this.assertRecoveryAcknowledgements(entry, recoveryAck);
     });
   }
 
@@ -307,6 +353,54 @@ export class ReviewerDeliveryQueue {
       reviewer: { ...entry.manifest.reviewer } };
   }
   private ack(entry: Entry): string { return JSON.stringify({ version: 1, runId: entry.manifest.runId, manifestSha256: sha256(entry.manifestBytes) }); }
+  private async optionalPrivateRead(path: string, limit: number): Promise<string | undefined> {
+    try { return await privateRead(path, limit); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  }
+  private async assertOrdinaryAcknowledgement(entry: Entry): Promise<void> {
+    const bytes = await this.optionalPrivateRead(join(entry.directory, 'acknowledged.json'), 4096);
+    if (bytes !== undefined && bytes !== this.ack(entry)) fail('immutable_conflict');
+  }
+  private activationIntent(entry: Entry, operation: RetainedReviewerRecoveryOperation): string {
+    return JSON.stringify({ version: 1, runId: entry.manifest.runId, operationId: operation.operationId,
+      recoveryManifestSha256: operation.recoveryManifestSha256, envelopeSha256: entry.manifest.envelope.sha256 });
+  }
+  private validateRecoveryOperation(entry: Entry, operation: RetainedReviewerRecoveryOperation): void {
+    const m = entry.manifest;
+    if (!operation || !uuid.safeParse(operation.operationId).success || !digest.safeParse(operation.recoveryManifestSha256).success ||
+      !operation.journal || (operation.mode !== 'apply' && operation.mode !== 'resume') ||
+      operation.destination.host !== m.host || operation.destination.credentialKind !== m.credentialKind ||
+      operation.destination.activationProtocol !== 1) fail('recovery_operation_mismatch');
+  }
+  private recoveryOutcomeDigest(operation: RetainedReviewerRecoveryOperation): string {
+    const outcomes = operation.journal.checkpoints()
+      .filter(checkpoint => outcomePhases.has(checkpoint.phase))
+      .map(checkpoint => {
+        const parsed = outcomeSchema.safeParse(checkpoint.data);
+        if (!parsed.success || !isDeepStrictEqual(parsed.data, checkpoint.data)) fail('journal_checkpoint_conflict');
+        return { phase: checkpoint.phase, data: parsed.data };
+      });
+    return sha256(JSON.stringify(outcomes));
+  }
+  private recoveryAcknowledgement(entry: Entry, operation: RetainedReviewerRecoveryOperation, activationIntent: string): string {
+    const m = entry.manifest;
+    return JSON.stringify({ version: 1, operationId: operation.operationId,
+      recoveryManifestSha256: operation.recoveryManifestSha256, outboxManifestSha256: sha256(entry.manifestBytes),
+      activationIntentSha256: sha256(activationIntent), journalOutcomesSha256: this.recoveryOutcomeDigest(operation),
+      destination: operation.destination, envelope: m.envelope, report_json: m.report_json,
+      ...(m.report_md ? { report_md: m.report_md } : {}), reviewer: m.reviewer });
+  }
+  private assertRecoveryJournalAcknowledgements(operation: RetainedReviewerRecoveryOperation, recoveryAck: string): void {
+    const acknowledgement = operation.journal.checkpoints().find(checkpoint => checkpoint.phase === 'recovery_acknowledged');
+    if (acknowledgement && !isDeepStrictEqual(acknowledgement.data, JSON.parse(recoveryAck))) fail('journal_checkpoint_conflict');
+    const complete = operation.journal.checkpoints().find(checkpoint => checkpoint.phase === 'complete');
+    if (complete && !isDeepStrictEqual(complete.data, { recovery_ack_sha256: sha256(recoveryAck) })) fail('journal_checkpoint_conflict');
+  }
+  private async assertRecoveryAcknowledgements(entry: Entry, recoveryAck: string): Promise<void> {
+    await this.assertOrdinaryAcknowledgement(entry);
+    const bytes = await this.optionalPrivateRead(join(entry.directory, 'recovery-acknowledged.json'), 4096);
+    if (bytes !== undefined && bytes !== recoveryAck) fail('immutable_conflict');
+  }
   private async acknowledged(entry: Entry): Promise<boolean> {
     try { if (await privateRead(join(entry.directory, 'acknowledged.json'), 4096) !== this.ack(entry)) fail('invalid_ack'); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
@@ -353,15 +447,8 @@ export class ReviewerDeliveryQueue {
     operation: RetainedReviewerRecoveryOperation,
   ): Promise<void> {
     const m = entry.manifest;
-    if (!operation || !uuid.safeParse(operation.operationId).success || !digest.safeParse(operation.recoveryManifestSha256).success ||
-      !operation.journal || (operation.mode !== 'apply' && operation.mode !== 'resume') ||
-      sink.baseUrl !== m.host || sink.credentialSource !== m.credentialKind ||
-      operation.destination.host !== m.host || operation.destination.credentialKind !== m.credentialKind ||
-      operation.destination.activationProtocol !== 1) fail('recovery_operation_mismatch');
-    const operationPhases = new Set(['prepared', 'activation_post_intent', 'activation_post_outcome', 'activation_post_uncertain',
-      'envelope_verified', 'report_json_put_intent', 'report_json_put_outcome', 'report_json_verified',
-      'report_md_put_intent', 'report_md_put_outcome', 'report_md_verified', 'reviewer_put_intent',
-      'reviewer_put_outcome', 'reviewer_verified', 'recovery_acknowledged', 'complete']);
+    this.validateRecoveryOperation(entry, operation);
+    if (sink.baseUrl !== m.host || sink.credentialSource !== m.credentialKind) fail('recovery_operation_mismatch');
     const phases = new Set<string>();
     for (const checkpoint of operation.journal.checkpoints()) {
       if (checkpoint.phase === 'interrupted_checkpoints_retained') continue;
@@ -388,12 +475,8 @@ export class ReviewerDeliveryQueue {
         !isDeepStrictEqual(capability.principal, operation.destination.principal)) fail('principal_mismatch');
     };
     const privateReadback = async () => sink.getReviewerArtifact(m.runId, m.reviewer, request());
-    const activationIntent = JSON.stringify({ version: 1, runId: m.runId, operationId: operation.operationId,
-      recoveryManifestSha256: operation.recoveryManifestSha256, envelopeSha256: m.envelope.sha256 });
-    const recoveryAck = JSON.stringify({ version: 1, operationId: operation.operationId,
-      recoveryManifestSha256: operation.recoveryManifestSha256, outboxManifestSha256: sha256(entry.manifestBytes),
-      activationIntentSha256: sha256(activationIntent), destination: operation.destination, envelope: m.envelope, report_json: m.report_json,
-      ...(m.report_md ? { report_md: m.report_md } : {}), reviewer: m.reviewer });
+    const activationIntent = this.activationIntent(entry, operation);
+    const initialRecoveryAck = this.recoveryAcknowledgement(entry, operation, activationIntent);
     const activationIntentPath = join(entry.directory, 'activation-intent.json');
     try {
       if (await privateRead(activationIntentPath, 4096) !== activationIntent) fail('activation_operation_conflict');
@@ -420,8 +503,8 @@ export class ReviewerDeliveryQueue {
     assertExisting('report_json_verified', m.report_json);
     if (m.report_md) assertExisting('report_md_verified', m.report_md);
     assertExisting('reviewer_verified', m.reviewer);
-    assertExisting('recovery_acknowledged', JSON.parse(recoveryAck));
-    assertExisting('complete', { recovery_ack_sha256: sha256(recoveryAck) });
+    this.assertRecoveryJournalAcknowledgements(operation, initialRecoveryAck);
+    await this.assertRecoveryAcknowledgements(entry, initialRecoveryAck);
 
     await assertDestination();
     await appendOnce('prepared', { outbox_manifest_sha256: sha256(entry.manifestBytes), destination: operation.destination });
@@ -504,6 +587,9 @@ export class ReviewerDeliveryQueue {
       fail('private_mismatch');
     }
     await assertDestination();
+    const recoveryAck = this.recoveryAcknowledgement(entry, operation, activationIntent);
+    this.assertRecoveryJournalAcknowledgements(operation, recoveryAck);
+    await this.assertRecoveryAcknowledgements(entry, recoveryAck);
     await publish(join(entry.directory, 'recovery-acknowledged.json'), recoveryAck);
     await appendOnce('recovery_acknowledged', JSON.parse(recoveryAck));
     await publish(join(entry.directory, 'acknowledged.json'), this.ack(entry));

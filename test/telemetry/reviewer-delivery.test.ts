@@ -434,6 +434,68 @@ describe('private immutable reviewer delivery', () => {
     },
   );
 
+  it.each(['recovery-acknowledged.json', 'acknowledged.json'])(
+    'refuses a pre-existing %s before notice, journal creation, HTTP, or reconciliation', async acknowledgement => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-preapply-ack-conflict-'))); roots.push(root);
+      const retained = { root, ...await strictFallbackReviewerFixture(root) };
+      const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
+      const declaration = declareReviewerRecovery({ artifact: retained.artifact, descriptor: retained.result.run.reviewer_evidence });
+      const envelope = buildRunEnvelope(retained.result, retained.artifacts,
+        { level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration });
+      await queue.retain({ sink: remote.sink(), envelope, artifacts: retained.artifacts, artifact: retained.artifact });
+      const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
+        credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl });
+      const manifest = join(root, 'activation.json');
+      const preview = await deliverTerminalReviewerRun(runtime, { preview: true, manifest, commonDir: root,
+        target: 'rcl-159', runId: retained.runId });
+      const directory = join(root, 'reviewer-outbox', retained.runId), conflict = '{"conflict":true}';
+      await writeFile(join(directory, acknowledgement), conflict, { mode: 0o600 });
+      await rm(join(root, NOTICE_FILE), { force: true });
+      runtime.stderr = vi.fn();
+      const before = await byteSnapshot(directory), requestCount = remote.requests.length;
+
+      await expect(deliverTerminalReviewerRun(runtime, { apply: true, manifest, commonDir: root,
+        manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_immutable_conflict');
+
+      expect(await byteSnapshot(directory)).toEqual(before);
+      expect(remote.requests.slice(requestCount)).toEqual([]);
+      expect(runtime.stderr).not.toHaveBeenCalled();
+      await expect(stat(`${manifest}.journal`)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it.each(['activation_post_outcome', 'report_json_put_outcome', 'report_md_put_outcome', 'reviewer_put_outcome'])(
+    'rejects valid hash-chained tampering of %s before notice, transport, or reconciliation', async phase => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-outcome-conflict-'))); roots.push(root);
+      const retained = { root, ...await strictFallbackReviewerFixture(root) };
+      const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
+      const declaration = declareReviewerRecovery({ artifact: retained.artifact, descriptor: retained.result.run.reviewer_evidence });
+      const envelope = buildRunEnvelope(retained.result, retained.artifacts,
+        { level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration });
+      await queue.retain({ sink: remote.sink(), envelope, artifacts: retained.artifacts, artifact: retained.artifact });
+      remote.requireReports();
+      const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
+        credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl });
+      const manifest = join(root, 'activation.json');
+      const preview = await deliverTerminalReviewerRun(runtime, { preview: true, manifest, commonDir: root,
+        target: 'rcl-159', runId: retained.runId });
+      await deliverTerminalReviewerRun(runtime, { apply: true, manifest, commonDir: root,
+        manifestSha256: preview.manifest_sha256 });
+      const journal = `${manifest}.journal`;
+      await rewriteJournalPhase(journal, phase, { kind: 'ok', http_status: 299 });
+      await rm(join(root, NOTICE_FILE), { force: true });
+      runtime.stderr = vi.fn();
+      const before = await byteSnapshot(journal), requestCount = remote.requests.length;
+
+      await expect(deliverTerminalReviewerRun(runtime, { resume: true, manifest, commonDir: root,
+        manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_journal_checkpoint_conflict');
+
+      expect(await byteSnapshot(journal)).toEqual(before);
+      expect(remote.requests.slice(requestCount)).toEqual([]);
+      expect(runtime.stderr).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['principal', 'capability-403'] as const)('refuses a changed %s before any local or HTTP write', async scenario => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-principal-'))); roots.push(root);
     const retained = { root, ...await strictFallbackReviewerFixture(root) };
@@ -720,6 +782,26 @@ describe('private immutable reviewer delivery', () => {
       reviewerArtifact: f.artifact, evidenceRequired: true })).toMatchObject({ status: 'spooled', exitCode: 4 });
     await expect(stat(join(f.root, NOTICE_FILE))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(remote.requests).toEqual([]);
+  });
+
+  it('fences a selected ordinary outbox flush before notice or transport when retained activation has started', async () => {
+    const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
+    await queue.retain({ sink: remote.sink(), envelope: f.envelope, artifacts: f.artifacts, artifact: f.artifact });
+    const directory = join(f.root, 'reviewer-outbox', f.runId);
+    await writeFile(join(directory, 'activation-intent.json'), '{"activation":true}', { mode: 0o600 });
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: f.root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl,
+      stderr: vi.fn() });
+    await runtime.outbox.spoolRun({ runId: f.runId, envelope: f.envelope, artifacts: f.artifacts });
+    const ordinaryBefore = await runtime.outbox.list();
+
+    await expect(flushOutbox(runtime, { runId: f.runId })).rejects.toThrow('reviewer_delivery_explicit_activation_required');
+
+    expect(runtime.stderr).not.toHaveBeenCalled();
+    expect(remote.requests).toEqual([]);
+    expect(await runtime.outbox.list()).toEqual(ordinaryBefore);
+    expect(await readFile(join(directory, 'activation-intent.json'), 'utf8')).toBe('{"activation":true}');
+    await expect(stat(join(directory, 'acknowledged.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('never sends stored private bytes for a changed owner/token, unsupported capability, unknown run or corrupt disk', async () => {
