@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { HarnessSink } from '../../src/telemetry/sink.js';
-import { createReviewCycleRemote, ReviewCycleRejected } from '../../src/converge/cycle-remote.js';
+import { createReviewCycleRemote, ReviewCycleRejected, type LivePullRequestReader } from '../../src/converge/cycle-remote.js';
 import { fakeFetch } from '../telemetry/fixtures.js';
 const head = 'a'.repeat(40);
 const request = { operation_id: randomUUID(), previous_cycle_id: null, head_sha: head };
 const receipt = { ...request, id: randomUUID(), inserted_at: new Date().toISOString() };
 function fixture(handler: Parameters<typeof fakeFetch>[0], requestedHead = head,
-  readLivePr = vi.fn(async () => ({ headSha: requestedHead, merged: false, state: 'open' }))) {
+  readLivePr: LivePullRequestReader = vi.fn(async () => ({ headSha: requestedHead, merged: false, state: 'open' }))) {
   const transport = fakeFetch(handler);
   const sink = new HarnessSink({ credential: { url: 'https://harness.example', token: 'fixture', source: 'login' }, rclVersion: '4.1.9', fetchImpl: transport.fetch });
   return { remote: createReviewCycleRemote(sink, 'Allocator-One/RCL', 42, requestedHead, readLivePr), readLivePr, ...transport };
@@ -41,6 +41,7 @@ it.each([
 it.each([
   () => { throw new Error('network failure'); },
   () => Promise.resolve({ headSha: '', merged: false }),
+  () => Promise.resolve({ headSha: head, merged: false }),
 ])('fails closed when the GitHub PR lookup is unavailable or malformed', async readLivePr => {
   const { remote } = fixture(() => ({ status: 200, body: { data: { repo: 'allocator-one/rcl', pr_number: 42,
     cycle_protocol: 1, active_cycle: receipt, head: { sha: head, merged: false } } } }), head,
