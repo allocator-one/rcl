@@ -6,7 +6,7 @@ import type { ReviewResult } from '../consensus/types.js';
 import { resolveGitCommonDir } from '../converge/attempt-budget.js';
 import { reconcileDeliveredRun } from '../converge/delivery-reconciliation.js';
 import { loadReviewerLineage, type ReviewerLineage } from '../evidence/reviewer-lineage.js';
-import { openJournal, serializeRecoveryDocument, writeExclusive, MAX_RECOVERY_DOCUMENT_BYTES } from '../evidence/original-run/journal.js';
+import { serializeRecoveryDocument, writeExclusive, MAX_RECOVERY_DOCUMENT_BYTES } from '../evidence/original-run/journal.js';
 import { declareReviewerRecovery, type ReviewerRecoverySource } from './envelope.js';
 import { deliverRun, noticeBefore, type DeliveryOutcome, type TelemetryRuntime } from './deliver.js';
 import { platformPath, readStable, sha256 } from './recovery/files.js';
@@ -225,14 +225,13 @@ export async function deliverTerminalReviewerRun(
   if (!isDeepStrictEqual(prepared, manifest.prepared) || !isDeepStrictEqual(outbox, manifest.prepared.outbox)) {
     throw new Error('reviewer_delivery_lineage_or_outbox_changed');
   }
-  const journalPath = `${manifestPath}.journal`;
   const queue = new ReviewerDeliveryQueue(runtime.dataDir);
-  let journal;
+  const journalPath = queue.recoveryJournalPath(outbox.runId, manifest.operation_id);
+  const operationBase = { operationId: manifest.operation_id,
+    recoveryManifestSha256: retained.sha256, destination: manifest.destination };
   let operation;
   if (activation.resume) {
-    journal = await openJournal(journalPath, retained.sha256, manifest.operation_id, 'resume');
-    operation = { mode: 'resume' as const, operationId: manifest.operation_id,
-      recoveryManifestSha256: retained.sha256, destination: manifest.destination, journal };
+    operation = { mode: 'resume' as const, ...operationBase, manifestPath };
     await queue.preflightRecoveryAcknowledgements(selection, outbox, operation);
   } else {
     await queue.preflightRecoveryAcknowledgements(selection, outbox);
@@ -240,11 +239,9 @@ export async function deliverTerminalReviewerRun(
   await noticeBefore(runtime, 'private-reviewers');
   await currentDestination(runtime, manifest.destination);
   if (activation.apply) {
-    journal = await openJournal(journalPath, retained.sha256, manifest.operation_id, 'apply');
-    operation = { mode: 'apply' as const, operationId: manifest.operation_id,
-      recoveryManifestSha256: retained.sha256, destination: manifest.destination, journal };
+    operation = { mode: 'apply' as const, ...operationBase, manifestPath };
   }
-  if (!operation || !journal) throw new Error('reviewer_delivery_recovery_operation_mismatch');
+  if (!operation) throw new Error('reviewer_delivery_recovery_operation_mismatch');
   if (activation.apply) await queue.applyRecovery(requireRuntime(runtime), selection, outbox, operation);
   else await queue.resumeRecovery(requireRuntime(runtime), selection, outbox, operation);
   const ack = platformPath(`${runtime.dataDir}/reviewer-outbox/${outbox.runId.toLowerCase()}/recovery-acknowledged.json`);

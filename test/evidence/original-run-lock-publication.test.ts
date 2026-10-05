@@ -2,6 +2,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { RegistryCleanupError } from '../../src/coordination/registry-lock.js';
 import { withRecoveryLock } from '../../src/evidence/original-run/journal.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 
@@ -56,11 +57,17 @@ it.each(['write', 'choosing file sync', 'choosing publication'])('fails before c
   await expectPublicationFailure(fault, undefined);
 });
 
-it.each(['ready file sync', 'ready publication', 'ready directory sync'])('leaves an empty bakery registry after %s fails', async fault => {
-  await expectPublicationFailure(fault, []);
+it.each(['ready file sync', 'ready publication', 'ready directory sync'])('removes the empty bakery registry after %s fails', async fault => {
+  await expectPublicationFailure(fault, undefined);
 });
 
 it.each(['release unlink', 'release sync'])('does not report successful completion after %s fails', async fault => {
   const path = await root(); const work = vi.fn(async () => { controls.fault = fault; controls.releasing = true; return 'complete'; });
-  await expect(withRecoveryLock(path, 'run', work)).rejects.toMatchObject({ code: 'EROFS' }); expect(work).toHaveBeenCalledOnce();
+  let error: unknown;
+  try { await withRecoveryLock(path, 'run', work); }
+  catch (caught) { error = caught; }
+  expect(error).toBeInstanceOf(RegistryCleanupError);
+  expect((error as RegistryCleanupError<string>).result).toBe('complete');
+  expect((error as Error).cause).toMatchObject({ code: 'EROFS' });
+  expect(work).toHaveBeenCalledOnce();
 });
