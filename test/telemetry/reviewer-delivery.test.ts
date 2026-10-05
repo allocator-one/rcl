@@ -221,7 +221,7 @@ describe('private immutable reviewer delivery', () => {
     expect(remote.requests.every(row => row.method === 'GET')).toBe(true);
   });
 
-  it('keeps the 4.5.9 target/run invocation as a read-only compatibility preview', async () => {
+  it('refuses mode-less target/run before local or remote mutation', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-legacy-cli-'))); roots.push(root);
     const retained = { root, ...await strictFallbackReviewerFixture(root) };
     const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
@@ -232,12 +232,12 @@ describe('private immutable reviewer delivery', () => {
     const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
       credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl });
 
-    const result = await deliverTerminalReviewerRun(runtime, { commonDir: root, cwd: root,
-      target: 'rcl-159', runId: retained.runId });
+    await expect(deliverTerminalReviewerRun(runtime, { commonDir: root, cwd: root,
+      target: 'rcl-159', runId: retained.runId })).rejects.toThrow(/choose_exactly_one_recovery_mode.*--preview/);
 
-    expect(result).toMatchObject({ status: 'prepared', manifest: join(root, `rcl-retained-reviewer-activation-${retained.runId}.json`) });
-    expect(remote.requests.every(row => row.method === 'GET')).toBe(true);
-    await expect(stat(`${result.manifest}.journal`)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(remote.requests).toEqual([]);
+    await expect(stat(join(root, `rcl-retained-reviewer-activation-${retained.runId}.json`)))
+      .rejects.toMatchObject({ code: 'ENOENT' });
     await expect(stat(join(root, 'reviewer-outbox', retained.runId, 'activation-intent.json')))
       .rejects.toMatchObject({ code: 'ENOENT' });
   });

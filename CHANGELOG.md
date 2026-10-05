@@ -10,9 +10,7 @@
   private artifact and terminal lineage; journal an immutable pre-POST intent,
   permit at most one activation POST, and require exact server readback plus a
   separate recovery acknowledgement. Reviewer calls and native accounting stay
-  unchanged, and generic telemetry flush still refuses unknown runs. Preserve
-  the original target/run CLI invocation as a read-only compatibility preview
-  rather than an implicit mutation (RCL-183).
+  unchanged, and generic telemetry flush still refuses unknown runs (RCL-183).
 - Add preview/apply/resume claim recovery on the existing native target, with
   explicit adoption of interrupted operations and read-only refresh of claim
   history. Preserve original evidence, attribution, unresolved findings and

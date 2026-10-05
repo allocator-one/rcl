@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ReviewResult } from '../consensus/types.js';
@@ -130,14 +129,11 @@ export async function deliverTerminalReviewerRun(
   runtime: TelemetryRuntime,
   options: TerminalReviewerDeliveryOptions,
 ): Promise<TerminalReviewerDeliveryResult> {
-  const explicitModes = [options.preview, options.apply, options.resume].filter(Boolean).length;
-  const compatibilityPreview = explicitModes === 0 && options.manifestSha256 === undefined &&
-    typeof options.target === 'string' && options.target.length > 0 && uuid.safeParse(options.runId).success;
-  const preview = options.preview === true || compatibilityPreview;
-  if ([preview, options.apply, options.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_recovery_mode');
-  const manifestOption = options.manifest ?? (compatibilityPreview
-    ? join(options.cwd ?? process.cwd(), `rcl-retained-reviewer-activation-${options.runId}.json`)
-    : undefined);
+  const preview = options.preview === true;
+  if ([preview, options.apply, options.resume].filter(Boolean).length !== 1) {
+    throw new Error('choose_exactly_one_recovery_mode: use exactly one of --preview, --apply, or --resume');
+  }
+  const manifestOption = options.manifest;
   if (!manifestOption) throw new Error('reviewer_delivery_manifest_required');
   const manifestPath = platformPath(manifestOption);
   const commonDir = options.commonDir ?? await resolveGitCommonDir(options.cwd);
