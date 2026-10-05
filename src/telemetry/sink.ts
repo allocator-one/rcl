@@ -105,6 +105,7 @@ export interface ReviewerRecoveryPrincipal {
 
 export interface ReviewerRecoveryActivationCapability {
   protocol: 1;
+  artifactReplayProtocol?: 1;
   principal: ReviewerRecoveryPrincipal;
 }
 
@@ -263,7 +264,8 @@ export class HarnessSink {
   }
 
   /** Absent-run activation additionally requires an exact authenticated principal. */
-  async checkReviewerRecoveryActivation(options: RequestOptions = {}): Promise<SinkOutcome<ReviewerRecoveryActivationCapability>> {
+  async checkReviewerRecoveryActivation(options: RequestOptions = {},
+    requiredArtifactReplayProtocol?: 1): Promise<SinkOutcome<ReviewerRecoveryActivationCapability>> {
     if (this.credentialSource === 'attest') {
       return { kind: 'rejected', httpStatus: 0, error: 'unsupported_reviewer_recovery_activation', message: 'Run-bound credentials cannot activate an absent reviewer run' };
     }
@@ -283,11 +285,17 @@ export class HarnessSink {
       principal.credential_kind === expectedCredentialKind &&
       (principal.api_token_id === null || typeof principal.api_token_id === 'string' && UUID_PATTERN.test(principal.api_token_id)) &&
       (principal.credential_kind === 'cli' ? principal.api_token_id === null : typeof principal.api_token_id === 'string');
+    const replaySupported = requiredArtifactReplayProtocol === undefined ||
+      body?.meta?.reviewer_artifact_replay_protocol === requiredArtifactReplayProtocol &&
+      body.meta.reviewer_checkpoint_plan_version === 2 && body.meta.reviewer_capture_version === 2 &&
+      body.meta.reviewer_provider_concurrency_version === 1 && body.meta.reviewer_artifact_schema === 1 &&
+      body.meta.reviewer_artifact_max_bytes === MAX_ARTIFACT_BYTES;
     if (!Array.isArray(body?.data?.models) || body?.meta?.reviewer_recovery_protocol !== 2 ||
-      body.meta.reviewer_recovery_activation_protocol !== 1 || !validPrincipal) {
+      body.meta.reviewer_recovery_activation_protocol !== 1 || !validPrincipal || !replaySupported) {
       return { kind: 'rejected', httpStatus: 200, error: 'unsupported_reviewer_recovery_activation', message: 'Absent-run reviewer recovery activation is not supported by this credential endpoint' };
     }
-    return { kind: 'ok', httpStatus: 200, value: { protocol: 1, principal: {
+    return { kind: 'ok', httpStatus: 200, value: { protocol: 1,
+      ...(requiredArtifactReplayProtocol === undefined ? {} : { artifactReplayProtocol: requiredArtifactReplayProtocol }), principal: {
       org_id: principal.org_id as string,
       actor_user_id: principal.actor_user_id as string,
       credential_kind: principal.credential_kind as 'cli' | 'api_token',

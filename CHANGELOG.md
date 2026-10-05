@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Resume one retained reviewer delivery that ended in the validator-fixed HTTP
+  422 `reviewer_artifact_http_422` transport outcome. Require the authenticated replay
+  capability, exact prior envelope and report readbacks, and the sealed
+  manifest, principal, artifact digest and bytes. Read the remote private
+  artifact first; otherwise journal a one-way replay intent before the sole
+  byte-identical PUT. Later resumes are readback-only, while every other
+  rejected outcome remains terminal (RCL-186).
+
 ## 4.5.10 - 2026-10-05
 
 - Verify the current unmerged GitHub pull request head during guarded review

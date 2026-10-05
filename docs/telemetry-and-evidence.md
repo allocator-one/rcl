@@ -176,6 +176,17 @@ readback, followed by a separate immutable recovery acknowledgement and bounded
 delivery-pending reconciliation. That bookkeeping changes no attempts, admitted
 rounds, findings, or reviewer calls. Generic `telemetry flush` and retry paths
 fail before their notice or network boundary once activation has begun.
+Resume has one compatibility exception for the exact retained activation
+journal whose reviewer PUT ended in HTTP 422
+`reviewer_artifact_http_422`. It is enabled only
+when the authenticated model-stats response advertises
+`reviewer_artifact_replay_protocol: 1` alongside the complete recovery tuple
+and the same bound principal. Resume first re-reads the private artifact. Exact
+bytes complete without a PUT; a still-pending artifact receives one
+byte-identical PUT only after `reviewer_put_replay_intent` is durable. Once that
+intent exists, every later resume is readback-only. The envelope and ordinary
+reports must already have exact readback checkpoints and are never reposted;
+all other rejected outcomes remain terminal.
 The published mode-less target/run form remains available for an authenticated
 terminal report that has no retained private outbox. It preserves the original
 delivery result, JSON fields and exit code. If a private outbox exists, even if

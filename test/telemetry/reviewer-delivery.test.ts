@@ -7,11 +7,12 @@ import { cp, readFile, mkdtemp, mkdir, realpath, rm, readdir, stat, writeFile, c
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, it, expect, vi } from 'vitest';
-import { ReviewerDeliveryQueue } from '../../src/telemetry/reviewer-delivery.js';
+import { ReviewerDeliveryQueue, type RetainedReviewerRecoveryDestination,
+  type RetainedReviewerRecoveryPreview } from '../../src/telemetry/reviewer-delivery.js';
 import { createReviewerRecoveryPreflight } from '../../src/telemetry/reviewer-preflight.js';
 import { HarnessSink, MAX_RESPONSE_BYTES } from '../../src/telemetry/sink.js';
 import { inspectReviewerArtifact, serializeReviewerArtifact } from '../../src/report/reviewer-artifact.js';
-import { buildRunEnvelope, declareReviewerRecovery } from '../../src/telemetry/envelope.js';
+import { buildRunEnvelope, declareReviewerRecovery, type RunEnvelope } from '../../src/telemetry/envelope.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import { deliverRun, flushOutbox, createTelemetryRuntime } from '../../src/telemetry/deliver.js';
 import { strictFallbackReviewerFixture } from '../support/strict-fallback-reviewer.js';
@@ -124,7 +125,7 @@ type DeliveryFixture = Pick<Awaited<ReturnType<typeof fixture>>, 'runId' | 'arti
 function server(f: DeliveryFixture) {
   const requests: Array<{ method: string; url: string; body?: string; token: string }> = [];
   let privateBytes: string | undefined; let posted = false; let postedEnvelope: string | undefined;
-  let lostAck = false; let losePost = false; let losePostReadback = false; let failPrivatePut = false; let hidePrivateReadback = false; let refused = false; let capability = true; let activationForbidden = false; let requireReports = false;
+  let lostAck = false; let losePost = false; let losePostReadback = false; let failPrivatePut = false; let rejectPrivatePut = false; let hidePrivateReadback = false; let refused = false; let capability = true; let replayCapability = true; let activationForbidden = false; let requireReports = false;
   let corruptOrdinaryReadback: string | undefined; let failArtifactPut: string | undefined;
   let malformedArtifactError: string | undefined;
   const hiddenOrdinaryReadback = new Set<string>();
@@ -139,6 +140,7 @@ function server(f: DeliveryFixture) {
       return Response.json({ data: { models: [] }, meta: capability ? { reviewer_recovery_protocol: 2,
       ...(activationShape === 'principal-only' ? {} : { reviewer_recovery_activation_protocol: 1 }),
       ...(activationShape === 'protocol-only' ? {} : { reviewer_recovery_principal: principal }),
+      ...(replayCapability ? { reviewer_artifact_replay_protocol: 1 } : {}),
       reviewer_checkpoint_plan_version: 2, reviewer_capture_version: 2, reviewer_provider_concurrency_version: 1, reviewer_artifact_schema: 1, reviewer_artifact_max_bytes: 25000000 } : {} });
     }
     if (refused) return Response.json({ error: 'forbidden', message: 'SYNTHETIC_PRIVATE_DETAIL' }, { status: 403 });
@@ -153,7 +155,7 @@ function server(f: DeliveryFixture) {
       return Response.json(body);
     }
     if (route.endsWith('/reviewer-artifact')) {
-      if (options.method === 'PUT') { if (requireReports && (generic.get('report_json') !== f.artifacts.report_json || generic.get('report_md') !== f.artifacts.report_md)) return Response.json({ error: 'source_unavailable' }, { status: 503 }); if (failPrivatePut) { failPrivatePut = false; return Response.json({ error: 'unavailable' }, { status: 503 }); } privateBytes = options.body; if (lostAck) throw new Error('lost ACK'); return Response.json({ data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(privateBytes!) }, meta: { status: 'created' } }, { status: 201 }); }
+      if (options.method === 'PUT') { if (requireReports && (generic.get('report_json') !== f.artifacts.report_json || generic.get('report_md') !== f.artifacts.report_md)) return Response.json({ error: 'source_unavailable' }, { status: 503 }); if (failPrivatePut) { failPrivatePut = false; return Response.json({ error: 'unavailable' }, { status: 503 }); } if (rejectPrivatePut) { rejectPrivatePut = false; return Response.json({ error: 'invalid_reviewer_artifact' }, { status: 422 }); } privateBytes = options.body; if (lostAck) throw new Error('lost ACK'); return Response.json({ data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(privateBytes!) }, meta: { status: 'created' } }, { status: 201 }); }
       if (losePostReadback) { losePostReadback = false; throw new Error('lost post readback'); }
       if (privateBytes === undefined || hidePrivateReadback) return Response.json(posted ? { error: 'reviewer_artifact_pending', data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(f.artifact.bytes) } } : { error: 'not_found' }, { status: 404 });
       return new Response(privateBytes, { headers: { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256(privateBytes), 'cache-control': 'private, no-store', 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff' } });
@@ -174,12 +176,27 @@ function server(f: DeliveryFixture) {
     return new Response(responseBytes, { headers: { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256(responseBytes) } });
   };
   const sink = (token = 'first-login', source: 'login' | 'env' = 'login') => new HarnessSink({ credential: { url: 'https://harness.example.test', token, source }, rclVersion: 'test', fetchImpl });
-  return { requests, sink, fetchImpl, requireReports: () => { requireReports = true; }, loseAck: () => { lostAck = true; }, losePost: () => { losePost = true; }, failPrivatePutOnce: () => { failPrivatePut = true; }, failArtifactPutOnce: (kind: string) => { failArtifactPut = kind; }, malformedArtifactErrorOnce: (kind: string) => { malformedArtifactError = kind; }, hideArtifactReadback: (kind: string) => { hiddenOrdinaryReadback.add(kind); }, hidePrivateReadback: () => { hidePrivateReadback = true; }, refuse: () => { refused = true; }, unsupported: () => { capability = false; }, forbidActivation: () => { activationForbidden = true; }, posted: () => { posted = true; }, existing: (envelope: string) => { posted = true; postedEnvelope = envelope; }, storeArtifact: (kind: string, bytes: string) => { generic.set(kind, bytes); }, storePrivateArtifact: (bytes: string) => { privateBytes = bytes; }, removeArtifact: (kind: string) => { generic.delete(kind); }, receipt: (value: typeof runReceipt) => { runReceipt = value; }, corruptReadback: (kind: string) => { corruptOrdinaryReadback = kind; }, activation: (shape: typeof activationShape) => { activationShape = shape; }, changePrincipal: () => { principal = { ...principal, org_id: '919921a0-0000-4000-8000-000000000099' }; }, apiPrincipal: () => { principal = { ...principal, credential_kind: 'api_token', api_token_id: '919921a0-0000-4000-8000-000000000003' }; } };
+  return { requests, sink, fetchImpl, requireReports: () => { requireReports = true; }, loseAck: () => { lostAck = true; }, losePost: () => { losePost = true; }, failPrivatePutOnce: () => { failPrivatePut = true; }, rejectPrivatePutOnce: () => { rejectPrivatePut = true; }, failArtifactPutOnce: (kind: string) => { failArtifactPut = kind; }, malformedArtifactErrorOnce: (kind: string) => { malformedArtifactError = kind; }, hideArtifactReadback: (kind: string) => { hiddenOrdinaryReadback.add(kind); }, hidePrivateReadback: () => { hidePrivateReadback = true; }, refuse: () => { refused = true; }, unsupported: () => { capability = false; }, unsupportedReplay: () => { replayCapability = false; }, forbidActivation: () => { activationForbidden = true; }, posted: () => { posted = true; }, existing: (envelope: string) => { posted = true; postedEnvelope = envelope; }, storeArtifact: (kind: string, bytes: string) => { generic.set(kind, bytes); }, storePrivateArtifact: (bytes: string) => { privateBytes = bytes; }, removeArtifact: (kind: string) => { generic.delete(kind); }, receipt: (value: typeof runReceipt) => { runReceipt = value; }, corruptReadback: (kind: string) => { corruptOrdinaryReadback = kind; }, activation: (shape: typeof activationShape) => { activationShape = shape; }, changePrincipal: () => { principal = { ...principal, org_id: '919921a0-0000-4000-8000-000000000099' }; }, apiPrincipal: () => { principal = { ...principal, credential_kind: 'api_token', api_token_id: '919921a0-0000-4000-8000-000000000003' }; } };
 }
 
 async function byteSnapshot(directory: string): Promise<Record<string, string>> {
   const names = await readdir(directory);
   return Object.fromEntries(await Promise.all(names.sort().map(async name => [name, await readFile(join(directory, name), 'utf8')])));
+}
+
+async function byteTreeSnapshot(directory: string, excludedTopLevel: ReadonlySet<string>): Promise<Record<string, string>> {
+  const snapshot: Record<string, string> = {};
+  const walk = async (current: string, relative: string): Promise<void> => {
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (relative === '' && excludedTopLevel.has(entry.name)) continue;
+      const childRelative = relative === '' ? entry.name : `${relative}/${entry.name}`;
+      if (entry.isDirectory()) await walk(join(current, entry.name), childRelative);
+      else snapshot[childRelative] = (await readFile(join(current, entry.name))).toString('base64');
+    }
+  };
+  await walk(directory, '');
+  return snapshot;
 }
 
 async function rewriteJournalPhase(directory: string, phase: string, data: unknown, duplicate = false): Promise<void> {
@@ -260,6 +277,71 @@ async function realRecoveryJournal(root: string, name: string,
     '919921a0-0000-4000-8000-000000000010', 'resume') };
 }
 
+const retainedTerminal422FixtureSha256 = '8bf07df1c1dd01ffbf326f0fe51c4bb7b058e3c7c34ad7bc55a9d748b0156e27';
+const retainedTerminal422SourceRecordSha256 = [
+  '12ece3982c99fb06e680cfbe7957a364d4a017fb211e53abba0a880f29ad3694',
+  'af59142d0e30fff88f82a104ee48fdf35ee05905147d6a328ee645feb5740bf6',
+  '767d4aa420da5de10ca5df951a1d98d3552856c444b13861485a6f830fa43e26',
+  '19cd376372490e896572706a8ec8fe39957b4d872d9c5277b7665e5ff3291732',
+  'f9fc1ababa248d07916393d85b2a5a7ffb8adfc1fe67a3829ec8c5c132c96a1e',
+  '06921f085fecfd8ceff85031f0d8f5e0f77db1b62f91615ac8194cf2527a94a8',
+  '9758568f3ad8d54b55f486ac5891cabc754d3279bf6a60d8b67c91effdbc8a11',
+  'f11b560c59446f6d013f11acd1dad1a6d65cf1613a9339d1eb9088055e376cf7',
+  'c13f754dfb5d2c09f6cfae22a7aa355127f0ab5857e30a9dea5ba933cdd9dbe0',
+  'a19d92aee8bc5c68c041298e23482d6b27b349885291a7c3310252db50c160d7',
+  '4af43e662ccdd593b1b1a94a839a308faba1825f27f91d3b453ba14e4737cdd2',
+  '12fe654cd1daeb2b82b7e4eaaf2643c785f6ac9763d2cdc6b48cb494da4143f7',
+];
+
+function replaceJournalFixtureValues(value: unknown, values: Record<string, unknown>): unknown {
+  if (typeof value === 'string' && Object.hasOwn(values, value)) return values[value];
+  if (Array.isArray(value)) return value.map(item => replaceJournalFixtureValues(item, values));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+    .map(([key, item]) => [key, replaceJournalFixtureValues(item, values)]));
+  return value;
+}
+
+async function retainedTerminal422RecoveryJournal(root: string, preview: RetainedReviewerRecoveryPreview,
+  operation: ReturnType<typeof recoveryOperation>): Promise<{ directory: string; journal: ReadableJournal }> {
+  const raw = await readFile(new URL('../fixtures/rcl-186-terminal-422-journal-template.json', import.meta.url), 'utf8');
+  expect(sha256(raw)).toBe(retainedTerminal422FixtureSha256);
+  const fixture = JSON.parse(raw) as { source_record_sha256: string[];
+    source_ref_bytes: Record<string, number>; records: unknown[] };
+  expect(fixture.source_record_sha256).toEqual(retainedTerminal422SourceRecordSha256);
+  expect(fixture.source_ref_bytes).toEqual({ envelope: 49139, report_json: 106768,
+    report_md: 20609, reviewer: 638626 });
+  const reportMarkdown = preview.report_md!;
+  const values: Record<string, unknown> = {
+    '{{operation_id}}': operation.operationId,
+    '{{recovery_manifest_sha256}}': operation.recoveryManifestSha256,
+    '{{outbox_manifest_sha256}}': preview.manifest.sha256,
+    '{{destination_host}}': operation.destination.host,
+    '{{destination_credential_kind}}': operation.destination.credentialKind,
+    '{{principal_org_id}}': operation.destination.principal.org_id,
+    '{{principal_actor_user_id}}': operation.destination.principal.actor_user_id,
+    '{{envelope_sha256}}': preview.envelope.sha256,
+    '{{envelope_bytes}}': preview.envelope.bytes,
+    '{{report_json_sha256}}': preview.report_json.sha256,
+    '{{report_json_bytes}}': preview.report_json.bytes,
+    '{{report_md_sha256}}': reportMarkdown.sha256,
+    '{{report_md_bytes}}': reportMarkdown.bytes,
+    '{{reviewer_sha256}}': preview.reviewer.sha256,
+    '{{reviewer_bytes}}': preview.reviewer.bytes,
+  };
+  const directory = join(root, 'reviewer-outbox', preview.runId, 'recovery.journal');
+  await openJournal(directory, operation.recoveryManifestSha256, operation.operationId, 'apply');
+  let previous = operation.recoveryManifestSha256;
+  for (const [index, template] of fixture.records.entries()) {
+    const record = replaceJournalFixtureValues(template, { ...values,
+      '{{previous_sha256}}': previous }) as JournalCheckpoint;
+    const bytes = serializeRecoveryDocument(record);
+    await writeFile(join(directory, `${String(index + 1).padStart(8, '0')}.json`), bytes, { mode: 0o600 });
+    previous = sha256(bytes);
+  }
+  return { directory, journal: await openJournal(directory, operation.recoveryManifestSha256,
+    operation.operationId, 'resume') };
+}
+
 async function exactSizeRecoveryJournal(root: string, name: string,
   rows: Array<Pick<JournalCheckpoint, 'phase' | 'data'>>, targetBytes: number) {
   const directory = join(root, name);
@@ -299,7 +381,27 @@ async function preparedRecoveryCase(prefix: string) {
   remote.existing(JSON.stringify(envelope));
   remote.storeArtifact('report_json', retained.artifacts.report_json);
   remote.storeArtifact('report_md', retained.artifacts.report_md);
-  return { retained, remote, queue, selection, preview };
+  return { retained, remote, queue, selection, preview, envelope };
+}
+
+function terminal422JournalRows(preview: RetainedReviewerRecoveryPreview, envelope: RunEnvelope,
+  destination: RetainedReviewerRecoveryDestination): Array<Pick<JournalCheckpoint, 'phase' | 'data'>> {
+  return [
+    { phase: 'prepared', data: { outbox_manifest_sha256: preview.manifest.sha256, destination } },
+    { phase: 'activation_post_intent', data: { envelope: preview.envelope } },
+    { phase: 'activation_post_outcome', data: { kind: 'ok', http_status: 201 } },
+    { phase: 'envelope_verified', data: { sha256: preview.envelope.sha256,
+      artifacts_declared: envelope.artifacts_declared } },
+    { phase: 'report_json_put_intent', data: preview.report_json },
+    { phase: 'report_json_put_outcome', data: { kind: 'ok', http_status: 201 } },
+    { phase: 'report_json_verified', data: preview.report_json },
+    { phase: 'report_md_put_intent', data: preview.report_md },
+    { phase: 'report_md_put_outcome', data: { kind: 'ok', http_status: 201 } },
+    { phase: 'report_md_verified', data: preview.report_md },
+    { phase: 'reviewer_put_intent', data: preview.reviewer },
+    { phase: 'reviewer_put_outcome', data: { kind: 'rejected', http_status: 422,
+      error: 'reviewer_artifact_http_422' } },
+  ];
 }
 
 describe('private immutable reviewer delivery', () => {
@@ -970,6 +1072,290 @@ describe('private immutable reviewer delivery', () => {
     expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))
       .map(row => row.body)).toEqual([retained.artifact.bytes]);
   });
+
+  it('resumes the hash-locked retained A3 terminal 422 with one byte-identical replay', async () => {
+    const { retained, remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-replay-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = terminal422JournalRows(preview, envelope, operation.destination);
+    const real = await retainedTerminal422RecoveryJournal(retained.root, preview, operation);
+    const originalJournalBytes = await byteSnapshot(real.directory);
+    const nativeStateBefore = await byteTreeSnapshot(retained.root, new Set(['reviewer-outbox']));
+    operation.journal = real.journal;
+
+    expect(real.journal.checkpoints().map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+    expect(real.journal.checkpoints().slice(0, 12).map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+    const completedJournalBytes = await byteSnapshot(real.directory);
+    expect(Object.fromEntries(Object.entries(completedJournalBytes).slice(0, 12))).toEqual(originalJournalBytes);
+    expect(real.journal.checkpoints().slice(12).map(row => row.phase)).toEqual([
+      'reviewer_put_replay_intent', 'reviewer_put_outcome_2', 'reviewer_verified',
+      'recovery_acknowledged', 'complete',
+    ]);
+    const replay = remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'));
+    expect(replay.map(row => row.body)).toEqual([retained.artifact.bytes]);
+    expect(remote.requests.some(row => row.method === 'POST' || row.method === 'PUT' &&
+      !row.url.endsWith('/reviewer-artifact'))).toBe(false);
+    expect(await byteTreeSnapshot(retained.root, new Set(['reviewer-outbox']))).toEqual(nativeStateBefore);
+  });
+
+  it('completes the validator-fixed terminal 422 from exact private readback without replaying any PUT', async () => {
+    const { retained, remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-readback-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = terminal422JournalRows(preview, envelope, operation.destination);
+    operation.journal = memoryJournal(initialRows);
+    remote.storePrivateArtifact(retained.artifact.bytes);
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+    expect(remote.requests.some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+    expect(operation.journal.checkpoints().slice(12).map(row => row.phase)).toEqual([
+      'reviewer_verified', 'recovery_acknowledged', 'complete',
+    ]);
+  });
+
+  it('requires the authenticated replay capability before terminal-422 readback or journal mutation', async () => {
+    const { remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-capability-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = terminal422JournalRows(preview, envelope, operation.destination);
+    operation.journal = memoryJournal(initialRows);
+    remote.unsupportedReplay();
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_refused');
+
+    expect(operation.journal.checkpoints().map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+    expect(remote.requests).toHaveLength(1);
+    expect(remote.requests[0]).toMatchObject({ method: 'GET', url: expect.stringMatching(/model-stats$/) });
+  });
+
+  it.each(['recovery-acknowledged.json', 'acknowledged.json'] as const)(
+    'refuses a terminal-422 base with an existing %s before network or journal mutation', async acknowledgement => {
+      const { retained, remote, queue, selection, preview, envelope } =
+        await preparedRecoveryCase(`rcl-retained-reviewer-terminal-422-${acknowledgement}-`);
+      const operation = recoveryOperation(memoryJournal([]));
+      const initialRows = terminal422JournalRows(preview, envelope, operation.destination);
+      operation.journal = memoryJournal(initialRows);
+      const bytes = acknowledgement === 'acknowledged.json'
+        ? JSON.stringify({ version: 1, runId: retained.runId, manifestSha256: preview.manifest.sha256 })
+        : '{"existing":true}';
+      await writeFile(join(retained.root, 'reviewer-outbox', retained.runId, acknowledgement), bytes, { mode: 0o600 });
+      remote.requests.length = 0;
+
+      await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+        { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_immutable_conflict');
+
+      expect(remote.requests).toEqual([]);
+      expect(operation.journal.checkpoints().map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+      expect(await readFile(join(retained.root, 'reviewer-outbox', retained.runId, acknowledgement), 'utf8')).toBe(bytes);
+    },
+  );
+
+  it('continues after an exact recovery ACK was published before its journal checkpoint', async () => {
+    const { retained, remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-ack-frontier-');
+    const destination = recoveryOperation(memoryJournal([])).destination;
+    const journal = memoryJournal(terminal422JournalRows(preview, envelope, destination));
+    const append = journal.append;
+    let interruptAcknowledgement = true;
+    journal.append = async (phase: string, data: unknown = null) => {
+      if (phase === 'recovery_acknowledged' && interruptAcknowledgement) {
+        interruptAcknowledgement = false;
+        throw new Error('synthetic_recovery_ack_checkpoint_interruption');
+      }
+      await append(phase, data);
+    };
+    const operation = recoveryOperation(journal);
+    remote.storePrivateArtifact(retained.artifact.bytes);
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('synthetic_recovery_ack_checkpoint_interruption');
+
+    const recoveryAckPath = join(retained.root, 'reviewer-outbox', retained.runId, 'recovery-acknowledged.json');
+    const recoveryAck = await readFile(recoveryAckPath, 'utf8');
+    expect(operation.journal.checkpoints().slice(12).map(row => row.phase)).toEqual(['reviewer_verified']);
+    await expect(readFile(join(retained.root, 'reviewer-outbox', retained.runId, 'acknowledged.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+
+    const beforeResume = remote.requests.length;
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+    expect(await readFile(recoveryAckPath, 'utf8')).toBe(recoveryAck);
+    expect(operation.journal.checkpoints().slice(12).map(row => row.phase)).toEqual([
+      'reviewer_verified', 'recovery_acknowledged', 'complete',
+    ]);
+    expect(remote.requests.slice(beforeResume).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+  });
+
+  it('never sends a reviewer PUT after the terminal-422 replay intent survives a crash', async () => {
+    const { remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-intent-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = [
+      ...terminal422JournalRows(preview, envelope, operation.destination),
+      { phase: 'reviewer_put_replay_intent', data: preview.reviewer },
+    ];
+    operation.journal = memoryJournal(initialRows);
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_unavailable');
+
+    expect(remote.requests.some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+    expect(operation.journal.checkpoints().map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+  });
+
+  it('finishes from exact readback after a replay-intent/PUT crash without inventing a second outcome', async () => {
+    const { retained, remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-put-crash-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = [
+      ...terminal422JournalRows(preview, envelope, operation.destination),
+      { phase: 'reviewer_put_replay_intent', data: preview.reviewer },
+    ];
+    operation.journal = memoryJournal(initialRows);
+    remote.storePrivateArtifact(retained.artifact.bytes);
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+    expect(remote.requests.some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+    expect(operation.journal.checkpoints().slice(13).map(row => row.phase)).toEqual([
+      'reviewer_verified', 'recovery_acknowledged', 'complete',
+    ]);
+  });
+
+  it('reads back and completes a lost replay response without another reviewer PUT', async () => {
+    const { retained, remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-lost-response-');
+    const operation = recoveryOperation(memoryJournal([]));
+    operation.journal = memoryJournal(terminal422JournalRows(preview, envelope, operation.destination));
+    remote.loseAck();
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))
+      .map(row => row.body)).toEqual([retained.artifact.bytes]);
+    expect(operation.journal.checkpoints().slice(12).map(row => [row.phase,
+      (row.data as { kind?: string }).kind])).toEqual([
+      ['reviewer_put_replay_intent', undefined],
+      ['reviewer_put_outcome_2', 'unavailable'],
+      ['reviewer_verified', undefined],
+      ['recovery_acknowledged', undefined],
+      ['complete', undefined],
+    ]);
+  });
+
+  it('makes a second unavailable replay outcome terminal and readback-only', async () => {
+    const { remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-second-unavailable-');
+    const operation = recoveryOperation(memoryJournal([]));
+    operation.journal = memoryJournal(terminal422JournalRows(preview, envelope, operation.destination));
+    remote.failPrivatePutOnce();
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_unavailable');
+    const before = remote.requests.length;
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_unavailable');
+
+    expect(remote.requests.slice(before).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+    expect(operation.journal.checkpoints().filter(row => row.phase.startsWith('reviewer_put_outcome')))
+      .toHaveLength(2);
+  });
+
+  it('records a second terminal rejection after the sole replay and never acknowledges or retries it', async () => {
+    const { remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-second-rejection-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = terminal422JournalRows(preview, envelope, operation.destination);
+    operation.journal = memoryJournal(initialRows);
+    remote.rejectPrivatePutOnce();
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_refused');
+
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact')))
+      .toHaveLength(1);
+    expect(operation.journal.checkpoints().slice(12).map(row => [row.phase, row.data])).toEqual([
+      ['reviewer_put_replay_intent', preview.reviewer],
+      ['reviewer_put_outcome_2', { kind: 'rejected', http_status: 422,
+        error: 'reviewer_artifact_http_422' }],
+    ]);
+    const before = remote.requests.length;
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_refused');
+    expect(remote.requests.slice(before).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+    expect(operation.journal.checkpoints().some(row =>
+      row.phase === 'recovery_acknowledged' || row.phase === 'complete')).toBe(false);
+  });
+
+  it.each([
+    { kind: 'rejected', http_status: 422, error: 'reviewer_artifact_http_422' },
+    { kind: 'conflict' },
+    { kind: 'disabled' },
+  ])('keeps replay outcome_2 $kind terminal even after exact private readback', async terminal => {
+    const { retained, remote, queue, selection, preview, envelope } =
+      await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-outcome-readback-');
+    const operation = recoveryOperation(memoryJournal([]));
+    const initialRows = [
+      ...terminal422JournalRows(preview, envelope, operation.destination),
+      { phase: 'reviewer_put_replay_intent', data: preview.reviewer },
+      { phase: 'reviewer_put_outcome_2', data: terminal },
+    ];
+    operation.journal = memoryJournal(initialRows);
+    remote.storePrivateArtifact(retained.artifact.bytes);
+    remote.requests.length = 0;
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_refused');
+
+    expect(remote.requests).toEqual([]);
+    expect(operation.journal.checkpoints().map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+    await expect(readFile(join(retained.root, 'reviewer-outbox', retained.runId,
+      'recovery-acknowledged.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(join(retained.root, 'reviewer-outbox', retained.runId,
+      'acknowledged.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['truncated', 'undefined-suffix', 'complete-only', 'apply'] as const)(
+    'refuses the %s terminal-422 journal shape before any network or journal mutation', async shape => {
+      const { remote, queue, selection, preview, envelope } =
+        await preparedRecoveryCase(`rcl-retained-reviewer-terminal-422-${shape}-`);
+      const operation = recoveryOperation(memoryJournal([]));
+      const prefix = terminal422JournalRows(preview, envelope, operation.destination);
+      const initialRows = shape === 'truncated' ? prefix.slice(0, -1) : shape === 'undefined-suffix'
+        ? [...prefix, { phase: 'recovery_acknowledged', data: { unexpected: true } }]
+        : shape === 'complete-only' ? [...prefix, { phase: 'complete', data: { unexpected: true } }]
+        : prefix;
+      operation.journal = memoryJournal(initialRows);
+      remote.requests.length = 0;
+
+      const execution = shape === 'apply'
+        ? applyRecoveryForTest(queue, remote.sink(), selection, preview, operation)
+        : resumeRecoveryForTest(queue, remote.sink(), selection, preview, { ...operation, mode: 'resume' });
+      await expect(execution).rejects.toThrow(shape === 'apply'
+        ? 'reviewer_delivery_refused' : 'reviewer_delivery_journal_checkpoint_conflict');
+
+      expect(remote.requests).toEqual([]);
+      expect(operation.journal.checkpoints().map(({ phase, data }) => ({ phase, data }))).toEqual(initialRows);
+    },
+  );
 
   it.each([
     { kind: 'conflict' },
