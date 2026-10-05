@@ -52,7 +52,7 @@ describe('Outbox', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    await Promise.all([dir, `${dir}-entry-locks`].map(path => rm(path, { recursive: true, force: true })));
   });
 
   it('spools a run and delivers it later as a retried delivery with its original id', async () => {

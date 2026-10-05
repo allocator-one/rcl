@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { withLegacyReservation } from '../../coordination/registry-lock.js';
+import { withRegistryLock } from '../../coordination/registry-lock.js';
 import { readStable, sha256 } from '../../telemetry/recovery/files.js';
 import { checkLockDirectory, prepareLockRoot } from './lock-path.js';
 import { localLockScope, LOCK_UUID, validLockScope, type LockScope } from './lock-scope.js';
@@ -36,6 +36,25 @@ async function sync(path: string): Promise<void> {
  * Each path is unique for all time. No shared reclaim guard or TTL is involved.
  */
 export async function withRecoveryLock<T>(root: string, identity: string, work: () => Promise<T>, hooks: LockHooks = {}): Promise<T> {
+  if (hooks.legacy !== false) {
+    return withRegistryLock(root, identity, work, {
+      scope: localLockScope,
+      validScope: validLockScope,
+      prepareRoot: prepareLockRoot,
+      inspectRegistry: async path => {
+        checkLockDirectory(await lstat(path), process.geteuid!(), true);
+        // Includes inherited Darwin ACL and mount inspection for the registry itself.
+        await prepareLockRoot(path);
+      },
+      sync,
+      read: async file => (await readStable(file, 2048)).text,
+      mayProbePid: () => true,
+      reclaimLegacy: false,
+      lockTimeoutMs: 5_000,
+      lockRetryMs: 25,
+    }, hooks);
+  }
+  if (process.env.NODE_ENV !== 'test') throw new Error('test_only_bakery_hook');
   const scope = await (hooks.scope ?? localLockScope)();
   if (!validLockScope(scope)) throw new Error('unsupported_recovery_lock_scope');
   root = await prepareLockRoot(root);
@@ -182,12 +201,5 @@ export async function withRecoveryLock<T>(root: string, identity: string, work: 
     catch (error) { if (failed) throw new AggregateError([failure, error], 'recovery_lock_cleanup_failed', { cause: failure }); throw error; }
   }
   };
-  if (hooks.legacy === false) {
-    if (process.env.NODE_ENV !== 'test') throw new Error('test_only_bakery_hook');
-    return acquire();
-  }
-  return withLegacyReservation(root, identity, { pid: process.pid, token, scope }, acquire,
-    { sync, read: hooks.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait, reclaimLegacy: false,
-      qualifiedLegacy: owner => validLockScope((owner as { scope?: unknown }).scope) &&
-        isDeepStrictEqual((owner as { scope: unknown }).scope, scope) });
+  return acquire();
 }

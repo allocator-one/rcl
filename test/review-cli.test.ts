@@ -244,9 +244,26 @@ describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
   it('advertises exact terminal reviewer delivery recovery separately from review resumption', () => {
     const result = runRcl(['telemetry', 'recover-reviewer', '--help'], tempRepository());
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--preview');
+    expect(result.stdout).toContain('--apply');
+    expect(result.stdout).toContain('--resume');
+    expect(result.stdout).toContain('--manifest <path>');
+    expect(result.stdout).toContain('--manifest-sha256 <sha256>');
     expect(result.stdout).toContain('--target <target>');
     expect(result.stdout).toContain('--run <id>');
-    expect(result.stdout.replace(/\s+/g, ' ')).toContain('without restarting reviewers or verification');
+    expect(result.stdout.replace(/\s+/g, ' ')).toContain('without restarting reviewers');
+  });
+
+  it('parses the published mode-less target/run form while manifestless explicit apply stays closed', () => {
+    const repo = tempRepository();
+    const runId = '00000000-0000-4000-8000-000000000159';
+    const modeLess = runRcl(['telemetry', 'recover-reviewer', '--target', 'rcl-159', '--run', runId], repo);
+    expect(modeLess.status).toBe(4);
+    expect(modeLess.stderr).not.toMatch(/choose_exactly_one_recovery_mode|reviewer_delivery_manifest_required/i);
+
+    const unsafe = runRcl(['telemetry', 'recover-reviewer', '--apply'], repo);
+    expect(unsafe.status).toBe(4);
+    expect(unsafe.stderr).toContain('reviewer_delivery_manifest_required');
   });
 
   it('advertises unknown finalization, fresh recovery and immutable async bindings', () => {

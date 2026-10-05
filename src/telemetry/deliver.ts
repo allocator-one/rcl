@@ -15,7 +15,7 @@ import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
 import { isReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
 import { sha256Hex } from '../report/run-header.js';
-import { ReviewerDeliveryQueue, type RetainedReviewerRecoverySelection } from './reviewer-delivery.js';
+import { ReviewerDeliveryQueue } from './reviewer-delivery.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 import { verifiedConsensusReportProblem } from './report-consistency.js';
 import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
@@ -32,6 +32,7 @@ import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
 
 export const STARTUP_FLUSH_DEADLINE_MS = 5_000;
 export const EVIDENCE_REQUIRED_EXIT_CODE = 4;
+const WIRE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface TelemetryRuntime {
   level: TelemetryLevel;
@@ -219,7 +220,7 @@ export async function createTelemetryRuntime(options: RuntimeOptions): Promise<T
 // Persistence failures are absorbed inside `ensureNoticeShown` (shown, not
 // recorded — it shows again next time); anything that escapes means the
 // notice itself could not be written, and nothing is transmitted then.
-async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ordinary'): Promise<void> {
+export async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ordinary'): Promise<void> {
   if (!runtime.credential) return;
   await ensureNoticeShown(credentialHost(runtime.credential), runtime.dataDir, runtime.stderr, scope);
 }
@@ -227,49 +228,61 @@ async function noticeBefore(runtime: TelemetryRuntime, scope: NoticeScope = 'ord
 /** Flush the outbox through the runtime's sink, the notice shown first. */
 export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptions = {}): Promise<FlushSummary> {
   if (!runtime.sink) throw new Error('No Harness credential to flush with.');
-  await noticeBefore(runtime);
+  const reviewerQueue = new ReviewerDeliveryQueue(runtime.dataDir);
   const started = performance.now();
-  const ordinary = await runtime.outbox.flush(runtime.sink, options);
+  const transferBoundary = async <T>(work: () => Promise<T>) => {
+    await noticeBefore(runtime);
+    return work();
+  };
+  const refusalReason = options.runId === undefined ? (error: unknown): string | undefined => {
+    if (!(error instanceof Error)) return undefined;
+    if (error.message === 'reviewer_delivery_explicit_activation_required' ||
+        error.message === 'reviewer_delivery_invalid_event_run_id') return error.message;
+    if (error.message === 'recovery_run_locked') return 'reviewer_delivery_recovery_run_locked';
+    return undefined;
+  } : undefined;
+  const eventRunIds = (event: WireEvent): string[] => {
+    const payloadRunId = event.kind === 'loss' && event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+      ? event.payload['run_id'] : undefined;
+    const bindings = [event.run_id, typeof payloadRunId === 'string' ? payloadRunId : undefined]
+      .filter((runId): runId is string => runId !== undefined);
+    if (bindings.some(runId => !WIRE_RUN_ID.test(runId))) throw new Error('reviewer_delivery_invalid_event_run_id');
+    return [...new Set(bindings.map(runId => runId.toLowerCase()))].sort();
+  };
+  const eventBoundary = async <T>(event: WireEvent, entry: { id: string; meta: { kind: 'run' | 'events' } } | undefined,
+    work: () => Promise<T>): Promise<T> => {
+    const runIds = eventRunIds(event).filter(runId => entry?.meta.kind !== 'run' || runId.toLowerCase() !== entry.id.toLowerCase());
+    const acquire = (index: number): Promise<T> => index === runIds.length
+      ? transferBoundary(work)
+      : reviewerQueue.withGenericDeliveryAllowed(runIds[index]!, () => acquire(index + 1));
+    return acquire(0);
+  };
+  const ordinary = await runtime.outbox.flush(runtime.sink, {
+    ...options,
+    entryBoundary: (entry, work) => entry.meta.kind === 'run'
+      ? reviewerQueue.withGenericDeliveryAllowed(entry.id, () => transferBoundary(work))
+      : work(),
+    eventBoundary,
+    ...(refusalReason ? { entryRefusalReason: refusalReason } : {}),
+  });
   if (runtime.level !== 'full' || runtime.attested) return ordinary;
   const remaining = options.deadlineMs === undefined ? undefined : Math.max(0, options.deadlineMs - (performance.now() - started));
-  const privateResult = await new ReviewerDeliveryQueue(runtime.dataDir).flush(
+  const privateResult = await reviewerQueue.flush(
     runtime.sink,
     { ...options, deadlineMs: remaining },
     () => noticeBefore(runtime, 'private-reviewers'),
   );
-  return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...ordinary.remaining, ...privateResult.remaining],
-    failed: [...ordinary.failed, ...privateResult.failed], dropped: [...ordinary.dropped, ...privateResult.dropped],
+  const failed: FlushSummary['failed'] = [];
+  const seenFailures = new Set<string>();
+  for (const row of [...ordinary.failed, ...privateResult.failed]) {
+    const key = JSON.stringify([row.id, row.reason]);
+    if (seenFailures.has(key)) continue;
+    seenFailures.add(key);
+    failed.push(row);
+  }
+  return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...new Set([...ordinary.remaining, ...privateResult.remaining])],
+    failed, dropped: [...ordinary.dropped, ...privateResult.dropped],
     ...(ordinary.stopped || privateResult.stopped ? { stopped: ordinary.stopped ?? privateResult.stopped } : {}) };
-}
-
-/**
- * Explicit lineage-authenticated activation of one exact retained reviewer
- * outbox. This is deliberately separate from generic telemetry flush.
- */
-export async function activateRetainedReviewerRun(
-  runtime: TelemetryRuntime,
-  selection: RetainedReviewerRecoverySelection,
-): Promise<DeliveryOutcome> {
-  const finish = (status: DeliveryStatus, spooled: boolean, line: string): DeliveryOutcome => ({
-    status, spooled, line, runId: selection.runId, exitCode: exitFor(status, true),
-  });
-  if (runtime.level !== 'full' || !runtime.repoManaged || !runtime.sink || !runtime.credential || runtime.attested) {
-    return finish('rejected', false,
-      'Retained reviewer activation requires full telemetry and a supported current owner credential');
-  }
-  const queue = new ReviewerDeliveryQueue(runtime.dataDir);
-  try {
-    const preview = await queue.previewRecovery(selection);
-    await noticeBefore(runtime, 'private-reviewers');
-    await queue.applyRecovery(runtime.sink, selection, preview);
-    return finish('recorded', false,
-      'Retained reviewer envelope, ordinary reports and private evidence recorded and read back; no native admission implied');
-  } catch {
-    const retained = await queue.isRetained(selection.runId);
-    return finish(retained ? 'spooled' : 'rejected', retained,
-      retained ? 'Retained reviewer activation incomplete; exact bytes remain queued for the explicit recovery command' :
-        'Retained reviewer activation refused locally; original checkpoint evidence is unchanged');
-  }
 }
 
 /** Bounded: an offline machine must never stall a command. Fail-soft. */
@@ -456,12 +469,13 @@ async function deliverReviewerRun(runtime: TelemetryRuntime, input: DeliverRunIn
   }
   const queue = new ReviewerDeliveryQueue(runtime.dataDir);
   try {
-    await noticeBefore(runtime, 'private-reviewers');
     if (runtime.attested) {
+      await noticeBefore(runtime, 'private-reviewers');
       await input.attestedReviewer!.deliver({ envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
       return finish('recorded', false, 'Private evidence and embedded JSON read back; ordinary artifact PUT receipts verified; no native admission implied');
     }
-    await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
+    await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact }, {},
+      () => noticeBefore(runtime, 'private-reviewers'));
     return finish('recorded', false, 'Reviewer evidence and ordinary reports recorded and read back; no native admission implied');
   } catch {
     if (runtime.attested) return finish('rejected', false,

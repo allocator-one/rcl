@@ -1,0 +1,296 @@
+{
+  "version": 1,
+  "target": "allocator-one-9691",
+  "roundCap": 15,
+  "rounds": [
+    {
+      "round": 1,
+      "counts": {
+        "new": 8,
+        "repeat": 0,
+        "suppressed": 0,
+        "regating": 0
+      },
+      "severities": {
+        "f8b59436bf657275": "critical",
+        "a2261a4bfd18ce17": "important",
+        "7591ee65a9d198f4": "important",
+        "883a74904197383f": "important",
+        "25688f47a3362863": "important",
+        "d06daa5b3f0918e7": "important",
+        "453a23633a003b4f": "important",
+        "a08fc53524532343": "important"
+      },
+      "runId": "01a0ee65-8c82-7a1a-94e9-0886bb0a6591"
+    }
+  ],
+  "findings": {
+    "f8b59436bf657275": {
+      "key": "f8b59436bf657275",
+      "file": "lib/allocator_one/harness/reviews/severity_fallback_recovery.ex",
+      "category": "security",
+      "startLine": 43,
+      "endLine": 56,
+      "title": "Recovered findings become actionable before source verification",
+      "claimTextSha256": "e8f6931da1de7caa9c17675410747b49e9eb6df365971d3d4f041c5cec8dcfa0",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:f8b59436bf657275",
+      "severity": "critical",
+      "models": [
+        "openai/gpt-6-sol"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "fixed",
+      "verdictRound": 1,
+      "verdictSeverity": "critical"
+    },
+    "a2261a4bfd18ce17": {
+      "key": "a2261a4bfd18ce17",
+      "file": "lib/allocator_one/harness/reviews.ex",
+      "category": "correctness",
+      "startLine": 640,
+      "endLine": 655,
+      "title": "Unmapped error atoms from verify_bytes leak through store_artifact",
+      "claimTextSha256": "64729aeca1b5bed354d7be3b2506a2c4fd11a60964079299bdc00f0ddbf85622",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:a2261a4bfd18ce17",
+      "severity": "important",
+      "models": [
+        "openrouter/moonshotai/kimi-k3"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "dismissed",
+      "verdictRound": 1,
+      "verdictSeverity": "important",
+      "verdictReason": "normalized source mismatches return binding_conflict after the same source-bound activation fix"
+    },
+    "7591ee65a9d198f4": {
+      "key": "7591ee65a9d198f4",
+      "file": "lib/allocator_one/harness/reviews/envelope.ex",
+      "category": "correctness",
+      "startLine": 114,
+      "endLine": 117,
+      "title": "Recovered gating is accepted before its source report is verified",
+      "claimTextSha256": "f7643b1ffec404149c365924b729605fd8fd851b7bfb9df56a686235cd9711bd",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:7591ee65a9d198f4",
+      "severity": "important",
+      "models": [
+        "openai/gpt-6-sol"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "dismissed",
+      "verdictRound": 1,
+      "verdictSeverity": "important",
+      "verdictReason": "duplicate of f8b59436bf657275 source-verification-before-actionability defect"
+    },
+    "883a74904197383f": {
+      "key": "883a74904197383f",
+      "file": "lib/allocator_one/harness/reviews/envelope.ex",
+      "category": "correctness",
+      "startLine": 117,
+      "endLine": 119,
+      "title": "Recovered findings are published before source verification",
+      "claimTextSha256": "5d62b68e033b1e85eb25a78dac24ba2ccec26bdc4275e521ae208675b2a38c0d",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:883a74904197383f",
+      "severity": "important",
+      "models": [
+        "openai/gpt-6-sol"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "dismissed",
+      "verdictRound": 1,
+      "verdictSeverity": "important",
+      "verdictReason": "duplicate of f8b59436bf657275 source-verification-before-actionability defect"
+    },
+    "25688f47a3362863": {
+      "key": "25688f47a3362863",
+      "file": "lib/allocator_one/harness/reviews/severity_fallback_recovery.ex",
+      "category": "correctness",
+      "startLine": 29,
+      "endLine": 53,
+      "title": "A non-map recovery descriptor crashes envelope validation",
+      "claimTextSha256": "4201781ff20dd055e747ecee39dd79da75bebd2f3f6eca768090de3d7cebadce",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:25688f47a3362863",
+      "severity": "important",
+      "models": [
+        "anthropic/claude-opus-5-5"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "fixed",
+      "verdictRound": 1,
+      "verdictSeverity": "important"
+    },
+    "d06daa5b3f0918e7": {
+      "key": "d06daa5b3f0918e7",
+      "file": "lib/allocator_one/harness/reviews/severity_fallback_recovery.ex",
+      "category": "security",
+      "startLine": 37,
+      "endLine": 54,
+      "title": "Severity-fallback recovery is stored and exposed before the source report is verified",
+      "claimTextSha256": "59c95cc44f1dd647d47628ff79fb4b8067ef620bc1720c3acf8b90ef27876b0d",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:d06daa5b3f0918e7",
+      "severity": "important",
+      "models": [
+        "anthropic/claude-opus-5-5"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "dismissed",
+      "verdictRound": 1,
+      "verdictSeverity": "important",
+      "verdictReason": "RecoverySource binds the full immutable source report before activation"
+    },
+    "453a23633a003b4f": {
+      "key": "453a23633a003b4f",
+      "file": "lib/allocator_one/harness/reviews/severity_fallback_recovery.ex",
+      "category": "security",
+      "startLine": 148,
+      "endLine": 156,
+      "title": "Declared source envelope and manifest hashes are never bound",
+      "claimTextSha256": "8fa02e1a7fe0155a9a842c5325e1bd47962d2e601ed6af2fb432a47ca9e3628c",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:453a23633a003b4f",
+      "severity": "important",
+      "models": [
+        "openai/gpt-6-sol"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "dismissed",
+      "verdictRound": 1,
+      "verdictSeverity": "important",
+      "verdictReason": "declared provenance is strictly shaped and conflicting replays are rejected; absent bytes cannot be independently verified"
+    },
+    "a08fc53524532343": {
+      "key": "a08fc53524532343",
+      "file": "lib/allocator_one/harness/reviews/severity_fallback_recovery.ex",
+      "category": "correctness",
+      "startLine": 150,
+      "endLine": 155,
+      "title": "Source provenance hashes are checked for shape but not binding",
+      "claimTextSha256": "206ada385589db6a431e97130846f25d6bbd65f129d2842c5bb6a7b3228812ec",
+      "identityOrigin": "modern",
+      "sourceReportIdentity": "report:01a0ee65-8c82-7a1a-94e9-0886bb0a6591:a08fc53524532343",
+      "severity": "important",
+      "models": [
+        "openai/gpt-6-sol"
+      ],
+      "firstRound": 1,
+      "lastRound": 1,
+      "verdict": "dismissed",
+      "verdictRound": 1,
+      "verdictSeverity": "important",
+      "verdictReason": "declared provenance is strictly shaped and conflicting replays are rejected; absent bytes cannot be independently verified"
+    }
+  },
+  "updatedAt": "2026-10-01T14:00:05.497Z",
+  "lastLaunch": {
+    "status": "completed",
+    "attempt": 3,
+    "round": 2,
+    "headSha": "60df6d782f9ef9a255028391595dbbbe92442a57",
+    "inputSha256": "b1cedd3d7d55720b8efea4474f9cf82e5c8ee7accf6a1f9e0121e7d5ad7ae2db",
+    "startedAt": "2026-10-01T12:38:01.843Z",
+    "pid": 99785,
+    "retryReason": "Dead A2 coordinator; authenticated immutable package and retained async artifact.",
+    "pendingResume": {
+      "version": 1,
+      "runId": "01a0f778-c373-75de-9d1a-e7ef1bdfdad3",
+      "planDigest": "e3bf03240eba6067e60b599e34c88ae04c781f0b135eedf25a6ba2c607cafa4e",
+      "capturedInputsSha256": "5c9cd924dfa786d4b2d69ec72e652b10abb36d36b6d703eb9cd7473887fb9047",
+      "originalPid": 32832,
+      "pid": 11767,
+      "phase": "finished",
+      "startedAtMs": 1790858281843,
+      "expiresAtMs": 1790863201843,
+      "maxPhysicalCalls": 56,
+      "maxAttemptsPerCell": 4
+    },
+    "pendingRecovery": {
+      "version": 1,
+      "sourceDigest": "b3bd5775b8c23ae60c2f4b0180c27de93f3664642572121a20c53cfbdb294c90",
+      "pendingAttempt": 2,
+      "round": 2,
+      "originalPid": 32832,
+      "originalStartedAt": "2026-09-29T18:31:03.157Z",
+      "blockingOutcome": "unknown",
+      "reason": "coordinator_exited_without_durable_blocking_receipts",
+      "nativeStateSha256": "324cb5c80d65699f95c54140bc2f735288bd35ef6266c5de6b267a35d34edf27",
+      "attemptStateSha256": "d6fb30b6c058336ecbd44ce8cf5adec9e2ed6b96057b2798052f3160693dd4f7",
+      "retainedAsyncSha256": [
+        "92705bdeb895e3bcab6863b5f717262f45fa4a4b6e98853b214677b64771e834"
+      ],
+      "migrationPackageSha256": "ec311f93ff429cf1b23e2d70e98c22599af296f2a0966363e96477a57178a040"
+    },
+    "runId": "01a0f778-c373-75de-9d1a-e7ef1bdfdad3",
+    "reportJsonSha256": "0e92efc3e626f9da1ca8704d75a5f80a9578ad52649f44c0cc0f593c18c56112",
+    "successfulReviews": 11,
+    "totalReviews": 14,
+    "deliveryPending": true,
+    "hardFailure": false,
+    "reviewerHealth": {
+      "version": 1,
+      "policy": {
+        "version": 1,
+        "fraction": 0.6666666666666666,
+        "seatCount": 10,
+        "minimumSuccessful": 7
+      },
+      "successfulSeats": 7
+    }
+  },
+  "lastAnnotations": {
+    "round": 1,
+    "identities": [
+      {
+        "identity": "f8b59436bf657275",
+        "status": "new",
+        "gating": "critical"
+      },
+      {
+        "identity": "a2261a4bfd18ce17",
+        "status": "new",
+        "gating": "none"
+      },
+      {
+        "identity": "7591ee65a9d198f4",
+        "status": "new",
+        "gating": "none"
+      },
+      {
+        "identity": "883a74904197383f",
+        "status": "new",
+        "gating": "none"
+      },
+      {
+        "identity": "25688f47a3362863",
+        "status": "new",
+        "gating": "verified"
+      },
+      {
+        "identity": "d06daa5b3f0918e7",
+        "status": "new",
+        "gating": "none"
+      },
+      {
+        "identity": "453a23633a003b4f",
+        "status": "new",
+        "gating": "none"
+      },
+      {
+        "identity": "a08fc53524532343",
+        "status": "new",
+        "gating": "none"
+      }
+    ]
+  }
+}

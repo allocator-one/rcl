@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { convergeRunStatePath, initialConvergeRunState, loadConvergeRunState, writeState } from '../../src/converge/run-state.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { reconcileDeliveredRun, reconcileFlushedRun, shouldReconcileDeliveredRun } from '../../src/converge/delivery-reconciliation.js';
-import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
+import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { primitiveFixture, spendAndRecord } from '../fixtures/attempt-recovery-owner-child.js';
 const runId = '019921a0-0000-7000-8000-000000000001', head = 'a'.repeat(40);
 const digest = 'c'.repeat(64);
@@ -65,6 +66,55 @@ async function expectUnchanged(mutator: (detail: ReturnType<typeof matchingDetai
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 describe('reconcileDeliveredRun', () => {
+  it('reconciles the exact sealed A3 v1 state without changing cycle absence, accounting, rounds or findings', async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-a3-')));
+    const target = 'allocator-one-9691';
+    const statePath = convergeRunStatePath(dir, target);
+    const attemptPath = convergeAttemptStatePath(dir, target);
+    try {
+      const nativeBytes = await readFile(new URL('../fixtures/rcl183-a3-native.json', import.meta.url), 'utf8');
+      const attemptBytes = await readFile(new URL('../fixtures/rcl183-a3-attempts.json', import.meta.url), 'utf8');
+      expect(createHash('sha256').update(nativeBytes).digest('hex')).toBe('4f54e1eaf564551e189f0dfc2f95d3d263c5b7d6fe24adca802732c24f51d136');
+      expect(createHash('sha256').update(attemptBytes).digest('hex')).toBe('c642970c04d92b5776adb7bcd6e5d1e03f7b9e1656d13f8b3a0850dc367b45a5');
+      await mkdir(join(statePath, '..'), { recursive: true });
+      await mkdir(join(attemptPath, '..'), { recursive: true });
+      await writeFile(statePath, nativeBytes, { mode: 0o600 });
+      await writeFile(attemptPath, attemptBytes, { mode: 0o600 });
+      const before = JSON.parse(nativeBytes);
+      const fixed = new Date('2026-10-05T06:30:00.000Z');
+      const detail = {
+        id: before.lastLaunch.runId, provenance: 'live', cycle_id: null,
+        converge: { target, round: 2, attempt: 3 },
+        target: { kind: 'pull_request', head_sha: before.lastLaunch.headSha },
+        artifacts: [{ kind: 'report_json', stored: true, declared_sha256: before.lastLaunch.reportJsonSha256 }],
+        findings: [], calls: [],
+      };
+      const getRun = vi.fn().mockResolvedValue({ kind: 'ok', value: detail });
+
+      await expect(reconcileDeliveredRun(before.lastLaunch.runId, {} as never,
+        { gitCommonDir: dir, getRun, now: () => fixed })).resolves.toBe('reconciled');
+
+      const afterBytes = await readFile(statePath, 'utf8');
+      const after = JSON.parse(afterBytes);
+      const expected = structuredClone(before);
+      expected.lastLaunch.deliveryPending = false;
+      expected.updatedAt = fixed.toISOString();
+      expect(after).toEqual(expected);
+      expect(Object.hasOwn(after, 'cycle')).toBe(false);
+      expect(after.rounds).toEqual(before.rounds);
+      expect(after.findings).toEqual(before.findings);
+      expect(after.lastAnnotations).toEqual(before.lastAnnotations);
+      expect(after.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+      expect(await readFile(attemptPath, 'utf8')).toBe(attemptBytes);
+      expect(JSON.parse(attemptBytes)).toMatchObject({ attemptsUsed: 3, cap: 3, attempts: [{ attempt: 1 }, { attempt: 2 }, { attempt: 3 }] });
+
+      await expect(reconcileDeliveredRun(before.lastLaunch.runId, {} as never,
+        { gitCommonDir: dir, getRun, now: () => new Date('2026-10-05T07:00:00.000Z') })).resolves.toBe('unchanged');
+      expect(await readFile(statePath, 'utf8')).toBe(afterBytes);
+      expect(await readFile(attemptPath, 'utf8')).toBe(attemptBytes);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
   it('clears a recovered-v3 pending delivery only in the attempt ledger', async () => {
     const dir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-v3-')));
     try {

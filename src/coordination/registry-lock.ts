@@ -32,6 +32,8 @@ export interface RegistryPolicy<Scope> {
   sync: (path: string) => Promise<void>;
   read?: (path: string) => Promise<string>;
   mayProbePid: (scope: Scope) => boolean;
+  /** PID-only legacy owners may be reclaimed only for compatibility callers that opt in. */
+  reclaimLegacy?: boolean;
   /** Bounded waiting policy for callers that expose lock timing as part of their contract. */
   lockTimeoutMs?: number;
   lockRetryMs?: number;
@@ -233,13 +235,32 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   const token = (hooks.token ?? randomUUID)();
   if (!LOCK_UUID.test(token)) throw new Error('invalid_recovery_lock_token');
   return withLegacyReservation(root, identity, { pid: process.pid, token, scope }, async () => {
-  // Keep this directory permanently: removing it on release could split two
-  // contenders across different inodes of the same registry pathname.
+  // The outer legacy reservation serializes pathname creation and removal.
+  // Direct bakery-only tests bypass this lifecycle and keep their registry.
   const registry = join(root, `${key}.bakery`);
-  try { await mkdir(registry, { mode: 0o700 }); }
-  catch (error) { if (code(error) !== 'EEXIST') throw error; }
-  await sync(root);
-  await policy.inspectRegistry(registry);
+  const removeEmptyRegistry = async () => {
+    try { await rmdir(registry); }
+    catch (error) {
+      // Another registration or conservative unknown entry keeps the registry.
+      // A queued production contender is still behind our outer reservation and
+      // recreates the directory only after this release completes.
+      if (['ENOENT', 'ENOTEMPTY'].includes(code(error) ?? '')) return;
+      throw error;
+    }
+    // Directory removal committed. A durability error must remain visible so
+    // completed work is not replayed even though registry cleanup is uncertain.
+    await sync(root);
+  };
+  try {
+    try { await mkdir(registry, { mode: 0o700 }); }
+    catch (error) { if (code(error) !== 'EEXIST') throw error; }
+    await sync(root);
+    await policy.inspectRegistry(registry);
+  } catch (error) {
+    try { await removeEmptyRegistry(); }
+    catch (cleanup) { throw new AggregateError([error, cleanup], 'registry_lock_initialization_cleanup_failed', { cause: error }); }
+    throw error;
+  }
   const path = join(registry, `${token}.json`);
   let owner: RegistryRegistration<Scope> = { version: 1, pid: process.pid, token, scope, state: 'choosing' };
   const lockTimeoutMs = policy.lockTimeoutMs ?? 5_000;
@@ -329,8 +350,10 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
     }
   };
   const release = async () => {
-    if (!published) return;
-    await verifyOwned(); await unlink(path); published = false; await sync(registry);
+    if (published) {
+      await verifyOwned(); await unlink(path); published = false; await sync(registry);
+    }
+    await removeEmptyRegistry();
   };
   let failed = false; let failure: unknown; let completed = false; let result: T;
   try {
@@ -381,6 +404,7 @@ export async function withRegistryLock<T, Scope>(root: string, identity: string,
   }
   }, { sync, read: hooks.read ?? policy.read, probe: hooks.probe, now: hooks.now, wait: hooks.wait,
     lockTimeoutMs: policy.lockTimeoutMs, lockRetryMs: policy.lockRetryMs, onPrepared: hooks.onLegacyPrepared,
+    reclaimLegacy: policy.reclaimLegacy,
     qualifiedLegacy: owner => policy.validScope((owner as { scope?: unknown }).scope) &&
       isDeepStrictEqual((owner as { scope: unknown }).scope, scope),
     mayProbeLegacy: owner => policy.validScope(owner.scope) && policy.mayProbePid(owner.scope) });
