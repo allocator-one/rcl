@@ -722,6 +722,42 @@ describe('private immutable reviewer delivery', () => {
     const outcomes = rows.filter(row => row.phase === 'activation_post_outcome' || row.phase.includes('_put_outcome'))
       .map(row => ({ phase: row.phase, data: row.data }));
     expect(recoveryAck.journalOutcomesSha256).toBe(sha256(JSON.stringify(outcomes)));
+    const beforeReplay = journal.checkpoints();
+    const networkBoundary = remote.requests.length;
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+    expect(journal.checkpoints()).toEqual(beforeReplay);
+    expect(remote.requests.slice(networkBoundary).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+  });
+
+  it('resumes two ordinary unavailable reviewer outcomes with the next bounded PUT', async () => {
+    const { retained, remote, queue, selection, preview } =
+      await preparedRecoveryCase('rcl-retained-ordinary-two-unavailable-');
+    const real = await realRecoveryJournal(retained.root, 'two-unavailable.journal', [
+      { phase: 'report_json_verified', data: preview.report_json },
+      { phase: 'report_md_verified', data: preview.report_md! },
+    ]);
+    const operation = recoveryOperation(real.journal);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      remote.failPrivatePutOnce();
+      await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+        { ...operation, mode: 'resume' })).rejects.toThrow('reviewer_delivery_unavailable');
+    }
+    operation.journal = await openJournal(real.directory, operation.recoveryManifestSha256,
+      operation.operationId, 'resume');
+
+    await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+      { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+    expect(operation.journal.checkpoints().filter(row => row.phase.startsWith('reviewer_put_outcome'))
+      .map(row => [row.phase, (row.data as { kind: string }).kind])).toEqual([
+      ['reviewer_put_outcome', 'unavailable'], ['reviewer_put_outcome_2', 'unavailable'],
+      ['reviewer_put_outcome_3', 'ok'],
+    ]);
+    expect(remote.requests.filter(row => row.method === 'PUT').map(row => row.body))
+      .toEqual([retained.artifact.bytes, retained.artifact.bytes, retained.artifact.bytes]);
+    expect(remote.requests.some(row => row.method === 'POST')).toBe(false);
+    expect(operation.journal.checkpoints().some(row => row.phase === 'reviewer_put_replay_intent')).toBe(false);
   });
 
   it.each(['report_json', 'report_md'] as const)(
@@ -1236,6 +1272,74 @@ describe('private immutable reviewer delivery', () => {
     ]);
   });
 
+  it.each(['recovery_acknowledged', 'complete'] as const)(
+    'resumes the readback-only replay crash before %s without inventing an outcome', async boundary => {
+      const { retained, remote, queue, selection, preview, envelope } =
+        await preparedRecoveryCase('rcl-retained-replay-readback-checkpoint-crash-');
+      const operation = recoveryOperation(memoryJournal([]));
+      const initialRows = [
+        ...terminal422JournalRows(preview, envelope, operation.destination),
+        { phase: 'reviewer_put_replay_intent', data: preview.reviewer },
+      ];
+      const real = await realRecoveryJournal(retained.root, 'readback-crash.journal', initialRows);
+      operation.journal = real.journal;
+      const append = real.journal.append.bind(real.journal);
+      let interrupt = true;
+      real.journal.append = async (phase, data) => {
+        if (phase === boundary && interrupt) {
+          interrupt = false;
+          throw new Error('synthetic_replay_readback_checkpoint_interruption');
+        }
+        await append(phase, data);
+      };
+      remote.storePrivateArtifact(retained.artifact.bytes);
+      remote.requests.length = 0;
+
+      await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+        { ...operation, mode: 'resume' })).rejects.toThrow('synthetic_replay_readback_checkpoint_interruption');
+      operation.journal = await openJournal(real.directory, operation.recoveryManifestSha256,
+        operation.operationId, 'resume');
+      await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+        { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+      const completed = await byteSnapshot(real.directory);
+      await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+        { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+      expect(await byteSnapshot(real.directory)).toEqual(completed);
+      expect(remote.requests.some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+      expect(operation.journal.checkpoints().slice(12).map(row => row.phase)).toEqual([
+        'reviewer_put_replay_intent', 'reviewer_verified', 'recovery_acknowledged', 'complete',
+      ]);
+    },
+  );
+
+  it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])(
+    'resumes an ordinary interrupted journal at prefix length %i without requiring replay capability', async length => {
+      const { retained, remote, queue, selection, preview, envelope } =
+        await preparedRecoveryCase('rcl-retained-ordinary-interrupted-prefix-');
+      const operation = recoveryOperation(memoryJournal([]));
+      const prefix = terminal422JournalRows(preview, envelope, operation.destination).slice(0, length);
+      const real = await realRecoveryJournal(retained.root, 'ordinary-prefix.journal', prefix);
+      operation.journal = real.journal;
+      const before = await byteSnapshot(real.directory);
+      remote.unsupportedReplay();
+      remote.requests.length = 0;
+
+      await expect(resumeRecoveryForTest(queue, remote.sink(), selection, preview,
+        { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+      const after = await byteSnapshot(real.directory);
+      for (const [path, bytes] of Object.entries(before)) expect(after[path]).toEqual(bytes);
+      expect(operation.journal.checkpoints().slice(0, length).map(({ phase, data }) => ({ phase, data })))
+        .toEqual(prefix);
+      expect(operation.journal.checkpoints().at(-1)?.phase).toBe('complete');
+      expect(operation.journal.checkpoints().some(row => row.phase === 'reviewer_put_replay_intent')).toBe(false);
+      expect(remote.requests.filter(row => row.method === 'PUT').map(row => row.body))
+        .toEqual([retained.artifact.bytes]);
+      expect(remote.requests.some(row => row.method === 'POST')).toBe(false);
+    },
+  );
+
   it('reads back and completes a lost replay response without another reviewer PUT', async () => {
     const { retained, remote, queue, selection, preview, envelope } =
       await preparedRecoveryCase('rcl-retained-reviewer-terminal-422-lost-response-');
@@ -1339,7 +1443,7 @@ describe('private immutable reviewer delivery', () => {
         await preparedRecoveryCase(`rcl-retained-reviewer-terminal-422-${shape}-`);
       const operation = recoveryOperation(memoryJournal([]));
       const prefix = terminal422JournalRows(preview, envelope, operation.destination);
-      const initialRows = shape === 'truncated' ? prefix.slice(0, -1) : shape === 'undefined-suffix'
+      const initialRows = shape === 'truncated' ? prefix.filter(row => row.phase !== 'report_md_verified') : shape === 'undefined-suffix'
         ? [...prefix, { phase: 'recovery_acknowledged', data: { unexpected: true } }]
         : shape === 'complete-only' ? [...prefix, { phase: 'complete', data: { unexpected: true } }]
         : prefix;

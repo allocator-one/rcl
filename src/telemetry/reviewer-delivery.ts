@@ -585,11 +585,17 @@ export class ReviewerDeliveryQueue {
       return expected !== undefined && checkpoint.phase === expected.phase &&
         isDeepStrictEqual(checkpoint.data, JSON.parse(JSON.stringify(expected.data)));
     });
-    if (operation.mode === 'resume' && terminal422Prefix.length > 0 && checkpoints.length > 0 &&
-      checkpoints.length < terminal422Prefix.length &&
-      exactPrefix(checkpoints.length)) fail('journal_checkpoint_conflict');
+    const reviewerHistory = putHistories.get('reviewer_put_outcome') ?? [];
+    const firstReviewerOutcome = reviewerHistory[0];
     const terminal422Base = terminal422Prefix.length > 0 && checkpoints.length >= terminal422Prefix.length &&
       exactPrefix(terminal422Prefix.length);
+    // Ordinary interrupted delivery can share every preceding checkpoint with
+    // this special case. Only a recorded terminal rejection establishes the
+    // replay boundary; a partial ordinary prefix must keep its usual resume path.
+    const terminal422Outcome = firstReviewerOutcome?.data.kind === 'rejected' &&
+      firstReviewerOutcome.data.http_status === 422 &&
+      firstReviewerOutcome.data.error === 'reviewer_artifact_http_422';
+    if (terminal422Outcome && !terminal422Base) fail('journal_checkpoint_conflict');
     if (terminal422Base && operation.mode !== 'resume') fail('refused');
     const terminal422Replay = operation.mode === 'resume' && terminal422Base;
     if (terminal422Replay) {
@@ -601,6 +607,9 @@ export class ReviewerDeliveryQueue {
         ['reviewer_verified', 'recovery_acknowledged'],
         ['reviewer_verified', 'recovery_acknowledged', 'complete'],
         ['reviewer_put_replay_intent'],
+        ['reviewer_put_replay_intent', 'reviewer_verified'],
+        ['reviewer_put_replay_intent', 'reviewer_verified', 'recovery_acknowledged'],
+        ['reviewer_put_replay_intent', 'reviewer_verified', 'recovery_acknowledged', 'complete'],
         ['reviewer_put_replay_intent', 'reviewer_put_outcome_2'],
         ['reviewer_put_replay_intent', 'reviewer_put_outcome_2', 'reviewer_verified'],
         ['reviewer_put_replay_intent', 'reviewer_put_outcome_2', 'reviewer_verified', 'recovery_acknowledged'],
@@ -616,8 +625,6 @@ export class ReviewerDeliveryQueue {
         }
       }
     }
-    const reviewerHistory = putHistories.get('reviewer_put_outcome') ?? [];
-    const firstReviewerOutcome = reviewerHistory[0];
     const replayOutcome = reviewerHistory[1]?.data;
     const replayIntentPosition = phasePositions.get('reviewer_put_replay_intent');
     if (replayIntentPosition !== undefined) {
@@ -625,7 +632,9 @@ export class ReviewerDeliveryQueue {
         replayIntentPosition <= firstReviewerOutcome.index || reviewerHistory.length === 2 &&
         replayIntentPosition >= reviewerHistory[1]!.index) fail('journal_checkpoint_conflict');
     }
-    if (reviewerHistory.length === 2 && replayIntentPosition === undefined) fail('journal_checkpoint_conflict');
+    if (terminal422Replay && reviewerHistory.length === 2 && replayIntentPosition === undefined) {
+      fail('journal_checkpoint_conflict');
+    }
     if (terminal422Replay && replayOutcome !== undefined &&
       (replayOutcome.kind === 'conflict' || replayOutcome.kind === 'disabled' || replayOutcome.kind === 'rejected')) {
       fail('refused');
