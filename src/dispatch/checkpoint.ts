@@ -373,6 +373,13 @@ function validateBindingBytes(name: CheckpointBindingName, bytes: string, plan: 
   return captured.capacity?.bytes ?? 0;
 }
 
+/** Private receipt for one read; never retained by the journal or accepted from proof bytes. */
+interface ValidatedCaptureBinding {
+  readonly planDigest: string;
+  readonly sha256: string;
+  readonly allowance: number;
+}
+
 function validateRecordChain(input: unknown[], plan: FrozenCheckpointPlan): JournalRecord[] {
   let previous = plan.digest;
   return input.map((value, index) => {
@@ -388,7 +395,7 @@ function validateRecordChain(input: unknown[], plan: FrozenCheckpointPlan): Jour
 }
 
 /** One semantic validator for both private files and portable proof bytes. */
-function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], resultBytes: Map<string, string>, suppliedBindings: CheckpointBindings): { state: CheckpointState; bindings: CheckpointBindings; captureAllowance: number } {
+function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], resultBytes: Map<string, string>, suppliedBindings: CheckpointBindings, validatedCapture?: ValidatedCaptureBinding): { state: CheckpointState; bindings: CheckpointBindings; captureAllowance: number } {
   const cells = new Set(plan.cells.map(cell => cell.id));
   const intents = new Map<string, PaidAttempt>(), terminalAttempts = new Map<string, JournalRecord>(), outcomes: Array<{ cell: string; paidAttempt: PaidAttempt; result: CheckpointResult }> = [], successes: Array<{ cell: string; paidAttempt: PaidAttempt; reviewBytes: string }> = [];
   const successfulCells = new Set<string>(), attemptIds = new Set<string>(), bindings: CheckpointBindings = {}; let finalized = false;
@@ -405,7 +412,10 @@ function validateHistory(plan: FrozenCheckpointPlan, records: JournalRecord[], r
       if (typeof bytes !== 'string') throw new Error('checkpoint_missing_binding');
       boundedOpaqueBytes(bytes, bindingByteLimit(binding.name));
       if (sha256(bytes) !== binding.sha256) throw new Error('checkpoint_binding_tampered');
-      captureAllowance = Math.max(captureAllowance, validateBindingBytes(binding.name, bytes, plan));
+      const allowance = binding.name === 'captured-inputs' && validatedCapture?.planDigest === plan.digest &&
+        validatedCapture.sha256 === binding.sha256
+        ? validatedCapture.allowance : validateBindingBytes(binding.name, bytes, plan);
+      captureAllowance = Math.max(captureAllowance, allowance);
       bindings[binding.name] = bytes;
       continue;
     }
@@ -955,6 +965,7 @@ export class CheckpointJournal {
     const rawRecords: unknown[] = [];
     const resultBytes = new Map<string, string>(), suppliedBindings: CheckpointBindings = {};
     let captureAllowance = 0;
+    let validatedCapture: ValidatedCaptureBinding | undefined;
     const readBinding = async (binding: NonNullable<JournalRecord['binding']>) => {
       const { name, file, sha256: expectedDigest } = binding;
       if (Object.hasOwn(suppliedBindings, name)) throw new Error('checkpoint_duplicate_binding');
@@ -966,6 +977,7 @@ export class CheckpointJournal {
       if (sha256(bytes) !== expectedDigest) throw new Error('checkpoint_binding_tampered');
       const allowance = validateBindingBytes(name, bytes, this.plan);
       if (name === 'captured-inputs') {
+        validatedCapture = Object.freeze({ planDigest: this.plan.digest, sha256: expectedDigest, allowance });
         captureAllowance = allowance;
         budget.remaining += allowance - Buffer.byteLength(bytes, 'utf8');
         if (budget.remaining < 0) throw new Error(budget.error);
@@ -999,7 +1011,7 @@ export class CheckpointJournal {
       if (record.binding && record.binding.name !== 'captured-inputs') await readBinding(record.binding);
       if (record.result) resultBytes.set(record.result.resultFile, await readSafe(join(this.path, 'results', record.result.resultFile), true, { budget }));
     }
-    return { ...validateHistory(this.plan, records, resultBytes, suppliedBindings), bytesRead: maxReadBytes + captureAllowance - budget.remaining };
+    return { ...validateHistory(this.plan, records, resultBytes, suppliedBindings, validatedCapture), bytesRead: maxReadBytes + captureAllowance - budget.remaining };
   }
 
   private async write<T>(ownership: NativeTargetOwnership, operation: (active: NativeTargetOwnership) => Promise<T>): Promise<T> {

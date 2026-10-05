@@ -1,7 +1,7 @@
 import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
-import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
+import { createGitHubClient, getGitHubClientToken, getGitHubPullRequest } from './github-client.js';
 import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from './git.js';
 import { parseUnifiedDiff } from '../prepare/unified-diff.js';
 
@@ -139,7 +139,8 @@ async function fetchChangedFiles(
     if (requireMergeBase && (typeof mergeBaseSha !== "string" || !/^[a-f0-9]{40}$/.test(mergeBaseSha))) {
       throw new Error("The exact PR comparison did not provide a valid effective merge base.");
     }
-    if (files !== undefined && files.length === pr.changed_files) return { files, ...(requireMergeBase ? { mergeBaseSha } : {}) };
+    if (files !== undefined && files.length === pr.changed_files) return { files,
+      ...(typeof mergeBaseSha === 'string' && /^[a-f0-9]{40}$/.test(mergeBaseSha) ? { mergeBaseSha } : {}) };
   }
 
   const listed: ChangedFile[] = await octokit.paginate(octokit.pulls.listFiles, {
@@ -161,7 +162,22 @@ async function fetchChangedFiles(
       `PR #${target.number} reports ${recheck.changed_files} changed files but the API listed ${listed.length} — the diff is incomplete (GitHub lists at most 3,000 files), refusing to review it as if it were whole.`
     );
   }
-  return { files: listed, ...(requireMergeBase ? { mergeBaseSha } : {}) };
+  return { files: listed,
+    ...(typeof mergeBaseSha === 'string' && /^[a-f0-9]{40}$/.test(mergeBaseSha) ? { mergeBaseSha } : {}) };
+}
+
+async function fetchMergeBaseSha(octokit: Octokit, target: GitHubTarget, pr: PullRequest): Promise<string> {
+  if (![pr.base.sha, pr.head.sha].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
+    throw new Error('A complete PR patch requires exact GitHub comparison commits.');
+  }
+  const comparison = await octokit.repos.compareCommitsWithBasehead({
+    owner: target.owner, repo: target.repo, basehead: `${pr.base.sha}...${pr.head.sha}`,
+  });
+  const mergeBaseSha = comparison.data.merge_base_commit?.sha;
+  if (typeof mergeBaseSha !== 'string' || !/^[a-f0-9]{40}$/.test(mergeBaseSha)) {
+    throw new Error('The exact PR comparison did not provide a valid effective merge base.');
+  }
+  return mergeBaseSha;
 }
 
 export async function fetchPRDiff(
@@ -183,16 +199,7 @@ export async function fetchPRDiff(
   } else {
     // Only this immutable comparison may supply ancestry for a depth-one
     // hosted object database; the paginated file list cannot establish it.
-    if (![pr.base.sha, pr.head.sha].every(sha => /^[a-f0-9]{40}$/.test(sha))) {
-      throw new Error('A complete PR patch requires exact GitHub comparison commits.');
-    }
-    const comparison = await octokit.repos.compareCommitsWithBasehead({
-      owner: target.owner, repo: target.repo, basehead: `${pr.base.sha}...${pr.head.sha}`,
-    });
-    mergeBaseSha = comparison.data.merge_base_commit?.sha;
-    if (typeof mergeBaseSha !== 'string' || !/^[a-f0-9]{40}$/.test(mergeBaseSha)) {
-      throw new Error('The exact PR comparison did not provide a valid effective merge base.');
-    }
+    mergeBaseSha = await fetchMergeBaseSha(octokit, target, pr);
   }
   // Zero counts and a blob digest alone cannot distinguish binary/metadata
   // changes from omitted text. Certify expected patchless files against the
@@ -214,10 +221,13 @@ export async function fetchPRDiff(
       } catch (error) {
         // A malformed/oversized/binary patch or an ancestry mismatch remains a
         // refusal. Hosted retrieval only repairs missing local object storage.
-        if (!(error instanceof PinnedGitObjectsUnavailableError) || options.maxDiffBytes === undefined || !mergeBaseSha) throw error;
-        const hostedToken = token?.trim() || process.env['GITHUB_TOKEN']?.trim();
-        if (!hostedToken) throw new Error('Hosted PR object acquisition needs GITHUB_TOKEN or githubToken.');
-        authoritative = await loadHostedPinnedGitDiff({ ...pinned, expectedMergeBaseSha: mergeBaseSha, token: hostedToken });
+        if (!(error instanceof PinnedGitObjectsUnavailableError)) throw error;
+        // Ordinary recovery retains the reader's default byte ceiling. Resolve
+        // ancestry from the same exact comparison if file pagination omitted it.
+        mergeBaseSha ??= await fetchMergeBaseSha(octokit, target, pr);
+        const hostedToken = token?.trim() || process.env['GITHUB_TOKEN']?.trim() || await getGitHubClientToken(octokit);
+        authoritative = await loadHostedPinnedGitDiff({ ...pinned, expectedMergeBaseSha: mergeBaseSha,
+          ...(hostedToken === undefined ? {} : { token: hostedToken }) });
       }
     } catch (error) {
       throw new Error(`Cannot acquire a complete PR patch: ${error instanceof Error ? error.message : String(error)}`);

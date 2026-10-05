@@ -138,6 +138,22 @@ describe('hosted pinned PR object acquisition', () => {
     }
   });
 
+  it('fetches public objects anonymously without inheriting authorization headers', async () => {
+    vi.stubEnv('GIT_CONFIG_COUNT', '1');
+    vi.stubEnv('GIT_CONFIG_KEY_0', `http.${origin}.extraHeader`);
+    vi.stubEnv('GIT_CONFIG_VALUE_0', 'Authorization: inherited-secret');
+    const diff = await loadHostedPinnedGitDiff({ ...input(), token: undefined });
+    expect(diff.rawDiff).toBe(rawDiff);
+    for (const [, args, options] of mocks.spawn.mock.calls) {
+      expect(options.env.GIT_CONFIG_KEY_0).toBeUndefined();
+      expect(options.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+      expect(options.env.GIT_TERMINAL_PROMPT).toBe('0');
+      expect(options.env.GIT_ALLOW_PROTOCOL).toBe('https');
+      expect(args).toContain('credential.helper=');
+    }
+    await expectRemoved();
+  });
+
   it('redacts a failed fetch and still removes all temporary objects', async () => {
     failFetch = true;
     const error = await loadHostedPinnedGitDiff(input()).catch(error => error as Error);

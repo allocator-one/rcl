@@ -15,6 +15,19 @@ export async function createGitHubClient(token?: string): Promise<Octokit> {
   return new Octokit({ auth });
 }
 
+/** Reuse the client's resolved token, including gh credentials, without another account lookup. */
+export async function getGitHubClientToken(client: Octokit): Promise<string | undefined> {
+  // Injected anonymous/test clients need not expose an authentication strategy.
+  if (typeof client.auth !== 'function') return undefined;
+  try {
+    const auth = await client.auth();
+    return typeof auth === 'object' && auth !== null && 'token' in auth && typeof auth.token === 'string'
+      ? auth.token.trim() || undefined : undefined;
+  } catch {
+    throw new Error('Hosted PR acquisition could not resolve GitHub authentication.');
+  }
+}
+
 export async function getGitHubPullRequest(client: Octokit, target: GitHubTarget) {
   try {
     return await client.pulls.get({

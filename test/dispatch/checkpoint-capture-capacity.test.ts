@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withNativeTarget } from '../../src/converge/target-ownership.js';
 import { CAPTURED_INPUT_HARD_LIMITS, captureReviewerInputs } from '../../src/dispatch/captured-inputs.js';
 import { CheckpointJournal, checkpointPath, decodeCheckpointProof, freezeCheckpointPlan, MAX_CHECKPOINT_PROOF_BYTES } from '../../src/dispatch/checkpoint.js';
@@ -32,6 +32,41 @@ async function directory() {
 }
 
 describe('checkpoint explicit capture capacity', () => {
+  it.each(['explicit', 'default'] as const)('validates exact capture bytes once per operation and again on later reads with %s capacity', async mode => {
+    const commonDir = await directory(), captured = capture(1024);
+    const wire = JSON.parse(captured.bytes);
+    if (mode === 'default') delete wire.capacity;
+    const bytes = stableStringify(wire);
+    await withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace, plan: captured.plan, ownership });
+      await journal.bind('captured-inputs', bytes, ownership);
+      const parse = JSON.parse;
+      let captureParses = 0;
+      const spy = vi.spyOn(JSON, 'parse').mockImplementation((...args: Parameters<typeof JSON.parse>) => {
+        if (args[0] === bytes) captureParses += 1;
+        return parse(...args);
+      });
+      try {
+        expect((await journal.read()).records).toHaveLength(1);
+        expect(captureParses).toBe(1);
+        const attempt = { id: 'single-decode', kind: 'paid' as const };
+        await journal.recordIntent('s0:0', attempt, ownership);
+        expect(captureParses).toBe(2);
+        const reviewBytes = stableStringify({ model: 'fake/m0', role: 'general', provider: 'fake',
+          status: 'success', findings: [], durationMs: 1 });
+        await journal.recordResult('s0:0', attempt, { kind: 'success', chunk: 0, reviewBytes }, ownership);
+        expect(captureParses).toBe(3);
+        expect((await journal.read()).successes).toEqual([{ cell: 's0:0', paidAttempt: attempt, reviewBytes }]);
+        expect(captureParses).toBe(4);
+        await writeFile(join(checkpointPath(commonDir, target, namespace), 'binding-captured-inputs.data'), `${bytes} `);
+        await expect(journal.read()).rejects.toThrow('checkpoint_binding_tampered');
+        expect(captureParses).toBe(4);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it('persists, replays, reopens and exports a capture above the default file limit', async () => {
     const commonDir = await directory(), captured = capture();
     await withNativeTarget(commonDir, target, async ownership => {

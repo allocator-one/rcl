@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Octokit } from '@octokit/rest';
 import { fetchPRDiff } from '../../src/resolver/github.js';
 import { loadHostedPinnedGitDiff, loadPinnedGitDiff, PinnedGitObjectsUnavailableError } from '../../src/resolver/git.js';
@@ -39,6 +39,8 @@ beforeEach(() => {
   vi.mocked(loadHostedPinnedGitDiff).mockResolvedValue({ source: 'local', files: [complete],
     rawDiff: 'hosted pinned patch', mergeBaseSha: mergeBase });
 });
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('authoritative PR patch acquisition', () => {
   it('uses pinned local objects for explicit capacity even when the API could return patches', async () => {
@@ -103,6 +105,7 @@ describe('authoritative PR patch acquisition', () => {
   ])('does not certify ambiguous or mismatched patchless comparison blocks (%#)', async rawDiff => {
     const f = fixture([{ filename: 'logo.png', status: 'modified', additions: 0, deletions: 0, sha: 'd'.repeat(40) }], rawDiff);
     vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    vi.mocked(loadHostedPinnedGitDiff).mockRejectedValue(new Error('complete patch unavailable'));
     await expect(fetchPRDiff(target, undefined, f.client)).rejects.toThrow('complete PR patch');
   });
 
@@ -115,6 +118,7 @@ describe('authoritative PR patch acquisition', () => {
     }, cancel });
     f.compare.mockResolvedValueOnce({ data: { files: [file] } }).mockResolvedValueOnce({ data: stream });
     vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('missing objects'));
+    vi.mocked(loadHostedPinnedGitDiff).mockRejectedValue(new Error('complete patch unavailable'));
     await expect(fetchPRDiff(target, undefined, f.client)).rejects.toThrow('complete PR patch');
     expect(cancel).toHaveBeenCalledOnce();
   });
@@ -159,6 +163,49 @@ describe('authoritative PR patch acquisition', () => {
       headSha: head, expectedMergeBaseSha: mergeBase, maxBytes: 16 * 1024 * 1024, token: 'test-token' });
     expect(diff.rawDiff).toBe('hosted pinned patch');
     expect(f.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers omitted text remotely with the ordinary default capacity', async () => {
+    const f = fixture([{ ...complete, patch: undefined }]);
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('outside matching clone'));
+    const diff = await fetchPRDiff(target, 'test-token', f.client);
+    expect(diff.rawDiff).toBe('hosted pinned patch');
+    expect(diff.files[0]?.patch).toBe(complete.patch);
+    expect(loadHostedPinnedGitDiff).toHaveBeenCalledWith({ owner: 'o', repo: 'r', baseSha: base,
+      headSha: head, expectedMergeBaseSha: mergeBase, token: 'test-token' });
+    expect(f.get).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves exact ancestry for ordinary hosted recovery after the file listing fallback', async () => {
+    const f = fixture([{ ...complete, patch: undefined }]);
+    f.compare.mockRejectedValueOnce(new Error('initial comparison unavailable'));
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('outside matching clone'));
+    await fetchPRDiff(target, 'test-token', f.client);
+    expect(f.compare).toHaveBeenCalledTimes(2);
+    expect(f.compare).toHaveBeenLastCalledWith({ owner: 'o', repo: 'r', basehead: `${base}...${head}` });
+    expect(loadHostedPinnedGitDiff).toHaveBeenCalledWith(expect.objectContaining({ expectedMergeBaseSha: mergeBase }));
+  });
+
+  it('allows anonymous public hosted acquisition with explicit capacity', async () => {
+    vi.stubEnv('GITHUB_TOKEN', '');
+    const f = fixture();
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('outside matching clone'));
+    const diff = await fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024 });
+    expect(diff.rawDiff).toBe('hosted pinned patch');
+    expect(loadHostedPinnedGitDiff).toHaveBeenCalledWith(expect.objectContaining({ expectedMergeBaseSha: mergeBase,
+      maxBytes: 16 * 1024 * 1024 }));
+    expect(vi.mocked(loadHostedPinnedGitDiff).mock.calls[0]?.[0].token).toBeUndefined();
+  });
+
+  it('reuses an injected client credential for private hosted acquisition', async () => {
+    vi.stubEnv('GITHUB_TOKEN', '');
+    const f = fixture();
+    const auth = vi.fn().mockResolvedValue({ type: 'token', token: 'client-fixture-token' });
+    Object.assign(f.client, { auth });
+    vi.mocked(loadPinnedGitDiff).mockRejectedValue(new PinnedGitObjectsUnavailableError('outside matching clone'));
+    await fetchPRDiff(target, undefined, f.client, { maxDiffBytes: 16 * 1024 * 1024 });
+    expect(loadHostedPinnedGitDiff).toHaveBeenCalledWith(expect.objectContaining({ token: 'client-fixture-token' }));
+    expect(auth).toHaveBeenCalledOnce();
   });
 
   it('requires an authoritative comparison before either object reader runs', async () => {

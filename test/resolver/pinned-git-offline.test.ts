@@ -10,10 +10,73 @@ const exec = promisify(execFile);
 const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
 afterEach(() => { vi.unstubAllEnvs(); });
 
+// Fixture setup must be safe even when the suite is launched by a Git hook.
+function fixtureEnvironment(): NodeJS.ProcessEnv {
+  return { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+    GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+}
+
+
 describe('local pinned PR reads stay offline', () => {
+  it('isolates fixture writes and pinned reads from inherited repository, object, and config settings', async () => {
+    const decoy = await mkdtemp(join(tmpdir(), 'rcl-pinned-decoy-'));
+    const target = await mkdtemp(join(tmpdir(), 'rcl-pinned-target-'));
+    const gitAt = async (cwd: string, ...args: string[]) =>
+      (await exec('git', args, { cwd, env: fixtureEnvironment() })).stdout.trim();
+    const createFixture = async (cwd: string, repo: string) => {
+      await gitAt(cwd, 'init', '--template=', '-q');
+      await gitAt(cwd, 'config', 'user.email', 'test@example.com');
+      await gitAt(cwd, 'config', 'user.name', 'Test');
+      await gitAt(cwd, 'remote', 'add', 'origin', `git@github.com:o/${repo}.git`);
+      await writeFile(join(cwd, 'a.ex'), `${repo}-old\n`);
+      await gitAt(cwd, 'add', '.');
+      await gitAt(cwd, 'commit', '-qm', 'base');
+      const baseSha = await gitAt(cwd, 'rev-parse', 'HEAD');
+      await writeFile(join(cwd, 'a.ex'), `${repo}-new\n`);
+      await gitAt(cwd, 'add', '.');
+      await gitAt(cwd, 'commit', '-qm', 'head');
+      return { baseSha, headSha: await gitAt(cwd, 'rev-parse', 'HEAD') };
+    };
+    const decoyState = async () => ({
+      config: await readFile(join(decoy, '.git', 'config'), 'utf8'),
+      head: await gitAt(decoy, 'rev-parse', 'HEAD'),
+      index: await readFile(join(decoy, '.git', 'index')),
+    });
+    try {
+      await createFixture(decoy, 'decoy');
+      const before = await decoyState();
+      const decoyGit = join(decoy, '.git');
+      for (const [key, value] of Object.entries({
+        GIT_DIR: decoyGit, GIT_COMMON_DIR: decoyGit, GIT_WORK_TREE: decoy,
+        GIT_INDEX_FILE: join(decoyGit, 'index'), GIT_OBJECT_DIRECTORY: join(decoyGit, 'objects'),
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: join(decoyGit, 'objects'),
+        GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'remote.origin.url',
+        GIT_CONFIG_VALUE_0: 'git@github.com:o/injected.git',
+        GIT_TRACE: join(decoy, 'inherited-trace'),
+      })) vi.stubEnv(key, value);
+      // Only disposable paths are ever injected, including during fixture
+      // setup, so a regression cannot mutate the developer's checkout.
+      const targetFixture = await createFixture(target, 'r').catch(error => error as Error);
+      expect(await decoyState()).toEqual(before);
+      expect(targetFixture).not.toBeInstanceOf(Error);
+      if (targetFixture instanceof Error) throw targetFixture;
+
+      const result = await loadPinnedGitDiff({ cwd: target, owner: 'o', repo: 'r', ...targetFixture })
+        .catch(error => error as Error);
+
+      expect(await decoyState()).toEqual(before);
+      await expect(access(join(decoy, 'inherited-trace'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(result).toMatchObject({ mergeBaseSha: targetFixture.baseSha,
+        files: [{ filename: 'a.ex', patch: '@@ -1 +1 @@\n-r-old\n+r-new\n' }] });
+    } finally {
+      await rm(decoy, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
   it.each(['commit', 'blob'] as const)('does not invoke a promisor transport for a missing %s', async missing => {
     const cwd = await mkdtemp(join(tmpdir(), 'rcl-pinned-offline-'));
-    const fixtureEnv = { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+    const fixtureEnv = fixtureEnvironment();
     const git = async (...args: string[]) => (await exec('git', args, { cwd, env: fixtureEnv })).stdout.trim();
     try {
       await git('init', '-q');
@@ -42,7 +105,7 @@ describe('local pinned PR reads stay offline', () => {
       await writeFile(probe, `require('node:fs').appendFileSync(${JSON.stringify(attempted)}, 'attempt\\n'); process.exit(1);\n`);
       vi.stubEnv('GIT_CONFIG_GLOBAL', nullDevice);
       vi.stubEnv('GIT_CONFIG_SYSTEM', nullDevice);
-      vi.stubEnv('GIT_SSH_COMMAND', `"${process.execPath}" "${probe}"`);
+      await git('config', 'core.sshCommand', `"${process.execPath}" "${probe}"`);
       vi.stubEnv('GIT_NO_LAZY_FETCH', '0');
       vi.stubEnv('GIT_ALLOW_PROTOCOL', 'ssh');
       const configBefore = await readFile(join(cwd, '.git', 'config'), 'utf8');

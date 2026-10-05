@@ -147,8 +147,10 @@ export async function loadPinnedGitDiff(options: PinnedGitDiffOptions): Promise<
   // Object reads in partial clones can otherwise invoke a promisor fetch.
   // Deny transports as a backstop for Git versions predating NO_LAZY_FETCH;
   // the separately bounded hosted reader is the only acquisition path.
-  const env = { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '',
-    GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  Object.assign(env, { GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '',
+    GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null' });
   const readGit = async (args: string[], bound = 16_384): Promise<string> => {
     try {
       const { stdout } = await execFileAsync('git', ['--no-replace-objects', ...args], {
@@ -240,14 +242,14 @@ const HOSTED_GIT_STORAGE_BYTES = 512 * 1024 * 1024;
  * No PR checkout, config, hooks, credential helper, or submodule is executed.
  */
 export async function loadHostedPinnedGitDiff(
-  options: PinnedGitDiffOptions & { expectedMergeBaseSha: string; token: string }
+  options: PinnedGitDiffOptions & { expectedMergeBaseSha: string; token?: string }
 ): Promise<Diff & { mergeBaseSha: string }> {
   const maxBytes = validateDiffCapacity(options.maxBytes);
   const origin = `https://github.com/${options.owner}/${options.repo}.git`;
   if (githubRepository(origin) !== `${options.owner}/${options.repo}`.toLowerCase() ||
     ![options.baseSha, options.headSha, options.expectedMergeBaseSha].every(sha => /^[a-f0-9]{40}$/.test(sha)) ||
-    !options.token.trim() || /[\r\n\0]/.test(options.token)) {
-    throw new Error('Hosted PR acquisition requires a GitHub repository, exact comparison commits and a token.');
+    (options.token !== undefined && (typeof options.token !== 'string' || /[\r\n\0]/.test(options.token)))) {
+    throw new Error('Hosted PR acquisition requires a GitHub repository, exact comparison commits and a valid optional token.');
   }
   const cwd = await mkdtemp(join(tmpdir(), 'rcl-pr-objects-'));
   const deadline = Date.now() + HOSTED_GIT_TIMEOUT_MS;
@@ -256,9 +258,11 @@ export async function loadHostedPinnedGitDiff(
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-    GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'https', GIT_CONFIG_COUNT: '1',
+    GIT_TERMINAL_PROMPT: '0', GIT_ALLOW_PROTOCOL: 'https', GIT_CONFIG_COUNT: '0' });
+  const token = options.token?.trim();
+  if (token) Object.assign(env, { GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: `http.${origin}.extraHeader`,
-    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${options.token}`).toString('base64')}` });
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}` });
   const argsPrefix = ['--no-replace-objects', '-c', `core.hooksPath=${join(cwd, 'disabled-hooks')}`, '-c', 'credential.helper=',
     '-c', 'http.followRedirects=false', '-c', 'http.sslVerify=true', '-c', 'submodule.recurse=false',
     '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'fetch.unpackLimit=0'];
