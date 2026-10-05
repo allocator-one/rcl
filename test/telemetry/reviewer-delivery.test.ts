@@ -35,8 +35,9 @@ type DeliveryFixture = Pick<Awaited<ReturnType<typeof fixture>>, 'runId' | 'arti
 function server(f: DeliveryFixture) {
   const requests: Array<{ method: string; url: string; body?: string; token: string }> = [];
   let privateBytes: string | undefined; let posted = false; let postedEnvelope: string | undefined;
-  let lostAck = false; let losePost = false; let losePostReadback = false; let refused = false; let capability = true; let activationForbidden = false; let requireReports = false;
-  let corruptOrdinaryReadback: string | undefined;
+  let lostAck = false; let losePost = false; let losePostReadback = false; let failPrivatePut = false; let hidePrivateReadback = false; let refused = false; let capability = true; let activationForbidden = false; let requireReports = false;
+  let corruptOrdinaryReadback: string | undefined; let failArtifactPut: string | undefined;
+  const hiddenOrdinaryReadback = new Set<string>();
   let runReceipt: 'valid' | 'absent' | 'mismatch' | 'malformed' = 'valid';
   let principal = { org_id: '919921a0-0000-4000-8000-000000000001', actor_user_id: '919921a0-0000-4000-8000-000000000002', credential_kind: 'cli', api_token_id: null };
   let activationShape: 'full' | 'protocol-only' | 'principal-only' = 'full';
@@ -62,15 +63,18 @@ function server(f: DeliveryFixture) {
       return Response.json(body);
     }
     if (route.endsWith('/reviewer-artifact')) {
-      if (options.method === 'PUT') { if (requireReports && (generic.get('report_json') !== f.artifacts.report_json || generic.get('report_md') !== f.artifacts.report_md)) return Response.json({ error: 'source_unavailable' }, { status: 503 }); privateBytes = options.body; if (lostAck) throw new Error('lost ACK'); return Response.json({ data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(privateBytes!) }, meta: { status: 'created' } }, { status: 201 }); }
+      if (options.method === 'PUT') { if (requireReports && (generic.get('report_json') !== f.artifacts.report_json || generic.get('report_md') !== f.artifacts.report_md)) return Response.json({ error: 'source_unavailable' }, { status: 503 }); if (failPrivatePut) { failPrivatePut = false; return Response.json({ error: 'unavailable' }, { status: 503 }); } privateBytes = options.body; if (lostAck) throw new Error('lost ACK'); return Response.json({ data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(privateBytes!) }, meta: { status: 'created' } }, { status: 201 }); }
       if (losePostReadback) { losePostReadback = false; throw new Error('lost post readback'); }
-      if (privateBytes === undefined) return Response.json(posted ? { error: 'reviewer_artifact_pending', data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(f.artifact.bytes) } } : { error: 'not_found' }, { status: 404 });
+      if (privateBytes === undefined || hidePrivateReadback) return Response.json(posted ? { error: 'reviewer_artifact_pending', data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(f.artifact.bytes) } } : { error: 'not_found' }, { status: 404 });
       return new Response(privateBytes, { headers: { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256(privateBytes), 'cache-control': 'private, no-store', 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff' } });
     }
     if (route.endsWith('/runs')) { posted = true; postedEnvelope = options.body; if (losePost) { losePost = false; losePostReadback = true; throw new Error('lost POST response'); } const envelope = JSON.parse(options.body); return Response.json({ data: { id: envelope.run.id, url: 'https://harness.example.test/run', artifacts_expected: envelope.artifacts_declared.map((row: any) => row.kind) }, meta: { status: 'existing' } }); }
     const kind = route.split('/').at(-1)!;
-    if (options.method === 'PUT') { generic.set(kind, options.body); return Response.json({ data: { kind, sha256: sha256(options.body) } }, { status: 201 }); }
-    const stored = generic.get(kind);
+    if (options.method === 'PUT') {
+      if (failArtifactPut === kind) { failArtifactPut = undefined; return Response.json({ error: 'unavailable' }, { status: 503 }); }
+      generic.set(kind, options.body); return Response.json({ data: { kind, sha256: sha256(options.body) } }, { status: 201 });
+    }
+    const stored = hiddenOrdinaryReadback.has(kind) ? undefined : generic.get(kind);
     if (stored === undefined) return Response.json({ error: 'not_found' }, { status: 404 });
     const responseBytes = corruptOrdinaryReadback === kind
       ? `${stored[0] === 'x' ? 'y' : 'x'}${stored.slice(1)}`
@@ -78,7 +82,7 @@ function server(f: DeliveryFixture) {
     return new Response(responseBytes, { headers: { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256(responseBytes) } });
   };
   const sink = (token = 'first-login', source: 'login' | 'env' = 'login') => new HarnessSink({ credential: { url: 'https://harness.example.test', token, source }, rclVersion: 'test', fetchImpl });
-  return { requests, sink, fetchImpl, requireReports: () => { requireReports = true; }, loseAck: () => { lostAck = true; }, losePost: () => { losePost = true; }, refuse: () => { refused = true; }, unsupported: () => { capability = false; }, forbidActivation: () => { activationForbidden = true; }, posted: () => { posted = true; }, existing: (envelope: string) => { posted = true; postedEnvelope = envelope; }, receipt: (value: typeof runReceipt) => { runReceipt = value; }, corruptReadback: (kind: string) => { corruptOrdinaryReadback = kind; }, activation: (shape: typeof activationShape) => { activationShape = shape; }, changePrincipal: () => { principal = { ...principal, org_id: '919921a0-0000-4000-8000-000000000099' }; }, apiPrincipal: () => { principal = { ...principal, credential_kind: 'api_token', api_token_id: '919921a0-0000-4000-8000-000000000003' }; } };
+  return { requests, sink, fetchImpl, requireReports: () => { requireReports = true; }, loseAck: () => { lostAck = true; }, losePost: () => { losePost = true; }, failPrivatePutOnce: () => { failPrivatePut = true; }, failArtifactPutOnce: (kind: string) => { failArtifactPut = kind; }, hideArtifactReadback: (kind: string) => { hiddenOrdinaryReadback.add(kind); }, hidePrivateReadback: () => { hidePrivateReadback = true; }, refuse: () => { refused = true; }, unsupported: () => { capability = false; }, forbidActivation: () => { activationForbidden = true; }, posted: () => { posted = true; }, existing: (envelope: string) => { posted = true; postedEnvelope = envelope; }, storeArtifact: (kind: string, bytes: string) => { generic.set(kind, bytes); }, removeArtifact: (kind: string) => { generic.delete(kind); }, receipt: (value: typeof runReceipt) => { runReceipt = value; }, corruptReadback: (kind: string) => { corruptOrdinaryReadback = kind; }, activation: (shape: typeof activationShape) => { activationShape = shape; }, changePrincipal: () => { principal = { ...principal, org_id: '919921a0-0000-4000-8000-000000000099' }; }, apiPrincipal: () => { principal = { ...principal, credential_kind: 'api_token', api_token_id: '919921a0-0000-4000-8000-000000000003' }; } };
 }
 
 async function byteSnapshot(directory: string): Promise<Record<string, string>> {
@@ -109,6 +113,39 @@ function recoverySelection(retained: Awaited<ReturnType<typeof strictFallbackRev
     reportSha256: sha256(retained.artifacts.report_json), reportByteLength: Buffer.byteLength(retained.artifacts.report_json), reportBytes: retained.artifacts.report_json,
     reviewerArtifactSha256: retained.artifact.digest, reviewerArtifactByteLength: Buffer.byteLength(retained.artifact.bytes), reviewerArtifactBytes: retained.artifact.bytes,
     reviewerRecovery: envelope.reviewer_recovery! };
+}
+
+function memoryJournal(phases: Array<{ phase: string; data: unknown }>) {
+  const checkpoints = phases.map((row, index) => ({ operation_id: '919921a0-0000-4000-8000-000000000010',
+    manifest_sha256: 'b'.repeat(64), sequence: index + 1, previous_sha256: 'c'.repeat(64),
+    recorded_at: new Date().toISOString(), ...row }));
+  return { checkpoints: () => structuredClone(checkpoints), append: async (phase: string, data: unknown = null) => {
+    checkpoints.push({ operation_id: '919921a0-0000-4000-8000-000000000010', manifest_sha256: 'b'.repeat(64),
+      sequence: checkpoints.length + 1, previous_sha256: 'c'.repeat(64), phase, recorded_at: new Date().toISOString(), data });
+  } };
+}
+
+function recoveryOperation(journal: ReturnType<typeof memoryJournal>) {
+  return { mode: 'apply' as const, operationId: '919921a0-0000-4000-8000-000000000010',
+    recoveryManifestSha256: 'b'.repeat(64), destination: { host: 'https://harness.example.test', credentialKind: 'login' as const,
+      activationProtocol: 1 as const, principal: { org_id: '919921a0-0000-4000-8000-000000000001',
+        actor_user_id: '919921a0-0000-4000-8000-000000000002', credential_kind: 'cli' as const, api_token_id: null } }, journal };
+}
+
+async function preparedRecoveryCase(prefix: string) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix))); roots.push(root);
+  const retained = { root, ...await strictFallbackReviewerFixture(root) };
+  const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
+  const declaration = declareReviewerRecovery({ artifact: retained.artifact, descriptor: retained.result.run.reviewer_evidence });
+  const envelope = buildRunEnvelope(retained.result, retained.artifacts,
+    { level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration });
+  await queue.retain({ sink: remote.sink(), envelope, artifacts: retained.artifacts, artifact: retained.artifact });
+  const selection = recoverySelection(retained, envelope);
+  const preview = (await queue.prepareRecovery(selection)).preview;
+  remote.existing(JSON.stringify(envelope));
+  remote.storeArtifact('report_json', retained.artifacts.report_json);
+  remote.storeArtifact('report_md', retained.artifacts.report_md);
+  return { retained, remote, queue, selection, preview };
 }
 
 describe('private immutable reviewer delivery', () => {
@@ -352,6 +389,198 @@ describe('private immutable reviewer delivery', () => {
     expect(replay.some(row => row.method === 'GET' && new URL(row.url).pathname.endsWith(`/runs/${retained.runId}`))).toBe(true);
     expect(replay.some(row => row.method === 'POST' && row.url.endsWith('/runs'))).toBe(false);
     expect(remote.requests.filter(row => row.method === 'POST' && row.url.endsWith('/runs'))).toHaveLength(1);
+  });
+
+  it('journals a retriable reviewer PUT failure and one successful retry without another write after success', async () => {
+    const { retained, remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-put-retry-');
+    const journal = memoryJournal([
+      { phase: 'report_json_verified', data: preview.report_json },
+      { phase: 'report_md_verified', data: preview.report_md },
+    ]);
+    const operation = recoveryOperation(journal);
+    remote.failPrivatePutOnce();
+
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, operation)).rejects.toThrow('reviewer_delivery_unavailable');
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))).toHaveLength(1);
+
+    await expect(queue.resumeRecovery(remote.sink(), selection, preview, { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+    expect(remote.requests.filter(row => row.method === 'POST' && row.url.endsWith('/runs'))).toHaveLength(0);
+    const reviewerPuts = remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'));
+    expect(reviewerPuts).toHaveLength(2);
+    expect(reviewerPuts.map(row => row.body)).toEqual([retained.artifact.bytes, retained.artifact.bytes]);
+    const rows = journal.checkpoints();
+    expect(rows.filter(row => row.phase.startsWith('reviewer_put_outcome'))
+      .map(row => [row.phase, (row.data as { kind: string }).kind])).toEqual([
+      ['reviewer_put_outcome', 'unavailable'],
+      ['reviewer_put_outcome_2', 'ok'],
+    ]);
+    const directory = join(retained.root, 'reviewer-outbox', retained.runId);
+    const outboxManifestBytes = await readFile(join(directory, 'manifest.json'), 'utf8');
+    expect(await readFile(join(directory, 'acknowledged.json'), 'utf8')).toBe(JSON.stringify({
+      version: 1, runId: retained.runId, manifestSha256: sha256(outboxManifestBytes),
+    }));
+    const recoveryAck = JSON.parse(await readFile(join(directory, 'recovery-acknowledged.json'), 'utf8'));
+    const outcomes = rows.filter(row => row.phase === 'activation_post_outcome' || row.phase.includes('_put_outcome'))
+      .map(row => ({ phase: row.phase, data: row.data }));
+    expect(recoveryAck.journalOutcomesSha256).toBe(sha256(JSON.stringify(outcomes)));
+  });
+
+  it.each(['report_json', 'report_md'] as const)(
+    'journals and retries an unavailable %s PUT with the exact retained bytes', async kind => {
+      const { retained, remote, queue, selection, preview } = await preparedRecoveryCase(`rcl-retained-${kind}-put-retry-`);
+      remote.removeArtifact(kind);
+      const other = kind === 'report_json' ? 'report_md' : 'report_json';
+      const journal = memoryJournal([{ phase: `${other}_verified`, data: preview[other] }]);
+      const operation = recoveryOperation(journal);
+      remote.failArtifactPutOnce(kind);
+
+      await expect(queue.applyRecovery(remote.sink(), selection, preview, operation)).rejects.toThrow('reviewer_delivery_unavailable');
+      await expect(queue.resumeRecovery(remote.sink(), selection, preview, { ...operation, mode: 'resume' })).resolves.toBeUndefined();
+
+      const puts = remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith(`/artifacts/${kind}`));
+      expect(puts.map(row => row.body)).toEqual([retained.artifacts[kind], retained.artifacts[kind]]);
+      const rows = journal.checkpoints();
+      expect(rows.filter(row => row.phase.startsWith(`${kind}_put_outcome`))
+        .map(row => [row.phase, (row.data as { kind: string }).kind])).toEqual([
+        [`${kind}_put_outcome`, 'unavailable'],
+        [`${kind}_put_outcome_2`, 'ok'],
+      ]);
+    },
+  );
+
+  it.each(['report_json', 'report_md'] as const)(
+    'does not repeat a durable successful %s PUT while exact readback remains unavailable', async kind => {
+      const { remote, queue, selection, preview } = await preparedRecoveryCase(`rcl-retained-${kind}-put-success-`);
+      remote.removeArtifact(kind);
+      const other = kind === 'report_json' ? 'report_md' : 'report_json';
+      const journal = memoryJournal([{ phase: `${other}_verified`, data: preview[other] }]);
+      const operation = recoveryOperation(journal);
+      remote.hideArtifactReadback(kind);
+
+      await expect(queue.applyRecovery(remote.sink(), selection, preview, operation)).rejects.toThrow('reviewer_delivery_ordinary_mismatch');
+      const before = remote.requests.length;
+      await expect(queue.resumeRecovery(remote.sink(), selection, preview, { ...operation, mode: 'resume' }))
+        .rejects.toThrow('reviewer_delivery_unavailable');
+      expect(remote.requests.slice(before).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+      expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith(`/artifacts/${kind}`))).toHaveLength(1);
+    },
+  );
+
+  it('accepts canonical multi-digit PUT attempt suffixes through 100', async () => {
+    const { remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-put-attempt-boundary-');
+    const journal = memoryJournal([
+      { phase: 'reviewer_put_intent', data: preview.reviewer },
+      ...Array.from({ length: 100 }, (_, index) => ({
+        phase: index === 0 ? 'reviewer_put_outcome' : `reviewer_put_outcome_${index + 1}`,
+        data: { kind: 'unavailable', http_status: 503 },
+      })),
+    ]);
+    remote.failPrivatePutOnce();
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, recoveryOperation(journal)))
+      .rejects.toThrow('reviewer_delivery_unavailable');
+    const phases = journal.checkpoints().map(row => row.phase);
+    expect(phases).toContain('reviewer_put_outcome_10');
+    expect(phases).toContain('reviewer_put_outcome_100');
+    expect(phases).toContain('reviewer_put_outcome_101');
+  });
+
+  it('does not repeat a reviewer PUT after its durable success outcome while readback remains pending', async () => {
+    const { remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-put-success-');
+    const journal = memoryJournal([
+      { phase: 'report_json_verified', data: preview.report_json },
+      { phase: 'report_md_verified', data: preview.report_md },
+    ]);
+    const operation = recoveryOperation(journal);
+    remote.hidePrivateReadback();
+
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, operation)).rejects.toThrow('reviewer_delivery_unavailable');
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))).toHaveLength(1);
+    const beforeResume = remote.requests.length;
+
+    await expect(queue.resumeRecovery(remote.sink(), selection, preview, { ...operation, mode: 'resume' }))
+      .rejects.toThrow('reviewer_delivery_unavailable');
+    expect(remote.requests.slice(beforeResume).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))).toHaveLength(1);
+  });
+
+  it('retries a reviewer PUT from an intent-only crash frontier', async () => {
+    const { retained, remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-intent-only-');
+    const journal = memoryJournal([
+      { phase: 'report_json_verified', data: preview.report_json },
+      { phase: 'report_md_verified', data: preview.report_md },
+      { phase: 'reviewer_put_intent', data: preview.reviewer },
+    ]);
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, recoveryOperation(journal))).resolves.toBeUndefined();
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))
+      .map(row => row.body)).toEqual([retained.artifact.bytes]);
+  });
+
+  it.each([
+    { kind: 'conflict' },
+    { kind: 'disabled' },
+    { kind: 'rejected', http_status: 422, error: 'invalid' },
+  ])('never retries a durable terminal reviewer PUT outcome $kind', async terminal => {
+    const { remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-terminal-put-');
+    const journal = memoryJournal([
+      { phase: 'report_json_verified', data: preview.report_json },
+      { phase: 'report_md_verified', data: preview.report_md },
+      { phase: 'reviewer_put_intent', data: preview.reviewer },
+      { phase: 'reviewer_put_outcome', data: terminal },
+    ]);
+    const before = remote.requests.length;
+
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, recoveryOperation(journal)))
+      .rejects.toThrow('reviewer_delivery_refused');
+    expect(remote.requests.slice(before).some(row => row.method === 'POST' || row.method === 'PUT')).toBe(false);
+  });
+
+  it('rejects a reviewer PUT outcome without its durable intent before transport', async () => {
+    const { remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-missing-put-intent-');
+    const journal = memoryJournal([{ phase: 'reviewer_put_outcome', data: { kind: 'unavailable', http_status: 503 } }]);
+    const before = remote.requests.length;
+
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, recoveryOperation(journal)))
+      .rejects.toThrow('reviewer_delivery_journal_checkpoint_conflict');
+    expect(remote.requests.slice(before)).toEqual([]);
+  });
+
+  it.each(['reviewer_put_outcome_3', 'reviewer_put_outcome_02', 'reviewer_put_outcome_9007199254740992'])(
+    'rejects gapped or noncanonical PUT outcome phase %s before transport', async badPhase => {
+      const { remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-invalid-put-phase-');
+      const journal = memoryJournal([
+        { phase: 'reviewer_put_intent', data: preview.reviewer },
+        { phase: 'reviewer_put_outcome', data: { kind: 'unavailable', http_status: 503 } },
+        { phase: badPhase, data: { kind: 'unavailable', http_status: 503 } },
+      ]);
+      const before = remote.requests.length;
+
+      await expect(queue.applyRecovery(remote.sink(), selection, preview, recoveryOperation(journal)))
+        .rejects.toThrow('reviewer_delivery_journal_checkpoint_conflict');
+      expect(remote.requests.slice(before)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['terminal', [
+      { phase: 'reviewer_put_intent', data: null },
+      { phase: 'reviewer_put_outcome', data: { kind: 'ok', http_status: 201 } },
+      { phase: 'reviewer_put_outcome_2', data: { kind: 'unavailable', http_status: 503 } },
+    ]],
+    ['verified', [
+      { phase: 'reviewer_put_intent', data: null },
+      { phase: 'reviewer_put_outcome', data: { kind: 'unavailable', http_status: 503 } },
+      { phase: 'reviewer_verified', data: null },
+      { phase: 'reviewer_put_outcome_2', data: { kind: 'unavailable', http_status: 503 } },
+    ]],
+  ] as const)('rejects a PUT outcome after %s before transport', async (_case, rows) => {
+    const { remote, queue, selection, preview } = await preparedRecoveryCase('rcl-retained-reviewer-closed-put-history-');
+    const journal = memoryJournal(rows.map(row => ({ ...row,
+      data: row.phase === 'reviewer_put_intent' || row.phase === 'reviewer_verified' ? preview.reviewer : row.data })));
+    const before = remote.requests.length;
+
+    await expect(queue.applyRecovery(remote.sink(), selection, preview, recoveryOperation(journal)))
+      .rejects.toThrow('reviewer_delivery_journal_checkpoint_conflict');
+    expect(remote.requests.slice(before)).toEqual([]);
   });
 
   it('resumes the safe pre-POST frontier when the immutable entry intent exists without a journal post-intent', async () => {

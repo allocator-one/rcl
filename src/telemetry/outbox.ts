@@ -1,6 +1,7 @@
 import { mkdir, open, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'fs/promises';
-import { join, resolve, sep } from 'path';
+import { basename, join, resolve, sep } from 'path';
 import { resolveDataDir } from '../config/data-dir.js';
+import { withRecoveryLock } from '../evidence/original-run/lock.js';
 import { sha256Hex, type ArtifactKind, type RunEnvelope } from './envelope.js';
 import { MAX_ARTIFACT_BYTES, validateRunEnvelope } from './envelope-validation.js';
 import { buildEvent, type WireEvent } from './events.js';
@@ -40,6 +41,7 @@ const EVENTS_FILE = 'events.json';
 const ARTIFACTS_DIR = 'artifacts';
 const LOSS_DIR = 'loss';
 const FAILED_MARKER = 'failed.json';
+const FAILED_EVENTS_FILE = 'failed-events.json';
 /** A loss report the server refused stays on disk under this suffix; it is never retried or counted as reported. */
 const LOSS_REFUSED_SUFFIX = '.refused';
 /** Loss reports go out in batches this size, well under the server's event cap. */
@@ -115,6 +117,8 @@ export interface FlushOptions {
   entryBoundary?: <T>(entry: Pick<OutboxEntry, 'id' | 'meta'>, work: () => Promise<T>) => Promise<T>;
   /** A batch may retain one fenced entry and continue independent entries. */
   entryRefusalReason?: (error: unknown) => string | undefined;
+  /** Coordinator-owned boundary for one event transmission. Per-event scope lets a mixed batch retain protected rows while unrelated rows proceed. */
+  eventBoundary?: <T>(event: WireEvent, entry: Pick<OutboxEntry, 'id' | 'meta'> | undefined, work: () => Promise<T>) => Promise<T>;
   /** Coordinator-owned notice or authorization boundary for pending loss transmission. */
   lossBoundary?: <T>(work: () => Promise<T>) => Promise<T>;
 }
@@ -141,12 +145,21 @@ type ReadResult<T> =
   | { kind: 'missing' }
   | { kind: 'malformed' }
   | { kind: 'error'; reason: string };
+type TextReadResult = { kind: 'ok'; value: string } | { kind: 'missing' } | { kind: 'oversized' } | { kind: 'error'; reason: string };
 
 /** The entry vanished under us: another process delivered or dropped it. */
 class EntryGone extends Error {
   constructor() {
     super('outbox entry removed concurrently');
     this.name = 'EntryGone';
+  }
+}
+
+/** A bounded local outbox transaction could not acquire its per-entry lock. */
+class EntryMutationLocked extends Error {
+  constructor() {
+    super('outbox_entry_locked');
+    this.name = 'EntryMutationLocked';
   }
 }
 
@@ -165,8 +178,7 @@ async function readJson<T>(path: string): Promise<ReadResult<T>> {
   }
 }
 
-/** Read no more than the declared artifact bytes, including if a file grows after stat. */
-async function readBoundedJson<T>(path: string, limit: number): Promise<ReadResult<T> | { kind: 'oversized' }> {
+async function readText(path: string, limit = MAX_ARTIFACT_BYTES): Promise<TextReadResult> {
   let file: Awaited<ReturnType<typeof open>> | undefined;
   try {
     file = await open(path, 'r');
@@ -181,15 +193,10 @@ async function readBoundedJson<T>(path: string, limit: number): Promise<ReadResu
       if (size > limit) return { kind: 'oversized' };
       chunks.push(chunk.subarray(0, bytesRead));
     }
-    const raw = Buffer.concat(chunks, size).toString('utf8');
-    try {
-      return { kind: 'ok', value: JSON.parse(raw) as T, raw };
-    } catch {
-      return { kind: 'malformed' };
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
-    return { kind: 'error', reason: err instanceof Error ? err.message : String(err) };
+    return { kind: 'ok', value: Buffer.concat(chunks, size).toString('utf8') };
+  } catch (error) {
+    if (isEnoent(error)) return { kind: 'missing' };
+    return { kind: 'error', reason: error instanceof Error ? error.message : String(error) };
   } finally {
     await file?.close().catch(() => undefined);
   }
@@ -200,15 +207,11 @@ async function readBoundedJson<T>(path: string, limit: number): Promise<ReadResu
  * what was sent; otherwise (another process queued more meanwhile) only the
  * delivered ids leave it and the rest waits for the next flush.
  */
-async function dropDeliveredEvents(path: string, raw: string, delivered: WireEvent[]): Promise<void> {
+async function dropDeliveredEvents(path: string, delivered: WireEvent[]): Promise<void> {
   let current: string;
   try {
     current = await readFile(path, 'utf8');
   } catch {
-    return;
-  }
-  if (current === raw) {
-    await rm(path, { force: true });
     return;
   }
   let parsed: unknown;
@@ -276,15 +279,31 @@ function validEvents(value: unknown): value is WireEvent[] {
   return Array.isArray(value) && value.every((e) => isRecord(e) && typeof e['id'] === 'string' && typeof e['kind'] === 'string');
 }
 
+function validEventFailures(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.entries(value).every(([id, reason]) => UUID.test(id) && typeof reason === 'string');
+}
+
 export class Outbox {
   readonly dir: string;
   private readonly capBytes: number;
   private readonly now: () => number;
+  private readonly entryLocks: string;
 
   constructor(dir: string = join(resolveDataDir(), OUTBOX_DIR), options: { capBytes?: number; now?: () => number } = {}) {
     this.dir = resolve(dir);
     this.capBytes = options.capBytes ?? DEFAULT_OUTBOX_CAP_BYTES;
     this.now = options.now ?? Date.now;
+    this.entryLocks = `${this.dir}-entry-locks`;
+  }
+
+  private async withEntryMutation<T>(id: string, work: () => Promise<T>): Promise<T> {
+    if (!ENTRY_ID.test(id)) throw new OutboxError(`Not an outbox entry id: ${JSON.stringify(id)}`);
+    try {
+      return await withRecoveryLock(this.entryLocks, id.toLowerCase(), work);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'recovery_run_locked') throw new EntryMutationLocked();
+      throw error;
+    }
   }
 
   async totalBytes(): Promise<number> {
@@ -302,12 +321,77 @@ export class Outbox {
     return dir;
   }
 
+  private async updateMeta(id: string, update: (current: OutboxMeta) => OutboxMeta): Promise<OutboxMeta> {
+    return this.withEntryMutation(id, async () => {
+      const path = join(this.entryDir(id), META_FILE);
+      const current = await readJson<OutboxMeta>(path);
+      if (current.kind === 'missing') throw new EntryGone();
+      if (current.kind !== 'ok' || !isRecord(current.value)) throw new OutboxError('meta.json malformed');
+      const next = update(current.value);
+      await writeJsonAtomic(path, next);
+      return next;
+    });
+  }
+
+  private mergeFlushMeta(current: OutboxMeta, desired: OutboxMeta): OutboxMeta {
+    return {
+      ...current,
+      attempts: Math.max(current.attempts, desired.attempts),
+      ...(current.envelope_delivered || desired.envelope_delivered ? { envelope_delivered: true } : {}),
+      ...(desired.run_url !== undefined ? { run_url: desired.run_url } : current.run_url !== undefined ? { run_url: current.run_url } : {}),
+      ...(desired.last_error !== undefined ? { last_error: desired.last_error } : current.last_error !== undefined ? { last_error: current.last_error } : {}),
+    };
+  }
+
+  private async beginFlush(id: string): Promise<{
+    meta: OutboxMeta;
+    envelope: ReadResult<RunEnvelope>;
+    artifacts: Partial<Record<ArtifactKind, TextReadResult>>;
+    events: ReadResult<unknown>;
+    failures: ReadResult<unknown>;
+  }> {
+    return this.withEntryMutation(id, async () => {
+      const dir = this.entryDir(id);
+      const metaRead = await readJson<OutboxMeta>(join(dir, META_FILE));
+      if (metaRead.kind === 'missing') throw new EntryGone();
+      if (metaRead.kind !== 'ok' || !isRecord(metaRead.value)) throw new OutboxError('meta.json malformed');
+      const meta = { ...metaRead.value, attempts: metaRead.value.attempts + 1 };
+      await writeJsonAtomic(join(dir, META_FILE), meta);
+      const names = await readdir(join(dir, ARTIFACTS_DIR)).catch(() => [] as string[]);
+      const artifacts: Partial<Record<ArtifactKind, TextReadResult>> = {};
+      for (const [kind, file] of Object.entries(ARTIFACT_FILES) as Array<[ArtifactKind, string]>) {
+        if (names.includes(file)) artifacts[kind] = await readText(join(dir, ARTIFACTS_DIR, file));
+      }
+      return {
+        meta,
+        envelope: await readJson<RunEnvelope>(join(dir, ENVELOPE_FILE)),
+        artifacts,
+        events: await readJson<unknown>(join(dir, EVENTS_FILE)),
+        failures: await readJson<unknown>(join(dir, FAILED_EVENTS_FILE)),
+      };
+    });
+  }
+
+  private async removeArtifactIfExact(id: string, path: string, bytes: string): Promise<void> {
+    await this.withEntryMutation(id, async () => {
+      const current = await readFile(path, 'utf8').catch(error => {
+        if (isEnoent(error)) return undefined;
+        throw error;
+      });
+      if (current === bytes) await rm(path, { force: true });
+    });
+  }
+
   /** Spool a run whose delivery failed (or whose artifacts could not be uploaded). */
   async spoolRun(input: SpoolRunInput): Promise<SpoolResult> {
     if (!UUID.test(input.runId)) throw new OutboxError(`Not a run id: ${JSON.stringify(input.runId)}`);
     if (input.envelope.run?.id?.toLowerCase() !== input.runId.toLowerCase()) {
       throw new OutboxError(`Envelope run id ${JSON.stringify(input.envelope.run?.id)} does not match the entry id ${input.runId}.`);
     }
+    return this.withEntryMutation(input.runId, () => this.spoolRunLocked(input));
+  }
+
+  private async spoolRunLocked(input: SpoolRunInput): Promise<SpoolResult> {
     const dir = this.entryDir(input.runId);
     await mkdir(join(dir, ARTIFACTS_DIR), { recursive: true, mode: 0o700 });
     const existing = await readOptionalJson<OutboxMeta>(join(dir, META_FILE));
@@ -360,6 +444,10 @@ export class Outbox {
     const first = events[0];
     if (!first || !UUID.test(first.id)) throw new OutboxError('Events to spool must carry UUID ids.');
     const id = `events-${first.id.toLowerCase()}`;
+    return this.withEntryMutation(id, () => this.spoolEventsLocked(id, events));
+  }
+
+  private async spoolEventsLocked(id: string, events: WireEvent[]): Promise<string> {
     const dir = this.entryDir(id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     // A batch spooled again lands on the same entry: merge by event id so
@@ -506,10 +594,11 @@ export class Outbox {
       }
       let result: Awaited<ReturnType<Outbox['flushEntry']>>;
       try {
-        const work = () => this.flushEntry(sink, entry, pastDeadline, request);
+        const work = () => this.flushEntry(sink, entry, pastDeadline, request, options);
         result = options.entryBoundary ? await options.entryBoundary(entry, work) : await work();
       } catch (error) {
         if (error instanceof EntryGone) result = { kind: 'delivered' as const };
+        else if (error instanceof EntryMutationLocked) result = { kind: 'retry' as const };
         else {
           const reason = options.entryRefusalReason?.(error);
           if (reason === undefined) throw error;
@@ -523,6 +612,10 @@ export class Outbox {
           summary.delivered.push(entry.id);
           break;
         case 'failed':
+          summary.failed.push({ id: entry.id, reason: result.reason });
+          break;
+        case 'retained-failed':
+          summary.remaining.push(entry.id);
           summary.failed.push({ id: entry.id, reason: result.reason });
           break;
         case 'dropped':
@@ -543,7 +636,7 @@ export class Outbox {
     }
 
     if (summary.stopped !== 'unavailable' && options.runId === undefined && (await this.pendingLossFiles()).length > 0) {
-      const report = () => this.reportLoss(sink, pastDeadline, request);
+      const report = () => this.reportLoss(sink, pastDeadline, request, options);
       const loss = options.lossBoundary ? await options.lossBoundary(report) : await report();
       if (loss.kind === 'done' && loss.reported > 0) summary.lossReported = loss.reported;
       if (loss.kind !== 'done' && !summary.stopped) summary.stopped = loss.kind;
@@ -557,64 +650,66 @@ export class Outbox {
     sink: HarnessSink,
     entry: OutboxEntry,
     pastDeadline: () => boolean,
-    request: () => RequestOptions
+    request: () => RequestOptions,
+    options: Pick<FlushOptions, 'eventBoundary' | 'entryRefusalReason'>
   ): Promise<
     | { kind: 'delivered' }
     | { kind: 'failed'; reason: string }
+    | { kind: 'retained-failed'; reason: string }
     | { kind: 'dropped'; reason: string }
     | { kind: 'retry' }
     | { kind: 'unavailable' }
     | { kind: 'deadline' }
   > {
     const dir = this.entryDir(entry.id);
-    if (entry.meta.kind !== 'run' && entry.meta.kind !== 'events') {
-      return this.markFailed(dir, `meta.json: unknown entry kind ${JSON.stringify(entry.meta.kind)}`);
+    const snapshot = await this.beginFlush(entry.id);
+    let meta = snapshot.meta;
+    if (meta.kind !== 'run' && meta.kind !== 'events') {
+      return this.markFailed(entry.id, dir, `meta.json: unknown entry kind ${JSON.stringify(meta.kind)}`);
     }
-    const meta: OutboxMeta = { ...entry.meta, attempts: entry.meta.attempts + 1 };
     const remember = async (error?: string) => {
       if (error !== undefined) meta.last_error = error;
-      try {
-        await writeJsonAtomic(join(dir, META_FILE), meta);
-      } catch (err) {
-        if (isEnoent(err)) throw new EntryGone();
-        throw err;
-      }
+      meta = await this.updateMeta(entry.id, current => this.mergeFlushMeta(current, meta));
     };
-    await remember();
-
 
     if (meta.kind === 'run' && !meta.envelope_delivered) {
-      const read = await readJson<RunEnvelope>(join(dir, ENVELOPE_FILE));
+      const read = snapshot.envelope;
       if (read.kind === 'error') {
         await remember(`envelope unreadable: ${read.reason}`);
         return { kind: 'retry' };
       }
       if (read.kind !== 'ok' || !isRecord(read.value) || !isRecord(read.value['run'])) {
-        return this.markFailed(dir, 'envelope.json missing or malformed');
+        return this.markFailed(entry.id, dir, 'envelope.json missing or malformed');
       }
       const envelope = read.value;
       envelope.delivery = { mode: 'retried', spooled_at: meta.spooled_at };
       if (envelope.run.gating?.mode === 'verified-consensus') {
         const invalid = validateRunEnvelope(envelope);
-        if (invalid.length > 0) return this.markFailed(dir, `queued verified-consensus envelope invalid: ${invalid[0]!.path}`);
+        if (invalid.length > 0) return this.markFailed(entry.id, dir, `queued verified-consensus envelope invalid: ${invalid[0]!.path}`);
         const declared = envelope.artifacts_declared.find(artifact => artifact.kind === 'report_json')!;
-        const report = await readBoundedJson<unknown>(
-          join(dir, ARTIFACTS_DIR, ARTIFACT_FILES.report_json), Math.min(declared.bytes, MAX_ARTIFACT_BYTES)
-        );
-        if (report.kind === 'error') {
-          await remember(`report_json unreadable: ${report.reason}`);
+        const reportText = snapshot.artifacts.report_json;
+        if (reportText?.kind === 'error') {
+          await remember(`report_json unreadable: ${reportText.reason}`);
           return { kind: 'retry' };
         }
-        if (report.kind === 'oversized') return this.markFailed(dir, 'report_json exceeds declared or maximum artifact bytes');
-        if (report.kind === 'malformed') return this.markFailed(dir, 'report_json malformed; verified-consensus source cannot be checked');
-        if (report.kind === 'ok') {
-          if (declared.sha256 !== sha256Hex(report.raw) || declared.bytes !== Buffer.byteLength(report.raw, 'utf8')) {
-            return this.markFailed(dir, 'report_json digest or size differs from the queued envelope');
+        if (reportText?.kind === 'oversized') {
+          return this.markFailed(entry.id, dir, 'report_json exceeds declared or maximum artifact bytes');
+        }
+        if (reportText?.kind === 'ok') {
+          const size = Buffer.byteLength(reportText.value, 'utf8');
+          if (size > Math.min(declared.bytes, MAX_ARTIFACT_BYTES)) {
+            return this.markFailed(entry.id, dir, 'report_json exceeds declared or maximum artifact bytes');
           }
-          const problem = verifiedConsensusReportProblem(report.value, envelope, report.raw);
-          if (problem) return this.markFailed(dir, problem);
+          let report: unknown;
+          try { report = JSON.parse(reportText.value); }
+          catch { return this.markFailed(entry.id, dir, 'report_json malformed; verified-consensus source cannot be checked'); }
+          if (declared.sha256 !== sha256Hex(reportText.value) || declared.bytes !== size) {
+            return this.markFailed(entry.id, dir, 'report_json digest or size differs from the queued envelope');
+          }
+          const problem = verifiedConsensusReportProblem(report, envelope, reportText.value);
+          if (problem) return this.markFailed(entry.id, dir, problem);
         } else if (!hasGuardedProducer(envelope.run.rcl_version)) {
-          return this.markFailed(dir, 'report_json unavailable; queued verified-consensus producer or envelope cannot prove original gating labels');
+          return this.markFailed(entry.id, dir, 'report_json unavailable; queued verified-consensus producer or envelope cannot prove original gating labels');
         }
       }
       if (pastDeadline()) return { kind: 'deadline' };
@@ -636,30 +731,31 @@ export class Outbox {
           // The server holds this run id with a different report. The events
           // queued here name that run id too, so they must not be attached to
           // whatever the server has; the whole entry stays for inspection.
-          return this.markFailed(dir, `conflict: ${outcome.message}`);
+          return this.markFailed(entry.id, dir, `conflict: ${outcome.message}`);
         case 'rejected':
-          return this.markFailed(dir, `HTTP ${outcome.httpStatus} ${outcome.error} ${outcome.message}`.trim());
+          return this.markFailed(entry.id, dir, `HTTP ${outcome.httpStatus} ${outcome.error} ${outcome.message}`.trim());
       }
     }
 
     if (meta.kind === 'run') {
-      for (const kind of entry.artifacts) {
+      for (const kind of Object.keys(snapshot.artifacts) as ArtifactKind[]) {
         if (pastDeadline()) return { kind: 'deadline' };
         const path = join(dir, ARTIFACTS_DIR, ARTIFACT_FILES[kind]);
-        let bytes: string;
-        try {
-          bytes = await readFile(path, 'utf8');
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue; // delivered by a concurrent flush
-          await remember(`artifact ${kind} unreadable: ${err instanceof Error ? err.message : String(err)}`);
+        const artifact = snapshot.artifacts[kind]!;
+        if (artifact.kind === 'missing') continue;
+        if (artifact.kind === 'oversized') {
+          return this.markFailed(entry.id, dir, `artifact ${kind} exceeds maximum artifact bytes`);
+        }
+        if (artifact.kind === 'error') {
+          await remember(`artifact ${kind} unreadable: ${artifact.reason}`);
           return { kind: 'retry' };
         }
+        const bytes = artifact.value;
         const outcome = await sink.putArtifact(entry.id, kind, bytes, request());
         switch (outcome.kind) {
           case 'ok': {
             // Remove exactly the bytes that were uploaded; a re-spool meanwhile stays.
-            const current = await readFile(path, 'utf8').catch(() => undefined);
-            if (current === bytes) await rm(path, { force: true });
+            await this.removeArtifactIfExact(entry.id, path, bytes);
             break;
           }
           case 'disabled':
@@ -668,7 +764,7 @@ export class Outbox {
               return { kind: 'dropped', reason: outcome.message || outcome.reason };
             }
             // Artifacts are capped for the org; the envelope stands.
-            await rm(path, { force: true });
+            await this.removeArtifactIfExact(entry.id, path, bytes);
             break;
           case 'unavailable':
             await remember(outcome.reason);
@@ -676,20 +772,20 @@ export class Outbox {
           case 'conflict':
           case 'rejected':
             return this.markFailed(
-              dir,
+              entry.id, dir,
               `artifact ${kind}: ${outcome.kind === 'conflict' ? outcome.message : `HTTP ${outcome.httpStatus} ${outcome.error}`}`
             );
         }
       }
     }
 
-    const events = await readJson<unknown>(join(dir, EVENTS_FILE));
+    const events = snapshot.events;
     if (events.kind === 'error') {
       await remember(`events unreadable: ${events.reason}`);
       return { kind: 'retry' };
     }
     if (events.kind === 'malformed' || (events.kind === 'ok' && !validEvents(events.value))) {
-      return this.markFailed(dir, 'events.json malformed');
+      return this.markFailed(entry.id, dir, 'events.json malformed');
     }
     if (events.kind === 'missing' && meta.kind === 'events') {
       // events.json is written before meta.json, so a missing file means an
@@ -698,29 +794,71 @@ export class Outbox {
       return (await this.finish(dir, meta)) ? { kind: 'delivered' } : { kind: 'retry' };
     }
     if (events.kind === 'ok' && validEvents(events.value) && events.value.length > 0) {
-      if (pastDeadline()) return { kind: 'deadline' };
-      const outcome = await sink.postEvents(events.value, request());
-      switch (outcome.kind) {
-        case 'ok':
-          await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, events.value);
-          break;
-        case 'unavailable':
-          await remember(outcome.reason);
-          return { kind: 'unavailable' };
-        case 'disabled':
-          await this.drop(dir);
-          return { kind: 'dropped', reason: outcome.message || outcome.reason };
-        case 'conflict':
-        case 'rejected':
-          return this.markFailed(
-            dir,
-            `events: ${outcome.kind === 'conflict' ? outcome.message : `HTTP ${outcome.httpStatus} ${outcome.error} ${outcome.message}`.trim()}`
-          );
+      const failuresRead = snapshot.failures;
+      if (failuresRead.kind === 'error') {
+        await remember(`failed events unreadable: ${failuresRead.reason}`);
+        return { kind: 'retry' };
+      }
+      if (failuresRead.kind === 'malformed' || (failuresRead.kind === 'ok' && !validEventFailures(failuresRead.value))) {
+        return this.markFailed(entry.id, dir, 'failed-events.json malformed');
+      }
+      const eventFailures: Record<string, string> = failuresRead.kind === 'ok' && validEventFailures(failuresRead.value)
+        ? failuresRead.value : {};
+      const batches = options.eventBoundary ? events.value.map(event => [event]) : [events.value];
+      let retainedBoundaryError: unknown;
+      let retainedEventFailure = Object.values(eventFailures)[0];
+      let disabledReason: string | undefined;
+      for (const batch of batches) {
+        if (options.eventBoundary && eventFailures[batch[0]!.id] !== undefined) continue;
+        if (pastDeadline()) return { kind: 'deadline' };
+        let outcome: Awaited<ReturnType<HarnessSink['postEvents']>>;
+        try {
+          const work = () => sink.postEvents(batch, request());
+          outcome = options.eventBoundary
+            ? await options.eventBoundary(batch[0]!, entry, work)
+            : await work();
+        } catch (error) {
+          if (options.entryRefusalReason?.(error) === undefined) throw error;
+          retainedBoundaryError ??= error;
+          continue;
+        }
+        switch (outcome.kind) {
+          case 'ok':
+            await this.dropDeliveredEvents(entry.id, join(dir, EVENTS_FILE), batch);
+            break;
+          case 'unavailable':
+            await remember(outcome.reason);
+            return { kind: 'unavailable' };
+          case 'disabled':
+            if (!options.eventBoundary) {
+              await this.drop(dir);
+              return { kind: 'dropped', reason: outcome.message || outcome.reason };
+            }
+            // A mixed entry may also hold an armed run's event. Remove only
+            // the independently classified row; never drop protected peers.
+            await this.dropDeliveredEvents(entry.id, join(dir, EVENTS_FILE), batch);
+            disabledReason ??= outcome.message || outcome.reason;
+            break;
+          case 'conflict':
+          case 'rejected': {
+            const reason = `events: ${outcome.kind === 'conflict' ? outcome.message : `HTTP ${outcome.httpStatus} ${outcome.error} ${outcome.message}`.trim()}`;
+            if (!options.eventBoundary) return this.markFailed(entry.id, dir, reason);
+            eventFailures[batch[0]!.id] = reason;
+            await this.recordFailedEvent(entry.id, dir, batch[0]!.id, reason);
+            retainedEventFailure ??= reason;
+            break;
+          }
+        }
+      }
+      if (retainedBoundaryError !== undefined) throw retainedBoundaryError;
+      if (retainedEventFailure !== undefined) return { kind: 'retained-failed', reason: retainedEventFailure };
+      if (disabledReason !== undefined) {
+        return (await this.finish(dir, meta)) ? { kind: 'dropped', reason: disabledReason } : { kind: 'retry' };
       }
     }
 
     if (events.kind === 'ok' && Array.isArray(events.value) && events.value.length === 0) {
-      await dropDeliveredEvents(join(dir, EVENTS_FILE), events.raw, []);
+      await this.dropDeliveredEvents(entry.id, join(dir, EVENTS_FILE), []);
     }
 
     // Whatever arrived while flushing stays for the next flush; the entry
@@ -733,9 +871,57 @@ export class Outbox {
    * files, then the directory — which stays, listed, if another process
    * put something new into it meanwhile. Returns whether the directory went.
    */
+  private async dropDeliveredEvents(id: string, path: string, delivered: WireEvent[]): Promise<void> {
+    await this.withEntryMutation(id, async () => {
+      await dropDeliveredEvents(path, delivered);
+      const failedPath = join(this.entryDir(id), FAILED_EVENTS_FILE);
+      const current = await readJson<unknown>(failedPath);
+      if (current.kind !== 'ok' || !validEventFailures(current.value)) return;
+      const deliveredIds = new Set(delivered.map(event => event.id));
+      const remaining = Object.fromEntries(Object.entries(current.value).filter(([eventId]) => !deliveredIds.has(eventId)));
+      if (Object.keys(remaining).length === 0) await rm(failedPath, { force: true });
+      else await writeJsonAtomic(failedPath, remaining);
+    });
+  }
+
+  private async recordFailedEvent(id: string, dir: string, eventId: string, reason: string): Promise<void> {
+    await this.withEntryMutation(id, async () => {
+      const path = join(dir, FAILED_EVENTS_FILE);
+      const current = await readJson<unknown>(path);
+      if (current.kind === 'error' || current.kind === 'malformed' ||
+          (current.kind === 'ok' && !validEventFailures(current.value))) {
+        throw new OutboxError('failed-events.json malformed');
+      }
+      const failures: Record<string, string> = current.kind === 'ok' && validEventFailures(current.value)
+        ? current.value : {};
+      await writeJsonAtomic(path, { ...failures, [eventId]: reason });
+    });
+  }
+
   private async finish(dir: string, meta: OutboxMeta): Promise<boolean> {
+    return this.withEntryMutation(basename(dir), () => this.finishLocked(dir, meta));
+  }
+
+  private async finishLocked(dir: string, meta: OutboxMeta): Promise<boolean> {
+    const events = await readJson<unknown>(join(dir, EVENTS_FILE));
+    const failedEvents = await readJson<unknown>(join(dir, FAILED_EVENTS_FILE));
+    const metaRead = await readJson<OutboxMeta>(join(dir, META_FILE));
+    if (metaRead.kind === 'missing') throw new EntryGone();
+    if (metaRead.kind !== 'ok' || !isRecord(metaRead.value)) throw new OutboxError('meta.json malformed');
+    const retainedMeta = this.mergeFlushMeta(metaRead.value, { ...meta, envelope_delivered: true });
+    const pendingEvents = events.kind === 'ok' ? !validEvents(events.value) || events.value.length > 0 : events.kind !== 'missing';
+    const pendingFailures = failedEvents.kind === 'ok'
+      ? !validEventFailures(failedEvents.value) || Object.keys(failedEvents.value).length > 0
+      : failedEvents.kind !== 'missing';
+    if (pendingEvents || pendingFailures) {
+      await writeJsonAtomic(join(dir, META_FILE), retainedMeta);
+      return false;
+    }
+    if (events.kind === 'ok') await rm(join(dir, EVENTS_FILE), { force: true });
+    if (failedEvents.kind === 'ok') await rm(join(dir, FAILED_EVENTS_FILE), { force: true });
     await rm(join(dir, ENVELOPE_FILE), { force: true });
     await rm(join(dir, FAILED_MARKER), { force: true });
+    await rm(join(dir, FAILED_EVENTS_FILE), { force: true });
     await this.sweepTempFiles(dir);
     await rmdir(join(dir, ARTIFACTS_DIR)).catch(() => undefined);
     await rm(join(dir, META_FILE), { force: true });
@@ -746,7 +932,7 @@ export class Outbox {
       if (isEnoent(err)) return true;
       if ((err as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw err;
       // Something arrived while flushing: keep the entry visible for the next flush.
-      await writeJsonAtomic(join(dir, META_FILE), { ...meta, envelope_delivered: true }).catch(() => undefined);
+      await writeJsonAtomic(join(dir, META_FILE), retainedMeta).catch(() => undefined);
       return false;
     }
   }
@@ -765,16 +951,22 @@ export class Outbox {
 
   /** The organization switched evidence off: nothing in this entry will ever be wanted. */
   private async drop(dir: string): Promise<void> {
+    await this.withEntryMutation(basename(dir), () => this.dropLocked(dir));
+  }
+
+  private async dropLocked(dir: string): Promise<void> {
     await rm(dir, { recursive: true, force: true });
   }
 
-  private async markFailed(dir: string, reason: string): Promise<{ kind: 'failed'; reason: string }> {
-    try {
-      await writeJsonAtomic(join(dir, FAILED_MARKER), { at: new Date().toISOString(), reason });
-    } catch (err) {
-      if (isEnoent(err)) throw new EntryGone();
-      throw err;
-    }
+  private async markFailed(id: string, dir: string, reason: string): Promise<{ kind: 'failed'; reason: string }> {
+    await this.withEntryMutation(id, async () => {
+      try {
+        await writeJsonAtomic(join(dir, FAILED_MARKER), { at: new Date().toISOString(), reason });
+      } catch (err) {
+        if (isEnoent(err)) throw new EntryGone();
+        throw err;
+      }
+    });
     return { kind: 'failed', reason };
   }
 
@@ -787,16 +979,29 @@ export class Outbox {
    * never retried, never counted. An unreachable server or an expired
    * deadline ends the pass with the rest still pending.
    */
-  private async reportLoss(sink: HarnessSink, pastDeadline: () => boolean, request: () => RequestOptions): Promise<LossOutcome> {
+  private async reportLoss(
+    sink: HarnessSink,
+    pastDeadline: () => boolean,
+    request: () => RequestOptions,
+    options: Pick<FlushOptions, 'eventBoundary' | 'entryRefusalReason'>
+  ): Promise<LossOutcome> {
     const files = await this.pendingLossFiles();
     let reported = 0;
-    for (let i = 0; i < files.length; i += LOSS_BATCH) {
+    const batches = options.eventBoundary ? files.map(file => [file]) :
+      Array.from({ length: Math.ceil(files.length / LOSS_BATCH) }, (_, index) => files.slice(index * LOSS_BATCH, (index + 1) * LOSS_BATCH));
+    for (const batch of batches) {
       if (pastDeadline()) return { kind: 'deadline' };
-      const batch = files.slice(i, i + LOSS_BATCH);
-      const outcome = await sink.postEvents(
-        batch.map((f) => f.event),
-        request()
-      );
+      let outcome: Awaited<ReturnType<HarnessSink['postEvents']>>;
+      try {
+        const work = () => sink.postEvents(batch.map(f => f.event), request());
+        outcome = options.eventBoundary
+          ? await options.eventBoundary(batch[0]!.event, undefined, work)
+          : await work();
+      } catch (error) {
+        if (options.entryRefusalReason?.(error) === undefined) throw error;
+        // This loss row remains in place, while independent rows continue.
+        continue;
+      }
       switch (outcome.kind) {
         case 'ok':
           // The sink only reads `ok` when the receipt accounts for every event
@@ -823,6 +1028,6 @@ export class Outbox {
 
   /** Remove one entry by id (validated like every other id). */
   async remove(id: string): Promise<void> {
-    await rm(this.entryDir(id), { recursive: true, force: true });
+    await this.withEntryMutation(id, () => rm(this.entryDir(id), { recursive: true, force: true }));
   }
 }

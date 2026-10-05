@@ -66,9 +66,20 @@ export interface RetainedReviewerRecoveryPreparation {
   envelopeBytes: string;
   reportMarkdownBytes?: string;
 }
-const outcomePhases = new Set(['activation_post_outcome', 'report_json_put_outcome',
-  'report_md_put_outcome', 'reviewer_put_outcome']);
-const operationPhases = new Set(['prepared', 'activation_post_intent', ...outcomePhases, 'activation_post_uncertain',
+const putOutcomePhases = ['report_json_put_outcome', 'report_md_put_outcome', 'reviewer_put_outcome'] as const;
+function putOutcomeAttempt(phase: string): { base: typeof putOutcomePhases[number]; attempt: number } | undefined {
+  for (const base of putOutcomePhases) {
+    if (phase === base) return { base, attempt: 1 };
+    if (!phase.startsWith(`${base}_`)) continue;
+    const suffix = phase.slice(base.length + 1);
+    if (!/^(?:[2-9]|[1-9][0-9]+)$/.test(suffix)) return undefined;
+    const attempt = Number(suffix);
+    return Number.isSafeInteger(attempt) && attempt >= 2 ? { base, attempt } : undefined;
+  }
+  return undefined;
+}
+const isOutcomePhase = (phase: string) => phase === 'activation_post_outcome' || putOutcomeAttempt(phase) !== undefined;
+const operationPhases = new Set(['prepared', 'activation_post_intent', 'activation_post_outcome', ...putOutcomePhases, 'activation_post_uncertain',
   'envelope_verified', 'report_json_put_intent', 'report_json_verified',
   'report_md_put_intent', 'report_md_verified', 'reviewer_put_intent',
   'reviewer_verified', 'recovery_acknowledged', 'complete']);
@@ -83,6 +94,7 @@ const files = { report_json: 'report.json', report_md: 'report.md' } as const;
 const ref = (text: string) => ({ sha256: sha256(text), bytes: Buffer.byteLength(text) });
 function fail(reason: string): never { throw new Error(`reviewer_delivery_${reason}`); }
 function safeFailure(error: unknown): string {
+  if (error instanceof Error && error.message === 'recovery_run_locked') return 'reviewer_delivery_recovery_run_locked';
   return error instanceof Error && /^reviewer_delivery_[a-z_]+$/.test(error.message) ? error.message : 'reviewer_delivery_local_refusal';
 }
 function accepted<T>(outcome: SinkOutcome<T>): T {
@@ -374,7 +386,7 @@ export class ReviewerDeliveryQueue {
   }
   private recoveryOutcomeDigest(operation: RetainedReviewerRecoveryOperation): string {
     const outcomes = operation.journal.checkpoints()
-      .filter(checkpoint => outcomePhases.has(checkpoint.phase))
+      .filter(checkpoint => isOutcomePhase(checkpoint.phase))
       .map(checkpoint => {
         const parsed = outcomeSchema.safeParse(checkpoint.data);
         if (!parsed.success || !isDeepStrictEqual(parsed.data, checkpoint.data)) fail('journal_checkpoint_conflict');
@@ -449,18 +461,73 @@ export class ReviewerDeliveryQueue {
     const m = entry.manifest;
     this.validateRecoveryOperation(entry, operation);
     if (sink.baseUrl !== m.host || sink.credentialSource !== m.credentialKind) fail('recovery_operation_mismatch');
+    const checkpoints = operation.journal.checkpoints();
     const phases = new Set<string>();
-    for (const checkpoint of operation.journal.checkpoints()) {
+    const putAttempts = new Map<typeof putOutcomePhases[number], number>();
+    const putHistories = new Map<typeof putOutcomePhases[number], Array<{ index: number; data: z.infer<typeof outcomeSchema> }>>();
+    const phasePositions = new Map<string, number>();
+    for (const [index, checkpoint] of checkpoints.entries()) {
       if (checkpoint.phase === 'interrupted_checkpoints_retained') continue;
-      if (!operationPhases.has(checkpoint.phase)) fail('journal_checkpoint_conflict');
+      const putAttempt = putOutcomeAttempt(checkpoint.phase);
+      if (!operationPhases.has(checkpoint.phase) && putAttempt === undefined) fail('journal_checkpoint_conflict');
       if (phases.has(checkpoint.phase)) fail('journal_checkpoint_conflict');
       phases.add(checkpoint.phase);
+      phasePositions.set(checkpoint.phase, index);
+      if (isOutcomePhase(checkpoint.phase)) {
+        const parsed = outcomeSchema.safeParse(checkpoint.data);
+        if (!parsed.success || !isDeepStrictEqual(parsed.data, checkpoint.data)) fail('journal_checkpoint_conflict');
+      }
+      if (putAttempt !== undefined) {
+        const expected = (putAttempts.get(putAttempt.base) ?? 0) + 1;
+        if (putAttempt.attempt !== expected) fail('journal_checkpoint_conflict');
+        putAttempts.set(putAttempt.base, expected);
+        const parsed = outcomeSchema.safeParse(checkpoint.data);
+        if (!parsed.success) fail('journal_checkpoint_conflict');
+        const history = putHistories.get(putAttempt.base) ?? [];
+        history.push({ index, data: parsed.data });
+        putHistories.set(putAttempt.base, history);
+      }
+    }
+    for (const base of putOutcomePhases) {
+      const prefix = base.slice(0, -'_put_outcome'.length);
+      const intentPosition = phasePositions.get(`${prefix}_put_intent`);
+      const verifiedPosition = phasePositions.get(`${prefix}_verified`);
+      const history = putHistories.get(base) ?? [];
+      if (history.length > 0 && intentPosition === undefined) fail('journal_checkpoint_conflict');
+      if (intentPosition !== undefined && verifiedPosition !== undefined && intentPosition > verifiedPosition) {
+        fail('journal_checkpoint_conflict');
+      }
+      let terminal = false;
+      for (const item of history) {
+        if (item.index < intentPosition! || (verifiedPosition !== undefined && item.index > verifiedPosition) || terminal) {
+          fail('journal_checkpoint_conflict');
+        }
+        if (item.data.kind !== 'unavailable') terminal = true;
+      }
     }
     const appendOnce = async (phase: string, data: unknown) => {
       const normalized = JSON.parse(JSON.stringify(data)) as unknown;
       const matches = operation.journal.checkpoints().filter(checkpoint => checkpoint.phase === phase);
       if (matches.length === 0) await operation.journal.append(phase, normalized);
       else if (matches.length !== 1 || !isDeepStrictEqual(matches[0]!.data, normalized)) fail('journal_checkpoint_conflict');
+    };
+    const appendPutOutcome = async (phase: string, data: unknown) => {
+      if (!putOutcomePhases.includes(phase as typeof putOutcomePhases[number])) fail('journal_checkpoint_conflict');
+      const attempts = operation.journal.checkpoints().filter(checkpoint => putOutcomeAttempt(checkpoint.phase)?.base === phase).length;
+      const attemptPhase = attempts === 0 ? phase : `${phase}_${attempts + 1}`;
+      await operation.journal.append(attemptPhase, JSON.parse(JSON.stringify(data)) as unknown);
+    };
+    const assertPutMayProceed = (phase: typeof putOutcomePhases[number]) => {
+      const verifiedPhase = `${phase.slice(0, -'_put_outcome'.length)}_verified`;
+      if (operation.journal.checkpoints().some(checkpoint => checkpoint.phase === verifiedPhase)) fail('unavailable');
+      const attempts = operation.journal.checkpoints()
+        .filter(checkpoint => putOutcomeAttempt(checkpoint.phase)?.base === phase);
+      const previous = attempts.at(-1);
+      if (!previous) return;
+      const parsed = outcomeSchema.safeParse(previous.data);
+      if (!parsed.success || !isDeepStrictEqual(parsed.data, previous.data)) fail('journal_checkpoint_conflict');
+      if (parsed.data.kind === 'unavailable') return;
+      fail(parsed.data.kind === 'ok' ? 'unavailable' : 'refused');
     };
     const assertExisting = (phase: string, data: unknown) => {
       const checkpoint = operation.journal.checkpoints().find(candidate => candidate.phase === phase);
@@ -547,10 +614,11 @@ export class ReviewerDeliveryQueue {
         continue;
       }
       if (state === 'mismatch') fail('ordinary_mismatch');
+      assertPutMayProceed(`${kind}_put_outcome`);
       await assertDestination();
       await appendOnce(`${kind}_put_intent`, m[kind]);
       const uploaded = await sink.putArtifact(m.runId, kind as ArtifactKind, bytes, request());
-      await appendOnce(`${kind}_put_outcome`, outcome(uploaded));
+      await appendPutOutcome(`${kind}_put_outcome`, outcome(uploaded));
       if (await inspectOrdinary(kind, bytes) !== 'exact') {
         if (uploaded.kind !== 'ok') accepted(uploaded);
         fail('ordinary_mismatch');
@@ -558,10 +626,11 @@ export class ReviewerDeliveryQueue {
       await appendOnce(`${kind}_verified`, m[kind]);
     }
     if (read.kind === 'pending') {
+      assertPutMayProceed('reviewer_put_outcome');
       await assertDestination();
       await appendOnce('reviewer_put_intent', m.reviewer);
       const uploaded = await sink.putReviewerArtifact(m.runId, entry.privateBytes, m.reviewer, request());
-      await appendOnce('reviewer_put_outcome', outcome(uploaded));
+      await appendPutOutcome('reviewer_put_outcome', outcome(uploaded));
       read = await privateReadback();
       if (read.kind === 'pending') {
         if (uploaded.kind !== 'ok') accepted(uploaded);

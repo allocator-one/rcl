@@ -32,6 +32,7 @@ import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
 
 export const STARTUP_FLUSH_DEADLINE_MS = 5_000;
 export const EVIDENCE_REQUIRED_EXIT_CODE = 4;
+const WIRE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface TelemetryRuntime {
   level: TelemetryLevel;
@@ -233,15 +234,36 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
     await noticeBefore(runtime);
     return work();
   };
+  const refusalReason = options.runId === undefined ? (error: unknown): string | undefined => {
+    if (!(error instanceof Error)) return undefined;
+    if (error.message === 'reviewer_delivery_explicit_activation_required' ||
+        error.message === 'reviewer_delivery_invalid_event_run_id') return error.message;
+    if (error.message === 'recovery_run_locked') return 'reviewer_delivery_recovery_run_locked';
+    return undefined;
+  } : undefined;
+  const eventRunIds = (event: WireEvent): string[] => {
+    const payloadRunId = event.kind === 'loss' && event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+      ? event.payload['run_id'] : undefined;
+    const bindings = [event.run_id, typeof payloadRunId === 'string' ? payloadRunId : undefined]
+      .filter((runId): runId is string => runId !== undefined);
+    if (bindings.some(runId => !WIRE_RUN_ID.test(runId))) throw new Error('reviewer_delivery_invalid_event_run_id');
+    return [...new Set(bindings.map(runId => runId.toLowerCase()))].sort();
+  };
+  const eventBoundary = async <T>(event: WireEvent, entry: { id: string; meta: { kind: 'run' | 'events' } } | undefined,
+    work: () => Promise<T>): Promise<T> => {
+    const runIds = eventRunIds(event).filter(runId => entry?.meta.kind !== 'run' || runId.toLowerCase() !== entry.id.toLowerCase());
+    const acquire = (index: number): Promise<T> => index === runIds.length
+      ? transferBoundary(work)
+      : reviewerQueue.withGenericDeliveryAllowed(runIds[index]!, () => acquire(index + 1));
+    return acquire(0);
+  };
   const ordinary = await runtime.outbox.flush(runtime.sink, {
     ...options,
     entryBoundary: (entry, work) => entry.meta.kind === 'run'
       ? reviewerQueue.withGenericDeliveryAllowed(entry.id, () => transferBoundary(work))
-      : transferBoundary(work),
-    ...(options.runId === undefined ? { entryRefusalReason: (error: unknown) =>
-      error instanceof Error && error.message === 'reviewer_delivery_explicit_activation_required'
-        ? error.message : undefined } : {}),
-    lossBoundary: transferBoundary,
+      : work(),
+    eventBoundary,
+    ...(refusalReason ? { entryRefusalReason: refusalReason } : {}),
   });
   if (runtime.level !== 'full' || runtime.attested) return ordinary;
   const remaining = options.deadlineMs === undefined ? undefined : Math.max(0, options.deadlineMs - (performance.now() - started));
