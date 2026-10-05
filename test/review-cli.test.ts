@@ -254,6 +254,19 @@ describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
     expect(result.stdout.replace(/\s+/g, ' ')).toContain('without restarting reviewers');
   });
 
+  it('accepts the 4.5.9 target/run syntax as preview-only while explicit apply still requires a manifest', () => {
+    const repo = tempRepository();
+    const runId = '00000000-0000-4000-8000-000000000159';
+    const compatible = runRcl(['telemetry', 'recover-reviewer', '--target', 'rcl-159', '--run', runId], repo);
+    expect(compatible.status).toBe(4);
+    expect(compatible.stderr).not.toMatch(/required option.*manifest|choose_exactly_one_recovery_mode|reviewer_delivery_manifest_required/i);
+    expect(existsSync(join(repo, `rcl-retained-reviewer-activation-${runId}.json`))).toBe(false);
+
+    const unsafe = runRcl(['telemetry', 'recover-reviewer', '--apply'], repo);
+    expect(unsafe.status).toBe(4);
+    expect(unsafe.stderr).toContain('reviewer_delivery_manifest_required');
+  });
+
   it('advertises unknown finalization, fresh recovery and immutable async bindings', () => {
     const result = runRcl(['review', '--help'], tempRepository());
     expect(result.status).toBe(0);

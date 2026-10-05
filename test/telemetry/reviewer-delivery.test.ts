@@ -221,6 +221,27 @@ describe('private immutable reviewer delivery', () => {
     expect(remote.requests.every(row => row.method === 'GET')).toBe(true);
   });
 
+  it('keeps the 4.5.9 target/run invocation as a read-only compatibility preview', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-legacy-cli-'))); roots.push(root);
+    const retained = { root, ...await strictFallbackReviewerFixture(root) };
+    const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
+    const declaration = declareReviewerRecovery({ artifact: retained.artifact, descriptor: retained.result.run.reviewer_evidence });
+    const envelope = buildRunEnvelope(retained.result, retained.artifacts,
+      { level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration });
+    await queue.retain({ sink: remote.sink(), envelope, artifacts: retained.artifacts, artifact: retained.artifact });
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl });
+
+    const result = await deliverTerminalReviewerRun(runtime, { commonDir: root, cwd: root,
+      target: 'rcl-159', runId: retained.runId });
+
+    expect(result).toMatchObject({ status: 'prepared', manifest: join(root, `rcl-retained-reviewer-activation-${retained.runId}.json`) });
+    expect(remote.requests.every(row => row.method === 'GET')).toBe(true);
+    await expect(stat(`${result.manifest}.journal`)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(root, 'reviewer-outbox', retained.runId, 'activation-intent.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('never repeats an activation POST after a durable intent when its response is lost', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-post-intent-'))); roots.push(root);
     const retained = { root, ...await strictFallbackReviewerFixture(root) };

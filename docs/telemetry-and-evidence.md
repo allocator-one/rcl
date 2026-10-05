@@ -157,6 +157,7 @@ option does not rerun reviewers.
 rcl telemetry recover-reviewer --preview --manifest <path> --target <convergence-target> --run <run-uuid> [--json]
 rcl telemetry recover-reviewer --apply --manifest <path> --manifest-sha256 <sha256> [--json]
 rcl telemetry recover-reviewer --resume --manifest <path> --manifest-sha256 <sha256> [--json]
+rcl telemetry recover-reviewer --target <convergence-target> --run <run-uuid> [--json]
 ```
 
 Reopens one exact retained terminal reviewer report of a guarded convergence
@@ -172,6 +173,9 @@ records activation intent before the sole permitted run POST; an uncertain
 POST is never repeated. Completion requires exact ordinary and private
 readback, followed by a separate immutable recovery acknowledgement. Generic
 `telemetry flush` deliberately keeps refusing an unknown run.
+For patch-release compatibility, the original target/run-only invocation is a
+read-only preview and writes `rcl-retained-reviewer-activation-<run-uuid>.json`
+in the current directory. It never applies the operation implicitly.
 A verified-consensus report without finding labels is
 delivered only when its authenticated reviewer artifact proves the sealed
 failed-verification strict fallback with a conservative nonzero CI result;

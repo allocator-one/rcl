@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type { ReviewResult } from '../consensus/types.js';
@@ -35,7 +36,7 @@ export interface TerminalReviewerDeliveryOptions {
   preview?: boolean;
   apply?: boolean;
   resume?: boolean;
-  manifest: string;
+  manifest?: string;
   manifestSha256?: string;
   target?: string;
   runId?: string;
@@ -129,10 +130,18 @@ export async function deliverTerminalReviewerRun(
   runtime: TelemetryRuntime,
   options: TerminalReviewerDeliveryOptions,
 ): Promise<TerminalReviewerDeliveryResult> {
-  if ([options.preview, options.apply, options.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_recovery_mode');
-  const manifestPath = platformPath(options.manifest);
+  const explicitModes = [options.preview, options.apply, options.resume].filter(Boolean).length;
+  const compatibilityPreview = explicitModes === 0 && options.manifestSha256 === undefined &&
+    typeof options.target === 'string' && options.target.length > 0 && uuid.safeParse(options.runId).success;
+  const preview = options.preview === true || compatibilityPreview;
+  if ([preview, options.apply, options.resume].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_recovery_mode');
+  const manifestOption = options.manifest ?? (compatibilityPreview
+    ? join(options.cwd ?? process.cwd(), `rcl-retained-reviewer-activation-${options.runId}.json`)
+    : undefined);
+  if (!manifestOption) throw new Error('reviewer_delivery_manifest_required');
+  const manifestPath = platformPath(manifestOption);
   const commonDir = options.commonDir ?? await resolveGitCommonDir(options.cwd);
-  if (options.preview) {
+  if (preview) {
     if (!options.target || !options.runId || options.manifestSha256 !== undefined) throw new Error('reviewer_delivery_invalid_preview');
     const { prepared, selection } = await prepare(runtime, commonDir, options.target, options.runId);
     const target = await currentDestination(runtime);

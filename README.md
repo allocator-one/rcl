@@ -425,7 +425,7 @@ and the recovery runbooks are in
 | `rcl telemetry status` | Telemetry level, credential source and spooled deliveries |
 | `rcl telemetry flush [--run <id>]` | Deliver spooled evidence |
 | `rcl telemetry rejected` | Inspect retained rejected evidence without delivering it |
-| `rcl telemetry recover-reviewer --preview\|--apply\|--resume --manifest <path>` | Preview or execute one pinned retained reviewer activation without restarting reviewers or verification |
+| `rcl telemetry recover-reviewer --preview\|--apply\|--resume --manifest <path>` | Preview or execute one pinned retained reviewer activation; legacy `--target <t> --run <id>` safely defaults to preview |
 | `rcl telemetry backfill` | Post recovered pre-3.0 reports and ledgers as backfill evidence |
 | `rcl telemetry recover-refutations` | Discover original verifier explanations and write a reviewed recovery manifest |
 

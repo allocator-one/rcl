@@ -1145,12 +1145,12 @@ telemetry
   .option('--preview', 'Write a read-only pinned recovery manifest')
   .option('--apply', 'Apply one exact reviewed recovery manifest')
   .option('--resume', 'Resume the same journaled recovery operation')
-  .requiredOption('--manifest <path>', 'Immutable recovery manifest path')
+  .option('--manifest <path>', 'Immutable recovery manifest path; omitted target/run compatibility defaults to a local preview')
   .option('--manifest-sha256 <sha256>', 'Required exact manifest digest for apply or resume')
-  .option('--target <target>', 'Exact guarded convergence target (preview only)')
-  .option('--run <id>', 'Exact retained terminal run UUID (preview only)')
+  .option('--target <target>', 'Exact guarded convergence target (preview or compatibility preview)')
+  .option('--run <id>', 'Exact retained terminal run UUID (preview or compatibility preview)')
   .option('--json', 'Output JSON')
-  .action(async (opts: { preview?: boolean; apply?: boolean; resume?: boolean; manifest: string;
+  .action(async (opts: { preview?: boolean; apply?: boolean; resume?: boolean; manifest?: string;
     manifestSha256?: string; target?: string; run?: string; json?: boolean }) => {
     try {
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
