@@ -30,6 +30,61 @@ describe('council run planning', () => {
     );
   });
 
+  it('admits a full large review only with sufficient explicit capacity', () => {
+    expect(() => assertReviewWorkWithinLimit(400, 17)).toThrow(/safety limit of 512/i);
+    expect(() => assertReviewWorkWithinLimit(400, 17, 6_800)).not.toThrow();
+    expect(() => assertReviewWorkWithinLimit(400, 17, 6_799)).toThrow(
+      /6800 blocking calls.*safety limit of 6799/i,
+    );
+    expect(() => assertReviewWorkWithinLimit(512, 16, 8_192)).not.toThrow();
+    expect(() => assertReviewWorkWithinLimit(513, 16, 8_192)).toThrow(/safety limit of 8192/i);
+  });
+
+  it.each([0, -1, 512.5, 8_193, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER])(
+    'rejects invalid explicit blocking-call capacity %s even for empty work',
+    maxBlockingCalls => {
+      expect(() => assertReviewWorkWithinLimit(0, 0, maxBlockingCalls))
+        .toThrow(/Invalid maximum blocking calls.*1.*8192/i);
+      expect(() => buildCouncilRunPlan({
+        totalCalls: 0, reviewers: 0, chunks: 0, concurrency: 1, timeoutMs: 1_000,
+        maxBlockingCalls,
+      })).toThrow(/Invalid maximum blocking calls/i);
+    },
+  );
+
+  it.each([
+    [-1, 17], [1.5, 17], [Number.NaN, 17], [1, Number.POSITIVE_INFINITY],
+    [Number.MAX_SAFE_INTEGER, 2],
+  ])('keeps invalid dimensions closed with explicit capacity (%s, %s)', (chunks, reviewers) => {
+    expect(() => assertReviewWorkWithinLimit(chunks, reviewers, 8_192))
+      .toThrow('Invalid review work dimensions');
+  });
+
+  it('uses the explicit capacity when reconstructing a retained provider plan', () => {
+    const options = {
+      totalCalls: 6_800, reviewers: 17, chunks: 400, concurrency: 17, timeoutMs: 1_000,
+      providers: Array<string>(6_800).fill('openai'),
+      providerConcurrency: { openai: 17 },
+    };
+    expect(() => buildCouncilRunPlan(options)).toThrow(/safety limit of 512/i);
+    expect(buildCouncilRunPlan({ ...options, maxBlockingCalls: 6_800 })).toMatchObject({
+      totalCalls: 6_800, maxBlockingCalls: 6_800, waves: 400, timeoutBoundMs: 400_000,
+    });
+    expect(buildCouncilRunPlan({
+      totalCalls: 1, reviewers: 1, chunks: 1, concurrency: 1, timeoutMs: 1_000,
+    })).toMatchObject({ maxBlockingCalls: 512 });
+  });
+
+  it.each([2, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a plan whose scheduled call count %s differs from its dimensions',
+    totalCalls => {
+      expect(() => buildCouncilRunPlan({
+        totalCalls, reviewers: 1, chunks: 1, concurrency: 1, timeoutMs: 1_000,
+        maxBlockingCalls: 8_192,
+      })).toThrow('Invalid review total calls');
+    },
+  );
+
   it('makes the 18 reviewer × 6 chunk queue and timeout bound explicit', () => {
     const plan = buildCouncilRunPlan({
       totalCalls: 108,

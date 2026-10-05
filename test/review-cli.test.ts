@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { delimiter, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   asyncTargetKey,
@@ -1099,6 +1099,97 @@ describe('rcl review — guarded native launch', () => {
       expect(fixture.calls()).toBe(calls);
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ attemptsUsed: 1 });
+    });
+  }, 40_000);
+});
+
+describe('rcl review — PR capacity acquisition', () => {
+  it.each([
+    { name: 'complete API patches with only a blocking-call limit', complete: true, chunks: false, succeeds: true },
+    { name: 'incomplete API patches with only a blocking-call limit', complete: false, chunks: false, succeeds: false },
+    { name: 'complete API patches with an explicit chunk limit', complete: true, chunks: true, succeeds: false },
+  ])('$name', async ({ complete, chunks, succeeds }) => {
+    await withGuardedFixture(async fixture => {
+      const headSha = 'a'.repeat(40);
+      const baseSha = 'b'.repeat(40);
+      const apiRequests = join(fixture.repo, 'api-requests.jsonl');
+      const gitAcquisitions = join(fixture.repo, 'git-acquisitions.jsonl');
+      const shim = join(fixture.repo, 'github-acquisition-fixture.mjs');
+      const binaries = join(fixture.repo, 'bin');
+      const gitShim = join(binaries, 'git-fixture.mjs');
+      const pr = { title: 'Fixture', body: '', user: { login: 'fixture' },
+        base: { ref: 'main', sha: baseSha }, head: { ref: 'feature', sha: headSha },
+        html_url: 'https://github.com/owner/repo/pull/42', labels: [], changed_files: 1 };
+      const comparison = { merge_base_commit: { sha: baseSha }, files: [{
+        filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
+        ...(complete ? { patch: '@@ -1 +1 @@\n-export const a = 1;\n+export const a = 2;' } : {}),
+      }] };
+      writeFileSync(shim, `import { appendFileSync } from 'node:fs';
+        import childProcess from 'node:child_process';
+        import { syncBuiltinESMExports } from 'node:module';
+        if (process.platform === 'win32') {
+          // Native spawn does not execute a PATH-based .cmd shim on Windows.
+          const originalSpawn = childProcess.spawn;
+          childProcess.spawn = (command, args, options) => {
+            if (command === 'git' && Array.isArray(args) && args.includes('--no-replace-objects')) {
+              return originalSpawn(process.execPath, [${JSON.stringify(gitShim)}, ...args], options);
+            }
+            return originalSpawn(command, args, options);
+          };
+          syncBuiltinESMExports();
+        }
+        const original = globalThis.fetch;
+        globalThis.fetch = async (input, options) => {
+          const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+          if (url.hostname === '127.0.0.1') return original(input, options);
+          if (url.origin !== 'https://api.github.com') throw new Error('Unexpected network: ' + url);
+          appendFileSync(${JSON.stringify(apiRequests)}, JSON.stringify(url.pathname) + '\\n');
+          let data;
+          if (url.pathname === '/repos/owner/repo/pulls/42') data = ${JSON.stringify(pr)};
+          else if (url.pathname === '/repos/owner/repo/compare/${baseSha}...${headSha}') data = ${JSON.stringify(comparison)};
+          else throw new Error('Unexpected GitHub request: ' + url);
+          return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+        };`);
+      mkdirSync(binaries);
+      writeFileSync(gitShim, `import { appendFileSync } from 'node:fs';
+        import { spawnSync } from 'node:child_process';
+        const args = process.argv.slice(2);
+        if (args.includes('--no-replace-objects')) {
+          appendFileSync(${JSON.stringify(gitAcquisitions)}, JSON.stringify(args) + '\\n');
+          process.stderr.write('Fixture refuses pinned Git acquisition');
+          process.exit(1);
+        }
+        const result = spawnSync('git', args, {
+          env: { ...process.env, PATH: ${JSON.stringify(process.env['PATH'] ?? '')} }, stdio: 'inherit' });
+        process.exit(result.status ?? 1);
+      `);
+      if (process.platform !== 'win32') {
+        writeFileSync(join(binaries, 'git'),
+          `#!${process.execPath}\nimport(${JSON.stringify(pathToFileURL(gitShim).href)});\n`,
+          { mode: 0o700 });
+      }
+      const result = await runRclAsync([
+        'review', 'owner/repo#42', '--config', 'config.json', '--json-file', 'report.json',
+        '--reviewer', 'openai-compat/fixture:general', '--no-telemetry', '--max-blocking-calls', '1024',
+        ...(chunks ? ['--max-review-chunks', '256'] : []),
+      ], fixture.repo, {
+        ...fixture.env, NODE_OPTIONS: `--import=${pathToFileURL(shim).href}`, GITHUB_TOKEN: 'fixture-token',
+        PATH: `${binaries}${delimiter}${process.env['PATH'] ?? ''}`,
+      });
+
+      expect(readFileSync(apiRequests, 'utf8')).toContain(`/compare/${baseSha}...${headSha}`);
+      if (succeeds) {
+        expect(result.status, result.stderr).toBe(0);
+        expect(fixture.calls()).toBe(1);
+        expect(fixture.requestBodies()[0]!.messages.map(message => message.content).join('\n'))
+          .toContain('+export const a = 2;');
+        expect(existsSync(gitAcquisitions)).toBe(false);
+      } else {
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stderr).toContain('Cannot acquire a complete PR patch');
+        expect(readFileSync(gitAcquisitions, 'utf8')).toContain('--no-replace-objects');
+        expect(fixture.calls()).toBe(0);
+      }
     });
   }, 40_000);
 });

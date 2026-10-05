@@ -5,6 +5,7 @@ import { join } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { loadGitDiff, resolveGitHeads } from '../../src/resolver/git.js';
+import { parseDiffFromString } from '../../src/resolver/local.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +13,41 @@ const execFileAsync = promisify(execFile);
 // hooks, external diff) so the fixtures behave the same on every machine.
 const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
 const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+
+describe('Git patch path identity', () => {
+  it('preserves ambiguous spaced paths in metadata-only changes', () => {
+    const diff = parseDiffFromString('diff --git a/a b/z b/a b/z\nold mode 100644\nnew mode 100755\n');
+    expect(diff.files).toMatchObject([{ filename: 'a b/z', status: 'modified', patch: '' }]);
+  });
+
+  it('refuses an ambiguous header without matching path evidence', () => {
+    expect(() => parseDiffFromString('diff --git a/old b/path b/new\nold mode 100644\nnew mode 100755\n'))
+      .toThrow(/path|filename|identity/i);
+  });
+
+  it('refuses a header that disagrees with the text patch paths', () => {
+    expect(() => parseDiffFromString('diff --git a/a b/z b/a b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-old\n+new\n'))
+      .toThrow(/path|filename|identity/i);
+  });
+
+  it('parses CRLF metadata without changing CRLF hunk bytes', () => {
+    const diff = parseDiffFromString('diff --git a/source.ts b/source.ts\r\n--- a/source.ts\r\n+++ b/source.ts\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n');
+    expect(diff.files).toMatchObject([{ filename: 'source.ts', status: 'modified',
+      patch: '@@ -1 +1 @@\r\n-old\r\n+new\r\n' }]);
+  });
+
+  it('keeps both path identities for Git copy metadata', () => {
+    const diff = parseDiffFromString('diff --git a/source.ts b/copy.ts\nsimilarity index 100%\ncopy from source.ts\ncopy to copy.ts\n');
+    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'copied',
+      previousFilename: 'source.ts', patch: '' }]);
+  });
+
+  it('keeps both path identities for a content-changing Git copy', () => {
+    const diff = parseDiffFromString('diff --git a/source.ts b/copy.ts\nsimilarity index 80%\ncopy from source.ts\ncopy to copy.ts\n--- a/source.ts\n+++ b/copy.ts\n@@ -1 +1 @@\n-old\n+new\n');
+    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'copied',
+      previousFilename: 'source.ts', patch: '@@ -1 +1 @@\n-old\n+new\n' }]);
+  });
+});
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
   await execFileAsync('git', args, { cwd, env: GIT_ENV });

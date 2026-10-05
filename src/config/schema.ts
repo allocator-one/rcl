@@ -102,9 +102,9 @@ export const ConfigSchema = z.object({
   thresholds: ThresholdsSchema.optional(),
   gating: GatingSchema.optional(),
   output: OutputSchema.optional(),
-  timeout: z.number().positive().optional(),
+  timeout: TimerDelaySchema.optional(),
   /** Per-call timeout (ms) for the async lane; defaults higher than `timeout`. */
-  asyncTimeout: z.number().positive().optional(),
+  asyncTimeout: TimerDelaySchema.optional(),
   /**
    * Fraction of planned calls whose completion closes a review round;
    * outstanding non-core calls are canceled. 1 disables early closure.

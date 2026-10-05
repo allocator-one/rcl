@@ -2,7 +2,7 @@ import { gunzipSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { guardedInputSha256 } from '../../src/report/run-header.js';
-import { retainGuardedInput } from '../../src/converge/guarded-input-retention.js';
+import { DEFAULT_GUARDED_INPUT_CAPACITY, MAX_GUARDED_INPUT_CAPACITY, retainGuardedInput } from '../../src/converge/guarded-input-retention.js';
 import { ordinaryPendingGuardedInput,
   prepareOrdinaryPendingGuardedInput,
   validateOrdinaryPendingPackage } from '../../src/converge/ordinary-pending-package.js';
@@ -22,6 +22,58 @@ function directPrPackage() {
 }
 
 describe('ordinary pending migration package', () => {
+  it('preserves explicit archive capacity through preparation without changing the guarded-input digest', () => {
+    const original = prepareOrdinaryPendingGuardedInput(structuredClone(input));
+    expect(original.retained).not.toHaveProperty('capacity');
+    const capacity = { ...MAX_GUARDED_INPUT_CAPACITY };
+    const prepared = prepareOrdinaryPendingGuardedInput(structuredClone(input), capacity);
+    expect(prepared.retained.capacity).toEqual(capacity);
+    expect(prepared.inputSha256()).toBe(original.inputSha256());
+    capacity.decodedBytes -= 1;
+    expect(prepared.retained.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
+    const restored = prepareOrdinaryPendingGuardedInput(structuredClone(prepared.retained));
+    expect(restored.retained).toEqual(prepared.retained);
+    expect(restored.inputSha256()).toBe(expected.inputSha256);
+    expect(Object.isFrozen(restored.retained.capacity)).toBe(true);
+    const compact = { ...packet(), guardedInput: restored.retained,
+      guardedInputRepresentation: { version: 1 as const, encoding: 'json-string-table-v1' as const } };
+    expect(ordinaryPendingGuardedInput(validateOrdinaryPendingPackage(compact, expected, restored))).toEqual(input);
+  });
+
+  it('accepts a matching compact capacity and rejects overrides of the persisted policy', () => {
+    const archive = retainGuardedInput(input, MAX_GUARDED_INPUT_CAPACITY);
+    expect(prepareOrdinaryPendingGuardedInput(archive, MAX_GUARDED_INPUT_CAPACITY).retained).toEqual(archive);
+    expect(() => prepareOrdinaryPendingGuardedInput(archive, DEFAULT_GUARDED_INPUT_CAPACITY))
+      .toThrow('guarded_input_capacity_mismatch');
+    const legacy = retainGuardedInput(input);
+    expect(prepareOrdinaryPendingGuardedInput(legacy, DEFAULT_GUARDED_INPUT_CAPACITY).retained).toEqual(legacy);
+    expect(() => prepareOrdinaryPendingGuardedInput(legacy, MAX_GUARDED_INPUT_CAPACITY))
+      .toThrow('guarded_input_capacity_mismatch');
+  });
+
+  it('rejects invalid persisted capacity before preparing or authenticating a package', () => {
+    const archive = retainGuardedInput(input, MAX_GUARDED_INPUT_CAPACITY);
+    const invalid = { ...archive, capacity: { ...MAX_GUARDED_INPUT_CAPACITY, decodedBytes: MAX_GUARDED_INPUT_CAPACITY.decodedBytes + 1 } };
+    expect(() => prepareOrdinaryPendingGuardedInput(invalid)).toThrow();
+    expect(() => prepareOrdinaryPendingGuardedInput(archive, invalid.capacity)).toThrow();
+    const compact = { ...packet(), guardedInput: invalid,
+      guardedInputRepresentation: { version: 1 as const, encoding: 'json-string-table-v1' as const } };
+    expect(() => validateOrdinaryPendingPackage(compact, expected)).toThrow('ordinary_pending_package_mismatch');
+  });
+
+  it('restores an expanded pending input using its retained capacity without a new override', () => {
+    const prompt = { userPrompt: 'p'.repeat(1024 * 1024) };
+    const expanded = { ...structuredClone(input), prompts: Array.from({ length: 129 }, () => prompt) };
+    expect(() => prepareOrdinaryPendingGuardedInput(expanded)).toThrow('guarded_input_archive_expands_too_large');
+    const prepared = prepareOrdinaryPendingGuardedInput(expanded, MAX_GUARDED_INPUT_CAPACITY);
+    expect(prepared.input.prompts).toEqual(expanded.prompts);
+    const restored = prepareOrdinaryPendingGuardedInput(structuredClone(prepared.retained));
+    expect(restored.retained.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
+    expect(restored.inputSha256()).toBe(prepared.inputSha256());
+    expect(restored.input.prompts).toHaveLength(129);
+    expect((restored.input.prompts as typeof expanded.prompts)[128]!.userPrompt).toBe(prompt.userPrompt);
+  }, 30_000);
+
   it('requires an explicit representation contract for compact guarded input while accepting legacy raw input', () => {
     expect(validateOrdinaryPendingPackage(packet(), expected)).toBeDefined();
 

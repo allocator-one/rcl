@@ -1,3 +1,4 @@
+import { minimalCheckpointCapture } from './checkpoint-capture-fixture.js';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,11 +19,11 @@ function canonical(value: any): string {
     ? `[${value.map(canonical).join(',')}]` : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
 }
 function plan() {
-  return freezeCheckpointPlan({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: 'c'.repeat(64), configSha256: 'd'.repeat(64), specSha256: 'e'.repeat(64), contextSha256: '3'.repeat(64), toolsSha256: '4'.repeat(64), parser: { name: 'findings-json', version: 1 },
+  return minimalCheckpointCapture({ target, headSha: 'a'.repeat(40), mergeBaseSha: 'b'.repeat(40), patchSha256: 'c'.repeat(64), configSha256: 'd'.repeat(64), specSha256: 'e'.repeat(64), contextSha256: '3'.repeat(64), toolsSha256: '4'.repeat(64), parser: { name: 'findings-json', version: 1 },
     roster: [{ seat: 'general', model: 'openai/gpt-6-sol', role: 'general', route: 'openai' }, { seat: 'security', model: 'openai/gpt-6-sol', role: 'security', route: 'openai' }],
     chunks: [0, 1].map(index => ({ index, total: 2, digest: hash(`chunk-${index}`) })),
     prompts: ['general', 'security'].flatMap(seat => [0, 1].map(chunk => ({ seat, chunk, systemSha256: hash(`${seat}-system`), userSha256: hash(`${seat}-${chunk}`) }))),
-  });
+  }).plan;
 }
 const successfulBytes = JSON.stringify({ model: 'openai/gpt-6-sol', provider: 'openai', role: 'general', status: 'success', durationMs: 5, usage: { inputTokens: 11, outputTokens: 7 }, findings: [{ id: 'raw-1', file: 'src/a.ts', startLine: 1, endLine: 1, severity: 'important', category: 'correctness', title: '\uFEFFOriginal title', description: 'Original description' }] }, null, 2) + '\n';
 const failedBytes = JSON.stringify({ model: 'openai/gpt-6-sol', provider: 'openai', role: 'general', status: 'timeout', durationMs: 10, usage: { inputTokens: 3 }, findings: [], error: 'Stalled response' }, null, 4);
@@ -32,8 +33,8 @@ async function fixture(sealed = true) {
   const frozen = plan(); let journal!: CheckpointJournal;
   await withNativeTarget(commonDir, target, async owner => {
     journal = await CheckpointJournal.create({ commonDir, namespace, plan: frozen, ownership: owner });
-    await journal.bind('captured-inputs', '\uFEFF exact capture\n', owner);
-    await journal.bind('source', 'source bytes', owner);
+    await journal.bind('captured-inputs', minimalCheckpointCapture(frozen).bytes, owner);
+    await journal.bind('source', '\uFEFF exact source\n', owner);
     await journal.bind('operation', 'operation bytes', owner);
     await journal.recordIntent('general:0', { id: 'failed-paid', kind: 'paid' }, owner);
     await journal.recordResult('general:0', { id: 'failed-paid', kind: 'paid' }, { kind: 'failure', chunk: 0, reviewBytes: failedBytes, possiblyBilled: true }, owner);
@@ -60,6 +61,28 @@ function rechain(wire: any) {
 }
 
 describe('portable finalized checkpoint proof', () => {
+  it.each([
+    { mutation: 'malformed capture', error: 'capture_invalid_document' },
+    { mutation: 'unreferenced capture blob', error: 'capture_unreferenced_blob' },
+  ])('refuses $mutation even with recomputed binding and event hashes', async ({ mutation, error }) => {
+    const { journal } = await fixture(), original = await exportCheckpointProof(journal);
+    const wire = JSON.parse(original.bytes);
+    rechain(wire);
+    expect(canonical(wire)).toBe(original.bytes);
+    expect(decodeCheckpointProof(canonical(wire))).toEqual(original);
+    if (mutation === 'malformed capture') {
+      wire.bindings['captured-inputs'] = '{}';
+    } else {
+      const captured = JSON.parse(wire.bindings['captured-inputs']);
+      captured.blobs[hash('unreferenced')] = 'unreferenced';
+      wire.bindings['captured-inputs'] = canonical(captured);
+    }
+    const binding = wire.records.find((row: any) => row.type === 'binding' && row.binding.name === 'captured-inputs');
+    binding.binding.sha256 = hash(wire.bindings['captured-inputs']);
+    rechain(wire);
+    expect(() => decodeCheckpointProof(canonical(wire))).toThrow(error);
+  });
+
   it.each(['failure', 'success', 'other pending attempt'] as const)('refuses uncertainty appended after %s even with a valid digest chain', async kind => {
     const { journal } = await fixture();
     const original = await exportCheckpointProof(journal), wire = JSON.parse(original.bytes);
@@ -211,7 +234,7 @@ describe('portable finalized checkpoint proof', () => {
     let journal!: CheckpointJournal;
     await withNativeTarget(commonDir, target, async owner => {
       journal = await CheckpointJournal.create({ commonDir, namespace, plan: plan(), ownership: owner });
-      for (const name of ['captured-inputs', 'source', 'operation'] as const) await journal.bind(name, '"'.repeat(5 * 1024 * 1024), owner);
+      for (const name of ['source', 'operation', 'launch'] as const) await journal.bind(name, '"'.repeat(5 * 1024 * 1024), owner);
       await journal.finalize(owner);
     });
     await expect(exportCheckpointProof(journal)).rejects.toThrow('checkpoint_proof_too_large');

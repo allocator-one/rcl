@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildPrompt, type ContextDoc } from '../../src/prepare/prompt-builder.js';
-import { chunkDiff, formatChunkForPrompt } from '../../src/prepare/chunker.js';
+import { chunkDiff, formatChunkForPrompt, type ReviewCapacity } from '../../src/prepare/chunker.js';
 import { configDigest, configIdentity, diffDigest, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { captureAggregationInputs } from '../../src/report/aggregation-inputs.js';
 import { captureReviewerInputs, decodeCapturedInputs } from '../../src/dispatch/captured-inputs.js';
@@ -30,6 +30,24 @@ async function fixture() {
 }
 
 describe('capture prepared council', () => {
+  it('revalidates an opted full source with the same bound and retains every blocking cell', async () => {
+    const patch = `@@ -0,0 +1,2001 @@\n${Array.from({ length: 2001 }, (_, i) => `+line ${i + 1}`).join('\n')}\n`;
+    const diff: Diff = { source: 'local', files: Array.from({ length: 17 }, (_, i) => file(`large-${i}.ts`, patch)) };
+    const reviewCapacity: ReviewCapacity = {
+      maxChunks: 64, maxSourceFiles: 1280, maxSourcePatchLines: 128_000,
+      maxSourcePatchBytes: 4 * 1024 * 1024,
+    };
+    const chunks = chunkDiff(diff.files, reviewCapacity);
+    expect(chunks.length).toBeGreaterThan(32);
+    const prompts = await Promise.all(chunks.flatMap(chunk => assignments.map(assignment => buildPrompt(chunk, assignment.role, { contextDocs: [] }))));
+    const input = { ...await fixture(), diff, chunks, prompts, contextDocs: [], reviewCapacity,
+      captureCapacity: { bytes: 64 * 1024 * 1024, cells: 128, seats: 200, chunks: 64 } };
+    expect(() => capturePreparedCouncil({ ...input, reviewCapacity: undefined })).toThrow();
+    const captured = capturePreparedCouncil(input);
+    expect(captured.plan.cells).toHaveLength(chunks.length * assignments.length);
+    expect(captured.captured.capacity).toEqual(input.captureCapacity);
+  });
+
   it('freezes and round-trips actual prepared prompts as chunk-major cells with distinct assignment-index seats', async () => {
     const input = await fixture();
     const result = capturePreparedCouncil(input);

@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   buildRunHeader,
   buildRoster,
   configDigest,
   detectRunner,
   diffDigest,
+  guardedInputSha256,
   parseSpecSource,
   resolveConvergeContext,
+  sha256Hex,
+  stableStringify,
   validateSha,
 } from '../../src/report/run-header.js';
 import { uuidv7 } from '../../src/report/uuid.js';
@@ -243,6 +247,66 @@ describe('diffDigest', () => {
     expect(diffDigest([a, b])).toMatch(SHA256);
     expect(diffDigest([a, { ...b, patch: b.patch + '\n+3' }])).not.toBe(diffDigest([a, b]));
   });
+});
+
+describe('guardedInputSha256', () => {
+  it('preserves canonical bytes for nested ordering, omitted values and escaped text', () => {
+    const shared = { z: undefined, b: [undefined, null, () => 1, Symbol('missing')], a: -0 };
+    const sparse = Array(3);
+    sparse[1] = undefined;
+    const value = {
+      z: shared,
+      a: { shared, sparse, numbers: [Number.NaN, Infinity, -Infinity],
+        text: 'quote " backslash \\ newline\n ünï 😀', loneSurrogate: '\ud800' },
+      omitted: undefined,
+    };
+    expect(guardedInputSha256(value)).toBe(sha256Hex(stableStringify(value)));
+    expect(guardedInputSha256({ b: [undefined, 1], a: undefined }))
+      .toBe(sha256Hex('{"b":[null,1]}'));
+    expect(() => guardedInputSha256({ unsupported: 1n })).toThrow(TypeError);
+  });
+
+  it('rejects circular input while allowing repeated shared objects', () => {
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    expect(() => guardedInputSha256(cycle)).toThrow(/circular/i);
+    const shared = { prompt: 'same bytes' };
+    expect(guardedInputSha256({ cells: [shared, shared] }))
+      .toBe(sha256Hex(stableStringify({ cells: [shared, shared] })));
+  });
+
+  it('walks deeply nested acyclic input without exhausting the call stack', () => {
+    const depth = 20_000;
+    let value: unknown = 0;
+    for (let index = 0; index < depth; index++) value = { child: value };
+    expect(guardedInputSha256(value as Record<string, unknown>))
+      .toBe(sha256Hex('{"child":'.repeat(depth) + '0' + '}'.repeat(depth)));
+  });
+
+  it('hashes a repeated 200 MiB prompt matrix within a smaller heap', () => {
+    const script = `
+      import { createHash } from 'node:crypto';
+      import { guardedInputSha256 } from ${JSON.stringify(new URL('../../src/report/run-header.ts', import.meta.url).href)};
+      const prompt = { systemPrompt: 'review', userPrompt: 'x'.repeat(32 * 1024) };
+      const count = 6800;
+      const row = JSON.stringify(prompt);
+      const expected = createHash('sha256').update('{"prompts":[');
+      for (let index = 0; index < count; index++) {
+        if (index) expected.update(',');
+        expected.update(row);
+      }
+      expected.update('],"version":1}');
+      const digest = guardedInputSha256({ version: 1, prompts: Array(count).fill(prompt) });
+      console.log(JSON.stringify({ digest, expected: expected.digest('hex'), bytes: row.length * count }));
+    `;
+    const child = spawnSync(process.execPath, [
+      '--max-old-space-size=192', '--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script,
+    ], { encoding: 'utf8', timeout: 30_000, maxBuffer: 128 * 1024 });
+    expect(child.status, child.stderr).toBe(0);
+    const result = JSON.parse(child.stdout) as { digest: string; expected: string; bytes: number };
+    expect(result.bytes).toBeGreaterThan(200 * 1024 * 1024);
+    expect(result.digest).toBe(result.expected);
+  }, 35_000);
 });
 
 describe('configDigest', () => {

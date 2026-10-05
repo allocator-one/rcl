@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.5.9 - 2026-10-05
+
+- Admit explicitly bounded full-patch reviews above the ordinary 32-chunk limit
+  while preserving the default limits, exact input retention, guarded review
+  accounting, and complete-seat checks. For large pull requests, verify the
+  repository and exact commits and read the full pinned Git diff before any
+  paid dispatch; incomplete GitHub file patches fail closed. The hosted gate
+  accepts a current-head capacity label applied by a repository maintainer
+  without changing the default workflow (RCL-162).
 - Activate an exact retained private reviewer outbox through the explicit
   terminal reviewer recovery command when its server run is absent. Bind the
   original manifest, envelope, declared reports and private artifact to the

@@ -294,15 +294,23 @@ describe('proof-bound checkpoint assembly', () => {
       await expect(assembleCheckpointReview(input(f, await proof(f, rowsFor(f, ['s0', 's1'], 'source')), await proof(f, [])), { ask }))
         .rejects.toThrow();
     }
-    const f = fixture(), source = await proof(f, rowsFor(f, ['s0', 's1'], 'source'));
-    const malformed = await proof(f, [], '{}');
-    await expect(assembleCheckpointReview(input(f, source, malformed), { ask })).rejects.toThrow();
-    const malformedSource = await proof(f, rowsFor(f, ['s0', 's1'], 'invalid-capture'), '{}');
-    await expect(assembleCheckpointReview(input(f, malformedSource, malformed), { ask })).rejects.toThrow();
+    const f = fixture();
+    await expect(proof(f, [], '{}')).rejects.toThrow();
+    await expect(proof(f, rowsFor(f, ['s0', 's1'], 'invalid-capture'), '{}')).rejects.toThrow();
     const changed = JSON.parse(f.capture.bytes) as { blobs: Record<string, string> };
     changed.blobs['f'.repeat(64)] = 'unreferenced';
-    const foreignCapture = await proof(f, [], stableStringify(changed));
-    await expect(assembleCheckpointReview(input(f, source, foreignCapture), { ask })).rejects.toThrow();
+    await expect(proof(f, [], stableStringify(changed))).rejects.toThrow();
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it('refuses different valid captures for the same plan before any verifier call', async () => {
+    const f = fixture(), foreign = fixture({ aggregation: false }), ask = vi.fn();
+    expect(foreign.plan.digest).toBe(f.plan.digest);
+    expect(foreign.capture.bytes).not.toBe(f.capture.bytes);
+    const source = await proof(foreign, rowsFor(foreign, ['s0', 's1'], 'foreign'));
+    const successor = await proof(f, []);
+    await expect(assembleCheckpointReview(input(f, source, successor), { ask }))
+      .rejects.toThrow('checkpoint_assembly_capture_mismatch');
     expect(ask).not.toHaveBeenCalled();
   });
 
