@@ -13,6 +13,8 @@ export interface PRCapacityAuthorization {
 type PullRequest = RestEndpointMethodTypes['pulls']['get']['response']['data'];
 type IssueEvent = RestEndpointMethodTypes['issues']['listEvents']['response']['data'][number];
 type CapacityLabel = { name: string; description: string; allocation: PRCapacityAuthorization };
+const HISTORY_PAGE_SIZE = 100;
+const MAX_HISTORY_PAGES = 10;
 
 function eventLabelName(event: IssueEvent): string | undefined {
   return 'label' in event && event.label && typeof event.label === 'object'
@@ -53,23 +55,31 @@ function capacityLabel(pr: PullRequest): CapacityLabel | undefined {
 }
 
 async function latestApplication(client: Octokit, target: GitHubTarget, name: string): Promise<IssueEvent> {
-  const events = await client.paginate(client.issues.listEvents, {
-    owner: target.owner, repo: target.repo, issue_number: target.number, per_page: 100,
-  });
-  const matching = events.filter(event =>
-    (event.event === 'labeled' || event.event === 'unlabeled') &&
-    eventLabelName(event)?.toLowerCase() === name.toLowerCase());
   const ids = new Set<number>();
-  for (const event of matching) {
-    if (!Number.isSafeInteger(event.id) || event.id < 1 || ids.has(event.id) ||
-        !Number.isFinite(Date.parse(event.created_at))) {
-      throw new CapacityRefused('ambiguous capacity label history.');
+  let pages = 0, latest: IssueEvent | undefined;
+  // REST issue events have no documented ordering guarantee. Read complete
+  // bounded history, retaining only matching IDs and the latest transition.
+  // One overflow page detects incompleteness without collecting the history.
+  for await (const { data: events } of client.paginate.iterator(client.issues.listEvents, {
+    owner: target.owner, repo: target.repo, issue_number: target.number, per_page: HISTORY_PAGE_SIZE,
+  })) {
+    if (++pages > MAX_HISTORY_PAGES || events.length > HISTORY_PAGE_SIZE) {
+      throw new CapacityRefused('capacity label history exceeds the 1000-event limit.');
     }
-    ids.add(event.id);
+    for (const event of events) {
+      if ((event.event !== 'labeled' && event.event !== 'unlabeled') ||
+          eventLabelName(event)?.toLowerCase() !== name.toLowerCase()) continue;
+      const createdAt = Date.parse(event.created_at);
+      if (!Number.isSafeInteger(event.id) || event.id < 1 || ids.has(event.id) ||
+          !Number.isFinite(createdAt)) {
+        throw new CapacityRefused('ambiguous capacity label history.');
+      }
+      ids.add(event.id);
+      // IDs disambiguate transitions within GitHub's timestamp precision.
+      if (!latest || createdAt > Date.parse(latest.created_at) ||
+          createdAt === Date.parse(latest.created_at) && event.id > latest.id) latest = event;
+    }
   }
-  // IDs disambiguate multiple transitions within GitHub's timestamp precision.
-  matching.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
-  const latest = matching[0];
   if (!latest || latest.event !== 'labeled' || eventLabelName(latest) !== name ||
       !latest.actor?.login || !Number.isSafeInteger(latest.actor.id) || latest.actor.id < 1) {
     throw new CapacityRefused('capacity label is removed or has no attributable application.');
@@ -80,6 +90,8 @@ async function latestApplication(client: Octokit, target: GitHubTarget, name: st
 /**
  * Resolve a live, exact-head capacity grant from GitHub metadata. An ordinary
  * PR returns undefined; any present but unverifiable opt-in fails closed.
+ * PRs with more than 1000 issue events cannot opt in: each history scan is
+ * limited to ten 100-event pages and one overflow request.
  * The caller must compare headSha with the diff it actually reviews.
  */
 export async function resolvePRCapacity(

@@ -14,7 +14,9 @@ const event = {
 function fixture() {
   const pr = { head: { sha: headSha }, labels: [label] };
   const get = vi.fn().mockResolvedValue({ data: pr });
-  const paginate = vi.fn().mockResolvedValue([event]);
+  const events = vi.fn().mockResolvedValue([event]);
+  const iterator = vi.fn(async function* () { yield { data: await events() }; });
+  const paginate = Object.assign(vi.fn(), { iterator });
   const permission = vi.fn().mockResolvedValue({ data: {
     permission: 'write', role_name: 'maintain', user: { login: 'maintainer', id: 42 },
   } });
@@ -23,7 +25,7 @@ function fixture() {
     auth, pulls: { get }, issues: { listEvents: vi.fn() }, paginate,
     repos: { getCollaboratorPermissionLevel: permission },
   } as unknown as Octokit;
-  return { octokit, get, paginate, permission, auth, pr };
+  return { octokit, get, events, iterator, paginate, permission, auth, pr };
 }
 
 describe('resolvePRCapacity', () => {
@@ -32,6 +34,7 @@ describe('resolvePRCapacity', () => {
     f.get.mockResolvedValue({ data: { ...f.pr, labels: [{ name: 'bug' }] } });
     await expect(resolvePRCapacity(target, undefined, f.octokit)).resolves.toBeUndefined();
     expect(f.auth).not.toHaveBeenCalled();
+    expect(f.iterator).not.toHaveBeenCalled();
     expect(f.paginate).not.toHaveBeenCalled();
     expect(f.permission).not.toHaveBeenCalled();
   });
@@ -43,7 +46,7 @@ describe('resolvePRCapacity', () => {
       maxReviewChunks: 128, maxBlockingCalls: 2048, headSha,
     });
     expect(f.permission).toHaveBeenCalledWith({ owner: 'owner', repo: 'repo', username: 'maintainer' });
-    expect(f.paginate).toHaveBeenCalledWith(f.octokit.issues.listEvents, {
+    expect(f.iterator).toHaveBeenCalledWith(f.octokit.issues.listEvents, {
       owner: 'owner', repo: 'repo', issue_number: 7, per_page: 100,
     });
     expect(f.get).toHaveBeenCalledTimes(2);
@@ -99,7 +102,7 @@ describe('resolvePRCapacity', () => {
 
   it('checks the latest application actor, regardless of API event order', async () => {
     const f = fixture();
-    f.paginate.mockResolvedValue([
+    f.events.mockResolvedValue([
       { ...event, id: 12, created_at: '2026-10-05T12:02:00Z', actor: { login: 'outsider', id: 43 } },
       event,
       { ...event, id: 11, created_at: '2026-10-05T12:01:00Z', event: 'unlabeled' },
@@ -115,9 +118,9 @@ describe('resolvePRCapacity', () => {
     [{ ...event, created_at: 'invalid' }],
   ].map(events => ({ events })))('refuses absent, removed, unattributed or ambiguous label history %#', async ({ events }) => {
     const f = fixture();
-    f.paginate.mockResolvedValue(events);
+    f.events.mockResolvedValue(events);
     await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/capacity/i);
-    expect(f.paginate).toHaveBeenCalled();
+    expect(f.iterator).toHaveBeenCalled();
     expect(f.permission).not.toHaveBeenCalled();
   });
 
@@ -137,7 +140,7 @@ describe('resolvePRCapacity', () => {
 
   it('refuses removal and reapplication during authorization even with unchanged PR labels', async () => {
     const f = fixture();
-    f.paginate.mockResolvedValueOnce([event]).mockResolvedValueOnce([
+    f.events.mockResolvedValueOnce([event]).mockResolvedValueOnce([
       event,
       { ...event, id: 11, created_at: '2026-10-05T12:01:00Z', event: 'unlabeled' },
       { ...event, id: 12, created_at: '2026-10-05T12:02:00Z' },
@@ -145,7 +148,63 @@ describe('resolvePRCapacity', () => {
     await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/changed/i);
   });
 
-  it.each(['get', 'auth', 'paginate', 'permission'] as const)('fails closed and sanitizes %s errors', async method => {
+  it.each(['initial', 'recheck'] as const)('bounds requests and refuses incomplete history during the %s scan', async phase => {
+    const f = fixture(), readPage = vi.fn();
+    let scans = 0;
+    const iterator = vi.fn(async function* () {
+      scans += 1;
+      if (phase === 'recheck' && scans === 1) {
+        yield { data: [event] };
+        return;
+      }
+      // Even an attributable grant in the prefix cannot authorize while a
+      // later removal or reapplication might exist beyond the scan budget.
+      for (let page = 0; page < 30; page++) {
+        readPage(page);
+        yield { data: Array.from({ length: 100 }, (_, index) => page === 0 && index === 0
+          ? event : { id: 1000 + page * 100 + index, event: 'commented' }) };
+      }
+    });
+    Object.assign(f.octokit.paginate, { iterator });
+    await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/history.*limit/i);
+    expect(readPage).toHaveBeenCalledTimes(11);
+    expect(f.paginate).not.toHaveBeenCalled(); // Never collect the full history.
+    expect(f.permission).toHaveBeenCalledTimes(phase === 'initial' ? 0 : 1);
+    expect(f.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts complete history at the page limit and orders same-second transitions across pages', async () => {
+    const f = fixture(), readPage = vi.fn();
+    const latest = { ...event, id: 12, actor: { login: 'new-maintainer', id: 43 } };
+    f.permission.mockResolvedValue({ data: { permission: 'write', user: latest.actor } });
+    f.iterator.mockImplementation(async function* () {
+      for (let page = 0; page < 10; page++) {
+        readPage(page);
+        yield { data: Array.from({ length: 100 }, (_, index) => index !== 0
+          ? { id: 1000 + page * 100 + index, event: 'commented' }
+          : page === 0 ? event : page === 5 ? { ...event, id: 11, event: 'unlabeled' }
+          : page === 9 ? latest : { id: 1000 + page * 100, event: 'commented' }) };
+      }
+    });
+    await expect(resolvePRCapacity(target, undefined, f.octokit)).resolves.toEqual({
+      maxReviewChunks: 128, maxBlockingCalls: 2048, headSha,
+    });
+    expect(readPage).toHaveBeenCalledTimes(20);
+    expect(f.paginate).not.toHaveBeenCalled();
+    expect(f.permission).toHaveBeenCalledWith(expect.objectContaining({ username: 'new-maintainer' }));
+  });
+
+  it('refuses duplicate capacity transitions across pages before permission lookup', async () => {
+    const f = fixture();
+    f.iterator.mockImplementation(async function* () {
+      yield { data: [event] };
+      yield { data: [event] };
+    });
+    await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/ambiguous/i);
+    expect(f.permission).not.toHaveBeenCalled();
+  });
+
+  it.each(['get', 'auth', 'events', 'permission'] as const)('fails closed and sanitizes %s errors', async method => {
     const f = fixture();
     f[method].mockRejectedValue(new Error('secret-fixture-token'));
     const error = await resolvePRCapacity(target, undefined, f.octokit).catch(error => error);
