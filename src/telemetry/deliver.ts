@@ -15,7 +15,7 @@ import { scrubText } from './scrub.js';
 import { describeOutcome, HarnessSink, validateEnvelopeTimeoutMs, type RunReceipt, type SinkOutcome } from './sink.js';
 import { isReviewerArtifact, type ReviewerArtifact } from '../report/reviewer-artifact.js';
 import { sha256Hex } from '../report/run-header.js';
-import { ReviewerDeliveryQueue } from './reviewer-delivery.js';
+import { ReviewerDeliveryQueue, type RetainedReviewerRecoverySelection } from './reviewer-delivery.js';
 import { parseAttestedExpiry, recoverAttestedDelivery } from './attested-retry.js';
 import { verifiedConsensusReportProblem } from './report-consistency.js';
 import { AttestedReviewerDelivery } from './attested-reviewer-delivery.js';
@@ -240,6 +240,36 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
   return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...ordinary.remaining, ...privateResult.remaining],
     failed: [...ordinary.failed, ...privateResult.failed], dropped: [...ordinary.dropped, ...privateResult.dropped],
     ...(ordinary.stopped || privateResult.stopped ? { stopped: ordinary.stopped ?? privateResult.stopped } : {}) };
+}
+
+/**
+ * Explicit lineage-authenticated activation of one exact retained reviewer
+ * outbox. This is deliberately separate from generic telemetry flush.
+ */
+export async function activateRetainedReviewerRun(
+  runtime: TelemetryRuntime,
+  selection: RetainedReviewerRecoverySelection,
+): Promise<DeliveryOutcome> {
+  const finish = (status: DeliveryStatus, spooled: boolean, line: string): DeliveryOutcome => ({
+    status, spooled, line, runId: selection.runId, exitCode: exitFor(status, true),
+  });
+  if (runtime.level !== 'full' || !runtime.repoManaged || !runtime.sink || !runtime.credential || runtime.attested) {
+    return finish('rejected', false,
+      'Retained reviewer activation requires full telemetry and a supported current owner credential');
+  }
+  const queue = new ReviewerDeliveryQueue(runtime.dataDir);
+  try {
+    const preview = await queue.previewRecovery(selection);
+    await noticeBefore(runtime, 'private-reviewers');
+    await queue.applyRecovery(runtime.sink, selection, preview);
+    return finish('recorded', false,
+      'Retained reviewer envelope, ordinary reports and private evidence recorded and read back; no native admission implied');
+  } catch {
+    const retained = await queue.isRetained(selection.runId);
+    return finish(retained ? 'spooled' : 'rejected', retained,
+      retained ? 'Retained reviewer activation incomplete; exact bytes remain queued for the explicit recovery command' :
+        'Retained reviewer activation refused locally; original checkpoint evidence is unchanged');
+  }
 }
 
 /** Bounded: an offline machine must never stall a command. Fail-soft. */
