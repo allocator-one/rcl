@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.9 - 2026-10-05
+
 - Activate an exact retained private reviewer outbox through the explicit
   terminal reviewer recovery command when its server run is absent. Bind the
   original manifest, envelope, declared reports and private artifact to the
