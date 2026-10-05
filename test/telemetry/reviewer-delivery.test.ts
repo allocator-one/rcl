@@ -156,7 +156,7 @@ describe('private immutable reviewer delivery', () => {
       fetchImpl: remote.fetchImpl });
 
     await expect(deliverTerminalReviewerRun(runtime, { preview: true, manifest: join(root, 'manifest.json'),
-      commonDir: root, target: 'rcl-159', runId: retained.runId })).rejects.toThrow();
+      commonDir: root, target: 'rcl-159', runId: retained.runId })).rejects.toMatchObject({ code: 'ENOENT' });
     expect(remote.requests).toEqual([]);
   });
 
@@ -378,10 +378,14 @@ describe('private immutable reviewer delivery', () => {
     await writeFile(join(directory, 'report.md'), alteredMarkdown, { mode: 0o600 });
     await writeFile(join(directory, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
 
+    const activationManifest = join(root, 'activation.json');
     await expect(deliverTerminalReviewerRun(await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
       credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl }),
-    { preview: true, manifest: join(root, 'activation.json'), commonDir: root, target: 'rcl-159', runId: retained.runId })).rejects.toThrow();
+    { preview: true, manifest: activationManifest, commonDir: root, target: 'rcl-159', runId: retained.runId }))
+      .rejects.toThrow('reviewer_delivery_recovery_selection_mismatch');
     expect(remote.requests.some(row => row.method !== 'GET')).toBe(false);
+    await expect(stat(activationManifest)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(directory, 'activation-intent.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('requires exact ordinary JSON and Markdown readback before a recovery acknowledgement', async () => {
