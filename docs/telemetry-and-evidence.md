@@ -161,11 +161,18 @@ Reopens one exact retained terminal reviewer report of a guarded convergence
 target — the report and its private reviewer artifact, retained under the
 repository's common Git directory — authenticates the pair locally, and retries
 only its Harness delivery, with evidence required. It never restarts reviewers
-or verification. A verified-consensus report without finding labels is
+or verification. When the exact run also has a retained private reviewer
+outbox, this command binds its original manifest, envelope, declared reports
+and private artifact to the authenticated terminal lineage before transport.
+It may create the absent server run from that exact envelope, then reads every
+artifact back before acknowledging the original manifest. Repeating the
+command after a lost acknowledgement resumes from authenticated server
+readback. Generic `telemetry flush` deliberately keeps refusing an unknown run.
+A verified-consensus report without finding labels is
 delivered only when its authenticated reviewer artifact proves the sealed
 failed-verification strict fallback with a conservative nonzero CI result;
 generic, altered and completed-verification reports fail closed before
-transport. Repeating the command is idempotent. The exit code is the delivery
+transport. The exit code is the delivery
 outcome (0 acknowledged, 4 not acknowledged); a pair that cannot be reopened or
 authenticated also exits 4.
 

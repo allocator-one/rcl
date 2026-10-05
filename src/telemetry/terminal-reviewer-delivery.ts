@@ -2,7 +2,8 @@ import type { ReviewResult } from '../consensus/types.js';
 import { resolveGitCommonDir } from '../converge/attempt-budget.js';
 import { loadReviewerLineage } from '../evidence/reviewer-lineage.js';
 import { sha256Hex } from '../report/run-header.js';
-import { deliverRun, type DeliveryOutcome, type TelemetryRuntime } from './deliver.js';
+import { activateRetainedReviewerRun, deliverRun, type DeliveryOutcome, type TelemetryRuntime } from './deliver.js';
+import { ReviewerDeliveryQueue, type RetainedReviewerRecoverySelection } from './reviewer-delivery.js';
 
 export interface TerminalReviewerDeliveryOptions {
   target: string;
@@ -30,12 +31,26 @@ export async function deliverTerminalReviewerRun(
   const lineage = await loadReviewerLineage({ commonDir, target: options.target, runId: options.runId });
   const { inspected, terminal } = lineage.latest;
   const result = JSON.parse(terminal.reportBytes) as ReviewResult;
-  const outcome = await deliverRun(runtime, {
-    result,
-    artifacts: { report_json: terminal.reportBytes },
-    reviewerArtifact: inspected.artifact,
-    evidenceRequired: true,
-  });
+  const selection: RetainedReviewerRecoverySelection = {
+    target: options.target,
+    runId: options.runId,
+    headSha: lineage.plan.headSha,
+    reportSha256: terminal.reportSha256,
+    reportByteLength: Buffer.byteLength(terminal.reportBytes),
+    reportBytes: terminal.reportBytes,
+    reviewerArtifactSha256: sha256Hex(terminal.reviewerArtifactBytes),
+    reviewerArtifactByteLength: Buffer.byteLength(terminal.reviewerArtifactBytes),
+    reviewerArtifactBytes: terminal.reviewerArtifactBytes,
+  };
+  const queue = new ReviewerDeliveryQueue(runtime.dataDir);
+  const outcome = await (await queue.isRetained(options.runId)
+    ? activateRetainedReviewerRun(runtime, selection)
+    : deliverRun(runtime, {
+      result,
+      artifacts: { report_json: terminal.reportBytes },
+      reviewerArtifact: inspected.artifact,
+      evidenceRequired: true,
+    }));
   return {
     outcome,
     reportSha256: sha256Hex(terminal.reportBytes),
