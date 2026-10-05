@@ -1,14 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPinnedGitDiff } from '../../src/resolver/git.js';
 
 const exec = promisify(execFile);
 const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
-const env = { ...process.env, GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+function fixtureEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith('GIT_'))),
+    GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+}
+const env = fixtureEnvironment();
 describe('pinned PR Git patches', () => {
   let cwd: string, baseSha: string, headSha: string, largeSha: string, binarySha: string;
   const git = async (...args: string[]) => (await exec('git', args, { cwd, env })).stdout.trim();
@@ -77,5 +81,54 @@ describe('pinned PR Git patches', () => {
   it('refuses binary changes instead of counting an empty patch as reviewed', async () => {
     await expect(loadPinnedGitDiff({ ...input(), baseSha: largeSha, headSha: binarySha }))
       .rejects.toThrow('binary changes');
+  });
+});
+
+
+describe('pinned PR fixture isolation', () => {
+  it('keeps init, config, add, and commit confined to the fixture despite inherited Git settings', async () => {
+    const decoy = await mkdtemp(join(tmpdir(), 'rcl-fixture-decoy-'));
+    const target = await mkdtemp(join(tmpdir(), 'rcl-fixture-target-'));
+    // Bootstrap and inspect using a trusted environment, independent of the
+    // helper under test. Every injected path refers only to these temp dirs.
+    const cleanEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+      GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
+    const gitAt = async (cwd: string, childEnv: NodeJS.ProcessEnv, ...args: string[]) =>
+      (await exec('git', args, { cwd, env: childEnv })).stdout.trim();
+    const initialize = async (cwd: string, childEnv: NodeJS.ProcessEnv, name: string) => {
+      await gitAt(cwd, childEnv, 'init', '--template=', '-q');
+      await gitAt(cwd, childEnv, 'config', 'user.email', 'test@example.com');
+      await gitAt(cwd, childEnv, 'config', 'user.name', name);
+      await writeFile(join(cwd, 'a.ex'), `${name}\n`);
+      await gitAt(cwd, childEnv, 'add', '.');
+      await gitAt(cwd, childEnv, 'commit', '-qm', name);
+    };
+    const state = async () => ({
+      config: await readFile(join(decoy, '.git', 'config'), 'utf8'),
+      head: await gitAt(decoy, cleanEnv, 'rev-parse', 'HEAD'),
+      index: await readFile(join(decoy, '.git', 'index')),
+    });
+    try {
+      await initialize(decoy, cleanEnv, 'Decoy');
+      const before = await state();
+      const decoyGit = join(decoy, '.git');
+      const pollutedEnv = fixtureEnvironment({ ...cleanEnv,
+        GIT_DIR: decoyGit, GIT_COMMON_DIR: decoyGit, GIT_WORK_TREE: decoy,
+        GIT_INDEX_FILE: join(decoyGit, 'index'), GIT_OBJECT_DIRECTORY: join(decoyGit, 'objects'),
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: join(decoyGit, 'objects'),
+        GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Injected',
+        GIT_TRACE: join(decoy, 'unexpected-trace'),
+      });
+      const setupError = await initialize(target, pollutedEnv, 'Target').then(() => undefined, error => error);
+
+      expect(await state()).toEqual(before);
+      await expect(access(join(decoy, 'unexpected-trace'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(setupError).toBeUndefined();
+      expect(await gitAt(target, cleanEnv, 'config', '--get', 'user.name')).toBe('Target');
+      expect(await gitAt(target, cleanEnv, 'log', '-1', '--format=%s')).toBe('Target');
+    } finally {
+      await rm(target, { recursive: true, force: true });
+      await rm(decoy, { recursive: true, force: true });
+    }
   });
 });
