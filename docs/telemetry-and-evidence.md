@@ -154,7 +154,9 @@ option does not rerun reviewers.
 ## `rcl telemetry recover-reviewer`
 
 ```bash
-rcl telemetry recover-reviewer --target <convergence-target> --run <run-uuid> [--json]
+rcl telemetry recover-reviewer --preview --manifest <path> --target <convergence-target> --run <run-uuid> [--json]
+rcl telemetry recover-reviewer --apply --manifest <path> --manifest-sha256 <sha256> [--json]
+rcl telemetry recover-reviewer --resume --manifest <path> --manifest-sha256 <sha256> [--json]
 ```
 
 Reopens one exact retained terminal reviewer report of a guarded convergence
@@ -162,19 +164,21 @@ target — the report and its private reviewer artifact, retained under the
 repository's common Git directory — authenticates the pair locally, and retries
 only its Harness delivery, with evidence required. It never restarts reviewers
 or verification. When the exact run also has a retained private reviewer
-outbox, this command binds its original manifest, envelope, declared reports
-and private artifact to the authenticated terminal lineage before transport.
-It may create the absent server run from that exact envelope, then reads every
-artifact back before acknowledging the original manifest. Repeating the
-command after a lost acknowledgement resumes from authenticated server
-readback. Generic `telemetry flush` deliberately keeps refusing an unknown run.
+outbox, preview binds its original manifest, exact envelope, JSON and Markdown
+reports, private artifact, complete terminal lineage, and authenticated Harness
+principal into an immutable operation manifest. Apply and resume accept only
+that manifest's exact digest and revalidate every binding. A durable journal
+records activation intent before the sole permitted run POST; an uncertain
+POST is never repeated. Completion requires exact ordinary and private
+readback, followed by a separate immutable recovery acknowledgement. Generic
+`telemetry flush` deliberately keeps refusing an unknown run.
 A verified-consensus report without finding labels is
 delivered only when its authenticated reviewer artifact proves the sealed
 failed-verification strict fallback with a conservative nonzero CI result;
 generic, altered and completed-verification reports fail closed before
-transport. The exit code is the delivery
-outcome (0 acknowledged, 4 not acknowledged); a pair that cannot be reopened or
-authenticated also exits 4.
+transport. Preview is read-only. Apply creates the operation journal, while
+resume requires that same journal. Successful preparation or completion exits
+0; a pair that cannot be reopened or authenticated exits 4.
 
 ## `--attest`: attested reviews from the gate workflow
 

@@ -39,6 +39,7 @@ export const ARTIFACT_TRANSFER_TIMEOUT_MS = 120_000;
 export const MAX_RESPONSE_BYTES = 64 * 1024;
 /** A read carries a run's findings and calls (up to the bounded evidence envelope) or a gate status; anything past this is not one. */
 export const MAX_READ_RESPONSE_BYTES = 8 * 1024 * 1024;
+const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 export interface RequestOptions {
   /** Recovery reserves transport capacity before its final source proof. */
@@ -94,6 +95,18 @@ export type SinkOutcome<T> =
 export type PreparedPostRun =
   | Extract<SinkOutcome<RunReceipt>, { kind: 'rejected' }>
   | { kind: 'ready'; serializedEnvelope: string; post: (options?: RequestOptions) => Promise<SinkOutcome<RunReceipt>>; receipt: (options?: RequestOptions) => Promise<ReceiptProbe<RunReceipt>> };
+
+export interface ReviewerRecoveryPrincipal {
+  org_id: string;
+  actor_user_id: string;
+  credential_kind: 'cli' | 'api_token';
+  api_token_id: string | null;
+}
+
+export interface ReviewerRecoveryActivationCapability {
+  protocol: 1;
+  principal: ReviewerRecoveryPrincipal;
+}
 
 interface PreparedRunBinding {
   runId: string;
@@ -247,6 +260,39 @@ export class HarnessSink {
       return { kind: 'rejected', httpStatus: 200, error: 'unsupported_reviewer_recovery', message: 'Private reviewer recovery is not supported by this credential endpoint' };
     }
     return { kind: 'ok', httpStatus: 200, value: { protocol: 2, schema: 1, planVersion: 2, captureVersion: 2, providerConcurrencyVersion: 1, maxBytes: MAX_ARTIFACT_BYTES } };
+  }
+
+  /** Absent-run activation additionally requires an exact authenticated principal. */
+  async checkReviewerRecoveryActivation(options: RequestOptions = {}): Promise<SinkOutcome<ReviewerRecoveryActivationCapability>> {
+    if (this.credentialSource === 'attest') {
+      return { kind: 'rejected', httpStatus: 0, error: 'unsupported_reviewer_recovery_activation', message: 'Run-bound credentials cannot activate an absent reviewer run' };
+    }
+    const budget = Math.min(this.timeoutMs, this.artifactBudget(options));
+    if (!Number.isFinite(budget) || budget <= 0) return { kind: 'unavailable', reason: 'reviewer_artifact_expired' };
+    const response = await this.request('GET', '/api/v1/reviews/model-stats', undefined, 'application/json',
+      { ...options, maxResponseBytes: MAX_RESPONSE_BYTES }, budget);
+    if ('failure' in response) return { kind: 'unavailable', reason: 'reviewer_capability_unavailable' };
+    if (response.status !== 200) return privateArtifactFailure(response.status);
+    const body = response.body as { data?: { models?: unknown }; meta?: Record<string, unknown> } | null;
+    const principal = body?.meta?.reviewer_recovery_principal as Record<string, unknown> | undefined;
+    const expectedCredentialKind = this.credentialSource === 'login' ? 'cli' : 'api_token';
+    const validPrincipal = principal && Object.keys(principal).length === 4 &&
+      typeof principal.org_id === 'string' && UUID_PATTERN.test(principal.org_id) &&
+      typeof principal.actor_user_id === 'string' && UUID_PATTERN.test(principal.actor_user_id) &&
+      (principal.credential_kind === 'cli' || principal.credential_kind === 'api_token') &&
+      principal.credential_kind === expectedCredentialKind &&
+      (principal.api_token_id === null || typeof principal.api_token_id === 'string' && UUID_PATTERN.test(principal.api_token_id)) &&
+      (principal.credential_kind === 'cli' ? principal.api_token_id === null : typeof principal.api_token_id === 'string');
+    if (!Array.isArray(body?.data?.models) || body?.meta?.reviewer_recovery_protocol !== 2 ||
+      body.meta.reviewer_recovery_activation_protocol !== 1 || !validPrincipal) {
+      return { kind: 'rejected', httpStatus: 200, error: 'unsupported_reviewer_recovery_activation', message: 'Absent-run reviewer recovery activation is not supported by this credential endpoint' };
+    }
+    return { kind: 'ok', httpStatus: 200, value: { protocol: 1, principal: {
+      org_id: principal.org_id as string,
+      actor_user_id: principal.actor_user_id as string,
+      credential_kind: principal.credential_kind as 'cli' | 'api_token',
+      api_token_id: principal.api_token_id as string | null,
+    } } };
   }
 
   /** Exact private upload. The server independently authorizes the owner and validates the declared pair. */

@@ -244,9 +244,14 @@ describe('rcl review — pending legacy retry recovery (RCL-152)', () => {
   it('advertises exact terminal reviewer delivery recovery separately from review resumption', () => {
     const result = runRcl(['telemetry', 'recover-reviewer', '--help'], tempRepository());
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain('--preview');
+    expect(result.stdout).toContain('--apply');
+    expect(result.stdout).toContain('--resume');
+    expect(result.stdout).toContain('--manifest <path>');
+    expect(result.stdout).toContain('--manifest-sha256 <sha256>');
     expect(result.stdout).toContain('--target <target>');
     expect(result.stdout).toContain('--run <id>');
-    expect(result.stdout.replace(/\s+/g, ' ')).toContain('without restarting reviewers or verification');
+    expect(result.stdout.replace(/\s+/g, ' ')).toContain('without restarting reviewers');
   });
 
   it('advertises unknown finalization, fresh recovery and immutable async bindings', () => {

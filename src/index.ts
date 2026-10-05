@@ -1141,17 +1141,25 @@ const telemetry = program
 
 telemetry
   .command('recover-reviewer')
-  .description('Deliver one exact retained terminal reviewer report without restarting reviewers or verification')
-  .requiredOption('--target <target>', 'Exact guarded convergence target')
-  .requiredOption('--run <id>', 'Exact retained terminal run UUID')
+  .description('Preview, apply or resume one pinned retained reviewer activation without restarting reviewers')
+  .option('--preview', 'Write a read-only pinned recovery manifest')
+  .option('--apply', 'Apply one exact reviewed recovery manifest')
+  .option('--resume', 'Resume the same journaled recovery operation')
+  .requiredOption('--manifest <path>', 'Immutable recovery manifest path')
+  .option('--manifest-sha256 <sha256>', 'Required exact manifest digest for apply or resume')
+  .option('--target <target>', 'Exact guarded convergence target (preview only)')
+  .option('--run <id>', 'Exact retained terminal run UUID (preview only)')
   .option('--json', 'Output JSON')
-  .action(async (opts: { target: string; run: string; json?: boolean }) => {
+  .action(async (opts: { preview?: boolean; apply?: boolean; resume?: boolean; manifest: string;
+    manifestSha256?: string; target?: string; run?: string; json?: boolean }) => {
     try {
       const runtime = await createTelemetryRuntime({ rclVersion: RCL_VERSION });
-      const result = await deliverTerminalReviewerRun(runtime, { target: opts.target, runId: opts.run });
+      const result = await deliverTerminalReviewerRun(runtime, { preview: opts.preview, apply: opts.apply, resume: opts.resume,
+        manifest: opts.manifest, manifestSha256: opts.manifestSha256, target: opts.target, runId: opts.run });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
-      else console.log(`${result.outcome.line}\nReport ${result.reportSha256}; reviewer artifact ${result.reviewerArtifactSha256}`);
-      process.exitCode = result.outcome.exitCode;
+      else if (result.status === 'prepared') console.log(`Recovery manifest ${result.manifest}\nSHA-256 ${result.manifest_sha256}\nOperation ${result.operation_id}`);
+      else console.log(`Reviewer recovery complete for ${result.run_id}\nJournal ${result.journal}\nAcknowledgement ${result.recovery_acknowledgement}`);
+      process.exitCode = 0;
     } catch (error) {
       const message = scrubText(error instanceof Error ? error.message : String(error), 300);
       if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_TERMINAL_REVIEWER_DELIVERY', message } }));

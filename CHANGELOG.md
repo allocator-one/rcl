@@ -5,11 +5,12 @@
 ## 4.5.9 - 2026-10-05
 
 - Activate an exact retained private reviewer outbox through the explicit
-  terminal reviewer recovery command when its server run is absent. Bind the
-  original manifest, envelope, declared reports and private artifact to the
-  authenticated local lineage; resume lost acknowledgements from server
-  readback without reviewer calls or accounting changes. Generic telemetry
-  flush continues to refuse unknown runs (RCL-183).
+  terminal reviewer preview/apply/resume operation when its server run is
+  absent. Pin the exact Harness principal, full envelope, JSON and Markdown,
+  private artifact and terminal lineage; journal an immutable pre-POST intent,
+  permit at most one activation POST, and require exact server readback plus a
+  separate recovery acknowledgement. Reviewer calls and native accounting stay
+  unchanged, and generic telemetry flush still refuses unknown runs (RCL-183).
 - Add preview/apply/resume claim recovery on the existing native target, with
   explicit adoption of interrupted operations and read-only refresh of claim
   history. Preserve original evidence, attribution, unresolved findings and
