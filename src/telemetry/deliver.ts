@@ -250,8 +250,14 @@ export async function flushOutbox(runtime: TelemetryRuntime, options: FlushOptio
     { ...options, deadlineMs: remaining },
     () => noticeBefore(runtime, 'private-reviewers'),
   );
-  const failed = [...ordinary.failed, ...privateResult.failed]
-    .filter((row, index, rows) => rows.findIndex(candidate => candidate.id === row.id && candidate.reason === row.reason) === index);
+  const failed: FlushSummary['failed'] = [];
+  const seenFailures = new Set<string>();
+  for (const row of [...ordinary.failed, ...privateResult.failed]) {
+    const key = JSON.stringify([row.id, row.reason]);
+    if (seenFailures.has(key)) continue;
+    seenFailures.add(key);
+    failed.push(row);
+  }
   return { ...ordinary, delivered: [...ordinary.delivered, ...privateResult.delivered], remaining: [...new Set([...ordinary.remaining, ...privateResult.remaining])],
     failed, dropped: [...ordinary.dropped, ...privateResult.dropped],
     ...(ordinary.stopped || privateResult.stopped ? { stopped: ordinary.stopped ?? privateResult.stopped } : {}) };

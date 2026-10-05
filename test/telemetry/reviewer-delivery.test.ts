@@ -35,7 +35,7 @@ type DeliveryFixture = Pick<Awaited<ReturnType<typeof fixture>>, 'runId' | 'arti
 function server(f: DeliveryFixture) {
   const requests: Array<{ method: string; url: string; body?: string; token: string }> = [];
   let privateBytes: string | undefined; let posted = false; let postedEnvelope: string | undefined;
-  let lostAck = false; let losePost = false; let refused = false; let capability = true; let activationForbidden = false; let requireReports = false;
+  let lostAck = false; let losePost = false; let losePostReadback = false; let refused = false; let capability = true; let activationForbidden = false; let requireReports = false;
   let corruptOrdinaryReadback: string | undefined;
   let runReceipt: 'valid' | 'absent' | 'mismatch' | 'malformed' = 'valid';
   let principal = { org_id: '919921a0-0000-4000-8000-000000000001', actor_user_id: '919921a0-0000-4000-8000-000000000002', credential_kind: 'cli', api_token_id: null };
@@ -52,21 +52,22 @@ function server(f: DeliveryFixture) {
     }
     if (refused) return Response.json({ error: 'forbidden', message: 'SYNTHETIC_PRIVATE_DETAIL' }, { status: 403 });
     if (options.method === 'GET' && new URL(route).pathname.endsWith(`/runs/${f.runId}`)) {
-      if (!posted || runReceipt === 'absent') return Response.json({ error: 'not_found' }, { status: 404 });
+      if (!posted) return Response.json({ error: 'not_found' }, { status: 404 });
       if (!postedEnvelope) return Response.json({ data: { id: f.runId }, meta: { status: 'existing' } });
       const envelope = JSON.parse(postedEnvelope);
       const body: any = { data: { id: f.runId, url: `https://harness.example.test/api/v1/reviews/runs/${f.runId}`,
-        envelope_sha256: runReceipt === 'mismatch' ? '0'.repeat(64) : sha256(postedEnvelope),
+        ...(runReceipt === 'absent' ? {} : { envelope_sha256: runReceipt === 'mismatch' ? '0'.repeat(64) : sha256(postedEnvelope) }),
         artifacts_declared: envelope.artifacts_declared }, meta: { status: 'existing' } };
       if (runReceipt === 'malformed') body.unexpected = true;
       return Response.json(body);
     }
     if (route.endsWith('/reviewer-artifact')) {
       if (options.method === 'PUT') { if (requireReports && (generic.get('report_json') !== f.artifacts.report_json || generic.get('report_md') !== f.artifacts.report_md)) return Response.json({ error: 'source_unavailable' }, { status: 503 }); privateBytes = options.body; if (lostAck) throw new Error('lost ACK'); return Response.json({ data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(privateBytes!) }, meta: { status: 'created' } }, { status: 201 }); }
+      if (losePostReadback) { losePostReadback = false; throw new Error('lost post readback'); }
       if (privateBytes === undefined) return Response.json(posted ? { error: 'reviewer_artifact_pending', data: { run_id: f.runId, sha256: f.artifact.digest, bytes: Buffer.byteLength(f.artifact.bytes) } } : { error: 'not_found' }, { status: 404 });
       return new Response(privateBytes, { headers: { 'content-type': 'application/octet-stream', 'x-artifact-sha256': sha256(privateBytes), 'cache-control': 'private, no-store', 'content-disposition': 'attachment', 'x-content-type-options': 'nosniff' } });
     }
-    if (route.endsWith('/runs')) { posted = true; postedEnvelope = options.body; if (losePost) { losePost = false; posted = false; throw new Error('lost POST response'); } const envelope = JSON.parse(options.body); return Response.json({ data: { id: envelope.run.id, url: 'https://harness.example.test/run', artifacts_expected: envelope.artifacts_declared.map((row: any) => row.kind) }, meta: { status: 'existing' } }); }
+    if (route.endsWith('/runs')) { posted = true; postedEnvelope = options.body; if (losePost) { losePost = false; losePostReadback = true; throw new Error('lost POST response'); } const envelope = JSON.parse(options.body); return Response.json({ data: { id: envelope.run.id, url: 'https://harness.example.test/run', artifacts_expected: envelope.artifacts_declared.map((row: any) => row.kind) }, meta: { status: 'existing' } }); }
     const kind = route.split('/').at(-1)!;
     if (options.method === 'PUT') { generic.set(kind, options.body); return Response.json({ data: { kind, sha256: sha256(options.body) } }, { status: 201 }); }
     const stored = generic.get(kind);
@@ -343,17 +344,13 @@ describe('private immutable reviewer delivery', () => {
       target: 'rcl-159', runId: retained.runId });
     remote.losePost();
     await expect(deliverTerminalReviewerRun(runtime, { apply: true, manifest, commonDir: root,
-      manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_activation_post_uncertain');
-    const journalRows = Object.values(await byteSnapshot(`${manifest}.journal`)).map(bytes => JSON.parse(bytes));
-    expect(journalRows.filter(row => row.phase === 'activation_post_uncertain'))
-      .toEqual([expect.objectContaining({ data: { reason: 'intent_without_remote_readback' } })]);
+      manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_unavailable');
+    const beforeResume = remote.requests.length;
     await expect(deliverTerminalReviewerRun(runtime, { resume: true, manifest, commonDir: root,
-      manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_activation_post_uncertain');
-    const secondManifest = join(root, 'second-activation.json');
-    const second = await deliverTerminalReviewerRun(runtime, { preview: true, manifest: secondManifest, commonDir: root,
-      target: 'rcl-159', runId: retained.runId });
-    await expect(deliverTerminalReviewerRun(runtime, { apply: true, manifest: secondManifest, commonDir: root,
-      manifestSha256: second.manifest_sha256 })).rejects.toThrow('reviewer_delivery_activation_operation_conflict');
+      manifestSha256: preview.manifest_sha256 })).resolves.toMatchObject({ status: 'complete' });
+    const replay = remote.requests.slice(beforeResume);
+    expect(replay.some(row => row.method === 'GET' && new URL(row.url).pathname.endsWith(`/runs/${retained.runId}`))).toBe(true);
+    expect(replay.some(row => row.method === 'POST' && row.url.endsWith('/runs'))).toBe(false);
     expect(remote.requests.filter(row => row.method === 'POST' && row.url.endsWith('/runs'))).toHaveLength(1);
   });
 
@@ -662,7 +659,7 @@ describe('private immutable reviewer delivery', () => {
       const before = remote.requests.length;
 
       await expect(deliverTerminalReviewerRun(runtime, { apply: true, manifest, commonDir: root,
-        manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_envelope_receipt');
+        manifestSha256: preview.manifest_sha256 })).rejects.toThrow('reviewer_delivery_envelope_receipt_mismatch');
 
       const replay = remote.requests.slice(before);
       expect(replay.some(row => row.method === 'GET' && new URL(row.url).pathname.endsWith(`/runs/${retained.runId}`))).toBe(true);
@@ -804,7 +801,7 @@ describe('private immutable reviewer delivery', () => {
     await expect(stat(join(directory, 'acknowledged.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('retains an armed run during a bare batch flush before notice, transport, or mutation', async () => {
+  it('retains an armed run and collapses its exact duplicate refusal during a bare batch flush', async () => {
     const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
     await queue.retain({ sink: remote.sink(), envelope: f.envelope, artifacts: f.artifacts, artifact: f.artifact });
     const directory = join(f.root, 'reviewer-outbox', f.runId);
@@ -815,16 +812,39 @@ describe('private immutable reviewer delivery', () => {
     await runtime.outbox.spoolRun({ runId: f.runId, envelope: f.envelope, artifacts: f.artifacts });
     const ordinaryBefore = await runtime.outbox.list();
 
-    await expect(flushOutbox(runtime)).resolves.toMatchObject({
+    const summary = await flushOutbox(runtime);
+    expect(summary).toMatchObject({
       delivered: [], remaining: [f.runId],
       failed: [{ id: f.runId, reason: 'reviewer_delivery_explicit_activation_required' }],
     });
+    expect(summary.failed).toEqual([{ id: f.runId, reason: 'reviewer_delivery_explicit_activation_required' }]);
 
     expect(runtime.stderr).not.toHaveBeenCalled();
     expect(remote.requests).toEqual([]);
     expect(await runtime.outbox.list()).toEqual(ordinaryBefore);
     expect(await readFile(join(directory, 'activation-intent.json'), 'utf8')).toBe('{"activation":true}');
     await expect(stat(join(directory, 'acknowledged.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preserves different failure reasons for the same run while deduping only exact pairs', async () => {
+    const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
+    await queue.retain({ sink: remote.sink(), envelope: f.envelope, artifacts: f.artifacts, artifact: f.artifact });
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: f.root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' }, fetchImpl: remote.fetchImpl,
+      stderr: vi.fn() });
+    await runtime.outbox.spoolRun({ runId: f.runId, envelope: f.envelope, artifacts: f.artifacts });
+    const ordinaryReason = 'ordinary synthetic conflict';
+    await writeFile(join(f.root, 'outbox', f.runId, 'failed.json'),
+      JSON.stringify({ at: new Date().toISOString(), reason: ordinaryReason }));
+    remote.refuse();
+
+    const summary = await flushOutbox(runtime);
+
+    expect(summary.failed).toEqual([
+      { id: f.runId, reason: ordinaryReason },
+      { id: f.runId, reason: 'reviewer_delivery_refused' },
+    ]);
+    expect(summary.remaining).toEqual([f.runId]);
   });
 
   it('continues unrelated ordinary entries while retaining an armed run during a bare batch flush', async () => {
