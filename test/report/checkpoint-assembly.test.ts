@@ -303,6 +303,17 @@ describe('proof-bound checkpoint assembly', () => {
     expect(ask).not.toHaveBeenCalled();
   });
 
+  it('refuses different valid captures for the same plan before any verifier call', async () => {
+    const f = fixture(), foreign = fixture({ aggregation: false }), ask = vi.fn();
+    expect(foreign.plan.digest).toBe(f.plan.digest);
+    expect(foreign.capture.bytes).not.toBe(f.capture.bytes);
+    const source = await proof(foreign, rowsFor(foreign, ['s0', 's1'], 'foreign'));
+    const successor = await proof(f, []);
+    await expect(assembleCheckpointReview(input(f, source, successor), { ask }))
+      .rejects.toThrow('checkpoint_assembly_capture_mismatch');
+    expect(ask).not.toHaveBeenCalled();
+  });
+
   it.each([
     { appendix: false, aggregationAppendix: true },
     { omitAppendix: true, aggregationAppendix: false },

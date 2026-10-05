@@ -2346,7 +2346,7 @@ function reviewBounds(opts: CouncilCliOpts): {
   const maxBlockingCalls = parse(opts.maxBlockingCalls, DEFAULT_MAX_BLOCKING_CALLS, '--max-blocking-calls');
   assertReviewWorkWithinLimit(0, 0, maxBlockingCalls);
   if (!explicit) return { maxBlockingCalls };
-  const reviewCapacity = validateReviewCapacity({
+  const reviewCapacity = opts.maxReviewChunks === undefined ? undefined : validateReviewCapacity({
     maxChunks,
     maxSourceFiles: maxChunks * 20,
     maxSourcePatchLines: maxChunks * 2000,
@@ -2354,7 +2354,7 @@ function reviewBounds(opts: CouncilCliOpts): {
       Math.max(DEFAULT_REVIEW_CAPACITY.maxSourcePatchBytes, maxChunks * 65_536)),
   });
   return {
-    reviewCapacity,
+    ...(reviewCapacity === undefined ? {} : { reviewCapacity }),
     maxBlockingCalls,
     guardedInputCapacity: { ...MAX_GUARDED_INPUT_CAPACITY },
     captureCapacity: {

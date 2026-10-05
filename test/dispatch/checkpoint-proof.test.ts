@@ -61,6 +61,28 @@ function rechain(wire: any) {
 }
 
 describe('portable finalized checkpoint proof', () => {
+  it.each([
+    { mutation: 'malformed capture', error: 'capture_invalid_document' },
+    { mutation: 'unreferenced capture blob', error: 'capture_unreferenced_blob' },
+  ])('refuses $mutation even with recomputed binding and event hashes', async ({ mutation, error }) => {
+    const { journal } = await fixture(), original = await exportCheckpointProof(journal);
+    const wire = JSON.parse(original.bytes);
+    rechain(wire);
+    expect(canonical(wire)).toBe(original.bytes);
+    expect(decodeCheckpointProof(canonical(wire))).toEqual(original);
+    if (mutation === 'malformed capture') {
+      wire.bindings['captured-inputs'] = '{}';
+    } else {
+      const captured = JSON.parse(wire.bindings['captured-inputs']);
+      captured.blobs[hash('unreferenced')] = 'unreferenced';
+      wire.bindings['captured-inputs'] = canonical(captured);
+    }
+    const binding = wire.records.find((row: any) => row.type === 'binding' && row.binding.name === 'captured-inputs');
+    binding.binding.sha256 = hash(wire.bindings['captured-inputs']);
+    rechain(wire);
+    expect(() => decodeCheckpointProof(canonical(wire))).toThrow(error);
+  });
+
   it.each(['failure', 'success', 'other pending attempt'] as const)('refuses uncertainty appended after %s even with a valid digest chain', async kind => {
     const { journal } = await fixture();
     const original = await exportCheckpointProof(journal), wire = JSON.parse(original.bytes);

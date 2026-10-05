@@ -21,10 +21,11 @@ describe('pinned PR path identity', () => {
     await mkdir(dirname(join(cwd, path)), { recursive: true });
     await writeFile(join(cwd, path), content);
   };
-  const renamedFrom = ' from b/old.ex ';
-  const renamedTo = ' to b/new.ex ';
-  // Windows cannot create filenames containing a tab, quote, or newline. The
-  // regular spaced/renamed fixtures still exercise exact path binding there.
+  // Windows does not preserve trailing filename spaces. Keep leading and
+  // internal spaces there, and exercise trailing spaces on POSIX too.
+  const renamedFrom = process.platform === 'win32' ? ' from b/old.ex' : ' from b/old.ex ';
+  const renamedTo = process.platform === 'win32' ? ' to b/new.ex' : ' to b/new.ex ';
+  // Windows cannot create filenames containing a tab, quote, or newline.
   const quoted = process.platform === 'win32' ? undefined : 'tab\tquote"line\n.ex';
   beforeAll(async () => {
     cwd = await mkdtemp(join(tmpdir(), 'rcl-pinned-paths-'));
