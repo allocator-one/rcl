@@ -113,10 +113,12 @@ describe('resolvePRCapacity', () => {
     [], [{ ...event, event: 'unlabeled' }], [{ ...event, actor: null }],
     [event, { ...event, actor: { login: 'other', id: 43 } }],
     [{ ...event, created_at: 'invalid' }],
-  ])('refuses absent, removed, unattributed or ambiguous label history %#', async events => {
+  ].map(events => ({ events })))('refuses absent, removed, unattributed or ambiguous label history %#', async ({ events }) => {
     const f = fixture();
     f.paginate.mockResolvedValue(events);
     await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/capacity/i);
+    expect(f.paginate).toHaveBeenCalled();
+    expect(f.permission).not.toHaveBeenCalled();
   });
 
   it('refuses a mismatched actor returned by the permission endpoint', async () => {
