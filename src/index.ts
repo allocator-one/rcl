@@ -187,7 +187,7 @@ import { assembleCheckpointReview, type CheckpointAssemblyInput } from './report
 import type { SealedVerificationProof } from './report/checkpoint-gating.js';
 import { describeReviewerEvidence } from './report/reviewer-evidence.js';
 import { serializeReviewerArtifact } from './report/reviewer-artifact.js';
-import { deliverTerminalReviewerRun } from './telemetry/terminal-reviewer-delivery.js';
+import { deliverTerminalReviewerRun, type TerminalReviewerDeliveryResult } from './telemetry/terminal-reviewer-delivery.js';
 
 const RCL_VERSION: string = JSON.parse(
   await readFile(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8')
@@ -1157,10 +1157,13 @@ telemetry
       const result = await deliverTerminalReviewerRun(runtime, { preview: opts.preview, apply: opts.apply, resume: opts.resume,
         manifest: opts.manifest, manifestSha256: opts.manifestSha256, target: opts.target, runId: opts.run });
       if (opts.json) console.log(JSON.stringify(result, null, 2));
-      else if ('outcome' in result) console.log(`${result.outcome.line}\nReport ${result.reportSha256}; reviewer artifact ${result.reviewerArtifactSha256}`);
+      else if (!('status' in result)) {
+        const legacy = result as TerminalReviewerDeliveryResult;
+        console.log(`${legacy.outcome.line}\nReport ${legacy.reportSha256}; reviewer artifact ${legacy.reviewerArtifactSha256}`);
+      }
       else if (result.status === 'prepared') console.log(`Recovery manifest ${result.manifest}\nSHA-256 ${result.manifest_sha256}\nOperation ${result.operation_id}`);
       else console.log(`Reviewer recovery complete for ${result.run_id}\nJournal ${result.journal}\nAcknowledgement ${result.recovery_acknowledgement}`);
-      process.exitCode = 'outcome' in result ? result.outcome.exitCode : 0;
+      process.exitCode = !('status' in result) ? (result as TerminalReviewerDeliveryResult).outcome.exitCode : 0;
     } catch (error) {
       const message = scrubText(error instanceof Error ? error.message : String(error), 300);
       if (opts.json) console.error(JSON.stringify({ error: { code: 'RCL_TERMINAL_REVIEWER_DELIVERY', message } }));

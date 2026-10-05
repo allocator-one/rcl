@@ -13,14 +13,14 @@ export function shouldReconcileDeliveredRun(runId: string | undefined, summary: 
   return runId !== undefined && summary.remaining.length === 0 && summary.failed.length === 0 && summary.dropped.length === 0;
 }
 
-export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, options: { cwd?: string; gitCommonDir?: string; getRun?: typeof getRun } = {}): Promise<'reconciled' | 'unchanged'> {
-  const read = await (options.getRun ?? getRun)(sink, runId);
+export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, deps: { cwd?: string; gitCommonDir?: string; getRun?: typeof getRun; now?: () => Date } = {}): Promise<'reconciled' | 'unchanged'> {
+  const read = await (deps.getRun ?? getRun)(sink, runId);
   if (read.kind !== 'ok') return 'unchanged';
   const detail = read.value, target = detail.converge?.target;
   if (!target || target === '.' || target === '..' || !/^[A-Za-z0-9._-]+$/.test(target) || detail.id.toLowerCase() !== runId.toLowerCase()) return 'unchanged';
   let common: string;
   try {
-    common = options.gitCommonDir ?? await resolveGitCommonDir(options.cwd);
+    common = deps.gitCommonDir ?? await resolveGitCommonDir(deps.cwd);
   } catch {
     return 'unchanged';
   }
@@ -38,7 +38,7 @@ export async function reconcileDeliveredRun(runId: string, sink: HarnessSink, op
     const needsStrongMarker = launch?.hardFailure === true &&
       (launch.deliveryPending === true || markerlessLegacy || weakMarker);
     const reports = detail.artifacts?.filter(artifact => artifact.kind === 'report_json') ?? [];
-    const reconciledAt = new Date().toISOString();
+    const reconciledAt = (deps.now ?? (() => new Date()))().toISOString();
     const strongMarker = needsStrongMarker ? strongDeliveryReconciliationSchema.safeParse({ version: 2,
       runId: launch.runId, reportJsonSha256: launch.reportJsonSha256, headSha: launch.headSha,
       inputSha256: launch.inputSha256, attempt: launch.attempt, round: launch.round,

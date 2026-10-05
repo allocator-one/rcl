@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "target": "allocator-one-9691",
+  "cap": 3,
+  "migratedAttempts": 0,
+  "attemptsUsed": 3,
+  "attempts": [
+    {
+      "attempt": 1,
+      "claimedAt": "2026-09-29T18:19:07.508Z",
+      "pid": 29714,
+      "source": "claim"
+    },
+    {
+      "attempt": 2,
+      "claimedAt": "2026-09-29T18:31:03.161Z",
+      "pid": 32832,
+      "source": "claim"
+    },
+    {
+      "attempt": 3,
+      "claimedAt": "2026-10-01T12:38:01.849Z",
+      "pid": 99785,
+      "source": "claim",
+      "pendingRecoverySource": {
+        "version": 1,
+        "target": "allocator-one-9691",
+        "headSha": "60df6d782f9ef9a255028391595dbbbe92442a57",
+        "inputSha256": "b1cedd3d7d55720b8efea4474f9cf82e5c8ee7accf6a1f9e0121e7d5ad7ae2db",
+        "pendingAttempt": 2,
+        "round": 2,
+        "originalPid": 32832,
+        "startedAt": "2026-09-29T18:31:03.157Z",
+        "blockingOutcome": "unknown",
+        "reason": "coordinator_exited_without_durable_blocking_receipts",
+        "nativeStateSha256": "324cb5c80d65699f95c54140bc2f735288bd35ef6266c5de6b267a35d34edf27",
+        "attemptStateSha256": "d6fb30b6c058336ecbd44ce8cf5adec9e2ed6b96057b2798052f3160693dd4f7",
+        "retainedAsyncSha256": [
+          "92705bdeb895e3bcab6863b5f717262f45fa4a4b6e98853b214677b64771e834"
+        ],
+        "migrationPackageSha256": "ec311f93ff429cf1b23e2d70e98c22599af296f2a0966363e96477a57178a040",
+        "digest": "b3bd5775b8c23ae60c2f4b0180c27de93f3664642572121a20c53cfbdb294c90"
+      }
+    }
+  ],
+  "updatedAt": "2026-10-01T12:38:01.849Z"
+}

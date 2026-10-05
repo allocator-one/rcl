@@ -165,14 +165,17 @@ target — the report and its private reviewer artifact, retained under the
 repository's common Git directory — authenticates the pair locally, and retries
 only its Harness delivery, with evidence required. It never restarts reviewers
 or verification. When the exact run also has a retained private reviewer
-outbox, preview binds its original manifest, exact envelope, JSON and Markdown
-reports, private artifact, complete terminal lineage, and authenticated Harness
-principal into an immutable operation manifest. Apply and resume accept only
+outbox, preview binds its original manifest, retained exact envelope and JSON,
+its retained Markdown when one was declared, private artifact, complete terminal
+lineage, and authenticated Harness principal into an immutable operation
+manifest. Recovery never rebuilds those bytes with the current renderer. Apply and resume accept only
 that manifest's exact digest and revalidate every binding. A durable journal
 records activation intent before the sole permitted run POST; an uncertain
 POST is never repeated. Completion requires exact ordinary and private
-readback, followed by a separate immutable recovery acknowledgement. Generic
-`telemetry flush` deliberately keeps refusing an unknown run.
+readback, followed by a separate immutable recovery acknowledgement and bounded
+delivery-pending reconciliation. That bookkeeping changes no attempts, admitted
+rounds, findings, or reviewer calls. Generic `telemetry flush` and retry paths
+fail before their notice or network boundary once activation has begun.
 The published mode-less target/run form remains available for an authenticated
 terminal report that has no retained private outbox. It preserves the original
 delivery result, JSON fields and exit code. If a private outbox exists, even if

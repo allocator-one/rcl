@@ -426,12 +426,13 @@ async function deliverReviewerRun(runtime: TelemetryRuntime, input: DeliverRunIn
   }
   const queue = new ReviewerDeliveryQueue(runtime.dataDir);
   try {
-    await noticeBefore(runtime, 'private-reviewers');
     if (runtime.attested) {
+      await noticeBefore(runtime, 'private-reviewers');
       await input.attestedReviewer!.deliver({ envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
       return finish('recorded', false, 'Private evidence and embedded JSON read back; ordinary artifact PUT receipts verified; no native admission implied');
     }
-    await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact });
+    await queue.deliver({ sink: runtime.sink, envelope, artifacts: input.artifacts, artifact: input.reviewerArtifact }, {},
+      () => noticeBefore(runtime, 'private-reviewers'));
     return finish('recorded', false, 'Reviewer evidence and ordinary reports recorded and read back; no native admission implied');
   } catch {
     if (runtime.attested) return finish('rejected', false,
