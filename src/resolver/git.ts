@@ -214,6 +214,8 @@ async function readPinnedPatch(
   if (/^GIT binary patch$/m.test(rawDiff) || /^Binary files .+ differ$/m.test(rawDiff)) {
     throw new Error('A complete PR patch contains binary changes that cannot be represented as textual review input.');
   }
+  // The parser proves each header against its path metadata (or exact
+  // same-path symmetry). Counting blocks alone cannot detect wrong identities.
   const diff = parseDiffFromString(rawDiff);
   const blocks = rawDiff.split(/^diff --git /m).filter(Boolean);
   if (blocks.length !== diff.files.length || new Set(diff.files.map(file => file.filename)).size !== blocks.length) {

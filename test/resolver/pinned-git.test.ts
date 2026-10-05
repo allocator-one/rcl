@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { loadPinnedGitDiff } from '../../src/resolver/git.js';
 
 const exec = promisify(execFile);
@@ -13,6 +13,54 @@ function fixtureEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     GIT_CONFIG_GLOBAL: nullDevice, GIT_CONFIG_SYSTEM: nullDevice };
 }
 const env = fixtureEnvironment();
+
+describe('pinned PR path identity', () => {
+  let cwd: string, baseSha: string, headSha: string;
+  const git = async (...args: string[]) => (await exec('git', args, { cwd, env })).stdout.trim();
+  const write = async (path: string, content: string) => {
+    await mkdir(dirname(join(cwd, path)), { recursive: true });
+    await writeFile(join(cwd, path), content);
+  };
+  const renamedFrom = ' from b/old.ex ';
+  const renamedTo = ' to b/new.ex ';
+  const quoted = 'tab\tquote"line\n.ex';
+  beforeAll(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'rcl-pinned-paths-'));
+    await git('init', '--template=', '-q');
+    await git('config', 'user.email', 'test@example.com');
+    await git('config', 'user.name', 'Test');
+    await git('remote', 'add', 'origin', 'git@github.com:o/r.git');
+    await write('a b/z', 'old\n');
+    await write('a b/deleted.ex', 'deleted\n');
+    await write(renamedFrom, 'unique renamed content\n');
+    await write(quoted, 'quoted old\n');
+    await git('add', '.'); await git('commit', '-qm', 'base');
+    baseSha = await git('rev-parse', 'HEAD');
+    await write('a b/z', 'new\n');
+    await write('a b/added.ex', 'added\n');
+    await rm(join(cwd, 'a b/deleted.ex'));
+    await rm(join(cwd, renamedFrom));
+    await write(renamedTo, 'unique renamed content\n');
+    await write(quoted, 'quoted new\n');
+    await git('add', '.'); await git('commit', '-qm', 'head');
+    headSha = await git('rev-parse', 'HEAD');
+  });
+  afterAll(async () => { await rm(cwd, { recursive: true, force: true }); });
+
+  it('binds every spaced or quoted patch to the exact committed filename', async () => {
+    const diff = await loadPinnedGitDiff({ cwd, owner: 'o', repo: 'r', baseSha, headSha });
+    expect(diff.files.map(file => file.filename).sort()).toEqual([
+      'a b/z', 'a b/added.ex', 'a b/deleted.ex', renamedTo, quoted,
+    ].sort());
+    expect(diff.files.find(file => file.filename === 'a b/z')).toMatchObject({ status: 'modified',
+      patch: '@@ -1 +1 @@\n-old\n+new\n' });
+    expect(diff.files.find(file => file.filename === 'a b/added.ex')).toMatchObject({ status: 'added' });
+    expect(diff.files.find(file => file.filename === 'a b/deleted.ex')).toMatchObject({ status: 'deleted' });
+    expect(diff.files.find(file => file.filename === renamedTo)).toMatchObject({ status: 'renamed', previousFilename: renamedFrom });
+    expect(diff.files.find(file => file.filename === quoted)?.patch).toContain('+quoted new');
+  });
+});
+
 describe('pinned PR Git patches', () => {
   let cwd: string, baseSha: string, headSha: string, largeSha: string, binarySha: string;
   const git = async (...args: string[]) => (await exec('git', args, { cwd, env })).stdout.trim();
