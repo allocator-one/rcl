@@ -136,6 +136,90 @@ describe('private immutable reviewer delivery', () => {
       .toBe(retained.artifacts.report_json);
   });
 
+  it('activates an exact retained outbox after an unknown-run flush refuses, then resumes a lost acknowledgement without provider calls', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-activation-'))); roots.push(root);
+    const retained = { root, ...await strictFallbackReviewerFixture(root) };
+    const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
+    const declaration = declareReviewerRecovery({ artifact: retained.artifact,
+      descriptor: retained.result.run.reviewer_evidence });
+    const envelope = buildRunEnvelope(retained.result, retained.artifacts,
+      { level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration });
+    await queue.retain({ sink: remote.sink(), envelope, artifacts: retained.artifacts, artifact: retained.artifact });
+
+    expect(await queue.flush(remote.sink(), { runId: retained.runId })).toMatchObject({
+      delivered: [], remaining: [retained.runId],
+      failed: [{ id: retained.runId, reason: 'reviewer_delivery_refused' }],
+    });
+    expect(remote.requests.some(row => row.method !== 'GET')).toBe(false);
+
+    remote.requireReports(); remote.loseAck();
+    const runtime = await createTelemetryRuntime({ rclVersion: 'test', config: {}, dataDir: root, env: {},
+      credential: { url: 'https://harness.example.test', token: 'first-login', source: 'login' },
+      fetchImpl: remote.fetchImpl });
+    expect(await deliverTerminalReviewerRun(runtime, {
+      commonDir: root, target: 'rcl-159', runId: retained.runId,
+    })).toMatchObject({ outcome: { status: 'spooled', exitCode: 4 } });
+    expect(await deliverTerminalReviewerRun(runtime, {
+      commonDir: root, target: 'rcl-159', runId: retained.runId,
+    })).toMatchObject({ outcome: { status: 'recorded', exitCode: 0 } });
+
+    expect(remote.requests.filter(row => row.method === 'POST' && row.url.endsWith('/runs')).map(row => row.body))
+      .toEqual([JSON.stringify(envelope)]);
+    expect(remote.requests.filter(row => row.method === 'PUT' && row.url.endsWith('/reviewer-artifact'))).toHaveLength(1);
+    expect(remote.requests.some(row => /provider|model\/chat|completion/.test(row.url))).toBe(false);
+    const directory = join(root, 'reviewer-outbox', retained.runId);
+    const manifestBytes = await readFile(join(directory, 'manifest.json'), 'utf8');
+    expect(await readFile(join(directory, 'acknowledged.json'), 'utf8')).toBe(JSON.stringify({
+      version: 1, runId: retained.runId, manifestSha256: sha256(manifestBytes),
+    }));
+  });
+
+  it('binds retained activation to the exact lineage selection and immutable outbox before any write', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'rcl-retained-reviewer-binding-'))); roots.push(root);
+    const retained = { root, ...await strictFallbackReviewerFixture(root) };
+    const remote = server(retained), queue = new ReviewerDeliveryQueue(root);
+    const declaration = declareReviewerRecovery({ artifact: retained.artifact,
+      descriptor: retained.result.run.reviewer_evidence });
+    const envelope = buildRunEnvelope(retained.result, retained.artifacts,
+      { level: 'full', delivery: { mode: 'direct' }, reviewerRecovery: declaration });
+    await queue.retain({ sink: remote.sink(), envelope, artifacts: retained.artifacts, artifact: retained.artifact });
+    const selection = {
+      target: 'rcl-159', runId: retained.runId, headSha: 'a'.repeat(40),
+      reportSha256: sha256(retained.artifacts.report_json),
+      reportByteLength: Buffer.byteLength(retained.artifacts.report_json), reportBytes: retained.artifacts.report_json,
+      reviewerArtifactSha256: retained.artifact.digest,
+      reviewerArtifactByteLength: Buffer.byteLength(retained.artifact.bytes), reviewerArtifactBytes: retained.artifact.bytes,
+    };
+    const preview = await queue.previewRecovery(selection);
+
+    for (const changed of [
+      { ...selection, target: 'rcl-elsewhere' },
+      { ...selection, headSha: 'b'.repeat(40) },
+      { ...selection, reportSha256: 'c'.repeat(64) },
+      { ...selection, reportByteLength: selection.reportByteLength + 1 },
+      { ...selection, reviewerArtifactSha256: 'd'.repeat(64) },
+      { ...selection, reviewerArtifactByteLength: selection.reviewerArtifactByteLength + 1 },
+    ]) await expect(queue.previewRecovery(changed)).rejects.toThrow('reviewer_delivery_recovery_selection_mismatch');
+
+    const changedPreviews = [
+      { ...preview, manifest: { ...preview.manifest, sha256: '1'.repeat(64) } },
+      { ...preview, envelope: { ...preview.envelope, sha256: '2'.repeat(64) } },
+      { ...preview, report_json: { ...preview.report_json, sha256: '3'.repeat(64) } },
+      { ...preview, report_md: { ...preview.report_md!, sha256: '4'.repeat(64) } },
+      { ...preview, reviewer: { ...preview.reviewer, sha256: '5'.repeat(64) } },
+    ];
+    for (const changed of changedPreviews) {
+      await expect(queue.applyRecovery(remote.sink(), selection, changed)).rejects
+        .toThrow('reviewer_delivery_recovery_selection_mismatch');
+    }
+    expect(remote.requests).toEqual([]);
+
+    remote.refuse();
+    await expect(queue.applyRecovery(remote.sink('different-owner'), selection, preview))
+      .rejects.toThrow('reviewer_delivery_refused');
+    expect(remote.requests.some(row => row.method !== 'GET')).toBe(false);
+  });
+
   it('persists privately before network and recovers lost PUT ACK with renewed login and no duplicate private PUT', async () => {
     const f = await fixture(), remote = server(f), queue = new ReviewerDeliveryQueue(f.root);
     remote.requireReports(); remote.loseAck();

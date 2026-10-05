@@ -22,7 +22,31 @@ const manifestSchema = z.object({ version: z.literal(1), runId: uuid, host: z.st
 type Manifest = z.infer<typeof manifestSchema>;
 export interface ReviewerDeliveryInput { sink: HarnessSink; envelope: RunEnvelope; artifacts: ArtifactBytes; artifact: ReviewerArtifact }
 export interface ReviewerDeliveryOptions { deadlineMs?: number; signal?: AbortSignal }
-interface Entry { manifest: Manifest; envelope: RunEnvelope; envelopeBytes: string; artifacts: ArtifactBytes; privateBytes: string; directory: string }
+interface Entry { manifest: Manifest; manifestBytes: string; envelope: RunEnvelope; envelopeBytes: string; artifacts: ArtifactBytes; privateBytes: string; directory: string }
+export interface RetainedReviewerRecoverySelection {
+  target: string;
+  runId: string;
+  headSha: string;
+  reportSha256: string;
+  reportByteLength: number;
+  reportBytes: string;
+  reviewerArtifactSha256: string;
+  reviewerArtifactByteLength: number;
+  reviewerArtifactBytes: string;
+}
+export interface RetainedReviewerRecoveryPreview {
+  version: 1;
+  target: string;
+  runId: string;
+  headSha: string;
+  host: string;
+  credentialKind: 'login' | 'env';
+  manifest: { sha256: string; bytes: number };
+  envelope: { sha256: string; bytes: number };
+  report_json: { sha256: string; bytes: number };
+  report_md?: { sha256: string; bytes: number };
+  reviewer: { sha256: string; bytes: number };
+}
 const files = { report_json: 'report.json', report_md: 'report.md' } as const;
 const ref = (text: string) => ({ sha256: sha256(text), bytes: Buffer.byteLength(text) });
 function fail(reason: string): never { throw new Error(`reviewer_delivery_${reason}`); }
@@ -53,6 +77,7 @@ async function publish(path: string, bytes: string): Promise<void> {
 function validate(entry: Entry): void {
   const { manifest: m, envelope, artifacts, privateBytes } = entry;
   if (normalizeUrl(m.host) !== m.host || m.envelope.bytes > MAX_ENVELOPE_BYTES || envelope.run.id !== m.runId ||
+      entry.manifestBytes !== JSON.stringify(m) || entry.envelopeBytes !== JSON.stringify(envelope) ||
       validateRunEnvelope(envelope, artifacts).length || !isDeepStrictEqual(ref(entry.envelopeBytes), m.envelope) ||
       !isDeepStrictEqual(ref(artifacts.report_json), m.report_json) || !isDeepStrictEqual(ref(privateBytes), m.reviewer) ||
       (m.report_md === undefined ? artifacts.report_md !== undefined : !isDeepStrictEqual(ref(artifacts.report_md!), m.report_md))) fail('invalid_entry');
@@ -94,7 +119,8 @@ export class ReviewerDeliveryQueue {
       request(); await this.save(entry);
       // An existing manifest might belong to an earlier process/principal.
       // Only this invocation's first publication can use the creation path.
-      await this.transfer(await this.load(entry.manifest.runId), input.sink, request, entryWasNew.delete(entry));
+      await this.transfer(await this.load(entry.manifest.runId), input.sink, request,
+        entryWasNew.delete(entry) ? 'initial' : 'retry');
     });
   }
 
@@ -118,7 +144,7 @@ export class ReviewerDeliveryQueue {
           const entry = await this.load(id);
           if (await this.acknowledged(entry)) return;
           await authorizeTransfer?.();
-          request(); await this.transfer(entry, sink, request, false); summary.delivered.push(entry.manifest.runId);
+          request(); await this.transfer(entry, sink, request, 'retry'); summary.delivered.push(entry.manifest.runId);
         });
       } catch (error) {
         const reason = safeFailure(error); summary.remaining.push(id); summary.failed.push({ id, reason });
@@ -137,6 +163,40 @@ export class ReviewerDeliveryQueue {
     catch { return false; }
   }
 
+  /** Read-only exact activation proposal derived from authenticated local lineage. */
+  async previewRecovery(selection: RetainedReviewerRecoverySelection): Promise<RetainedReviewerRecoveryPreview> {
+    if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
+    return this.lock(selection.runId, async () => this.recoveryPreview(await this.load(selection.runId), selection));
+  }
+
+  /** Activate an exact retained entry. Generic flush never receives this creation authority. */
+  async applyRecovery(
+    sink: HarnessSink,
+    selection: RetainedReviewerRecoverySelection,
+    preview: RetainedReviewerRecoveryPreview,
+    options: ReviewerDeliveryOptions = {},
+  ): Promise<void> {
+    if (!selection || typeof selection !== 'object' || !uuid.safeParse(selection.runId).success) fail('invalid_recovery_selection');
+    const request = budget(options);
+    await this.lock(selection.runId, async () => {
+      const entry = await this.load(selection.runId);
+      const current = this.recoveryPreview(entry, selection);
+      if (!isDeepStrictEqual(current, preview)) fail('recovery_selection_mismatch');
+      if (await this.acknowledged(entry)) return;
+      request(); await this.transfer(entry, sink, request, 'recovery');
+    });
+  }
+
+  /** Resume is the same exact operation; server readback decides which writes remain. */
+  async resumeRecovery(
+    sink: HarnessSink,
+    selection: RetainedReviewerRecoverySelection,
+    preview: RetainedReviewerRecoveryPreview,
+    options: ReviewerDeliveryOptions = {},
+  ): Promise<void> {
+    await this.applyRecovery(sink, selection, preview, options);
+  }
+
   private snapshot(input: ReviewerDeliveryInput): Entry {
     if (!isReviewerArtifact(input.artifact)) fail('unvalidated_artifact');
     if (input.sink.credentialSource === 'attest') fail('attested_replay_unsupported');
@@ -144,7 +204,8 @@ export class ReviewerDeliveryQueue {
     const artifacts = { ...input.artifacts }, privateBytes = input.artifact.bytes;
     const manifest = manifestSchema.parse({ version: 1, runId: envelope.run.id, host: input.sink.baseUrl, credentialKind: input.sink.credentialSource,
       envelope: ref(envelopeBytes), report_json: ref(artifacts.report_json), ...(artifacts.report_md === undefined ? {} : { report_md: ref(artifacts.report_md) }), reviewer: ref(privateBytes) });
-    const entry = { manifest, envelope, envelopeBytes, artifacts, privateBytes, directory: join(this.root, manifest.runId.toLowerCase()) };
+    const entry = { manifest, manifestBytes: JSON.stringify(manifest), envelope, envelopeBytes, artifacts, privateBytes,
+      directory: join(this.root, manifest.runId.toLowerCase()) };
     validate(entry); return entry;
   }
   private async lock<T>(runId: string, work: () => Promise<T>): Promise<T> {
@@ -161,30 +222,53 @@ export class ReviewerDeliveryQueue {
     await publish(join(entry.directory, 'reviewer-artifact.json'), entry.privateBytes);
     for (const kind of ['report_json', 'report_md'] as const) if (entry.artifacts[kind] !== undefined) await publish(join(entry.directory, files[kind]), entry.artifacts[kind]!);
     // Publish manifest last; a crash before it leaves evidence, never an uploadable partial entry.
-    await publish(join(entry.directory, 'manifest.json'), JSON.stringify(entry.manifest));
+    await publish(join(entry.directory, 'manifest.json'), entry.manifestBytes);
   }
   private async load(id: string): Promise<Entry> {
     const directory = join(this.root, id.toLowerCase()); await inspectRecoveryDirectory(directory, true);
-    const manifest = manifestSchema.parse(JSON.parse(await privateRead(join(directory, 'manifest.json'), 4096)));
+    const manifestBytes = await privateRead(join(directory, 'manifest.json'), 4096);
+    const manifest = manifestSchema.parse(JSON.parse(manifestBytes));
     if (manifest.runId.toLowerCase() !== id.toLowerCase()) fail('invalid_run');
     const allowed = ['manifest.json', 'envelope.json', 'reviewer-artifact.json', 'report.json', 'acknowledged.json', ...(manifest.report_md ? ['report.md'] : [])];
     if ((await readdir(directory)).some(name => !allowed.includes(name))) fail('unknown_file');
     const envelopeBytes = await privateRead(join(directory, 'envelope.json'), MAX_ENVELOPE_BYTES);
-    const entry: Entry = { manifest, directory, envelopeBytes, envelope: JSON.parse(envelopeBytes), privateBytes: await privateRead(join(directory, 'reviewer-artifact.json'), MAX_ARTIFACT_BYTES),
+    const entry: Entry = { manifest, manifestBytes, directory, envelopeBytes, envelope: JSON.parse(envelopeBytes), privateBytes: await privateRead(join(directory, 'reviewer-artifact.json'), MAX_ARTIFACT_BYTES),
       artifacts: { report_json: await privateRead(join(directory, 'report.json'), MAX_ARTIFACT_BYTES), ...(manifest.report_md ? { report_md: await privateRead(join(directory, 'report.md'), MAX_ARTIFACT_BYTES) } : {}) } };
     validate(entry); return entry;
   }
-  private ack(entry: Entry): string { return JSON.stringify({ version: 1, runId: entry.manifest.runId, manifestSha256: sha256(JSON.stringify(entry.manifest)) }); }
+  private recoveryPreview(entry: Entry, selection: RetainedReviewerRecoverySelection): RetainedReviewerRecoveryPreview {
+    const report = ref(selection.reportBytes), reviewer = ref(selection.reviewerArtifactBytes);
+    const run = entry.envelope.run;
+    if (typeof selection.target !== 'string' || !selection.target || !/^[a-f0-9]{40}$/.test(selection.headSha) ||
+      selection.runId.toLowerCase() !== entry.manifest.runId.toLowerCase() || run.id !== entry.manifest.runId ||
+      run.converge?.target !== selection.target || run.target.head_sha !== selection.headSha ||
+      selection.reportSha256 !== report.sha256 || selection.reportByteLength !== report.bytes ||
+      selection.reviewerArtifactSha256 !== reviewer.sha256 || selection.reviewerArtifactByteLength !== reviewer.bytes ||
+      entry.artifacts.report_json !== selection.reportBytes || entry.privateBytes !== selection.reviewerArtifactBytes ||
+      !isDeepStrictEqual(entry.manifest.report_json, report) || !isDeepStrictEqual(entry.manifest.reviewer, reviewer)) {
+      fail('recovery_selection_mismatch');
+    }
+    return { version: 1, target: selection.target, runId: entry.manifest.runId, headSha: selection.headSha,
+      host: entry.manifest.host, credentialKind: entry.manifest.credentialKind,
+      manifest: ref(entry.manifestBytes), envelope: { ...entry.manifest.envelope },
+      report_json: { ...entry.manifest.report_json },
+      ...(entry.manifest.report_md ? { report_md: { ...entry.manifest.report_md } } : {}),
+      reviewer: { ...entry.manifest.reviewer } };
+  }
+  private ack(entry: Entry): string { return JSON.stringify({ version: 1, runId: entry.manifest.runId, manifestSha256: sha256(entry.manifestBytes) }); }
   private async acknowledged(entry: Entry): Promise<boolean> {
     try { if (await privateRead(join(entry.directory, 'acknowledged.json'), 4096) !== this.ack(entry)) fail('invalid_ack'); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
-  private async transfer(entry: Entry, sink: HarnessSink, request: () => RequestOptions, initial: boolean): Promise<void> {
+  private async transfer(entry: Entry, sink: HarnessSink, request: () => RequestOptions, mode: 'initial' | 'retry' | 'recovery'): Promise<void> {
     const m = entry.manifest;
     if (sink.baseUrl !== m.host || sink.credentialSource !== m.credentialKind) fail('credential_mismatch');
     accepted(await sink.checkReviewerRecovery(request()));
-    let read = initial ? undefined : await sink.getReviewerArtifact(m.runId, m.reviewer, request());
-    if (read && read.kind !== 'ok' && read.kind !== 'pending') accepted(read);
+    let read = mode === 'initial' ? undefined : await sink.getReviewerArtifact(m.runId, m.reviewer, request());
+    const absentRecovery = mode === 'recovery' && read?.kind === 'rejected' && read.httpStatus === 404 &&
+      read.error === 'reviewer_artifact_http_404';
+    if (read && read.kind !== 'ok' && read.kind !== 'pending' && !absentRecovery) accepted(read);
+    if (absentRecovery) read = undefined;
     // A matching private read is the server's completed admission proof: it
     // validates the retained ordinary/private pair, so replaying the ordinary
     // uploads would only repeat already acknowledged work after a lost local ACK.
