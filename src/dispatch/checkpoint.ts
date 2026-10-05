@@ -466,7 +466,7 @@ export function decodeCheckpointProof(bytes: string, expectedPlan?: FrozenCheckp
     resultBytes.set(outcome.resultFile, outcome.reviewBytes);
   }
   const { state, bindings, captureAllowance } = validateHistory(plan, records, resultBytes, wire.bindings);
-  if (!captureAllowance && byteLength > MAX_CHECKPOINT_PROOF_BYTES) throw new Error('checkpoint_proof_too_large');
+  if (byteLength > MAX_CHECKPOINT_PROOF_BYTES + captureAllowance) throw new Error('checkpoint_proof_too_large');
   if (!state.finalized) throw new Error('checkpoint_proof_unsealed');
   if (canonical(wire as unknown as Json) !== bytes) throw new Error('checkpoint_proof_noncanonical');
   const proof: CheckpointProof = deepFreeze({ version: 1 as const, bytes, digest: sha256(bytes), plan, state, bindings });

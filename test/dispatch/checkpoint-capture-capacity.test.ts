@@ -10,7 +10,7 @@ import { sha256Hex, stableStringify } from '../../src/report/run-header.js';
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
 const target = 'allocator-one/rcl#162', namespace = 'capture-capacity';
-function capture(patchSize = 9 * 1024 * 1024) {
+function capture(patchSize = 9 * 1024 * 1024, capacity = CAPTURED_INPUT_HARD_LIMITS) {
   const patchBytes = 'p'.repeat(patchSize), configBytes = stableStringify({ quorumFraction: 2 / 3 });
   const toolsBytes = stableStringify({ parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } });
   const assignments = [0, 1].map(index => ({ model: `fake/m${index}`, provider: 'fake',
@@ -23,7 +23,7 @@ function capture(patchSize = 9 * 1024 * 1024) {
     chunks: [{ index: 0, total: 1, digest: sha256Hex('chunk') }],
     prompts: prompts.map((p, index) => ({ seat: `s${index}`, chunk: 0, systemSha256: sha256Hex(p.systemPrompt), userSha256: sha256Hex(p.userPrompt) })),
   });
-  return captureReviewerInputs({ plan, capacity: CAPTURED_INPUT_HARD_LIMITS, policy: { version: 1, fraction: 2 / 3 },
+  return captureReviewerInputs({ plan, capacity, policy: { version: 1, fraction: 2 / 3 },
     patchBytes, configBytes, specBytes: 'spec', contextBytes: '[]', toolsBytes, assignments, prompts, chunkBytes: ['chunk'] });
 }
 async function directory() {
@@ -79,6 +79,30 @@ describe('checkpoint explicit capture capacity', () => {
       await rm(checkpointPath(commonDir, target, namespace), { recursive: true });
       expect(decodeCheckpointProof(proof.bytes, captured.plan).state.outcomes.map(outcome => outcome.result.reviewBytes))
         .toEqual(Array(4).fill(reviewBytes));
+    });
+  }, 30_000);
+
+  it.each(['decode', 'export'] as const)('%s enforces the declared capture allowance on serialized proof bytes', async operation => {
+    const commonDir = await directory();
+    const capacity = { ...CAPTURED_INPUT_HARD_LIMITS, bytes: 1024 * 1024 };
+    const captured = capture(1024, capacity);
+    await withNativeTarget(commonDir, target, async ownership => {
+      const journal = await CheckpointJournal.create({ commonDir, namespace, plan: captured.plan, ownership });
+      await journal.bind('captured-inputs', captured.bytes, ownership);
+      // These individually bounded bindings fit the raw journal budget, but
+      // JSON escaping takes the portable proof past its declared allowance.
+      for (const name of ['source', 'operation', 'launch'] as const) {
+        await journal.bind(name, '"'.repeat(5 * 1024 * 1024), ownership);
+      }
+      await journal.finalize(ownership);
+      const { records } = await journal.read(), bindings = await journal.readBindings();
+      const bytes = stableStringify({ version: 1, plan: captured.plan, records, outcomes: [], bindings });
+      expect(Buffer.byteLength(bytes)).toBeGreaterThan(MAX_CHECKPOINT_PROOF_BYTES + capacity.bytes);
+      if (operation === 'decode') {
+        expect(() => decodeCheckpointProof(bytes, captured.plan)).toThrow('checkpoint_proof_too_large');
+      } else {
+        await expect(journal.exportProof()).rejects.toThrow('checkpoint_proof_too_large');
+      }
     });
   }, 30_000);
 
