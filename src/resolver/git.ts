@@ -144,11 +144,28 @@ export async function loadPinnedGitDiff(options: PinnedGitDiffOptions): Promise<
     (options.expectedMergeBaseSha !== undefined && !FULL_OBJECT_ID.test(options.expectedMergeBaseSha))) {
     throw new Error('Pinned PR diff requires exact commits, not revision names.');
   }
+  // Object reads in partial clones can otherwise invoke a promisor fetch.
+  // Deny transports as a backstop for Git versions predating NO_LAZY_FETCH;
+  // the separately bounded hosted reader is the only acquisition path.
+  const env = { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '',
+    GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
   const readGit = async (args: string[], bound = 16_384): Promise<string> => {
-    const { stdout } = await execFileAsync('git', ['--no-replace-objects', ...args], {
-      cwd, maxBuffer: bound, encoding: 'utf8', timeout: 60_000,
-    });
-    return stdout;
+    try {
+      const { stdout } = await execFileAsync('git', ['--no-replace-objects', ...args], {
+        cwd, env, maxBuffer: bound, encoding: 'utf8', timeout: 60_000,
+      });
+      return stdout;
+    } catch (error) {
+      const failure = error as { code?: unknown; stderr?: unknown };
+      const missing = typeof failure.stderr === 'string'
+        ? /^fatal: unable to read ([a-f0-9]+)\r?$/m.exec(failure.stderr) : null;
+      // Only an explicit missing object may select hosted acquisition. Output
+      // limits and malformed patches must keep their original refusal.
+      if (failure.code === 128 && missing && FULL_OBJECT_ID.test(missing[1]!)) {
+        throw new PinnedGitObjectsUnavailableError('Pinned PR diff requires locally available objects; a referenced object is missing.');
+      }
+      throw error;
+    }
   };
   let remote: string;
   try { remote = (await readGit(['config', '--get', 'remote.origin.url'])).trim(); }
@@ -187,7 +204,8 @@ async function readPinnedPatch(
       '-c', 'diff.indentHeuristic=true', 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
       '--find-renames=50%', '--full-index', '--binary', '--src-prefix=a/', '--dst-prefix=b/', '--unified=3',
       mergeBaseSha, headSha, '--'], maxBytes);
-  } catch {
+  } catch (error) {
+    if (error instanceof PinnedGitObjectsUnavailableError) throw error;
     throw new Error(`Pinned PR diff could not be read within its ${maxBytes}-byte output bound.`);
   }
   if (/^GIT binary patch$/m.test(rawDiff) || /^Binary files .+ differ$/m.test(rawDiff)) {
