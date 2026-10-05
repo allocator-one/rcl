@@ -7,7 +7,7 @@ const head = 'a'.repeat(40);
 const request = { operation_id: randomUUID(), previous_cycle_id: null, head_sha: head };
 const receipt = { ...request, id: randomUUID(), inserted_at: new Date().toISOString() };
 function fixture(handler: Parameters<typeof fakeFetch>[0], requestedHead = head,
-  readLivePr = vi.fn(async () => ({ headSha: requestedHead, merged: false }))) {
+  readLivePr = vi.fn(async () => ({ headSha: requestedHead, merged: false, state: 'open' }))) {
   const transport = fakeFetch(handler);
   const sink = new HarnessSink({ credential: { url: 'https://harness.example', token: 'fixture', source: 'login' }, rclVersion: '4.1.9', fetchImpl: transport.fetch });
   return { remote: createReviewCycleRemote(sink, 'Allocator-One/RCL', 42, requestedHead, readLivePr), readLivePr, ...transport };
@@ -28,12 +28,13 @@ it('accepts a stale Harness status head and an older cycle when GitHub confirms 
 });
 
 it.each([
-  { liveHead: 'b'.repeat(40), merged: false },
-  { liveHead: head, merged: true },
-])('refuses changed or merged live GitHub PR membership before returning the active cycle', async ({ liveHead, merged }) => {
+  { liveHead: 'b'.repeat(40), merged: false, state: 'open' },
+  { liveHead: head, merged: true, state: 'closed' },
+  { liveHead: head, merged: false, state: 'closed' },
+])('refuses changed or merged live GitHub PR membership before returning the active cycle', async ({ liveHead, merged, state }) => {
   const { remote } = fixture(() => ({ status: 200, body: { data: { repo: 'allocator-one/rcl', pr_number: 42,
     cycle_protocol: 1, active_cycle: receipt, head: { sha: head, merged: false } } } }), head,
-  vi.fn(async () => ({ headSha: liveHead, merged })));
+  vi.fn(async () => ({ headSha: liveHead, merged, state })));
   await expect(remote.current()).rejects.toThrow('fresh_review_head_changed');
 });
 
@@ -43,7 +44,7 @@ it.each([
 ])('fails closed when the GitHub PR lookup is unavailable or malformed', async readLivePr => {
   const { remote } = fixture(() => ({ status: 200, body: { data: { repo: 'allocator-one/rcl', pr_number: 42,
     cycle_protocol: 1, active_cycle: receipt, head: { sha: head, merged: false } } } }), head,
-  readLivePr as () => Promise<{ headSha: string; merged: boolean }>);
+  readLivePr as () => Promise<{ headSha: string; merged: boolean; state: string }>);
   await expect(remote.current()).rejects.toThrow('fresh_review_github_unavailable');
 });
 it.each([
@@ -76,6 +77,6 @@ it('negotiates a first cycle before Harness has any cached head or review histor
 it.each(['./repo', '../repo', 'owner/.', 'owner/..'])('rejects URL dot segments in repository %s before transport', repo => {
   const { fetch, requests } = fakeFetch(() => ({ status: 500, body: {} }));
   const sink = new HarnessSink({ credential: { url: 'https://harness.example', token: 'fixture', source: 'login' }, rclVersion: '4.1.11', fetchImpl: fetch });
-  expect(() => createReviewCycleRemote(sink, repo, 42, head, async () => ({ headSha: head, merged: false }))).toThrow('fresh_review_requires_pr');
+  expect(() => createReviewCycleRemote(sink, repo, 42, head, async () => ({ headSha: head, merged: false, state: 'open' }))).toThrow('fresh_review_requires_pr');
   expect(requests).toHaveLength(0);
 });

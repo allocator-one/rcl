@@ -47,7 +47,7 @@ async function fixture(work: (f: {
       patch: '@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;', sha: head }]);
     if (path.startsWith('/github/repos/fixture/repo/pulls/42/files?')) return answer(200, [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
       patch: '@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;', sha: head }]);
-    if (path === '/github/repos/fixture/repo/pulls/42') return answer(200, { number: 42, changed_files: 1, labels: [], title: 'Fixture', body: '', html_url: 'https://github.com/fixture/repo/pull/42', merged: false,
+    if (path === '/github/repos/fixture/repo/pulls/42') return answer(200, { number: 42, changed_files: 1, labels: [], title: 'Fixture', body: '', html_url: 'https://github.com/fixture/repo/pull/42', merged: false, state: 'open',
       base: { sha: 'b'.repeat(40), ref: 'main', repo: { full_name: 'fixture/repo' } }, head: { sha: head, ref: 'fixture', repo: { full_name: 'fixture/repo' } } });
     if (path === '/api/v1/reviews/prs/fixture/repo/42' && req.method === 'GET') return answer(200, { data: {
       repo: 'fixture/repo', pr_number: 42, head: { sha: statusHead, merged: false }, cycle_protocol: 1, active_cycle: cycles.at(-1) ?? null } });

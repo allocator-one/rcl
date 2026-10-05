@@ -2393,7 +2393,7 @@ async function executeCouncil(
             throw new Error('fresh_review_github_auth_unavailable');
           }
           const { data: pr } = await getGitHubPullRequest(client, prTarget);
-          return { headSha: pr.head.sha, merged: pr.merged };
+          return { headSha: pr.head.sha, merged: pr.merged, state: pr.state };
         });
     }
     if (opts.resumePending || opts.finalizePendingOnly) {

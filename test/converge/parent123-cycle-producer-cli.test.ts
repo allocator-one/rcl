@@ -91,7 +91,7 @@ it('actual CLI preserves recovery, cycle, artifact and attempt bindings through 
     await writeFile(shim, `const original = globalThis.fetch; globalThis.fetch = (input, options) => {
       const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
       if (url.hostname === 'api.github.com' && url.pathname === '/repos/allocator-one/rcl/pulls/42') {
-        return Response.json({ head: { sha: ${JSON.stringify('9'.repeat(40))} }, merged: false });
+        return Response.json({ head: { sha: ${JSON.stringify('9'.repeat(40))} }, merged: false, state: 'open' });
       }
       if (url.origin !== ${JSON.stringify(baseUrl)}) throw new Error('Unexpected external fixture request: ' + url.origin);
       return original(input, options);

@@ -5,7 +5,7 @@ import { reviewCycleReceiptSchema, type ReviewCycleRemote } from './review-cycle
 /** A server-confirmed noncommit can restore local barriers; uncertain replies cannot. */
 export class ReviewCycleRejected extends Error {}
 
-export type LivePullRequestReader = () => Promise<{ headSha: string; merged: boolean }>;
+export type LivePullRequestReader = () => Promise<{ headSha: string; merged: boolean; state: string }>;
 
 export function createReviewCycleRemote(sink: HarnessSink, repo: string, prNumber: number, headSha: string,
   readLivePr: LivePullRequestReader): ReviewCycleRemote {
@@ -30,8 +30,8 @@ export function createReviewCycleRemote(sink: HarnessSink, repo: string, prNumbe
         throw new Error('fresh_review_github_unavailable');
       }
       if (!livePr || typeof livePr.headSha !== 'string' || !/^[a-f0-9]{40}$/.test(livePr.headSha) ||
-        typeof livePr.merged !== 'boolean') throw new Error('fresh_review_github_unavailable');
-      if (livePr.merged || livePr.headSha !== headSha) {
+        typeof livePr.merged !== 'boolean' || typeof livePr.state !== 'string') throw new Error('fresh_review_github_unavailable');
+      if (livePr.merged || livePr.state !== 'open' || livePr.headSha !== headSha) {
         throw new Error('fresh_review_head_changed');
       }
       return result.value.active_cycle;
