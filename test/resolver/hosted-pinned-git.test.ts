@@ -30,11 +30,14 @@ index ${'1'.repeat(40)}..${'2'.repeat(40)} 100644
 +new
 `;
 const input = () => ({ owner: 'o', repo: 'r', baseSha, headSha, expectedMergeBaseSha, token });
-let failFetch = false, wrongCommit = false, pauseFetch = false;
+let failFetch = false, wrongCommit = false, pauseFetch = false, largeSnapshot = false;
+let unsupportedFilterCommand: 'fetch' | 'diff' | undefined;
+let pauseDiff = false;
 
 beforeEach(() => {
   mocks.oversizedStorage = false;
-  failFetch = false; wrongCommit = false; pauseFetch = false;
+  failFetch = false; wrongCommit = false; pauseFetch = false; largeSnapshot = false;
+  unsupportedFilterCommand = undefined; pauseDiff = false;
   mocks.spawn.mockReset().mockImplementation((_command, args: string[]) => {
     const child = Object.assign(new EventEmitter(), {
       stdout: new PassThrough(), stderr: new PassThrough(),
@@ -42,6 +45,16 @@ beforeEach(() => {
     });
     queueMicrotask(() => {
       if (args.includes('fetch') && pauseFetch) return;
+      if (args.includes('diff') && pauseDiff) return;
+      // Model a large unchanged repository snapshot: only a blobless fetch
+      // can keep it within the storage budget for this one-file text diff.
+      if (args.includes('fetch') && largeSnapshot && !args.includes('--filter=blob:none')) {
+        mocks.oversizedStorage = true;
+      }
+      if (unsupportedFilterCommand && args.includes(unsupportedFilterCommand)) {
+        child.stderr.write('warning: filtering not recognized ');
+        child.stderr.write(`by server, ignoring\n${token}`);
+      }
       if (args.includes('fetch') && failFetch) {
         child.stderr.write(`fatal: rejected ${token}`);
         child.emit('close', 1);
@@ -72,6 +85,40 @@ describe('hosted pinned PR object acquisition', () => {
       '--no-write-fetch-head', '--no-auto-maintenance', 'origin', headSha, expectedMergeBaseSha]));
     expect(mocks.spawn.mock.calls.flatMap(([, args]) => args)).not.toContain('checkout');
     expect(mocks.spawn.mock.calls.flatMap(([, args]) => args)).not.toContain('merge-base');
+    await expectRemoved();
+  });
+
+  it('reviews a small text change without downloading large unchanged snapshot blobs', async () => {
+    largeSnapshot = true;
+    const diff = await loadHostedPinnedGitDiff(input());
+    expect(diff.files).toMatchObject([{ filename: 'a.ex', additions: 1, deletions: 1 }]);
+    expect(diff.rawDiff).toBe(rawDiff);
+    expect(mocks.oversizedStorage).toBe(false);
+    await expectRemoved();
+  });
+
+  it.each(['fetch', 'diff'] as const)('refuses unsupported filtering during %s even if Git exits successfully', async command => {
+    unsupportedFilterCommand = command;
+    const error = await loadHostedPinnedGitDiff(input()).catch(error => error as Error);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain(command === 'fetch' ? 'filter' : 'output bound');
+    expect(String(error)).not.toContain(token);
+    const call = mocks.spawn.mock.calls.findIndex(([, args]) => args.includes(command));
+    expect(mocks.spawn.mock.results[call]!.value.kill).toHaveBeenCalled();
+    if (command === 'fetch') expect(mocks.spawn.mock.calls.some(([, args]) => args.includes('diff'))).toBe(false);
+    await expectRemoved();
+  });
+
+  it('bounds lazy blob acquisition during diff by the same shared deadline', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    pauseDiff = true;
+    const pending = loadHostedPinnedGitDiff(input());
+    const assertion = expect(pending).rejects.toThrow('output bound');
+    await vi.waitFor(() => expect(mocks.spawn.mock.calls.some(([, args]) => args.includes('diff'))).toBe(true));
+    await vi.advanceTimersByTimeAsync(180_000);
+    await assertion;
+    const call = mocks.spawn.mock.calls.findIndex(([, args]) => args.includes('diff'));
+    expect(mocks.spawn.mock.results[call]!.value.kill).toHaveBeenCalled();
     await expectRemoved();
   });
 

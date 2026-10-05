@@ -217,6 +217,8 @@ const HOSTED_GIT_STORAGE_BYTES = 512 * 1024 * 1024;
 /**
  * Read GitHub's pinned comparison in a disposable object database. The API
  * supplies the merge base; depth-one snapshots must never infer ancestry.
+ * Blobless snapshots omit unchanged file contents; Git's promisor machinery
+ * fetches the changed blobs needed by diff inside the same bounded process.
  * No PR checkout, config, hooks, credential helper, or submodule is executed.
  */
 export async function loadHostedPinnedGitDiff(
@@ -251,7 +253,7 @@ export async function loadHostedPinnedGitDiff(
     if ((await readGit(['config', '--get', 'remote.origin.url'])).trim() !== origin) {
       throw new Error('Hosted PR repository identity did not match.');
     }
-    await readGit(['fetch', '--quiet', '--depth=1', '--no-tags', '--no-recurse-submodules',
+    await readGit(['fetch', '--quiet', '--depth=1', '--filter=blob:none', '--no-tags', '--no-recurse-submodules',
       '--no-write-fetch-head', '--no-auto-maintenance', 'origin',
       ...new Set([options.headSha, options.expectedMergeBaseSha])]);
     for (const sha of [options.headSha, options.expectedMergeBaseSha]) {
@@ -289,6 +291,7 @@ async function runHostedGit(
     const child = spawn('git', args, { cwd, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     let outputBytes = 0, errorBytes = 0, failure: string | undefined, closed = false;
+    let diagnosticTail = '';
     let storageCheck: Promise<void> | undefined;
     const stop = (message: string) => {
       failure ??= message;
@@ -305,7 +308,18 @@ async function runHostedGit(
     });
     child.stderr.on('data', (data: Buffer) => {
       errorBytes += data.length;
-      if (errorBytes > 65_536) stop('Hosted PR acquisition exceeded its diagnostic byte bound.');
+      if (errorBytes > 65_536) {
+        stop('Hosted PR acquisition exceeded its diagnostic byte bound.');
+        return;
+      }
+      // Git otherwise warns and silently downloads full snapshots when the
+      // server lacks filtering. Detect split writes too, including a nested
+      // promisor fetch launched by diff, and never expose its diagnostics.
+      const diagnostic = diagnosticTail + data.toString('utf8');
+      if (diagnostic.includes('filtering not recognized by server, ignoring')) {
+        stop('Hosted PR acquisition requires server support for object filtering.');
+      }
+      diagnosticTail = diagnostic.slice(-128);
     });
     const timer = setTimeout(() => stop('Hosted PR acquisition exceeded its time bound.'), deadline - Date.now());
     const monitor = setInterval(() => {
