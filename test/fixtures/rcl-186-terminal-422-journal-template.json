@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "source": "RCL-186 privacy-safe structural snapshot of the retained A3 recovery journal",
+  "source_record_sha256": [
+    "12ece3982c99fb06e680cfbe7957a364d4a017fb211e53abba0a880f29ad3694",
+    "af59142d0e30fff88f82a104ee48fdf35ee05905147d6a328ee645feb5740bf6",
+    "767d4aa420da5de10ca5df951a1d98d3552856c444b13861485a6f830fa43e26",
+    "19cd376372490e896572706a8ec8fe39957b4d872d9c5277b7665e5ff3291732",
+    "f9fc1ababa248d07916393d85b2a5a7ffb8adfc1fe67a3829ec8c5c132c96a1e",
+    "06921f085fecfd8ceff85031f0d8f5e0f77db1b62f91615ac8194cf2527a94a8",
+    "9758568f3ad8d54b55f486ac5891cabc754d3279bf6a60d8b67c91effdbc8a11",
+    "f11b560c59446f6d013f11acd1dad1a6d65cf1613a9339d1eb9088055e376cf7",
+    "c13f754dfb5d2c09f6cfae22a7aa355127f0ab5857e30a9dea5ba933cdd9dbe0",
+    "a19d92aee8bc5c68c041298e23482d6b27b349885291a7c3310252db50c160d7",
+    "4af43e662ccdd593b1b1a94a839a308faba1825f27f91d3b453ba14e4737cdd2",
+    "12fe654cd1daeb2b82b7e4eaaf2643c785f6ac9763d2cdc6b48cb494da4143f7"
+  ],
+  "source_ref_bytes": {
+    "envelope": 49139,
+    "report_json": 106768,
+    "report_md": 20609,
+    "reviewer": 638626
+  },
+  "records": [
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 1,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "prepared",
+      "recorded_at": "2026-10-05T14:31:17.228Z",
+      "data": {
+        "outbox_manifest_sha256": "{{outbox_manifest_sha256}}",
+        "destination": {
+          "host": "{{destination_host}}",
+          "credentialKind": "{{destination_credential_kind}}",
+          "activationProtocol": 1,
+          "principal": {
+            "org_id": "{{principal_org_id}}",
+            "actor_user_id": "{{principal_actor_user_id}}",
+            "credential_kind": "cli",
+            "api_token_id": null
+          }
+        }
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 2,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "activation_post_intent",
+      "recorded_at": "2026-10-05T14:31:17.260Z",
+      "data": {
+        "envelope": {
+          "sha256": "{{envelope_sha256}}",
+          "bytes": "{{envelope_bytes}}"
+        }
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 3,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "activation_post_outcome",
+      "recorded_at": "2026-10-05T14:31:20.096Z",
+      "data": {
+        "kind": "ok",
+        "http_status": 201
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 4,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "envelope_verified",
+      "recorded_at": "2026-10-05T18:11:57.212Z",
+      "data": {
+        "sha256": "{{envelope_sha256}}",
+        "artifacts_declared": [
+          {
+            "kind": "report_json",
+            "sha256": "{{report_json_sha256}}",
+            "bytes": "{{report_json_bytes}}"
+          },
+          {
+            "kind": "report_md",
+            "sha256": "{{report_md_sha256}}",
+            "bytes": "{{report_md_bytes}}"
+          }
+        ]
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 5,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "report_json_put_intent",
+      "recorded_at": "2026-10-05T18:11:58.427Z",
+      "data": {
+        "sha256": "{{report_json_sha256}}",
+        "bytes": "{{report_json_bytes}}"
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 6,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "report_json_put_outcome",
+      "recorded_at": "2026-10-05T18:11:59.172Z",
+      "data": {
+        "kind": "ok",
+        "http_status": 201
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 7,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "report_json_verified",
+      "recorded_at": "2026-10-05T18:11:59.896Z",
+      "data": {
+        "sha256": "{{report_json_sha256}}",
+        "bytes": "{{report_json_bytes}}"
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 8,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "report_md_put_intent",
+      "recorded_at": "2026-10-05T18:12:01.536Z",
+      "data": {
+        "sha256": "{{report_md_sha256}}",
+        "bytes": "{{report_md_bytes}}"
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 9,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "report_md_put_outcome",
+      "recorded_at": "2026-10-05T18:12:03.068Z",
+      "data": {
+        "kind": "ok",
+        "http_status": 201
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 10,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "report_md_verified",
+      "recorded_at": "2026-10-05T18:12:03.317Z",
+      "data": {
+        "sha256": "{{report_md_sha256}}",
+        "bytes": "{{report_md_bytes}}"
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 11,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "reviewer_put_intent",
+      "recorded_at": "2026-10-05T18:12:06.594Z",
+      "data": {
+        "sha256": "{{reviewer_sha256}}",
+        "bytes": "{{reviewer_bytes}}"
+      }
+    },
+    {
+      "operation_id": "{{operation_id}}",
+      "manifest_sha256": "{{recovery_manifest_sha256}}",
+      "sequence": 12,
+      "previous_sha256": "{{previous_sha256}}",
+      "phase": "reviewer_put_outcome",
+      "recorded_at": "2026-10-05T18:12:11.235Z",
+      "data": {
+        "kind": "rejected",
+        "http_status": 422,
+        "error": "reviewer_artifact_http_422"
+      }
+    }
+  ]
+}

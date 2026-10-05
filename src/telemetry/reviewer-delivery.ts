@@ -99,7 +99,7 @@ const isOutcomePhase = (phase: string) => phase === 'activation_post_outcome' ||
 const operationPhases = new Set(['prepared', 'activation_post_intent', 'activation_post_outcome', ...putOutcomePhases, 'activation_post_uncertain',
   'envelope_verified', 'report_json_put_intent', 'report_json_verified',
   'report_md_put_intent', 'report_md_verified', 'reviewer_put_intent',
-  'reviewer_verified', 'recovery_acknowledged', 'complete']);
+  'reviewer_put_replay_intent', 'reviewer_verified', 'recovery_acknowledged', 'complete']);
 const outcomeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('ok'), http_status: z.number().int() }).strict(),
   z.object({ kind: z.literal('disabled') }).strict(),
@@ -546,14 +546,98 @@ export class ReviewerDeliveryQueue {
       if (intentPosition !== undefined && verifiedPosition !== undefined && intentPosition > verifiedPosition) {
         fail('journal_checkpoint_conflict');
       }
-      let terminal = false;
       for (const item of history) {
-        if (item.index < intentPosition! || (verifiedPosition !== undefined && item.index > verifiedPosition) || terminal) {
+        if (item.index < intentPosition! || (verifiedPosition !== undefined && item.index > verifiedPosition)) {
           fail('journal_checkpoint_conflict');
         }
-        if (item.data.kind !== 'unavailable') terminal = true;
+      }
+      const terminalIndex = history.findIndex(item => item.data.kind !== 'unavailable');
+      if (terminalIndex >= 0 && terminalIndex < history.length - 1) {
+        const replayIntentPosition = phasePositions.get('reviewer_put_replay_intent');
+        const first = history[0];
+        const allowedReplayOutcome = base === 'reviewer_put_outcome' && operation.mode === 'resume' &&
+          terminalIndex === 0 && history.length === 2 && replayIntentPosition !== undefined && first !== undefined &&
+          first.data.kind === 'rejected' && first.data.http_status === 422 &&
+          first.data.error === 'reviewer_artifact_http_422' &&
+          first.index < replayIntentPosition && replayIntentPosition < history[1]!.index;
+        if (!allowedReplayOutcome) fail('journal_checkpoint_conflict');
       }
       if (history.length > MAX_PUT_OUTCOMES_PER_ARTIFACT) fail('put_retry_limit');
+    }
+    const terminal422Prefix: Array<{ phase: string; data: unknown }> = m.report_md === undefined ? [] : [
+      { phase: 'prepared', data: { outbox_manifest_sha256: sha256(entry.manifestBytes), destination: operation.destination } },
+      { phase: 'activation_post_intent', data: { envelope: m.envelope } },
+      { phase: 'activation_post_outcome', data: { kind: 'ok', http_status: 201 } },
+      { phase: 'envelope_verified', data: { sha256: m.envelope.sha256,
+        artifacts_declared: entry.envelope.artifacts_declared } },
+      { phase: 'report_json_put_intent', data: m.report_json },
+      { phase: 'report_json_put_outcome', data: { kind: 'ok', http_status: 201 } },
+      { phase: 'report_json_verified', data: m.report_json },
+      { phase: 'report_md_put_intent', data: m.report_md },
+      { phase: 'report_md_put_outcome', data: { kind: 'ok', http_status: 201 } },
+      { phase: 'report_md_verified', data: m.report_md },
+      { phase: 'reviewer_put_intent', data: m.reviewer },
+      { phase: 'reviewer_put_outcome', data: { kind: 'rejected', http_status: 422,
+        error: 'reviewer_artifact_http_422' } },
+    ];
+    const exactPrefix = (length: number) => checkpoints.slice(0, length).every((checkpoint, index) => {
+      const expected = terminal422Prefix[index];
+      return expected !== undefined && checkpoint.phase === expected.phase &&
+        isDeepStrictEqual(checkpoint.data, JSON.parse(JSON.stringify(expected.data)));
+    });
+    const reviewerHistory = putHistories.get('reviewer_put_outcome') ?? [];
+    const firstReviewerOutcome = reviewerHistory[0];
+    const terminal422Base = terminal422Prefix.length > 0 && checkpoints.length >= terminal422Prefix.length &&
+      exactPrefix(terminal422Prefix.length);
+    // Ordinary interrupted delivery can share every preceding checkpoint with
+    // this special case. Only a recorded terminal rejection establishes the
+    // replay boundary; a partial ordinary prefix must keep its usual resume path.
+    const terminal422Outcome = firstReviewerOutcome?.data.kind === 'rejected' &&
+      firstReviewerOutcome.data.http_status === 422 &&
+      firstReviewerOutcome.data.error === 'reviewer_artifact_http_422';
+    if (terminal422Outcome && !terminal422Base) fail('journal_checkpoint_conflict');
+    if (terminal422Base && operation.mode !== 'resume') fail('refused');
+    const terminal422Replay = operation.mode === 'resume' && terminal422Base;
+    if (terminal422Replay) {
+      const suffix = checkpoints.slice(terminal422Prefix.length);
+      const phases = suffix.map(checkpoint => checkpoint.phase);
+      const allowedSuffixes = [
+        [],
+        ['reviewer_verified'],
+        ['reviewer_verified', 'recovery_acknowledged'],
+        ['reviewer_verified', 'recovery_acknowledged', 'complete'],
+        ['reviewer_put_replay_intent'],
+        ['reviewer_put_replay_intent', 'reviewer_verified'],
+        ['reviewer_put_replay_intent', 'reviewer_verified', 'recovery_acknowledged'],
+        ['reviewer_put_replay_intent', 'reviewer_verified', 'recovery_acknowledged', 'complete'],
+        ['reviewer_put_replay_intent', 'reviewer_put_outcome_2'],
+        ['reviewer_put_replay_intent', 'reviewer_put_outcome_2', 'reviewer_verified'],
+        ['reviewer_put_replay_intent', 'reviewer_put_outcome_2', 'reviewer_verified', 'recovery_acknowledged'],
+        ['reviewer_put_replay_intent', 'reviewer_put_outcome_2', 'reviewer_verified', 'recovery_acknowledged', 'complete'],
+      ];
+      if (!allowedSuffixes.some(expected => isDeepStrictEqual(phases, expected))) fail('journal_checkpoint_conflict');
+      for (const checkpoint of suffix) {
+        if ((checkpoint.phase === 'reviewer_put_replay_intent' || checkpoint.phase === 'reviewer_verified') &&
+          !isDeepStrictEqual(checkpoint.data, m.reviewer)) fail('journal_checkpoint_conflict');
+        if (checkpoint.phase === 'reviewer_put_outcome_2') {
+          const parsed = outcomeSchema.safeParse(checkpoint.data);
+          if (!parsed.success || !isDeepStrictEqual(parsed.data, checkpoint.data)) fail('journal_checkpoint_conflict');
+        }
+      }
+    }
+    const replayOutcome = reviewerHistory[1]?.data;
+    const replayIntentPosition = phasePositions.get('reviewer_put_replay_intent');
+    if (replayIntentPosition !== undefined) {
+      if (!terminal422Replay || operation.mode !== 'resume' || firstReviewerOutcome === undefined ||
+        replayIntentPosition <= firstReviewerOutcome.index || reviewerHistory.length === 2 &&
+        replayIntentPosition >= reviewerHistory[1]!.index) fail('journal_checkpoint_conflict');
+    }
+    if (terminal422Replay && reviewerHistory.length === 2 && replayIntentPosition === undefined) {
+      fail('journal_checkpoint_conflict');
+    }
+    if (terminal422Replay && replayOutcome !== undefined &&
+      (replayOutcome.kind === 'conflict' || replayOutcome.kind === 'disabled' || replayOutcome.kind === 'rejected')) {
+      fail('refused');
     }
     const appendOnce = async (phase: string, data: unknown) => {
       const normalized = JSON.parse(JSON.stringify(data)) as unknown;
@@ -575,6 +659,15 @@ export class ReviewerDeliveryQueue {
         .filter(checkpoint => putOutcomeAttempt(checkpoint.phase)?.base === phase);
       const previous = attempts.at(-1);
       if (!previous) return;
+      if (phase === 'reviewer_put_outcome' && terminal422Replay) {
+        if (replayIntentPosition !== undefined) {
+          if (attempts.length === 1) fail('unavailable');
+          const parsed = outcomeSchema.safeParse(previous.data);
+          if (!parsed.success || !isDeepStrictEqual(parsed.data, previous.data)) fail('journal_checkpoint_conflict');
+          fail(parsed.data.kind === 'unavailable' || parsed.data.kind === 'ok' ? 'unavailable' : 'refused');
+        }
+        return;
+      }
       const parsed = outcomeSchema.safeParse(previous.data);
       if (!parsed.success || !isDeepStrictEqual(parsed.data, previous.data)) fail('journal_checkpoint_conflict');
       if (parsed.data.kind === 'unavailable') {
@@ -600,9 +693,11 @@ export class ReviewerDeliveryQueue {
         ...('httpStatus' in value ? { http_status: value.httpStatus } : {}),
         ...(rawError !== undefined ? { error: typeof rawError === 'string' ? rawError : 'malformed_response' } : {}) };
     };
-    const assertDestination = async () => {
-      const capability = accepted(await sink.checkReviewerRecoveryActivation(request()));
+    const assertDestination = async (requireArtifactReplay = false) => {
+      const capability = accepted(await sink.checkReviewerRecoveryActivation(request(),
+        requireArtifactReplay ? 1 : undefined));
       if (capability.protocol !== operation.destination.activationProtocol ||
+        requireArtifactReplay && capability.artifactReplayProtocol !== 1 ||
         !isDeepStrictEqual(capability.principal, operation.destination.principal)) fail('principal_mismatch');
     };
     const privateReadback = async () => sink.getReviewerArtifact(m.runId, m.reviewer, request());
@@ -646,10 +741,25 @@ export class ReviewerDeliveryQueue {
     assertExisting('report_json_verified', m.report_json);
     if (m.report_md) assertExisting('report_md_verified', m.report_md);
     assertExisting('reviewer_verified', m.reviewer);
+    assertExisting('reviewer_put_replay_intent', m.reviewer);
     this.assertRecoveryJournalAcknowledgements(operation, initialRecoveryAck);
     await this.assertRecoveryAcknowledgements(entry, initialRecoveryAck);
 
-    await assertDestination();
+    if (terminal422Replay && !operation.journal.checkpoints().some(checkpoint =>
+      checkpoint.phase === 'recovery_acknowledged')) {
+      const recoveryAck = await this.optionalPrivateRead(join(entry.directory, 'recovery-acknowledged.json'), 4096);
+      const ordinaryAck = await this.optionalPrivateRead(join(entry.directory, 'acknowledged.json'), 4096);
+      // Publishing the immutable recovery acknowledgement precedes its journal
+      // checkpoint. An exact file may therefore survive that crash frontier;
+      // assertRecoveryAcknowledgements above has already bound its bytes to the
+      // current journal outcomes. The ordinary acknowledgement is published
+      // only after the recovery checkpoint and cannot legitimately exist here.
+      if ((recoveryAck !== undefined && recoveryAck !== initialRecoveryAck) || ordinaryAck !== undefined) {
+        fail('immutable_conflict');
+      }
+    }
+
+    await assertDestination(terminal422Replay);
     let read = await privateReadback();
     if (read.kind !== 'ok' && read.kind !== 'pending' && !absent(read)) accepted(read);
     if (read.kind === 'ok' && !read.value.bytes.equals(Buffer.from(entry.privateBytes))) fail('private_mismatch');
@@ -692,13 +802,17 @@ export class ReviewerDeliveryQueue {
       const state = await inspectOrdinary(kind, bytes);
       if (state === 'mismatch') fail('ordinary_mismatch');
       if (state === 'missing') {
+        if (terminal422Replay) fail('ordinary_mismatch');
         assertPutMayProceed(`${kind}_put_outcome`);
         if (!activationUncertain) planPut(kind, m[kind]);
       } else if (!activationUncertain) planVerified(kind, m[kind]);
     }
     if (read.kind === 'pending' || absent(read)) {
       assertPutMayProceed('reviewer_put_outcome');
-      if (!activationUncertain) planPut('reviewer', m.reviewer);
+      if (!activationUncertain) {
+        if (terminal422Replay) planExact('reviewer_put_replay_intent', m.reviewer);
+        planPut('reviewer', m.reviewer);
+      }
     } else if (!activationUncertain) planVerified('reviewer', m.reviewer);
     if (!activationUncertain) {
       planExact('recovery_acknowledged', JSON.parse(initialRecoveryAck));
@@ -767,9 +881,9 @@ export class ReviewerDeliveryQueue {
     if (read.kind === 'pending') {
       assertPutMayProceed('reviewer_put_outcome');
       assertPutCapacityBeforeIntent('reviewer');
-      await assertDestination();
+      await assertDestination(terminal422Replay);
       await ensureActivationIntent();
-      await appendOnce('reviewer_put_intent', m.reviewer);
+      await appendOnce(terminal422Replay ? 'reviewer_put_replay_intent' : 'reviewer_put_intent', m.reviewer);
       operation.journal.assertAppendCapacity(PUT_COMPLETION_AFTER_INTENT_CHECKPOINTS, PUT_COMPLETION_AFTER_INTENT_BYTES);
       const uploaded = await sink.putReviewerArtifact(m.runId, entry.privateBytes, m.reviewer, request());
       await appendPutOutcome('reviewer_put_outcome', outcome(uploaded));
