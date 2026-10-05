@@ -20,12 +20,16 @@ const digest = (value: Buffer | string) => createHash('sha256').update(value).di
 async function fixture(work: (f: {
   root: string; run: (args: string[]) => Promise<{ code: number | null; output: string }>;
   calls: () => number; events: any[]; envelopes: any[]; cycles: ReviewCycleReceipt[]; requests: string[];
+  setStatusHead: (headSha: string) => void; advanceHead: () => string;
 }) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'rcl-fresh-cli-'));
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }, encoding: 'utf8' }).trim();
   git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test');
   await writeFile(join(root, 'a.ts'), 'export const a = 1;\n'); git('add', '.'); git('commit', '-qm', 'fixture');
-  const head = git('rev-parse', 'HEAD');
+  let head = git('rev-parse', 'HEAD');
+  let statusHead = head;
+  const setStatusHead = (headSha: string) => { statusHead = headSha; };
+  const advanceHead = () => { git('commit', '--allow-empty', '-qm', 'next fixture head'); head = git('rev-parse', 'HEAD'); return head; };
   await mkdir(join(root, '.harness-cli'));
   await writeFile(join(root, '.harness-cli/config.json'), '{}');
   await writeFile(join(root, '.review-council.json'), JSON.stringify({ models: ['openai-compat/fixture'], secondaryModels: [], asyncModels: [],
@@ -43,10 +47,10 @@ async function fixture(work: (f: {
       patch: '@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;', sha: head }]);
     if (path.startsWith('/github/repos/fixture/repo/pulls/42/files?')) return answer(200, [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
       patch: '@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;', sha: head }]);
-    if (path === '/github/repos/fixture/repo/pulls/42') return answer(200, { number: 42, changed_files: 1, labels: [], title: 'Fixture', body: '', html_url: 'https://github.com/fixture/repo/pull/42',
+    if (path === '/github/repos/fixture/repo/pulls/42') return answer(200, { number: 42, changed_files: 1, labels: [], title: 'Fixture', body: '', html_url: 'https://github.com/fixture/repo/pull/42', merged: false, state: 'open',
       base: { sha: 'b'.repeat(40), ref: 'main', repo: { full_name: 'fixture/repo' } }, head: { sha: head, ref: 'fixture', repo: { full_name: 'fixture/repo' } } });
     if (path === '/api/v1/reviews/prs/fixture/repo/42' && req.method === 'GET') return answer(200, { data: {
-      repo: 'fixture/repo', pr_number: 42, head: { sha: head, merged: false }, cycle_protocol: 1, active_cycle: cycles.at(-1) ?? null } });
+      repo: 'fixture/repo', pr_number: 42, head: { sha: statusHead, merged: false }, cycle_protocol: 1, active_cycle: cycles.at(-1) ?? null } });
     if (path === '/api/v1/reviews/prs/fixture/repo/42/cycles') {
       const body = JSON.parse(raw.toString());
       const existing = cycles.find(c => c.operation_id === body.operation_id);
@@ -91,9 +95,39 @@ async function fixture(work: (f: {
     const timeout = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('fixture CLI timeout')); }, 30_000);
     child.on('error', reject); child.on('close', code => { clearTimeout(timeout); resolve({ code, output }); });
   });
-  try { await work({ root, run, calls: () => calls, events, envelopes, cycles, requests }); }
+  try { await work({ root, run, calls: () => calls, events, envelopes, cycles, requests, setStatusHead, advanceHead }); }
   finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
 }
+
+it('continues the same cycle at GitHub head C when Harness status still reports A and the cycle began at B', async () => {
+  await fixture(async f => {
+    f.setStatusHead('a'.repeat(40));
+    const first = await f.run(['review', 'fixture/repo#42', '--start-over']);
+    expect(first.code, first.output).toBe(0);
+    expect(f.cycles).toHaveLength(1);
+    const cycle = f.cycles[0]!;
+    const directory = join(f.root, '.git', 'rcl-fresh-reports');
+    const reportPath = join(directory, (await readdir(directory)).find(path => path.endsWith('.json'))!);
+    const report = JSON.parse(await readFile(reportPath, 'utf8'));
+    expect(cycle.head_sha).toBe(report.run.target.head_sha);
+    const admitted = await f.run(['converge-report', '--target', 'repo-42', '--round', '1', '--report', reportPath, '--json']);
+    expect(admitted.code, admitted.output).toBe(0);
+
+    const currentHead = f.advanceHead();
+    expect(currentHead).not.toBe(cycle.head_sha);
+    const next = await f.run(['review', 'fixture/repo#42']);
+    expect(next.code, next.output).toBe(0);
+    expect(f.cycles).toHaveLength(1);
+    expect(f.calls()).toBe(4);
+    expect(f.requests.filter(path => path === 'POST /api/v1/reviews/prs/fixture/repo/42/cycles')).toHaveLength(1);
+    expect(await loadConvergeAttemptState(join(f.root, '.git'), 'repo-42')).toMatchObject({
+      attemptsUsed: 2, cycle: { id: cycle.id },
+    });
+    expect(await loadConvergeRunState(join(f.root, '.git'), 'repo-42')).toMatchObject({
+      cycle: { id: cycle.id }, lastLaunch: { attempt: 2, round: 2, headSha: currentHead },
+    });
+  });
+}, 60_000);
 
 it('runs a bare explicit fresh PR review, retains outputs, binds admission, and preserves its budget on bare continuation', async () => {
   await fixture(async f => {
