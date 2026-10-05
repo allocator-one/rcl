@@ -1,6 +1,6 @@
 export interface FileChange {
   filename: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'copied';
   additions: number;
   deletions: number;
   patch: string;

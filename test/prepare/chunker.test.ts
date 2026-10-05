@@ -536,6 +536,27 @@ describe('review capacity', () => {
 });
 
 describe('formatChunkForPrompt', () => {
+  it.each(['', '@@ -1 +1 @@\n-old\n+new\n'])(
+    'identifies a copied file and its source in the reviewer prompt (patch: %j)',
+    (patch) => {
+      const file: FileChange = {
+        filename: 'copy.ts',
+        previousFilename: 'source.ts',
+        status: 'copied',
+        language: 'typescript',
+        additions: patch ? 1 : 0,
+        deletions: patch ? 1 : 0,
+        patch,
+      };
+      const [chunk] = chunkDiff([file]);
+      const prompt = formatChunkForPrompt(chunk!);
+
+      expect(prompt).toContain('### File: copy.ts (typescript, copied)');
+      expect(prompt).toMatch(/copied from[^\n]*source\.ts/i);
+      if (patch) expect(prompt).toContain(patch.trimEnd());
+    }
+  );
+
   it('marks binary or missing patches', () => {
     const file = { ...makeFile('img.png', 1), patch: '' };
     const [chunk] = chunkDiff([file]);

@@ -100,7 +100,7 @@ const metadataSchema = z.object({
       recovery_source: recoverySourceSchema.optional() }).strict().optional(),
   }).strict(),
 }).strict();
-const patchSchema = z.array(z.object({ filename: z.string(), status: z.enum(['added', 'modified', 'deleted', 'renamed']),
+const patchSchema = z.array(z.object({ filename: z.string(), status: z.enum(['added', 'modified', 'deleted', 'renamed', 'copied']),
   previousFilename: z.string().nullable(), patch: z.string(), additions: integer, deletions: integer, blobSha: z.string().nullable() }).strict());
 
 /** Small rendering metadata only; exact patches/prompts remain in the one captured input store. */

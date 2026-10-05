@@ -116,10 +116,7 @@ function parseDiffText(diffText: string): ParsedHunk[] {
       aPath = previousFilename = decodePath(renameFrom);
       bPath = decodePath(renameTo);
     } else if (copyFrom !== undefined && copyTo !== undefined) {
-      // FileChange has no distinct copied status. Preserve both proven paths
-      // using the established rename-shaped representation so downstream
-      // review code can retain the destination file and source context.
-      status = 'renamed';
+      status = 'copied';
       aPath = previousFilename = decodePath(copyFrom);
       bPath = decodePath(copyTo);
     }
@@ -142,7 +139,7 @@ function parseDiffText(diffText: string): ParsedHunk[] {
       bPath = newPath ?? oldPath;
     }
     if (aPath === undefined || bPath === undefined) aPath = bPath = symmetricHeaderPath(headerLine);
-    if ((status !== 'renamed' && aPath !== bPath) || !headerMatches(headerLine, aPath, bPath)) return invalidPath();
+    if ((status !== 'renamed' && status !== 'copied' && aPath !== bPath) || !headerMatches(headerLine, aPath, bPath)) return invalidPath();
     const filename = status === 'deleted' ? aPath : bPath;
 
     // Extract the actual patch lines (@@...)

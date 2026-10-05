@@ -38,13 +38,13 @@ describe('Git patch path identity', () => {
 
   it('keeps both path identities for Git copy metadata', () => {
     const diff = parseDiffFromString('diff --git a/source.ts b/copy.ts\nsimilarity index 100%\ncopy from source.ts\ncopy to copy.ts\n');
-    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'renamed',
+    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'copied',
       previousFilename: 'source.ts', patch: '' }]);
   });
 
   it('keeps both path identities for a content-changing Git copy', () => {
     const diff = parseDiffFromString('diff --git a/source.ts b/copy.ts\nsimilarity index 80%\ncopy from source.ts\ncopy to copy.ts\n--- a/source.ts\n+++ b/copy.ts\n@@ -1 +1 @@\n-old\n+new\n');
-    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'renamed',
+    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'copied',
       previousFilename: 'source.ts', patch: '@@ -1 +1 @@\n-old\n+new\n' }]);
   });
 });

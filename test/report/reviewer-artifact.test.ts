@@ -42,12 +42,12 @@ function finding(id: string, file = 'tenant.ts'): Finding {
     title: 'Missing tenant isolation', description: 'An unrelated tenant can read this record.' };
 }
 function fixture(options: { models?: string[]; chunks?: number; appendix?: boolean; minConfidence?: number;
-  aggregation?: boolean; async?: boolean; verified?: boolean; missingThresholds?: boolean } = {}) {
+  aggregation?: boolean; async?: boolean; verified?: boolean; missingThresholds?: boolean; diff?: Diff } = {}) {
   const models = options.models ?? ['model-a', 'model-b', 'model-c'];
   const chunks = options.chunks ?? 2;
-  const diff: Diff = { source: 'local', files: [{ filename: 'tenant.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, language: 'typescript' }] };
+  const diff: Diff = options.diff ?? { source: 'local', files: [{ filename: 'tenant.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, language: 'typescript' }] };
   const patchBytes = stableStringify(diff.files.map(file => ({ filename: file.filename, status: file.status,
-    previousFilename: null, patch: file.patch, additions: file.additions, deletions: file.deletions, blobSha: null })));
+    previousFilename: file.previousFilename ?? null, patch: file.patch, additions: file.additions, deletions: file.deletions, blobSha: null })));
   const resolvedThresholds = { ...thresholds, minConfidence: options.minConfidence ?? 0 };
   const config: Config = { quorumFraction: policy.fraction, thresholds: resolvedThresholds,
     output: { belowThresholdAppendix: options.appendix ?? true } };
@@ -365,8 +365,8 @@ describe('private reviewer artifact', () => {
   });
 });
 
-async function originalArtifact(withAsync = false) {
-  const f = fixture({ chunks: 1, async: withAsync });
+async function originalArtifact(withAsync = false, diff?: Diff) {
+  const f = fixture({ chunks: 1, async: withAsync, diff });
   const launch = createOriginalLaunch({ runId: runId(2), target: f.plan.target, originalNativeClaim: { attempt: 2, round: 2 },
     capturedInputsSha256: f.capture.digest, planDigest: f.plan.digest, startedAtMs: 1000, expiresAtMs: 2000,
     maxPhysicalCalls: 3, maxAttemptsPerCell: 1 });
@@ -551,6 +551,21 @@ describe('reviewer recovery envelope declaration', () => {
 });
 
 describe('separate terminal artifact inspection', () => {
+  it('retains copy status, source identity and changed content through artifact reconstruction', async () => {
+    const diff: Diff = {
+      source: 'local',
+      files: [{ filename: 'tenant.ts', previousFilename: 'source.ts', status: 'copied',
+        patch: '@@ -1 +1 @@\n-old\n+new\n', additions: 1, deletions: 1, language: 'typescript' }],
+    };
+    const { artifact, expected, args } = await originalArtifact(false, diff);
+
+    expect(validateReviewerArtifact(artifact.bytes, { assembly: args, representation }).digest)
+      .toBe(artifact.digest);
+    const inspected = inspectReviewerArtifact(artifact.bytes, expected);
+    expect(inspected.assembly.diff.files).toEqual(diff.files);
+    expect(inspected.reportBytes).toBe(expected.expectedReportBytes);
+  });
+
   it('reconstructs original assembly and validates the exact terminal pair without inline proof or new report hash', async () => {
     const { f, launch, originalProof, artifact, expected, args } = await originalArtifact();
     const inspected = inspectReviewerArtifact(artifact.bytes, expected);

@@ -535,6 +535,9 @@ export function formatChunkForPrompt(chunk: Chunk): string {
       ? `; patch fragment ${fragment.index + 1} of ${fragment.total}`
       : '';
     parts.push(`\n### File: ${file.filename} (${file.language}, ${file.status}${fragmentLabel})`);
+    if (file.status === 'copied' && file.previousFilename !== undefined) {
+      parts.push(`Copied from: ${file.previousFilename}`);
+    }
     if (file.patch) {
       parts.push('```diff');
       const promptPatch = fragment?.promptPatch ?? file.patch;

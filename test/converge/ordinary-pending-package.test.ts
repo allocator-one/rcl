@@ -66,6 +66,7 @@ describe('ordinary pending migration package', () => {
     const expanded = { ...structuredClone(input), prompts: Array.from({ length: 129 }, () => prompt) };
     expect(() => prepareOrdinaryPendingGuardedInput(expanded)).toThrow('guarded_input_archive_expands_too_large');
     const prepared = prepareOrdinaryPendingGuardedInput(expanded, MAX_GUARDED_INPUT_CAPACITY);
+    expect(prepared.input.prompts).toEqual(expanded.prompts);
     const restored = prepareOrdinaryPendingGuardedInput(structuredClone(prepared.retained));
     expect(restored.retained.capacity).toEqual(MAX_GUARDED_INPUT_CAPACITY);
     expect(restored.inputSha256()).toBe(prepared.inputSha256());
