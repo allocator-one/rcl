@@ -121,16 +121,18 @@ export async function resolvePRCapacity(
       throw new CapacityRefused('the applying actor lacks verified current repository write permission.');
     }
 
+    const rechecked = capacityLabel((await getGitHubPullRequest(client, target)).data);
+    if (rechecked?.name !== initial.name || rechecked.description !== initial.description) {
+      throw new CapacityRefused('capacity label or PR head changed during authorization.');
+    }
+    // Bind the final PR snapshot to the original approval: a remove/reapply
+    // during that read must not reuse the previous actor's permission check.
     const recheckedApplication = await latestApplication(client, target, initial.name);
     if (recheckedApplication.id !== application.id ||
         recheckedApplication.actor?.id !== actor.id ||
         recheckedApplication.actor.login !== actor.login ||
         recheckedApplication.created_at !== application.created_at) {
       throw new CapacityRefused('capacity label application changed during authorization.');
-    }
-    const rechecked = capacityLabel((await getGitHubPullRequest(client, target)).data);
-    if (rechecked?.name !== initial.name || rechecked.description !== initial.description) {
-      throw new CapacityRefused('capacity label or PR head changed during authorization.');
     }
     return initial.allocation;
   } catch (error) {

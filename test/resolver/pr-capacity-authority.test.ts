@@ -148,6 +148,21 @@ describe('resolvePRCapacity', () => {
     await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/changed/i);
   });
 
+  it('refuses an unauthorized reapplication visible in the final PR read', async () => {
+    const f = fixture();
+    f.get.mockResolvedValueOnce({ data: f.pr }).mockImplementationOnce(async () => {
+      // The label is removed and reapplied while the final PR read is in flight.
+      // Its name and limits remain unchanged, but its original approval is gone.
+      f.events.mockResolvedValue([
+        event,
+        { ...event, id: 11, created_at: '2026-10-05T12:01:00Z', event: 'unlabeled' },
+        { ...event, id: 12, created_at: '2026-10-05T12:02:00Z', actor: { login: 'outsider', id: 43 } },
+      ]);
+      return { data: f.pr };
+    });
+    await expect(resolvePRCapacity(target, undefined, f.octokit)).rejects.toThrow(/changed/i);
+  });
+
   it.each(['initial', 'recheck'] as const)('bounds requests and refuses incomplete history during the %s scan', async phase => {
     const f = fixture(), readPage = vi.fn();
     let scans = 0;
@@ -170,7 +185,7 @@ describe('resolvePRCapacity', () => {
     expect(readPage).toHaveBeenCalledTimes(11);
     expect(f.paginate).not.toHaveBeenCalled(); // Never collect the full history.
     expect(f.permission).toHaveBeenCalledTimes(phase === 'initial' ? 0 : 1);
-    expect(f.get).toHaveBeenCalledTimes(1);
+    expect(f.get).toHaveBeenCalledTimes(phase === 'initial' ? 1 : 2);
   });
 
   it('accepts complete history at the page limit and orders same-second transitions across pages', async () => {

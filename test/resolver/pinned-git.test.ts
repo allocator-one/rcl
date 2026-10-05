@@ -50,6 +50,39 @@ describe('pinned PR Git patches', () => {
     await expect(loadPinnedGitDiff({ ...input(), repo: 'other' })).rejects.toThrow('repository mismatch');
   });
 
+  it.each([
+    'https://github.com/o/r.git/',
+    'https://github.com/o/r/',
+    'ssh://git@github.com/o/r.git/',
+    'git@github.com:o/r.git/',
+  ])('reads the pinned local patch with a trailing slash in origin %s', async remote => {
+    await git('remote', 'set-url', 'origin', remote);
+    try {
+      const diff = await loadPinnedGitDiff(input());
+      expect(diff.mergeBaseSha).toBe(baseSha);
+      expect(diff.files[0]?.patch).toBe('@@ -1 +1 @@\n-old\n+new\n');
+    } finally {
+      await git('remote', 'set-url', 'origin', 'git@github.com:o/r.git');
+    }
+  });
+
+  it.each([
+    'https://github.com.example.com/o/r.git/',
+    'https://github.com/o/other.git/',
+    'https://github.com/extra/o/r.git/',
+    'https://github.com/o/r.git//',
+    'https://github.com:8443/o/r.git/',
+    'https://github.com/o/r.git/?repository=o/r',
+    'https://github.com/o/r.git/#o/r',
+  ])('refuses a nonmatching origin despite a trailing slash: %s', async remote => {
+    await git('remote', 'set-url', 'origin', remote);
+    try {
+      await expect(loadPinnedGitDiff(input())).rejects.toThrow('repository mismatch');
+    } finally {
+      await git('remote', 'set-url', 'origin', 'git@github.com:o/r.git');
+    }
+  });
+
   it('refuses missing exact objects instead of substituting HEAD or origin/main', async () => {
     await expect(loadPinnedGitDiff({ ...input(), headSha: 'f'.repeat(40) })).rejects.toThrow('exact commits');
   });

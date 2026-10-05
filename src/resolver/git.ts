@@ -132,6 +132,7 @@ function githubRepository(remote: string): string | undefined {
       url.port || url.search || url.hash) return undefined;
     path = url.pathname.replace(/^\//, '');
   }
+  path = path.replace(/\/$/, '');
   return /^[\w.-]+\/[\w.-]+(?:\.git)?$/u.test(path)
     ? path.replace(/\.git$/i, '').toLowerCase() : undefined;
 }
