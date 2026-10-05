@@ -29,6 +29,24 @@ describe('Git patch path identity', () => {
     expect(() => parseDiffFromString('diff --git a/a b/z b/a b/z\n--- a/z\n+++ b/z\n@@ -1 +1 @@\n-old\n+new\n'))
       .toThrow(/path|filename|identity/i);
   });
+
+  it('parses CRLF metadata without changing CRLF hunk bytes', () => {
+    const diff = parseDiffFromString('diff --git a/source.ts b/source.ts\r\n--- a/source.ts\r\n+++ b/source.ts\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n');
+    expect(diff.files).toMatchObject([{ filename: 'source.ts', status: 'modified',
+      patch: '@@ -1 +1 @@\r\n-old\r\n+new\r\n' }]);
+  });
+
+  it('keeps both path identities for Git copy metadata', () => {
+    const diff = parseDiffFromString('diff --git a/source.ts b/copy.ts\nsimilarity index 100%\ncopy from source.ts\ncopy to copy.ts\n');
+    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'renamed',
+      previousFilename: 'source.ts', patch: '' }]);
+  });
+
+  it('keeps both path identities for a content-changing Git copy', () => {
+    const diff = parseDiffFromString('diff --git a/source.ts b/copy.ts\nsimilarity index 80%\ncopy from source.ts\ncopy to copy.ts\n--- a/source.ts\n+++ b/copy.ts\n@@ -1 +1 @@\n-old\n+new\n');
+    expect(diff.files).toMatchObject([{ filename: 'copy.ts', status: 'renamed',
+      previousFilename: 'source.ts', patch: '@@ -1 +1 @@\n-old\n+new\n' }]);
+  });
 });
 
 async function git(cwd: string, ...args: string[]): Promise<void> {

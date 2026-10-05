@@ -81,12 +81,16 @@ function parseDiffText(diffText: string): ParsedHunk[] {
 
   for (const block of fileBlocks) {
     const lines = block.split('\n');
-    const headerLine = lines[0] ?? '';
+    // Git emits LF patches, but local patch files may arrive with CRLF record
+    // separators. Strip a record terminator only while parsing metadata; the
+    // hunk slice below remains byte-for-byte as supplied for review.
+    const record = (line: string): string => line.endsWith('\r') ? line.slice(0, -1) : line;
+    const headerLine = record(lines[0] ?? '');
 
     let status: FileChange['status'] = 'modified';
     let previousFilename: string | undefined;
     const patchStart = block.indexOf('\n@@');
-    const metadata = (patchStart >= 0 ? block.slice(0, patchStart) : block).split('\n').slice(1);
+    const metadata = (patchStart >= 0 ? block.slice(0, patchStart) : block).split('\n').slice(1).map(record);
     const field = (prefix: string): string | undefined => {
       const matches = metadata.filter(line => line.startsWith(prefix));
       if (matches.length > 1) return invalidPath();
@@ -96,7 +100,11 @@ function parseDiffText(diffText: string): ParsedHunk[] {
     const newFileMatch = field('new file mode ');
     const renameFrom = field('rename from ');
     const renameTo = field('rename to ');
-    if ((renameFrom === undefined) !== (renameTo === undefined) || (deletedMatch && newFileMatch)) return invalidPath();
+    const copyFrom = field('copy from ');
+    const copyTo = field('copy to ');
+    if ((renameFrom === undefined) !== (renameTo === undefined) ||
+      (copyFrom === undefined) !== (copyTo === undefined) ||
+      (renameFrom !== undefined && copyFrom !== undefined) || (deletedMatch && newFileMatch)) return invalidPath();
     let aPath: string | undefined, bPath: string | undefined;
 
     if (deletedMatch) {
@@ -107,6 +115,13 @@ function parseDiffText(diffText: string): ParsedHunk[] {
       status = 'renamed';
       aPath = previousFilename = decodePath(renameFrom);
       bPath = decodePath(renameTo);
+    } else if (copyFrom !== undefined && copyTo !== undefined) {
+      // FileChange has no distinct copied status. Preserve both proven paths
+      // using the established rename-shaped representation so downstream
+      // review code can retain the destination file and source context.
+      status = 'renamed';
+      aPath = previousFilename = decodePath(copyFrom);
+      bPath = decodePath(copyTo);
     }
 
     const before = field('--- '), after = field('+++ ');
