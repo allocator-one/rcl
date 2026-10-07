@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.5.12 - 2026-10-07
+
+- Preserve and authenticate retained ordinary input packets when recovering a
+  cycle-free legacy launch with an omitted exit code. Verify the exact packet
+  digest, guarded input hash, target, original report and launch bindings;
+  refuse missing, changed or inconsistent packets without altering history.
+  This covers the original RCL-187 record, including its retained base binding.
+  The 4.5.11 release was cancelled during validation before npm publication.
+
 ## 4.5.11 - 2026-10-07
 
 - Recover delivery bookkeeping for a completed, cycle-free legacy hard-failure

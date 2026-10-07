@@ -2,13 +2,16 @@ import { expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { devNull } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reconcileFlushedRun } from '../../src/converge/delivery-reconciliation.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { loadConvergeRunState } from '../../src/converge/run-state.js';
 import { loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { reviewCycleDirectory } from '../../src/converge/fresh-review.js';
+import { retainOrdinaryLaunchInputs } from '../../src/converge/ordinary-pending-export.js';
+import { guardedInputSha256 } from '../../src/report/run-header.js';
+import { serializeRecoveryDocument } from '../../src/evidence/original-run/journal.js';
 import { previewStaleReport, verifyStaleReportReceipts } from '../../src/converge/stale-report.js';
 import { sha256 } from '../../src/telemetry/recovery/files.js';
 import { MAX_ARTIFACT_BYTES } from '../../src/telemetry/envelope-validation.js';
@@ -18,7 +21,7 @@ import { reconciledHardFailureFixture } from './stale-report-fixtures.js';
 const clean = { remaining: [], failed: [], dropped: [] };
 const fixed = new Date('2026-10-07T10:00:00.000Z');
 
-/** A pre-cycle producer omitted the native exit code; report ci_exit_code remains 1. */
+/** A completed launch in legacy native state omitted its exit code; report ci_exit_code remains 1. */
 async function legacyFixture(git = false, targetKind: 'patch' | 'pr' = 'patch') {
   const f = await reconciledHardFailureFixture(git, true);
   const state = (await loadConvergeRunState(f.dir, f.target))!;
@@ -60,6 +63,137 @@ async function legacyFixture(git = false, targetKind: 'patch' | 'pr' = 'patch') 
     { gitCommonDir: f.dir, getRun, now: () => fixed });
   return { ...f, state, report, detail, getRun, getArtifact, sink, flush };
 }
+
+async function ordinaryFixture(git = false, version: 1 | 2 = 2) {
+  const f = await legacyFixture(git);
+  f.report.run.rcl_version = '4.5.9';
+  f.report.run.spec = { source: 'flag', sha256: 'f'.repeat(64) };
+  const reportBytes = Buffer.from(JSON.stringify(f.report));
+  await writeFile(f.reportPath, reportBytes);
+  f.reportSha256 = sha256(reportBytes);
+  f.selection.reportSha256 = f.reportSha256;
+  f.hardFailureSelection.reportSha256 = f.reportSha256;
+  f.state.lastLaunch!.reportJsonSha256 = f.reportSha256;
+  f.detail.artifacts[0] = { ...f.detail.artifacts[0]!, declared_sha256: f.reportSha256, declared_bytes: reportBytes.length };
+  f.getArtifact.mockResolvedValue({ kind: 'ok', value: { bytes: reportBytes, sha256: f.reportSha256 } });
+  const guardedInput = {
+    head: f.report.run.target.head_sha, kind: f.report.run.target.kind,
+    repo: f.report.run.target.repo, pr: f.report.run.target.pr_number,
+    diff: f.report.run.target.diff_sha256, config: f.report.run.config_sha256,
+    roster: structuredClone(f.report.run.roster),
+    prompts: [{ system: 'Retained synthetic system prompt.', user: 'Retained synthetic patch.' }],
+    asyncRoles: [{ name: 'fixture-role-15' }],
+    spec: structuredClone(f.report.run.spec),
+  };
+  const retained = await retainOrdinaryLaunchInputs({ gitCommonDir: f.dir, target: f.target,
+    headSha: f.state.lastLaunch!.headSha, baseSha: f.report.run.target.base_sha,
+    attempt: 4, round: 4, guardedInput });
+  let packetPath = retained.path, packetSha256 = retained.sha256;
+  if (version === 1) {
+    const packet = JSON.parse(await readFile(packetPath, 'utf8'));
+    const bytes = serializeRecoveryDocument({ ...packet, version: 1, guardedInput });
+    packetSha256 = sha256(bytes);
+    packetPath = packetPath.replace(retained.sha256, packetSha256);
+    await writeFile(packetPath, bytes, { mode: 0o600 });
+  }
+  f.state.lastLaunch!.ordinaryInputs = { version: 1, packetSha256, baseSha: retained.baseSha };
+  f.state.lastLaunch!.inputSha256 = guardedInputSha256(guardedInput);
+  await writeFile(f.statePath, JSON.stringify(f.state));
+  return { ...f, guardedInput, packetPath };
+}
+
+it.each([1, 2] as const)('reconciles an ordinary legacy launch with its authenticated v%s input packet intact', async version => {
+  const f = await ordinaryFixture(false, version), before = await f.bytes(), packetBefore = await readFile(f.packetPath);
+  expect(f.state).toMatchObject({ version: 1, roundCap: 15, lastLaunch: {
+    status: 'completed', attempt: 4, round: 4, hardFailure: true, deliveryPending: false,
+    ordinaryInputs: { version: 1, packetSha256: sha256(packetBefore), baseSha: f.report.run.target.base_sha },
+  } });
+  expect(f.state).not.toHaveProperty('cycle');
+  expect(f.state.lastLaunch).not.toHaveProperty('exitCode');
+  expect(f.state.lastLaunch).not.toHaveProperty('deliveryReconciliation');
+  await expect(f.flush()).resolves.toBe('reconciled');
+  const after = (await loadConvergeRunState(f.dir, f.target))!;
+  expect(after).toEqual({ ...f.state, updatedAt: fixed.toISOString(), lastLaunch: {
+    ...f.state.lastLaunch, deliveryReconciliation: { version: 2, runId: f.detail.id,
+      reportJsonSha256: f.reportSha256, headSha: f.state.lastLaunch!.headSha,
+      inputSha256: f.state.lastLaunch!.inputSha256, attempt: 4, round: 4,
+      claimPid: f.state.lastLaunch!.pid, cycleId: null, reconciledAt: fixed.toISOString() },
+  } });
+  expect(await readFile(f.packetPath)).toEqual(packetBefore);
+  expect((await f.bytes()).slice(1)).toEqual(before.slice(1));
+  await expect(previewStaleReport(f.hardFailureSelection, f.dir)).resolves.toMatchObject({
+    version: 3, outcome: 'delivered-hard-failure', attempt: 4, round: 4,
+  });
+  expect(f.options.run).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ['different retained base', (f: any) => { f.state.lastLaunch.ordinaryInputs.baseSha = 'e'.repeat(40); }],
+  ['different effective input digest', (f: any) => { f.state.lastLaunch.inputSha256 = 'e'.repeat(64); }],
+  ['missing retained packet', async (f: any) => { await rm(f.packetPath); }],
+  ['changed retained bytes', async (f: any) => { await writeFile(f.packetPath, '{}'); }],
+  ['BOM-prefixed retained bytes', async (f: any) => {
+    await writeFile(f.packetPath, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), await readFile(f.packetPath)]));
+  }],
+])('refuses ordinary legacy recovery with %s', async (_label, mutate) => {
+  const f = await ordinaryFixture();
+  await mutate(f);
+  await writeFile(f.statePath, JSON.stringify(f.state));
+  const before = await f.bytes();
+  await expect(f.flush()).resolves.toBe('unchanged');
+  expect(await f.bytes()).toEqual(before);
+});
+
+it.each([
+  ['head', (packet: any) => { packet.headSha = 'e'.repeat(40); }],
+  ['base', (packet: any) => { packet.baseSha = 'e'.repeat(40); }],
+  ['target', (packet: any) => { packet.target = 'unrelated'; }],
+  ['attempt', (packet: any) => { packet.attempt = 5; }],
+  ['round', (packet: any) => { packet.round = 5; }],
+  ['cycle', (packet: any) => { packet.cycleId = '019921a0-0000-7000-8000-000000000099'; }],
+  ['packet input hash', (packet: any) => { packet.inputSha256 = 'e'.repeat(64); }],
+])('refuses a digest-bound ordinary packet with conflicting %s', async (_label, mutate) => {
+  const f = await ordinaryFixture(false, 1);
+  const packet = JSON.parse(await readFile(f.packetPath, 'utf8'));
+  mutate(packet);
+  const bytes = serializeRecoveryDocument(packet), packetSha256 = sha256(bytes);
+  const packetPath = f.packetPath.replace(f.state.lastLaunch!.ordinaryInputs!.packetSha256, packetSha256);
+  f.state.lastLaunch!.ordinaryInputs!.packetSha256 = packetSha256;
+  await writeFile(packetPath, bytes, { mode: 0o600 });
+  await writeFile(f.statePath, JSON.stringify(f.state));
+  const before = await f.bytes();
+  await expect(f.flush()).resolves.toBe('unchanged');
+  expect(await f.bytes()).toEqual(before);
+  expect(await readFile(packetPath, 'utf8')).toBe(bytes);
+});
+
+it.each([
+  ['head', (input: any) => { input.head = 'e'.repeat(40); }],
+  ['kind', (input: any) => { input.kind = 'pr'; }],
+  ['repository', (input: any) => { input.repo = 'other/repo'; }],
+  ['pull request', (input: any) => { input.pr = 43; }],
+  ['diff', (input: any) => { input.diff = 'e'.repeat(64); }],
+  ['config', (input: any) => { input.config = 'e'.repeat(64); }],
+  ['roster', (input: any) => { input.roster[0].model = 'other/model'; }],
+  ['specification', (input: any) => { input.spec = { source: 'flag', sha256: 'e'.repeat(64) }; }],
+])('refuses retained ordinary inputs whose %s conflicts with the original report', async (_label, mutate) => {
+  const f = await ordinaryFixture(false, 1);
+  const input = structuredClone(f.guardedInput);
+  mutate(input);
+  const packet = JSON.parse(await readFile(f.packetPath, 'utf8'));
+  const inputSha256 = guardedInputSha256(input);
+  const bytes = serializeRecoveryDocument({ ...packet, inputSha256, guardedInput: input });
+  const packetSha256 = sha256(bytes), packetPath = join(dirname(f.packetPath),
+    f.packetPath.slice(dirname(f.packetPath).length + 1).replace(f.state.lastLaunch!.ordinaryInputs!.packetSha256, packetSha256));
+  f.state.lastLaunch!.ordinaryInputs!.packetSha256 = packetSha256;
+  f.state.lastLaunch!.inputSha256 = inputSha256;
+  await writeFile(packetPath, bytes, { mode: 0o600 });
+  await writeFile(f.statePath, JSON.stringify(f.state));
+  const before = await f.bytes();
+  await expect(f.flush()).resolves.toBe('unchanged');
+  expect(await f.bytes()).toEqual(before);
+  expect(await readFile(packetPath, 'utf8')).toBe(bytes);
+});
 
 it.each(['patch', 'pr'] as const)('authenticates the completed legacy %s launch without fabricating its omitted terminal exit code', async kind => {
   const f = await legacyFixture(false, kind), before = await f.bytes();
@@ -117,7 +251,7 @@ it.each([
   ['invalid quorum policy', (state: any) => { state.lastLaunch.reviewerHealth.policy.minimumSuccessful = 1; }],
   ['invalid aggregate counts', (state: any) => { state.lastLaunch.successfulReviews = 6; }],
   ['pending retained recovery', (state: any) => { state.lastLaunch.pendingResume = {}; }],
-  ['modern ordinary input binding', (state: any) => { state.lastLaunch.ordinaryInputs = { version: 1, packetSha256: 'e'.repeat(64), baseSha: null }; }],
+  ['unavailable ordinary input binding', (state: any) => { state.lastLaunch.ordinaryInputs = { version: 1, packetSha256: 'e'.repeat(64), baseSha: null }; }],
 ])('does not reinterpret %s as the supported legacy omission', async (_label, mutate) => {
   const f = await legacyFixture();
   mutate(f.state);
@@ -287,7 +421,7 @@ async function command(cwd: string, args: string[], transport: string) {
 }
 
 it('recovers through public flush and stale CLI, then permits exactly one successor within the original caps', async () => {
-  const f = await legacyFixture(true), before = await f.bytes();
+  const f = await ordinaryFixture(true), before = await f.bytes(), packetBefore = await readFile(f.packetPath);
   const transport = join(f.cwd, 'synthetic-harness.mjs');
   const callsPath = join(f.cwd, 'requests.jsonl');
   await mkdir(join(f.cwd, 'config'));
@@ -313,6 +447,8 @@ globalThis.fetch = async (input, init) => {
   expect(JSON.parse(flush.stdout)).toMatchObject({ remaining: [], failed: [], dropped: [] });
   const reconciled = (await loadConvergeRunState(f.dir, f.target))!;
   expect(reconciled.lastLaunch).not.toHaveProperty('exitCode');
+  expect(reconciled.lastLaunch!.ordinaryInputs).toEqual(f.state.lastLaunch!.ordinaryInputs);
+  expect(await readFile(f.packetPath)).toEqual(packetBefore);
   expect(reconciled.lastLaunch!.deliveryReconciliation).toMatchObject({ version: 2, cycleId: null, attempt: 4, round: 4 });
   expect((await f.bytes()).slice(1)).toEqual(before.slice(1));
 
@@ -355,6 +491,7 @@ globalThis.fetch = async (input, init) => {
   expect(successor.staleReportAudit).toEqual(disposed.staleReportAudit);
   expect(await readFile(receipt)).toEqual(receiptBefore);
   expect(await readFile(f.reportPath)).toEqual(before[2]);
+  expect(await readFile(f.packetPath)).toEqual(packetBefore);
   expect((await readFile(callsPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))).toEqual([
     { url: `http://127.0.0.1:1/api/v1/reviews/runs/${f.detail.id}`, method: 'GET' },
     { url: `http://127.0.0.1:1/api/v1/reviews/runs/${f.detail.id}/artifacts/report_json`, method: 'GET' },
