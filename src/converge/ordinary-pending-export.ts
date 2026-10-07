@@ -137,7 +137,7 @@ function ownerAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
+function retainedHistoricalInput(text: string, options: Omit<OrdinaryLaunchInputs, 'guardedInput'>,
   packetSha256: string): PreparedOrdinaryPendingGuardedInput {
   let value: unknown;
   try { value = JSON.parse(text); } catch { refuse('retained_input_mismatch'); }
@@ -157,6 +157,17 @@ function retainedHistoricalInput(text: string, options: OrdinaryLaunchInputs,
     refuse('retained_input_mismatch');
   }
   return prepared;
+}
+
+/** Read and authenticate the exact packet retained before a native ordinary launch claim. */
+export async function readRetainedOrdinaryLaunchInputs(
+  options: Omit<OrdinaryLaunchInputs, 'guardedInput' | 'asyncDescriptors'> & { packetSha256: string }
+): Promise<PreparedOrdinaryPendingGuardedInput> {
+  const common = await realpath(options.gitCommonDir);
+  const path = retainedInputsPath({ ...options, gitCommonDir: common });
+  const retained = await readStable(path, MAX_RETAINED_INPUT_BYTES);
+  if (retained.sha256 !== options.packetSha256) refuse('retained_input_mismatch');
+  return retainedHistoricalInput(retained.text, options, options.packetSha256);
 }
 
 /**
@@ -206,7 +217,6 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const historicalInput = binding ? retainedHistoricalInput(retainedBefore!.text, {
     gitCommonDir: common, target: options.target, headSha: launch.headSha, baseSha: options.baseSha,
     attempt: launch.attempt, round: launch.round, ...(state.cycle ? { cycleId: state.cycle.id } : {}),
-    guardedInput: options.guardedInput,
   }, binding.packetSha256) : currentInput;
   if (binding && !cycleBacked &&
       !isDeepStrictEqual(historicalInput.retained, currentInput.retained)) {

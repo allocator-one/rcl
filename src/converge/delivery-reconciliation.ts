@@ -4,6 +4,7 @@ import { loadConvergeRunState, writeState, type ConvergeRunState } from './run-s
 import { launchSchema, strongDeliveryReconciliationSchema, type GuardedLaunchState } from './launch-record.js';
 import { assertNoPendingFreshReview } from './fresh-review.js';
 import { mergedBlockingHealth } from './legacy-launch-health.js';
+import { readRetainedOrdinaryLaunchInputs } from './ordinary-pending-export.js';
 import { withNativeTarget } from './target-ownership.js';
 import { hasSuccessfulQuorum } from '../dispatch/quorum.js';
 import { assertAdmissibleReportHealth } from '../report/blocking-health.js';
@@ -26,7 +27,7 @@ async function supportsMissingLegacyExit(common: string, state: ConvergeRunState
   if (state.version !== 1 || state.cycle !== undefined || !parsed.success ||
     Object.hasOwn(launch, 'exitCode') || launch.status !== 'completed' || launch.deliveryPending !== false ||
     launch.hardFailure !== true || launch.deliveryFailure !== undefined || launch.deliveryReconciliation !== undefined ||
-    launch.ordinaryInputs !== undefined || launch.retainedOriginal !== undefined || launch.recovery !== undefined ||
+    launch.retainedOriginal !== undefined || launch.recovery !== undefined ||
     launch.pendingResume !== undefined || launch.pendingRecovery !== undefined || !launch.reviewerHealth ||
     !hasSuccessfulQuorum(launch.reviewerHealth.policy, launch.reviewerHealth.successfulSeats)) return false;
   try {
@@ -65,6 +66,17 @@ async function supportsMissingLegacyExit(common: string, state: ConvergeRunState
       report.reviews.length !== launch.totalReviews ||
       report.reviews.filter(review => review.status === 'success').length !== launch.successfulReviews ||
       !isDeepStrictEqual(mergedBlockingHealth(report, launch.reviewerHealth.policy.fraction), launch.reviewerHealth)) return false;
+    if (launch.ordinaryInputs) {
+      if (launch.ordinaryInputs.baseSha !== (originalTarget.base_sha ?? null)) return false;
+      const retained = await readRetainedOrdinaryLaunchInputs({ gitCommonDir: common, target: state.target,
+        headSha: launch.headSha, baseSha: launch.ordinaryInputs.baseSha,
+        attempt: launch.attempt, round: launch.round, packetSha256: launch.ordinaryInputs.packetSha256 });
+      const input = retained.input;
+      if (retained.inputSha256() !== launch.inputSha256 || input.head !== originalTarget.head_sha ||
+        input.kind !== originalTarget.kind || input.repo !== originalTarget.repo || input.pr !== originalTarget.pr_number ||
+        input.diff !== originalTarget.diff_sha256 || input.config !== report.run.config_sha256 ||
+        !isDeepStrictEqual(input.roster, report.run.roster) || !isDeepStrictEqual(input.spec, report.run.spec)) return false;
+    }
     // The source schema validates the roster, rows and stats this reader uses;
     // presentation-only finding/spec types are deliberately not reconstructed.
     assertAdmissibleReportHealth(report as unknown as Parameters<typeof assertAdmissibleReportHealth>[0]);
