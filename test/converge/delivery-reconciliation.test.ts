@@ -198,6 +198,23 @@ describe('reconcileDeliveredRun', () => {
       });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
+  it('does not extend missing-exit legacy recovery to a cycle-backed launch', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
+    try {
+      const { state, detail } = await pendingCycleState(dir, target);
+      state.lastLaunch!.deliveryPending = false;
+      delete state.lastLaunch!.exitCode;
+      state.lastLaunch!.successfulReviews = 7;
+      state.lastLaunch!.totalReviews = 10;
+      state.lastLaunch!.reviewerHealth = { version: 1,
+        policy: { version: 1, fraction: 2 / 3, seatCount: 10, minimumSuccessful: 7 }, successfulSeats: 7 };
+      await withNativeTarget(dir, target, owner => writeState(dir, state, owner));
+      const before = await readFile(convergeRunStatePath(dir, target));
+      await expect(reconcileDeliveredRun(runId, {} as never, { gitCommonDir: dir,
+        getRun: vi.fn().mockResolvedValue({ kind: 'ok', value: detail }) })).resolves.toBe('unchanged');
+      expect(await readFile(convergeRunStatePath(dir, target))).toEqual(before);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
   it('leaves markerless legacy reconciliation unchanged when the server binding differs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'rcl-delivery-reconcile-')), target = 'fixture';
     try {
