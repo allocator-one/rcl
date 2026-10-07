@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 4.5.11 - 2026-10-07
+
+- Recover delivery bookkeeping for a completed, cycle-free legacy hard-failure
+  launch whose terminal exit code was never recorded. Validate the original
+  attempt claim, authenticated stored report and blocking reviewer health
+  before binding a strong delivery receipt. Preserve the absent exit code,
+  original evidence and accounting; stale disposition and fresh exact-head
+  review remain required before a successor can approve a merge (RCL-187).
+
 ## 4.5.10 - 2026-10-05
 
 - Verify the current unmerged GitHub pull request head during guarded review
