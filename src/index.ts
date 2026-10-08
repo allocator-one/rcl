@@ -168,6 +168,7 @@ import { runFindingRetriage, type FindingRetriageOptions } from './evidence/retr
 import { fetchServerModelStats, loadMergedWeights, mergeWeights } from './models/server-stats.js';
 import { runBackfill } from './telemetry/backfill.js';
 import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemetry/recovery/command.js';
+import { runRejectedRecovery, type RejectedRecoveryOptions } from './telemetry/rejected-recovery-command.js';
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
@@ -1193,6 +1194,21 @@ telemetry
       console.error(`Cannot inspect retained evidence: ${scrubText(error instanceof Error ? error.message : String(error), 200)}`);
       process.exitCode = 1;
     }
+  });
+
+telemetry
+  .command('recover-rejected')
+  .description('Preview or apply one source-bound recovery of immutable rejected verified-consensus evidence')
+  .requiredOption('--manifest <path>', 'New reviewed recovery manifest, or the reviewed manifest with --apply')
+  .option('--run <id>', 'Retained original run to preview; omitted with --apply')
+  .option('--apply', 'Apply only the reviewed manifest and read back the exact retained artifacts')
+  .option('--output <path>', 'New outcome path for apply; defaults to a unique file beside the manifest')
+  .option('--json', 'Print machine-readable manifest or outcome')
+  .action(async (opts: RejectedRecoveryOptions) => {
+    process.exitCode = await runRejectedRecovery(opts, {
+      ...evidenceDeps(),
+      dataDir: resolveDataDir(),
+    });
   });
 
 telemetry

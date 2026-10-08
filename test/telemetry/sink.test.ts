@@ -28,6 +28,25 @@ function sightingIdentity() {
   };
 }
 
+describe('HarnessSink.checkSeverityFallbackRecovery', () => {
+  it('accepts only the complete versioned capability and organization binding', async () => {
+    const orgId = '019921a0-0000-7000-8000-000000000099';
+    const { sink: supported, requests } = sink(() => ({
+      status: 200, body: { data: [], meta: { severity_fallback_recovery_version: 1, org_id: orgId } },
+    }));
+    await expect(supported.checkSeverityFallbackRecovery()).resolves.toMatchObject({
+      kind: 'ok', value: { protocol: 1, orgId },
+    });
+    expect(requests.map(request => `${request.method} ${new URL(request.url).pathname}${new URL(request.url).search}`))
+      .toEqual(['GET /api/v1/reviews/runs?page_size=1']);
+
+    const { sink: missing } = sink(() => ({ status: 200, body: { data: [], meta: { org_id: orgId } } }));
+    await expect(missing.checkSeverityFallbackRecovery()).resolves.toMatchObject({
+      kind: 'rejected', error: 'malformed_response',
+    });
+  });
+});
+
 describe('HarnessSink.postRun', () => {
   it('posts the envelope with the client handshake to the credential host and reads the receipt', async () => {
     const envelope = buildRunEnvelope(sampleResult(), ARTIFACTS, { level: 'full', delivery: { mode: 'direct' } });

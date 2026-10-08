@@ -75,7 +75,7 @@ const finding = z.object({
   claim_descriptor: claimDescriptorSchema.optional(),
   severity: z.enum(['critical', 'important', 'minor', 'nitpick']), category: text(64, true),
   title: short, description: optional(text(20_000)), suggested_fix: optional(text(20_000)),
-  consensus: optional(map), gating_reason: z.enum(['consensus', 'critical', 'verified', 'none']),
+  consensus: optional(map), gating_reason: z.enum(['consensus', 'critical', 'verified', 'severity-fallback', 'none']),
   verification_verdict: optional(text(32)), verification_model: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)), verification_note: optional(text(MAX_RETAINED_DIAGNOSTIC_CHARS)),
   below_threshold: z.boolean(),
 }).passthrough().superRefine((v, ctx) => {
@@ -146,6 +146,39 @@ const envelopeSchema = z.object({
     const descriptor = (v.run as Record<string, unknown>).reviewer_evidence;
     if (descriptor === undefined || stableStringify(descriptor) !== stableStringify(v.reviewer_recovery.descriptor)) {
       ctx.addIssue({ code: 'custom', path: ['reviewer_recovery', 'descriptor'], message: 'Reviewer recovery descriptor differs from the ordinary report header' });
+    }
+  }
+  const fallback = v.findings.filter(finding => finding.gating_reason === 'severity-fallback');
+  const gating = v.run.gating;
+  const recovery = gating && typeof gating === 'object' && !Array.isArray(gating)
+    ? (gating as Record<string, unknown>)['severity_fallback_recovery'] : undefined;
+  if (fallback.length > 0 || recovery !== undefined) {
+    const descriptor = recovery && typeof recovery === 'object' && !Array.isArray(recovery)
+      ? recovery as Record<string, unknown> : null;
+    const keys = descriptor ? Object.keys(descriptor).sort() : [];
+    const expectedKeys = ['cause', 'source_envelope_sha256', 'source_manifest_sha256', 'source_mode', 'source_rcl_version', 'source_report_sha256', 'version'];
+    const report = v.artifacts_declared.find(artifact => artifact.kind === 'report_json');
+    const validDescriptor = descriptor !== null && JSON.stringify(keys) === JSON.stringify(expectedKeys) &&
+      descriptor['version'] === 1 && descriptor['cause'] === 'verification_pass_failed' &&
+      descriptor['source_rcl_version'] === '4.4.7' && descriptor['source_mode'] === 'asserted' &&
+      ['source_report_sha256', 'source_envelope_sha256', 'source_manifest_sha256'].every(key =>
+        typeof descriptor[key] === 'string' && digest.safeParse(descriptor[key]).success) &&
+      descriptor['source_report_sha256'] === report?.sha256;
+    const health = v.stats && typeof v.stats === 'object' && !Array.isArray(v.stats)
+      ? (v.stats as Record<string, unknown>)['blockingHealth'] : undefined;
+    const conclusive = health && typeof health === 'object' && !Array.isArray(health)
+      ? (health as Record<string, unknown>)['conclusive'] : undefined;
+    const hasVerification = v.stats && typeof v.stats === 'object' && !Array.isArray(v.stats) &&
+      Object.hasOwn(v.stats, 'verification');
+    const validProjection = v.findings.every(finding => {
+      const expected = !finding.below_threshold && (finding.severity === 'critical' || finding.severity === 'important')
+        ? 'severity-fallback' : 'none';
+      return finding.gating_reason === expected && finding.verification_verdict == null &&
+        finding.verification_model == null && finding.verification_note == null;
+    });
+    if (!validDescriptor || v.run.rcl_version !== '4.4.7' || gating?.['mode'] !== 'verified-consensus' ||
+        fallback.length === 0 || conclusive !== true || hasVerification || !validProjection) {
+      ctx.addIssue({ code: 'custom', path: ['run', 'gating', 'severity_fallback_recovery'], message: 'Invalid source-bound severity fallback recovery' });
     }
   }
 });
