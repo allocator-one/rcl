@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.14 - 2026-10-11
+
 - Journal every guarded council's reviewer calls and resume an interrupted
   council under its existing attempt and round. Rerunning the same command
   after a kill, host timeout or the new `--max-slice-minutes` budget (no new
