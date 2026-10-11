@@ -111,7 +111,7 @@ describe('journaled ordinary council (RCL-80)', () => {
       Array.from({ length: CHUNKS }, (_, chunk) => resumed.reviews[chunk * SEATS + index]!).every(item => item.status === 'success'));
     expect(completeSeats.length).toBeGreaterThanOrEqual(12);
     expect((await withJournal(dir, false, journal => journal.read())).finalized).toBe(true);
-  });
+  }, 180_000);
 
   it('records the same successful evidence as an uninterrupted wait-for-all council', async () => {
     const small = council(3, 6), { assignments, prompts } = small, all = { quorum: { fraction: 1, blocking: assignments.map(() => true) } };

@@ -378,6 +378,30 @@ Normal guarded launches, including fresh and existing cycles, retain their
 inputs before spending the claim, so an interrupted launch has a durable,
 digest-bound recovery source.
 
+### Interrupted councils
+
+A guarded launch with an exact head and base journals its council in
+`.git/rcl-checkpoints/`: an intent before every reviewer call, its result
+after. Scheduling, provider caps, reviewers and the quorum are unchanged.
+
+If the process ends before the council reaches quorum (killed, a host time
+limit, or `--max-slice-minutes <n>`, which stops cleanly with exit 5), rerun
+the exact same command. When the recorded process has exited and the head,
+effective inputs and journal still match, RCL resumes the same attempt and
+round: it reuses every journaled result, keeps recorded failures, and runs only
+the calls that never finished. No attempt is claimed. A call that was in flight
+when the process ended may already be billed; it is dispatched at most once
+more, and a call interrupted twice stays canceled. Changed inputs, a live or
+unverifiable owner, or a missing journal keep the existing refusal of an
+unknown dispatch. An interrupted `--start-over` launch resumes through the same
+`--start-over` command, without requesting another cycle.
+
+```bash
+rcl review owner/repo#123 --guarded-converge --converge-target repo-123 \
+  --evidence-required --max-slice-minutes 40 --json-file report.json
+# exit 5: the council is journaled; run the same command again to continue it
+```
+
 ### Bound fix recovery
 
 When native triage reports `converged-dismissal-only` but Harness still reports

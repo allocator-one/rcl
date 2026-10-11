@@ -909,6 +909,20 @@ describe('rcl review — guarded native launch', () => {
       title: 'A title\uD800', description: 'Preserve 😀 and replace \uD800 \uDFFF', suggestedFix: 'Fix\0 the issue' }]);
   }, 40_000);
 
+  it('refuses an invalid or unguarded slice budget before any claim or call', async () => {
+    await withGuardedFixture(async fixture => {
+      const invalid = await runRclAsync([...fixture.args, '--max-slice-minutes', '0'], fixture.repo, fixture.env);
+      expect(invalid.status).toBe(1);
+      expect(invalid.stderr).toContain('invalid_slice_budget');
+      const unguarded = await runRclAsync([...fixture.args.filter(arg => arg !== '--guarded-converge'), '--max-slice-minutes', '5'],
+        fixture.repo, fixture.env);
+      expect(unguarded.status).toBe(1);
+      expect(unguarded.stderr).toContain('guard_required');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  }, 40_000);
+
   it('claims and binds one launch only after successful preflight', async () => {
     await withGuardedFixture(async fixture => {
       const result = await runRclAsync(fixture.args, fixture.repo, fixture.env);
