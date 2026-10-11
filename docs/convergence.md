@@ -38,6 +38,7 @@ enforced review evidence and CI (see
   - [`rcl converge-stale`](#rcl-converge-stale)
   - [`rcl converge-gap`](#rcl-converge-gap)
   - [`rcl converge-rejected`](#rcl-converge-rejected)
+  - [A round admitted against the wrong patch](#a-round-admitted-against-the-wrong-patch)
 - [`rcl converge-attempt` (legacy accounting)](#rcl-converge-attempt-legacy-accounting)
 
 ## Budgets: attempts and rounds
@@ -641,6 +642,28 @@ original producer to have exited. It rechecks for queued evidence at apply and
 before the later guarded claim. It never treats a server/transport refusal as
 that proof. Historical audits use their retained copies, so ordinary temporary
 source cleanup does not break subsequent review and admission.
+
+### A round admitted against the wrong patch
+
+A round can be admitted before anyone notices that its patch was captured
+against the wrong base, for example the moving default-branch tip instead of
+the pull request's merge base. Its findings then describe changes the pull
+request does not make. None of the recoveries above applies:
+`converge-stale` covers only reports that were never admitted and refuses this
+one with `stale_report_not_unadmitted`. Classifying, dismissing or fixing the
+round's findings would record verdicts about code the pull request never
+changed.
+
+Leave the admitted round, its findings and its spent attempts as they are.
+Report the mismatch to the user with both bases and the captured patch digest,
+and ask whether to start a fresh review. Only on that request, run
+[`--start-over`](#start-a-fresh-review); for a patch file, capture it again from
+the merge base and pass it with `--for-pr` and `--head-sha`. The new review
+cycle reviews the corrected inputs with a fresh budget. Harness counts only the
+selected cycle's evidence for its gate, so the wrong-patch round stops counting
+but stays in history, neither fixed nor dismissed. It can never approve a
+merge: a new conclusive exact-head round and the enforced gate are still
+required.
 
 ## `rcl converge-attempt`
 
