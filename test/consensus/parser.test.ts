@@ -280,6 +280,26 @@ describe('tolerant field parsing', () => {
     expect(out.dropped).toBe(1);
   });
 
+  it('drops a finding without a file or title instead of carrying it into refused evidence', () => {
+    const out = parseReviewOutput(
+      JSON.stringify({
+        findings: [
+          { ...base, startLine: 1, endLine: 2 },
+          { ...base, file: '', startLine: 1, endLine: 2 },
+          { ...base, file: '   ', startLine: 1, endLine: 2 },
+          { ...base, file: 'src/\u0000a.ts', startLine: 1, endLine: 2 },
+          { ...base, title: ' ', startLine: 1, endLine: 2 },
+        ],
+      }),
+      'm',
+      'r'
+    );
+
+    expect(out.findings.map((f) => f.file)).toEqual(['src/a.ts']);
+    expect(out.dropped).toBe(4);
+    expect(out.unusable).toBe(false);
+  });
+
   it('reports how many findings were dropped when some survive', () => {
     const out = parseReviewOutput(
       JSON.stringify({

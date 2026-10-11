@@ -7,12 +7,12 @@ import { readStable } from '../telemetry/recovery/files.js';
 import { decodeOriginalReport } from '../evidence/original-run/decode.js';
 import { serializeRecoveryDocument, syncDirectory } from '../evidence/original-run/journal.js';
 import { inspectRecoveryDirectory, prepareLockRoot } from '../evidence/original-run/lock-path.js';
-import { originalRunReportSchema } from '../telemetry/recovery/source.js';
+import { locallyRefusedReportSchema } from '../telemetry/recovery/source.js';
 import { Quarantine, QUARANTINE_DIR } from '../telemetry/quarantine.js';
 import { OUTBOX_DIR } from '../telemetry/outbox.js';
 import { REVIEWER_OUTBOX_DIR } from '../telemetry/reviewer-delivery.js';
-import { buildRunEnvelope, type ArtifactBytes } from '../telemetry/envelope.js';
-import { validateRunEnvelope } from '../telemetry/envelope-validation.js';
+import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope } from '../telemetry/envelope.js';
+import { validateRunEnvelope, type EvidenceDiagnostic } from '../telemetry/envelope-validation.js';
 import { verifiedConsensusDiagnostics } from '../telemetry/deliver.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { mergedBlockingHealth } from './legacy-launch-health.js';
@@ -26,6 +26,8 @@ import { rejectionManifest, rejectionManifestSchema, rejectionSelectionSchema, v
   type RejectionEntry, type RejectionManifest, type RejectionSelection } from './terminal-rejection-schema.js';
 
 const parse = (file: Awaited<ReturnType<typeof readStable>>) => decodeOriginalReport(file.text).value;
+const LABEL_PATH = /^(findings|belowThresholdFindings)\.\d+\.gating\.reason$/;
+const BLANK_TEXT_PATH = /^findings\.(\d+)\.(file|title)$/;
 function refuse(code: string): never { throw new Error(`terminal_rejection_${code}`); }
 export function assertDeadOwner(pid: number): void {
   try { process.kill(pid, 0); }
@@ -64,7 +66,7 @@ async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeo
   m: RejectionSelection, dataDir: string, retainedDirectory?: string) {
   const launch = eligible(state, attempts, m);
   const reportBytes = await selected(retainedDirectory ? join(retainedDirectory, 'report.json') : m.reportPath, m.reportSha256);
-  const raw = parse(reportBytes), report = originalRunReportSchema.parse(raw);
+  const raw = parse(reportBytes), report = locallyRefusedReportSchema.parse(raw);
   if (report.run.id !== launch.runId || report.run.target.head_sha !== launch.headSha ||
     report.run.converge?.target !== m.target || report.run.converge?.attempt !== launch.attempt ||
     report.run.converge?.round !== launch.round || report.run.cycle_id !== state.cycle?.id ||
@@ -82,17 +84,28 @@ async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeo
   const artifacts: ArtifactBytes = { report_json: reportBytes.text };
   if (retained.manifest!.artifacts['report_md']) artifacts.report_md = (await readStable(join(retained.path, 'report.md'))).text;
   const storedEnvelope = parse(await readStable(join(retained.path, 'envelope.json')));
-  // Only the supported, pre-network missing-label rejection is disposable. A
+  // Only two pre-network rejections are disposable: a missing gating label,
+  // or a finding whose blank file or title the evidence protocol refuses. A
   // transport/server refusal, malformed envelope or valid report is not proof.
-  const diagnostics = verifiedConsensusDiagnostics(raw as ReviewResult);
-  if (diagnostics.length === 0 || diagnostics.some(d => !/^(findings|belowThresholdFindings)\.\d+\.gating\.reason$/.test(d.path))) refuse('unsupported_local_rejection');
+  const labels = verifiedConsensusDiagnostics(raw as ReviewResult);
+  const blank = [...report.findings, ...(report.belowThresholdFindings ?? [])].some(f => !f.file.trim() || !f.title.trim());
+  if ((labels.length === 0 && !blank) || labels.some(d => !LABEL_PATH.test(d.path))) refuse('unsupported_local_rejection');
   const levels = ['full', 'findings', 'envelope'] as const;
   const projections = levels.flatMap(level => [false, true].map(parseFailures =>
     buildRunEnvelope(raw as ReviewResult, artifacts, { level, parseFailures, delivery: { mode: 'direct' } })));
   const envelope = projections.find(candidate => isDeepStrictEqual(candidate, storedEnvelope));
-  if (!envelope || validateRunEnvelope(envelope, artifacts).length > 0 ||
+  // Delivery records envelope-schema diagnostics before label diagnostics.
+  const refused = envelope ? validateRunEnvelope(envelope, artifacts) : [];
+  const diagnostics = [...refused, ...labels];
+  if (!envelope || diagnostics.length === 0 || !refused.every(d => blankText(envelope, d)) ||
     !isDeepStrictEqual(retained.manifest!.diagnostics, diagnostics)) refuse('rejection_diagnostics');
   return { launch, reportBytes, manifest, quarantinePath: retained.path, quarantineManifest: retained.manifest! };
+}
+/** The envelope-schema refusal of a blank finding file or title, checked against the projected row. */
+function blankText(envelope: RunEnvelope, d: EvidenceDiagnostic): boolean {
+  const [, index, field] = BLANK_TEXT_PATH.exec(d.path) ?? [];
+  const value = index === undefined ? undefined : envelope.findings[Number(index)]?.[field as 'file' | 'title'];
+  return d.message === 'Invalid text' && typeof value === 'string' && value.trim() === '';
 }
 function bound(m: RejectionManifest, state: ConvergeRunState, launch: ReturnType<typeof launchSchema.parse>): void {
   if (m.cycleId !== (state.cycle?.id ?? null) || m.attempt !== launch.attempt || m.round !== launch.round ||

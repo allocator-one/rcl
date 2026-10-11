@@ -75,6 +75,16 @@ export const originalRunReportSchema = modern.safeExtend({
   findings: z.array(originalFinding).max(2000),
   belowThresholdFindings: z.array(originalFinding).max(2000).optional(),
 });
+/**
+ * A report whose evidence was refused locally because a finding's file or
+ * title was blank (RCL-189). Only a terminal-rejection proof reads it, to
+ * dispose of that run; it never becomes a delivery source.
+ */
+const locallyRefusedFinding = originalFinding.extend({ file: string, title: string });
+export const locallyRefusedReportSchema = originalRunReportSchema.safeExtend({
+  findings: z.array(locallyRefusedFinding).max(2000),
+  belowThresholdFindings: z.array(locallyRefusedFinding).max(2000).optional(),
+});
 const legacy = z.object({
   reviews: z.array(z.object({ model: nonblank }).passthrough()).max(500),
   findings: z.array(finding).max(2000), belowThresholdFindings: z.array(finding).max(2000).optional(),
