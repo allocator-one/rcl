@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
@@ -518,4 +518,38 @@ it('refuses an oversized encoded archive before publishing an operation or chang
   await rm(ledger);
   await guardReviewLaunch(options);
   expect(await loadConvergeAttemptState(options.gitCommonDir, options.target)).toMatchObject({ attemptsUsed: 1, cycle: { history: { attempts: 1 } } });
+});
+
+it('ends a prepared operation the server refused for good so a later request starts a new one (RCL-193)', async () => {
+  const { createReviewCycleRemote } = await import('../../src/converge/cycle-remote.js');
+  const { HarnessSink } = await import('../../src/telemetry/sink.js');
+  const { fakeFetch } = await import('../telemetry/fixtures.js');
+  const { assertNoPendingFreshReview } = await import('../../src/converge/fresh-review.js');
+  const options = await freshFixture();
+  let server: 'unavailable' | 'not_found' | 'accept' = 'unavailable';
+  let active: import('../../src/converge/review-cycle.js').ReviewCycleReceipt | null = null;
+  const posted: string[] = [];
+  const transport = fakeFetch(request => {
+    if (request.method === 'GET') return { status: 200, body: { data: { repo: 'allocator-one/rcl', pr_number: 42, cycle_protocol: 1, active_cycle: active } } };
+    const body = JSON.parse(request.body!);
+    posted.push(body.operation_id);
+    if (server === 'unavailable') return { status: 503, body: { error: 'unavailable', message: 'retry' } };
+    if (server === 'not_found') return { status: 404, body: { error: 'not_found', message: 'Not found' } };
+    active = { ...body, id: randomUUID(), inserted_at: new Date().toISOString() };
+    return { status: 201, body: { data: active } };
+  });
+  const sink = new HarnessSink({ credential: { url: 'https://harness.example', token: 'fixture', source: 'login' }, rclVersion: '4.5.14', fetchImpl: transport.fetch });
+  const launch = { ...options, cycleRemote: createReviewCycleRemote(sink, 'allocator-one/rcl', 42, options.headSha,
+    async () => ({ headSha: options.headSha, merged: false, state: 'open' })) };
+  // An uncertain failure leaves the operation prepared, exactly as RCL-193 found it.
+  await expect(guardReviewLaunch(launch)).rejects.toThrow(/fresh_review_receipt_unavailable: unavailable HTTP 503/);
+  server = 'not_found';
+  await expect(guardReviewLaunch(launch)).rejects.toThrow(/Fresh review refused: rejected HTTP 404 not_found: Not found/);
+  expect(posted).toEqual([posted[0], posted[0]]);
+  await expect(assertNoPendingFreshReview(await realpath(options.gitCommonDir), options.target)).resolves.toBeUndefined();
+  server = 'accept';
+  await guardReviewLaunch(launch);
+  expect(posted).toHaveLength(3);
+  expect(posted[2]).not.toBe(posted[0]);
+  expect(options.run).toHaveBeenCalledTimes(1);
 });

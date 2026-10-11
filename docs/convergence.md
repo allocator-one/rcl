@@ -152,6 +152,15 @@ discovers the local cycle and continues its existing budget; it does not
 replenish it. A concurrent fresh request cannot silently create another cycle
 after waiting for the first.
 
+When Harness refuses to create the cycle (for example HTTP 404 for a
+repository its GitHub connection does not include, 422 for an invalid request,
+or a disabled organization) and its active cycle does not belong to this
+operation, the refusal is final: RCL restores the target's previous state, ends
+the operation and prints the server's status and reason. Fix the cause, then run
+`--start-over` again; it requests a new cycle. A server or network failure, or
+a refusal RCL cannot confirm, keeps the operation for a retry with the same
+command, and its message also names the status and reason.
+
 Stop an active review through its recorded host task before replacing it. Late
 reports and verdicts remain bound to their original cycle. After checking
 reviewer health and exact-head freshness, admit the report with

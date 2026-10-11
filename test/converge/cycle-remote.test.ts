@@ -81,3 +81,31 @@ it.each(['./repo', '../repo', 'owner/.', 'owner/..'])('rejects URL dot segments 
   expect(() => createReviewCycleRemote(sink, repo, 42, head, async () => ({ headSha: head, merged: false, state: 'open' }))).toThrow('fresh_review_requires_pr');
   expect(requests).toHaveLength(0);
 });
+
+const status = (active: unknown) => ({ status: 200, body: { data: { repo: 'allocator-one/rcl', pr_number: 42, cycle_protocol: 1, active_cycle: active } } });
+it.each([
+  ['an unknown repository', { status: 404, body: { error: 'not_found', message: 'Not found' } }, 'HTTP 404'],
+  ['an invalid request', { status: 422, body: { error: 'unprocessable_entity', message: 'operation_id, previous_cycle_id and head_sha are required' } }, 'HTTP 422'],
+  ['a disabled organization', { status: 403, body: { error: 'reviews_disabled', message: 'Reviews are disabled' } }, 'reviews_disabled'],
+])('treats %s as a confirmed noncommit and keeps the server reason (RCL-193)', async (_label, refusal, reason) => {
+  const { remote } = fixture(request => request.method === 'POST' ? refusal : status(null));
+  const error = await remote.start(request).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(ReviewCycleRejected);
+  expect((error as Error).message).toContain(reason);
+});
+it('keeps a refusal uncertain when this operation already owns the active cycle', async () => {
+  const { remote } = fixture(req => req.method === 'POST' ? { status: 404, body: { error: 'not_found', message: 'Not found' } } : status(receipt));
+  const error = await remote.start(request).catch((caught: unknown) => caught);
+  expect(error).not.toBeInstanceOf(ReviewCycleRejected);
+  expect((error as Error).message).toMatch(/fresh_review_receipt_unavailable: rejected HTTP 404 not_found: Not found/);
+});
+it('keeps a refusal uncertain when the active cycle cannot be read back', async () => {
+  const { remote } = fixture(req => req.method === 'POST' ? { status: 404, body: { error: 'not_found', message: 'Not found' } } : { status: 503, body: {} });
+  await expect(remote.start(request)).rejects.toThrow(/fresh_review_receipt_unavailable: rejected HTTP 404/);
+});
+it('keeps a malformed success uncertain, since the cycle may exist', async () => {
+  const { remote } = fixture(req => req.method === 'POST' ? { status: 201, body: { data: { unexpected: true } } } : status(null));
+  const error = await remote.start(request).catch((caught: unknown) => caught);
+  expect(error).not.toBeInstanceOf(ReviewCycleRejected);
+  expect((error as Error).message).toContain('HTTP 201');
+});

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- End a fresh-review operation that Harness refused for good. A 4xx refusal or a
+  disabled organization, confirmed against the active cycle, now restores the
+  target and finishes the operation, so the next `--start-over` requests a new
+  cycle instead of reusing the refused one. Every refusal names the server's
+  HTTP status and reason (RCL-193).
+
 ## 4.5.14 - 2026-10-11
 
 - Journal every guarded council's reviewer calls and resume an interrupted
