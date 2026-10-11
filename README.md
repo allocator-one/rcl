@@ -176,7 +176,7 @@ Untracked files are invisible to `git diff` and therefore not reviewed.
 | `--models <models>` | Comma-separated primary (blocking) models; clears the default secondary and async lists unless those flags are also given |
 | `--secondary-models <models>` | Comma-separated secondary models, used for specialist roles only |
 | `--async-models <models>` | Comma-separated async bonus reviewers, fired with the round and never awaited |
-| `--context <path>` | Context file or directory (repeatable) |
+| `--context <path>` | Context file (repeatable). A directory is not read: an ordinary review warns and skips it, a guarded review refuses to launch |
 | `--spec <path>` | Specification file; enables the `spec-compliance` role |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` (recorded in the report) |
 | `--post` | Post the review to the pull request; findings that map onto the diff become inline comments |
@@ -284,7 +284,7 @@ rcl review owner/repo#7 \
   --reviewer openai/gpt-6-sol:bug-hunter
 
 # Spec compliance review with context
-rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/
+rcl review ./feature.patch --role spec-compliance --spec SPEC.md --context src/auth.ts
 
 # JSON for downstream processing
 rcl review owner/repo#99 --json > findings.json

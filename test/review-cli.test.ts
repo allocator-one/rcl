@@ -205,6 +205,23 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
   }
 }
 
+describe('rcl review — files-only --context contract (RCL-190)', () => {
+  it.each(['review', 'review-plan'])('describes --context as files only in %s help', command => {
+    const result = runRcl([command, '--help'], tempRepository());
+    expect(result.status).toBe(0);
+    // Help wraps long descriptions; compare the words, not the line breaks.
+    const help = result.stdout.replace(/\s+/g, ' ');
+    expect(help).toContain('Context file to include (repeatable); a directory is not read');
+    expect(help).not.toContain('Context file or directory');
+  });
+
+  it('documents and demonstrates --context with files only in the README', () => {
+    const readme = readFileSync('README.md', 'utf8');
+    expect(readme).toContain('| `--context <path>` | Context file (repeatable). A directory is not read');
+    expect(readme).not.toMatch(/--context \S*\/(?=[\s`]|$)/m);
+  });
+});
+
 describe('rcl review — bound fix-obligation recovery (RCL-148)', () => {
   const recoveryRunId = '019921a0-0000-7000-8000-000000000002';
 

@@ -336,7 +336,7 @@ program
   )
   .option(
     '--context <path>',
-    'Context file or directory to include (repeatable)',
+    'Context file to include (repeatable); a directory is not read',
     (val: string, prev: string[]) => {
       prev.push(val);
       return prev;
@@ -410,7 +410,7 @@ program
   )
   .option(
     '--context <path>',
-    'Context file or directory to include (repeatable)',
+    'Context file to include (repeatable); a directory is not read',
     (val: string, prev: string[]) => {
       prev.push(val);
       return prev;
