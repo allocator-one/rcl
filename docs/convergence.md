@@ -606,8 +606,9 @@ reviewer quorum. It does not admit the report or authorize another review.
 Transport failures and spooled evidence retain their existing delivery gates.
 
 For an ordinary completed report rejected for missing verified-consensus
-gating labels, preview a disposition using its original report and exact
-digest:
+gating labels, or for a finding whose file or title is blank (reports from
+releases before 4.5.13, which drops such findings at parse time), preview a
+disposition using its original report and exact digest:
 
 ```bash
 rcl converge-rejected --preview --target owner-repo-123 --run ORIGINAL_RUN_UUID \
