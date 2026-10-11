@@ -384,9 +384,11 @@ A guarded launch with an exact head and base journals its council in
 `.git/rcl-checkpoints/`: an intent before every reviewer call, its result
 after. Scheduling, provider caps, reviewers and the quorum are unchanged.
 
-If the process ends before the council reaches quorum (killed, a host time
-limit, or `--max-slice-minutes <n>`, which stops cleanly with exit 5), rerun
-the exact same command. When the recorded process has exited and the head,
+If the process ends before the council closes (killed, or a host time limit),
+rerun the exact same command. `--max-slice-minutes <n>` makes that boundary
+clean: after N minutes no new reviewer call starts, the running calls finish
+and are journaled, and RCL exits 5. Choose N at least one per-call timeout
+below the host's limit. When the recorded process has exited and the head,
 effective inputs and journal still match, RCL resumes the same attempt and
 round: it reuses every journaled result, keeps recorded failures, and runs only
 the calls that never finished. No attempt is claimed. A call that was in flight

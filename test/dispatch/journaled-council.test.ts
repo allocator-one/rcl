@@ -43,7 +43,7 @@ const review = (model: string, provider: string, userPrompt: string): ModelRevie
     severity: 'minor', category: 'correctness', title: `Finding from ${model} on ${userPrompt}`, description: 'fixture' }] });
 
 /** Fake providers that count calls per cell and in-flight calls per provider. */
-function providers(options: { hang?: (cell: string) => boolean; onStart?: (calls: number) => void } = {}) {
+function providers(options: { hang?: (cell: string) => boolean; onStart?: (calls: number) => void; adapterAttempts?: number; delayMs?: number } = {}) {
   const calls = new Map<string, number>();
   const inFlight = new Map<string, number>();
   let total = 0, peak = 0;
@@ -60,8 +60,8 @@ function providers(options: { hang?: (cell: string) => boolean; onStart?: (calls
         if (options.hang?.(cell)) {
           await new Promise((_resolve, reject) => adapterOptions.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
         }
-        await new Promise(resolve => setTimeout(resolve, 1));
-        return review(model, provider, userPrompt);
+        await new Promise(resolve => setTimeout(resolve, options.delayMs ?? 1));
+        return { ...review(model, provider, userPrompt), ...(options.adapterAttempts ? { adapterAttempts: options.adapterAttempts } : {}) };
       } finally { inFlight.set(provider, inFlight.get(provider)! - 1); }
     } });
   return { factory, calls, peaks, peak: () => peak };
@@ -86,12 +86,13 @@ async function commonDir(): Promise<string> {
 }
 
 describe('journaled ordinary council (RCL-80)', () => {
-  it('resumes an interrupted 12x17 council without repeating any successful call', async () => {
+  it('resumes a sliced 12x17 council without repeating any call', async () => {
     const dir = await commonDir(), { assignments, prompts, CHUNKS, SEATS } = council();
-    const abort = new AbortController();
-    const first = providers({ onStart: started => { if (started === 80) abort.abort(); } });
+    let started = 0;
+    // In-call retries are journaled as one dispatch (adapterAttempts > 1).
+    const first = providers({ onStart: () => { started++; }, adapterAttempts: 2 });
     const interrupted = await withJournal(dir, true, (journal, ownership) => runJournaledCouncil({ journal, ownership,
-      assignments, prompts, runner: runner(first.factory, { signal: abort.signal }) }));
+      assignments, prompts, runner: runner(first.factory), admit: () => started < 80 }));
     expect(interrupted.interrupted).toBe(true);
     expect(first.peaks.get('anthropic')).toBeLessThanOrEqual(2);
     expect(first.peak()).toBeLessThanOrEqual(9);
@@ -104,8 +105,9 @@ describe('journaled ordinary council (RCL-80)', () => {
       assignments, prompts, runner: runner(second.factory) }));
     expect(resumed.interrupted).toBe(false);
     expect(resumed.retained).toBe(firstSuccesses.size);
-    for (const cell of firstSuccesses) expect(second.calls.has(cell)).toBe(false);
-    for (const [cell, count] of second.calls) expect(count + (first.calls.get(cell) ?? 0)).toBeLessThanOrEqual(MAX_DISPATCHES_PER_CELL);
+    expect(firstSuccesses.size).toBe(first.calls.size);
+    // A slice lets running calls finish, so no call is ever dispatched twice.
+    for (const [cell, count] of second.calls) expect(count + (first.calls.get(cell) ?? 0)).toBe(1);
     expect(second.peaks.get('anthropic')).toBeLessThanOrEqual(2);
     const completeSeats = assignments.slice(0, SEATS).filter((seat, index) =>
       Array.from({ length: CHUNKS }, (_, chunk) => resumed.reviews[chunk * SEATS + index]!).every(item => item.status === 'success'));
@@ -160,6 +162,23 @@ describe('journaled ordinary council (RCL-80)', () => {
     expect(again.calls.size).toBe(0);
     expect(replay.dispatched).toBe(0);
     expect(replay.reviews.filter(item => item.status === 'success')).toEqual(done.reviews.filter(item => item.status === 'success'));
+  }, 30_000);
+
+  it('keeps a wait-for-all council open while sliced secondary calls are missing', async () => {
+    const dir = await commonDir(), small = council(3, 6), { assignments, prompts } = small;
+    // Seats 4 and 5 are secondary: wait-for-all must still collect them.
+    const lanes = assignments.map((_, index) => index % 6 < 4);
+    let started = 0;
+    const first = providers({ onStart: () => { started++; } });
+    const sliced = await withJournal(dir, true, (journal, ownership) => runJournaledCouncil({ journal, ownership, assignments, prompts,
+      runner: runner(first.factory, { quorum: { fraction: 1, blocking: lanes } }, assignments.length), admit: () => started < 14 }), small);
+    expect(sliced.interrupted).toBe(true);
+    expect((await withJournal(dir, false, journal => journal.read(), small)).finalized).toBe(false);
+    const rest = providers();
+    const resumed = await withJournal(dir, false, (journal, ownership) => runJournaledCouncil({ journal, ownership, assignments, prompts,
+      runner: runner(rest.factory, { quorum: { fraction: 1, blocking: lanes } }, assignments.length) }), small);
+    expect(resumed.reviews.every(item => item.status === 'success')).toBe(true);
+    expect(rest.calls.size + first.calls.size).toBe(assignments.length);
   }, 30_000);
 
   it('refuses a journal captured for different review inputs', async () => {

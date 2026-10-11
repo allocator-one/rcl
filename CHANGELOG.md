@@ -4,9 +4,10 @@
 
 - Journal every guarded council's reviewer calls and resume an interrupted
   council under its existing attempt and round. Rerunning the same command
-  after a kill, host timeout or the new `--max-slice-minutes` budget (exit 5)
-  reuses every journaled result and runs only the calls that never finished;
-  a call in flight at the interruption is dispatched at most once more.
+  after a kill, host timeout or the new `--max-slice-minutes` budget (no new
+  call after N minutes, running calls finish, exit 5) reuses every journaled
+  result and runs only the calls that never finished; a call in flight when a
+  process ended is dispatched at most once more.
   Scheduling, provider caps, reviewers and quorum are unchanged, and a launch
   without a matching journal keeps the unknown-dispatch refusal (RCL-80).
 - Document recovery for a round admitted against the wrong patch: leave it

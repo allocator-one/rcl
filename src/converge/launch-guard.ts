@@ -375,10 +375,10 @@ async function resumeInterruptedOrdinary(options: GuardedLaunchOptions, ownershi
     if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
   }
   await options.validate();
-  const processIdentity = await captureCurrentProcessIdentity();
-  state.lastLaunch = { ...previous, pid: process.pid, processIdentity };
-  state.updatedAt = new Date().toISOString();
-  await writeState(options.gitCommonDir, state, ownership);
+  // The launch keeps its original claimant: the attempt ledger and every
+  // pending-recovery path bind that identity. This guard holds the native
+  // target lock for the whole run, which excludes a concurrent resumer.
+  state.lastLaunch = previous;
   const context = { target: options.target, round: previous.round, attempt: previous.attempt,
     ...(state.cycle ? { cycleId: state.cycle.id } : {}) };
   let failure: { error: unknown } | undefined;

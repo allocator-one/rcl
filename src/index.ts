@@ -379,7 +379,7 @@ program
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
-  .option('--max-slice-minutes <n>', 'Guarded convergence: stop the council cleanly after N minutes (exit 5); rerunning the same command resumes it without a new attempt')
+  .option('--max-slice-minutes <n>', 'Guarded convergence: start no new reviewer call after N minutes; running calls finish, then exit 5. Rerunning the same command resumes without a new attempt')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
   .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
@@ -2659,6 +2659,10 @@ async function executeCouncil(
       }
     }
     const journalPlan = ordinaryPlan;
+    if (opts.maxSliceMinutes !== undefined && !journalPlan) {
+      throw new ReviewLaunchRefused('slice_budget_unavailable',
+        '--max-slice-minutes needs a journaled council (an exact head and base within the capture limits); rerun without it.');
+    }
     const claim = await guardReviewLaunch({
       gitCommonDir: await resolveGitCommonDir(),
       target: prepared.converge!.target,
@@ -2884,10 +2888,10 @@ async function executeCouncil(
         const open = { commonDir: await resolveGitCommonDir(), namespace: checkpoint.namespace,
           plan: checkpoint.plan, ownership: checkpoint.ownership };
         const journal = await (checkpoint.resumed ? CheckpointJournal.openWrite(open) : CheckpointJournal.create(open));
-        const slice = opts.maxSliceMinutes === undefined ? undefined : AbortSignal.timeout(Number(opts.maxSliceMinutes) * 60_000);
+        const sliceEndsAt = opts.maxSliceMinutes === undefined ? undefined : Date.now() + Number(opts.maxSliceMinutes) * 60_000;
         const journaled = await runJournaledCouncil({ journal, ownership: checkpoint.ownership,
-          assignments: chunkAssignments.map((ca) => ca.assignment), prompts,
-          runner: { ...ordinaryRunner, ...(slice ? { signal: slice } : {}) } });
+          assignments: chunkAssignments.map((ca) => ca.assignment), prompts, runner: ordinaryRunner,
+          ...(sliceEndsAt === undefined ? {} : { admit: () => Date.now() < sliceEndsAt }) });
         if (journaled.retained > 0) process.stderr.write(`Reused ${journaled.retained} journaled call(s) from the interrupted council.\n`);
         if (journaled.interrupted) {
           throw new ReviewCouncilInterrupted(journaled.reviews.filter(review => review.status !== 'canceled').length, totalCalls);

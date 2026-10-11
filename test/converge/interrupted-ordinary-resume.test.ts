@@ -28,12 +28,15 @@ async function fixture(): Promise<GuardedLaunchOptions & { exists: ReturnType<ty
     run: vi.fn(async () => { throw new ReviewCouncilInterrupted(5, 10); }) };
 }
 
-/** Model the interrupted coordinator having exited, without touching any real process. */
+/** Model the interrupted claimant having exited, in both the launch and its ledger claim. */
 async function exitOwner(options: GuardedLaunchOptions): Promise<void> {
-  const path = convergeRunStatePath(options.gitCommonDir, target), state = JSON.parse(await readFile(path, 'utf8'));
-  state.lastLaunch.pid = 99_999_999;
-  if (state.lastLaunch.processIdentity) state.lastLaunch.processIdentity.pid = 99_999_999;
-  await writeFile(path, JSON.stringify(state));
+  const nativePath = convergeRunStatePath(options.gitCommonDir, target), state = JSON.parse(await readFile(nativePath, 'utf8'));
+  const ledgerPath = convergeAttemptStatePath(options.gitCommonDir, target), ledger = JSON.parse(await readFile(ledgerPath, 'utf8'));
+  for (const owner of [state.lastLaunch, ledger.attempts.at(-1)]) {
+    owner.pid = 99_999_999;
+    if (owner.processIdentity) owner.processIdentity.pid = 99_999_999;
+  }
+  await writeFile(nativePath, JSON.stringify(state)); await writeFile(ledgerPath, JSON.stringify(ledger));
 }
 
 describe('interrupted journaled council (RCL-80)', () => {
@@ -52,8 +55,25 @@ describe('interrupted journaled council (RCL-80)', () => {
       { namespace: ordinaryCheckpointNamespace(packetSha256), resumed: true });
     expect(options.exists).toHaveBeenCalledWith(ordinaryCheckpointNamespace(packetSha256));
     expect(await loadConvergeAttemptState(options.gitCommonDir, target)).toMatchObject({ attemptsUsed: 1 });
-    expect((await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch)
-      .toMatchObject({ status: 'completed', attempt: 1, round: 1, pid: process.pid, runId: completion.runId });
+    // The launch keeps its original claimant, the identity its ledger claim binds.
+    const launch = (await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch!;
+    const claimRecord = (await loadConvergeAttemptState(options.gitCommonDir, target))!.attempts.at(-1)!;
+    expect(launch).toMatchObject({ status: 'completed', attempt: 1, round: 1, runId: completion.runId, pid: 99_999_999 });
+    expect(launch.processIdentity).toEqual(claimRecord.processIdentity);
+  });
+
+  it('can be interrupted and resumed again while the ledger claimant stays unchanged', async () => {
+    const options = await fixture();
+    await expect(guardReviewLaunch(options)).rejects.toBeInstanceOf(ReviewCouncilInterrupted);
+    await exitOwner(options);
+    await expect(guardReviewLaunch(options)).rejects.toBeInstanceOf(ReviewCouncilInterrupted);
+    const launch = (await loadConvergeRunState(options.gitCommonDir, target))!.lastLaunch!;
+    const claimRecord = (await loadConvergeAttemptState(options.gitCommonDir, target))!.attempts.at(-1)!;
+    expect(launch).toMatchObject({ status: 'pending', attempt: 1, pid: claimRecord.pid });
+    expect(launch.processIdentity).toEqual(claimRecord.processIdentity);
+    const run = vi.fn(async () => completion);
+    await expect(guardReviewLaunch({ ...options, run })).resolves.toMatchObject({ attempt: 1, resumedInterrupted: true });
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it.each([

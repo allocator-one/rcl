@@ -30,11 +30,17 @@ export interface JournaledCouncilInput {
   assignments: ReviewAssignment[];
   prompts: BuiltPrompt[];
   runner: JournaledRunnerOptions;
+  /**
+   * Slice budget: once this returns false no new call starts, while calls
+   * already running finish and are journaled. Declined calls stay open for a
+   * resume and never count as interrupted dispatches.
+   */
+  admit?: () => boolean;
 }
 
 export interface JournaledCouncilResult {
   reviews: ModelReview[];
-  /** The signal stopped the council before quorum; the journal stays open for a resume. */
+  /** The slice or signal stopped the council before it would have closed; the journal stays open for a resume. */
   interrupted: boolean;
   /** Successful calls reused from the journal instead of dispatched again. */
   retained: number;
@@ -45,9 +51,13 @@ export interface JournaledCouncilResult {
 /**
  * The report normalizes reviewer prose before hashing; the journal keeps that
  * same normalized text, because its strict schema refuses raw control bytes.
+ * One journaled dispatch may include the runner's in-call retries, so the
+ * diagnostic adapter counter is not kept: the journal reserves it for the
+ * one-request-per-intent retained executor.
  */
 function journalable(review: ModelReview): ModelReview {
-  return { ...review, findings: review.findings.map(finding => ({ ...finding, id: normalizeGeneratedText(finding.id),
+  const { adapterAttempts: _diagnostic, ...rest } = review;
+  return { ...rest, findings: review.findings.map(finding => ({ ...finding, id: normalizeGeneratedText(finding.id),
     title: normalizeGeneratedText(finding.title), description: normalizeGeneratedText(finding.description),
     ...(finding.suggestedFix === undefined ? {} : { suggestedFix: normalizeGeneratedText(finding.suggestedFix) }) })) };
 }
@@ -80,9 +90,10 @@ export function planJournaledCouncil(cells: readonly { id: string }[], state: Ch
   return plan;
 }
 
-function blockingQuorum(assignments: readonly ReviewAssignment[], reviews: readonly ModelReview[],
+/** Whether the ordinary runner would close this council at quorum; wait-for-all never closes early. */
+function closesAtQuorum(assignments: readonly ReviewAssignment[], reviews: readonly ModelReview[],
   quorum: RunnerOptions['quorum']): boolean {
-  if (!quorum) return reviews.every(review => review.status === 'success');
+  if (!quorum) return false;
   const expected = new Map<string, number>(), succeeded = new Map<string, number>();
   assignments.forEach((assignment, index) => {
     if (quorum.blocking && !quorum.blocking[index]) return;
@@ -92,7 +103,7 @@ function blockingQuorum(assignments: readonly ReviewAssignment[], reviews: reado
   });
   const complete = [...expected].filter(([seat, count]) => succeeded.get(seat) === count).length;
   const policy = resolveQuorumPolicy(expected.size, quorum.fraction);
-  return policy.fraction < 1 ? hasSuccessfulQuorum(policy, complete) : complete === expected.size;
+  return policy.fraction < 1 && hasSuccessfulQuorum(policy, complete);
 }
 
 /**
@@ -133,6 +144,7 @@ export async function runJournaledCouncil(input: JournaledCouncilInput): Promise
     return { reviews, interrupted: false, retained: plan.retained.size, dispatched: 0 };
   }
   const attempts = new Map<number, PaidAttempt>();
+  const declined = new Set<number>();
   const reviews = merge(await runReviews(assignments, prompts, {
     ...input.runner,
     retainedReviews: [...plan.retained].map(([callIndex, review]) => ({ callIndex, review,
@@ -140,6 +152,7 @@ export async function runJournaledCouncil(input: JournaledCouncilInput): Promise
     eligibleCallIndices: plan.eligible,
     beforeReview: async (index, signal) => {
       if (signal.aborted) return false;
+      if (input.admit && !input.admit()) { declined.add(index); return false; }
       const attempt: PaidAttempt = { id: randomUUID(), kind: 'paid' };
       await journal.recordIntent(cells[index]!.id, attempt, ownership);
       attempts.set(index, attempt);
@@ -152,17 +165,22 @@ export async function runJournaledCouncil(input: JournaledCouncilInput): Promise
         return;
       }
       const stored = journalable(review);
-      if (!blockingCheckpointReviewSchema.safeParse(stored).success) {
-        // This run still reports the result; only a resume would dispatch it again.
+      try {
+        if (!blockingCheckpointReviewSchema.safeParse(stored).success) throw new Error('checkpoint_invalid_result');
+        await journal.recordResult(cell.id, attempt, stored.status === 'success'
+          ? { kind: 'success', chunk: cell.chunk, reviewBytes: JSON.stringify(stored) }
+          : { kind: 'failure', chunk: cell.chunk, reviewBytes: JSON.stringify(stored), possiblyBilled: true }, ownership);
+      } catch (error) {
+        // Validation refuses before any write. This run still reports the
+        // result; only a later resume would dispatch the call again.
+        if (!(error instanceof Error) || !['checkpoint_invalid_result', 'checkpoint_result_cell_mismatch'].includes(error.message)) throw error;
         await journal.recordUncertain(cell.id, attempt, 'Reviewer result could not be journaled; a resume treats it as interrupted.', ownership);
-        return;
       }
-      await journal.recordResult(cell.id, attempt, stored.status === 'success'
-        ? { kind: 'success', chunk: cell.chunk, reviewBytes: JSON.stringify(stored) }
-        : { kind: 'failure', chunk: cell.chunk, reviewBytes: JSON.stringify(stored), possiblyBilled: true }, ownership);
     },
   }));
-  const interrupted = input.runner.signal?.aborted === true && !blockingQuorum(assignments, reviews, input.runner.quorum);
+  const stopped = declined.size > 0 || input.runner.signal?.aborted === true;
+  const interrupted = stopped && reviews.some(review => review.status === 'canceled') &&
+    !closesAtQuorum(assignments, reviews, input.runner.quorum);
   if (!interrupted) await journal.finalize(ownership);
   return { reviews, interrupted, retained: plan.retained.size, dispatched: attempts.size };
 }
