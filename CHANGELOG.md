@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 4.5.15 - 2026-10-11
+
+- Document the files-only `--context` contract. The `review` and
+  `review-plan` help and the README no longer promise directories: an
+  ordinary review warns and skips a directory, and a guarded review refuses to
+  launch. Context collection is unchanged (RCL-190).
 - End a fresh-review operation that Harness refused for good. A 4xx refusal or a
   disabled organization, confirmed against the active cycle, now restores the
   target and finishes the operation, so the next `--start-over` requests a new
