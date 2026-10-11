@@ -55,7 +55,7 @@ vi.mock('../../src/converge/process-identity.js', async importOriginal => {
 
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-async function fixture(legacy = true, cap = 20) {
+async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' = 'label') {
   const common = await mkdtemp(join(tmpdir(), 'rcl-terminal-')); roots.push(common);
   const dataDir = join(common, 'data'); await mkdir(dataDir, { mode: 0o700 });
   const target = 'synthetic-9220', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), reportPath = join(common, 'original-report.json');
@@ -69,7 +69,8 @@ async function fixture(legacy = true, cap = 20) {
   result.run!.roster = Array.from({ length: 10 }, (_, i) => ({ model: `openai/seat${i}`, role: 'bug-hunter', provider: 'openai', lane: 'blocking' as const }));
   result.reviews = result.run!.roster.map((seat, i) => sampleReview({ ...seat, status: i < 7 ? 'success' : 'error', error: i < 7 ? undefined : 'synthetic failure' }));
   result.stats.totalReviews = 10; result.stats.successfulReviews = 7;
-  delete result.findings[0]!.gating;
+  if (defect === 'label') delete result.findings[0]!.gating;
+  else result.belowThresholdFindings![0]!.file = '';
   const health = { version: 1 as const, policy: resolveQuorumPolicy(10), successfulSeats: 7 };
   const options = { gitCommonDir: common, target, headSha, inputSha256, cycleRemote, maxAttempts: cap, validate: vi.fn(async () => {}) };
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -254,6 +255,31 @@ it.each(['forged-label-diagnostic', 'transport-refusal'])('refuses self-consiste
       : [{ path: 'findings.0.gating.reason', message: 'Verified-consensus finding is missing a valid gating label' }] })).toMatchObject({ status: 'complete' });
   const before = await snapshot(f);
   await expect(f.preview()).rejects.toThrow('unsupported_local_rejection');
+  expect(await snapshot(f)).toEqual(before);
+});
+
+it('disposes a run refused for a blank appendix file and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'blank-file'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Blank-file producer fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('refuses a blank-file proof whose retained diagnostic names a finding that has a file', async () => {
+  const f = await fixture(false, 20, 'blank-file');
+  const bytes = await readFile(f.selection.reportPath, 'utf8'), artifacts = { report_json: bytes };
+  await rm(join(f.dataDir, 'quarantine'), { recursive: true });
+  expect(await f.rt.quarantine!.retain({ runId: f.selection.runId, artifacts,
+    envelope: buildRunEnvelope(JSON.parse(bytes), artifacts, { level: 'full', delivery: { mode: 'direct' }, parseFailures: false }),
+    events: [], requestedMode: 'asserted', acknowledged: false,
+    diagnostics: [{ path: 'findings.0.file', message: 'Invalid text' }] })).toMatchObject({ status: 'complete' });
+  const before = await snapshot(f);
+  await expect(f.preview()).rejects.toThrow('terminal_rejection_rejection_diagnostics');
   expect(await snapshot(f)).toEqual(before);
 });
 

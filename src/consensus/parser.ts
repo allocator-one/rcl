@@ -25,17 +25,25 @@ function normalizedEnum<const T extends readonly [string, ...string[]]>(values: 
   );
 }
 
+/**
+ * The evidence protocol refuses a finding without a file or a title, and one
+ * refused finding blocks its whole converge target (RCL-189). Like a blank
+ * line number, a blank file or title is missing meaning, not formatting:
+ * drop the finding rather than invent a placeholder.
+ */
+const nonblank = (value: string) => value.trim() !== '' && !value.includes('\0');
+
 const FindingSchema = z.object({
   // Optional with a default: models routinely omit ids, and a required id
   // used to fail the whole response (and every salvage attempt), silently
   // dropping the reviewer's entire output. Empty ids are regenerated below.
   id: z.string().optional().default(''),
-  file: z.string(),
+  file: z.string().refine(nonblank),
   startLine: LineNumber,
   endLine: LineNumber,
   severity: normalizedEnum(['critical', 'important', 'minor', 'nitpick']),
   category: normalizedEnum(['security', 'correctness', 'best-practices', 'tests', 'api-design']),
-  title: z.string().max(200),
+  title: z.string().max(200).refine(nonblank),
   description: z.string(),
   suggestedFix: z.string().optional(),
 }).transform((finding): Finding => {
