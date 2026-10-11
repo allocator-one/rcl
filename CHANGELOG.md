@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Document recovery for a round admitted against the wrong patch: leave it
+  and its findings untriaged, report the mismatch, and only when the user asks
+  start a fresh review with `--start-over` on a patch captured from the merge
+  base. Harness then counts only the new cycle's evidence, so the wrong-patch
+  round never approves a merge (RCL-129).
+
 ## 4.5.13 - 2026-10-11
 
 - Drop a reviewer finding whose file or title is blank or contains NUL, as
