@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.16 - 2026-10-12
+
 - Share bounded task context with every reviewer. The `--spec` text (up to
   16 KiB) and, for a pull request target, its title (300 characters) and
   description (4 KiB) now reach every role and chunk, including async
