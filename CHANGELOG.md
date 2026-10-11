@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 4.5.13 - 2026-10-11
+
+- Drop a reviewer finding whose file or title is blank or contains NUL, as
+  a blank line number already is. The evidence protocol refuses such a
+  finding, and one refused finding left its whole converge target
+  unrecoverable. `rcl converge-rejected` now also disposes of a run refused
+  locally only because a finding's file or title was blank: it reads the
+  retained report through a proof-only schema and checks every recorded
+  diagnostic against the projected envelope row (RCL-189).
+- Wait up to 12 s for the Harness model-key fetch and retry it once after a
+  timeout, network error, 429 or 5xx. When it still fails, the note and a
+  `missing_provider_credentials` launch refusal name why, instead of listing
+  only the missing providers (RCL-188).
+
 ## 4.5.12 - 2026-10-07
 
 - Preserve and authenticate retained ordinary input packets when recovering a
