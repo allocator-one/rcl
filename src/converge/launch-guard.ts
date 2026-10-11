@@ -31,7 +31,7 @@ import { boundFixRecoverySourceSchema, type BoundFixRecoverySource } from './bou
 import { createOriginalLaunch, encodeOriginalLaunch, remainingOriginalBudget,
   type OriginalLaunch, type OriginalLaunchInput } from '../dispatch/original-launch.js';
 import { verifyCyclePendingFinalization } from './pending-finalization-receipt.js';
-import { captureCurrentProcessIdentity } from './process-identity.js';
+import { captureCurrentProcessIdentity, inspectProcessIdentity } from './process-identity.js';
 
 /** Canonical original descriptor prepared under target ownership, before its claim is spent. */
 export interface PreparedOriginalLaunch {
@@ -43,6 +43,30 @@ export interface OriginalLaunchPreflight {
   /** Persist the immutable package while the target is exclusively owned, before spending the claim. */
   beforeClaim: (value: PreparedOriginalLaunch, ownership: NativeTargetOwnership) => Promise<void>;
   nowMs?: () => number;
+}
+
+/** Journal namespace of an ordinary guarded council, bound to its retained launch packet (RCL-80). */
+export function ordinaryCheckpointNamespace(packetSha256: string): string {
+  if (!/^[a-f0-9]{64}$/.test(packetSha256)) throw new Error('ordinary_checkpoint_invalid_packet');
+  return `ordinary-${packetSha256.slice(0, 48)}`;
+}
+
+/** The council's journal for an ordinary launch, and whether this invocation resumes it. */
+export interface OrdinaryCheckpoint {
+  readonly namespace: string;
+  readonly resumed: boolean;
+}
+
+/**
+ * A council stopped before quorum with its calls journaled. The launch stays
+ * pending, so rerunning the same guarded command resumes it under the same
+ * attempt instead of spending a new one.
+ */
+export class ReviewCouncilInterrupted extends Error {
+  constructor(readonly completed: number, readonly total: number) {
+    super(`Council interrupted before quorum with ${completed} of ${total} calls journaled; rerun the same command to resume without a new attempt.`);
+    this.name = 'ReviewCouncilInterrupted';
+  }
 }
 
 export interface GuardedLaunchOptions {
@@ -70,8 +94,15 @@ export interface GuardedLaunchOptions {
     ordinaryInputs: OrdinaryLaunchInputsBinding;
   }>;
   onClaim?: (claim: ConvergeAttemptClaim) => Promise<void>;
+  /**
+   * Journal ordinary councils (RCL-80): `exists` reports whether a journal for
+   * the namespace matches the current captured plan. Omission keeps unjournaled
+   * dispatch and today's refusal of an unknown pending launch.
+   */
+  ordinaryCheckpoint?: { exists: (namespace: string) => Promise<boolean> };
   /** Reuse this ownership for durable reviewer checkpoints; never take a second target lock. */
-  run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch) => Promise<GuardedLaunchCompletion>;
+  run: (context: ConvergeContext, ownership: NativeTargetOwnership, original?: PreparedOriginalLaunch,
+    checkpoint?: OrdinaryCheckpoint) => Promise<GuardedLaunchCompletion>;
 }
 
 export class ReviewLaunchRefused extends Error {
@@ -264,6 +295,8 @@ export function hasHealthyGuardedLaunch(previous: GuardedLaunchState): boolean {
 
 export interface GuardedLaunchClaim extends ConvergeAttemptClaim {
   resumedCompletion?: GuardedLaunchCompletion;
+  /** This invocation continued an interrupted journaled council under its existing claim. */
+  resumedInterrupted?: true;
 }
 
 export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<GuardedLaunchClaim> {
@@ -303,7 +336,70 @@ export async function guardReviewLaunch(input: GuardedLaunchOptions): Promise<Gu
   }
 }
 
+/**
+ * Continue the latest pending ordinary launch when its process has exited, its
+ * exact head and inputs are requested again and its council journal matches
+ * the current capture. No attempt is claimed and the round is unchanged; any
+ * other pending launch keeps today's refusal path.
+ */
+async function resumeInterruptedOrdinary(options: GuardedLaunchOptions, ownership: NativeTargetOwnership,
+  freshOperation?: string): Promise<GuardedLaunchClaim | undefined> {
+  const checkpoint = options.ordinaryCheckpoint;
+  if (!checkpoint || (options.startOver ?? false) !== (freshOperation !== undefined) || options.originalLaunch ||
+    options.legacyRetry || options.boundFixRecovery || options.recoverySource || options.consumeAttempt !== undefined ||
+    (options.intent ?? 'review') !== 'review') return undefined;
+  // An ordinary continuation never bypasses a pending fresh request; an
+  // interrupted fresh request resumes only through its own --start-over.
+  if (!freshOperation) await assertNoPendingFreshReview(options.gitCommonDir, options.target);
+  const native = await loadConvergeRunStateEvidence(options.gitCommonDir, options.target);
+  const attempts = await previewConvergeAttemptState(options.gitCommonDir, options.target);
+  const state = native?.state;
+  if (!state || state.version === 3 || !attempts || !state.lastLaunch || !isDeepStrictEqual(state.cycle, attempts.cycle) ||
+    (freshOperation !== undefined && state.cycle?.operationId !== freshOperation)) return undefined;
+  const previous = launchSchema.parse(state.lastLaunch);
+  if (previous.status !== 'pending' || previous.attempt !== attempts.attemptsUsed || !previous.ordinaryInputs ||
+    previous.headSha !== options.headSha || previous.inputSha256 !== options.inputSha256 ||
+    previous.runId || previous.retainedOriginal || previous.pendingResume || previous.pendingRecovery || previous.recovery ||
+    !previous.processIdentity || await inspectProcessIdentity(previous.processIdentity) !== 'dead') return undefined;
+  const namespace = ordinaryCheckpointNamespace(previous.ordinaryInputs.packetSha256);
+  if (!await checkpoint.exists(namespace)) return undefined;
+  if (state.cycle) {
+    await verifyReviewCycle(options.gitCommonDir, options.target, state.cycle);
+    const remote = options.cycleRemote;
+    if (!remote || remote.repo.toLowerCase() !== state.cycle.repo || remote.prNumber !== state.cycle.prNumber || remote.url !== state.cycle.url) {
+      refuse('fresh_review_remote_mismatch', 'Continue this cycle against its original Harness PR.');
+    }
+    if ((await remote.current())?.id !== state.cycle.id) refuse('fresh_review_superseded', 'This review cycle has been replaced.');
+  }
+  await options.validate();
+  const processIdentity = await captureCurrentProcessIdentity();
+  state.lastLaunch = { ...previous, pid: process.pid, processIdentity };
+  state.updatedAt = new Date().toISOString();
+  await writeState(options.gitCommonDir, state, ownership);
+  const context = { target: options.target, round: previous.round, attempt: previous.attempt,
+    ...(state.cycle ? { cycleId: state.cycle.id } : {}) };
+  let failure: { error: unknown } | undefined;
+  try {
+    const completion = completionSchema.parse(await options.run(context, ownership, undefined, { namespace, resumed: true }));
+    state.lastLaunch = { ...state.lastLaunch, ...completion, status: 'completed' };
+  } catch (error) {
+    if (!(error instanceof ReviewCouncilInterrupted)) state.lastLaunch.status = 'failed';
+    failure = { error };
+  }
+  state.updatedAt = new Date().toISOString();
+  await writeState(options.gitCommonDir, state, ownership);
+  if (freshOperation && !(failure?.error instanceof ReviewCouncilInterrupted)) {
+    await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+  }
+  if (failure) throw failure.error;
+  return { target: options.target, attempt: previous.attempt, attemptsUsed: attempts.attemptsUsed, cap: attempts.cap,
+    stateFile: convergeAttemptStatePath(options.gitCommonDir, options.target),
+    ...(attempts.cycle ? { cycle: attempts.cycle } : {}), resumedInterrupted: true };
+}
+
 async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: NativeTargetOwnership): Promise<GuardedLaunchClaim> {
+  const resumed = await resumeInterruptedOrdinary(options, ownership);
+  if (resumed) return resumed;
   let preparedOriginal: PreparedOriginalLaunch | undefined;
   const assertOriginalLive = () => {
     if (preparedOriginal && remainingOriginalBudget(preparedOriginal.launch,
@@ -332,6 +428,8 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         cap: attempts.cap, cycle: fresh.cycle, stateFile: convergeAttemptStatePath(options.gitCommonDir, options.target),
         resumedCompletion: completionSchema.parse(resumed.lastLaunch) };
     }
+    const resumedFresh = await resumeInterruptedOrdinary(options, ownership, freshOperation);
+    if (resumedFresh) return resumedFresh;
     if (completionPending) await options.validate();
     if (attempts && attempts.attemptsUsed > 0 && options.retryReason === undefined) {
       options.retryReason = 'Resuming an explicitly requested fresh review after interrupted local dispatch; previous attempts remain spent.';
@@ -455,19 +553,29 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         const context = { target: options.target, round: state.lastLaunch!.round, attempt: claimed.attempt,
           ...(state.cycle ? { cycleId: state.cycle.id } : {}),
           ...(options.recoverySource ? { recovery_source: options.recoverySource } : {}) };
+        const ordinaryInputs = state.lastLaunch!.ordinaryInputs;
+        const checkpoint = options.ordinaryCheckpoint && ordinaryInputs && !recovered
+          ? { namespace: ordinaryCheckpointNamespace(ordinaryInputs.packetSha256), resumed: false } : undefined;
         const completion = completionSchema.parse(await (preparedOriginal
-          ? options.run(context, ownership, preparedOriginal) : options.run(context, ownership)));
+          ? options.run(context, ownership, preparedOriginal)
+          : checkpoint ? options.run(context, ownership, undefined, checkpoint) : options.run(context, ownership)));
         if (preparedOriginal && completion.runId !== preparedOriginal.launch.runId) {
           refuse('original_launch_run_mismatch', 'The completion differs from the prepared original run.');
         }
         state.lastLaunch = { ...state.lastLaunch!, ...completion, status: 'completed' };
       } catch (error) {
-        state.lastLaunch!.status = 'failed';
+        // A journaled council stopped before quorum stays pending: rerunning
+        // the same command resumes it under this claim (RCL-80).
+        if (!(error instanceof ReviewCouncilInterrupted)) state.lastLaunch!.status = 'failed';
         failure = { error };
       }
       state.updatedAt = new Date().toISOString();
       await persistLaunch();
-      if (freshOperation) await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+      // An interrupted fresh council stays pending: rerunning the same
+      // --start-over command resumes it instead of requesting another cycle.
+      if (freshOperation && !(failure?.error instanceof ReviewCouncilInterrupted)) {
+        await finishFreshReview(options.gitCommonDir, options.target, freshOperation, ownership);
+      }
     },
   }).catch(async (error: unknown) => {
     if (freshOperation && error instanceof ConvergeAttemptBudgetExceededError) {

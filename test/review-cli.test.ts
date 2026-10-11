@@ -1094,7 +1094,7 @@ describe('rcl review — guarded native launch', () => {
     });
   }, 40_000);
 
-  it.skipIf(process.platform === 'win32')('preserves uncertain dispatch after an actual process loss and refuses automatic retry', async () => {
+  it.skipIf(process.platform === 'win32')('resumes the journaled council after an actual process loss without a new attempt', async () => {
     await withGuardedFixture(async fixture => {
       fixture.holdResponses();
       let child: ChildProcess | undefined;
@@ -1116,11 +1116,15 @@ describe('rcl review — guarded native launch', () => {
       expect(await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ lastLaunch: { status: 'pending', pid: child!.pid } });
 
+      fixture.releaseResponses();
       const second = await runRclAsync([...fixture.args, '--json-file', 'second.json'], fixture.repo, fixture.env);
 
-      expect(second.status).toBe(1);
-      expect(second.stderr).toContain('dispatch_unknown');
-      expect(fixture.calls()).toBe(calls);
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stderr).toContain('Resuming the interrupted council of attempt 1');
+      // Both calls were in flight at the kill: each is dispatched exactly once more.
+      expect(fixture.calls()).toBe(calls + 2);
+      expect(JSON.parse(readFileSync(join(fixture.repo, 'second.json'), 'utf8')).run.converge)
+        .toEqual({ target: 'guarded-fixture', round: 1, attempt: 1 });
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ attemptsUsed: 1 });
     });

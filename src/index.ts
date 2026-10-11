@@ -103,7 +103,8 @@ import {
 } from './converge/run-state.js';
 import { applyRoundGap, previewRoundGap } from './converge/round-gap.js';
 import { withNativeTarget } from './converge/target-ownership.js';
-import { guardReviewLaunch, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions } from './converge/launch-guard.js';
+import { guardReviewLaunch, ReviewCouncilInterrupted, ReviewLaunchRefused, type GuardedLaunchCompletion, type GuardedLaunchOptions,
+  type OrdinaryCheckpoint } from './converge/launch-guard.js';
 import { selectCurrentRecoveredProduction, type RecoveredProduction } from './converge/recovered-production.js';
 import { createBoundFixRecovery } from './converge/bound-fix-recovery.js';
 import { openReadSink } from './telemetry/read-sink.js';
@@ -179,7 +180,9 @@ import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
 import { resolveFinalizedAsyncExecution } from './dispatch/checkpoint-async-store.js';
 import type { SealedAsyncProof } from './dispatch/checkpoint-async-context.js';
-import { exportCheckpointProof, type CheckpointProof } from './dispatch/checkpoint.js';
+import type { NativeTargetOwnership } from './converge/target-ownership.js';
+import { CheckpointJournal, checkpointPath, exportCheckpointProof, type CheckpointProof, type FrozenCheckpointPlan } from './dispatch/checkpoint.js';
+import { runJournaledCouncil } from './dispatch/journaled-council.js';
 import { captureAggregationInputs, AGGREGATION_ALGORITHM } from './report/aggregation-inputs.js';
 import { decodeSupplementalAsync } from './report/supplemental-async.js';
 import { projectCheckpointReport } from './report/checkpoint-projection.js';
@@ -376,6 +379,7 @@ program
   .option('--resume-async-sha256 <hashes>', 'Comma-separated SHA-256 bindings for every legacy async result retained as historical evidence')
   .option('--retry-reason <reason>', 'Explicit bounded recovery decision for a previous failed or unknown launch; never resets caps')
   .option('--max-attempts <n>', 'Guarded convergence: explicitly authorized attempt cap (omitting preserves the cap)')
+  .option('--max-slice-minutes <n>', 'Guarded convergence: stop the council cleanly after N minutes (exit 5); rerunning the same command resumes it without a new attempt')
   .option('--max-rounds <n>', 'Guarded convergence: explicitly authorized round cap (2–99; omitting preserves the cap)')
   .option('--no-telemetry', 'Do not deliver this review as evidence to Harness')
   .option('--evidence-required', 'Exit 4 unless Harness acknowledged the evidence (spools first; retry with rcl telemetry flush)')
@@ -1710,6 +1714,7 @@ interface CouncilCliOpts {
   previewPending?: boolean;
   resumeAsyncSha256?: string;
   maxAttempts?: string;
+  maxSliceMinutes?: string;
   maxRounds?: string;
   /** commander: `--no-telemetry` sets this false. */
   telemetry?: boolean;
@@ -2128,8 +2133,11 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       } catch { /* Startup delivery remains best-effort for legacy reviews. */ }
     }
     if (!opts.guardedConverge && (opts.launchIntent !== undefined || opts.retryReason !== undefined || opts.retryReport !== undefined ||
-      opts.maxAttempts !== undefined || opts.maxRounds !== undefined)) {
-      throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason and launch caps require --guarded-converge.');
+      opts.maxAttempts !== undefined || opts.maxRounds !== undefined || opts.maxSliceMinutes !== undefined)) {
+      throw new ReviewLaunchRefused('guard_required', 'Launch intent, retry reason, launch caps and slice budgets require --guarded-converge.');
+    }
+    if (opts.maxSliceMinutes !== undefined && (!/^[1-9]\d{0,3}$/.test(opts.maxSliceMinutes) || Number(opts.maxSliceMinutes) > 1440)) {
+      throw new ReviewLaunchRefused('invalid_slice_budget', '--max-slice-minutes must be a whole number of minutes from 1 to 1440.');
     }
     if (opts.guardedConverge) {
       const converge = resolveConvergeContext(opts, reviewConvergeEnvironment(opts));
@@ -2295,7 +2303,8 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       console.error(err);
     }
     process.exitCode = opts.guardedConverge && (err instanceof ConvergeAttemptBudgetExceededError || err instanceof ConvergeRoundCapError)
-      ? 2 : opts.guardedConverge && (err instanceof ConvergeAttemptStateError || err instanceof ConvergeRunStateError) ? 3 : 1;
+      ? 2 : opts.guardedConverge && (err instanceof ConvergeAttemptStateError || err instanceof ConvergeRunStateError) ? 3
+        : opts.guardedConverge && err instanceof ReviewCouncilInterrupted ? 5 : 1;
   }
 }
 
@@ -2340,6 +2349,8 @@ async function executeCouncil(
     /** `--attest`: the run-bound credential and the run id it binds (RCL-40). */
     attestation?: Attestation;
     pendingResume?: PendingLegacyResumeExecution;
+    /** Journal of an ordinary guarded council (RCL-80), opened under the launch's ownership. */
+    ordinaryCheckpoint?: OrdinaryCheckpoint & { ownership: NativeTargetOwnership; plan: FrozenCheckpointPlan };
   },
   preparedWork?: Awaited<ReturnType<typeof prepareCouncilWork>>
 ): Promise<GuardedLaunchCompletion | undefined> {
@@ -2632,10 +2643,30 @@ async function executeCouncil(
       }
       return result.completion;
     }
+    // Journal the ordinary council so an interrupted process resumes without
+    // repeating successful calls (RCL-80). Without an exact head and base, or
+    // inputs beyond the capture limits, dispatch stays unjournaled.
+    let ordinaryPlan: FrozenCheckpointPlan | undefined;
+    if (/^[a-f0-9]{40}$/.test(extra.target.headSha ?? '') && /^[a-f0-9]{40}$/.test(extra.target.baseSha ?? '')) {
+      try {
+        ordinaryPlan = capturePreparedCouncil({ target: prepared.converge!.target,
+          headSha: extra.target.headSha!, mergeBaseSha: extra.target.baseSha!, diff, assignments,
+          lanes: assignments.map(item => assignmentLane(item.model, prepared.coreModels, prepared.explicit)),
+          chunks, prompts, config, specBytes: prepared.specContent ?? '', contextDocs,
+          compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: AGGREGATION_ALGORITHM } }).plan;
+      } catch (error) {
+        process.stderr.write(`Council journal unavailable (${scrubText(String(error), 200)}); an interrupted run cannot resume.\n`);
+      }
+    }
+    const journalPlan = ordinaryPlan;
     const claim = await guardReviewLaunch({
       gitCommonDir: await resolveGitCommonDir(),
       target: prepared.converge!.target,
       startOver: opts.startOver, cycleRemote,
+      ...(journalPlan ? { ordinaryCheckpoint: { exists: async (namespace: string) => {
+        try { return !!await CheckpointJournal.openRead(checkpointPath(common, prepared.converge!.target, namespace), journalPlan); }
+        catch { return false; }
+      } } } : {}),
       boundFixRecovery,
       recoverySource: prepared.converge!.recovery_source,
       headSha: extra.target.headSha ?? '',
@@ -2674,9 +2705,11 @@ async function executeCouncil(
         process.stderr.write(`Convergence attempt ${claim.attempt}/${claim.cap} claimed for ${claim.target}.\n`);
         if (boundFixRecovery) process.stderr.write(`Bound fix recovery verified from run ${boundFixRecovery.runId}; attempt ${claim.attempt} retains the existing review history.\n`);
       },
-      run: async converge => {
+      run: async (converge, ownership, _original, checkpoint) => {
+        if (checkpoint?.resumed) process.stderr.write(`Resuming the interrupted council of attempt ${converge.attempt}; journaled calls are not repeated.\n`);
         const guardedCompletion = await executeCouncil(spinner, { ...prepared, converge }, diff,
-          { ...opts, guardedConverge: false, exclusiveOutputs: true }, extra, work);
+          { ...opts, guardedConverge: false, exclusiveOutputs: true },
+          { ...extra, ...(checkpoint && journalPlan ? { ordinaryCheckpoint: { ...checkpoint, ownership, plan: journalPlan } } : {}) }, work);
         if (!guardedCompletion) throw new Error('guarded_launch_missing_completion');
         completion = guardedCompletion;
         return guardedCompletion;
@@ -2700,7 +2733,7 @@ async function executeCouncil(
   let asyncKey: string | undefined;
   let asyncLaunched = 0;
   if (
-    !extra.pendingResume &&
+    !extra.pendingResume && !extra.ordinaryCheckpoint?.resumed &&
     asyncTargetLabel !== undefined &&
     (asyncAssignments.length > 0 || (config.asyncModels?.length ?? 0) > 0)
   ) {
@@ -2822,10 +2855,8 @@ async function executeCouncil(
         successor: { runId: extra.pendingResume.launch.runId, proof },
         policy: { version: 1 as const, fraction: config.quorumFraction ?? DEFAULT_QUORUM_FRACTION } });
       chunkReviews = pendingProjection.seatReviews.map(seat => structuredClone(seat.review));
-    } else chunkReviews = await runReviews(
-      chunkAssignments.map((ca) => ca.assignment),
-      prompts,
-      {
+    } else {
+      const ordinaryRunner = {
         // Fall back to the shared constants, never to inline literals:
         // duplicated defaults drift (this read 120_000 after the default
         // moved to 600_000).
@@ -2846,9 +2877,24 @@ async function executeCouncil(
           blocking: chunkAssignments.map((ca) =>
             assignmentLane(ca.assignment.model, prepared.coreModels, prepared.explicit) === 'blocking'),
         },
-        onReviewComplete: (review) => progress.complete(review),
-      }
-    );
+        onReviewComplete: (review: ModelReview) => progress.complete(review),
+      };
+      const checkpoint = extra.ordinaryCheckpoint;
+      if (checkpoint) {
+        const open = { commonDir: await resolveGitCommonDir(), namespace: checkpoint.namespace,
+          plan: checkpoint.plan, ownership: checkpoint.ownership };
+        const journal = await (checkpoint.resumed ? CheckpointJournal.openWrite(open) : CheckpointJournal.create(open));
+        const slice = opts.maxSliceMinutes === undefined ? undefined : AbortSignal.timeout(Number(opts.maxSliceMinutes) * 60_000);
+        const journaled = await runJournaledCouncil({ journal, ownership: checkpoint.ownership,
+          assignments: chunkAssignments.map((ca) => ca.assignment), prompts,
+          runner: { ...ordinaryRunner, ...(slice ? { signal: slice } : {}) } });
+        if (journaled.retained > 0) process.stderr.write(`Reused ${journaled.retained} journaled call(s) from the interrupted council.\n`);
+        if (journaled.interrupted) {
+          throw new ReviewCouncilInterrupted(journaled.reviews.filter(review => review.status !== 'canceled').length, totalCalls);
+        }
+        chunkReviews = journaled.reviews;
+      } else chunkReviews = await runReviews(chunkAssignments.map((ca) => ca.assignment), prompts, ordinaryRunner);
+    }
   } finally {
     progress.stop();
   }
