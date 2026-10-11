@@ -909,6 +909,20 @@ describe('rcl review — guarded native launch', () => {
       title: 'A title\uD800', description: 'Preserve 😀 and replace \uD800 \uDFFF', suggestedFix: 'Fix\0 the issue' }]);
   }, 40_000);
 
+  it('refuses an invalid or unguarded slice budget before any claim or call', async () => {
+    await withGuardedFixture(async fixture => {
+      const invalid = await runRclAsync([...fixture.args, '--max-slice-minutes', '0'], fixture.repo, fixture.env);
+      expect(invalid.status).toBe(1);
+      expect(invalid.stderr).toContain('invalid_slice_budget');
+      const unguarded = await runRclAsync([...fixture.args.filter(arg => arg !== '--guarded-converge'), '--max-slice-minutes', '5'],
+        fixture.repo, fixture.env);
+      expect(unguarded.status).toBe(1);
+      expect(unguarded.stderr).toContain('guard_required');
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  }, 40_000);
+
   it('claims and binds one launch only after successful preflight', async () => {
     await withGuardedFixture(async fixture => {
       const result = await runRclAsync(fixture.args, fixture.repo, fixture.env);
@@ -1094,7 +1108,7 @@ describe('rcl review — guarded native launch', () => {
     });
   }, 40_000);
 
-  it.skipIf(process.platform === 'win32')('preserves uncertain dispatch after an actual process loss and refuses automatic retry', async () => {
+  it.skipIf(process.platform === 'win32')('resumes the journaled council after an actual process loss without a new attempt', async () => {
     await withGuardedFixture(async fixture => {
       fixture.holdResponses();
       let child: ChildProcess | undefined;
@@ -1116,11 +1130,15 @@ describe('rcl review — guarded native launch', () => {
       expect(await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ lastLaunch: { status: 'pending', pid: child!.pid } });
 
+      fixture.releaseResponses();
       const second = await runRclAsync([...fixture.args, '--json-file', 'second.json'], fixture.repo, fixture.env);
 
-      expect(second.status).toBe(1);
-      expect(second.stderr).toContain('dispatch_unknown');
-      expect(fixture.calls()).toBe(calls);
+      expect(second.status, second.stderr).toBe(0);
+      expect(second.stderr).toContain('Resuming the interrupted council of attempt 1');
+      // Both calls were in flight at the kill: each is dispatched exactly once more.
+      expect(fixture.calls()).toBe(calls + 2);
+      expect(JSON.parse(readFileSync(join(fixture.repo, 'second.json'), 'utf8')).run.converge)
+        .toEqual({ target: 'guarded-fixture', round: 1, attempt: 1 });
       expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture'))
         .toMatchObject({ attemptsUsed: 1 });
     });

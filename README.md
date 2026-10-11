@@ -209,6 +209,7 @@ recovery operations, documented in
 | `--round <n>` / `--attempt <n>` | Converge context recorded in the report (or `RCL_CONVERGE_ROUND` / `RCL_CONVERGE_ATTEMPT`); guarded launches derive these except the explicit recovered-v3 handoff |
 | `--start-over` | Start an explicitly requested fresh review cycle with a new normal budget; preserves prior spending and evidence |
 | `--max-attempts <n>` / `--max-rounds <n>` | Guarded launch only: explicitly authorized caps; omission preserves native caps |
+| `--max-slice-minutes <n>` | Guarded launch only: start no new reviewer call after N minutes; running calls finish, then exit 5. Rerunning the same command resumes the journaled council under the same attempt |
 | `--retry-reason <reason>` | Explicit bounded recovery decision for a failed, unknown or inconclusive launch; preserves spent attempts |
 | `--retry-report <path>` | Bind an original legacy (4.1.10–4.1.12) report to an inconclusive retry; requires `--retry-reason` |
 | `--launch-intent <intent>` | `review` (default), `stop-upstream`, `stop-review`, or `retry-delivery` |
@@ -253,6 +254,7 @@ completion lines, so a long queue is distinguishable from a hung process.
 | 2 | Guarded convergence only: the attempt or round cap is exhausted; continuing needs an explicitly approved higher cap |
 | 3 | Guarded convergence only: native attempt or round state could not be read or written |
 | 4 | `--evidence-required` (implied by `--attest`): the review completed but Harness did not acknowledge the evidence |
+| 5 | Guarded convergence only: the council reached `--max-slice-minutes` before it could close; its calls are journaled and rerunning the same command resumes it without a new attempt |
 
 When `--ci` fails and evidence delivery also failed, the exit code is 1 and the
 evidence failure is printed beside the gate verdict. A run that starts or
