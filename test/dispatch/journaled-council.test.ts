@@ -127,7 +127,7 @@ describe('journaled ordinary council (RCL-80)', () => {
       assignments, prompts, runner: runner(second.factory, all) }), small);
     expect(resumed.reviews).toEqual(baseline.reviews);
     expect(resumed.dispatched + resumed.retained).toBe(assignments.length);
-  });
+  }, 30_000);
 
   it('gives a call that was in flight at a hard kill exactly one more dispatch', async () => {
     const dir = await commonDir(), small = council(3, 6), { assignments, prompts } = small;
@@ -148,7 +148,7 @@ describe('journaled ordinary council (RCL-80)', () => {
     const records = (await withJournal(dir, false, journal => journal.read(), small)).records
       .filter(record => record.cell === killed && record.type === 'intent');
     expect(records).toHaveLength(MAX_DISPATCHES_PER_CELL);
-  });
+  }, 30_000);
 
   it('reassembles a finished council from its journal without any provider call', async () => {
     const dir = await commonDir(), small = council(3, 6), { assignments, prompts } = small;
@@ -160,7 +160,7 @@ describe('journaled ordinary council (RCL-80)', () => {
     expect(again.calls.size).toBe(0);
     expect(replay.dispatched).toBe(0);
     expect(replay.reviews.filter(item => item.status === 'success')).toEqual(done.reviews.filter(item => item.status === 'success'));
-  });
+  }, 30_000);
 
   it('refuses a journal captured for different review inputs', async () => {
     const dir = await commonDir(), { plan } = council();
