@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Share bounded task context with every reviewer. The `--spec` text (up to
+  16 KiB) and, for a pull request target, its title (300 characters) and
+  description (4 KiB) now reach every role and chunk, including async
+  reviewers, as untrusted reference data in their own neutralized block;
+  `spec-compliance` still receives the full spec. Truncation is marked. A
+  review without a spec or PR text builds byte-identical prompts; one with
+  them sees its effective inputs change once across this upgrade, while
+  `--export-pending-package` still authenticates a pending launch recorded
+  with the earlier prompts (RCL-191).
+
 ## 4.5.15 - 2026-10-11
 
 - Document the files-only `--context` contract. The `review` and
