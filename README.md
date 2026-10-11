@@ -177,7 +177,7 @@ Untracked files are invisible to `git diff` and therefore not reviewed.
 | `--secondary-models <models>` | Comma-separated secondary models, used for specialist roles only |
 | `--async-models <models>` | Comma-separated async bonus reviewers, fired with the round and never awaited |
 | `--context <path>` | Context file (repeatable). A directory is not read: an ordinary review warns and skips it, a guarded review refuses to launch |
-| `--spec <path>` | Specification file; enables the `spec-compliance` role |
+| `--spec <path>` | Specification file. It enables the `spec-compliance` role, which sees it in full, and every reviewer gets its first 16 KiB as untrusted task context |
 | `--spec-source <source>` | Where `--spec` came from: `flag`, `repo_file`, or `harness_issue:<ID>` (recorded in the report) |
 | `--post` | Post the review to the pull request; findings that map onto the diff become inline comments |
 | `--json` | Print the JSON report to stdout |

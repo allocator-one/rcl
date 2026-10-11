@@ -36,6 +36,7 @@ import { loadPlanAsDiff } from './resolver/plan.js';
 import { isPlanFocus, PLAN_FOCUS_MODES, type PlanFocus } from './prompts/plan.js';
 import { chunkDiff } from './prepare/chunker.js';
 import { buildPrompt, loadContextDocs as loadPromptContextDocs } from './prepare/prompt-builder.js';
+import { buildTaskContext } from './prepare/task-context.js';
 import { BUILTIN_ROLES, getRoleByName } from './roles/builtin.js';
 import { resolveRoles, findProjectRulesFile } from './roles/loader.js';
 import { historicalExecutionPlan, legacyPendingClaimRoles } from './converge/legacy-roster.js';
@@ -2329,11 +2330,15 @@ async function prepareCouncilWork(
     throw new ReviewLaunchRefused('unreadable_context', `Required context could not be read: ${skipped.join(', ')}`);
   }
   for (const path of skipped) console.warn(`Context file not readable, not included in the review: ${path}`);
+  // One bounded copy of the spec and PR text for every reviewer and chunk (RCL-191).
+  const taskContext = buildTaskContext({ specContent: prepared.specContent,
+    ...(diff.source === 'github' && diff.metadata ? { pr: { title: diff.metadata.title, body: diff.metadata.body } } : {}) });
   const prompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) => buildPrompt(chunk, assignment.role, {
     contextDocs,
     plan: focus === undefined ? undefined : { focus },
+    ...(taskContext ? { taskContext } : {}),
   })));
-  return { chunks, chunkAssignments, contextDocs, prompts };
+  return { chunks, chunkAssignments, contextDocs, prompts, taskContext };
 }
 
 async function executeCouncil(
@@ -2373,10 +2378,19 @@ async function executeCouncil(
     const common = await resolveGitCommonDir();
     if (opts.exportPendingPackage) {
       const pendingNative = await loadConvergeRunState(common, prepared.converge!.target);
+      // A launch recorded before shared task context (RCL-191) hashed prompts
+      // without it. Offer that exact earlier form too; the export still
+      // authenticates only an exact match with the recorded input hash.
+      let exportInput = guardedInput;
+      if (work.taskContext && pendingNative?.lastLaunch?.inputSha256 !== guardedInputSha256(guardedInput)) {
+        const earlier = { ...guardedInput, prompts: await Promise.all(chunkAssignments.map(({ assignment, chunk }) =>
+          buildPrompt(chunk, assignment.role, { contextDocs, plan: planContext }))) };
+        if (pendingNative?.lastLaunch?.inputSha256 === guardedInputSha256(earlier)) exportInput = earlier;
+      }
       const receipt = await exportOrdinaryPendingPackage({ gitCommonDir: common,
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
-        guardedInput, path: opts.exportPendingPackage,
+        guardedInput: exportInput, path: opts.exportPendingPackage,
         preview: opts.previewPending === true, asyncStoreDir: await resolveExistingAsyncStoreDir(),
         asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
           extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
@@ -2764,6 +2778,7 @@ async function executeCouncil(
             buildPrompt(chunk, assignment.role, {
               contextDocs,
               plan: planContext,
+              ...(work.taskContext ? { taskContext: work.taskContext } : {}),
             })
           )
         );

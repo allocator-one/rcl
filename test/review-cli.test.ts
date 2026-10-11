@@ -222,6 +222,20 @@ describe('rcl review — files-only --context contract (RCL-190)', () => {
   });
 });
 
+describe('rcl review — shared task context (RCL-191)', () => {
+  it('gives every reviewer, not only spec-compliance, the specification', async () => {
+    await withGuardedFixture(async fixture => {
+      writeFileSync(join(fixture.repo, 'SPEC.md'), 'Spec marker: duplicate rows must be rejected.\n');
+      const result = await runRclAsync([...fixture.args, '--spec', 'SPEC.md'], fixture.repo, fixture.env);
+      expect(result.status, result.stderr).toBe(0);
+      const prompts = fixture.requestBodies().map(body => body.messages.map(message => message.content).join('\n'));
+      expect(prompts.length).toBeGreaterThanOrEqual(2);
+      for (const prompt of prompts) expect(prompt).toContain('Spec marker: duplicate rows must be rejected.');
+      expect(prompts.filter(prompt => prompt.includes('## Task Context (untrusted reference)')).length).toBe(prompts.length);
+    });
+  }, 40_000);
+});
+
 describe('rcl review — bound fix-obligation recovery (RCL-148)', () => {
   const recoveryRunId = '019921a0-0000-7000-8000-000000000002';
 
