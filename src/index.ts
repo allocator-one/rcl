@@ -1747,6 +1747,8 @@ interface PreparedCouncil {
   recoveredProduction?: RecoveredProduction;
   /** When the command started; the run header records the full wall time. */
   startedAt: Date;
+  /** Why the Harness model-key fetch failed, named by a missing-credentials refusal. */
+  keyFetchFailure?: string;
 }
 
 /**
@@ -1759,12 +1761,13 @@ interface PreparedCouncil {
  * degradation (dropping openrouter models without OPENROUTER_API_KEY) must
  * see any injected keys.
  */
-async function fetchHarnessKeys(spinner: Spinner, credential?: HarnessCredential): Promise<void> {
-  const { note } = await applyHarnessModelKeys(credential ? { credential } : {});
+async function fetchHarnessKeys(spinner: Spinner, credential?: HarnessCredential): Promise<string | undefined> {
+  const { note, fetchFailure } = await applyHarnessModelKeys(credential ? { credential } : {});
   if (note) {
     spinner.info(note);
     spinner.start('Loading configuration...');
   }
+  return fetchFailure;
 }
 
 async function prepareCouncil(
@@ -1795,7 +1798,7 @@ async function prepareCouncil(
     throw new ReviewLaunchRefused('preclaimed_attempt_ineligible',
       'An explicit guarded attempt may only hand off the exact standalone claim for recovered-v3 production.');
   }
-  if (!opts.exportPendingPackage) await fetchHarnessKeys(spinner, attestation?.credential);
+  const keyFetchFailure = opts.exportPendingPackage ? undefined : await fetchHarnessKeys(spinner, attestation?.credential);
   const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
 
   // Validate mutually exclusive role options
@@ -2010,6 +2013,7 @@ async function prepareCouncil(
     } } : {}) } } : {}),
     ...(recoveredProduction ? { recoveredProduction } : {}),
     startedAt,
+    ...(keyFetchFailure ? { keyFetchFailure } : {}),
   };
 }
 
@@ -2577,7 +2581,10 @@ async function executeCouncil(
           (config.timeout ?? DEFAULT_TIMEOUT_MS) * Math.max(1, Math.ceil(captured.plan.cells.length / (config.concurrency ?? DEFAULT_CONCURRENCY))) *
           ((config.maxRetries ?? DEFAULT_MAX_RETRIES) + 1) +
           prepared.gatingConfig.verificationTimeoutMs),
-        validate: async () => { validateLaunchProviders(roster.map(entry => entry.provider)); await validateLaunchOutputs(opts); },
+        validate: async () => {
+          validateLaunchProviders(roster.map(entry => entry.provider), process.env, prepared.keyFetchFailure);
+          await validateLaunchOutputs(opts);
+        },
         loadRetainedAsync: migrationPackage ? loadMigrationRetainedAsync : async () => {
           const snapshot = await snapshotAsyncResults(asyncStoreDir, asyncKey,
             pendingClaimPlan.assignments.map(assignment => ({
@@ -2642,7 +2649,7 @@ async function executeCouncil(
       consumeAttempt: prepared.recoveredProduction ? prepared.converge!.attempt : undefined,
       maxRounds: opts.maxRounds === undefined ? undefined : Number(opts.maxRounds),
       validate: async () => {
-        validateLaunchProviders(roster.map(entry => entry.provider));
+        validateLaunchProviders(roster.map(entry => entry.provider), process.env, prepared.keyFetchFailure);
         if (assignments.length < 2) {
           throw new ReviewLaunchRefused('insufficient_reviewers', 'Convergence needs at least two reviewer assignments for a conclusive round.');
         }

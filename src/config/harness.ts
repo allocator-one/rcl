@@ -16,9 +16,9 @@ import { dirname, isAbsolute, join, parse } from 'path';
  * - The stored {url, token} credential pair is indivisible: the token is
  *   only ever sent to the host that minted it — NEVER to a URL named by the
  *   repo's own config, which is attacker-controlled input in a cloned repo.
- * - Every failure degrades silently to today's behavior (missing keys warn
- *   or fail exactly as before); the fetch runs under a short timeout so an
- *   offline machine never hangs a review.
+ * - Every failure degrades to today's behavior (missing keys warn or fail
+ *   as before, naming why the fetch failed); the fetch runs under a bounded
+ *   timeout and one retry so an offline machine never hangs a review.
  * - Keys land in the (injected) env only — never on disk, never in logs.
  */
 
@@ -30,14 +30,23 @@ const PROVIDER_ENV_VARS: Record<string, string> = {
   openrouter: 'OPENROUTER_API_KEY',
 };
 
-/** Long enough for a healthy backend, short enough to never stall a review. */
-const FETCH_TIMEOUT_MS = 3_000;
+/**
+ * Long enough for a healthy but slow backend (responses of 3.7–7.1 s were
+ * measured in RCL-188, when a 3 s cap refused launches), short enough that
+ * an unreachable host never stalls a review for long.
+ */
+const FETCH_TIMEOUT_MS = 12_000;
+/** A timeout, network error, 429 or 5xx is retried once after this delay. */
+const FETCH_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1_000;
 
 export interface HarnessKeyResult {
   /** Providers whose keys were injected into the env. */
   injected: string[];
   /** One human-readable line worth showing, when there is something to say. */
   note?: string;
+  /** Why the key fetch failed, for a later missing-credentials refusal to name. */
+  fetchFailure?: string;
 }
 
 export interface HarnessKeyOptions {
@@ -46,6 +55,8 @@ export interface HarnessKeyOptions {
   env?: Record<string, string | undefined>;
   credentialsPath?: string;
   fetchImpl?: typeof fetch;
+  /** Injectable for tests; waits between fetch attempts. */
+  sleep?: (ms: number) => Promise<void>;
   /**
    * A credential already in hand — the run-bound one `rcl review --attest`
    * minted (RCL-40). Used instead of the stored login, and the attestation
@@ -98,29 +109,44 @@ export async function readStoredCredentials(path: string): Promise<{ url: string
   return null;
 }
 
-async function fetchModelKeys(
-  baseUrl: string,
-  token: string,
-  fetchImpl: typeof fetch
-): Promise<Record<string, string> | null> {
+type FetchOutcome = { keys: Record<string, string> } | { failure: string; retryable: boolean };
+
+async function fetchModelKeysOnce(baseUrl: string, token: string, fetchImpl: typeof fetch): Promise<FetchOutcome> {
   try {
     const response = await fetchImpl(`${baseUrl}/api/v1/model-keys`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
+    // An older backend without the endpoint answers 404; only overload and
+    // server errors are worth a second request.
+    if (!response.ok) return { failure: `HTTP ${response.status}`, retryable: response.status === 429 || response.status >= 500 };
     const body: unknown = await response.json();
     const keys = (body as { data?: { keys?: unknown } })?.data?.keys;
-    if (typeof keys !== 'object' || keys === null) return null;
+    if (typeof keys !== 'object' || keys === null) return { failure: 'unrecognized response', retryable: false };
     const out: Record<string, string> = {};
     for (const [provider, key] of Object.entries(keys)) {
       if (typeof key === 'string' && key !== '') out[provider] = key;
     }
-    return out;
-  } catch {
-    // Timeout, offline, older backend without the endpoint — all read as
-    // "no keys from Harness".
-    return null;
+    return { keys: out };
+  } catch (error) {
+    if (error instanceof SyntaxError) return { failure: 'unrecognized response', retryable: false };
+    const timedOut = (error as { name?: unknown } | null)?.name === 'TimeoutError';
+    return { failure: timedOut ? `timed out after ${FETCH_TIMEOUT_MS / 1000} s` : 'network error', retryable: true };
+  }
+}
+
+async function fetchModelKeys(
+  baseUrl: string,
+  token: string,
+  fetchImpl: typeof fetch,
+  sleep: (ms: number) => Promise<void>
+): Promise<{ keys: Record<string, string> } | { failure: string }> {
+  for (let attempt = 1; ; attempt++) {
+    const outcome = await fetchModelKeysOnce(baseUrl, token, fetchImpl);
+    if ('keys' in outcome) return outcome;
+    if (!outcome.retryable) return { failure: outcome.failure };
+    if (attempt === FETCH_ATTEMPTS) return { failure: `${outcome.failure} on ${FETCH_ATTEMPTS} attempts` };
+    await sleep(RETRY_DELAY_MS);
   }
 }
 
@@ -160,10 +186,16 @@ export async function applyHarnessModelKeys(options: HarnessKeyOptions = {}): Pr
     };
   }
 
-  const keys = await fetchModelKeys(credentials.url, credentials.token, options.fetchImpl ?? fetch);
-  if (keys === null) {
-    return { injected: [], note: `Could not fetch model keys from ${credentials.url} — continuing with the environment as-is.` };
+  const fetched = await fetchModelKeys(credentials.url, credentials.token, options.fetchImpl ?? fetch,
+    options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))));
+  if ('failure' in fetched) {
+    return {
+      injected: [],
+      fetchFailure: fetched.failure,
+      note: `Could not fetch model keys from ${credentials.url} (${fetched.failure}) — continuing with the environment as-is.`,
+    };
   }
+  const { keys } = fetched;
 
   const injected: string[] = [];
   for (const provider of missing) {

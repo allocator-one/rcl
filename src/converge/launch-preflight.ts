@@ -4,10 +4,11 @@ import { basename, dirname, join } from 'node:path';
 import { missingProviders } from '../config/harness.js';
 import { ReviewLaunchRefused } from './launch-guard.js';
 
-export function validateLaunchProviders(providers: readonly string[], env = process.env): void {
+export function validateLaunchProviders(providers: readonly string[], env = process.env, keyFetchFailure?: string): void {
   const missing = missingProviders(env).filter(provider => providers.includes(provider));
   if (missing.length > 0) {
-    throw new ReviewLaunchRefused('missing_provider_credentials', `Missing nonempty credentials for: ${missing.join(', ')}. No attempt claimed.`);
+    const cause = keyFetchFailure ? ` Fetching model keys from Harness failed: ${keyFetchFailure}.` : '';
+    throw new ReviewLaunchRefused('missing_provider_credentials', `Missing nonempty credentials for: ${missing.join(', ')}.${cause} No attempt claimed.`);
   }
   if (providers.includes('openai-compat')) {
     const base = new URL(env['OPENAI_COMPAT_BASE_URL'] ?? 'http://localhost:11434/v1');
