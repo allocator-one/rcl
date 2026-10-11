@@ -356,11 +356,14 @@ async function resumeInterruptedOrdinary(options: GuardedLaunchOptions, ownershi
   const state = native?.state;
   if (!state || state.version === 3 || !attempts || !state.lastLaunch || !isDeepStrictEqual(state.cycle, attempts.cycle) ||
     (freshOperation !== undefined && state.cycle?.operationId !== freshOperation)) return undefined;
-  const previous = launchSchema.parse(state.lastLaunch);
+  // Anything unexpected falls through to the ordinary guard and its refusals.
+  const parsed = launchSchema.safeParse(state.lastLaunch);
+  if (!parsed.success) return undefined;
+  const previous = parsed.data;
   if (previous.status !== 'pending' || previous.attempt !== attempts.attemptsUsed || !previous.ordinaryInputs ||
     previous.headSha !== options.headSha || previous.inputSha256 !== options.inputSha256 ||
     previous.runId || previous.retainedOriginal || previous.pendingResume || previous.pendingRecovery || previous.recovery ||
-    !previous.processIdentity || await inspectProcessIdentity(previous.processIdentity) !== 'dead') return undefined;
+    !previous.processIdentity || await inspectProcessIdentity(previous.processIdentity).catch(() => 'unverifiable') !== 'dead') return undefined;
   const namespace = ordinaryCheckpointNamespace(previous.ordinaryInputs.packetSha256);
   if (!await checkpoint.exists(namespace)) return undefined;
   if (state.cycle) {
