@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from './attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState } from './run-state.js';
 import { launchSchema } from './launch-record.js';
-import { prepareOrdinaryPendingGuardedInput, validateOrdinaryPendingPackage,
+import { guardedInputWithoutAsyncSeats, prepareOrdinaryPendingGuardedInput, validateOrdinaryPendingPackage,
   type OrdinaryPendingPackage, type PreparedOrdinaryPendingGuardedInput } from './ordinary-pending-package.js';
 import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults,
   type AsyncResultReference } from '../dispatch/async-lane.js';
@@ -126,7 +126,7 @@ interface OrdinaryPendingExportOptions {
   expectedBaseSha: string;
   expectedRound?: number;
   guardedInput: Record<string, unknown>;
-  /** Undefined when no async reviewer ever ran here: the store holds no results. */
+  /** Undefined when no async reviewer ever ran here; only a zero-async ordinary launch may omit it. */
   asyncStoreDir: string | undefined;
   asyncTargetKey: string;
   asyncDescriptors: Array<{ model: string; role: string; provider: string }>;
@@ -226,8 +226,12 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     refuse('retained_input_mismatch');
   }
   if (launch.inputSha256 !== historicalInput.inputSha256()) refuse('input_mismatch');
-
+  // Only an ordinary council without async seats can lack the store; any
+  // other launch's async evidence must be read from the store it wrote.
   const storeDir = options.asyncStoreDir;
+  if (storeDir === undefined && (cycleBacked || !guardedInputWithoutAsyncSeats(historicalInput.input))) {
+    refuse('async_store_missing');
+  }
   const snapshotStore = (expectedSha256?: readonly string[]) => storeDir === undefined
     ? Promise.resolve({ reviews: [] as ModelReview[], artifacts: [] as AsyncResultReference[] })
     : cycleBacked

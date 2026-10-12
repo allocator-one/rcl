@@ -137,6 +137,16 @@ export async function resolveExistingAsyncStoreDir(cwd = process.cwd()): Promise
   return base;
 }
 
+/** The existing async store, or undefined when no async reviewer ever created one here. */
+export async function findExistingAsyncStoreDir(cwd = process.cwd()): Promise<string | undefined> {
+  try {
+    return await resolveExistingAsyncStoreDir(cwd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 function spoolPath(storeDir: string, targetKey: string): string {
   return join(storeDir, `pending-${targetKey}-${randomUUID()}.json`);
 }

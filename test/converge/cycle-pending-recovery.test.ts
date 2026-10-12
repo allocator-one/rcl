@@ -6,7 +6,8 @@ import { expect, it, onTestFinished, vi } from 'vitest';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from '../../src/converge/ordinary-pending-export.js';
-import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch } from '../../src/converge/pending-legacy-resume.js';
+import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch,
+  resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { guardedInputSha256, sha256Hex, stableStringify } from '../../src/report/run-header.js';
 import { asyncTargetKey, consumeBoundAsyncHistory } from '../../src/dispatch/async-lane.js';
@@ -420,6 +421,33 @@ it('terminalizes a cycle with zero completed async artifacts', async () => {
     retryReason: 'Continue at the current exact head after empty-history finalization.',
     cycleRemote: fixture.cycleRemote, validate: async () => {}, run: successor });
   expect(successor).toHaveBeenCalledOnce();
+});
+
+it('refuses combined resume of a cycle launch from a package stripped of its cycle binding', async () => {
+  const fixture = await cyclePendingFixture({ retainedCount: 1 });
+  const { version: _version, cycle: _cycle, attemptCap: _attemptCap, roundCap: _roundCap,
+    attemptsUsed: _attemptsUsed, asyncAttribution: _asyncAttribution, ...stripped } = fixture.options.migrationPackage;
+  const nativeBefore = await readFile(fixture.nativePath);
+  const attemptsBefore = await readFile(convergeAttemptStatePath(fixture.common, fixture.target));
+
+  await expect(resumePendingLegacyLaunch({ ...fixture.options, migrationPackage: stripped, maxAttempts: 2 }))
+    .rejects.toThrow('pending_legacy_resume_cycle_mismatch');
+
+  expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
+  expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target))).toEqual(attemptsBefore);
+  expect(fixture.options.run).not.toHaveBeenCalled();
+});
+
+it('refuses a cycle export without the async store its history lives in', async () => {
+  const fixture = await cyclePendingFixture({ retainedCount: 0 });
+  const outputDir = await realpath(await mkdtemp(join(tmpdir(), 'rcl-cycle-package-')));
+  onTestFinished(() => rm(outputDir, { recursive: true, force: true }));
+
+  await expect(exportOrdinaryPendingPackage({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: fixture.headSha, baseSha: fixture.baseSha, expectedBaseSha: fixture.baseSha, expectedRound: 1,
+    guardedInput: fixture.guardedInput, asyncStoreDir: undefined, asyncTargetKey: fixture.asyncKey,
+    asyncDescriptors: [{ model: 'openrouter/moonshotai/kimi-k3', role: 'general', provider: 'openrouter' }],
+    path: join(outputDir, 'pending.json'), preview: true })).rejects.toThrow('pending_export_async_store_missing');
 });
 
 it('terminalizes a dead cycle attempt with unattributed async history and permits only a later successor', async () => {

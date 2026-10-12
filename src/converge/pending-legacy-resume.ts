@@ -957,6 +957,9 @@ export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOption
       previewConvergeAttemptState(options.gitCommonDir, options.target),
     ]);
     if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
+    // Combined recovery is ordinary only: a cycle-backed launch terminalizes
+    // with finalize-only recovery bound to its cycle, never a stripped package.
+    if (options.migrationPackage && state.cycle) fail('cycle_mismatch');
     const current = launchSchema.parse(state.lastLaunch);
     const persistedSource = attempts.attempts.at(-1)?.pendingRecoverySource;
     const original = persistedSource ?? current;

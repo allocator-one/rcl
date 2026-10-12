@@ -10,13 +10,16 @@ import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch,
   resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
 import { chunkDiff } from '../../src/prepare/chunker.js';
-import { guardedInputSha256 } from '../../src/report/run-header.js';
+import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
 
 const blockingRoster = [
   { model: 'openai/test', role: 'bug-hunter', provider: 'openai', lane: 'blocking' },
   { model: 'openai/test', role: 'security-auditor', provider: 'openai', lane: 'blocking' },
   { model: 'openai/verify', role: 'verification', provider: 'openai', lane: 'verification' },
 ];
+
+const asyncSeats = { asyncRoles: [{ name: 'general' }], roster: [...blockingRoster,
+  { model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }] };
 
 // A legacy ordinary launch whose owner died while its blocking council ran.
 async function pendingLaunch(guardedOverrides: Record<string, unknown> = {}) {
@@ -41,7 +44,7 @@ async function pendingLaunch(guardedOverrides: Record<string, unknown> = {}) {
     exportOrdinaryPendingPackage({ gitCommonDir, target, headSha, baseSha, expectedBaseSha: baseSha,
       guardedInput, asyncStoreDir: withoutStore ? undefined : asyncStoreDir, asyncTargetKey: 'zero-async',
       asyncDescriptors: [], path: join(root, 'pending.json'), preview });
-  return { root, gitCommonDir, asyncStoreDir, target, headSha, baseSha, inputSha256, nativePath,
+  return { root, gitCommonDir, asyncStoreDir, target, headSha, baseSha, guardedInput, inputSha256, nativePath,
     attemptsPath: convergeAttemptStatePath(gitCommonDir, target), exportPackage };
 }
 
@@ -138,15 +141,39 @@ describe('zero-async ordinary pending recovery', () => {
   });
 
   it('refuses to export a launch whose async seats left no retained results', async () => {
-    const fixture = await pendingLaunch({ asyncRoles: [{ name: 'general' }], roster: [...blockingRoster,
-      { model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }] });
+    const fixture = await pendingLaunch(asyncSeats);
     const nativeBefore = await readFile(fixture.nativePath);
     const attemptsBefore = await readFile(fixture.attemptsPath);
 
     await expect(fixture.exportPackage(false)).rejects.toThrow('ordinary_pending_package_mismatch');
+    await expect(fixture.exportPackage(false, { withoutStore: true }))
+      .rejects.toThrow('pending_export_async_store_missing');
 
     expect(await readdir(fixture.root)).not.toContain('pending.json');
     expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
     expect(await readFile(fixture.attemptsPath)).toEqual(attemptsBefore);
+  });
+
+  it('refuses to finalize or retry an empty package from a council with async seats', async () => {
+    const fixture = await pendingLaunch(asyncSeats);
+    const options = recoveryOptions(fixture, { target: fixture.target, headSha: fixture.headSha,
+      baseSha: fixture.baseSha, attempt: 1, round: 1, pid: 999_999, retainedAsyncSha256: [], retainedAsync: [],
+      guardedInput: fixture.guardedInput });
+    const nativeBefore = await readFile(fixture.nativePath);
+    const attemptsBefore = await readFile(fixture.attemptsPath);
+
+    await expect(previewOrdinaryPendingLaunch({ ...options, previewMode: 'finalize-only' }))
+      .rejects.toThrow('ordinary_pending_package_mismatch');
+    await expect(finalizeOrdinaryPendingLaunch({ gitCommonDir: fixture.gitCommonDir, target: fixture.target,
+      headSha: fixture.headSha, baseSha: fixture.baseSha, pendingInputSha256: fixture.inputSha256,
+      nativeStateSha256: sha256Hex(nativeBefore), attemptStateSha256: sha256Hex(attemptsBefore),
+      retainedAsyncSha256: [], maxAttempts: 2, migrationPackage: options.migrationPackage,
+      ownerAlive: options.ownerAlive, loadRetainedAsync: options.loadRetainedAsync }))
+      .rejects.toThrow('ordinary_pending_package_mismatch');
+    await expect(resumePendingLegacyLaunch(options)).rejects.toThrow('ordinary_pending_package_mismatch');
+
+    expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
+    expect(await readFile(fixture.attemptsPath)).toEqual(attemptsBefore);
+    expect(options.run).not.toHaveBeenCalled();
   });
 });

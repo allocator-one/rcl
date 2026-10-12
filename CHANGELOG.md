@@ -7,9 +7,11 @@
   and `--resume-pending` now accept an ordinary package that retains no async
   results, bound with `--resume-async-sha256 none`, when the original guarded
   input declared no async roles or async roster seats. A launch whose council
-  had async seats but retained no results is still refused, and export no
-  longer needs an async store that a zero-async checkout never created
-  (RCL-195).
+  had async seats but retained no results is still refused. Export of such a
+  zero-async ordinary launch no longer needs an async store the checkout never
+  created; every other export still requires it. Combined `--resume-pending`
+  now refuses any package for a cycle-backed launch, so a version-2 package
+  stripped of its cycle binding can no longer bypass cycle recovery (RCL-195).
 
 ## 4.5.16 - 2026-10-12
 

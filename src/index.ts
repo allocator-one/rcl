@@ -49,6 +49,7 @@ import {
   partitionAsyncAssignments,
   asyncTargetKey,
   resolveAsyncStoreDir,
+  findExistingAsyncStoreDir,
   resolveExistingAsyncStoreDir,
   spoolAsyncCalls,
   launchAsyncWorkers,
@@ -2393,11 +2394,7 @@ async function executeCouncil(
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
         guardedInput: exportInput, path: opts.exportPendingPackage,
         preview: opts.previewPending === true,
-        // A checkout where no async reviewer ever ran has no store, and so no results.
-        asyncStoreDir: await resolveExistingAsyncStoreDir().catch((error: NodeJS.ErrnoException) => {
-          if (error?.code === 'ENOENT') return undefined;
-          throw error;
-        }),
+        asyncStoreDir: await findExistingAsyncStoreDir(),
         asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
           extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
           pendingNative?.cycle?.id),
