@@ -37,11 +37,11 @@ async function pendingLaunch(guardedOverrides: Record<string, unknown> = {}) {
   await writeFile(nativePath, JSON.stringify({ version: 1, target, roundCap: 15, rounds: [], findings: {},
     updatedAt: '2026-10-11T00:00:00.000Z', lastLaunch: { status: 'pending', attempt: 1, round: 1, headSha,
       inputSha256, startedAt: '2026-10-11T00:00:00.000Z', pid: 999_999 } }));
-  const exportPackage = (preview: boolean, store: string | undefined = asyncStoreDir) =>
+  const exportPackage = (preview: boolean, { withoutStore = false } = {}) =>
     exportOrdinaryPendingPackage({ gitCommonDir, target, headSha, baseSha, expectedBaseSha: baseSha,
-      guardedInput, asyncStoreDir: store, asyncTargetKey: 'zero-async', asyncDescriptors: [],
-      path: join(root, 'pending.json'), preview });
-  return { root, gitCommonDir, target, headSha, baseSha, inputSha256, nativePath,
+      guardedInput, asyncStoreDir: withoutStore ? undefined : asyncStoreDir, asyncTargetKey: 'zero-async',
+      asyncDescriptors: [], path: join(root, 'pending.json'), preview });
+  return { root, gitCommonDir, asyncStoreDir, target, headSha, baseSha, inputSha256, nativePath,
     attemptsPath: convergeAttemptStatePath(gitCommonDir, target), exportPackage };
 }
 
@@ -131,7 +131,9 @@ describe('zero-async ordinary pending recovery', () => {
     const fixture = await pendingLaunch();
     const withStore = await fixture.exportPackage(true);
 
-    await expect(fixture.exportPackage(true, undefined)).resolves.toMatchObject({
+    await rm(fixture.asyncStoreDir, { recursive: true });
+
+    await expect(fixture.exportPackage(true, { withoutStore: true })).resolves.toMatchObject({
       packageSha256: withStore.packageSha256, retainedAsyncSha256: [] });
   });
 
