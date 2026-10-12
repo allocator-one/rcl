@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.17 - 2026-10-12
+
 - Recover an interrupted ordinary launch whose council had no async
   reviewers. `--export-pending-package`, its preview, `--finalize-pending-only`
   and `--resume-pending` now accept an ordinary package that retains no async
