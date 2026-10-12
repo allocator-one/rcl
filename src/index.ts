@@ -175,7 +175,8 @@ import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
-import { ordinaryPendingGuardedInput, type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
+import { guardedInputWithoutAsyncSeats, ordinaryPendingGuardedInput,
+  type OrdinaryPendingPackage } from './converge/ordinary-pending-package.js';
 import { exportOrdinaryPendingPackage, retainOrdinaryLaunchInputs } from './converge/ordinary-pending-export.js';
 import { capturePreparedCouncil, type CapturedPreparedCouncil } from './dispatch/capture-council.js';
 import { executeCapturedOriginal } from './dispatch/original-execution.js';
@@ -2391,7 +2392,12 @@ async function executeCouncil(
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
         guardedInput: exportInput, path: opts.exportPendingPackage,
-        preview: opts.previewPending === true, asyncStoreDir: await resolveExistingAsyncStoreDir(),
+        preview: opts.previewPending === true,
+        // A checkout where no async reviewer ever ran has no store, and so no results.
+        asyncStoreDir: await resolveExistingAsyncStoreDir().catch((error: NodeJS.ErrnoException) => {
+          if (error?.code === 'ENOENT') return undefined;
+          throw error;
+        }),
         asyncTargetKey: asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
           extra.target.kind === 'patch' ? prepared.converge!.target : undefined,
           pendingNative?.cycle?.id),
@@ -2431,7 +2437,7 @@ async function executeCouncil(
         ? [] : asyncBinding.split(',').map(value => value.trim());
       if (expectedAsyncSha256.some(value => !/^[a-f0-9]{64}$/.test(value))) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
-          'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" for an empty cycle history.');
+          'Retained async bindings must be comma-separated lowercase SHA-256 digests, or "none" when nothing was retained.');
       }
       const migrationPackage = opts.ordinaryPendingPackage === undefined ? undefined : JSON.parse(
         (await readStable(opts.ordinaryPendingPackage)).text
@@ -2446,10 +2452,12 @@ async function executeCouncil(
         throw new ReviewLaunchRefused('pending_finalize_incompatible',
           '--for-pr finalize-only recovery requires a cycle-backed version-2 pending package.');
       }
-      if (migrationPackage?.version !== 2 && (expectedAsyncSha256.length === 0 ||
+      // Only a package whose council had no async seats retains nothing.
+      if (migrationPackage?.version !== 2 && ((expectedAsyncSha256.length === 0 &&
+          !(migrationGuardedInput && guardedInputWithoutAsyncSeats(migrationGuardedInput))) ||
           new Set(expectedAsyncSha256).size !== expectedAsyncSha256.length)) {
         throw new ReviewLaunchRefused('pending_async_binding_invalid',
-          'Ordinary retained async SHA-256 bindings must be non-empty and unique.');
+          'Ordinary retained async SHA-256 bindings must be unique, and non-empty unless the package\'s council had no async seats.');
       }
       if (migrationPackage?.version === 2 && opts.resumePending) {
         throw new ReviewLaunchRefused('cycle_pending_finalize_only',
@@ -2457,6 +2465,8 @@ async function executeCouncil(
       }
       const loadMigrationRetainedAsync = async (): Promise<AsyncResultReference[]> => {
         if (!migrationPackage) throw new ReviewLaunchRefused('pending_async_missing', 'An ordinary package is required.');
+        // Nothing to load: package validation refuses an empty list unless its council had no async seats.
+        if (migrationPackage.version !== 2 && migrationPackage.retainedAsync.length === 0) return [];
         const store = await resolveExistingAsyncStoreDir();
         if (migrationPackage.version === 2) {
           const key = asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
