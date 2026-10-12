@@ -206,6 +206,16 @@ export class HarnessSink {
   /** Recovery never substitutes an ordinary credential for an attested one. */
   get credentialSource(): HarnessCredential['source'] { return this.credential.token.startsWith('rbc_') ? 'attest' : this.credential.source; }
 
+  /** Explicit capability for the one source-bound 4.4.7 severity fallback recovery protocol. */
+  async checkSeverityFallbackRecovery(options: RequestOptions = {}): Promise<SinkOutcome<{ protocol: 1; orgId: string }>> {
+    return this.getJson('/api/v1/reviews/runs?page_size=1', (data, meta) => {
+      const record = meta as { severity_fallback_recovery_version?: unknown; org_id?: unknown } | null;
+      if (!Array.isArray(data) || record?.severity_fallback_recovery_version !== 1 ||
+          typeof record.org_id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(record.org_id)) return null;
+      return { protocol: 1, orgId: record.org_id.toLowerCase() };
+    }, { ...options, requireCompleteRead: true });
+  }
+
   /** Actor-authorized cycle creation; never fall back from a run-bound credential. */
   async startReviewCycle(repo: string, prNumber: number, request: ReviewCycleRequest): Promise<SinkOutcome<ReviewCycleReceipt>> {
     if (this.credentialSource === 'attest') throw new Error('fresh_review_requires_actor_credential');
