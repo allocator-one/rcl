@@ -5,9 +5,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from './attempt-budget.js';
 import { convergeRunStatePath, loadConvergeRunState } from './run-state.js';
 import { launchSchema } from './launch-record.js';
-import { prepareOrdinaryPendingGuardedInput, validateOrdinaryPendingPackage,
+import { guardedInputWithoutAsyncSeats, prepareOrdinaryPendingGuardedInput, validateOrdinaryPendingPackage,
   type OrdinaryPendingPackage, type PreparedOrdinaryPendingGuardedInput } from './ordinary-pending-package.js';
-import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults } from '../dispatch/async-lane.js';
+import { MAX_ASYNC_CALLS_PER_ROUND, snapshotAsyncHistory, snapshotAsyncResults,
+  type AsyncResultReference } from '../dispatch/async-lane.js';
+import type { ModelReview } from '../consensus/types.js';
 import { sha256Hex } from '../report/run-header.js';
 import { MAX_REPORT_BYTES, readStable } from '../telemetry/recovery/files.js';
 import { serializeRecoveryDocument, writeExclusiveBytes } from '../evidence/original-run/journal.js';
@@ -124,7 +126,8 @@ interface OrdinaryPendingExportOptions {
   expectedBaseSha: string;
   expectedRound?: number;
   guardedInput: Record<string, unknown>;
-  asyncStoreDir: string;
+  /** Undefined when no async reviewer ever ran here; only a zero-async ordinary launch may omit it. */
+  asyncStoreDir: string | undefined;
   asyncTargetKey: string;
   asyncDescriptors: Array<{ model: string; role: string; provider: string }>;
   path: string;
@@ -223,11 +226,19 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
     refuse('retained_input_mismatch');
   }
   if (launch.inputSha256 !== historicalInput.inputSha256()) refuse('input_mismatch');
-
-  const snapshot = cycleBacked
-    ? await snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
-      Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND))
-    : await snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey);
+  // Only an ordinary council without async seats can lack the store; any
+  // other launch's async evidence must be read from the store it wrote.
+  const storeDir = options.asyncStoreDir;
+  if (storeDir === undefined && (cycleBacked || !guardedInputWithoutAsyncSeats(historicalInput.input))) {
+    refuse('async_store_missing');
+  }
+  const snapshotStore = (expectedSha256?: readonly string[]) => storeDir === undefined
+    ? Promise.resolve({ reviews: [] as ModelReview[], artifacts: [] as AsyncResultReference[] })
+    : cycleBacked
+      ? snapshotAsyncHistory(storeDir, options.asyncTargetKey,
+        Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND), expectedSha256)
+      : snapshotAsyncResults(storeDir, options.asyncTargetKey, [], expectedSha256);
+  const snapshot = await snapshotStore();
   const identity = (item: { model: string; role: string; provider?: string }) =>
     JSON.stringify([item.model, item.role, item.provider]);
   const historicalRoster = Array.isArray(historicalInput.input.roster)
@@ -259,11 +270,7 @@ export async function exportOrdinaryPendingPackage(options: OrdinaryPendingExpor
   const packet = validateOrdinaryPendingPackage(candidate,
     { ...candidate, inputSha256: launch.inputSha256 }, historicalInput);
   const [nativeAfter, attemptsAfter, asyncAfter] = await Promise.all([
-    readStable(nativePath), readStable(attemptPath),
-    cycleBacked
-      ? snapshotAsyncHistory(options.asyncStoreDir, options.asyncTargetKey,
-        Math.max(MAX_ASYNC_CALLS_PER_ROUND, (attempts.attemptsUsed + 1) * MAX_ASYNC_CALLS_PER_ROUND), retainedAsyncSha256)
-      : snapshotAsyncResults(options.asyncStoreDir, options.asyncTargetKey, [], retainedAsyncSha256),
+    readStable(nativePath), readStable(attemptPath), snapshotStore(retainedAsyncSha256),
   ]);
   if (nativeAfter.sha256 !== nativeBefore.sha256 || attemptsAfter.sha256 !== attemptsBefore.sha256 ||
       asyncAfter.artifacts.some((item, index) => item.path !== snapshot.artifacts[index]?.path) || ownerAlive(launch.pid)) refuse('state_changed');

@@ -192,4 +192,24 @@ describe('ordinary pending migration package', () => {
     const changed = packet(); mutate(changed);
     expect(() => validateOrdinaryPendingPackage(changed, expected)).toThrow('ordinary_pending_package_mismatch');
   });
+  it('accepts no retained async results only when the original council had no async seats', () => {
+    const zeroAsync = { ...structuredClone(input), asyncRoles: [], roster: [
+      { model: 'openai/test', role: 'bug-hunter', provider: 'openai', lane: 'blocking' },
+      { model: 'openai/verify', role: 'verification', provider: 'openai', lane: 'verification' }] };
+    const empty = (guardedInput: Record<string, unknown>) => ({
+      value: { ...packet(), retainedAsyncSha256: [] as string[], retainedAsync: [], guardedInput: structuredClone(guardedInput) },
+      identity: { ...expected, retainedAsyncSha256: [] as string[], inputSha256: guardedInputSha256(guardedInput) },
+    });
+    const accepted = empty(zeroAsync);
+    expect(validateOrdinaryPendingPackage(accepted.value, accepted.identity))
+      .toMatchObject({ retainedAsyncSha256: [], retainedAsync: [] });
+
+    const asyncSeat = { ...zeroAsync, roster: [...zeroAsync.roster,
+      { model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }] };
+    for (const guardedInput of [asyncSeat, { ...zeroAsync, asyncRoles: [{ name: 'general' }] }]) {
+      const refused = empty(guardedInput);
+      expect(() => validateOrdinaryPendingPackage(refused.value, refused.identity))
+        .toThrow('ordinary_pending_package_mismatch');
+    }
+  });
 });

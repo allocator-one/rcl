@@ -129,7 +129,8 @@ const ordinaryPendingFinalizationReceiptBodySchema = z.object({
   cap: z.number().int().positive().safe(),
   nextFreeAttempt: z.number().int().positive().safe(),
   blockingOutcome: z.literal('unknown'),
-  retainedAsyncSha256: z.array(digestSchema).min(1),
+  // Empty only for a council without async seats, which the package proved.
+  retainedAsyncSha256: z.array(digestSchema),
   sourceNativeStateSha256: digestSchema,
   sourceAttemptStateSha256: digestSchema,
   finalizedNativeStateSha256: digestSchema,
@@ -164,8 +165,8 @@ const ordinaryPendingFinalizationReceiptSchema = z.union([
   }
   if (receipt.nextFreeAttempt !== receipt.finalizedAttempt + 1 ||
       receipt.attemptsUsed !== receipt.finalizedAttempt || receipt.attemptsUsed > receipt.cap ||
-      (receipt.version === 1 && (receipt.retainedAsyncSha256.length === 0 ||
-        new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length))) {
+      (receipt.version === 1 &&
+        new Set(receipt.retainedAsyncSha256).size !== receipt.retainedAsyncSha256.length)) {
     context.addIssue({ code: 'custom', message: 'Pending finalization accounting is inconsistent' });
   }
   if (receipt.version === 2 && (receipt.attemptCap !== receipt.cap || receipt.round > receipt.roundCap)) {
@@ -305,6 +306,9 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
   const hashes = input?.retainedAsyncSha256;
   const cycleFinalizePreview = input?.migrationPackage?.version === 2 &&
     input.previewMode === 'finalize-only';
+  // A legacy ordinary package may bind no async results; its validation
+  // accepts that only for a council without async seats.
+  const ordinaryPackage = !!input?.migrationPackage && input.migrationPackage.version !== 2;
   const currentPrHeadValid = input?.currentPrHeadSha === undefined ||
     (cycleFinalizePreview && /^[a-f0-9]{40}$/.test(input.currentPrHeadSha));
   if (!input || typeof input.gitCommonDir !== 'string' || typeof input.target !== 'string' || !input.target.trim() ||
@@ -314,7 +318,8 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
     !/^[a-f0-9]{64}$/.test(input.recoveryInputSha256 ?? '') ||
     typeof input.retryReason !== 'string' || !input.retryReason.trim() || input.retryReason.length > 500 ||
     !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-    (!cycleFinalizePreview && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
+    (!cycleFinalizePreview && ((hashes.length === 0 && !ordinaryPackage) ||
+      new Set(hashes).size !== hashes.length)) ||
     typeof input.validate !== 'function' ||
     typeof input.run !== 'function' || typeof input.loadRetainedAsync !== 'function' ||
     (!input.migrationPackage && !input.legacyRetry) ||
@@ -342,7 +347,7 @@ function validateFinalizeOptions(input: OrdinaryPendingFinalizeOptions): void {
     !/^[a-f0-9]{64}$/.test(input.nativeStateSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.attemptStateSha256 ?? '') ||
     !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-    (!cycleBacked && (hashes.length === 0 || new Set(hashes).size !== hashes.length)) ||
+    (!cycleBacked && new Set(hashes).size !== hashes.length) ||
     typeof input.loadRetainedAsync !== 'function' ||
     (input.writeFinalizedState !== undefined && typeof input.writeFinalizedState !== 'function') ||
     (input.consumeCycleHistory !== undefined && typeof input.consumeCycleHistory !== 'function') ||
@@ -952,6 +957,9 @@ export async function resumePendingLegacyLaunch(input: PendingLegacyResumeOption
       previewConvergeAttemptState(options.gitCommonDir, options.target),
     ]);
     if (!state || !attempts || !state.lastLaunch) fail('missing_launch');
+    // Combined recovery is ordinary only: a cycle-backed launch terminalizes
+    // with finalize-only recovery bound to its cycle, never a stripped package.
+    if (options.migrationPackage && state.cycle) fail('cycle_mismatch');
     const current = launchSchema.parse(state.lastLaunch);
     const persistedSource = attempts.attempts.at(-1)?.pendingRecoverySource;
     const original = persistedSource ?? current;

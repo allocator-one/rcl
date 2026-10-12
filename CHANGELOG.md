@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Recover an interrupted ordinary launch whose council had no async
+  reviewers. `--export-pending-package`, its preview, `--finalize-pending-only`
+  and `--resume-pending` now accept an ordinary package that retains no async
+  results, bound with `--resume-async-sha256 none`, when the original guarded
+  input declared no async roles or async roster seats. A launch whose council
+  had async seats but retained no results is still refused. Export of such a
+  zero-async ordinary launch no longer needs an async store the checkout never
+  created; every other export still requires it. Combined `--resume-pending`
+  now refuses any package for a cycle-backed launch, so a version-2 package
+  stripped of its cycle binding can no longer bypass cycle recovery (RCL-195).
+
 ## 4.5.16 - 2026-10-12
 
 - Share bounded task context with every reviewer. The `--spec` text (up to

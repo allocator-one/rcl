@@ -395,6 +395,33 @@ describe('rcl review — pending launch recovery (RCL-152, RCL-154)', () => {
   });
 });
 
+describe('rcl review — zero-async ordinary pending recovery (RCL-195)', () => {
+  it.each([
+    ['refuses', [{ model: 'openai/async', role: 'general', provider: 'openai', lane: 'async' }],
+      [{ name: 'general' }], 'pending_async_binding_invalid'],
+    ['accepts', [{ model: 'openai/test', role: 'general', provider: 'openai', lane: 'blocking' }],
+      [], 'pending_legacy_resume_missing_launch'],
+  ])('%s an empty async binding by whether the package council had async seats', async (_verdict, roster,
+    asyncRoles, refusal) => {
+    await withGuardedFixture(async fixture => {
+      const packagePath = join(fixture.repo, 'ordinary-pending.json');
+      const headSha = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
+      writeFileSync(packagePath, JSON.stringify({ target: 'guarded-fixture', headSha, baseSha: headSha,
+        attempt: 1, round: 1, pid: 999_999, retainedAsyncSha256: [], retainedAsync: [],
+        guardedInput: { head: headSha, kind: 'patch', repo: 'allocator-one/rcl', pr: 146,
+          diff: 'b'.repeat(64), config: 'c'.repeat(64), roster, prompts: [], asyncRoles } }));
+      const args = fixture.args.filter(argument => argument !== '--json-file' && argument !== 'report.json');
+      const result = await runRclAsync([...args, '--finalize-pending-only', '--preview-pending',
+        '--ordinary-pending-package', packagePath, '--resume-async-sha256', 'none', '--max-attempts', '20'],
+      fixture.repo, fixture.env);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(refusal);
+      expect(fixture.calls()).toBe(0);
+      expect(await loadConvergeRunState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+    });
+  });
+});
+
 describe('rcl review — ordinary pending package export (RCL-166)', () => {
   it('retains ordinary input packets for start-over and existing-cycle reviews', async () => {
     await withGuardedFixture(async fixture => {

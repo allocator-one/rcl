@@ -106,6 +106,16 @@ export function ordinaryPendingGuardedInput(value: OrdinaryPendingPackage): Reco
   return restoreGuardedInput(value.guardedInput);
 }
 
+/**
+ * Whether a guarded launch input declared no async reviewers at all: no async
+ * roles and no async roster seat. Only such a legacy ordinary launch may
+ * retain no async results; one with async seats and no results stays refused.
+ */
+export function guardedInputWithoutAsyncSeats(input: Record<string, unknown>): boolean {
+  return Array.isArray(input.asyncRoles) && input.asyncRoles.length === 0 && Array.isArray(input.roster) &&
+    !input.roster.some(seat => (seat as Record<string, unknown> | null)?.lane === 'async');
+}
+
 export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, expected: PendingLaunchIdentity,
   prepared?: PreparedOrdinaryPendingGuardedInput): OrdinaryPendingPackage {
   let input: Record<string, unknown> | undefined;
@@ -150,7 +160,7 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
   const descriptorHashes = Array.isArray(value.retainedAsync)
     ? value.retainedAsync.map(item => item?.sha256).sort() : [];
   if (!structuredInput || !/^[a-f0-9]{40}$/.test(value.headSha) ||
-      (!cycleHistory && (!new Set(value.retainedAsyncSha256).size ||
+      (!cycleHistory && ((!value.retainedAsyncSha256.length && !guardedInputWithoutAsyncSeats(input)) ||
         new Set(value.retainedAsyncSha256).size !== value.retainedAsyncSha256.length)) ||
       value.retainedAsyncSha256.some(hash => !digest(hash)) || !Array.isArray(value.retainedAsync) ||
       value.retainedAsync.length !== value.retainedAsyncSha256.length ||
