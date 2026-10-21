@@ -55,6 +55,7 @@ const header = z.object({
     verification_timeout_ms: z.number().finite().nonnegative(),
     // Optional for reports written before RCL-85 introduced a whole-pass bound.
     verification_pass_timeout_ms: z.number().finite().nonnegative().optional(),
+    verification_pass_effective_timeout_ms: z.number().finite().nonnegative().optional(),
     strict_fallback: z.object({ version: z.literal(1), cause: z.enum(['verification_pass_timeout', 'verification_pass_failed']) }).strict().optional(),
   }),
   spec: z.object({ source: nonblank, sha256: hash }).optional(),

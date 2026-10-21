@@ -90,6 +90,8 @@ export interface RunHeader {
     verification_reasoning_effort?: ResolvedGatingConfig['verificationReasoningEffort'];
     verification_timeout_ms: number;
     verification_pass_timeout_ms?: number;
+    /** The larger bound a pass applied when its workload stretched the configured one (RCL-206). */
+    verification_pass_effective_timeout_ms?: number;
     /** Present only when the whole verification pass failed (`consensus/strict-fallback.ts`). */
     strict_fallback?: StrictFallbackMarker;
   };
@@ -143,6 +145,8 @@ export interface RunHeaderInput {
   gating: ResolvedGatingConfig;
   /** The failed verification pass's declaration, when this round fell back to severity gating. */
   strictFallback?: StrictFallbackMarker;
+  /** The whole-pass bound the verification pass applied, when larger than the configured one. */
+  verificationPassEffectiveTimeoutMs?: number;
   spec?: { source: SpecSource; sha256: string };
   contextFiles?: Array<{ path: string; sha256: string }>;
   plan?: { focus: string };
@@ -485,6 +489,8 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       ...(input.gating.verificationReasoningEffort ? { verification_reasoning_effort: input.gating.verificationReasoningEffort } : {}),
       verification_timeout_ms: input.gating.verificationTimeoutMs,
       verification_pass_timeout_ms: input.gating.verificationPassTimeoutMs,
+      ...(input.verificationPassEffectiveTimeoutMs !== undefined
+        ? { verification_pass_effective_timeout_ms: input.verificationPassEffectiveTimeoutMs } : {}),
       ...(input.converge?.recovery_source ? { bound_classification_protocol: 1 as const } : {}),
       ...(input.strictFallback ? { strict_fallback: { version: input.strictFallback.version, cause: input.strictFallback.cause } } : {}),
     },

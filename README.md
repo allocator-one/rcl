@@ -524,7 +524,7 @@ gating:
   minModels: 2                    # distinct models for consensus gating
   verificationModel: openai/gpt-6-astra  # direct-API models only
   verificationReasoningEffort: high      # OpenAI verifier only; separate from reviewer effort
-  verificationPassTimeout: 600000        # ms for the complete verification queue
+  verificationPassTimeout: 600000        # ms for up to two waves of verifier batches; scales with more
 
 output:
   belowThresholdAppendix: true  # false drops below-threshold findings outright
@@ -634,10 +634,15 @@ cannot verify. Astra defaults to `high` effort;
 or `max` for an OpenAI verifier only (other verifiers keep their provider
 defaults and reject the setting), and is recorded in the report header and
 retained verification plan. The whole verification pass has a 10-minute
-default deadline (`gating.verificationPassTimeout`) across all queued verifier
-batches; verifier calls default to the remaining pass budget, and the optional
-`gating.verificationTimeout` (milliseconds) imposes a shorter per-call limit,
-still capped by the remaining pass deadline.
+default deadline (`gating.verificationPassTimeout`). It covers up to two waves
+of verifier batches (three batches of eight candidates run at a time); a
+larger review's deadline grows in proportion to its waves, up to four times
+the configured one, and the report records the bound it applied as
+`run.gating.verification_pass_effective_timeout_ms`. Verifier calls default to
+the remaining pass budget, and the optional `gating.verificationTimeout`
+(milliseconds) imposes a shorter per-call limit, still capped by the
+remaining pass deadline. A pass that overruns its deadline falls back to
+strict severity gating for the round.
 
 ---
 

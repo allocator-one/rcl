@@ -4,7 +4,9 @@ import { DEFAULT_QUORUM_FRACTION, DEFAULT_THRESHOLDS } from '../config/defaults.
 import { deriveBlockingHealth, summarizeBlockingHealth } from './blocking-health.js';
 import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
-import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
+import {
+  applyGatingWithFallback, effectiveVerificationPassTimeoutMs, planGating, type GatingOptions, type ResolvedGatingConfig,
+} from '../consensus/gating.js';
 import { applyStrictFallback, strictFallbackCause, type StrictFallbackMarker } from '../consensus/strict-fallback.js';
 import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
@@ -87,9 +89,10 @@ export async function assembleCompletedReview(
   let gatedAppendix = retained?.appendix ?? droppedFindings;
   let verificationStats = retained?.verification;
   let strictFallback: StrictFallbackMarker | undefined;
+  let scaledPassTimeoutMs: number | undefined;
   if (retained === undefined && gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
     dependencies.onVerificationStart?.();
-    const gated = await applyGatingWithFallback(reportFindings, {
+    const gatingOptions: GatingOptions = {
       minModels: gatingConfig.minModels,
       verificationModel: gatingConfig.verificationModel,
       verificationReasoningEffort: gatingConfig.verificationReasoningEffort,
@@ -100,7 +103,17 @@ export async function assembleCompletedReview(
       onVerificationProgress: dependencies.onVerificationProgress,
       diffFiles: diff.files,
       ...(modelWeights ? { modelWeights } : {}),
-    });
+    };
+    // The bound the pass applies, recorded when its workload stretched the
+    // configured one (RCL-206). A plan that cannot be built fails inside the
+    // pass below, which keeps the council's result.
+    try {
+      const passTimeoutMs = effectiveVerificationPassTimeoutMs(planGating(reportFindings, gatingOptions));
+      if (passTimeoutMs > gatingConfig.verificationPassTimeoutMs) scaledPassTimeoutMs = passTimeoutMs;
+    } catch {
+      scaledPassTimeoutMs = undefined;
+    }
+    const gated = await applyGatingWithFallback(reportFindings, gatingOptions);
     finalFindings = gated.findings;
     verificationStats = gated.ok ? gated.verification : undefined;
     if (!gated.ok) {
@@ -181,6 +194,7 @@ export async function assembleCompletedReview(
     diff,
     gating: gatingConfig,
     ...(strictFallback ? { strictFallback } : {}),
+    ...(scaledPassTimeoutMs !== undefined ? { verificationPassEffectiveTimeoutMs: scaledPassTimeoutMs } : {}),
     thresholds: {
       minConsensusScore: config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
       minConfidence: config.thresholds?.minConfidence ?? DEFAULT_THRESHOLDS.minConfidence,

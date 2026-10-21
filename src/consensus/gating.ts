@@ -129,7 +129,7 @@ export interface VerificationProgress {
 }
 
 export class VerificationPassTimeoutError extends Error {
-  constructor(timeoutMs: number) {
+  constructor(readonly timeoutMs: number) {
     super(`Verification pass exceeded its whole-pass deadline of ${timeoutMs}ms`);
     this.name = 'VerificationPassTimeoutError';
   }
@@ -267,6 +267,28 @@ const VERIFIER_BATCH_SIZE = 8;
 
 /** Verifier batches in flight at once — small enough to stay clear of per-model rate limits. */
 const VERIFIER_CONCURRENCY = 3;
+
+/**
+ * Waves of concurrent batches the configured whole-pass bound is sized for,
+ * and how far a larger pass may stretch it (RCL-206). A fixed bound sent
+ * every large review to the strict fallback, discarding its completed
+ * batches: allocator-one#13363 had fifteen batches against 600 s.
+ */
+const BASELINE_VERIFIER_WAVES = 2;
+const MAX_PASS_SCALE = 4;
+
+/**
+ * The whole-pass deadline a live pass applies: the configured bound for up
+ * to two waves of batches, then in proportion to the waves, at most four
+ * times the configured bound. Derived from the plan alone, so a retained
+ * plan keeps its recorded bound.
+ */
+export function effectiveVerificationPassTimeoutMs(plan: Pick<GatingPlan, 'verificationPassTimeoutMs' | 'batches'>): number {
+  const waves = Math.ceil(plan.batches.length / VERIFIER_CONCURRENCY);
+  if (waves <= BASELINE_VERIFIER_WAVES) return plan.verificationPassTimeoutMs;
+  const scale = Math.min(MAX_PASS_SCALE, waves / BASELINE_VERIFIER_WAVES);
+  return Math.min(MAX_TIMER_DELAY_MS, Math.round(plan.verificationPassTimeoutMs * scale));
+}
 
 /** Lines of slack when matching a finding's range against a hunk's span. */
 const HUNK_MARGIN_LINES = 16;
@@ -765,7 +787,12 @@ export async function applyGating(
   const now = options.monotonicNow ?? performance.now.bind(performance);
   const started = now();
   const plan = planGating(findings, options);
-  const { verificationTimeoutMs, verificationPassTimeoutMs, batches } = plan;
+  const { batches } = plan;
+  const verificationPassTimeoutMs = effectiveVerificationPassTimeoutMs(plan);
+  // A per-call bound left at the pass bound (the default) follows the scaled
+  // pass, so one slow batch still ends at the pass deadline, never earlier.
+  const verificationTimeoutMs = plan.verificationTimeoutMs === plan.verificationPassTimeoutMs
+    ? verificationPassTimeoutMs : plan.verificationTimeoutMs;
   const verificationDeadline = started + verificationPassTimeoutMs;
   const providedAsk = options.ask;
   const onVerificationProgress = options.onVerificationProgress;
