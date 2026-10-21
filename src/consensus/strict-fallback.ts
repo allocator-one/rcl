@@ -89,7 +89,7 @@ export function strictFallbackProblem(report: ReportLike): string | undefined {
   const gating = report.run?.gating;
   if (!declaresStrictFallback(gating)) {
     for (const [group, findings] of groups) {
-      const index = findings.findIndex((f) => f.gating?.reason === 'strict_fallback');
+      const index = findings.findIndex((f) => f?.gating?.reason === 'strict_fallback');
       if (index >= 0) return `${group}.${index} is a strict_fallback blocker without run.gating.strict_fallback`;
     }
     return undefined;
@@ -105,12 +105,12 @@ export function strictFallbackProblem(report: ReportLike): string | undefined {
   let blockers = 0;
   for (const [group, findings] of groups) {
     for (const [index, finding] of findings.entries()) {
-      if (group === 'findings' && BLOCKING_SEVERITIES.has(finding.severity)) {
+      if (group === 'findings' && BLOCKING_SEVERITIES.has(finding?.severity)) {
         if (finding.gating?.reason !== 'strict_fallback' || finding.gating.verification?.verdict !== 'unavailable') {
           return `${group}.${index} must be a strict_fallback blocker with unavailable verification`;
         }
         blockers += 1;
-      } else if (finding.gating?.reason !== 'none' || finding.gating.verification !== undefined) {
+      } else if (finding?.gating?.reason !== 'none' || finding.gating.verification !== undefined) {
         return `${group}.${index} must be gating none without verification`;
       }
     }

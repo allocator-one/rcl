@@ -342,7 +342,7 @@ export function deriveCurrentClaimProjection(state: ConvergeRunState,anchors: Na
     const observed=selected.flatMap(({ source,members }) => {
       const exact=members.filter(m => isDeepStrictEqual(m.raw.claimDescriptor,anchor.descriptor));
       return (projectionVersion===1? members.filter(m => m.gating!=='none'):
-        exact.some(m => ['consensus','critical','verified'].includes(m.gating)&&m.stored.below_threshold===false)? exact:[])
+        exact.some(m => ['consensus','critical','verified','strict_fallback'].includes(m.gating)&&m.stored.below_threshold===false)? exact:[])
         .map(member => ({ source,member }));
     });
     const allReceipts=history.histories.flatMap(h => h.receipts);

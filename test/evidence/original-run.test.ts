@@ -317,6 +317,24 @@ describe('source and receipt binding', () => {
       gating_reason: 'verified', verification_verdict: verdict,
     });
   });
+  it('accepts a declared strict fallback and refuses one that breaks its contract', async () => {
+    const fallback = (r: ReviewResult) => {
+      r.run!.gating.strict_fallback = { version: 1, cause: 'verification_pass_timeout' };
+      r.run!.ci_exit_code = 1;
+      r.findings[0]!.gating = { reason: 'strict_fallback', verification: { verdict: 'unavailable' } };
+      delete r.stats.verification;
+    };
+    const valid = await fixture(fallback);
+    expect((await prepareOriginalRun(valid.selection)).prepared.envelope.findings[0]).toMatchObject({
+      gating_reason: 'strict_fallback', verification_verdict: 'unavailable',
+    });
+    const invalid = await fixture(r => { fallback(r); r.findings[0]!.gating = { reason: 'none' }; });
+    expect(await invalid.preview()).toBe(2);
+    expect(JSON.parse(invalid.stdout.at(-1)!)).toMatchObject({
+      status: 'incomplete', error: 'original_verified_consensus_strict_fallback_invalid', stage: 'input', exit_code: 2,
+    });
+    expect(invalid.requests).toEqual([]);
+  });
   it('accepts zero-candidate verified-consensus and historical all-findings originals', async () => {
     const empty = await fixture(r => {
       r.findings = []; r.belowThresholdFindings = [];

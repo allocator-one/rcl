@@ -29,8 +29,14 @@
   verified-consensus findings and a `strict_fallback` label without the
   marker. It refuses such a run at a telemetry level that never sends its
   report, and does not report it complete when the organization takes no
-  `report_json`, which Harness needs before it counts the run. Reports refused
-  before this release stay refused (RCL-160, RCL-167).
+  `report_json`, which Harness needs before it counts the run. `rcl telemetry
+  flush` likewise fails a queued fallback whose report_json the outbox
+  dropped, never held, or the organization refuses, instead of reporting it
+  delivered. `rcl evidence recover-run` accepts a declared fallback and checks
+  it exactly. `rcl converge-rejected` can dispose of a fallback refused only
+  for its telemetry level. Claim recovery counts a `strict_fallback` blocker
+  as a gated sighting. Reports refused before this release stay refused
+  (RCL-160, RCL-167).
 
 ## 4.5.17 - 2026-10-12
 

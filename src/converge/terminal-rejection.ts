@@ -13,7 +13,8 @@ import { OUTBOX_DIR } from '../telemetry/outbox.js';
 import { REVIEWER_OUTBOX_DIR } from '../telemetry/reviewer-delivery.js';
 import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope } from '../telemetry/envelope.js';
 import { validateRunEnvelope, type EvidenceDiagnostic } from '../telemetry/envelope-validation.js';
-import { verifiedConsensusDiagnostics } from '../telemetry/deliver.js';
+import { strictFallbackLevelDiagnostic, verifiedConsensusDiagnostics } from '../telemetry/deliver.js';
+import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { mergedBlockingHealth } from './legacy-launch-health.js';
 import { convergeAttemptStatePath, validateConvergeAttemptState } from './attempt-budget.js';
@@ -84,19 +85,28 @@ async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeo
   const artifacts: ArtifactBytes = { report_json: reportBytes.text };
   if (retained.manifest!.artifacts['report_md']) artifacts.report_md = (await readStable(join(retained.path, 'report.md'))).text;
   const storedEnvelope = parse(await readStable(join(retained.path, 'envelope.json')));
-  // Only two pre-network rejections are disposable: a missing gating label,
-  // or a finding whose blank file or title the evidence protocol refuses. A
-  // transport/server refusal, malformed envelope or valid report is not proof.
+  // Only three pre-network rejections are disposable: a missing gating label,
+  // a finding whose blank file or title the evidence protocol refuses, or a
+  // valid strict fallback at a telemetry level that never sends its report.
+  // A transport/server refusal, malformed envelope or valid report is not proof.
   const labels = verifiedConsensusDiagnostics(raw as ReviewResult);
   const blank = [...report.findings, ...(report.belowThresholdFindings ?? [])].some(f => !f.file.trim() || !f.title.trim());
-  if ((labels.length === 0 && !blank) || labels.some(d => !LABEL_PATH.test(d.path))) refuse('unsupported_local_rejection');
+  const fallback = declaresStrictFallback(report.run.gating) && strictFallbackProblem(raw as ReviewResult) === undefined;
+  if ((labels.length === 0 && !blank && !fallback) || labels.some(d => !LABEL_PATH.test(d.path))) refuse('unsupported_local_rejection');
   const levels = ['full', 'findings', 'envelope'] as const;
   const projections = levels.flatMap(level => [false, true].map(parseFailures =>
     buildRunEnvelope(raw as ReviewResult, artifacts, { level, parseFailures, delivery: { mode: 'direct' } })));
   const envelope = projections.find(candidate => isDeepStrictEqual(candidate, storedEnvelope));
-  // Delivery records envelope-schema diagnostics before label diagnostics.
+  // Delivery records envelope-schema diagnostics before label diagnostics,
+  // and the telemetry level last. Levels `full` and `findings` project the
+  // same envelope, so the recorded level is accepted only for a level below
+  // `full` whose projection matches.
   const refused = envelope ? validateRunEnvelope(envelope, artifacts) : [];
-  const diagnostics = [...refused, ...labels];
+  const recordedLevel = fallback ? levels.slice(1)
+    .filter((_level, i) => projections.slice((i + 1) * 2, (i + 2) * 2).some(candidate => isDeepStrictEqual(candidate, storedEnvelope)))
+    .map(strictFallbackLevelDiagnostic)
+    .find(diagnostic => isDeepStrictEqual(retained.manifest!.diagnostics.at(-1), diagnostic)) : undefined;
+  const diagnostics = [...refused, ...labels, ...(recordedLevel ? [recordedLevel] : [])];
   if (!envelope || diagnostics.length === 0 || !refused.every(d => blankText(envelope, d)) ||
     !isDeepStrictEqual(retained.manifest!.diagnostics, diagnostics)) refuse('rejection_diagnostics');
   return { launch, reportBytes, manifest, quarantinePath: retained.path, quarantineManifest: retained.manifest! };
