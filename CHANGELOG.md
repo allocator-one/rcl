@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 4.5.19 - 2026-10-21
+
+- Verify large reviews instead of falling back at a fixed deadline. The whole
+  verification pass's deadline now covers two waves of concurrent verifier
+  batches at the configured bound, then grows in proportion to the waves, up
+  to four times that bound. A review with 116 single-model candidates
+  (fifteen batches) gets 1,500 s instead of 600 s. The bound is derived from
+  the planned batches alone. The report records it as
+  `run.gating.verification_pass_effective_timeout_ms` when it exceeds the
+  configured `verification_pass_timeout_ms`. A pass that still overruns falls
+  back to the strict fallback as before. Retained checkpoint plans keep their
+  recorded bound (RCL-206).
+
 ## 4.5.18 - 2026-10-21
 
 - Declare the strict fallback instead of leaving findings unlabelled when a
