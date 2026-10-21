@@ -230,10 +230,14 @@ export function toMarkdown(result: ReviewResult): string {
     const byReason = (reason: string): number =>
       annotated.filter((f) => f.gating!.reason === reason).length;
     const gatingCount = annotated.length - byReason('none');
-    let line =
-      `**Gating:** ${gatingCount} finding(s) block convergence ` +
-      `(${byReason('consensus')} consensus · ${byReason('critical')} critical · ` +
-      `${byReason('verified')} verified) · ${byReason('none')} non-gating`;
+    const fallback = result.run?.gating?.strict_fallback;
+    let line = fallback
+      ? `**Gating:** ${gatingCount} finding(s) block convergence (${byReason('strict_fallback')} strict fallback: the ` +
+        `verification pass ${fallback.cause === 'verification_pass_timeout' ? 'timed out' : 'failed'}, so every ` +
+        `critical and important finding blocks, unverified) · ${byReason('none')} non-gating`
+      : `**Gating:** ${gatingCount} finding(s) block convergence ` +
+        `(${byReason('consensus')} consensus · ${byReason('critical')} critical · ` +
+        `${byReason('verified')} verified) · ${byReason('none')} non-gating`;
     const v = stats.verification;
     if (v) {
       line += ` · verification: ${v.refuted}/${v.candidates} single-model claim(s) refuted in ${(v.durationMs / 1000).toFixed(1)}s`;

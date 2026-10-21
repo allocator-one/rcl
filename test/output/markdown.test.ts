@@ -83,6 +83,14 @@ function mkResult(
 }
 
 describe('toMarkdown — recorded verification', () => {
+  it('renders annotated findings for a report whose run header has no gating map', () => {
+    const finding = mkFinding({ tier: 'single', severity: 'important' });
+    finding.gating = { reason: 'consensus' };
+    const result = { ...mkResult([finding], []), run: { id: 'legacy-run', rcl_version: '4.5.17', target: { kind: 'diff', diff_sha256: 'a'.repeat(64) } } } as unknown as ReviewResult;
+    const md = toMarkdown(result);
+    expect(md).toContain('**Gating:** 1 finding(s) block convergence');
+  });
+
   it('shows normalized explanations for kept and below-threshold findings without changing their claims', () => {
     const kept = mkFinding({ tier: 'single', title: 'Original allegation' });
     kept.suggestedFix = 'original_fix();';

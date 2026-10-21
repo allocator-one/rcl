@@ -2,6 +2,7 @@ import type { RecoverySource } from './recovery-source.js';
 import { createHash } from 'node:crypto';
 import type { Config } from '../config/schema.js';
 import type { ResolvedGatingConfig } from '../consensus/gating.js';
+import type { StrictFallbackMarker } from '../consensus/strict-fallback.js';
 import type { Diff, FileChange } from '../resolver/types.js';
 import type { ReviewAssignment } from '../roles/types.js';
 import { detectProvider } from '../roles/dispatcher.js';
@@ -89,6 +90,8 @@ export interface RunHeader {
     verification_reasoning_effort?: ResolvedGatingConfig['verificationReasoningEffort'];
     verification_timeout_ms: number;
     verification_pass_timeout_ms?: number;
+    /** Present only when the whole verification pass failed (`consensus/strict-fallback.ts`). */
+    strict_fallback?: StrictFallbackMarker;
   };
   spec?: { source: SpecSource; sha256: string };
   context_files: Array<{ path: string; sha256: string }>;
@@ -138,6 +141,8 @@ export interface RunHeaderInput {
   config: Config;
   thresholds: ResolvedThresholds;
   gating: ResolvedGatingConfig;
+  /** The failed verification pass's declaration, when this round fell back to severity gating. */
+  strictFallback?: StrictFallbackMarker;
   spec?: { source: SpecSource; sha256: string };
   contextFiles?: Array<{ path: string; sha256: string }>;
   plan?: { focus: string };
@@ -481,6 +486,7 @@ export function buildRunHeader(input: RunHeaderInput): RunHeader {
       verification_timeout_ms: input.gating.verificationTimeoutMs,
       verification_pass_timeout_ms: input.gating.verificationPassTimeoutMs,
       ...(input.converge?.recovery_source ? { bound_classification_protocol: 1 as const } : {}),
+      ...(input.strictFallback ? { strict_fallback: { version: input.strictFallback.version, cause: input.strictFallback.cause } } : {}),
     },
     ...(input.spec ? { spec: { source: input.spec.source, sha256: input.spec.sha256 } } : {}),
     context_files: (input.contextFiles ?? []).map((c) => ({ path: c.path, sha256: c.sha256 })),

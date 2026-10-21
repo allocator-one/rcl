@@ -97,7 +97,10 @@ describe('completed council terminal artifacts', () => {
     });
     expect(result.stats).toMatchObject({ totalReviews: 17, successfulReviews: 16, totalRawFindings: 32, totalDeduped: 32 });
     expect(result.findings).toHaveLength(32);
-    expect(result.findings.every((finding) => finding.gating === undefined && finding.consensus.models.length === 1)).toBe(true);
+    // The fallback is declared and labelled, never left for delivery to read as `none` (RCL-160).
+    expect(result.run.gating.strict_fallback).toEqual({ version: 1, cause: 'verification_pass_timeout' });
+    expect(result.findings.every((finding) => finding.gating?.reason === 'strict_fallback' &&
+      finding.gating.verification?.verdict === 'unavailable' && finding.consensus.models.length === 1)).toBe(true);
     expect(evaluateCiGate(result).exitCode).toBe(1);
     expect(warnings).toEqual([expect.stringMatching(/Gating pass failed .*VerificationPassTimeoutError:.*100ms.*severity gating/)]);
     expect(stages).toEqual(['computing consensus', 'assembling the terminal report']);

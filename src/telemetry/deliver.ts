@@ -3,6 +3,7 @@ import { join } from 'path';
 import { SEARCH_PLACES } from '../config/loader.js';
 import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
+import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import { resolveDataDir } from '../config/data-dir.js';
 import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
 import { declareReviewerRecovery, type ReviewerRecoverySource, buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type RunEnvelope, type TelemetryLevel } from './envelope.js';
@@ -357,7 +358,10 @@ function localFailure(err: unknown): string {
 
 /** The wire builder defaults an absent finding label to `none`; inspect the immutable report first. */
 export function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[] {
-  if (result.run?.gating?.mode !== 'verified-consensus') return [];
+  // A declared strict fallback is checked exactly; `strict_fallback` is no label without it.
+  const fallbackProblem = strictFallbackProblem(result);
+  if (fallbackProblem) return [{ path: 'run.gating.strict_fallback', message: fallbackProblem }];
+  if (result.run?.gating?.mode !== 'verified-consensus' || declaresStrictFallback(result.run.gating)) return [];
   const diagnostics: EvidenceDiagnostic[] = [];
   const reasons = new Set(['consensus', 'critical', 'verified', 'none']);
   let hasVerificationEvidence = false;
@@ -376,6 +380,14 @@ export function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiag
     diagnostics.unshift({ path: 'stats.verification', message: 'Verified-consensus report is missing verification stats for annotated candidates' });
   }
   return diagnostics.slice(0, 20);
+}
+
+/**
+ * Harness counts a strict fallback only once it holds the run's report_json,
+ * which only telemetry level `full` sends.
+ */
+export function strictFallbackLevelDiagnostic(level: TelemetryLevel): EvidenceDiagnostic {
+  return { path: 'telemetry', message: `A strict fallback counts only with its report_json, which telemetry level ${level} never sends; deliver it at telemetry level full` };
 }
 
 /** Only a proof-derived private artifact may explain intentionally unlabeled strict-fallback bytes. */
@@ -520,6 +532,8 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   }
   const diagnostics = validateRunEnvelope(envelope, input.artifacts);
   diagnostics.push(...verifiedConsensusEnvelopeDiagnostics(input, envelope));
+  const strictFallback = declaresStrictFallback(input.result.run?.gating);
+  if (strictFallback && runtime.level !== 'full') diagnostics.push(strictFallbackLevelDiagnostic(runtime.level));
   if (diagnostics.length > 0) {
     const retention = await retainRun(runtime, input, envelope, diagnostics);
     return { status: 'rejected', runId, spooled: false, failureDisposition: 'local-invalid', retention, exitCode: exitFor('rejected', evidenceRequired),
@@ -543,11 +557,12 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     }
     const retention = await retainRun(runtime, input, envelope, [{ path: 'delivery', message: reason }]);
     try {
-      await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
+      const spooled = await runtime.outbox.spoolRun({ runId, envelope, artifacts: artifactsToSend, events });
+      const dropped = spooled.artifactsDropped.length > 0 ? ` (${spooled.artifactsDropped.join(', ')} not spooled: outbox over its cap)` : '';
       return {
         status: 'spooled',
         retention,
-        line: `Evidence spooled (${reason}); run rcl telemetry flush once a credential is available; ${retentionLine(retention, runId)}`,
+        line: `Evidence spooled (${reason})${dropped}; run rcl telemetry flush once a credential is available; ${retentionLine(retention, runId)}`,
         runId,
         spooled: true,
         exitCode: EVIDENCE_REQUIRED_EXIT_CODE,
@@ -690,7 +705,9 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     const outcome = await runtime.sink.putArtifact(runId, kind, bytes);
     if (outcome.kind === 'ok') continue;
     if (outcome.kind === 'disabled') {
-      notes.push('artifacts capped by the organization');
+      notes.push(strictFallback && kind === 'report_json'
+        ? 'artifacts capped by the organization; the strict fallback counts only with its report_json'
+        : 'artifacts capped by the organization');
       artifactsRefused += 1;
       break;
     }

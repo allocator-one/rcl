@@ -1,8 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
+import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { buildRunEnvelope, type RunEnvelope } from './envelope.js';
 
-const GATING_REASONS = new Set(['consensus', 'critical', 'verified', 'none']);
+const GATING_REASONS = new Set(['consensus', 'critical', 'verified', 'strict_fallback', 'none']);
 
 /** Before 3.6.0, verifier outages could retain a `verified` gate. */
 function allowsUnavailableVerified(version: string): boolean {
@@ -46,6 +47,9 @@ export function verifiedConsensusReportProblem(
     ['findings', report['findings']],
     ['belowThresholdFindings', report['belowThresholdFindings'] ?? []],
   ] as const;
+  const declared = declaresStrictFallback(report['run']['gating']);
+  const fallbackProblem = strictFallbackProblem(report as unknown as ReviewResult);
+  if (fallbackProblem) return `${fallbackProblem} in report_json`;
   const sourceFindings = groups.flatMap(([, findings]) => findings);
   // `envelope` telemetry omits rows entirely, even when the report has findings.
   const hasWireFindings = envelope.findings.length > 0;
@@ -64,7 +68,7 @@ export function verifiedConsensusReportProblem(
       if (verification !== undefined) hasVerification = true;
       const verdict = isRecord(verification) ? verification['verdict'] : undefined;
       const reason = strictFallback ? 'none' : (gating as Record<string, unknown>)['reason'];
-      const coherent = reason === 'verified'
+      const coherent = reason === 'strict_fallback' ? verdict === 'unavailable' : reason === 'verified'
         ? verdict === 'confirmed' || verdict === 'unrefuted' ||
           (verdict === 'unavailable' && allowsUnavailableVerified(envelope.run.rcl_version))
         : reason === 'none'
@@ -79,7 +83,7 @@ export function verifiedConsensusReportProblem(
       }
     }
   }
-  if (hasVerification && (!isRecord(report['stats']) || report['stats']['verification'] == null)) {
+  if (hasVerification && !declared && (!isRecord(report['stats']) || report['stats']['verification'] == null)) {
     return 'stats.verification missing for annotated candidates in report_json';
   }
 

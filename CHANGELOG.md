@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 4.5.18 - 2026-10-21
+
+- Declare the strict fallback instead of leaving findings unlabelled when a
+  verified-consensus run's whole verification pass fails. Such a report was
+  refused before delivery, since an unlabelled finding reads as `none`.
+  Assembly now labels every kept critical or important finding
+  `strict_fallback` with verification `unavailable` and every other finding
+  `none`, and records `run.gating.strict_fallback` as `{version: 1, cause:
+  verification_pass_timeout | verification_pass_failed}`: the form Harness
+  accepts (IO-14611). The CI verdict stays the conservative severity gate.
+  Delivery checks that form exactly and still refuses unlabelled
+  verified-consensus findings and a `strict_fallback` label without the
+  marker. It refuses such a run at a telemetry level that never sends its
+  report, and does not report it complete when the organization takes no
+  `report_json`, which Harness needs before it counts the run. `rcl telemetry
+  flush` likewise fails a queued fallback whose report_json the outbox
+  dropped, never held, or the organization refuses, instead of reporting it
+  delivered. `rcl evidence recover-run` accepts a declared fallback and checks
+  it exactly. `rcl converge-rejected` can dispose of a fallback refused only
+  for its telemetry level. Claim recovery counts a `strict_fallback` blocker
+  as a gated sighting. Reports refused before this release stay refused
+  (RCL-160, RCL-167).
+
 ## 4.5.17 - 2026-10-12
 
 - Recover an interrupted ordinary launch whose council had no async

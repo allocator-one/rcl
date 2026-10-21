@@ -1,6 +1,7 @@
 import { mkdir, open, readdir, readFile, rename, rm, rmdir, stat, writeFile } from 'fs/promises';
 import { basename, join, resolve, sep } from 'path';
 import { resolveDataDir } from '../config/data-dir.js';
+import { declaresStrictFallback } from '../consensus/strict-fallback.js';
 import { withRecoveryLock } from '../evidence/original-run/lock.js';
 import { sha256Hex, type ArtifactKind, type RunEnvelope } from './envelope.js';
 import { MAX_ARTIFACT_BYTES, validateRunEnvelope } from './envelope-validation.js';
@@ -51,6 +52,7 @@ const LOSS_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export const INTERRUPTED_SPOOL_MS = 10 * 60 * 1000;
 
 const ARTIFACT_FILES: Record<ArtifactKind, string> = { report_json: 'report_json.json', report_md: 'report_md.md' };
+const STRICT_FALLBACK_REPORT_UNAVAILABLE = 'a strict fallback counts only with its report_json, which cannot be delivered';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENTRY_ID = /^(?:events-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -79,6 +81,11 @@ export interface OutboxMeta {
   envelope_delivered?: boolean;
   run_url?: string;
   last_error?: string;
+  /**
+   * A strict fallback's report_json was dropped over the outbox cap. Harness
+   * counts such a run only with its report, so the entry can never deliver.
+   */
+  report_json_lost?: boolean;
 }
 
 export interface OutboxEntry {
@@ -340,6 +347,7 @@ export class Outbox {
       ...(current.envelope_delivered || desired.envelope_delivered ? { envelope_delivered: true } : {}),
       ...(desired.run_url !== undefined ? { run_url: desired.run_url } : current.run_url !== undefined ? { run_url: current.run_url } : {}),
       ...(desired.last_error !== undefined ? { last_error: desired.last_error } : current.last_error !== undefined ? { last_error: current.last_error } : {}),
+      ...(current.report_json_lost || desired.report_json_lost ? { report_json_lost: true } : {}),
     };
   }
 
@@ -435,6 +443,10 @@ export class Outbox {
       }
     }
     if (artifactsDropped.length > 0) await this.recordLoss(input.runId, artifactsDropped);
+    if (declaresStrictFallback(input.envelope.run?.gating) &&
+        (artifactsDropped.includes('report_json') || (input.artifacts?.report_json === undefined && existing?.report_json_lost))) {
+      meta.report_json_lost = true;
+    }
     await writeJsonAtomic(join(dir, META_FILE), meta);
     return { spooled: true, artifactsDropped };
   }
@@ -672,7 +684,17 @@ export class Outbox {
       meta = await this.updateMeta(entry.id, current => this.mergeFlushMeta(current, meta));
     };
 
+    // Harness counts a strict fallback only with its report_json: one this
+    // entry lost, never stored, or that the organization refuses cannot deliver.
+    const strictFallback = snapshot.envelope.kind === 'ok' && isRecord(snapshot.envelope.value) &&
+      isRecord(snapshot.envelope.value['run']) && declaresStrictFallback(snapshot.envelope.value.run.gating);
+    if (meta.kind === 'run' && strictFallback && meta.report_json_lost) {
+      return this.markFailed(entry.id, dir, STRICT_FALLBACK_REPORT_UNAVAILABLE);
+    }
     if (meta.kind === 'run' && !meta.envelope_delivered) {
+      if (strictFallback && snapshot.artifacts.report_json === undefined) {
+        return this.markFailed(entry.id, dir, STRICT_FALLBACK_REPORT_UNAVAILABLE);
+      }
       const read = snapshot.envelope;
       if (read.kind === 'error') {
         await remember(`envelope unreadable: ${read.reason}`);
@@ -762,6 +784,9 @@ export class Outbox {
             if (outcome.reason === 'reviews_disabled') {
               await this.drop(dir);
               return { kind: 'dropped', reason: outcome.message || outcome.reason };
+            }
+            if (strictFallback && kind === 'report_json') {
+              return this.markFailed(entry.id, dir, `${STRICT_FALLBACK_REPORT_UNAVAILABLE}: artifacts capped by the organization`);
             }
             // Artifacts are capped for the org; the envelope stands.
             await this.removeArtifactIfExact(entry.id, path, bytes);

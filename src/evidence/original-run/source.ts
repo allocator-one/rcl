@@ -1,6 +1,7 @@
 import { recoverySourceSchema } from '../../report/recovery-source.js';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+import { declaresStrictFallback, strictFallbackProblem } from '../../consensus/strict-fallback.js';
 import type { ReviewResult } from '../../consensus/types.js';
 import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope } from '../../telemetry/envelope.js';
 import { validateRunEnvelope, MAX_ARTIFACT_BYTES } from '../../telemetry/envelope-validation.js';
@@ -96,7 +97,15 @@ function permitsHistoricalUnavailableGate(value: unknown): boolean {
 function assertVerifiedConsensusSource(value: unknown): void {
   if (!value || typeof value !== 'object') return;
   const report = value as Partial<ReviewResult>;
-  if (report.run?.gating?.mode !== 'verified-consensus') return;
+  // A declared strict fallback is checked exactly, and only then exempt from the label rules below.
+  if (strictFallbackProblem({
+    run: report.run, stats: report.stats as ReviewResult['stats'],
+    findings: Array.isArray(report.findings) ? report.findings : [],
+    belowThresholdFindings: Array.isArray(report.belowThresholdFindings) ? report.belowThresholdFindings : [],
+  }) !== undefined) {
+    throw new Error('original_verified_consensus_strict_fallback_invalid');
+  }
+  if (report.run?.gating?.mode !== 'verified-consensus' || declaresStrictFallback(report.run.gating)) return;
   const findings = [
     ...(Array.isArray(report.findings) ? report.findings : []),
     ...(Array.isArray(report.belowThresholdFindings) ? report.belowThresholdFindings : []),
