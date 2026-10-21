@@ -10,7 +10,8 @@ import type { Diff } from '../../src/resolver/types.js';
 import type { Role } from '../../src/roles/types.js';
 import { assembleCompletedReview } from '../../src/report/assembly.js';
 import type { RunHeader } from '../../src/report/run-header.js';
-import { createTelemetryRuntime, deliverRun } from '../../src/telemetry/deliver.js';
+import { createTelemetryRuntime, deliverRun, flushOutbox } from '../../src/telemetry/deliver.js';
+import { Outbox } from '../../src/telemetry/outbox.js';
 import type { TelemetryLevel } from '../../src/telemetry/envelope.js';
 import { fakeFetch, type RecordedRequest } from '../telemetry/fixtures.js';
 
@@ -96,12 +97,16 @@ describe('a verified-consensus review whose verification pass fails (RCL-160)', 
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  function harness(artifactsExpected: string[]) {
+  /** Harness lists every declared kind; an organization that takes no reports answers the PUT with 403. */
+  function harness(artifacts: 'accepted' | 'disabled' = 'accepted') {
     return (request: RecordedRequest): { status: number; body?: unknown } => {
       if (request.url.endsWith('/api/v1/reviews/runs')) {
         const envelope = JSON.parse(request.body!) as { run: { id: string } };
         return { status: 201, body: { data: { id: envelope.run.id, url: `https://harness.example.test/runs/${envelope.run.id}`,
-          artifacts_expected: artifactsExpected }, meta: { status: 'created' } } };
+          artifacts_expected: ['report_json', 'report_md'] }, meta: { status: 'created' } } };
+      }
+      if (request.url.includes('/artifacts/') && artifacts === 'disabled') {
+        return { status: 403, body: { error: 'artifacts_disabled', message: 'Full reports are off for this organization' } };
       }
       if (request.url.includes('/artifacts/')) {
         const kind = request.url.slice(request.url.lastIndexOf('/') + 1);
@@ -137,7 +142,7 @@ describe('a verified-consensus review whose verification pass fails (RCL-160)', 
   it('delivers that report as Harness accepts a strict fallback, with its report_json as the receipt', async () => {
     const result = await failedVerificationReport();
     const artifacts = renderReportArtifacts(result);
-    const { rt, requests } = await runtime(harness(['report_json', 'report_md']));
+    const { rt, requests } = await runtime(harness());
 
     expect(await deliverRun(rt, { result, artifacts, evidenceRequired: true })).toMatchObject({ status: 'recorded', exitCode: 0 });
 
@@ -160,7 +165,7 @@ describe('a verified-consensus review whose verification pass fails (RCL-160)', 
 
   it('does not report the run complete when the organization takes no report_json, which a fallback needs to count', async () => {
     const result = await failedVerificationReport();
-    const { rt } = await runtime(harness([]));
+    const { rt } = await runtime(harness('disabled'));
 
     const outcome = await deliverRun(rt, { result, artifacts: renderReportArtifacts(result), evidenceRequired: true });
 
@@ -168,9 +173,38 @@ describe('a verified-consensus review whose verification pass fails (RCL-160)', 
     expect(outcome.line).toMatch(/strict fallback counts only with its report_json/);
   });
 
+  it('does not flush a spooled fallback as delivered when the organization refuses its report_json', async () => {
+    const result = await failedVerificationReport();
+    const down = await runtime(() => new TypeError('fetch failed'));
+    expect(await deliverRun(down.rt, { result, artifacts: renderReportArtifacts(result), evidenceRequired: true }))
+      .toMatchObject({ status: 'spooled', exitCode: 4 });
+
+    const { rt } = await runtime(harness('disabled'));
+    const summary = await flushOutbox(rt);
+
+    expect(summary.delivered).toEqual([]);
+    expect(summary.failed).toEqual([{ id: result.run.id, reason: expect.stringMatching(/strict fallback counts only with its report_json/) }]);
+  });
+
+  it('does not flush a fallback whose report_json the outbox dropped over its cap', async () => {
+    const result = await failedVerificationReport();
+    const artifacts = renderReportArtifacts(result);
+    const down = await runtime(() => new TypeError('fetch failed'));
+    down.rt.outbox = new Outbox(join(dataDir, 'outbox'), { capBytes: Buffer.byteLength(artifacts.report_json) - 1 });
+    const spooled = await deliverRun(down.rt, { result, artifacts, evidenceRequired: true });
+    expect(spooled).toMatchObject({ status: 'spooled', exitCode: 4 });
+
+    const { rt, requests } = await runtime(harness());
+    const summary = await flushOutbox(rt);
+
+    expect(summary.delivered).toEqual([]);
+    expect(summary.failed).toEqual([{ id: result.run.id, reason: expect.stringMatching(/strict fallback counts only with its report_json/) }]);
+    expect(requests.some((r) => r.url.endsWith('/api/v1/reviews/runs'))).toBe(false);
+  });
+
   it.each<TelemetryLevel>(['envelope', 'findings'])('refuses it locally at telemetry level %s, which never sends the report', async (level) => {
     const result = await failedVerificationReport();
-    const { rt, requests } = await runtime(harness(['report_json', 'report_md']), level);
+    const { rt, requests } = await runtime(harness(), level);
 
     const outcome = await deliverRun(rt, { result, artifacts: renderReportArtifacts(result), evidenceRequired: true });
 
@@ -183,7 +217,7 @@ describe('a verified-consensus review whose verification pass fails (RCL-160)', 
     const result = await failedVerificationReport();
     delete result.run.gating.strict_fallback;
     for (const f of result.findings) delete f.gating;
-    const { rt, requests } = await runtime(harness(['report_json', 'report_md']));
+    const { rt, requests } = await runtime(harness());
 
     const outcome = await deliverRun(rt, { result, artifacts: renderReportArtifacts(result), evidenceRequired: true });
 

@@ -55,11 +55,11 @@ vi.mock('../../src/converge/process-identity.js', async importOriginal => {
 
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' = 'label') {
+async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'level' = 'label') {
   const common = await mkdtemp(join(tmpdir(), 'rcl-terminal-')); roots.push(common);
   const dataDir = join(common, 'data'); await mkdir(dataDir, { mode: 0o700 });
   const target = 'synthetic-9220', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), reportPath = join(common, 'original-report.json');
-  const rt: TelemetryRuntime = { level: 'full', repoManaged: true, parseFailures: false,
+  const rt: TelemetryRuntime = { level: defect === 'level' ? 'findings' : 'full', repoManaged: true, parseFailures: false,
     dataDir, rclVersion: '4.4.18', outbox: new Outbox(join(dataDir, 'outbox')), quarantine: new Quarantine(join(dataDir, 'quarantine')), stderr: () => {} };
   let active: ReviewCycleReceipt | null = null;
   const cycleRemote = { repo: 'allocator-one/rcl', prNumber: 42, url: 'https://harness.example', current: vi.fn(async () => active),
@@ -70,7 +70,12 @@ async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' =
   result.reviews = result.run!.roster.map((seat, i) => sampleReview({ ...seat, status: i < 7 ? 'success' : 'error', error: i < 7 ? undefined : 'synthetic failure' }));
   result.stats.totalReviews = 10; result.stats.successfulReviews = 7;
   if (defect === 'label') delete result.findings[0]!.gating;
-  else result.belowThresholdFindings![0]!.file = '';
+  else if (defect === 'blank-file') result.belowThresholdFindings![0]!.file = '';
+  else {
+    // A valid strict fallback (RCL-160), refused only because level `findings` never sends its report.
+    result.run!.gating.strict_fallback = { version: 1, cause: 'verification_pass_timeout' };
+    result.findings[0]!.gating = { reason: 'strict_fallback', verification: { verdict: 'unavailable' } };
+  }
   const health = { version: 1 as const, policy: resolveQuorumPolicy(10), successfulSeats: 7 };
   const options = { gitCommonDir: common, target, headSha, inputSha256, cycleRemote, maxAttempts: cap, validate: vi.fn(async () => {}) };
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -268,6 +273,17 @@ it('disposes a run refused for a blank appendix file and admits only the bounded
   const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Blank-file producer fix verified; bounded new review', run: f.nextRun });
   expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
   expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('disposes a strict fallback refused only for its telemetry level and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'level'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Telemetry level full restored; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
 });
 
 it('refuses a blank-file proof whose retained diagnostic names a finding that has a file', async () => {
