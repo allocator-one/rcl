@@ -230,7 +230,7 @@ export function toMarkdown(result: ReviewResult): string {
     const byReason = (reason: string): number =>
       annotated.filter((f) => f.gating!.reason === reason).length;
     const gatingCount = annotated.length - byReason('none');
-    const fallback = result.run?.gating.strict_fallback;
+    const fallback = result.run?.gating?.strict_fallback;
     let line = fallback
       ? `**Gating:** ${gatingCount} finding(s) block convergence (${byReason('strict_fallback')} strict fallback: the ` +
         `verification pass ${fallback.cause === 'verification_pass_timeout' ? 'timed out' : 'failed'}, so every ` +
