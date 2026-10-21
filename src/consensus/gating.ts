@@ -37,7 +37,12 @@ import {
  * failure promoted 73 single-model, low-confidence findings to blocking on
  * one PR and blocked every open PR in the organization (RCL-60, RCL-62).
  */
-export type GatingReason = 'consensus' | 'critical' | 'verified' | 'none';
+/**
+ * `strict_fallback` is used only when the whole verification pass failed
+ * (`consensus/strict-fallback.ts`): a kept critical or important finding then
+ * blocks on its severity, unverified.
+ */
+export type GatingReason = 'consensus' | 'critical' | 'verified' | 'strict_fallback' | 'none';
 
 export interface GatingVerification {
   /** Absent in legacy evidence or when no model was recorded. */

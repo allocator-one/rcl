@@ -3,6 +3,7 @@ import { join } from 'path';
 import { SEARCH_PLACES } from '../config/loader.js';
 import { HarnessSchema, type Config } from '../config/schema.js';
 import type { ReviewResult } from '../consensus/types.js';
+import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import { resolveDataDir } from '../config/data-dir.js';
 import { credentialHost, resolveHarnessCredential, type HarnessCredential } from './credentials.js';
 import { declareReviewerRecovery, type ReviewerRecoverySource, buildRunEnvelope, type ArtifactBytes, type ArtifactKind, type RunEnvelope, type TelemetryLevel } from './envelope.js';
@@ -357,7 +358,10 @@ function localFailure(err: unknown): string {
 
 /** The wire builder defaults an absent finding label to `none`; inspect the immutable report first. */
 export function verifiedConsensusDiagnostics(result: ReviewResult): EvidenceDiagnostic[] {
-  if (result.run?.gating?.mode !== 'verified-consensus') return [];
+  // A declared strict fallback is checked exactly; `strict_fallback` is no label without it.
+  const fallbackProblem = strictFallbackProblem(result);
+  if (fallbackProblem) return [{ path: 'run.gating.strict_fallback', message: fallbackProblem }];
+  if (result.run?.gating?.mode !== 'verified-consensus' || declaresStrictFallback(result.run.gating)) return [];
   const diagnostics: EvidenceDiagnostic[] = [];
   const reasons = new Set(['consensus', 'critical', 'verified', 'none']);
   let hasVerificationEvidence = false;
@@ -520,6 +524,10 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
   }
   const diagnostics = validateRunEnvelope(envelope, input.artifacts);
   diagnostics.push(...verifiedConsensusEnvelopeDiagnostics(input, envelope));
+  const strictFallback = declaresStrictFallback(input.result.run?.gating);
+  if (strictFallback && runtime.level !== 'full') {
+    diagnostics.push({ path: 'telemetry', message: `A strict fallback counts only with its report_json, which telemetry level ${runtime.level} never sends; deliver it at telemetry level full` });
+  }
   if (diagnostics.length > 0) {
     const retention = await retainRun(runtime, input, envelope, diagnostics);
     return { status: 'rejected', runId, spooled: false, failureDisposition: 'local-invalid', retention, exitCode: exitFor('rejected', evidenceRequired),
@@ -703,6 +711,12 @@ async function deliverCompletedRun(runtime: TelemetryRuntime, input: DeliverRunI
     // not spooled; under --evidence-required it makes the evidence incomplete.
     artifactsRefused += 1;
     notes.push(`${kind} refused: ${describeOutcome(outcome)}`);
+  }
+  // Harness counts a strict fallback only once it holds the report: an
+  // organization that takes none leaves the run inconclusive.
+  if (strictFallback && !receipt.artifacts_expected.includes('report_json')) {
+    artifactsRefused += 1;
+    notes.push('the strict fallback counts only with its report_json, which the organization does not accept');
   }
 
   let pendingEvents: WireEvent[] = [];

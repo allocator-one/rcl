@@ -5,6 +5,7 @@ import { deriveBlockingHealth, summarizeBlockingHealth } from './blocking-health
 import type { DedupeOrdering } from '../consensus/deduper.js';
 import type { Config } from '../config/schema.js';
 import { applyGatingWithFallback, type GatingOptions, type ResolvedGatingConfig } from '../consensus/gating.js';
+import { applyStrictFallback, strictFallbackCause, type StrictFallbackMarker } from '../consensus/strict-fallback.js';
 import type { ConsensusFinding, ModelReview, ReviewResult } from '../consensus/types.js';
 import { mergeChunkReviews } from '../dispatch/merge.js';
 import type { Diff } from '../resolver/types.js';
@@ -85,6 +86,7 @@ export async function assembleCompletedReview(
   let finalFindings = retained?.findings ?? reportFindings;
   let gatedAppendix = retained?.appendix ?? droppedFindings;
   let verificationStats = retained?.verification;
+  let strictFallback: StrictFallbackMarker | undefined;
   if (retained === undefined && gatingConfig.mode === 'verified-consensus' && (input.reviewerHealth === undefined || input.reviewerHealth.conclusive)) {
     dependencies.onVerificationStart?.();
     const gated = await applyGatingWithFallback(reportFindings, {
@@ -105,6 +107,13 @@ export async function assembleCompletedReview(
       (dependencies.onWarning ?? console.warn)(
         `Gating pass failed (${String(gated.failure)}); falling back to severity gating for this round.`
       );
+      // The fallback is declared, and every finding labelled, so delivery
+      // never reads an unlabelled blocker as `none` (RCL-160).
+      const fallback = applyStrictFallback(reportFindings, droppedFindings, strictFallbackCause(gated.failure),
+        gatingConfig.verificationModel);
+      finalFindings = fallback.findings;
+      gatedAppendix = fallback.appendix;
+      strictFallback = fallback.marker;
     } else {
       // Appendix findings never block convergence; mark them so the report
       // JSON carries a gating reason on every finding.
@@ -171,6 +180,7 @@ export async function assembleCompletedReview(
     config,
     diff,
     gating: gatingConfig,
+    ...(strictFallback ? { strictFallback } : {}),
     thresholds: {
       minConsensusScore: config.thresholds?.minConsensusScore ?? DEFAULT_THRESHOLDS.minConsensusScore,
       minConfidence: config.thresholds?.minConfidence ?? DEFAULT_THRESHOLDS.minConfidence,

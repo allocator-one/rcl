@@ -1706,7 +1706,8 @@ describe('rcl review — bounded verification fallback', () => {
           title: 'Synthetic blocking finding',
         }),
       ]);
-      expect(report.findings[0]).not.toHaveProperty('gating');
+      expect(report.run.gating.strict_fallback).toEqual({ version: 1, cause: 'verification_pass_timeout' });
+      expect(report.findings[0].gating).toMatchObject({ reason: 'strict_fallback', verification: { verdict: 'unavailable' } });
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) =>
