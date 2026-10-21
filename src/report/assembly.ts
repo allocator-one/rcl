@@ -104,9 +104,15 @@ export async function assembleCompletedReview(
       diffFiles: diff.files,
       ...(modelWeights ? { modelWeights } : {}),
     };
-    // The bound the pass applies, recorded when its workload stretched the configured one (RCL-206).
-    const passTimeoutMs = effectiveVerificationPassTimeoutMs(planGating(reportFindings, gatingOptions));
-    if (passTimeoutMs > gatingConfig.verificationPassTimeoutMs) scaledPassTimeoutMs = passTimeoutMs;
+    // The bound the pass applies, recorded when its workload stretched the
+    // configured one (RCL-206). A plan that cannot be built fails inside the
+    // pass below, which keeps the council's result.
+    try {
+      const passTimeoutMs = effectiveVerificationPassTimeoutMs(planGating(reportFindings, gatingOptions));
+      if (passTimeoutMs > gatingConfig.verificationPassTimeoutMs) scaledPassTimeoutMs = passTimeoutMs;
+    } catch {
+      scaledPassTimeoutMs = undefined;
+    }
     const gated = await applyGatingWithFallback(reportFindings, gatingOptions);
     finalFindings = gated.findings;
     verificationStats = gated.ok ? gated.verification : undefined;

@@ -67,6 +67,29 @@ describe('the whole verification pass deadline scales with its workload (RCL-206
     expect(bound(49, 600_000)).toBe(900_000);
   });
 
+  it('keeps a fractional configured bound exactly when it does not scale', () => {
+    expect(bound(48, 600_000.5)).toBe(600_000.5);
+  });
+
+  it('lets a defaulted per-call bound follow the scaled pass, and keeps an explicit shorter one', async () => {
+    const { findings, diffFiles } = review(144);
+    const calls = (verificationTimeoutMs: number) => {
+      const ask = answeringAfter(1);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const pass = applyGating(findings, { ...options(diffFiles, 100, ask), verificationTimeoutMs, monotonicNow: () => 0 });
+      return { ask, pass };
+    };
+    const defaulted = calls(100);
+    await vi.advanceTimersByTimeAsync(20);
+    await defaulted.pass;
+    expect(defaulted.ask.mock.calls[0]![3].timeoutMs).toBe(300);
+    vi.useRealTimers();
+    const explicit = calls(50);
+    await vi.advanceTimersByTimeAsync(20);
+    await explicit.pass;
+    expect(explicit.ask.mock.calls[0]![3].timeoutMs).toBe(50);
+  });
+
   it('caps at four times the configured bound and at the timer maximum', () => {
     expect(bound(400, 600_000)).toBe(2_400_000);
     expect(bound(400, MAX_TIMER_DELAY_MS)).toBe(MAX_TIMER_DELAY_MS);

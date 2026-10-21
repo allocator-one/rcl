@@ -285,7 +285,8 @@ const MAX_PASS_SCALE = 4;
  */
 export function effectiveVerificationPassTimeoutMs(plan: Pick<GatingPlan, 'verificationPassTimeoutMs' | 'batches'>): number {
   const waves = Math.ceil(plan.batches.length / VERIFIER_CONCURRENCY);
-  const scale = Math.min(MAX_PASS_SCALE, Math.max(1, waves / BASELINE_VERIFIER_WAVES));
+  if (waves <= BASELINE_VERIFIER_WAVES) return plan.verificationPassTimeoutMs;
+  const scale = Math.min(MAX_PASS_SCALE, waves / BASELINE_VERIFIER_WAVES);
   return Math.min(MAX_TIMER_DELAY_MS, Math.round(plan.verificationPassTimeoutMs * scale));
 }
 
@@ -786,8 +787,12 @@ export async function applyGating(
   const now = options.monotonicNow ?? performance.now.bind(performance);
   const started = now();
   const plan = planGating(findings, options);
-  const { verificationTimeoutMs, batches } = plan;
+  const { batches } = plan;
   const verificationPassTimeoutMs = effectiveVerificationPassTimeoutMs(plan);
+  // A per-call bound left at the pass bound (the default) follows the scaled
+  // pass, so one slow batch still ends at the pass deadline, never earlier.
+  const verificationTimeoutMs = plan.verificationTimeoutMs === plan.verificationPassTimeoutMs
+    ? verificationPassTimeoutMs : plan.verificationTimeoutMs;
   const verificationDeadline = started + verificationPassTimeoutMs;
   const providedAsk = options.ask;
   const onVerificationProgress = options.onVerificationProgress;

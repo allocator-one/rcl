@@ -12,8 +12,11 @@
   the planned batches alone. The report records it as
   `run.gating.verification_pass_effective_timeout_ms` when it exceeds the
   configured `verification_pass_timeout_ms`. A pass that still overruns falls
-  back to the strict fallback as before. Retained checkpoint plans keep their
-  recorded bound (RCL-206).
+  back to the strict fallback as before. A per-call bound left at its default
+  follows the scaled pass, so one slow batch still ends at the pass deadline.
+  An attested review renews its run credential again just before delivery,
+  since a longer pass can outlast the one it renewed before verification.
+  Retained checkpoint plans keep their recorded bound (RCL-206).
 
 ## 4.5.18 - 2026-10-21
 

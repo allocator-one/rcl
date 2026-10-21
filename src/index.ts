@@ -2996,7 +2996,8 @@ async function executeCouncil(
   // weights read, then delivery — the credential is renewed for the same run
   // id when little of it remains (RCL-40).
   let attestation = extra.attestation;
-  if (attestation) {
+  const renewAttestationForDelivery = async (): Promise<void> => {
+    if (!attestation) return;
     const renewal = await renewAttestation(attestation, { rclVersion: RCL_VERSION });
     attestation = renewal.attestation;
     if (renewal.renewed) {
@@ -3004,7 +3005,8 @@ async function executeCouncil(
     } else if (renewal.failure !== undefined) {
       process.stderr.write(chalk.dim(`Attestation not renewed (${renewal.failure}); continuing with the credential in hand`) + '\n');
     }
-  }
+  };
+  await renewAttestationForDelivery();
 
   let modelWeights: Map<string, number> | undefined;
   try {
@@ -3153,6 +3155,9 @@ async function executeCouncil(
   // turn a finished review into a failure unless --evidence-required asks.
   let runtime: TelemetryRuntime | undefined;
   let runtimeError: string | undefined;
+  // A verification pass scaled to a large review (RCL-206) can outlast the
+  // credential renewed before it, so renew again just before delivery.
+  await renewAttestationForDelivery();
   try {
     runtime = await createTelemetryRuntime({
       rclVersion: RCL_VERSION,
