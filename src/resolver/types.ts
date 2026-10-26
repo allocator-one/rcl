@@ -29,7 +29,7 @@ export interface PRMetadata {
    */
   headSha: string;
   baseSha: string;
-  /** Actual compare merge base, explicitly requested for retained PR execution. */
+  /** Actual comparison merge base; baseSha remains the target-branch tip. */
   mergeBaseSha?: string;
   mergeCommitSha?: string;
   url: string;

@@ -2247,7 +2247,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       }
     } else {
       const prTarget = parseGitHubTarget(target!);
-      diff = await fetchPRDiff(prTarget, config.githubToken);
+      diff = await fetchPRDiff(prTarget, config.githubToken, undefined, { requireMergeBase: true });
     }
 
     // Resolve the head BEFORE the empty-diff exit so --expect-head-sha is
@@ -2258,6 +2258,7 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
       gitMode,
       {
         ...opts,
+        historicalPendingRecovery: opts.exportPendingPackage !== undefined || opts.finalizePendingOnly === true,
         convergeTarget: opts.convergeTarget ?? process.env['RCL_CONVERGE_TARGET'],
         // The flag is the user's word and is refused off a patch file; a value
         // left in the environment only ever attributes a patch file.
@@ -2370,9 +2371,12 @@ async function executeCouncil(
       explicit: prepared.explicit, gating: prepared.gatingConfig });
     const guardedInput = {
       head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo, pr: extra.target.prNumber,
+      ...(extra.target.baseSha === undefined ? {} : { base: extra.target.baseSha }),
       diff: diffDigest(diff.files), config: configDigest(config), roster, prompts,
       asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
     };
+    const { base: _base, ...historicalGuardedInput } = guardedInput;
+    const historicalInputSha256 = guardedInputSha256(historicalGuardedInput);
     const ordinaryAsyncDescriptors = chunks.flatMap(() => asyncAssignments.map(assignment => ({
       model: assignment.model, role: assignment.role.name, provider: assignment.provider,
     }))).slice(0, MAX_ASYNC_CALLS_PER_ROUND);
@@ -2380,17 +2384,28 @@ async function executeCouncil(
     const common = await resolveGitCommonDir();
     if (opts.exportPendingPackage) {
       const pendingNative = await loadConvergeRunState(common, prepared.converge!.target);
-      // A launch recorded before shared task context (RCL-191) hashed prompts
-      // without it. Offer that exact earlier form too; the export still
-      // authenticates only an exact match with the recorded input hash.
+      // Discovery only: export re-reads the native marker and authenticates its
+      // complete retained packet before producing anything. The caller can
+      // confirm this historical base, never nominate an unauthenticated one.
+      const original = pendingNative?.lastLaunch;
+      const retainedBase = original?.headSha === extra.target.headSha ? original?.ordinaryInputs?.baseSha : undefined;
+      const exportBaseSha = retainedBase === opts.expectBaseSha ? retainedBase : extra.target.baseSha;
+      // Only explicit historical export may reconstruct older input forms.
+      // New launches always hash a resolved base; older records may omit it or the
+      // shared task context. Retained receipts still check the base separately.
       let exportInput = guardedInput;
-      if (work.taskContext && pendingNative?.lastLaunch?.inputSha256 !== guardedInputSha256(guardedInput)) {
-        const earlier = { ...guardedInput, prompts: await Promise.all(chunkAssignments.map(({ assignment, chunk }) =>
-          buildPrompt(chunk, assignment.role, { contextDocs, plan: planContext }))) };
-        if (pendingNative?.lastLaunch?.inputSha256 === guardedInputSha256(earlier)) exportInput = earlier;
+      if (pendingNative?.lastLaunch?.inputSha256 !== guardedInputSha256(guardedInput)) {
+        const candidates = [guardedInput, ...(exportBaseSha === undefined ? [] : [{ ...guardedInput, base: exportBaseSha }]), historicalGuardedInput];
+        if (work.taskContext) {
+          const earlierPrompts = await Promise.all(chunkAssignments.map(({ assignment, chunk }) =>
+            buildPrompt(chunk, assignment.role, { contextDocs, plan: planContext })));
+          candidates.push(...candidates.map(input => ({ ...input, prompts: earlierPrompts })));
+        }
+        exportInput = candidates.find(input =>
+          pendingNative?.lastLaunch?.inputSha256 === guardedInputSha256(input)) ?? guardedInput;
       }
       const receipt = await exportOrdinaryPendingPackage({ gitCommonDir: common,
-        target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
+        target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: exportBaseSha ?? '',
         expectedBaseSha: opts.expectBaseSha!, expectedRound: prepared.converge!.round,
         guardedInput: exportInput, path: opts.exportPendingPackage,
         preview: opts.previewPending === true,
@@ -2441,6 +2456,14 @@ async function executeCouncil(
       ) as OrdinaryPendingPackage;
       const migrationGuardedInput = migrationPackage
         ? ordinaryPendingGuardedInput(migrationPackage) : undefined;
+      // Only finalize-only may authenticate the old PR base rather than the
+      // current comparison. Never feed that base into a successor's capture.
+      // Advanced receipt replay remains available via an explicitly bound patch.
+      const retainedBase = native?.lastLaunch?.headSha === extra.target.headSha
+        ? native?.lastLaunch?.ordinaryInputs?.baseSha : undefined;
+      const finalizationBaseSha = opts.finalizePendingOnly && extra.target.kind === 'pr' &&
+        retainedBase !== undefined && retainedBase === migrationPackage?.baseSha
+        ? retainedBase : extra.target.baseSha ?? '';
       if (opts.expectPrHeadSha !== undefined && migrationPackage?.version !== 2) {
         throw new ReviewLaunchRefused('pending_finalize_incompatible',
           '--expect-pr-head-sha requires a cycle-backed version-2 pending package.');
@@ -2494,7 +2517,7 @@ async function executeCouncil(
       if (opts.previewPending && migrationPackage) {
         const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
-          target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: extra.target.baseSha ?? '',
+          target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: finalizationBaseSha,
           pendingInputSha256: inputSha256, recoveryInputSha256: inputSha256,
           retryReason: opts.retryReason ?? 'Finalize-only authentication preview.',
           captured: {} as CapturedPreparedCouncil, retainedAsyncSha256: expectedAsyncSha256,
@@ -2512,7 +2535,7 @@ async function executeCouncil(
         const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const result = await finalizeOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
-          baseSha: extra.target.baseSha ?? '', pendingInputSha256: inputSha256,
+          baseSha: finalizationBaseSha, pendingInputSha256: inputSha256,
           nativeStateSha256: opts.pendingNativeSha256!, attemptStateSha256: opts.pendingAttemptSha256!,
           retainedAsyncSha256: expectedAsyncSha256, migrationPackage,
           maxAttempts: Number(opts.maxAttempts), cycleRemote,
@@ -2592,15 +2615,12 @@ async function executeCouncil(
       const asyncStoreDir = await resolveAsyncStoreDir();
       const asyncKey = asyncTargetKey(extra.asyncTargetLabel ?? prepared.converge!.target,
         extra.target.kind === 'patch' ? prepared.converge!.target : undefined, prepared.converge!.cycleId);
-      const recoveryInputSha256 = sha256Hex(stableStringify({
-        head: extra.target.headSha, kind: extra.target.kind, repo: extra.target.repo,
-        pr: extra.target.prNumber, diff: diffDigest(diff.files), config: configDigest(config),
-        roster, prompts, asyncRoles: asyncAssignments.map(assignment => assignment.role), spec: prepared.spec,
-      }));
+      const recoveryInputSha256 = guardedInputSha256(guardedInput);
       const pendingResumeOptions: PendingLegacyResumeOptions = { gitCommonDir: common,
         target: prepared.converge!.target, headSha: extra.target.headSha ?? '',
         baseSha: extra.target.baseSha ?? '',
         pendingInputSha256: claimedInputSha256, recoveryInputSha256,
+        historicalRecoveryInputSha256: historicalInputSha256,
         retryReason: opts.retryReason!,
         ...(opts.retryReport ? { legacyRetry: { reportPath: opts.retryReport, config, roster,
           historicalPlan: prepared.historicalRetryPlan === true } } : {}),
@@ -2696,6 +2716,7 @@ async function executeCouncil(
       recoverySource: prepared.converge!.recovery_source,
       headSha: extra.target.headSha ?? '',
       inputSha256: guardedInputSha256(guardedInput),
+      historicalInputSha256,
       round: prepared.converge!.round,
       intent: opts.launchIntent,
       retryReason: opts.retryReason,

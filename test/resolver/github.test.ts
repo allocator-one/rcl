@@ -109,6 +109,14 @@ describe('isGitHubTarget', () => {
 });
 
 describe('fetchPRDiff', () => {
+  it('retains the actual comparison merge base for ordinary PR reviews (RCL-210)', async () => {
+    const fake = octokitWith({ pr: fakePr(1) });
+    fake.compare.mockResolvedValueOnce({ data: { files: files(1), merge_base_commit: { sha: 'c'.repeat(40) } } } as any);
+    const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', fake.octokit);
+    expect(diff.metadata?.mergeBaseSha).toBe('c'.repeat(40));
+    expect(diff.metadata?.baseSha).toBe('basesha456');
+  });
+
   it('fetches the files through ONE compare pinned to the PR base and head SHAs (no paging params)', async () => {
     const { octokit, get, compare, paginate } = octokitWith({ pr: fakePr(31) });
     const diff = await fetchPRDiff({ owner: 'o', repo: 'r', number: 1 }, 'token', octokit);

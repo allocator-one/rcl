@@ -130,7 +130,8 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
     throw new Error('ordinary_pending_package_mismatch');
   }
   const specPresent = !!input && Object.hasOwn(input, 'spec');
-  const keys = ['asyncRoles','config','diff','head','kind','pr','prompts','repo','roster',
+  const basePresent = !!input && Object.hasOwn(input, 'base');
+  const keys = ['asyncRoles',...(basePresent ? ['base'] : []),'config','diff','head','kind','pr','prompts','repo','roster',
     ...(specPresent ? ['spec'] : [])];
   const digest = (candidate: unknown): candidate is string => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
   const structuredInput = input && (input.kind === 'patch' || input.kind === 'pr') && typeof input.repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(input.repo) &&
@@ -155,6 +156,7 @@ export function validateOrdinaryPendingPackage(value: OrdinaryPendingPackage, ex
     !Number.isSafeInteger(value.attempt) || value.attempt < 1 || !Number.isSafeInteger(value.round) || value.round < 1 ||
     !Number.isSafeInteger(value.pid) || value.pid < 1 || !input || Object.keys(input).sort().join(',') !== keys.join(',') ||
     !Array.isArray(value.retainedAsyncSha256) || [...value.retainedAsyncSha256].sort().join(',') !== [...expected.retainedAsyncSha256].sort().join(',') || input.head !== value.headSha ||
+    (basePresent && input.base !== value.baseSha) ||
     (prepared ? prepared.inputSha256() : guardedInputSha256(input)) !== expected.inputSha256) throw new Error('ordinary_pending_package_mismatch');
   const cycleHistory = value.version === 2;
   const descriptorHashes = Array.isArray(value.retainedAsync)

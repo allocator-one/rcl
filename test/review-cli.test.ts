@@ -205,6 +205,45 @@ async function withGuardedFixture(work: (fixture: GuardedCliFixture) => Promise<
   }
 }
 
+describe('rcl review — exact base binding (RCL-210)', () => {
+  it.each([true, false])('requires the actual PR comparison merge base before dispatch (present=%s)', async present => {
+    await withGuardedFixture(async fixture => {
+      const head = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
+      const mergeBase = 'c'.repeat(40);
+      const diff = await loadLocalDiff(join(fixture.repo, 'change.patch'));
+      const pr = { title: 'Fixture', body: '', user: { login: 'fixture' },
+        base: { ref: 'main', sha: 'b'.repeat(40) }, head: { ref: 'feature', sha: head },
+        html_url: 'https://github.com/allocator-one/rcl/pull/42', labels: [], changed_files: 1 };
+      const comparison = { files: diff.files, ...(present ? { merge_base_commit: { sha: mergeBase } } : {}) };
+      const shim = join(fixture.repo, 'github-base.mjs');
+      writeFileSync(shim, `const original = globalThis.fetch;
+        globalThis.fetch = async (request, options) => {
+          const url = new URL(typeof request === 'string' || request instanceof URL ? request : request.url);
+          if (url.hostname === 'api.github.com') {
+            const data = url.pathname.includes('/compare/') ? ${JSON.stringify(comparison)} : ${JSON.stringify(pr)};
+            return new Response(JSON.stringify(data), {status: 200, headers: {'content-type': 'application/json'}});
+          }
+          if (url.hostname !== '127.0.0.1') throw new Error('Unexpected non-local request');
+          return original(request, options);
+        };`);
+      const args = fixture.args.filter((value, index, values) =>
+        !['--head-sha', '--base-sha'].includes(value) && !['--head-sha', '--base-sha'].includes(values[index - 1]!));
+      args[1] = 'allocator-one/rcl#42';
+      const result = await runRclAsync([...args, '--max-rounds', '2'], fixture.repo,
+        { ...fixture.env, NODE_OPTIONS: `--import=${shim}`, GITHUB_TOKEN: 'fixture-only' });
+      expect(result.status, result.stderr).toBe(present ? 0 : 1);
+      if (present) {
+        const report = JSON.parse(readFileSync(join(fixture.repo, 'report.json'), 'utf8'));
+        expect(report.run.target).toMatchObject({ head_sha: head, base_sha: mergeBase });
+      } else {
+        expect(result.stderr).toMatch(/merge base/i);
+        expect(fixture.calls()).toBe(0);
+        expect(await loadConvergeAttemptState(join(fixture.repo, '.git'), 'guarded-fixture')).toBeUndefined();
+      }
+    });
+  }, 40_000);
+});
+
 describe('rcl review — files-only --context contract (RCL-190)', () => {
   it.each(['review', 'review-plan'])('describes --context as files only in %s help', command => {
     const result = runRcl([command, '--help'], tempRepository());
@@ -515,12 +554,89 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
           headSha: launch.headSha, baseSha: fixture.args[fixture.args.indexOf('--base-sha') + 1],
           inputSha256: launch.inputSha256 });
         expect(guardedInputSha256(restoreGuardedInput(capture.guardedInput))).toBe(launch.inputSha256);
+        expect(restoreGuardedInput(capture.guardedInput).base)
+          .toBe(fixture.args[fixture.args.indexOf('--base-sha') + 1]);
         expect(launch.ordinaryInputs).toEqual({ version: 1, packetSha256: sha256Hex(readFileSync(path, 'utf8')),
           baseSha: capture.baseSha });
         expect(statSync(path).mode & 0o777).toBe(0o600);
       } finally { fixture.releaseResponses(); await running; }
     });
   });
+
+  it('exports an authenticated historical PR pending receipt with its original base tip (RCL-210)', async () => {
+    await withGuardedFixture(async fixture => {
+      const common = join(fixture.repo, '.git');
+      const target = 'guarded-fixture';
+      const head = fixture.args[fixture.args.indexOf('--head-sha') + 1]!;
+      const baseTip = 'b'.repeat(40), mergeBase = 'c'.repeat(40);
+      const config = await loadConfig(join(fixture.repo, 'config.json'), fixture.repo, { preserveDefaultRoster: true });
+      const roles = await resolveRoles(config);
+      const assignments = buildAssignments({ models: config.models!, roles,
+        roleMap: new Map(roles.map(role => [role.name, role])), deterministic: true });
+      const diff = await loadLocalDiff(join(fixture.repo, 'change.patch'));
+      const prompts = await Promise.all(chunkDiff(diff.files).flatMap(chunk => assignments.map(assignment =>
+        buildPrompt(chunk, assignment.role, { contextDocs: [] }))));
+      const input = { head, kind: 'pr', repo: 'allocator-one/rcl', pr: 42,
+        diff: diffDigest(diff.files), config: configDigest(config),
+        roster: buildRoster({ assignments, asyncAssignments: [], coreModels: config.models!, explicit: false,
+          gating: resolveGatingConfig(config.gating, config.models!) }), prompts, asyncRoles: [] };
+      const retained = await retainOrdinaryLaunchInputs({ gitCommonDir: common, target, headSha: head,
+        baseSha: baseTip, attempt: 1, round: 1, guardedInput: input });
+      await claimConvergeAttempt({ gitCommonDir: common, target, recordPid: 999_999 });
+      const nativePath = convergeRunStatePath(common, target);
+      mkdirSync(join(common, 'rcl-converge-runs'), { recursive: true });
+      writeFileSync(nativePath, JSON.stringify({ version: 1, target, roundCap: 2, rounds: [], findings: {},
+        updatedAt: new Date().toISOString(), lastLaunch: { status: 'pending', attempt: 1, round: 1,
+          headSha: head, inputSha256: guardedInputSha256(input), startedAt: new Date().toISOString(), pid: 999_999,
+          ordinaryInputs: { version: 1, packetSha256: retained.sha256, baseSha: baseTip } } }));
+      const before = readFileSync(nativePath);
+      const shim = join(fixture.repo, 'historical-pr.mjs');
+      const pr = { title: 'Fixture', body: '', user: { login: 'fixture' },
+        base: { ref: 'main', sha: baseTip }, head: { ref: 'feature', sha: head },
+        html_url: 'https://github.com/allocator-one/rcl/pull/42', labels: [], changed_files: 1 };
+      writeFileSync(shim, `globalThis.fetch = async request => {
+        const url = new URL(typeof request === 'string' || request instanceof URL ? request : request.url);
+        if (url.hostname !== 'api.github.com') throw new Error('Unexpected network');
+        const data = url.pathname.includes('/compare/')
+          ? ${JSON.stringify({ files: diff.files, merge_base_commit: { sha: mergeBase } })} : ${JSON.stringify(pr)};
+        return new Response(JSON.stringify(data), {status: 200, headers: {'content-type': 'application/json'}});
+      };`);
+      const args = fixture.args.filter((value, index, values) =>
+        !['--head-sha', '--base-sha', '--json-file'].includes(value) &&
+        !['--head-sha', '--base-sha', '--json-file'].includes(values[index - 1]!));
+      args[1] = 'allocator-one/rcl#42';
+      args.push('--export-pending-package', 'historical.json', '--expect-base-sha', baseTip);
+      const env = { ...fixture.env, NODE_OPTIONS: `--import=${shim}`, GITHUB_TOKEN: 'fixture-only' };
+      const preview = await runRclAsync([...args, '--preview-pending'], fixture.repo, env);
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(JSON.parse(preview.stdout).baseBinding).toBe('retained-launch-inputs');
+      const exported = await runRclAsync(args, fixture.repo, env);
+      expect(exported.status, exported.stderr).toBe(0);
+      const packet = JSON.parse(readFileSync(join(fixture.repo, 'historical.json'), 'utf8'));
+      expect(packet.baseSha).toBe(baseTip);
+      expect(ordinaryPendingGuardedInput(packet)).toEqual(input);
+      expect(readFileSync(nativePath)).toEqual(before);
+      const wrongBase = args.map(value => value === baseTip ? mergeBase : value);
+      const refused = await runRclAsync([...wrongBase, '--preview-pending'], fixture.repo, env);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('pending_export_retained_base_mismatch');
+      expect(readFileSync(nativePath)).toEqual(before);
+      const finalize = args.filter((value, index, values) =>
+        !['--export-pending-package', '--expect-base-sha'].includes(value) &&
+        !['--export-pending-package', '--expect-base-sha'].includes(values[index - 1]!));
+      finalize.push('--finalize-pending-only', '--ordinary-pending-package', 'historical.json',
+        '--resume-async-sha256', 'none', '--max-attempts', '20');
+      const finalizedPreview = await runRclAsync([...finalize, '--preview-pending'], fixture.repo, env);
+      expect(finalizedPreview.status, finalizedPreview.stderr).toBe(0);
+      const bindings = JSON.parse(finalizedPreview.stdout);
+      const applied = await runRclAsync([...finalize, '--pending-native-sha256', bindings.nativeStateSha256,
+        '--pending-attempt-sha256', bindings.attemptStateSha256], fixture.repo, env);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout).receipt.baseSha).toBe(baseTip);
+      expect((await loadConvergeAttemptState(common, target))?.attemptsUsed).toBe(1);
+      expect(fixture.calls()).toBe(0);
+    });
+  }, 40_000);
 
   it('advertises the explicit export and expected base bindings', () => {
     const result = runRcl(['review', '--help'], tempRepository());
@@ -567,7 +683,7 @@ describe('rcl review — ordinary pending package export (RCL-166)', () => {
         writeFileSync(mockPath, `globalThis.fetch = async (request) => {
           const url = String(request.url ?? request);
           if (!url.startsWith('https://api.github.com/repos/allocator-one/rcl/')) throw new Error('Unexpected network: ' + url);
-          const data = url.includes('/compare/') ? ${JSON.stringify({ files: diff.files })} : ${JSON.stringify(pr)};
+          const data = url.includes('/compare/') ? ${JSON.stringify({ files: diff.files, merge_base_commit: { sha: headSha } })} : ${JSON.stringify(pr)};
           return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
         };`);
         fixture.env.NODE_OPTIONS = `--import=${mockPath}`;
@@ -723,7 +839,10 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       const movedPrHeadSha = 'e'.repeat(40);
       const currentPrHeadPath = join(fixture.repo, 'current-pr-head');
       writeFileSync(currentPrHeadPath, currentPrHeadSha);
-      const baseSha = headSha;
+      writeFileSync(join(fixture.repo, 'base-movement.txt'), 'The target branch moved after the reviewed head.\n');
+      execFileSync('git', ['add', 'base-movement.txt'], { cwd: fixture.repo, env: GIT_ENV });
+      execFileSync('git', ['commit', '-qm', 'base tip moved'], { cwd: fixture.repo, env: GIT_ENV });
+      const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fixture.repo, env: GIT_ENV, encoding: 'utf8' }).trim();
       const guardedInput = { head: headSha, kind: 'patch', repo: 'owner/repo', pr: 42,
         diff: 'b'.repeat(64), config: 'c'.repeat(64), roster: [{ model: 'openrouter/history-seat',
           role: 'general', provider: 'openrouter', lane: 'async' }], prompts: [],
@@ -809,6 +928,7 @@ describe('rcl review — ordinary pending finalize-only recovery (RCL-165)', () 
       args.push('--finalize-pending-only',
         '--ordinary-pending-package', packagePath, '--resume-async-sha256', `${digest},${digest}`,
         '--max-attempts', '20', '--expect-head-sha', headSha, '--for-pr', 'owner/repo#42');
+      args[args.indexOf('--base-sha') + 1] = baseSha;
       const staleBinding = await runRclAsync([...args, '--preview-pending'], fixture.repo, env);
       expect(staleBinding.status).toBe(1);
       expect(staleBinding.stderr).toContain('fresh_review_head_changed');
@@ -1144,7 +1264,46 @@ describe('rcl review — guarded native launch', () => {
     });
   },40000);
 
-  it('does not spend on base-tip movement but requires review of a changed head', async () => {
+  it('recovers an unadmitted wrong-base report without changing the head, patch or spec (RCL-210)', async () => {
+    await withGuardedFixture(async fixture => {
+      const args = [...fixture.args, '--max-rounds', '2'];
+      const first = await runRclAsync(args, fixture.repo, fixture.env);
+      expect(first.status, first.stderr).toBe(0);
+      const common = join(fixture.repo, '.git');
+      const before = (await loadConvergeRunState(common, 'guarded-fixture'))!;
+      const reportPath = join(fixture.repo, 'report.json');
+      const bytes = readFileSync(reportPath);
+      const base = 'b'.repeat(40);
+      const next = [...args, '--base-sha', base, '--json-file', 'corrected.json'];
+      const refused = await runRclAsync(next, fixture.repo, fixture.env);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('report_not_admitted');
+      const input = refused.stderr.match(/--input-sha256 ([a-f0-9]{64})/)?.[1];
+      expect(input).toBeTruthy();
+      expect(input).not.toBe(before.lastLaunch!.inputSha256);
+      const manifest = join(fixture.repo, 'corrected-base.json');
+      const preview = await runRclAsync(['converge-stale', '--preview', '--manifest', manifest,
+        '--target', 'guarded-fixture', '--head', before.lastLaunch!.headSha,
+        '--input-sha256', input!, '--report', reportPath, '--report-sha256', sha256Hex(bytes),
+        '--reason', 'The report bound the base tip; only the corrected merge-base binding changed.'],
+      fixture.repo, fixture.env);
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(fixture.calls()).toBe(2);
+      const applied = await runRclAsync(['converge-stale', '--apply', '--manifest', manifest,
+        '--manifest-sha256', sha256Hex(readFileSync(manifest))], fixture.repo, fixture.env);
+      expect(applied.status, applied.stderr).toBe(0);
+      const corrected = await runRclAsync(next, fixture.repo, fixture.env);
+      expect(corrected.status, corrected.stderr).toBe(0);
+      const report = JSON.parse(readFileSync(join(fixture.repo, 'corrected.json'), 'utf8'));
+      expect(report.run.target).toMatchObject({ head_sha: before.lastLaunch!.headSha, base_sha: base });
+      expect(report.run.converge).toEqual({ target: 'guarded-fixture', round: 1, attempt: 2 });
+      expect(readFileSync(reportPath)).toEqual(bytes);
+      expect((await loadConvergeRunState(common, 'guarded-fixture'))!.rounds).toEqual([]);
+      expect(fixture.calls()).toBe(4);
+    });
+  }, 40_000);
+
+  it('requires a fresh review when the explicit patch base binding changes', async () => {
     await withGuardedFixture(async fixture => {
       const first = await runRclAsync([...fixture.args, '--launch-intent', 'stop-upstream'], fixture.repo, fixture.env);
       expect(first.status, first.stderr).toBe(0);
@@ -1153,12 +1312,7 @@ describe('rcl review — guarded native launch', () => {
       await processRoundReport({ gitCommonDir: join(fixture.repo, '.git'), target: 'guarded-fixture',
         round: 1, findings: report.findings, runId: report.run.id, reportSha256: sha256Hex(bytes) });
 
-      const unchanged = await runRclAsync([...fixture.args, '--base-sha', 'b'.repeat(40), '--json-file', 'second.json'], fixture.repo, fixture.env);
-      expect(unchanged.status, unchanged.stderr).toBe(1);
-      expect(unchanged.stderr).toContain('inputs_unchanged');
-      expect(fixture.calls()).toBe(2);
-      const changed = await runRclAsync([...fixture.args, '--head-sha', 'c'.repeat(40), '--json-file', 'second.json'], fixture.repo, fixture.env);
-
+      const changed = await runRclAsync([...fixture.args, '--base-sha', 'b'.repeat(40), '--json-file', 'second.json'], fixture.repo, fixture.env);
       expect(changed.status, changed.stderr).toBe(0);
       expect(fixture.calls()).toBe(4);
       expect(JSON.parse(readFileSync(join(fixture.repo, 'second.json'), 'utf8')).run.converge)

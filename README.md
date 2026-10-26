@@ -222,9 +222,10 @@ recovery operations, documented in
 | `--finalize-pending-only` / `--pending-native-sha256 <digest>` / `--pending-attempt-sha256 <digest>` | Finalize the previewed pending attempt as failed/unknown without claiming a successor; cycle recovery after PR movement also requires `--for-pr`, `--expect-pr-head-sha`, and the returned `--pending-preview-sha256` |
 
 **Reports.** Every report carries a `run` header: a client run id (UUIDv7),
-the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub
-for PRs, from `git rev-parse HEAD` and the merge-base with the remote default
-branch for `--staged`/`--working-tree`, from `--head-sha`/`--base-sha` for
+the rcl version, the target with its exact `head_sha`/`base_sha` (from GitHub's
+PR head and comparison merge base for PRs; from `git rev-parse HEAD` and the
+merge base with the remote default branch for `--staged`/`--working-tree`; from
+`--head-sha`/`--base-sha` for
 patch files) and a `diff_sha256`, the roster with each seat's lane
 (`blocking`, `secondary`, `async`, `verification`), a config digest with
 thresholds and gating inline, spec and context-file digests, a best-effort

@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { loadGitDiff, resolveGitHeads } from '../../src/resolver/git.js';
+import { loadGitDiff, resolveGitHeads, resolveGitMergeBase } from '../../src/resolver/git.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -148,6 +148,12 @@ describe('resolveGitHeads', () => {
     const heads = await resolveGitHeads(repo);
     expect(heads.headSha).toBe(secondCommit);
     expect(heads.baseSha).toBe(firstCommit);
+  });
+
+  it('computes the common ancestor of explicit commits instead of assuming the supplied base (RCL-210)', async () => {
+    expect(await resolveGitMergeBase(firstCommit, secondCommit, repo)).toBe(firstCommit);
+    expect(await resolveGitMergeBase(secondCommit, firstCommit, repo)).toBe(firstCommit);
+    expect(await resolveGitMergeBase(firstCommit, secondCommit, notARepo)).toBeUndefined();
   });
 
   it('returns nothing outside a repository instead of throwing', async () => {
