@@ -680,6 +680,31 @@ before the later guarded claim. It never treats a server/transport refusal as
 that proof. Historical audits use their retained copies, so ordinary temporary
 source cleanup does not break subsequent review and admission.
 
+### Correcting only an unadmitted report’s base binding
+
+New guarded input digests include the resolved base commit as well as the head,
+patch, configuration and prompts. Correcting `--base-sha` therefore changes the
+inputs even when the head, patch and spec are byte-identical. Use the existing
+`converge-stale` preview/apply flow on the original unadmitted report, then
+continue the same target. Keep the original report and spent attempt; do not
+edit native state, invent a verdict or create a replacement target.
+
+Direct PR review binds to GitHub’s comparison merge base. A PR-bound patch with
+both commits available locally refuses a declared base that is not their
+common ancestor. Explicit historical pending-package export can reconstruct
+older input digests that lacked the base; it still checks the retained base
+receipt separately. Export and finalize-only may authenticate an original
+PR base from that receipt, even if it was the wrong base tip. They never
+dispatch a reviewer. After a successor replaces the original native marker,
+use an explicitly bound historical patch for finalization receipt replay.
+New launches and recovery successors never omit a resolved base to match old history.
+An already-claimed legacy recovery successor may retain its old digest only
+when its captured-input and plan digests still match exactly; that
+compatibility match never creates a new claim.
+The old input format also preserves unchanged-input refusals for an admitted
+legacy report, so upgrading alone cannot bypass inspection of its original
+blocking health. It never authorizes a review or checkpoint resume.
+
 ### A round admitted against the wrong patch
 
 A round can be admitted before anyone notices that its patch was captured

@@ -187,6 +187,12 @@ describe('ordinary launch health through the public CLI', () => {
       expect(f.calls()).toBe(12);
       expect(await loadConvergeAttemptState(f.common, 'health-fixture')).toMatchObject({ attemptsUsed: 2 });
       expect(await loadConvergeRunState(f.common, 'health-fixture')).toMatchObject({ lastLaunch: { attempt: 2, status: 'completed' } });
+      const successor = (await loadConvergeRunState(f.common, 'health-fixture'))!.lastLaunch!;
+      const ordinary = await f.run(f.args.filter(arg => arg !== '--no-telemetry')
+        .concat(['--json-file', 'ordinary-successor.json', '--max-attempts', '2']), telemetryEnv);
+      expect(ordinary.status).toBe(1);
+      expect(ordinary.stderr).toContain('report_not_admitted');
+      expect(ordinary.stderr.match(/--input-sha256 ([a-f0-9]{64})/)?.[1]).toBe(successor.inputSha256);
       const callsAfterApply = f.calls();
       const replay = await f.run(args.filter(arg => arg !== '--preview-pending').concat(['--json-file', 'replay.json']), telemetryEnv);
       expect(replay.status, replay.stderr).toBe(0);

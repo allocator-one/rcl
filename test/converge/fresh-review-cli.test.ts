@@ -27,6 +27,7 @@ async function fixture(work: (f: {
   git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test');
   await writeFile(join(root, 'a.ts'), 'export const a = 1;\n'); git('add', '.'); git('commit', '-qm', 'fixture');
   let head = git('rev-parse', 'HEAD');
+  const mergeBase = head;
   let statusHead = head;
   const setStatusHead = (headSha: string) => { statusHead = headSha; };
   const advanceHead = () => { git('commit', '--allow-empty', '-qm', 'next fixture head'); head = git('rev-parse', 'HEAD'); return head; };
@@ -41,7 +42,7 @@ async function fixture(work: (f: {
     const raw = Buffer.concat(parts), path = req.url!;
     requests.push(`${req.method} ${path}`);
     const answer = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
-    if (path.startsWith('/github/repos/fixture/repo/compare/')) return answer(200, { files: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
+    if (path.startsWith('/github/repos/fixture/repo/compare/')) return answer(200, { merge_base_commit: { sha: mergeBase }, files: [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
       patch: '@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;', sha: head }] });
     if (path === '/github/repos/fixture/repo/pulls/42/files') return answer(200, [{ filename: 'a.ts', status: 'modified', additions: 1, deletions: 1,
       patch: '@@ -1 +1 @@\n-export const a = 0;\n+export const a = 1;', sha: head }]);

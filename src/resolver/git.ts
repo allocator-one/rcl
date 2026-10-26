@@ -63,6 +63,12 @@ async function revParse(cwd: string, ...args: string[]): Promise<string | undefi
  */
 const DEFAULT_BRANCH_FALLBACKS = ['origin/main', 'origin/master'] as const;
 
+/** Resolve the actual common ancestor when both explicitly named commits are available locally. */
+export async function resolveGitMergeBase(baseSha: string, headSha: string, cwd = process.cwd()): Promise<string | undefined> {
+  if (!FULL_OBJECT_ID.test(baseSha) || !FULL_OBJECT_ID.test(headSha)) return undefined;
+  return revParse(cwd, 'merge-base', baseSha, headSha);
+}
+
 /**
  * Best-effort exact-head binding for local review modes (IO-12475 section
  * 8.1). Never throws: outside a repository, on an unborn branch, or without

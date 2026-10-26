@@ -74,6 +74,8 @@ export interface GuardedLaunchOptions {
   target: string;
   headSha: string;
   inputSha256: string;
+  /** Refusal-only match for older input formats. Never authorizes claims, admission or checkpoint recovery. */
+  historicalInputSha256?: string;
   recoverySource?: NonNullable<ConvergeContext['recovery_source']>;
   round?: number;
   maxAttempts?: number;
@@ -136,7 +138,8 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   if (intent === 'stop-review') refuse('review_stopped', 'No review will launch. Stop only the recorded host task when cancellation was requested.');
   if (intent === 'retry-delivery') refuse('delivery_only', 'Retry evidence delivery with rcl telemetry flush, not another review.');
-  if (!/^[a-f0-9]{40}$/.test(options.headSha) || !/^[a-f0-9]{64}$/.test(options.inputSha256)) {
+  if (!/^[a-f0-9]{40}$/.test(options.headSha) || !/^[a-f0-9]{64}$/.test(options.inputSha256) ||
+      (options.historicalInputSha256 !== undefined && !/^[a-f0-9]{64}$/.test(options.historicalInputSha256))) {
     refuse('invalid_input_identity', 'A guarded launch needs an exact head and effective-input SHA256.');
   }
   if (options.retryReason !== undefined) {
@@ -268,7 +271,11 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     }
 
   }
-  if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
+  // A format upgrade alone must not authorize blind re-review of an admitted
+  // legacy report. Unadmitted stale reports still require the audited path
+  // above, and an inspected legacy health retry keeps its original proof.
+  if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha &&
+      (previous.inputSha256 === options.inputSha256 || previous.inputSha256 === options.historicalInputSha256)) {
     refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');

@@ -22,6 +22,17 @@ function directPrPackage() {
 }
 
 describe('ordinary pending migration package', () => {
+  it('authenticates a new base-bound input while still accepting historical packets (RCL-210)', () => {
+    expect(validateOrdinaryPendingPackage(packet(), expected)).toBeDefined();
+    const guardedInput = { ...input, base: expected.baseSha };
+    const value = { ...packet(), guardedInput };
+    const identity = { ...expected, inputSha256: guardedInputSha256(guardedInput) };
+    expect(validateOrdinaryPendingPackage(value, identity)).toBeDefined();
+    const changed = { ...guardedInput, base: 'f'.repeat(40) };
+    expect(() => validateOrdinaryPendingPackage({ ...value, guardedInput: changed },
+      { ...identity, inputSha256: guardedInputSha256(changed) })).toThrow('ordinary_pending_package_mismatch');
+  });
+
   it('requires an explicit representation contract for compact guarded input while accepting legacy raw input', () => {
     expect(validateOrdinaryPendingPackage(packet(), expected)).toBeDefined();
 

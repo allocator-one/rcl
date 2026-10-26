@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 4.5.20 - 2026-10-26
+
+- Bind PR reviews to the comparison merge base instead of the moving base
+  tip, and refuse a locally checkable PR patch whose declared base is not
+  its common ancestor with the head. Include every resolved base in new
+  guarded input digests, so a base-only correction can use audited stale
+  recovery without changing the head, patch or spec. Historical pending
+  export and finalize-only retain their original input format and separate
+  base-receipt checks. Already-claimed legacy recovery successors remain
+  replayable only with the exact captured inputs and plan.
+  Clarify the capture steps in the generated converge skills (RCL-210).
+
 ## 4.5.19 - 2026-10-21
 
 - Verify large reviews instead of falling back at a fixed deadline. The whole

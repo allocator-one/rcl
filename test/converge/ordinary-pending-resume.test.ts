@@ -101,6 +101,22 @@ describe('ordinary pending launch migration', () => {
       .toMatchObject({ status: 'completed', attempt: 2, pendingRecovery: { blockingOutcome: 'unknown' } });
     await expect(resumePendingLegacyLaunch(options)).resolves.toMatchObject({ reusedCompletion: true,
       claim: { attempt: 2, attemptsUsed: 2 } });
+    // A 4.5.19 combined successor already owns its old base-less digest.
+    // An upgrade must reuse it only with the exact captured base and plan.
+    const upgraded = { ...options,
+      recoveryInputSha256: guardedInputSha256({ ...guardedInput, base: baseSha }),
+      historicalRecoveryInputSha256: inputSha256 };
+    await expect(resumePendingLegacyLaunch(upgraded)).resolves.toMatchObject({ reusedCompletion: true,
+      claim: { attempt: 2, attemptsUsed: 2 } });
+    await expect(resumePendingLegacyLaunch({ ...upgraded,
+      historicalRecoveryInputSha256: '9'.repeat(64) })).rejects.toThrow('capture_mismatch');
+    const changedBase = capturePreparedCouncil({ target, headSha, mergeBaseSha: 'e'.repeat(40), diff, assignments,
+      lanes: ['blocking', 'blocking'], chunks, prompts,
+      config: { models: ['openai/test'] }, specBytes: 'spec', contextDocs: [],
+      compatibility: { parser: { name: 'findings-json', version: 1 }, aggregation: { name: 'consensus', version: 2 } } });
+    await expect(resumePendingLegacyLaunch({ ...upgraded, captured: changedBase }))
+      .rejects.toThrow('capture_mismatch');
+    expect((await loadConvergeAttemptState(common, target))?.attemptsUsed).toBe(2);
     expect(recoveredRun).toHaveBeenCalledTimes(2);
   });
 });

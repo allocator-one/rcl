@@ -125,7 +125,9 @@ async function fetchChangedFiles(
         basehead: `${pr.base.sha}...${pr.head.sha}`,
       });
       files = data.files ?? [];
-      mergeBaseSha = data.merge_base_commit?.sha;
+      const comparisonBase = data.merge_base_commit?.sha;
+      mergeBaseSha = typeof comparisonBase === 'string' && /^[a-f0-9]{40}$/.test(comparisonBase)
+        ? comparisonBase : undefined;
     } catch {
       // A compare the API refuses (e.g. an object id it cannot resolve for
       // this repository) must not fail the review: the bracketed listing
@@ -137,7 +139,7 @@ async function fetchChangedFiles(
     if (requireMergeBase && (typeof mergeBaseSha !== "string" || !/^[a-f0-9]{40}$/.test(mergeBaseSha))) {
       throw new Error("The exact PR comparison did not provide a valid effective merge base.");
     }
-    if (files !== undefined && files.length === pr.changed_files) return { files, ...(requireMergeBase ? { mergeBaseSha } : {}) };
+    if (files !== undefined && files.length === pr.changed_files) return { files, ...(mergeBaseSha ? { mergeBaseSha } : {}) };
   }
 
   const listed: ChangedFile[] = await octokit.paginate(octokit.pulls.listFiles, {
@@ -159,7 +161,7 @@ async function fetchChangedFiles(
       `PR #${target.number} reports ${recheck.changed_files} changed files but the API listed ${listed.length} — the diff is incomplete (GitHub lists at most 3,000 files), refusing to review it as if it were whole.`
     );
   }
-  return { files: listed, ...(requireMergeBase ? { mergeBaseSha } : {}) };
+  return { files: listed, ...(mergeBaseSha ? { mergeBaseSha } : {}) };
 }
 
 export async function fetchPRDiff(

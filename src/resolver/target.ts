@@ -1,13 +1,13 @@
 import type { Diff } from './types.js';
 import type { GitHeads } from './git.js';
-import { resolveGitHeads } from './git.js';
+import { resolveGitHeads, resolveGitMergeBase } from './git.js';
 import { validateSha, type RunHeaderInput } from '../report/run-header.js';
 import { isGitHubTarget, parseGitHubTarget } from './github.js';
 import { parseRepoName } from './github.js';
 
 /**
  * Exact-head binding (IO-12475 section 8.1): which commit a diff belongs
- * to. PR mode takes the SHAs GitHub returned with the PR; git modes use the
+ * to. PR mode takes GitHub's head and comparison merge base; git modes use the
  * HEAD the caller resolved around the diff read (see `runReview`); a patch
  * file carries only its digest unless the caller vouches for its head with
  * --head-sha — the file could have come from anywhere, so rcl never guesses
@@ -20,6 +20,8 @@ export type GitDiffMode = 'staged' | 'working-tree';
 export interface TargetOverrides {
   headSha?: string;
   baseSha?: string;
+  /** Internal non-dispatching export/finalization only; retained evidence authenticates the historical base. */
+  historicalPendingRecovery?: boolean;
   /**
    * The pull request a patch-file review is evidence for (`owner/repo#N` or a
    * pull request URL), so Harness can verify its head and count the run for
@@ -34,7 +36,8 @@ export async function resolveReviewTarget(
   diff: Diff,
   gitMode: GitDiffMode | undefined,
   opts: TargetOverrides,
-  deps: { gitHeads?: GitHeads; resolveGitHeads?: () => Promise<GitHeads> } = {}
+  deps: { gitHeads?: GitHeads; resolveGitHeads?: () => Promise<GitHeads>;
+    resolveMergeBase?: (baseSha: string, headSha: string) => Promise<string | undefined> } = {}
 ): Promise<ReviewTarget> {
   const overrideGiven = opts.headSha !== undefined || opts.baseSha !== undefined;
   // `--for-pr` names the pull request a patch file stands for; a PR target
@@ -55,7 +58,7 @@ export async function resolveReviewTarget(
       prNumber: m.number,
       url: m.url,
       headSha: m.headSha,
-      baseSha: m.baseSha,
+      baseSha: m.mergeBaseSha ?? m.baseSha,
       headRef: m.head,
       baseRef: m.base,
     };
@@ -78,11 +81,20 @@ export async function resolveReviewTarget(
     throw new Error('A patch review bound to a pull request by --for-pr needs --head-sha: evidence binds to the commit it reviewed.');
   }
   const pr = attributed && opts.headSha !== undefined ? attributed : undefined;
+  const headSha = opts.headSha === undefined ? undefined : validateSha(opts.headSha, '--head-sha');
+  const baseSha = opts.baseSha === undefined ? undefined : validateSha(opts.baseSha, '--base-sha');
+  if (pr && headSha && baseSha && !opts.historicalPendingRecovery) {
+    const mergeBase = await (deps.resolveMergeBase ?? resolveGitMergeBase)(baseSha, headSha);
+    if (mergeBase !== undefined && mergeBase !== baseSha) {
+      throw new Error(`The supplied patch base ${baseSha} is not its merge base ${mergeBase}. ` +
+        'Recapture the PR patch from git merge-base(base, head) and pass that commit as --base-sha.');
+    }
+  }
   return {
     kind: 'patch',
     ...(pr ? { repo: `${pr.owner}/${pr.repo}`, prNumber: pr.number, url: `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}` } : {}),
-    ...(opts.headSha !== undefined ? { headSha: validateSha(opts.headSha, '--head-sha') } : {}),
-    ...(opts.baseSha !== undefined ? { baseSha: validateSha(opts.baseSha, '--base-sha') } : {}),
+    ...(headSha !== undefined ? { headSha } : {}),
+    ...(baseSha !== undefined ? { baseSha } : {}),
   };
 }
 

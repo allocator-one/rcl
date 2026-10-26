@@ -45,6 +45,8 @@ export interface PendingLegacyResumeOptions {
   baseSha?: string;
   pendingInputSha256: string;
   recoveryInputSha256: string;
+  /** Existing successor replay only, authenticated by its exact captured inputs and plan. Never used for a claim. */
+  historicalRecoveryInputSha256?: string;
   retryReason: string;
   legacyRetry?: LegacyRetrySelection;
   captured: CapturedPreparedCouncil;
@@ -316,6 +318,7 @@ function validateOptions(input: PendingLegacyResumeOptions): void {
     (input.migrationPackage && !/^[a-f0-9]{40}$/.test(input.baseSha ?? '')) ||
     !/^[a-f0-9]{64}$/.test(input.pendingInputSha256 ?? '') ||
     !/^[a-f0-9]{64}$/.test(input.recoveryInputSha256 ?? '') ||
+    (input.historicalRecoveryInputSha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.historicalRecoveryInputSha256)) ||
     typeof input.retryReason !== 'string' || !input.retryReason.trim() || input.retryReason.length > 500 ||
     !Array.isArray(hashes) || hashes.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
     (!cycleFinalizePreview && ((hashes.length === 0 && !ordinaryPackage) ||
@@ -916,7 +919,8 @@ async function resumeFresh(options: PendingLegacyResumeOptions, ownership: Nativ
   }
   const resume = current.pendingResume;
   if (!resume || current.attempt !== attempts.attemptsUsed ||
-      current.headSha !== options.headSha || current.inputSha256 !== options.recoveryInputSha256 ||
+      current.headSha !== options.headSha ||
+      (current.inputSha256 !== options.recoveryInputSha256 && current.inputSha256 !== options.historicalRecoveryInputSha256) ||
       resume.planDigest !== options.captured.plan.digest ||
       resume.capturedInputsSha256 !== options.captured.captured.digest ||
       current.pendingRecovery?.sourceDigest !== source.digest) fail('capture_mismatch');

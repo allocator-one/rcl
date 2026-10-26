@@ -87,7 +87,7 @@ export async function retainOrdinaryLaunchInputs(options: OrdinaryLaunchInputs):
 
   const packetSha256 = sha256Hex(bytes);
   // A preclaim crash leaves the ordinal unspent. Include the full packet so
-  // a changed base (which the guarded-input digest omits) gets its own file.
+  // historical inputs whose digest omitted the base still get their own file.
   const path = retainedInputsPath({ ...options, gitCommonDir: common, packetSha256 });
   const directory = dirname(path);
   await mkdir(directory, { mode: 0o700 }).catch(error => {
