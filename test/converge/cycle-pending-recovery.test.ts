@@ -497,9 +497,8 @@ it('terminalizes a dead cycle attempt with unattributed async history and permit
     successfulReviews: 2, totalReviews: 2, deliveryPending: false }));
   await expect(guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
     headSha: fixture.headSha, inputSha256: fixture.inputSha256,
-    retryReason: 'Repeat the exact inputs after terminalizing A29.',
     cycleRemote: fixture.cycleRemote, validate: sameInputValidate, run: sameInputSuccessor }))
-    .rejects.toThrow('cycle_pending_inputs_unchanged');
+    .rejects.toThrow('dispatch_unknown');
   expect(sameInputValidate).not.toHaveBeenCalled();
   expect(sameInputSuccessor).not.toHaveBeenCalled();
   expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target)))
@@ -630,6 +629,74 @@ it('revalidates live cycle membership before an exact receipt replay can mutate 
 
   expect(fixture.cycleRemote.current).toHaveBeenCalledTimes(2);
   expect(consumeCycleHistory).not.toHaveBeenCalled();
+  expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
+  expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target))).toEqual(attemptsBefore);
+});
+
+async function finalizedCycleFixture() {
+  const fixture = await cyclePendingFixture();
+  await finalizeOrdinaryPendingLaunch(await cycleFinalizeOptions(fixture));
+  const success = () => ({ runId: randomUUID(), reportJsonSha256: '2'.repeat(64),
+    successfulReviews: 2, totalReviews: 2, deliveryPending: false });
+  return { fixture, success };
+}
+
+it('authenticates the recovery receipt at its persisted round cap before applying a raised cap', async () => {
+  const { fixture, success } = await finalizedCycleFixture();
+  const run = vi.fn(async () => success());
+  await guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: 'f'.repeat(40), inputSha256: '1'.repeat(64), maxRounds: 31,
+    retryReason: 'Current exact head after the recovered dispatch.',
+    cycleRemote: fixture.cycleRemote, validate: async () => {}, run });
+  expect(run).toHaveBeenCalledOnce();
+  expect(await loadConvergeRunState(fixture.common, fixture.target)).toMatchObject({ roundCap: 31 });
+  expect(await loadConvergeAttemptState(fixture.common, fixture.target)).toMatchObject({
+    attemptsUsed: 2, cap: 35, cycle: fixture.state.cycle,
+    attempts: [{ attempt: 1 }, { attempt: 2 }],
+  });
+});
+
+it('dispatches a fresh canonical successor at unchanged inputs after an explicit bounded retry', async () => {
+  const { fixture, success } = await finalizedCycleFixture();
+  const original = (await loadConvergeRunState(fixture.common, fixture.target))!.lastLaunch!;
+  const validate = vi.fn(async () => {});
+  const run = vi.fn(async (_context: unknown, _ownership: unknown, _original?: unknown,
+    checkpoint?: { namespace: string; resumed: boolean }) => {
+    void checkpoint;
+    return success();
+  });
+  await guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: fixture.headSha, inputSha256: fixture.inputSha256, maxRounds: 31,
+    retryReason: 'Authorized fresh successor at the unchanged exact inputs.',
+    cycleRemote: fixture.cycleRemote, validate, beforeClaim: fixture.beforeClaim,
+    ordinaryCheckpoint: { exists: async () => false }, run });
+  expect(validate).toHaveBeenCalledOnce();
+  expect(run).toHaveBeenCalledOnce();
+  const checkpoint = run.mock.calls[0]![3]!;
+  // A fresh journal: neither the rejected attempt's checkpoint nor its results are reused.
+  expect(checkpoint.resumed).toBe(false);
+  expect(checkpoint.namespace).not.toBe(`ordinary-${original.ordinaryInputs!.packetSha256.slice(0, 48)}`);
+  const state = (await loadConvergeRunState(fixture.common, fixture.target))!;
+  expect(state.lastLaunch).toMatchObject({ status: 'completed', attempt: 2 });
+  const attempts = (await loadConvergeAttemptState(fixture.common, fixture.target))!;
+  expect(attempts).toMatchObject({ attemptsUsed: 2, cap: 35 });
+  expect(attempts.attempts[0]).toEqual(fixture.attempts.attempts[0]);
+});
+
+it('keeps refusing an unauthenticated recovery and leaves the cap untouched', async () => {
+  const { fixture, success } = await finalizedCycleFixture();
+  const receiptDir = join(fixture.common, 'rcl-converge-pending-finalizations');
+  await rm(receiptDir, { recursive: true, force: true });
+  const nativeBefore = await readFile(fixture.nativePath);
+  const attemptsBefore = await readFile(convergeAttemptStatePath(fixture.common, fixture.target));
+  const validate = vi.fn(async () => {});
+  const run = vi.fn(async () => success());
+  await expect(guardReviewLaunch({ gitCommonDir: fixture.common, target: fixture.target,
+    headSha: fixture.headSha, inputSha256: fixture.inputSha256, maxRounds: 31,
+    retryReason: 'Authorized fresh successor at the unchanged exact inputs.',
+    cycleRemote: fixture.cycleRemote, validate, run })).rejects.toThrow('cycle_pending_recovery_required');
+  expect(validate).not.toHaveBeenCalled();
+  expect(run).not.toHaveBeenCalled();
   expect(await readFile(fixture.nativePath)).toEqual(nativeBefore);
   expect(await readFile(convergeAttemptStatePath(fixture.common, fixture.target))).toEqual(attemptsBefore);
 });

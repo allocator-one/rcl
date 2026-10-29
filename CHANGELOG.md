@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Let an explicitly authorized bounded successor follow an authenticated
+  finalize-only cycle recovery. The recovery receipt is now verified against
+  the round cap it was issued on before a requested `--max-rounds` applies, and
+  a recovered unknown dispatch no longer refuses a fresh attempt at unchanged
+  exact inputs when a bounded retry reason is supplied. Attempts, caps and the
+  unknown provenance of the recovered dispatch stay cumulative, and the
+  successor starts a new journal instead of reusing the rejected attempt's.
+
 ## 4.5.20 - 2026-10-26
 
 - Bind PR reviews to the comparison merge base instead of the moving base

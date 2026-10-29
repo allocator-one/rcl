@@ -127,7 +127,9 @@ function nextRound(state: ConvergeRunState): number {
 }
 
 async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunState, attemptsUsed: number,
-  recordedLaunch: GuardedLaunchState | undefined = state.lastLaunch): Promise<{
+  recordedLaunch: GuardedLaunchState | undefined = state.lastLaunch,
+  /** Round cap the native state was persisted with; recovery receipts are issued against it, not a requested cap. */
+  persistedRoundCap: number = state.roundCap): Promise<{
   round: number;
   retryProof?: Awaited<ReturnType<typeof inspectLegacyRetry>>;
   boundFixRecoverySource?: BoundFixRecoverySource;
@@ -206,14 +208,12 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   }
   if (previous.status !== 'completed') {
     if (state.cycle && ((previous.status === 'pending' && !previous.runId) || previous.pendingRecovery)) {
-      if (!await verifyCyclePendingFinalization(options.gitCommonDir, state, previous)) {
+      if (!await verifyCyclePendingFinalization(options.gitCommonDir, state, previous, persistedRoundCap)) {
         refuse('cycle_pending_recovery_required',
           'The previous cycle dispatch is not terminal. Authenticate and finalize its pending recovery before launching a successor.');
       }
-      if (previous.headSha === options.headSha && previous.inputSha256 === options.inputSha256) {
-        refuse('cycle_pending_inputs_unchanged',
-          'The recovered dispatch remains unknown; its successor must use materially changed exact review inputs.');
-      }
+      // The recovered dispatch is unknown and its results were never admitted, so an
+      // explicit bounded retry may run a fresh attempt at the same exact inputs.
       if (!options.retryReason) {
         refuse('dispatch_unknown', 'The recovered dispatch remains spent; supply a bounded retry reason for its successor.');
       }
@@ -477,6 +477,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
         if (!(error instanceof StaleReportAuditError)) throw error;
         refuse('stale_report_audit_invalid','Retained stale-report evidence is missing or inconsistent; no attempt was claimed.');
       }
+      const persistedRoundCap = state.roundCap;
       if (options.maxRounds !== undefined) {
         const cap = validateRoundCap(options.maxRounds);
         if (recovered && cap !== state.roundCap) {
@@ -506,7 +507,7 @@ async function guardReviewLaunchOwned(options: GuardedLaunchOptions, ownership: 
       }
       const guardedAttemptsUsed = preclaimed ? attempts!.attemptsUsed - 1 : attempts?.attemptsUsed ?? 0;
       const { round, retryProof, boundFixRecoverySource } = await requireLaunch(options, state, guardedAttemptsUsed,
-        recovered ? attempts?.lastLaunch : state.lastLaunch);
+        recovered ? attempts?.lastLaunch : state.lastLaunch, persistedRoundCap);
       const cap = options.maxAttempts ?? attempts?.cap;
       if (!preclaimed && cap !== undefined && attempts && attempts.attemptsUsed >= cap) {
         throw new ConvergeAttemptBudgetExceededError(options.target, attempts.attemptsUsed, cap);
