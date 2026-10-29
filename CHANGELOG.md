@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.21 - 2026-10-30
+
 - Let an explicitly authorized bounded successor follow an authenticated
   finalize-only cycle recovery. The recovery receipt is now verified against
   the round cap it was issued on before a requested `--max-rounds` applies, and
