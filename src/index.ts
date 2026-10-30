@@ -4,6 +4,8 @@ import { guardedDeliveryState } from './telemetry/deliver.js';
 import { AmbiguousReviewerIdentityError, assertUnambiguousReviewerIdentities } from './dispatch/reviewer-identity.js';
 import { retainAssemblyRefusal } from './output/assembly-refusal.js';
 import { createReviewCycleRemote } from './converge/cycle-remote.js';
+import { prSnapshotFrom, readPrSnapshot, writePrSnapshot } from './converge/pr-snapshot.js';
+import { applyFreshReviewClose, previewFreshReviewClose } from './converge/fresh-review-close.js';
 import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
 import { previewHistoricalDeliveryReconciliation,
@@ -366,6 +368,7 @@ program
   .option('--round <n>', 'Converge round number (or RCL_CONVERGE_ROUND)')
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
+  .option('--pr-snapshot <path>', 'Live pull request state from `rcl pr-snapshot`, captured by a parent that holds GitHub credentials; review cycles read it instead of GitHub (RCL-216)')
   .option('--guarded-converge', 'Validate and claim inside this review process, or consume an exact recovered-v3 --attempt; derive the round from native state')
   .option('--bound-fix-recovery <run-id>', 'Review unchanged inputs once live Harness evidence proves a retained bound fix obligation after this native dismissal-only run')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
@@ -664,6 +667,65 @@ program
       console.log(JSON.stringify({...result as object,accounting:'unchanged',scope:'local stale disposition only; no admission, provider calls or approval'}));
     } catch (error) {
       console.error(JSON.stringify({error:{code:'RCL_CONVERGE_STALE',message:error instanceof Error?error.message:String(error)}}));
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command('pr-snapshot <pr>')
+  .description('Capture a pull request\'s live state (head, base, open/merged) for a review process that holds no GitHub ' +
+    'credentials: run it in the parent, then pass the file to `rcl review --pr-snapshot` within 15 minutes (RCL-216)')
+  .requiredOption('--out <path>', 'New file to write (refuses an existing one); readable by its owner only')
+  .option('--config <path>', 'Path to config file')
+  .option('--json')
+  .action(async (pr: string, opts: { out: string; config?: string; json?: boolean }) => {
+    try {
+      if (!isGitHubTarget(pr)) throw new Error('pr_snapshot_requires_pull_request');
+      const target = parseGitHubTarget(pr);
+      const config = await loadConfig(opts.config);
+      const { data } = await getGitHubPullRequest(await createGitHubClient(config.githubToken), target);
+      const snapshot = prSnapshotFrom(`${target.owner}/${target.repo}`, target.number, data);
+      const digest = await writePrSnapshot(opts.out, snapshot);
+      console.log(opts.json ? JSON.stringify({ snapshot, path: opts.out, sha256: digest })
+        : `Wrote ${opts.out}: ${snapshot.repo}#${snapshot.prNumber} ${snapshot.state} at ${snapshot.headSha} (sha256 ${digest})`);
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_PR_SNAPSHOT', message: error instanceof Error ? error.message : String(error) } }));
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command('converge-close-fresh')
+  .description('Preview or apply an audited close of a fresh-review operation whose launch died before writing any report; ' +
+    'never creates a round, finding, verdict or attempt (RCL-216)')
+  .option('--preview')
+  .option('--apply')
+  .option('--target <target>')
+  .option('--operation <uuid>', 'The fresh-review operation to close (its native current operation)')
+  .requiredOption('--manifest <path>', 'Exclusive preview manifest; the reviewed manifest for apply')
+  .option('--manifest-sha256 <sha256>', 'Exact reviewed manifest bytes; required for apply')
+  .option('--json')
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      if ([opts.preview, opts.apply].filter(Boolean).length !== 1) throw new Error('choose_exactly_one_fresh_close_mode');
+      const gitCommonDir = await resolveGitCommonDir();
+      let result: unknown;
+      if (opts.preview) {
+        if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
+        if (typeof opts.target !== 'string' || typeof opts.operation !== 'string') throw new Error('fresh_close_preview_arguments_required');
+        const manifest = await previewFreshReviewClose({ target: opts.target, operationId: opts.operation }, gitCommonDir);
+        await writeExclusive(opts.manifest as string, manifest, 256 * 1024);
+        result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)), accounting: 'unchanged',
+          scope: 'local operation close; no admission or approval' };
+      } else {
+        if (opts.target !== undefined || opts.operation !== undefined) throw new Error('apply_uses_only_pinned_manifest');
+        result = { mode: 'apply', result: await applyFreshReviewClose({ manifest: opts.manifest as string,
+          manifestSha256: opts.manifestSha256 as string }, gitCommonDir), accounting: 'unchanged',
+          scope: 'local operation close; no admission or approval' };
+      }
+      console.log(JSON.stringify(result));
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_CLOSE_FRESH', message: error instanceof Error ? error.message : String(error) } }));
       process.exitCode = 3;
     }
   });
@@ -1695,6 +1757,8 @@ interface CouncilCliOpts {
   /** Converge context, or the RCL_CONVERGE_* environment the skill exports. */
   convergeTarget?: string;
   forPr?: string;
+  /** A parent's `rcl pr-snapshot` file: the live PR state, read without GitHub credentials. */
+  prSnapshot?: string;
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
@@ -2434,6 +2498,9 @@ async function executeCouncil(
       const prTarget = parseGitHubTarget(`${extra.target.repo}#${extra.target.prNumber}`);
       cycleRemote = createReviewCycleRemote(runtime.sink, extra.target.repo, extra.target.prNumber,
         opts.expectPrHeadSha ?? extra.target.headSha ?? '', async () => {
+          // A parent with GitHub credentials hands the live state over, so this
+          // review process needs none (RCL-216).
+          if (opts.prSnapshot !== undefined) return readPrSnapshot(opts.prSnapshot, extra.target.repo!, extra.target.prNumber!);
           const client = await createGitHubClient(config.githubToken);
           const auth = await client.auth();
           if (typeof auth !== 'object' || auth === null || !('type' in auth) || auth.type !== 'token') {

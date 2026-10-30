@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Let a review cycle run without GitHub credentials in the reviewer process.
+  `rcl pr-snapshot <owner/repo#N> --out <file>` captures the pull request's
+  head, base and open/merged state in a parent that holds the credential, and
+  `rcl review --pr-snapshot <file>` confirms the reviewed head from it instead
+  of calling GitHub, for `--start-over` and every round within a cycle. The
+  file is refused when another user could write it, when it names another pull
+  request, or when it is more than 15 minutes old (RCL-216).
+- Add `rcl converge-close-fresh --preview|--apply`, an audited close of a
+  fresh-review operation whose launch died before the council wrote anything.
+  It proves from native state that the launching process is dead, its council
+  journal holds no reviewer result and the cycle admitted no round, retains
+  the exact operation, run and attempt bytes it rested on, and marks the
+  operation terminal with a reference to the audit. It creates or releases no
+  round, finding, verdict or attempt (RCL-216).
+
 ## 4.5.21 - 2026-10-30
 
 - Let an explicitly authorized bounded successor follow an authenticated
