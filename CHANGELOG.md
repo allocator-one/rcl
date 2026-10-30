@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.22 - 2026-10-30
+
 - Let a review cycle run without GitHub credentials in the reviewer process.
   `rcl pr-snapshot <owner/repo#N> --out <file>` captures the pull request's
   head, base and open/merged state in a parent that holds the credential, and
