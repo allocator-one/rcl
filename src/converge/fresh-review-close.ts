@@ -98,21 +98,25 @@ async function observe(commonDir: string, selection: FreshReviewCloseSelection, 
     launch!.pendingRecovery || launch!.recovery) fail('fresh_close_launch_has_work');
   if (launch!.headSha !== operation.headSha) fail('fresh_close_launch_head_mismatch');
   if (!launch!.processIdentity) fail('fresh_close_process_unverifiable');
+  // The dead launch must hold the cycle's latest claim: a later attempt may
+  // have produced work this close would not see.
   const claim = attempts!.attempts.find(record => record.attempt === launch!.attempt);
-  if (!claim || attempts!.attemptsUsed < launch!.attempt) fail('fresh_close_attempt_not_spent');
+  if (!claim || attempts!.attemptsUsed !== launch!.attempt) fail('fresh_close_attempt_not_latest');
   const status = await (io.inspectProcess ?? inspectProcessIdentity)(launch!.processIdentity!).catch(() => 'unverifiable' as const);
   if (status === 'alive') fail('fresh_close_process_alive');
   if (status !== 'dead') fail('fresh_close_process_unverifiable');
   // The council journals every reviewer result before anything is reported;
   // an empty (or never created) journal is the proof that nothing was produced.
-  const checkpoint = launch!.ordinaryInputs
-    ? checkpointPath(commonDir, target, ordinaryCheckpointNamespace(launch!.ordinaryInputs.packetSha256)) : undefined;
-  const results = checkpoint ? await entries(join(checkpoint, 'results')) : undefined;
-  const events = checkpoint ? await entries(join(checkpoint, 'events')) : undefined;
+  // Without the launch's packet binding there is no journal to inspect, and
+  // so no proof.
+  if (!launch!.ordinaryInputs) fail('fresh_close_journal_unknown');
+  const checkpoint = checkpointPath(commonDir, target, ordinaryCheckpointNamespace(launch!.ordinaryInputs!.packetSha256));
+  const results = await entries(join(checkpoint, 'results'));
+  const events = await entries(join(checkpoint, 'events'));
   if (results && results.length) fail('fresh_close_results_present');
   return { operation, operationPath: current!.path, operationBytes: await readStable(current!.path, 64 * 1024),
     runPath, runBytes, attemptsPath, attemptBytes, launch: launch!,
-    checkpoint: { path: checkpoint ?? '', present: results !== undefined, results: 0 as const, events: events?.length ?? 0 } };
+    checkpoint: { path: checkpoint, present: results !== undefined, results: 0 as const, events: events?.length ?? 0 } };
 }
 
 /** Read-only preview of a close; the only identity it introduces is the audit's own. */

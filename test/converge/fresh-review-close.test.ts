@@ -33,7 +33,7 @@ async function deadProcessIdentity() {
  * pending launch and journal, and died before any reviewer result: the state
  * an interrupted `--start-over` leaves behind.
  */
-async function diedFixture(options: { results?: string[]; gitCommonDir?: string } = {}) {
+async function diedFixture(options: { results?: string[]; gitCommonDir?: string; unbound?: boolean } = {}) {
   const gitCommonDir = options.gitCommonDir ?? await mkdtemp(join(tmpdir(), 'rcl-fresh-close-'));
   if (!options.gitCommonDir) roots.push(gitCommonDir);
   const target = 'rcl-42', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), packetSha256 = 'c'.repeat(64);
@@ -53,7 +53,7 @@ async function diedFixture(options: { results?: string[]; gitCommonDir?: string 
   const run = JSON.parse(await readFile(runPath, 'utf8'));
   await writeFile(runPath, JSON.stringify({ ...run, lastLaunch: { status: 'pending', attempt: 1, round: 1, headSha, inputSha256,
     startedAt: new Date().toISOString(), pid: processIdentity.pid, processIdentity,
-    ordinaryInputs: { version: 1, packetSha256, baseSha: 'd'.repeat(40) } } }));
+    ...(options.unbound ? {} : { ordinaryInputs: { version: 1, packetSha256, baseSha: 'd'.repeat(40) } }) } }));
   const checkpoint = checkpointPath(gitCommonDir, target, ordinaryCheckpointNamespace(packetSha256));
   for (const child of ['events', 'results']) await mkdir(join(checkpoint, child), { recursive: true, mode: 0o700 });
   await writeFile(join(checkpoint, 'plan.json'), '{}');
@@ -117,6 +117,12 @@ it('refuses a launch whose council journaled a reviewer result', async () => {
   const f = await diedFixture({ results: ['cell-1-attempt-1.json'] });
   await expect(previewFreshReviewClose({ target: f.target, operationId: f.fresh.operationId }, f.gitCommonDir))
     .rejects.toThrow('fresh_close_results_present');
+});
+
+it('refuses a launch with no journal binding, which leaves nothing to prove empty', async () => {
+  const f = await diedFixture({ unbound: true });
+  await expect(previewFreshReviewClose({ target: f.target, operationId: f.fresh.operationId }, f.gitCommonDir))
+    .rejects.toThrow('fresh_close_journal_unknown');
 });
 
 it('refuses a cycle that admitted a round', async () => {
