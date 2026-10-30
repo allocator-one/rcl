@@ -445,6 +445,8 @@ commands are documented in
 | `rcl converge-reconcile-history` | Authenticate and append a reconciliation receipt for an exact historical guarded launch after `lastLaunch` advanced |
 | `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |
+| `rcl converge-close-fresh` | Audited close of a fresh-review operation whose launch died before writing any report |
+| `rcl pr-snapshot` | Capture a pull request's live state for a review process that holds no GitHub credentials (`rcl review --pr-snapshot`) |
 | `rcl converge-rejected` | Audited disposition of a report rejected locally before delivery |
 | `rcl converge-attempt` | Claim one durable attempt; recovered-v3 continuation hands the exact claim to its guarded producer with `--attempt` |
 

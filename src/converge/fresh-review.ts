@@ -34,8 +34,13 @@ const operationSchema = z.object({
   phase: z.enum(['prepared', 'recorded', 'active', 'rejected', 'terminal']),
   rejection: z.string().optional(),
   receipt: reviewCycleReceiptSchema.optional(),
+  /** An audited close of an operation whose launch died before any report (RCL-216). */
+  closure: z.object({ kind: z.literal('died_before_report'), auditId: z.string().uuid(),
+    manifestSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
 }).strict();
 type Operation = z.infer<typeof operationSchema>;
+export type FreshReviewOperationRecord = Operation;
+export type FreshReviewClosure = NonNullable<Operation['closure']>;
 type Archive = z.infer<typeof archiveSchema>;
 
 export interface FreshReviewOptions {
@@ -93,6 +98,18 @@ async function currentOperation(directory: string, target: string): Promise<Oper
   const operation = operationSchema.parse(JSON.parse((await readStable(join(directory, `${operationId}.json`), 64 * 1024)).text));
   if (operation.operationId !== operationId || operation.target !== target) throw new Error('fresh_review_operation_mismatch');
   return operation;
+}
+
+/** The target's current fresh-review operation and its exact bytes, if any. */
+export async function readFreshReviewOperation(common: string, target: string):
+  Promise<{ operation: Operation; path: string; sha256: string } | undefined> {
+  const directory = reviewCycleDirectory(common, target);
+  const operation = await currentOperation(directory, target);
+  if (!operation) return undefined;
+  const path = join(directory, `${operation.operationId}.json`);
+  const bytes = (await readStable(path, 64 * 1024)).raw;
+  if (!isDeepStrictEqual(operationSchema.parse(JSON.parse(bytes.toString())), operation)) throw new Error('fresh_review_operation_changed');
+  return { operation, path, sha256: hash(bytes) };
 }
 
 /** Capture the request generation before waiting for another launcher. */
@@ -287,6 +304,25 @@ export async function finishFreshReview(common: string, target: string, operatio
   const operation = await currentOperation(directory, target);
   if (!operation || operation.operationId !== operationId || operation.phase !== 'active') throw new Error('fresh_review_operation_changed');
   await replaceJson(join(directory, `${operationId}.json`), { ...operation, phase: 'terminal' });
+}
+
+/**
+ * Close an active operation whose launch died before any report, as one
+ * compare-and-swap on its exact bytes: it becomes terminal and names the audit
+ * that justified it. Nothing else changes: no round, finding, verdict or
+ * attempt is created or released, and the cycle's spending stays history for
+ * the next explicitly requested fresh review (RCL-216).
+ */
+export async function closeDiedFreshReview(common: string, target: string, operationId: string,
+  expectedSha256: string, closure: FreshReviewClosure, ownership: NativeTargetOwnership): Promise<'closed' | 'already_closed'> {
+  common = await ownedNativeTargetCommonDir(ownership, common, target);
+  const directory = reviewCycleDirectory(common, target);
+  const current = await readFreshReviewOperation(common, target);
+  if (!current || current.operation.operationId !== operationId) throw new Error('fresh_review_operation_changed');
+  if (current.operation.phase === 'terminal' && isDeepStrictEqual(current.operation.closure, closure)) return 'already_closed';
+  if (current.operation.phase !== 'active' || current.sha256 !== expectedSha256) throw new Error('fresh_review_operation_changed');
+  await replaceJson(join(directory, `${operationId}.json`), { ...current.operation, phase: 'terminal', closure });
+  return 'closed';
 }
 
 /** Neither a missing partner nor a legacy ledger may replenish a cycle's budget. */
