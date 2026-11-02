@@ -456,19 +456,27 @@ export function validateReportIdentityMappings(findings: readonly ReportIdentity
   }
 }
 
+/** The dismissed claim this entry stands for before `round`: itself, or the root a suppressed repeat resolved to. */
+function standingDismissalRoot(state: ConvergeRunState, entry: FindingEntry, round: number): FindingEntry | undefined {
+  const root = entry.repeatOf ? state.findings[entry.repeatOf.identity] : entry;
+  return root?.verdict === 'dismissed' && root.verdictRound! < round ? root : undefined;
+}
+
 /**
  * Suppress this round's new gating findings when every one of them repeats a
  * standing dismissal (RCL-199). Mutates the annotations, counts and entries.
  */
 function suppressRepeatOnlyRound(state: ConvergeRunState, annotations: AnnotatedRoundFinding[], counts: RoundCounts,
   round: number, lineWindow: number): void {
-  const standingDismissal = (entry: FindingEntry): PriorClaim['dismissal'] => {
-    const root = entry.repeatOf ? state.findings[entry.repeatOf.identity] : entry;
-    return root?.verdict === 'dismissed' && root.verdictRound! < round
-      ? { identity: root.key, round: root.verdictRound!, severity: root.verdictSeverity ?? root.severity } : undefined;
-  };
-  const prior: PriorClaim[] = Object.values(state.findings).filter(entry => entry.firstRound < round)
-    .map(entry => ({ ...entry, dismissal: standingDismissal(entry) }));
+  // A suppressed repeat matches at its root's lines, so chained repeats cannot drift away from the dismissed code.
+  const prior: PriorClaim[] = Object.values(state.findings).filter(entry => entry.firstRound < round).map(entry => {
+    const root = standingDismissalRoot(state, entry, round);
+    return {
+      ...entry,
+      ...(root ? { startLine: root.startLine, endLine: root.endLine,
+        dismissal: { identity: root.key, round: root.verdictRound!, severity: root.verdictSeverity ?? root.severity } } : {}),
+    };
+  });
   const actionable = annotations.filter(a =>
     (a.status === 'new' || a.status === 'regating') && findingGatingReason(a.finding) !== 'none');
   if (actionable.length === 0 || actionable.some(a => a.status !== 'new')) return;
@@ -814,6 +822,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
 
     let status: FindingStatus;
     let suppressReason: string | undefined;
+    const repeatRoot = entry.verdict === undefined ? standingDismissalRoot(state, entry, options.round) : undefined;
     if (entry.firstRound === options.round) {
       // A re-run of the round that first recorded this finding — it is this
       // round's own NEW finding being reprocessed, not a cross-round repeat.
@@ -833,6 +842,12 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
           (entry.verdictReason ? ` (${entry.verdictReason})` : '') +
           ' — a dismissal is terminal on its evidence; re-gating requires escalation to critical (RCL-30)';
       }
+    } else if (repeatRoot && !(finding.severity === 'critical' && (repeatRoot.verdictSeverity ?? repeatRoot.severity) !== 'critical') &&
+        finding.startLine <= repeatRoot.endLine + lineWindow && repeatRoot.startLine <= finding.endLine + lineWindow) {
+      // An exact re-sighting of a suppressed repeat follows its dismissed root, within the root's line window (RCL-199).
+      status = 'suppressed';
+      counts.suppressed++;
+      suppressReason = repeatSuppressReason({ identity: repeatRoot.key, dismissedRound: repeatRoot.verdictRound! });
     } else {
       status = 'repeat';
       counts.repeat++;

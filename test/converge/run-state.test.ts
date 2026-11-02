@@ -686,6 +686,27 @@ describe('repeat-only rounds (RCL-199)', () => {
       suppressReason: expect.stringContaining(`repeats ${dismissed}, dismissed in round 1`) });
   });
 
+  it('suppresses an exact re-sighting of a suppressed repeat and converges that round', async () => {
+    const dismissed = await dismissFirstRound();
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    const third = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: [reworded(1)] });
+    expect(third.findings[0]).toMatchObject({ status: 'suppressed',
+      suppressReason: expect.stringContaining(`repeats ${dismissed}, dismissed in round 1`) });
+    expect(third.counts).toMatchObject({ new: 0, repeat: 0, suppressed: 1 });
+    expect(resolveRoundResolution((await loadConvergeRunState(dir, target))!, 3))
+      .toMatchObject({ status: 'converged-dismissal-only', unresolved: [] });
+  });
+
+  it('does not let chained repeats drift past the line window of the dismissed claim', async () => {
+    await dismissFirstRound();
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1, { startLine: 15, endLine: 19 })],
+      runId: runs[1] });
+    const third = await processRoundReport({ gitCommonDir: dir, target, round: 3,
+      findings: [reworded(2, { startLine: 20, endLine: 24 })] });
+    expect(third.findings[0]!.status).toBe('repeat');
+    expect(third.counts).toMatchObject({ suppressed: 0, repeat: 1 });
+  });
+
   it('keeps the round actionable when any gating finding is genuinely new', async () => {
     await dismissFirstRound();
     const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1], findings: [

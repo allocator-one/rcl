@@ -190,7 +190,8 @@ describe('report identity through native classification and telemetry', () => {
       : [{ ...nextModern!, identity: undefined }, nextModern!];
     const repeated = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: next });
     expect(repeated.findings.find(({ finding }) => finding.identity !== undefined))
-      .toMatchObject({ status: 'repeat', identity: transitionModern.identity });
+      .toMatchObject({ status: 'suppressed', identity: transitionModern.identity,
+        suppressReason: expect.stringContaining(`repeats ${legacyIdentity}`) });
     expect(repeated.findings.find(({ finding }) => finding.identity === undefined))
       .toMatchObject({ status: 'suppressed', identity: legacyIdentity });
   });
