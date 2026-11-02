@@ -716,6 +716,18 @@ describe('repeat-only rounds (RCL-199)', () => {
     expect(third.findings[0]!.status).toBe('regating');
   });
 
+  it('matches a later rewording against the dismissed wording, not an earlier repeat', async () => {
+    await dismissFirstRound();
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    // Title overlap is 0.42 with the round-2 repeat but 0.21 with the dismissed claim.
+    const third = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: [modern(0, 8, {
+      title: 'Treated as full coverage, a recipient silently drops queued retries',
+      description: 'Skipped when its cursor is past the start, although the retry window end is later and queued entries expire.',
+      startLine: 13, endLine: 17,
+    })] });
+    expect(third.findings[0]!.status).toBe('new');
+  });
+
   it('triages a rewording of a re-gated repeat that was then fixed', async () => {
     await dismissFirstRound();
     await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });

@@ -473,15 +473,16 @@ function suppressRepeatOnlyRound(state: ConvergeRunState, annotations: Annotated
   round: number, lineWindow: number): void {
   // A re-processed round decides again; its earlier decision must not stand.
   for (const entry of Object.values(state.findings)) if (entry.firstRound === round) delete entry.repeatOf;
-  // A suppressed repeat matches at its root's lines, so chained repeats cannot drift away from the dismissed code.
-  const prior: PriorClaim[] = Object.values(state.findings).filter(entry => entry.firstRound < round).map(entry => {
-    const root = standingDismissalRoot(state, entry, round);
-    return {
-      ...entry,
-      ...(root ? { startLine: root.startLine, endLine: root.endLine,
-        dismissal: { identity: root.key, round: root.verdictRound!, severity: root.verdictSeverity ?? root.severity } } : {}),
-    };
-  });
+  // A suppressed repeat without its own verdict is never a match target: a
+  // finding must resemble the dismissed root itself, so chained rewording
+  // cannot drift away from the dismissed claim's wording or lines.
+  const prior: PriorClaim[] = Object.values(state.findings)
+    .filter(entry => entry.firstRound < round && !(entry.repeatOf && entry.verdict === undefined))
+    .map(entry => {
+      const root = standingDismissalRoot(state, entry, round);
+      return { ...entry,
+        ...(root ? { dismissal: { identity: root.key, round: root.verdictRound!, severity: root.verdictSeverity ?? root.severity } } : {}) };
+    });
   const actionable = annotations.filter(a =>
     (a.status === 'new' || a.status === 'regating') && findingGatingReason(a.finding) !== 'none');
   if (actionable.length === 0 || actionable.some(a => a.status !== 'new')) return;
