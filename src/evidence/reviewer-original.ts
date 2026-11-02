@@ -62,7 +62,7 @@ function assertBindings(captured: CapturedReviewerInputs, run: RetainedOriginalR
   requireReviewerLaneBinding(plan);
   if (!aggregation || !isDeepStrictEqual(captured.config.thresholds, aggregation.thresholds) ||
     captured.config.output?.belowThresholdAppendix !== aggregation.belowThresholdAppendix) refuse('aggregation_mismatch');
-  if (aggregation.verifierContractVersion !== 2) refuse('verifier_contract');
+  if (aggregation.verifierContractVersion === undefined) refuse('verifier_contract');
   const repo = run.target.repo && parseRepoName(run.target.repo);
   const pr = run.target.prNumber;
   if (!repo || !Number.isSafeInteger(pr) || pr! < 1 || !['patch', 'pr'].includes(run.target.kind)) refuse('target_mismatch');

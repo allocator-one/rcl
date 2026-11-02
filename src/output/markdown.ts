@@ -240,8 +240,8 @@ export function toMarkdown(result: ReviewResult): string {
         `${byReason('verified')} verified) · ${byReason('none')} non-gating`;
     const v = stats.verification;
     if (v) {
-      line += ` · verification: ${v.refuted}/${v.candidates} single-model claim(s) refuted in ${(v.durationMs / 1000).toFixed(1)}s`;
-      if (v.unavailable > 0) line += ` (${v.unavailable} unavailable — unverified, not gating)`;
+      line += ` · verification: ${v.refuted}/${v.candidates} claim(s) refuted in ${(v.durationMs / 1000).toFixed(1)}s`;
+      if (v.unavailable > 0) line += ` (${v.unavailable} unavailable — unverified)`;
     }
     sections.push(line);
     sections.push('');

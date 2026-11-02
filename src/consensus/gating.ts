@@ -1,12 +1,15 @@
 import { performance } from 'node:perf_hooks';
 import { MAX_TIMER_DELAY_MS, VerificationReasoningEffortSchema, type VerificationReasoningEffort } from '../config/schema.js';
-import { VERIFIER_SYSTEM_PROMPT, parseVerificationVerdicts } from './verification-contract.js';
+import {
+  VERIFIER_SYSTEM_PROMPT, VERIFIER_SYSTEM_PROMPT_V3, parseVerificationVerdicts, type VerificationVerdict,
+} from './verification-contract.js';
 import type { ConsensusFinding } from './types.js';
 import type { ModelAnswer } from '../dispatch/adapter.js';
 import type { FileChange } from '../resolver/types.js';
 import { defaultAdapterFactory } from '../dispatch/runner.js';
 import { detectProvider } from '../roles/dispatcher.js';
-import { neutralizeDelimiters, wrapDiff } from '../prompts/hardening.js';
+import { neutralizeDelimiters, taskContextParts, wrapDiff } from '../prompts/hardening.js';
+import type { TaskContext } from '../prepare/task-context.js';
 import {
   formatSyntheticHunkHeader,
   parseUnifiedDiff,
@@ -36,6 +39,13 @@ import {
  * outage into a gate no pull request could pass: on 2026-09-14 a lane-wide
  * failure promoted 73 single-model, low-confidence findings to blocking on
  * one PR and blocked every open PR in the organization (RCL-60, RCL-62).
+ *
+ * Verifier contract version three (RCL-198) also sends critical and
+ * consensus findings to the verifier, with the task context. Unverified, they
+ * were wrong or spec-blind about half the time. A refuted one stops gating;
+ * any other verdict, including 'unavailable', keeps the tier it earned, so a
+ * verifier outage never opens the gate. Versions one and two replay as they
+ * were captured.
  */
 /**
  * `strict_fallback` is used only when the whole verification pass failed
@@ -107,6 +117,8 @@ export interface GatingOptions {
    * verification pass like a single-model claim.
    */
   modelWeights?: Map<string, number>;
+  /** Spec and pull request text for the verifier; version three only. */
+  taskContext?: TaskContext;
 }
 
 export interface VerificationStats {
@@ -253,6 +265,8 @@ Respond with ONLY a JSON array, one entry per finding id:
 "refuted" = the change itself shows the finding is wrong, already handled, or not applicable.
 "confirmed" = you could not refute it; it plausibly holds against this change.
 When unsure, answer "confirmed".`;
+
+const SYSTEM_PROMPTS = { 1: LEGACY_VERIFIER_SYSTEM_PROMPT, 2: VERIFIER_SYSTEM_PROMPT, 3: VERIFIER_SYSTEM_PROMPT_V3 } as const;
 
 const MAX_PATCH_CHARS = 4_000;
 
@@ -492,9 +506,9 @@ export function relevantPatchExcerpt(
   return excerptForContract(patch, ranges, 2);
 }
 
-function excerptForContract(patch: string, ranges: Array<{ start: number; end: number }>, version: 1 | 2): string {
+function excerptForContract(patch: string, ranges: Array<{ start: number; end: number }>, version: VerifierContractVersion): string {
   if (ranges.length === 0) return '';
-  const normalizedPatch = version === 2 ? patch.replace(/\r\n?/g, '\n') : patch;
+  const normalizedPatch = version !== 1 ? patch.replace(/\r\n?/g, '\n') : patch;
   if (!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(normalizedPatch)) {
     return normalizedPatch.length <= MAX_PATCH_CHARS ? normalizedPatch : '';
   }
@@ -555,10 +569,12 @@ function excerptForContract(patch: string, ranges: Array<{ start: number; end: n
   return '';
 }
 
-function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string, string>): string {
+function buildVerifierPrompt(candidates: ConsensusFinding[], patches: Map<string, string>, taskContext?: TaskContext): string {
   // Finding text originates from council models reading an untrusted diff —
   // neutralize boundary delimiters so it cannot fake a trusted region.
-  const lines: string[] = ['## Findings to verify', ''];
+  const task = taskContextParts(taskContext);
+  const lines: string[] = task.length > 0 ? [task.join('\n\n').trimStart(), ''] : [];
+  lines.push('## Findings to verify', '');
   candidates.forEach((f, i) => {
     lines.push(
       `### F${i + 1}`,
@@ -615,7 +631,7 @@ export interface GatingBatch {
 
 /** Private deterministic work plan, not authenticated evidence or launch authority. */
 export interface GatingPlan {
-  version: 1 | 2;
+  version: VerifierContractVersion;
   findings: ConsensusFinding[];
   initialGating: Array<GatingInfo | null>;
   candidateIndices: number[];
@@ -631,20 +647,24 @@ export type GatingBatchOutcome =
   | { batchIndex: number; kind: 'failure'; reason: string };
 
 type GatingPlanOptions = Pick<GatingOptions, 'minModels' | 'verificationModel' | 'verificationTimeoutMs' |
-  'verificationPassTimeoutMs' | 'verificationReasoningEffort' | 'diffFiles' | 'modelWeights'>;
+  'verificationPassTimeoutMs' | 'verificationReasoningEffort' | 'diffFiles' | 'modelWeights' | 'taskContext'>;
 
-function unavailableGating(model: string, note: string): GatingInfo {
-  return { reason: 'none', verification: { model, verdict: 'unavailable', note } };
+export type VerifierContractVersion = 1 | 2 | 3;
+export const CURRENT_VERIFIER_CONTRACT_VERSION = 3;
+
+/** An unchecked finding keeps the tier it earned without verification. */
+function unavailableGating(model: string, note: string, earned?: GatingInfo | null): GatingInfo {
+  return { reason: earned?.reason ?? 'none', verification: { model, verdict: 'unavailable', note } };
 }
 
 /** Derive every private verifier request before dispatch, without clocks, adapters or caller aliases. */
 export function planGating(input: ConsensusFinding[], options: GatingPlanOptions): GatingPlan {
-  return planGatingForCapturedContract(input, options, 2);
+  return planGatingForCapturedContract(input, options, CURRENT_VERIFIER_CONTRACT_VERSION);
 }
 
 /** Pure compatibility planner. The caller selects only from validated captured lineage, never saved plan bytes. */
-export function planGatingForCapturedContract(input: ConsensusFinding[], options: GatingPlanOptions, version: 1 | 2): GatingPlan {
-  if (version !== 1 && version !== 2 || version === 1 && options.verificationReasoningEffort !== undefined) {
+export function planGatingForCapturedContract(input: ConsensusFinding[], options: GatingPlanOptions, version: VerifierContractVersion): GatingPlan {
+  if (![1, 2, 3].includes(version) || version === 1 && options.verificationReasoningEffort !== undefined) {
     throw new Error('gating_invalid_captured_contract');
   }
   const verificationTimeoutMs = resolveTimerDelay('verificationTimeoutMs', options.verificationTimeoutMs);
@@ -662,14 +682,16 @@ export function planGatingForCapturedContract(input: ConsensusFinding[], options
     const support = weights === undefined ? models.length : models.reduce((sum, name) => sum + (weights.get(name) ?? 1), 0);
     if (finding.severity !== 'critical' && finding.severity !== 'important') {
       initialGating[index] = { reason: 'none' };
-    } else if (models.length >= options.minModels && support >= options.minModels) {
-      // Weights can demote consensus, never substitute for distinct models.
+      return;
+    }
+    // Weights can demote consensus, never substitute for distinct models.
+    if (models.length >= options.minModels && support >= options.minModels) {
       initialGating[index] = { reason: 'consensus' };
     } else if (finding.severity === 'critical') {
       initialGating[index] = { reason: 'critical' };
-    } else {
-      candidateIndices.push(index);
     }
+    // Version three keeps the earned tier as the fallback for its candidates.
+    if (version === 3 || initialGating[index] === null) candidateIndices.push(index);
   });
 
   const fullPatches = new Map<string, string>();
@@ -697,9 +719,10 @@ export function planGatingForCapturedContract(input: ConsensusFinding[], options
     if (!patches.has(finding.file)) {
       initialGating[index] = unavailableGating(model, fullPatches.has(finding.file)
         ? 'no hunk context fits the safe verifier bound — not sent to the verifier'
-        : 'no diff context for this file — not sent to the verifier');
+        : 'no diff context for this file — not sent to the verifier', initialGating[index]);
     } else if (options.verificationModel === undefined) {
-      initialGating[index] = unavailableGating(model, 'no direct-API verifier available in the configured roster');
+      initialGating[index] = unavailableGating(model, 'no direct-API verifier available in the configured roster',
+        initialGating[index]);
     } else {
       verifiable.push(index);
     }
@@ -709,9 +732,9 @@ export function planGatingForCapturedContract(input: ConsensusFinding[], options
     const findingIndices = verifiable.slice(index, index + VERIFIER_BATCH_SIZE);
     const candidates = findingIndices.map(i => findings[i]!);
     const relevantPatches = new Map([...new Set(candidates.map(f => f.file))].map(file => [file, patches.get(file)!]));
-    batches.push({ findingIndices, systemPrompt: version === 1 ? LEGACY_VERIFIER_SYSTEM_PROMPT : VERIFIER_SYSTEM_PROMPT,
-      userPrompt: buildVerifierPrompt(candidates, relevantPatches),
-      ...(version === 2 ? { sourcePatches: Object.fromEntries(relevantPatches) } : {}) });
+    batches.push({ findingIndices, systemPrompt: SYSTEM_PROMPTS[version],
+      userPrompt: buildVerifierPrompt(candidates, relevantPatches, version === 3 ? options.taskContext : undefined),
+      ...(version !== 1 ? { sourcePatches: Object.fromEntries(relevantPatches) } : {}) });
   }
   return { version, findings, initialGating, candidateIndices, model,
     ...(verificationReasoningEffort ? { verificationReasoningEffort } : {}), verificationTimeoutMs, verificationPassTimeoutMs, batches };
@@ -745,11 +768,12 @@ export function replayGating(
       ? (outcome.answer.error ?? outcome.answer.status) : undefined;
     const answerText = outcome.kind === 'answer' && outcome.answer.status === 'success' ? outcome.answer.text : '';
     const legacy = plan.version === 1 ? parseLegacyVerdicts(answerText) : undefined;
-    const current = plan.version === 2 ? parseVerificationVerdicts(answerText,
+    const current = plan.version !== 1 ? parseVerificationVerdicts(answerText,
       new Map(batch.findingIndices.map((findingIndex, offset) => [`F${offset + 1}`, plan.findings[findingIndex]!.file])),
       batch.sourcePatches ?? {}) : undefined;
     batch.findingIndices.forEach((findingIndex, offset) => {
       const id = `F${offset + 1}`;
+      const earned = plan.initialGating[findingIndex];
       const oldVerdict = legacy?.get(id), newVerdict = current?.get(id);
       if (oldVerdict) {
         annotations[findingIndex] = { reason: oldVerdict.refuted ? 'none' : 'verified', verification: {
@@ -757,10 +781,10 @@ export function replayGating(
           ...(oldVerdict.note ? { note: oldVerdict.note } : {}),
         } };
       } else if (newVerdict) {
-        annotations[findingIndex] = { reason: newVerdict.verdict === 'confirmed' ? 'verified' : 'none',
+        annotations[findingIndex] = { reason: verdictReason(newVerdict.verdict, earned),
           verification: { model: plan.model, ...newVerdict } };
       } else {
-        annotations[findingIndex] = unavailableGating(plan.model, failure ?? 'verifier response did not cover this finding');
+        annotations[findingIndex] = unavailableGating(plan.model, failure ?? 'verifier response did not cover this finding', earned);
       }
     });
   });
@@ -774,9 +798,15 @@ export function replayGating(
   return { findings, verification: { model: plan.model, candidates: plan.candidateIndices.length,
     refuted: verdicts.filter(v => v === 'refuted').length,
     unrefuted: verdicts.filter(v => v === 'unrefuted').length,
-    ...(plan.version === 2 ? { confirmed: verdicts.filter(v => v === 'confirmed').length,
+    ...(plan.version !== 1 ? { confirmed: verdicts.filter(v => v === 'confirmed').length,
       insufficientEvidence: verdicts.filter(v => v === 'insufficient_evidence').length } : {}),
     unavailable: verdicts.filter(v => v === 'unavailable').length, durationMs } };
+}
+
+/** Only a refutation removes an earned tier; only a confirmation promotes a single-model claim. */
+function verdictReason(verdict: VerificationVerdict['verdict'], earned: GatingInfo | null | undefined): GatingReason {
+  if (verdict === 'refuted') return 'none';
+  return earned?.reason ?? (verdict === 'confirmed' ? 'verified' : 'none');
 }
 
 /** Annotate findings through the same deterministic plan and interpreter used by retained replay. */

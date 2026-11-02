@@ -2664,7 +2664,8 @@ async function executeCouncil(
       };
       const aggregationInputs = captureAggregationInputs({ algorithm: AGGREGATION_ALGORITHM,
         diffSha256: diffDigest(diff.files), roleMap, thresholds, gating: prepared.gatingConfig,
-        belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true });
+        belowThresholdAppendix: config.output?.belowThresholdAppendix ?? true,
+        ...(work.taskContext ? { taskContext: work.taskContext } : {}) });
       const captured = capturePreparedCouncil({ target: prepared.converge!.target,
         headSha: extra.target.headSha ?? '', mergeBaseSha: extra.target.baseSha ?? '', diff,
         assignments,
@@ -3140,7 +3141,7 @@ async function executeCouncil(
     } satisfies CompletedReviewInput['run'];
   const assemblyDependencies: Parameters<typeof assembleCompletedReview>[1] = {
     onStage: postReviewStage,
-    onVerificationStart: () => { spinner.text = 'Verifying single-model findings...'; },
+    onVerificationStart: () => { spinner.text = 'Verifying blocking findings...'; },
     onVerificationProgress: (event) => {
       const line =
         `Verification ${event.completedBatches}/${event.totalBatches} batches ` +
@@ -3197,6 +3198,7 @@ async function executeCouncil(
   } else result = await assembleCompletedReview({
     chunkReviews, arrivedAsync, asyncLaunched, startTime, roleMap, config, diff,
     gatingConfig: prepared.gatingConfig, recoveredProduction: prepared.recoveredProduction, modelWeights, run: runInput,
+    ...(work.taskContext ? { taskContext: work.taskContext } : {}),
   }, assemblyDependencies);
   const { run } = result;
   // The same derivation converge-report and the server apply to this report.

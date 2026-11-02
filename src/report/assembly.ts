@@ -17,6 +17,7 @@ import { uuidv7 } from './uuid.js';
 import { assertReviewerHealth, type ReviewerHealth } from './reviewer-health.js';
 import { deriveConsensusAssembly, type ConsensusAssembly, type ConsensusAssemblyContribution } from './consensus-assembly.js';
 import type { RecoveredProduction } from '../converge/recovered-production.js';
+import type { TaskContext } from '../prepare/task-context.js';
 
 export interface CompletedReviewInput {
   chunkReviews: ModelReview[];
@@ -30,6 +31,8 @@ export interface CompletedReviewInput {
   modelWeights?: Map<string, number>;
   recoveredProduction?: RecoveredProduction;
   dedupeOrdering?: DedupeOrdering;
+  /** The reviewers' spec and pull request text, for the verifier (RCL-198). */
+  taskContext?: TaskContext;
   /** Validated original-seat health for proof-bearing reports; never deserialized counts. */
   reviewerHealth?: ReviewerHealth;
   run: Omit<RunHeaderInput, 'config' | 'diff' | 'gating' | 'thresholds' | 'finishedAt' | 'ciExitCode'>;
@@ -83,8 +86,8 @@ export async function assembleCompletedReview(
   });
 
   // Convergence gating (RCL-23): annotate every kept finding with why it
-  // does or does not gate; single-model blocking findings get one batched
-  // evidence-based adjudication call.
+  // does or does not gate; critical and important findings get batched
+  // evidence-based adjudication calls.
   let finalFindings = retained?.findings ?? reportFindings;
   let gatedAppendix = retained?.appendix ?? droppedFindings;
   let verificationStats = retained?.verification;
@@ -103,6 +106,7 @@ export async function assembleCompletedReview(
       onVerificationProgress: dependencies.onVerificationProgress,
       diffFiles: diff.files,
       ...(modelWeights ? { modelWeights } : {}),
+      ...(input.taskContext ? { taskContext: input.taskContext } : {}),
     };
     // The bound the pass applies, recorded when its workload stretched the
     // configured one (RCL-206). A plan that cannot be built fails inside the

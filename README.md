@@ -56,7 +56,7 @@ first review:
 | --- | --- | --- |
 | General and specialist reviewers (blocking lane) | `anthropic/claude-opus-5-5`, `openai/gpt-6-sol` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` |
 | Specialist reviewer (secondary lane) | `google/gemini-3.8-flash` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
-| Verifier for single-model findings | `openai/gpt-6-astra` | `OPENAI_API_KEY` |
+| Verifier for critical and important findings | `openai/gpt-6-astra` | `OPENAI_API_KEY` |
 | Async bonus reviewer (optional) | `openrouter/moonshotai/kimi-k3` | `OPENROUTER_API_KEY` |
 
 A seat whose key is missing fails; failed blocking-lane seats lower the
@@ -271,8 +271,8 @@ with evidence required.
 critical or important finding gates when at least two distinct models raised it
 (`gating.minModels`), when it is critical, or when the verifier confirmed it
 with source evidence; its `gating.reason` is then `consensus`, `critical` or
-`verified`. A refuted or unverifiable single-model claim (`gating.reason:
-none`) is reported but does not fail CI. In `all-findings` mode every critical
+`verified`. A refuted claim, or an unverifiable single-model one
+(`gating.reason: none`), is reported but does not fail CI. In `all-findings` mode every critical
 or important finding fails CI. Findings in the below-threshold appendix never
 count. See [How consensus and gating work](#how-consensus-and-gating-work).
 
@@ -717,10 +717,16 @@ each gets a `gating.reason`:
 
 | `gating.reason` | When |
 | --- | --- |
-| `consensus` | Raised by at least `gating.minModels` (default 2) distinct models; model weights can demote consensus but never replace distinct models |
-| `critical` | Critical severity |
+| `consensus` | Raised by at least `gating.minModels` (default 2) distinct models and not refuted by the verifier; model weights can demote consensus but never replace distinct models |
+| `critical` | Critical severity and not refuted by the verifier |
 | `verified` | A single-model important finding the verifier confirmed with source evidence |
-| `none` | Everything else, including refuted, insufficient-evidence and unverified (`unavailable`) claims; still reported, never blocking |
+| `none` | Everything else, including refuted claims and single-model claims with insufficient evidence or no verification (`unavailable`); still reported, never blocking |
+
+The verifier checks every critical and important finding against the change
+and the task context: the `--spec` text and, for a pull request, its title and
+description. A refutation removes any tier. Any other verdict leaves a
+`consensus` or `critical` finding gating, so a verifier outage never opens the
+gate. Each finding records its verdict in `gating.verification`.
 
 `gating.mode: all-findings` restores the legacy rule where every critical or
 important finding gates. For the full scoring algorithm, see

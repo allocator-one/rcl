@@ -145,10 +145,10 @@ async function sealedVerificationArtifact(failed = false, activeRunId = runId(2)
 
 
 const representation = { version: 1 as const, parseFailures: false };
-async function complete(options: Parameters<typeof fixture>[0] = {}) {
+async function complete(options: Parameters<typeof fixture>[0] = {}, file?: string) {
   const f = fixture({ chunks: 1, ...options });
   const rows = rowsFor(f, ['s0', 's1'], 'source');
-  rows[0]!.findings = [finding('retained')];
+  rows[0]!.findings = [finding('retained', file)];
   const args = input(f, await proof(f, rows), await proof(f, []));
   const assembled = await assembleCheckpointReview(args);
   const reportBytes = JSON.stringify(sanitizeForDelivery(assembled.report, representation));
@@ -332,7 +332,8 @@ describe('private reviewer artifact', () => {
   });
 
   it('refuses false nonblocking critical annotations and any gate annotation when health is inconclusive', async () => {
-    const { args, assembled } = await complete({ verified: true });
+    // Outside the diff, the critical finding cannot be verified and keeps its tier without a verifier phase.
+    const { args, assembled } = await complete({ verified: true }, 'outside-diff.ts');
     const deterministic = serializeReviewerArtifact({ assembly: args, representation, reportBytes: JSON.stringify(sanitizeForDelivery(assembled.report)) });
     expect(deterministic.validation.gate.validation).toBe('deterministic');
     const falseNone = structuredClone(assembled.report); falseNone.findings[0]!.gating = { reason: 'none' }; falseNone.run.ci_exit_code = 0;

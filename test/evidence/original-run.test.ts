@@ -272,8 +272,8 @@ describe('source and receipt binding', () => {
     ['verified', 'insufficient_evidence', 'original_verified_consensus_gating_inconsistent'],
     ['none', 'confirmed', 'original_verified_consensus_gating_inconsistent'],
     ['none', 'unrefuted', 'original_verified_consensus_gating_inconsistent'],
-    ['consensus', 'confirmed', 'original_verified_consensus_gating_inconsistent'],
-    ['critical', 'confirmed', 'original_verified_consensus_gating_inconsistent'],
+    ['consensus', 'refuted', 'original_verified_consensus_gating_inconsistent'],
+    ['critical', 'unrefuted', 'original_verified_consensus_gating_inconsistent'],
   ] as const)('refuses contradictory original %s/%s verification before HTTP', async (reason, verdict, error) => {
     const f = await fixture(r => {
       r.run!.rcl_version = '4.4.4';
@@ -315,6 +315,19 @@ describe('source and receipt binding', () => {
     });
     expect((await prepareOriginalRun(f.selection)).prepared.envelope.findings[0]).toMatchObject({
       gating_reason: 'verified', verification_verdict: verdict,
+    });
+  });
+  it.each([
+    ['consensus', 'confirmed'],
+    ['critical', 'insufficient_evidence'],
+    ['critical', 'unavailable'],
+  ] as const)('accepts verified %s/%s original evidence that keeps its tier', async (reason, verdict) => {
+    const f = await fixture(r => {
+      r.findings[0]!.gating = { reason, verification: { verdict } };
+      r.stats.verification = { model: 'openai/gpt', candidates: 1, refuted: 0, unrefuted: 0, unavailable: 0, durationMs: 12 };
+    });
+    expect((await prepareOriginalRun(f.selection)).prepared.envelope.findings[0]).toMatchObject({
+      gating_reason: reason, verification_verdict: verdict,
     });
   });
   it('accepts a declared strict fallback and refuses one that breaks its contract', async () => {

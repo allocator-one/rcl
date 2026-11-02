@@ -33,9 +33,8 @@ export function evaluateCiGate(result: ReviewResult, health?: ReviewerHealth): C
   }
 
   // Gating-annotated findings (RCL-23) block on their gating reason —
-  // consensus, critical, or verified — so a refuted single-model claim no
-  // longer fails CI. Legacy reports without annotations keep the pure
-  // severity gate.
+  // consensus, critical, or verified — so a refuted claim no longer fails
+  // CI. Legacy reports without annotations keep the pure severity gate.
   const blocking = result.findings.filter((f) =>
     f.gating
       ? f.gating.reason !== 'none'

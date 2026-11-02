@@ -8,6 +8,7 @@ import type { RecoveryAttempt, RecoveryPreview } from '../dispatch/recovery-poli
 import { decodeCapturedInputs, type CapturedReviewerInputs } from '../dispatch/captured-inputs.js';
 import { inspectReviewerArtifact, type InspectedReviewerArtifact } from '../report/reviewer-artifact.js';
 import { validateInspectedReviewerArtifactChain } from '../report/reviewer-evidence.js';
+import type { CapturedAggregationInputs } from '../report/aggregation-inputs.js';
 import { stableStringify } from '../report/run-header.js';
 import { UUID } from '../telemetry/recovery/source.js';
 
@@ -43,8 +44,9 @@ const validatedLineages = new WeakSet<ReviewerLineage>();
 
 /**
  * Compare current effective inputs only after complete source validation. The
- * sole compatibility exception is the new verifier discriminator on a legacy
- * aggregation blob. Historical bytes remain the execution/source authority.
+ * sole compatibility exception is a newer verifier contract (its discriminator
+ * and captured task context) over an older aggregation blob. Historical bytes
+ * remain the execution/source authority.
  */
 export function matchesReviewerRecoveryInputs(source: ReviewerLineage, freshBytes: string): boolean {
   if (!validatedLineages.has(source)) fail('unvalidated_source');
@@ -58,15 +60,23 @@ export function matchesReviewerRecoveryInputs(source: ReviewerLineage, freshByte
     throw error;
   }
   if (fresh.bytes === old.bytes) return true;
-  if (!old.aggregation || old.aggregation.verifierContractVersion !== undefined || fresh.aggregation?.verifierContractVersion !== 2) return false;
-  const aggregation = JSON.parse(fresh.aggregation.bytes);
-  delete aggregation.verifierContractVersion;
-  if (stableStringify(aggregation) !== old.aggregation.bytes) return false;
+  if (!old.aggregation || !fresh.aggregation || !isVerifierContractUpgrade(old.aggregation, fresh.aggregation)) return false;
   const wire = JSON.parse(fresh.bytes);
   delete wire.blobs[fresh.aggregation.digest];
   wire.blobs[old.aggregation.digest] = old.aggregation.bytes;
   wire.aggregationSha256 = old.aggregation.digest;
   return stableStringify(wire) === old.bytes;
+}
+
+/** True when fresh differs from old only by a newer verifier contract and its captured task context. */
+export function isVerifierContractUpgrade(old: CapturedAggregationInputs, fresh: CapturedAggregationInputs): boolean {
+  if ((old.verifierContractVersion ?? 1) >= (fresh.verifierContractVersion ?? 1)) return false;
+  return stableStringify(contractNeutral(fresh.bytes)) === stableStringify(contractNeutral(old.bytes));
+}
+
+function contractNeutral(bytes: string): unknown {
+  const { verifierContractVersion: _version, taskContext: _task, ...rest } = JSON.parse(bytes);
+  return rest;
 }
 
 function fail(code: string): never { throw new Error(`reviewer_lineage_${code}`); }

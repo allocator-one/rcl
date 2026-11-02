@@ -121,11 +121,12 @@ function assertVerifiedConsensusSource(value: unknown): void {
       throw new Error('original_verified_consensus_verification_unavailable');
     }
     const verdict = verification?.verdict;
+    // Since RCL-198 critical and consensus findings are verified too; only a refutation removes their tier.
     const consistent = reason === 'verified'
       ? verdict === 'confirmed' || verdict === 'unrefuted' || (verdict === 'unavailable' && historicalUnavailableGate)
       : reason === 'none'
         ? verification === undefined || verdict === 'refuted' || verdict === 'insufficient_evidence' || verdict === 'unavailable'
-        : verification === undefined;
+        : verification === undefined || verdict === 'confirmed' || verdict === 'insufficient_evidence' || verdict === 'unavailable';
     if (!consistent) throw new Error('original_verified_consensus_gating_inconsistent');
   }
   if (findings.some(finding => finding.gating?.verification !== undefined) && report.stats?.verification == null) {
