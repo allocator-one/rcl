@@ -12,7 +12,9 @@
   overlapping title or claim wording. Those findings are classified
   `suppressed` with the dismissed identity in their reason, and the ledger
   entry records it as `repeatOf`. One genuinely new gating finding keeps the
-  round actionable, and escalation to critical still re-gates. New ledger
+  round actionable, and escalation to critical still re-gates. A later
+  sighting of a suppressed repeat stays suppressed only while it still repeats
+  the dismissed lines; drift or escalation to critical re-gates it. New ledger
   entries keep hashed claim tokens for this match, never claim text (RCL-199).
 
 ## 4.5.22 - 2026-10-30

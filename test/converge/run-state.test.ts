@@ -697,14 +697,32 @@ describe('repeat-only rounds (RCL-199)', () => {
       .toMatchObject({ status: 'converged-dismissal-only', unresolved: [] });
   });
 
-  it('does not let chained repeats drift past the line window of the dismissed claim', async () => {
+  it('puts a suppressed repeat that drifts past the dismissed lines back in front of triage', async () => {
     await dismissFirstRound();
     await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1, { startLine: 15, endLine: 19 })],
       runId: runs[1] });
     const third = await processRoundReport({ gitCommonDir: dir, target, round: 3,
       findings: [reworded(2, { startLine: 20, endLine: 24 })] });
-    expect(third.findings[0]!.status).toBe('repeat');
-    expect(third.counts).toMatchObject({ suppressed: 0, repeat: 1 });
+    expect(third.findings[0]!.status).toBe('regating');
+    expect(resolveRoundResolution((await loadConvergeRunState(dir, target))!, 3))
+      .toMatchObject({ status: 'unresolved', unresolved: [third.findings[0]!.identity] });
+  });
+
+  it('re-gates a suppressed repeat escalated to critical', async () => {
+    await dismissFirstRound();
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    const third = await processRoundReport({ gitCommonDir: dir, target, round: 3,
+      findings: [reworded(1, { severity: 'critical', gating: { reason: 'critical' } })] });
+    expect(third.findings[0]!.status).toBe('regating');
+  });
+
+  it('forgets a repeat decision when its round is re-processed without being repeat-only', async () => {
+    await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1], findings: [
+      reworded(1), modern(1, 2, { file: 'src/other.ts', title: 'Token refresh races the logout handler' }),
+    ] });
+    expect((await loadConvergeRunState(dir, target))!.findings[second.findings[0]!.identity]!.repeatOf).toBeUndefined();
   });
 
   it('keeps the round actionable when any gating finding is genuinely new', async () => {

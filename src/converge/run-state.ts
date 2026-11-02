@@ -468,6 +468,8 @@ function standingDismissalRoot(state: ConvergeRunState, entry: FindingEntry, rou
  */
 function suppressRepeatOnlyRound(state: ConvergeRunState, annotations: AnnotatedRoundFinding[], counts: RoundCounts,
   round: number, lineWindow: number): void {
+  // A re-processed round decides again; its earlier decision must not stand.
+  for (const entry of Object.values(state.findings)) if (entry.firstRound === round) delete entry.repeatOf;
   // A suppressed repeat matches at its root's lines, so chained repeats cannot drift away from the dismissed code.
   const prior: PriorClaim[] = Object.values(state.findings).filter(entry => entry.firstRound < round).map(entry => {
     const root = standingDismissalRoot(state, entry, round);
@@ -842,12 +844,20 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
           (entry.verdictReason ? ` (${entry.verdictReason})` : '') +
           ' — a dismissal is terminal on its evidence; re-gating requires escalation to critical (RCL-30)';
       }
-    } else if (repeatRoot && !(finding.severity === 'critical' && (repeatRoot.verdictSeverity ?? repeatRoot.severity) !== 'critical') &&
-        finding.startLine <= repeatRoot.endLine + lineWindow && repeatRoot.startLine <= finding.endLine + lineWindow) {
-      // An exact re-sighting of a suppressed repeat follows its dismissed root, within the root's line window (RCL-199).
-      status = 'suppressed';
-      counts.suppressed++;
-      suppressReason = repeatSuppressReason({ identity: repeatRoot.key, dismissedRound: repeatRoot.verdictRound! });
+    } else if (repeatRoot) {
+      // A suppressed repeat has no verdict of its own: it stands only while it
+      // still repeats its dismissed root. Escalation to critical or drift past
+      // the root's lines puts it back in front of triage (RCL-199, RCL-30).
+      const escalated = finding.severity === 'critical' && (repeatRoot.verdictSeverity ?? repeatRoot.severity) !== 'critical';
+      const nearRoot = finding.startLine <= repeatRoot.endLine + lineWindow && repeatRoot.startLine <= finding.endLine + lineWindow;
+      if (escalated || !nearRoot) {
+        status = 'regating';
+        counts.regating++;
+      } else {
+        status = 'suppressed';
+        counts.suppressed++;
+        suppressReason = repeatSuppressReason({ identity: repeatRoot.key, dismissedRound: repeatRoot.verdictRound! });
+      }
     } else {
       status = 'repeat';
       counts.repeat++;
