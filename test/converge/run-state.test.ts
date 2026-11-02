@@ -760,6 +760,25 @@ describe('repeat-only rounds (RCL-199)', () => {
     expect(second.findings[0]!.status).toBe('new');
   });
 
+  it('keeps a different defect at the same lines with a similar title actionable', async () => {
+    await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1], findings: [reworded(1, {
+      description: 'Dereferencing the missing recipient record crashes the digest job before any message is sent.',
+    })] });
+    expect(second.findings[0]!.status).toBe('new');
+  });
+
+  it('keeps a critical finding that resembles both a critical and a non-critical dismissal actionable', async () => {
+    const first = await processRoundReport({ gitCommonDir: dir, target, round: 1, runId: runs[0], findings: [
+      modern(0, 1), modern(0, 2, { severity: 'critical', gating: { reason: 'critical' }, startLine: 12, endLine: 16 }),
+    ] });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1, runId: runs[0],
+      verdicts: first.findings.map(f => ({ key: f.identity, verdict: 'dismissed' as const, reason: 'Only after a superseded run' })) });
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1],
+      findings: [reworded(1, { severity: 'critical', gating: { reason: 'critical' } })] });
+    expect(second.findings[0]!.status).toBe('new');
+  });
+
   it('does not treat a fixed claim as a standing dismissal', async () => {
     await dismissFirstRound('fixed');
     const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });

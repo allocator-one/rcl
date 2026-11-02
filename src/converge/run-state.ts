@@ -24,7 +24,7 @@ import type { GuardedLaunchState } from './launch-guard.js';
 import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import { bindRoundEvidence, processSemanticRound, verifyRoundBinding } from './semantic-state.js';
-import { claimTokenDigests, dismissedRepeatOf, repeatSuppressReason, type PriorClaim, type RepeatOf } from './repeat-guard.js';
+import { descriptionTokenDigests, dismissedRepeatOf, repeatSuppressReason, type PriorClaim, type RepeatOf } from './repeat-guard.js';
 import { verdictClearsPending } from '../evidence/claim-recovery/validation/obligations.js';
 export { verdictClearsPending };
 import {
@@ -125,8 +125,8 @@ export interface FindingEntry {
   verdictSeverity?: string;
   claimDescriptor?: ClaimDescriptor;
   pendingRound?: number;
-  /** Hashed title and description tokens, for repeat matching (RCL-199). */
-  claimTokens?: string[];
+  /** Hashed description tokens, for repeat matching (RCL-199). */
+  descriptionTokens?: string[];
   /** The standing dismissal this claim repeated when first sighted (RCL-199). */
   repeatOf?: RepeatOf;
 }
@@ -787,7 +787,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         endLine: finding.endLine,
         title: finding.title,
         claimTextSha256: textDigest,
-        claimTokens: claimTokenDigests(finding),
+        descriptionTokens: descriptionTokenDigests(finding),
         identityOrigin: reportIdentity ? 'modern' : 'legacy',
         ...(reportIdentity ? { sourceReportIdentity: reportIdentity } : {}),
         severity: finding.severity,

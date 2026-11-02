@@ -13,8 +13,11 @@ import type { ConsensusFinding } from '../consensus/types.js';
  * standing dismissal, those findings are suppressed and the round converges.
  * One genuinely new gating finding keeps the whole round actionable, and an
  * escalation to critical past the dismissed severity still gates (RCL-30).
- * Matching is lexical, with the deduper's thresholds: same file and category,
- * line ranges within the line window, and title or claim token overlap.
+ * Matching is lexical and stricter than the deduper, because a match removes
+ * a finding from triage instead of merging it: same file and category, line
+ * ranges within the line window, and both title and description overlap at
+ * the deduper's Jaccard threshold. On the prod ledger of seven loop pull
+ * requests, none of the findings this matched was later fixed.
  */
 
 export interface RepeatOf {
@@ -29,14 +32,14 @@ export interface PriorClaim {
   startLine: number;
   endLine: number;
   title: string;
-  claimTokens?: string[];
+  descriptionTokens?: string[];
   /** Set only for a standing dismissal, or a repeat of one: then it names the dismissed root. */
   dismissal?: { identity: string; round: number; severity: string };
 }
 
-/** Hashed so the ledger keeps claim overlap without retaining claim prose. */
-export function claimTokenDigests(finding: Pick<ConsensusFinding, 'title' | 'description'>): string[] {
-  return [...tokenize(`${finding.title} ${finding.description}`)]
+/** Hashed so the ledger keeps description overlap without retaining claim prose. */
+export function descriptionTokenDigests(finding: Pick<ConsensusFinding, 'description'>): string[] {
+  return [...tokenize(finding.description)]
     .map(token => createHash('sha256').update(token).digest('hex').slice(0, 12)).sort();
 }
 
@@ -48,22 +51,23 @@ function overlap(left: ReadonlySet<string>, right: ReadonlySet<string>): number 
 }
 
 /**
- * The standing dismissal this finding repeats, if any. A finding that also
- * resembles an open or fixed prior claim is ambiguous and repeats nothing:
- * a fixed claim coming back is a regression to triage.
+ * The standing dismissal this finding repeats, if any. A finding is ambiguous
+ * and repeats nothing when it also resembles an open or fixed prior claim (a
+ * fixed claim coming back is a regression to triage), or when any resembled
+ * dismissal would re-gate at its severity.
  */
 export function dismissedRepeatOf(finding: ConsensusFinding, prior: readonly PriorClaim[],
   lineWindow: number): RepeatOf | undefined {
   const threshold = DEFAULT_THRESHOLDS.jaccardThreshold;
   const title = tokenize(finding.title);
-  const claim = new Set(claimTokenDigests(finding));
+  const description = new Set(descriptionTokenDigests(finding));
   const similar = prior.filter(entry => entry.file === finding.file && entry.category === finding.category &&
     finding.startLine <= entry.endLine + lineWindow && entry.startLine <= finding.endLine + lineWindow &&
-    (overlap(title, tokenize(entry.title)) >= threshold ||
-      entry.claimTokens !== undefined && overlap(claim, new Set(entry.claimTokens)) >= threshold));
-  if (similar.some(entry => entry.dismissal === undefined)) return undefined;
-  const match = similar
-    .filter(entry => !(finding.severity === 'critical' && entry.dismissal!.severity !== 'critical'))
+    entry.descriptionTokens !== undefined && overlap(title, tokenize(entry.title)) >= threshold &&
+    overlap(description, new Set(entry.descriptionTokens)) >= threshold);
+  if (similar.some(entry => entry.dismissal === undefined ||
+    finding.severity === 'critical' && entry.dismissal.severity !== 'critical')) return undefined;
+  const match = [...similar]
     .sort((left, right) => left.dismissal!.round - right.dismissal!.round ||
       left.dismissal!.identity.localeCompare(right.dismissal!.identity))[0];
   return match && { identity: match.dismissal!.identity, dismissedRound: match.dismissal!.round };
