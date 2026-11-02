@@ -23,6 +23,7 @@ export type RevisionReader = (path: string) => Promise<string | undefined>;
 
 const CITATION = /([^\s`:]+):(\d+)(?:-(\d+))?\s*`([^`\n]+)`/g;
 const MAX_CITED_LINES = 200;
+const MAX_REVISION_BYTES = 16 * 1024 * 1024;
 
 export function parseDismissalCitations(reason: string): DismissalCitation[] {
   return [...reason.matchAll(CITATION)].map(([, path, start, end, quote]) => ({
@@ -66,9 +67,14 @@ export function gitRevisionReader(cwd: string, revision: string): RevisionReader
     });
     await verified;
     try {
-      const { stdout } = await git('git', ['show', `${revision}:${path}`], { cwd, maxBuffer: 16 * 1024 * 1024 });
+      const { stdout } = await git('git', ['show', `${revision}:${path}`], { cwd, maxBuffer: MAX_REVISION_BYTES });
       return stdout;
-    } catch {
+    } catch (err) {
+      // A file past the limit still has its first lines to check. Drop the cut-off last line.
+      const { code, stdout } = err as { code?: string; stdout?: string };
+      if (code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && typeof stdout === 'string') {
+        return stdout.slice(0, stdout.lastIndexOf('\n') + 1);
+      }
       return undefined;
     }
   };

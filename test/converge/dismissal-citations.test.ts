@@ -110,6 +110,20 @@ describe('gitRevisionReader', () => {
     expect(await reader('lib/missing.ts')).toBeUndefined();
   });
 
+  it('reads the first lines of a file larger than the read limit', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'rcl-citations-'));
+    dirs.push(dir);
+    const git = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args],
+      { cwd: dir, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    await writeFile(join(dir, 'big.txt'), `first line\n${'x'.repeat(17 * 1024 * 1024)}\n`);
+    git('add', '.');
+    git('commit', '-q', '-m', 'big');
+
+    const content = await gitRevisionReader(dir, 'HEAD')('big.txt');
+    expect(content?.split('\n')[0]).toBe('first line');
+  });
+
   it('reports a reviewed commit the local repository does not have', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'rcl-citations-'));
     dirs.push(dir);
