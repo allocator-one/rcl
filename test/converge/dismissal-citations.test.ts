@@ -71,6 +71,10 @@ describe('which dismissals need a citation', () => {
     expect(dismissalRequiresCitation(state, 2, 'quiet')).toBe(false);
   });
 
+  it('requires one for an identity the round annotated nowhere', () => {
+    expect(dismissalRequiresCitation(state, 2, 'unknown')).toBe(true);
+  });
+
   it('requires one when the round has no recorded annotations', () => {
     expect(dismissalRequiresCitation(state, 1, 'quiet')).toBe(true);
     expect(dismissalRequiresCitation({}, 2, 'quiet')).toBe(true);

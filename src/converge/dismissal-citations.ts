@@ -80,12 +80,12 @@ interface RoundAnnotations {
 
 /**
  * Whether a dismissal of `identity` in `round` must cite its evidence: it
- * gated in that round. Without that round's annotations, assume it did.
+ * gated in that round. Without that round's annotation of it, assume it did.
  */
 export function dismissalRequiresCitation(state: RoundAnnotations, round: number, identity: string): boolean {
   const annotations = state.lastAnnotations;
   if (annotations?.round !== round) return true;
-  return annotations.identities.some(row => row.identity === identity && row.gating !== 'none');
+  return !annotations.identities.some(row => row.identity === identity && row.gating === 'none');
 }
 
 /** The commit `round` reviewed, from its launch record when that record belongs to the round. */
