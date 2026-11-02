@@ -8,6 +8,7 @@ import {
   validateRoundCap,
   processRoundReport,
   recordVerdicts,
+  resolveRoundResolution,
   loadConvergeRunState,
   convergeRunStatePath,
   ConvergeRoundCapError,
@@ -636,5 +637,88 @@ describe('cross-round identity and suppression (RCL-24)', () => {
     const entry = Object.values(state!.findings)[0]!;
     expect(entry.verdict).toBe('fixed');
     expect(entry.verdictRound).toBe(1);
+  });
+});
+
+// RCL-199: reworded or relocated repeats of a dismissed claim got a fresh
+// identity and had to be triaged again, round after round.
+describe('repeat-only rounds (RCL-199)', () => {
+  const target = 'repeat-only';
+  const runs = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+  const modern = (run: number, index: number, over: Partial<ConsensusFinding> = {}) => finding({
+    identity: `report:${runs[run]}:${String(index).padStart(16, '0')}`,
+    title: 'Partial cursor coverage counts as full coverage so a recipient misses work',
+    description: 'A recipient whose cursor is past the window start is skipped even though the window end is later.',
+    ...over,
+  });
+  const reworded = (index: number, over: Partial<ConsensusFinding> = {}) => modern(1, index, {
+    title: 'Partial cursor coverage treated as full coverage, a recipient silently misses work',
+    description: 'The recipient is skipped when its cursor is past the window start although the window end is later.',
+    startLine: 13, endLine: 17, ...over,
+  });
+  async function dismissFirstRound(verdict: 'dismissed' | 'fixed' = 'dismissed') {
+    const first = await processRoundReport({ gitCommonDir: dir, target, round: 1, findings: [modern(0, 1)], runId: runs[0] });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 1, runId: runs[0],
+      verdicts: [{ key: first.findings[0]!.identity, verdict, reason: 'Only after a superseded run' }] });
+    return first.findings[0]!.identity;
+  }
+
+  it('suppresses a round whose every gating finding rewords a standing dismissal, and converges it', async () => {
+    const dismissed = await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+
+    expect(second.counts).toMatchObject({ new: 0, suppressed: 1 });
+    expect(second.findings[0]!.identity).not.toBe(dismissed);
+    expect(second.findings[0]).toMatchObject({ status: 'suppressed',
+      suppressReason: expect.stringContaining(`repeats ${dismissed}, dismissed in round 1`) });
+    const state = (await loadConvergeRunState(dir, target))!;
+    expect(state.findings[second.findings[0]!.identity]!.repeatOf).toEqual({ identity: dismissed, dismissedRound: 1 });
+    expect(resolveRoundResolution(state, 2)).toMatchObject({ status: 'converged-dismissal-only', unresolved: [] });
+  });
+
+  it('keeps suppressing a claim reworded again in a later round', async () => {
+    const dismissed = await dismissFirstRound();
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    const third = await processRoundReport({ gitCommonDir: dir, target, round: 3, findings: [modern(0, 7, {
+      title: 'Recipient skipped on partial cursor coverage, so it silently misses work', startLine: 15, endLine: 19,
+    })] });
+    expect(third.findings[0]).toMatchObject({ status: 'suppressed',
+      suppressReason: expect.stringContaining(`repeats ${dismissed}, dismissed in round 1`) });
+  });
+
+  it('keeps the round actionable when any gating finding is genuinely new', async () => {
+    await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1], findings: [
+      reworded(1), modern(1, 2, { file: 'src/other.ts', title: 'Token refresh races the logout handler' }),
+    ] });
+    expect(second.findings.map(f => f.status)).toEqual(['new', 'new']);
+  });
+
+  it('ignores non-gating findings when deciding the round is repeat-only', async () => {
+    await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1], findings: [
+      reworded(1), modern(1, 2, { file: 'src/other.ts', title: 'Rename the helper', gating: { reason: 'none' } }),
+    ] });
+    expect(second.findings.map(f => f.status)).toEqual(['suppressed', 'new']);
+  });
+
+  it('lets an escalation to critical gate again', async () => {
+    await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1],
+      findings: [reworded(1, { severity: 'critical', gating: { reason: 'critical' } })] });
+    expect(second.findings[0]!.status).toBe('new');
+  });
+
+  it('does not treat a fixed claim as a standing dismissal', async () => {
+    await dismissFirstRound('fixed');
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    expect(second.findings[0]!.status).toBe('new');
+  });
+
+  it('does not match a claim in another part of the file', async () => {
+    await dismissFirstRound();
+    const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, runId: runs[1],
+      findings: [reworded(1, { startLine: 80, endLine: 84 })] });
+    expect(second.findings[0]!.status).toBe('new');
   });
 });

@@ -24,6 +24,7 @@ import type { GuardedLaunchState } from './launch-guard.js';
 import { validCycleVersion, type NativeReviewCycle } from './review-cycle.js';
 import { DEFAULT_SEVERITY_ORDER } from '../config/defaults.js';
 import { bindRoundEvidence, processSemanticRound, verifyRoundBinding } from './semantic-state.js';
+import { claimTokenDigests, dismissedRepeatOf, repeatSuppressReason, type PriorClaim, type RepeatOf } from './repeat-guard.js';
 import { verdictClearsPending } from '../evidence/claim-recovery/validation/obligations.js';
 export { verdictClearsPending };
 import {
@@ -124,6 +125,10 @@ export interface FindingEntry {
   verdictSeverity?: string;
   claimDescriptor?: ClaimDescriptor;
   pendingRound?: number;
+  /** Hashed title and description tokens, for repeat matching (RCL-199). */
+  claimTokens?: string[];
+  /** The standing dismissal this claim repeated when first sighted (RCL-199). */
+  repeatOf?: RepeatOf;
 }
 
 export interface RoundCounts {
@@ -452,6 +457,39 @@ export function validateReportIdentityMappings(findings: readonly ReportIdentity
 }
 
 /**
+ * Suppress this round's new gating findings when every one of them repeats a
+ * standing dismissal (RCL-199). Mutates the annotations, counts and entries.
+ */
+function suppressRepeatOnlyRound(state: ConvergeRunState, annotations: AnnotatedRoundFinding[], counts: RoundCounts,
+  round: number, lineWindow: number): void {
+  const standingDismissal = (entry: FindingEntry): PriorClaim['dismissal'] => {
+    const root = entry.repeatOf ? state.findings[entry.repeatOf.identity] : entry;
+    return root?.verdict === 'dismissed' && root.verdictRound! < round
+      ? { identity: root.key, round: root.verdictRound!, severity: root.verdictSeverity ?? root.severity } : undefined;
+  };
+  const prior: PriorClaim[] = Object.values(state.findings).filter(entry => entry.firstRound < round)
+    .map(entry => ({ ...entry, dismissal: standingDismissal(entry) }));
+  const actionable = annotations.filter(a =>
+    (a.status === 'new' || a.status === 'regating') && findingGatingReason(a.finding) !== 'none');
+  if (actionable.length === 0 || actionable.some(a => a.status !== 'new')) return;
+  const repeats = new Map<string, RepeatOf>();
+  for (const annotation of actionable) {
+    const repeatOf = dismissedRepeatOf(annotation.finding, prior, lineWindow);
+    if (!repeatOf) return;
+    repeats.set(annotation.identity, repeatOf);
+  }
+  for (const annotation of annotations) {
+    const repeatOf = repeats.get(annotation.identity);
+    if (!repeatOf || annotation.status !== 'new') continue;
+    state.findings[annotation.identity]!.repeatOf = repeatOf;
+    annotation.status = 'suppressed';
+    annotation.suppressReason = repeatSuppressReason(repeatOf);
+    counts.new--;
+    counts.suppressed++;
+  }
+}
+
+/**
  * Dedupe one round's findings against every prior round of this run,
  * enforce the round cap, and persist the updated identity ledger.
  *
@@ -736,6 +774,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
         endLine: finding.endLine,
         title: finding.title,
         claimTextSha256: textDigest,
+        claimTokens: claimTokenDigests(finding),
         identityOrigin: reportIdentity ? 'modern' : 'legacy',
         ...(reportIdentity ? { sourceReportIdentity: reportIdentity } : {}),
         severity: finding.severity,
@@ -806,6 +845,7 @@ async function processRoundReportOwned(options: ProcessRoundOptions, ownership: 
     });
   }
 
+  suppressRepeatOnlyRound(state, [...pending.values()], counts, options.round, lineWindow);
   annotated.push(...options.findings.map((_, index) => pending.get(index)!));
 
   validateReportIdentityMappings(annotated);

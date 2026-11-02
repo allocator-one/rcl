@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Verify critical and consensus findings before they gate, with the task
+  context (the `--spec` text and the pull request's title and description).
+  A refuted one no longer gates; any other verdict, including an unavailable
+  verifier, keeps its tier. Verifier contract version 3; version 1 and 2
+  captures replay unchanged (RCL-198).
+- Converge a round whose every new gating finding repeats a standing
+  dismissal: same file, category and lines within the dedupe window, with
+  overlapping title or claim wording. Those findings are classified
+  `suppressed` with the dismissed identity in their reason, and the ledger
+  entry records it as `repeatOf`. One genuinely new gating finding keeps the
+  round actionable, and escalation to critical still re-gates. New ledger
+  entries keep hashed claim tokens for this match, never claim text (RCL-199).
+
 ## 4.5.22 - 2026-10-30
 
 - Let a review cycle run without GitHub credentials in the reviewer process.
