@@ -61,7 +61,13 @@ it.each([['report', 201], ['verdict', 201], ['attempt', 201], ['attempt', 503]] 
     else {
       const admitted = await processRoundReport({ gitCommonDir: join(root, '.git'), target, round: 1,
         findings: report.findings, runId: report.run!.id });
-      args = ['converge-verdict', '--target', target, '--round', '1', '--dismissed', `${admitted.findings[0]!.identity}=synthetic guard`, '--json'];
+      // A gating dismissal must quote committed code (RCL-201).
+      await mkdir(join(root, 'src'));
+      await writeFile(join(root, 'src/guard.ts'), 'if (!allowed) return deny();\n');
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'add', 'src/guard.ts'], { cwd: root, env });
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'guard'], { cwd: root, env });
+      args = ['converge-verdict', '--target', target, '--round', '1', '--dismissed',
+        `${admitted.findings[0]!.identity}=synthetic guard: src/guard.ts:1 \`if (!allowed) return deny();\``, '--json'];
     }
     const entry = process.env.RCL_TEST_PACKAGED_CLI;
     const launch = entry ? [entry] : ['--import', import.meta.resolve('tsx'), fileURLToPath(new URL('../../src/index.ts', import.meta.url))];

@@ -176,6 +176,7 @@ import { runRefutationRecovery, type RefutationRecoveryOptions } from './telemet
 import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
+import { checkDismissalCitations, dismissalRequiresCitation, gitRevisionReader, reviewedRevision } from './converge/dismissal-citations.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
 import { guardedInputWithoutAsyncSeats, ordinaryPendingGuardedInput,
@@ -1024,7 +1025,7 @@ program
   )
   .option(
     '--dismissed <key=reason>',
-    'Finding identity dismissed, with reason (repeatable)',
+    'Finding identity dismissed, with reason; a gating dismissal must cite path:line `quoted code` (repeatable)',
     (val: string, prev: string[]) => {
       prev.push(val);
       return prev;
@@ -1088,6 +1089,7 @@ program
           gitCommonDir,
           target,
           async ownership => {
+            await assertCitedGatingDismissals(gitCommonDir, target, round, verdicts);
             const recorded = await recordVerdicts({
               gitCommonDir,
               target,
@@ -2373,6 +2375,31 @@ async function runReview(target: string | undefined, opts: CouncilCliOpts & {
     process.exitCode = opts.guardedConverge && (err instanceof ConvergeAttemptBudgetExceededError || err instanceof ConvergeRoundCapError)
       ? 2 : opts.guardedConverge && (err instanceof ConvergeAttemptStateError || err instanceof ConvergeRunStateError) ? 3
         : opts.guardedConverge && err instanceof ReviewCouncilInterrupted ? 5 : 1;
+  }
+}
+
+/**
+ * Refuse a gating dismissal that does not quote, on its cited lines, the code
+ * the round reviewed (RCL-201). Runs before any verdict is written.
+ */
+async function assertCitedGatingDismissals(gitCommonDir: string, target: string, round: number,
+  verdicts: ReadonlyArray<{ key: string; verdict: 'fixed' | 'dismissed'; reason?: string }>): Promise<void> {
+  const state = await loadConvergeRunState(gitCommonDir, target);
+  if (!state) return;
+  const gated = verdicts.filter(v => v.verdict === 'dismissed' && dismissalRequiresCitation(state, round, v.key));
+  if (gated.length === 0) return;
+  const launch = state.version === 3
+    ? (await (await import('./converge/attempt-budget.js')).loadConvergeAttemptState(gitCommonDir, target))?.lastLaunch
+    : state.lastLaunch;
+  const read = gitRevisionReader(process.cwd(), reviewedRevision(launch, round));
+  const problems: string[] = [];
+  for (const { key, reason } of gated) {
+    const problem = await checkDismissalCitations(reason ?? '', read);
+    if (problem) problems.push(`${key}: ${problem}`);
+  }
+  if (problems.length > 0) {
+    throw new ConvergeRunStateError(
+      `A dismissal of a gating finding must quote the code it relies on (RCL-201). No verdict was recorded.\n${problems.join('\n')}`);
   }
 }
 

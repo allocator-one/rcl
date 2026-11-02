@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Refuse a dismissal of a gating finding that does not quote the code it
+  relies on. `converge-verdict --dismissed` and `rcl evidence
+  retriage-finding` require at least one `path:line` or `path:start-end`
+  citation followed by the quoted code in backticks, and check each quote
+  against the cited lines of the reviewed commit. Nothing is recorded when a
+  quote is missing or does not match. Non-gating dismissals are unchanged
+  (RCL-201).
+
 - Verify critical and consensus findings before they gate, with the task
   context (the `--spec` text and the pull request's title and description).
   A refuted one no longer gates; any other verdict, including an unavailable

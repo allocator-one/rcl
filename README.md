@@ -424,7 +424,7 @@ and the recovery runbooks are in
 | `rcl evidence recover-run` | Preview, apply or resume delivery of one original asserted run |
 | `rcl evidence recover-claim` | Preview, apply, resume, adopt or refresh one selected semantic claim on its existing native target |
 | `rcl evidence recover-finding` | Preview or submit a correction of one recorded finding identity |
-| `rcl evidence retriage-finding` | Preview or submit a fresh dismissal of one finding at its recorded severity |
+| `rcl evidence retriage-finding` | Preview or submit a fresh dismissal of one finding at its recorded severity; a gating finding's reason must quote the code it cites |
 | `rcl telemetry status` | Telemetry level, credential source and spooled deliveries |
 | `rcl telemetry flush [--run <id>]` | Deliver spooled evidence |
 | `rcl telemetry rejected` | Inspect retained rejected evidence without delivering it |
@@ -441,7 +441,7 @@ commands are documented in
 | Command | Purpose |
 | --- | --- |
 | `rcl converge-report` | Dedupe a round report against earlier rounds, enforce the round cap, classify findings (`new` / `repeat` / `suppressed` / `regating`); refuses inconclusive reviewer health |
-| `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution |
+| `rcl converge-verdict` | Record fixed/dismissed verdicts and report the round's resolution; a gating dismissal must quote the code it cites (`path:line` then the code in backticks), checked against the reviewed commit |
 | `rcl converge-reconcile-history` | Authenticate and append a reconciliation receipt for an exact historical guarded launch after `lastLaunch` advanced |
 | `rcl converge-stale` | Audited disposition of a healthy or reconciled delivered-hard-failure report that became stale before admission |
 | `rcl converge-gap` | Audited record of one evidenced missing terminal report |

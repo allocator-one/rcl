@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { checkDismissalCitations, gitRevisionReader } from '../converge/dismissal-citations.js';
 import { describeOutcome } from '../telemetry/sink.js';
 import { MAX_FREE_TEXT } from '../telemetry/scrub.js';
 import { prepareFindingRetriage } from './finding-retriage.js';
@@ -50,6 +51,22 @@ export async function runFindingRetriage(options: FindingRetriageOptions, deps: 
   } catch (err) {
     deps.stderr(text(err instanceof Error ? err.message : String(err), 400));
     return EVIDENCE_EXIT.usage;
+  }
+
+  // A dismissal of a gating finding must quote the code it relies on at the run's head (RCL-201).
+  const finding = run.value.findings.find(row => row.ref === options.findingRef);
+  // A row without a gating reason predates the field; treat it as gating.
+  if (finding && finding.gating_reason !== 'none' && finding.below_threshold !== true) {
+    let problem: string | undefined;
+    try {
+      problem = await checkDismissalCitations(reason, gitRevisionReader(deps.cwd ?? process.cwd(), run.value.target.head_sha!));
+    } catch (err) {
+      problem = err instanceof Error ? err.message : String(err);
+    }
+    if (problem) {
+      deps.stderr(text(`A dismissal of a gating finding must quote the code it relies on (RCL-201): ${problem}`, 600));
+      return EVIDENCE_EXIT.usage;
+    }
   }
 
   if (!options.submit) {
