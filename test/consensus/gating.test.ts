@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   applyGating,
   applyGatingWithFallback,
+  planGatingForCapturedContract,
   resolveGatingConfig,
   relevantPatchExcerpt,
 } from '../../src/consensus/gating.js';
@@ -53,6 +54,10 @@ const confirmedResponse = JSON.stringify([{ id: 'F1', verdict: 'confirmed', reas
   failureMechanism: 'The incorrect constant propagates to callers.',
   evidence: [{ file: 'src/a.ts', quote: 'const x = 1;' }] }]);
 
+function answer(text: string): ModelAnswer {
+  return { model: 'google/gemini-3.6-flash', provider: 'google', text, durationMs: 5, status: 'success' };
+}
+
 const baseOpts = {
   minModels: 2,
   verificationModel: 'google/gemini-3.6-flash',
@@ -85,24 +90,24 @@ describe('applyGating (RCL-23)', () => {
     }
   );
 
-  it('marks critical findings as gating regardless of model count', async () => {
-    const ask = vi.fn();
+  it('keeps a confirmed critical finding gating regardless of model count', async () => {
+    const ask = vi.fn(async (): Promise<ModelAnswer> => answer(confirmedResponse));
     const { findings } = await applyGating(
       [makeFinding({ severity: 'critical', models: ['m1'] })],
       { ...baseOpts, ask }
     );
-    expect(findings[0]!.gating).toEqual({ reason: 'critical' });
-    expect(ask).not.toHaveBeenCalled();
+    expect(findings[0]!.gating).toMatchObject({ reason: 'critical', verification: { verdict: 'confirmed' } });
+    expect(ask).toHaveBeenCalledTimes(1);
   });
 
-  it('marks multi-model blocking findings as consensus without verification', async () => {
-    const ask = vi.fn();
+  it('keeps a confirmed multi-model blocking finding gating as consensus', async () => {
+    const ask = vi.fn(async (): Promise<ModelAnswer> => answer(confirmedResponse));
     const { findings } = await applyGating(
       [makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
       { ...baseOpts, ask }
     );
-    expect(findings[0]!.gating!.reason).toBe('consensus');
-    expect(ask).not.toHaveBeenCalled();
+    expect(findings[0]!.gating).toMatchObject({ reason: 'consensus', verification: { verdict: 'confirmed' } });
+    expect(ask).toHaveBeenCalledTimes(1);
   });
 
   it('marks minor and nitpick findings as none', async () => {
@@ -435,9 +440,9 @@ describe('applyGating (RCL-23)', () => {
       reason: 'none',
       verification: { verdict: 'unavailable', note: expect.stringMatching(/truncated/) },
     });
-    expect(findings[1]!.gating).toEqual({ reason: 'consensus' });
-    expect(findings[2]!.gating).toEqual({ reason: 'critical' });
-    expect(verification).toMatchObject({ candidates: 1, refuted: 0, unrefuted: 0, unavailable: 1 });
+    expect(findings[1]!.gating).toMatchObject({ reason: 'consensus', verification: { verdict: 'unavailable' } });
+    expect(findings[2]!.gating).toMatchObject({ reason: 'critical', verification: { verdict: 'unavailable' } });
+    expect(verification).toMatchObject({ candidates: 3, refuted: 0, unrefuted: 0, unavailable: 3 });
   });
 
   it('treats findings missing from a malformed verifier response as unavailable', async () => {
@@ -530,6 +535,68 @@ describe('applyGating (RCL-23)', () => {
   });
 });
 
+// RCL-198: unverified critical and consensus findings gated merges and were
+// wrong about half the time. They now face the same verifier, with the spec.
+describe('verified critical and consensus gating (RCL-198)', () => {
+  const refuted = JSON.stringify([{ id: 'F1', verdict: 'refuted', reason: 'The spec requires this behavior.' }]);
+
+  it.each([
+    ['critical', makeFinding({ severity: 'critical', models: ['m1'] })],
+    ['consensus', makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
+  ])('records a refuted %s finding without letting it gate', async (_tier, finding) => {
+    const { findings, verification } = await applyGating([finding],
+      { ...baseOpts, ask: vi.fn(async () => answer(refuted)) });
+    expect(findings[0]!.gating).toEqual({ reason: 'none',
+      verification: { model: 'google/gemini-3.6-flash', verdict: 'refuted', note: 'The spec requires this behavior.' } });
+    expect(verification).toMatchObject({ candidates: 1, refuted: 1 });
+  });
+
+  it('keeps a critical finding gating when the verifier lacks the evidence to decide', async () => {
+    const insufficient = JSON.stringify([{ id: 'F1', verdict: 'insufficient_evidence', reason: 'Caller not shown.' }]);
+    const { findings } = await applyGating([makeFinding({ severity: 'critical', models: ['m1'] })],
+      { ...baseOpts, ask: vi.fn(async () => answer(insufficient)) });
+    expect(findings[0]!.gating).toMatchObject({ reason: 'critical', verification: { verdict: 'insufficient_evidence' } });
+  });
+
+  it('keeps critical and consensus findings gating when they cannot be sent to a verifier', async () => {
+    const ask = vi.fn();
+    const { findings } = await applyGating([
+      makeFinding({ severity: 'critical', models: ['m1'], file: 'src/not-in-diff.ts' }),
+      makeFinding({ severity: 'important', models: ['m1', 'm2'] }),
+    ], { ...baseOpts, verificationModel: undefined, ask });
+    expect(ask).not.toHaveBeenCalled();
+    expect(findings.map(f => [f.gating!.reason, f.gating!.verification?.verdict]))
+      .toEqual([['critical', 'unavailable'], ['consensus', 'unavailable']]);
+  });
+
+  it('gives the verifier the task specification and pull request text', async () => {
+    let system = '', user = '';
+    const ask = vi.fn(async (_m: string, s: string, u: string) => { system = s; user = u; return answer(refuted); });
+    await applyGating([makeFinding({ severity: 'critical' })], { ...baseOpts, ask,
+      taskContext: { spec: 'Admins may delete any record.', prTitle: 'Allow admin deletes', prBody: 'Closes RCL-1' } });
+    expect(system).toMatch(/specification/i);
+    expect(user).toContain('<<<TASK_START>>> [specification]\nAdmins may delete any record.');
+    expect(user).toContain('Title: Allow admin deletes\n\nCloses RCL-1');
+    expect(user.indexOf('<<<TASK_START>>>')).toBeLessThan(user.indexOf('## Findings to verify'));
+  });
+
+  it('leaves the task section out when there is no task context', async () => {
+    let user = '';
+    await applyGating([makeFinding({ severity: 'critical' })], { ...baseOpts,
+      ask: vi.fn(async (_m: string, _s: string, u: string) => { user = u; return answer(refuted); }) });
+    expect(user).not.toContain('<<<TASK_START>>>');
+  });
+
+  it('replays a version two plan with critical and consensus findings gating unverified', () => {
+    const plan = planGatingForCapturedContract([
+      makeFinding({ severity: 'critical', models: ['m1'] }),
+      makeFinding({ severity: 'important', models: ['m1', 'm2'] }),
+    ], { ...baseOpts, taskContext: { spec: 'ignored by version two' } }, 2);
+    expect(plan.batches).toEqual([]);
+    expect(plan.initialGating).toEqual([{ reason: 'critical' }, { reason: 'consensus' }]);
+  });
+});
+
 describe('precision-weighted consensus gating (RCL-27)', () => {
   it('two noisy models no longer auto-gate — the finding goes to verification', async () => {
     const ask = vi.fn(
@@ -576,13 +643,12 @@ describe('precision-weighted consensus gating (RCL-27)', () => {
   });
 
   it('neutral or unknown weights keep two-model findings consensus-gated', async () => {
-    const ask = vi.fn();
+    const ask = vi.fn(async (): Promise<ModelAnswer> => answer(confirmedResponse));
     const { findings } = await applyGating(
       [makeFinding({ severity: 'important', models: ['m1', 'm2'] })],
       { ...baseOpts, modelWeights: new Map(), ask }
     );
     expect(findings[0]!.gating!.reason).toBe('consensus');
-    expect(ask).not.toHaveBeenCalled();
   });
 });
 
