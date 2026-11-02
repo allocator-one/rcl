@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,20 @@ const runId = '00000000-0000-4000-8000-000000000001';
 const reportKey = `report:${runId}:aaaaaaaaaaaaaaaa`;
 const canonical = 'bbbbbbbbbbbbbbbb';
 const digest = 'd'.repeat(64);
-const reason = 'Reviewed the critical claim against the exact code: the guard already enforces this invariant.';
+const citation = 'src/sample.ts:1 `if (!allowed) return deny();`';
+const reason = `Reviewed the critical claim against the exact code: the guard already enforces this invariant at ${citation}.`;
+
+/** Commits the cited guard (RCL-201) in `cwd` and returns the commit to use as the run's head. */
+function commitCitedSource(cwd: string): string {
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args],
+    { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+  git('init', '-q');
+  mkdirSync(join(cwd, 'src'), { recursive: true });
+  writeFileSync(join(cwd, 'src/sample.ts'), 'if (!allowed) return deny();\n');
+  git('add', 'src/sample.ts');
+  git('commit', '-q', '-m', 'guard');
+  return git('rev-parse', 'HEAD');
+}
 const directories: string[] = [];
 afterEach(async () => {
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true });
@@ -99,9 +113,10 @@ async function command(options: { submit?: boolean; postStatus?: number; readSta
   reason?: string | Uint8Array; missingFile?: boolean; receipt?: { inserted: number; duplicates: number };
   mutate?: (input: ReturnType<typeof fixture>) => void } = {}) {
   const input = fixture();
-  options.mutate?.(input);
   const cwd = await mkdtemp(join(tmpdir(), 'rcl-retriage-command-'));
   directories.push(cwd);
+  input.run.target.head_sha = commitCitedSource(cwd);
+  options.mutate?.(input);
   if (!options.missingFile) await writeFile(join(cwd, 'reason.txt'), options.reason ?? reason);
   const { fetch, requests } = fakeFetch((request) => {
     if (request.method === 'GET') return { status: options.readStatus ?? 200, body: { data: input.run } };
@@ -118,6 +133,27 @@ async function command(options: { submit?: boolean; postStatus?: number; readSta
   });
   return { code, requests, out: out.join('\n'), err: err.join('\n') };
 }
+
+describe('retriage cited dismissals (RCL-201)', () => {
+  it.each([false, true])('refuses an uncited dismissal of a gating finding before any submission, submit=%s', async (submit) => {
+    const result = await command({ submit, reason: 'The guard already enforces this invariant.' });
+    expect(result.code).toBe(2);
+    expect(result.requests.map((r) => r.method)).toEqual(['GET']);
+    expect(result.err).toMatch(/must quote the code it relies on \(RCL-201\): cite at least one line/);
+  });
+
+  it('refuses a quote that is not on the cited line at the run head', async () => {
+    const result = await command({ submit: true, reason: 'Guarded at src/sample.ts:1 `if (allowed) return allow();`' });
+    expect(result.code).toBe(2);
+    expect(result.err).toMatch(/src\/sample\.ts:1 does not contain the quoted text/);
+  });
+
+  it('accepts an uncited dismissal of a non-gating finding', async () => {
+    const result = await command({ submit: true, reason: 'Style preference only.',
+      mutate: (i) => { i.run.findings[1]!.gating_reason = 'none'; } });
+    expect(result.code).toBe(0);
+  });
+});
 
 describe('retriage command failures', () => {
   it.each([[0xff], [0xc3, 0x28], [0xe2, 0x82], [0xed, 0xa0, 0x80]])('refuses malformed UTF-8 bytes %j before network access', async (...bytes) => {
@@ -141,7 +177,7 @@ describe('retriage command failures', () => {
 
   it('preserves a valid Unicode reason in a newly inserted verdict', async () => {
     const unicodeReason = 'Prüfung: accès autorisé — 確認済み';
-    const result = await command({ submit: true, reason: unicodeReason });
+    const result = await command({ submit: true, reason: `${unicodeReason} ${citation}` });
     expect(result.code).toBe(0);
     expect(result.requests).toHaveLength(2);
     expect(result.requests[1]!.body).toContain(unicodeReason);
@@ -181,7 +217,7 @@ describe('retriage command failures', () => {
 
   it.each([false, true])('refuses a secret-shaped reason without exposing or posting it, submit=%s', async (submit) => {
     const secret = 'sk-' + 'a'.repeat(32);
-    const result = await command({ submit, reason: secret });
+    const result = await command({ submit, reason: `${secret} ${citation}` });
     expect(result.code).toBe(2);
     expect(result.requests.map((r) => r.method)).toEqual(['GET']);
     expect(result.out + result.err).not.toContain(secret);
@@ -243,7 +279,7 @@ describe('RCL-56 retained grouped-severity recovery', () => {
     const input = fixture();
     const cwd = await mkdtemp(join(tmpdir(), 'rcl-retriage-cli-'));
     directories.push(cwd);
-    execFileSync('git', ['init', '-q', cwd]);
+    input.run.target.head_sha = commitCitedSource(cwd);
     const state: ConvergeRunState = {
       version: 1, target: input.target, roundCap: 15,
       rounds: [{ round: 3, counts: { new: 2, repeat: 0, suppressed: 0, regating: 0 }, runId }],
