@@ -46,6 +46,10 @@ describe('dismissal citations (RCL-201)', () => {
       .resolves.toMatch(/lib\/cancel\.ts:3 does not contain the quoted text/);
   });
 
+  it('refuses a quote that is only whitespace', async () => {
+    await expect(checkDismissalCitations('lib/cancel.ts:2 `   `', read)).resolves.toMatch(/must quote code, not only whitespace/);
+  });
+
   it('refuses a citation of a missing file or a line past its end', async () => {
     await expect(checkDismissalCitations('lib/other.ts:1 `x`', read)).resolves.toMatch(/lib\/other\.ts does not exist/);
     await expect(checkDismissalCitations('lib/cancel.ts:9 `x`', read)).resolves.toMatch(/lib\/cancel\.ts:9 is past the end/);

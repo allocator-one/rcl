@@ -148,6 +148,13 @@ describe('retriage cited dismissals (RCL-201)', () => {
     expect(result.err).toMatch(/src\/sample\.ts:1 does not contain the quoted text/);
   });
 
+  it('refuses an uncited dismissal of a finding recorded without a gating reason', async () => {
+    const result = await command({ submit: true, reason: 'The guard already enforces this invariant.',
+      mutate: (i) => { i.run.findings[1]!.gating_reason = null; } });
+    expect(result.code).toBe(2);
+    expect(result.err).toMatch(/must quote the code it relies on \(RCL-201\)/);
+  });
+
   it('accepts an uncited dismissal of a non-gating finding', async () => {
     const result = await command({ submit: true, reason: 'Style preference only.',
       mutate: (i) => { i.run.findings[1]!.gating_reason = 'none'; } });

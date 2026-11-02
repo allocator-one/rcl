@@ -55,7 +55,8 @@ export async function runFindingRetriage(options: FindingRetriageOptions, deps: 
 
   // A dismissal of a gating finding must quote the code it relies on at the run's head (RCL-201).
   const finding = run.value.findings.find(row => row.ref === options.findingRef);
-  if (finding?.gating_reason && finding.gating_reason !== 'none' && finding.below_threshold !== true) {
+  // A row without a gating reason predates the field; treat it as gating.
+  if (finding && finding.gating_reason !== 'none' && finding.below_threshold !== true) {
     let problem: string | undefined;
     try {
       problem = await checkDismissalCitations(reason, gitRevisionReader(deps.cwd ?? process.cwd(), run.value.target.head_sha!));

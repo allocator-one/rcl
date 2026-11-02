@@ -44,6 +44,7 @@ export async function checkDismissalCitations(reason: string, read: RevisionRead
     if (startLine < 1 || endLine < startLine || endLine - startLine >= MAX_CITED_LINES) {
       return `${location} must name between 1 and ${MAX_CITED_LINES} lines`;
     }
+    if (collapse(quote) === '') return `${location} must quote code, not only whitespace`;
     const content = await read(path);
     if (content === undefined) return `${path} does not exist at the reviewed commit`;
     const lines = content.split(/\r?\n/);
