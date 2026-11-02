@@ -456,9 +456,12 @@ export function validateReportIdentityMappings(findings: readonly ReportIdentity
   }
 }
 
-/** The dismissed claim this entry stands for before `round`: itself, or the root a suppressed repeat resolved to. */
+/**
+ * The dismissed claim this entry stands for before `round`: itself, or the
+ * root a suppressed repeat resolved to. A repeat's own later verdict wins.
+ */
 function standingDismissalRoot(state: ConvergeRunState, entry: FindingEntry, round: number): FindingEntry | undefined {
-  const root = entry.repeatOf ? state.findings[entry.repeatOf.identity] : entry;
+  const root = entry.repeatOf && entry.verdict === undefined ? state.findings[entry.repeatOf.identity] : entry;
   return root?.verdict === 'dismissed' && root.verdictRound! < round ? root : undefined;
 }
 

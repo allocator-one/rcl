@@ -716,6 +716,18 @@ describe('repeat-only rounds (RCL-199)', () => {
     expect(third.findings[0]!.status).toBe('regating');
   });
 
+  it('triages a rewording of a re-gated repeat that was then fixed', async () => {
+    await dismissFirstRound();
+    await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
+    const third = await processRoundReport({ gitCommonDir: dir, target, round: 3,
+      findings: [reworded(1, { severity: 'critical', gating: { reason: 'critical' } })] });
+    await recordVerdicts({ gitCommonDir: dir, target, round: 3, verdicts: [{ key: third.findings[0]!.identity, verdict: 'fixed' }] });
+    const fourth = await processRoundReport({ gitCommonDir: dir, target, round: 4, findings: [modern(0, 9, {
+      title: 'Recipient skipped on partial cursor coverage, so it silently misses work', startLine: 13, endLine: 17,
+    })] });
+    expect(fourth.findings[0]!.status).toBe('new');
+  });
+
   it('forgets a repeat decision when its round is re-processed without being repeat-only', async () => {
     await dismissFirstRound();
     const second = await processRoundReport({ gitCommonDir: dir, target, round: 2, findings: [reworded(1)], runId: runs[1] });
