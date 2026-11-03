@@ -918,6 +918,11 @@ export interface RoundResolution {
   unresolved: string[];
   /** Identities recorded fixed this round (any status — every fix changes the patch). */
   fixedThisRound: number;
+  /**
+   * Fixed identities that gated, or that this round's annotations cannot place.
+   * Only these force a fresh round: a fix to a non-gating finding never does (RCL-218).
+   */
+  gatingFixedThisRound: number;
   status: 'converged-dismissal-only' | 'fixes-pending-fresh-round' | 'unresolved';
   recoveryProjection?: RecoveryProjectionFreshness;
 }
@@ -1047,9 +1052,14 @@ function deriveRoundResolution(state: ConvergeRunState, round: number,
     const unresolved = state.version === 3
       ? [...new Set([...effectivePendingIdentities(state), ...currentUnresolved])].sort()
       : currentUnresolved;
-    const fixedThisRound = Object.values(state.findings).filter(
-      (e) => e.verdict === 'fixed' && e.verdictRound === round
-    ).length;
+    const fixedIdentities = Object.values(state.findings)
+      .filter((e) => e.verdict === 'fixed' && e.verdictRound === round)
+      .map((e) => e.key);
+    const nonGatingIdentities = new Set(
+      state.lastAnnotations.identities.filter((a) => a.gating === 'none').map((a) => a.identity)
+    );
+    const fixedThisRound = fixedIdentities.length;
+    const gatingFixedThisRound = fixedIdentities.filter((key) => !nonGatingIdentities.has(key)).length;
     const admittedActionable = pendingBeforeTriage ?? admittedActionableBeforeTriage(state, round);
     const recoveryProjection = recoveryProjectionFreshness(state);
     return {
@@ -1059,11 +1069,12 @@ function deriveRoundResolution(state: ConvergeRunState, round: number,
       ]).size : actionable.length,
       unresolved,
       fixedThisRound,
+      gatingFixedThisRound,
       ...(recoveryProjection ? { recoveryProjection } : {}),
       status:
         unresolved.length > 0
           ? 'unresolved'
-          : fixedThisRound > 0
+          : gatingFixedThisRound > 0
             ? 'fixes-pending-fresh-round'
             : 'converged-dismissal-only',
     };

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Stop a converged round from pushing the pull request into another one. A fix
+  to a non-gating finding no longer resolves a round as
+  `fixes-pending-fresh-round`; the resolution reports `gatingFixedThisRound`
+  next to `fixedThisRound`, and `converge-verdict` tells the agent to leave a
+  non-gating fix out of the PR. The `rcl-converge` skill now ends the loop at
+  a converged round with the head unchanged: no push for a non-gating fix, a
+  rebase or a merge of the base branch unless it conflicts, a branch rule
+  requires it, or the user asks (RCL-218).
+
 - Refuse a dismissal of a gating finding that does not quote the code it
   relies on. `converge-verdict --dismissed` and `rcl evidence
   retriage-finding` require at least one `path:line` or `path:start-end`

@@ -223,9 +223,13 @@ earlier dismissal reason. Each identity may appear once per command, and each
 fixed reason must be nonempty and unique. In a fresh review cycle, pass the
 report's run UUID with `--run-id`. Once every gating identity of the current
 round is triaged, it also reports the round's resolution:
-`converged-dismissal-only` (everything dismissed, nothing fixed — the round
-converges on the spot, with no confirmation round),
+`converged-dismissal-only` (everything dismissed, no gating finding fixed — the
+round converges on the spot, with no confirmation round),
 `fixes-pending-fresh-round`, or `unresolved` with the identities still open.
+Only a fix to a gating finding makes a round `fixes-pending-fresh-round`
+(`gatingFixedThisRound`). A fix to a non-gating finding counts in
+`fixedThisRound` but never buys another round, and a converged pull request is
+not pushed again for it (RCL-218).
 
 ```bash
 rcl converge-report --target rcl-30 --report report-r2.json --round 2 --json
