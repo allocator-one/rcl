@@ -591,6 +591,57 @@ describe('cross-round identity and suppression (RCL-24)', () => {
     expect(fixed.resolution?.status).toBe('fixes-pending-fresh-round');
   });
 
+  describe('non-gating fixes (RCL-218)', () => {
+    async function roundWithNonGatingNit(target: string): Promise<{ gatingKey: string; nitKey: string }> {
+      const r1 = await processRoundReport({
+        gitCommonDir: dir,
+        target,
+        round: 1,
+        findings: [
+          finding({ models: ['m1', 'm2'] }),
+          finding({ models: ['m1'], severity: 'minor', gating: { reason: 'none' }, startLine: 100, endLine: 104, title: 'nit' }),
+        ],
+      });
+      return {
+        gatingKey: r1.findings.find((f) => f.finding.title === 'possible bug')!.identity,
+        nitKey: r1.findings.find((f) => f.finding.title === 'nit')!.identity,
+      };
+    }
+
+    it('keeps a round converged when its only fixes are non-gating findings', async () => {
+      const { gatingKey, nitKey } = await roundWithNonGatingNit('t4ng');
+
+      const done = await recordVerdicts({
+        gitCommonDir: dir,
+        target: 't4ng',
+        round: 1,
+        verdicts: [
+          { key: gatingKey, verdict: 'dismissed', reason: 'by design' },
+          { key: nitKey, verdict: 'fixed' },
+        ],
+      });
+
+      expect(done.resolution).toMatchObject({
+        status: 'converged-dismissal-only', unresolved: [], fixedThisRound: 1, gatingFixedThisRound: 0,
+      });
+    });
+
+    it('still needs a fresh round when a gating fix sits next to a non-gating one', async () => {
+      const { gatingKey, nitKey } = await roundWithNonGatingNit('t4mix');
+
+      const mixed = await recordVerdicts({
+        gitCommonDir: dir,
+        target: 't4mix',
+        round: 1,
+        verdicts: [{ key: gatingKey, verdict: 'fixed' }, { key: nitKey, verdict: 'fixed' }],
+      });
+
+      expect(mixed.resolution).toMatchObject({
+        status: 'fixes-pending-fresh-round', fixedThisRound: 2, gatingFixedThisRound: 1,
+      });
+    });
+  });
+
   it('makes no resolution claim for verdicts recorded against an older round', async () => {
     const r1 = await processRoundReport({
       gitCommonDir: dir,

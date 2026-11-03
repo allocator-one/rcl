@@ -276,12 +276,12 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   // above, and an inspected legacy health retry keeps its original proof.
   if (healthy && !disposed && !boundFixRecoverySource && previous.headSha === options.headSha &&
       (previous.inputSha256 === options.inputSha256 || previous.inputSha256 === options.historicalInputSha256)) {
-    refuse('inputs_unchanged', (resolution?.fixedThisRound ?? 0) > 0
+    refuse('inputs_unchanged', (resolution?.gatingFixedThisRound ?? 0) > 0
       ? 'A real fix needs changed review inputs and a fresh resulting head.'
       : 'These inputs were already reviewed; upstream tip movement alone needs no new council.');
   }
   // A disposed unadmitted report may already follow the fixed round's commit.
-  if (healthy && !disposed && (resolution?.fixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
+  if (healthy && !disposed && (resolution?.gatingFixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
   if ((previous.hardFailure || !healthy) && !options.retryReason) {

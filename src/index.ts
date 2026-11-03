@@ -1175,9 +1175,15 @@ program
               case 'converged-dismissal-only':
                 console.log(
                   `Round ${round} resolution: all ${resolution.actionable} gating finding(s) dismissed, ` +
-                    'nothing fixed — the reviewed patch is unchanged, so this round CONVERGES. ' +
+                    'no gating finding fixed — this round CONVERGES. ' +
                     'No confirmation round is required (RCL-30).'
                 );
+                if (resolution.fixedThisRound > 0) {
+                  console.log(
+                    `${resolution.fixedThisRound} non-gating fix(es) recorded. They never buy another round, ` +
+                      'and a converged PR is not pushed again for them (RCL-218): leave them out of the PR.'
+                  );
+                }
                 break;
               case 'fixes-pending-fresh-round':
                 console.log(
