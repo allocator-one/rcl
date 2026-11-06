@@ -73,7 +73,8 @@ export function verifiedConsensusReportProblem(
           (verdict === 'unavailable' && allowsUnavailableVerified(envelope.run.rcl_version))
         : reason === 'none'
           ? verification === undefined || verdict === 'refuted' || verdict === 'insufficient_evidence' || verdict === 'unavailable'
-          : verification === undefined;
+          // Since RCL-198 critical and consensus findings are verified too; only a refutation removes their tier.
+          : verification === undefined || verdict === 'confirmed' || verdict === 'insufficient_evidence' || verdict === 'unavailable';
       if (!coherent) {
         return `${group}.${index}.gating.verification.verdict contradicts the ${reason} gating reason in report_json`;
       }

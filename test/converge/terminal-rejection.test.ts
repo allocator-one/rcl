@@ -55,7 +55,7 @@ vi.mock('../../src/converge/process-identity.js', async importOriginal => {
 
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'level' = 'label') {
+async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'verdict' | 'level' = 'label') {
   const common = await mkdtemp(join(tmpdir(), 'rcl-terminal-')); roots.push(common);
   const dataDir = join(common, 'data'); await mkdir(dataDir, { mode: 0o700 });
   const target = 'synthetic-9220', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), reportPath = join(common, 'original-report.json');
@@ -71,6 +71,11 @@ async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' |
   result.stats.totalReviews = 10; result.stats.successfulReviews = 7;
   if (defect === 'label') delete result.findings[0]!.gating;
   else if (defect === 'blank-file') result.belowThresholdFindings![0]!.file = '';
+  else if (defect === 'verdict') {
+    // RCL-228: the verifier refuted a consensus finding, yet the report kept its consensus tier (an incoherent annotation).
+    result.findings[0]!.gating = { reason: 'consensus', verification: { model: 'openai/gpt-6-astra', verdict: 'refuted', note: 'The guard exists.' } };
+    result.stats.verification = { model: 'openai/gpt-6-astra', candidates: 1, refuted: 1, unrefuted: 0, unavailable: 0, durationMs: 100 };
+  }
   else {
     // A valid strict fallback (RCL-160), refused only because level `findings` never sends its report.
     result.run!.gating.strict_fallback = { version: 1, cause: 'verification_pass_timeout' };
@@ -261,6 +266,18 @@ it.each(['forged-label-diagnostic', 'transport-refusal'])('refuses self-consiste
   const before = await snapshot(f);
   await expect(f.preview()).rejects.toThrow('unsupported_local_rejection');
   expect(await snapshot(f)).toEqual(before);
+});
+
+it('disposes a run whose verification verdict contradicted its gating reason and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'verdict'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Validator fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
 });
 
 it('disposes a run refused for a blank appendix file and admits only the bounded retry', async () => {
