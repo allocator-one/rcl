@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.23 - 2026-11-06
+
 - Stop a converged round from pushing the pull request into another one. A fix
   to a non-gating finding no longer resolves a round as
   `fixes-pending-fresh-round`; the resolution reports `gatingFixedThisRound`
