@@ -2,13 +2,16 @@
 
 ## Unreleased
 
+## 4.5.24 - 2026-11-06
+
 - Accept a critical or consensus finding whose verification is `confirmed`,
   `insufficient_evidence` or `unavailable`. Since RCL-198 only a refutation
   removes the tier such a finding earned, but the local report validator still
   demanded no verification on it and refused a conclusive council's own report
   (exit 4, then `terminal_rejection_proof_required`). `rcl converge-rejected`
-  also accepts a quarantined report refused for such a verdict/gating mismatch,
-  so a pull request stuck on one can launch its bounded retry (RCL-228).
+  also accepts a quarantined 4.5.23 report refused for that mismatch, once the
+  current validator accepts it, so a pull request stuck on one can launch its
+  bounded retry (RCL-228).
 
 ## 4.5.23 - 2026-11-06
 
