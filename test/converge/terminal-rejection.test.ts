@@ -36,6 +36,22 @@ vi.mock('../../src/evidence/original-run/lock-scope.js', async importOriginal =>
   };
 });
 
+// Replays the 4.5.23 report validator, which refused any verification on a critical or consensus finding (RCL-228).
+const legacyValidator = vi.hoisted(() => ({ on: false }));
+vi.mock('../../src/telemetry/report-consistency.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../../src/telemetry/report-consistency.js')>();
+  return {
+    ...original,
+    verifiedConsensusReportProblem: (...args: Parameters<typeof original.verifiedConsensusReportProblem>) => {
+      const report = args[0] as { findings: Array<{ gating?: { reason: string; verification?: unknown } }> };
+      const index = report.findings.findIndex(f => ['consensus', 'critical'].includes(f.gating?.reason ?? '') && f.gating?.verification !== undefined);
+      return legacyValidator.on && index >= 0
+        ? `findings.${index}.gating.verification.verdict contradicts the ${report.findings[index]!.gating!.reason} gating reason in report_json`
+        : original.verifiedConsensusReportProblem(...args);
+    },
+  };
+});
+
 vi.mock('../../src/converge/process-identity.js', async importOriginal => {
   const identity = await importOriginal<typeof import('../../src/converge/process-identity.js')>();
   return {
@@ -55,7 +71,7 @@ vi.mock('../../src/converge/process-identity.js', async importOriginal => {
 
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'level' = 'label') {
+async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'verdict' | 'refuted' | 'level' = 'label') {
   const common = await mkdtemp(join(tmpdir(), 'rcl-terminal-')); roots.push(common);
   const dataDir = join(common, 'data'); await mkdir(dataDir, { mode: 0o700 });
   const target = 'synthetic-9220', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), reportPath = join(common, 'original-report.json');
@@ -71,6 +87,14 @@ async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' |
   result.stats.totalReviews = 10; result.stats.successfulReviews = 7;
   if (defect === 'label') delete result.findings[0]!.gating;
   else if (defect === 'blank-file') result.belowThresholdFindings![0]!.file = '';
+  else if (defect === 'verdict' || defect === 'refuted') {
+    // RCL-228: 4.5.23 refused a consensus finding with a verification. `verdict` is the shape of run 01a1b0fd, valid
+    // under the current validator. `refuted` keeps a tier the gate removes, so the current validator still refuses it.
+    result.run!.rcl_version = '4.5.23';
+    const verdict = defect === 'verdict' ? 'insufficient_evidence' : 'refuted';
+    result.findings[0]!.gating = { reason: 'consensus', verification: { model: 'openai/gpt-6-astra', verdict, note: 'The source does not show the caller.' } };
+    result.stats.verification = { model: 'openai/gpt-6-astra', candidates: 1, refuted: verdict === 'refuted' ? 1 : 0, unrefuted: 0, unavailable: 0, durationMs: 100 };
+  }
   else {
     // A valid strict fallback (RCL-160), refused only because level `findings` never sends its report.
     result.run!.gating.strict_fallback = { version: 1, cause: 'verification_pass_timeout' };
@@ -86,7 +110,8 @@ async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' |
     result.run!.cycle_id = context.cycleId;
     result.run!.converge = { target, attempt: context.attempt, round: context.round };
     const bytes = JSON.stringify(result); await writeFile(reportPath, bytes, { mode: 0o600 });
-    const outcome = await deliverRun(rt, { result, artifacts: { report_json: bytes }, evidenceRequired: true });
+    legacyValidator.on = defect === 'verdict';
+    const outcome = await deliverRun(rt, { result, artifacts: { report_json: bytes }, evidenceRequired: true }).finally(() => { legacyValidator.on = false; });
     expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4, failureDisposition: 'local-invalid' });
     return { runId: result.run!.id, reportJsonSha256: sha256(bytes), successfulReviews: 7, totalReviews: 10,
       reviewerHealth: health, ...(legacy ? { deliveryPending: outcome.spooled || outcome.exitCode !== 0 } : guardedDeliveryState(outcome)),
@@ -258,6 +283,41 @@ it.each(['forged-label-diagnostic', 'transport-refusal'])('refuses self-consiste
     events: [], requestedMode: 'asserted', acknowledged: false,
     diagnostics: kind === 'transport-refusal' ? [{ path: 'delivery', message: 'HTTP 422 rejected' }]
       : [{ path: 'findings.0.gating.reason', message: 'Verified-consensus finding is missing a valid gating label' }] })).toMatchObject({ status: 'complete' });
+  const before = await snapshot(f);
+  await expect(f.preview()).rejects.toThrow('unsupported_local_rejection');
+  expect(await snapshot(f)).toEqual(before);
+});
+
+it('disposes a run 4.5.23 refused for a verification the current validator accepts and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'verdict'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Validator fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a refuted consensus finding quarantined because the current validator still refuses it', async () => {
+  const f = await fixture(false, 20, 'refuted'), before = await snapshot(f);
+  await expect(f.preview()).rejects.toThrow('terminal_rejection_rejection_diagnostics');
+  expect(await snapshot(f)).toEqual(before);
+});
+
+it('refuses a forged 4.5.23 verdict refusal recorded for a report from another release', async () => {
+  const f = await fixture(false, 20, 'verdict');
+  f.result.run!.rcl_version = '4.5.22';
+  const bytes = JSON.stringify(f.result), artifacts = { report_json: bytes };
+  await writeFile(f.selection.reportPath, bytes);
+  f.selection.reportSha256 = sha256(bytes); f.state.lastLaunch.reportJsonSha256 = sha256(bytes);
+  await writeFile(f.nativePath, JSON.stringify(f.state));
+  const [recorded] = (await f.rt.quarantine!.inspect(f.selection.runId))!.manifest!.diagnostics;
+  await rm(join(f.dataDir, 'quarantine'), { recursive: true });
+  expect(await f.rt.quarantine!.retain({ runId: f.selection.runId, artifacts,
+    envelope: buildRunEnvelope(f.result, artifacts, { level: 'full', delivery: { mode: 'direct' }, parseFailures: false }),
+    events: [], requestedMode: 'asserted', acknowledged: false, diagnostics: [recorded!] })).toMatchObject({ status: 'complete' });
   const before = await snapshot(f);
   await expect(f.preview()).rejects.toThrow('unsupported_local_rejection');
   expect(await snapshot(f)).toEqual(before);

@@ -14,6 +14,7 @@ import { REVIEWER_OUTBOX_DIR } from '../telemetry/reviewer-delivery.js';
 import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope } from '../telemetry/envelope.js';
 import { validateRunEnvelope, type EvidenceDiagnostic } from '../telemetry/envelope-validation.js';
 import { strictFallbackLevelDiagnostic, verifiedConsensusDiagnostics } from '../telemetry/deliver.js';
+import { verifiedConsensusReportProblem } from '../telemetry/report-consistency.js';
 import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { mergedBlockingHealth } from './legacy-launch-health.js';
@@ -29,6 +30,8 @@ import { rejectionManifest, rejectionManifestSchema, rejectionSelectionSchema, v
 const parse = (file: Awaited<ReturnType<typeof readStable>>) => decodeOriginalReport(file.text).value;
 const LABEL_PATH = /^(findings|belowThresholdFindings)\.\d+\.gating\.reason$/;
 const BLANK_TEXT_PATH = /^findings\.(\d+)\.(file|title)$/;
+/** The only release whose report validator demanded no verification on a critical or consensus finding (RCL-198, RCL-228). */
+const LEGACY_VERDICT_RULE_VERSION = '4.5.23';
 function refuse(code: string): never { throw new Error(`terminal_rejection_${code}`); }
 export function assertDeadOwner(pid: number): void {
   try { process.kill(pid, 0); }
@@ -85,14 +88,18 @@ async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeo
   const artifacts: ArtifactBytes = { report_json: reportBytes.text };
   if (retained.manifest!.artifacts['report_md']) artifacts.report_md = (await readStable(join(retained.path, 'report.md'))).text;
   const storedEnvelope = parse(await readStable(join(retained.path, 'envelope.json')));
-  // Only three pre-network rejections are disposable: a missing gating label,
-  // a finding whose blank file or title the evidence protocol refuses, or a
-  // valid strict fallback at a telemetry level that never sends its report.
-  // A transport/server refusal, malformed envelope or valid report is not proof.
+  // Only four pre-network rejections are disposable: a missing gating label,
+  // a finding whose blank file or title the evidence protocol refuses, a
+  // verification the 4.5.23 report validator refused on a critical or consensus
+  // finding that the current validator accepts (RCL-228), or a valid strict fallback at a telemetry level that
+  // never sends its report. A transport/server refusal, malformed envelope or
+  // valid report is not proof.
   const labels = verifiedConsensusDiagnostics(raw as ReviewResult);
   const blank = [...report.findings, ...(report.belowThresholdFindings ?? [])].some(f => !f.file.trim() || !f.title.trim());
   const fallback = declaresStrictFallback(report.run.gating) && strictFallbackProblem(raw as ReviewResult) === undefined;
-  if ((labels.length === 0 && !blank && !fallback) || labels.some(d => !LABEL_PATH.test(d.path))) refuse('unsupported_local_rejection');
+  // Recomputed from the report, never copied from the quarantine; the recorded list must equal it.
+  const incoherent = retained.manifest!.diagnostics.some(d => d.path === 'report_json') ? legacyVerdictDiagnostics(raw as ReviewResult) : [];
+  if ((labels.length === 0 && !blank && !fallback && incoherent.length === 0) || labels.some(d => !LABEL_PATH.test(d.path))) refuse('unsupported_local_rejection');
   const levels = ['full', 'findings', 'envelope'] as const;
   const projections = levels.flatMap(level => [false, true].map(parseFailures =>
     buildRunEnvelope(raw as ReviewResult, artifacts, { level, parseFailures, delivery: { mode: 'direct' } })));
@@ -106,10 +113,28 @@ async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeo
     .filter((_level, i) => projections.slice((i + 1) * 2, (i + 2) * 2).some(candidate => isDeepStrictEqual(candidate, storedEnvelope)))
     .map(strictFallbackLevelDiagnostic)
     .find(diagnostic => isDeepStrictEqual(retained.manifest!.diagnostics.at(-1), diagnostic)) : undefined;
-  const diagnostics = [...refused, ...labels, ...(recordedLevel ? [recordedLevel] : [])];
+  const diagnostics = [...refused, ...labels, ...incoherent, ...(recordedLevel ? [recordedLevel] : [])];
   if (!envelope || diagnostics.length === 0 || !refused.every(d => blankText(envelope, d)) ||
     !isDeepStrictEqual(retained.manifest!.diagnostics, diagnostics)) refuse('rejection_diagnostics');
+  // Disposable only because the validator fix makes the report valid: a refuted verdict or any other
+  // inconsistency the current validator still refuses stays quarantined.
+  if (incoherent.length > 0 && verifiedConsensusReportProblem(raw, envelope, reportBytes.text) !== undefined) refuse('rejection_diagnostics');
   return { launch, reportBytes, manifest, quarantinePath: retained.path, quarantineManifest: retained.manifest! };
+}
+/**
+ * The refusal rcl 4.5.23 recorded for its own report when a critical or consensus finding carried a verification,
+ * which its validator then refused. Only the first such finding is named, as the validator stops at the first problem.
+ */
+function legacyVerdictDiagnostics(report: ReviewResult): EvidenceDiagnostic[] {
+  if (report.run?.rcl_version !== LEGACY_VERDICT_RULE_VERSION) return [];
+  for (const group of ['findings', 'belowThresholdFindings'] as const) {
+    const findings = report[group] ?? [];
+    const index = findings.findIndex(f => (f.gating?.reason === 'consensus' || f.gating?.reason === 'critical') && f.gating.verification !== undefined);
+    if (index >= 0) {
+      return [{ path: 'report_json', message: `${group}.${index}.gating.verification.verdict contradicts the ${findings[index]!.gating!.reason} gating reason in report_json` }];
+    }
+  }
+  return [];
 }
 /** The envelope-schema refusal of a blank finding file or title, checked against the projected row. */
 function blankText(envelope: RunEnvelope, d: EvidenceDiagnostic): boolean {

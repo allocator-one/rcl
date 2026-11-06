@@ -158,7 +158,9 @@ describe('retention of refused completed evidence', () => {
     { version: '4.4.5', reason: 'verified', verdict: undefined, accepted: false },
     { version: '4.4.5', reason: 'none', verdict: 'confirmed', accepted: false },
     { version: '4.4.5', reason: 'none', verdict: 'unknown', accepted: false },
-    { version: '4.4.5', reason: 'consensus', verdict: 'confirmed', accepted: false },
+    // Since RCL-198 only a refutation removes the tier a consensus or critical finding earned (RCL-228).
+    { version: '4.4.5', reason: 'consensus', verdict: 'confirmed', accepted: true },
+    { version: '4.4.5', reason: 'consensus', verdict: 'refuted', accepted: false },
     { version: '4.4.5', reason: 'critical', verdict: 'refuted', accepted: false },
     { version: '3.5.0', reason: 'verified', verdict: 'unavailable', accepted: true },
     { version: '3.5.1', reason: 'verified', verdict: 'unavailable', accepted: true },
