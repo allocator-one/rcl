@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Let `rcl converge-rejected` recover any report rcl refused locally, so a
+  refusal no longer strands the converge target until someone passes
+  `--start-over`. Until now only four named refusals (a missing gating label, a
+  blank finding file or title, a valid strict fallback below telemetry level
+  `full`, the 4.5.23 verdict refusal) were disposable; any other answered
+  `terminal_rejection_unsupported_local_rejection`. A refusal is now disposable
+  when the stored envelope projects from the report, no diagnostic is a
+  delivery one, and this release refuses the report with the same diagnostics
+  or an older release recorded the refusal and this one accepts the report. The
+  original report and quarantine stay retained, spent attempts stay spent, and
+  the next launch still needs a retry reason. An applied recovery is no longer
+  re-judged by later releases, only its retained bytes are checked (RCL-230).
+
 ## 4.5.24 - 2026-11-06
 
 - Accept a critical or consensus finding whose verification is `confirmed`,

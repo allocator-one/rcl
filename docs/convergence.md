@@ -647,10 +647,11 @@ outbox. `deliveryFailure: local-invalid` describes delivery, independently of
 reviewer quorum. It does not admit the report or authorize another review.
 Transport failures and spooled evidence retain their existing delivery gates.
 
-For an ordinary completed report rejected for missing verified-consensus
-gating labels, or for a finding whose file or title is blank (reports from
-releases before 4.5.13, which drops such findings at parse time), preview a
-disposition using its original report and exact digest:
+For an ordinary completed report that rcl itself refused before any network
+operation (missing verified-consensus gating labels, a blank finding file or
+title, an inconsistent verification, a strict fallback below telemetry level
+`full`, or any other local diagnostic), preview a disposition using its
+original report and exact digest:
 
 ```bash
 rcl converge-rejected --preview --target owner-repo-123 --run ORIGINAL_RUN_UUID \
@@ -663,10 +664,14 @@ rcl converge-rejected --apply --manifest /path/to/rejection-preview.json \
 
 The command verifies the original report, quarantine diagnostics and envelope,
 blocking health, run/head/input identity, cycle and latest spent attempt. It
-requires an exited coordinator and no admitted round or queued delivery. Valid
-reports, unsupported rejection classes, incomplete or conflicting proof, live
-or uncertain owners, and queued evidence refuse. Neither an empty outbox nor
-exit code 4 establishes terminal rejection.
+requires an exited coordinator and no admitted round or queued delivery. A
+refusal is disposable when the recorded diagnostics are all local (none names
+delivery) and either the running release refuses the report with the same
+diagnostics, or an older release recorded the refusal and the running release
+accepts the report. Transport or server refusals, a refusal the running release
+cannot confirm, incomplete or conflicting proof, live or uncertain owners, and
+queued evidence refuse. Neither an empty outbox nor exit code 4 establishes
+terminal rejection.
 
 Apply retains complete immutable evidence before an atomic native-state update;
 repeating the same apply is idempotent. The original reports, health, attempt

@@ -11,11 +11,11 @@ import { locallyRefusedReportSchema } from '../telemetry/recovery/source.js';
 import { Quarantine, QUARANTINE_DIR } from '../telemetry/quarantine.js';
 import { OUTBOX_DIR } from '../telemetry/outbox.js';
 import { REVIEWER_OUTBOX_DIR } from '../telemetry/reviewer-delivery.js';
-import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope } from '../telemetry/envelope.js';
+import { buildRunEnvelope, type ArtifactBytes, type RunEnvelope, type TelemetryLevel } from '../telemetry/envelope.js';
 import { validateRunEnvelope, type EvidenceDiagnostic } from '../telemetry/envelope-validation.js';
-import { strictFallbackLevelDiagnostic, verifiedConsensusDiagnostics } from '../telemetry/deliver.js';
-import { verifiedConsensusReportProblem } from '../telemetry/report-consistency.js';
-import { declaresStrictFallback, strictFallbackProblem } from '../consensus/strict-fallback.js';
+import { strictFallbackLevelDiagnostic, verifiedConsensusEnvelopeDiagnostics } from '../telemetry/deliver.js';
+import { scrubText } from '../telemetry/scrub.js';
+import { declaresStrictFallback } from '../consensus/strict-fallback.js';
 import type { ReviewResult } from '../consensus/types.js';
 import { mergedBlockingHealth } from './legacy-launch-health.js';
 import { convergeAttemptStatePath, validateConvergeAttemptState } from './attempt-budget.js';
@@ -28,10 +28,7 @@ import { rejectionManifest, rejectionManifestSchema, rejectionSelectionSchema, v
   type RejectionEntry, type RejectionManifest, type RejectionSelection } from './terminal-rejection-schema.js';
 
 const parse = (file: Awaited<ReturnType<typeof readStable>>) => decodeOriginalReport(file.text).value;
-const LABEL_PATH = /^(findings|belowThresholdFindings)\.\d+\.gating\.reason$/;
-const BLANK_TEXT_PATH = /^findings\.(\d+)\.(file|title)$/;
-/** The only release whose report validator demanded no verification on a critical or consensus finding (RCL-198, RCL-228). */
-const LEGACY_VERDICT_RULE_VERSION = '4.5.23';
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
 function refuse(code: string): never { throw new Error(`terminal_rejection_${code}`); }
 export function assertDeadOwner(pid: number): void {
   try { process.kill(pid, 0); }
@@ -67,7 +64,7 @@ function eligible(state: ConvergeRunState, attemptBytes: Awaited<ReturnType<type
   return launch;
 }
 async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeof readStable>>,
-  m: RejectionSelection, dataDir: string, retainedDirectory?: string) {
+  m: RejectionSelection, dataDir: string, retainedDirectory?: string, rclVersion?: string) {
   const launch = eligible(state, attempts, m);
   const reportBytes = await selected(retainedDirectory ? join(retainedDirectory, 'report.json') : m.reportPath, m.reportSha256);
   const raw = parse(reportBytes), report = locallyRefusedReportSchema.parse(raw);
@@ -88,59 +85,48 @@ async function proof(state: ConvergeRunState, attempts: Awaited<ReturnType<typeo
   const artifacts: ArtifactBytes = { report_json: reportBytes.text };
   if (retained.manifest!.artifacts['report_md']) artifacts.report_md = (await readStable(join(retained.path, 'report.md'))).text;
   const storedEnvelope = parse(await readStable(join(retained.path, 'envelope.json')));
-  // Only four pre-network rejections are disposable: a missing gating label,
-  // a finding whose blank file or title the evidence protocol refuses, a
-  // verification the 4.5.23 report validator refused on a critical or consensus
-  // finding that the current validator accepts (RCL-228), or a valid strict fallback at a telemetry level that
-  // never sends its report. A transport/server refusal, malformed envelope or
-  // valid report is not proof.
-  const labels = verifiedConsensusDiagnostics(raw as ReviewResult);
-  const blank = [...report.findings, ...(report.belowThresholdFindings ?? [])].some(f => !f.file.trim() || !f.title.trim());
-  const fallback = declaresStrictFallback(report.run.gating) && strictFallbackProblem(raw as ReviewResult) === undefined;
-  // Recomputed from the report, never copied from the quarantine; the recorded list must equal it.
-  const incoherent = retained.manifest!.diagnostics.some(d => d.path === 'report_json') ? legacyVerdictDiagnostics(raw as ReviewResult) : [];
-  if ((labels.length === 0 && !blank && !fallback && incoherent.length === 0) || labels.some(d => !LABEL_PATH.test(d.path))) refuse('unsupported_local_rejection');
+  // The report is disposable when rcl itself refused it before any network operation (RCL-230): the stored envelope
+  // projects from this exact report and every recorded diagnostic is a local one. A transport or server refusal, a
+  // malformed envelope or a delivered report is not proof. An applied audit is judged once, at apply time, and
+  // afterwards only its retained bytes are checked, so a later release that words a diagnostic differently cannot
+  // strand the target again.
   const levels = ['full', 'findings', 'envelope'] as const;
-  const projections = levels.flatMap(level => [false, true].map(parseFailures =>
-    buildRunEnvelope(raw as ReviewResult, artifacts, { level, parseFailures, delivery: { mode: 'direct' } })));
-  const envelope = projections.find(candidate => isDeepStrictEqual(candidate, storedEnvelope));
-  // Delivery records envelope-schema diagnostics before label diagnostics,
-  // and the telemetry level last. Levels `full` and `findings` project the
-  // same envelope, so the recorded level is accepted only for a level below
-  // `full` whose projection matches.
-  const refused = envelope ? validateRunEnvelope(envelope, artifacts) : [];
-  const recordedLevel = fallback ? levels.slice(1)
-    .filter((_level, i) => projections.slice((i + 1) * 2, (i + 2) * 2).some(candidate => isDeepStrictEqual(candidate, storedEnvelope)))
-    .map(strictFallbackLevelDiagnostic)
-    .find(diagnostic => isDeepStrictEqual(retained.manifest!.diagnostics.at(-1), diagnostic)) : undefined;
-  const diagnostics = [...refused, ...labels, ...incoherent, ...(recordedLevel ? [recordedLevel] : [])];
-  if (!envelope || diagnostics.length === 0 || !refused.every(d => blankText(envelope, d)) ||
-    !isDeepStrictEqual(retained.manifest!.diagnostics, diagnostics)) refuse('rejection_diagnostics');
-  // Disposable only because the validator fix makes the report valid: a refuted verdict or any other
-  // inconsistency the current validator still refuses stays quarantined.
-  if (incoherent.length > 0 && verifiedConsensusReportProblem(raw, envelope, reportBytes.text) !== undefined) refuse('rejection_diagnostics');
+  const candidates = levels.flatMap(level => [false, true].map(parseFailures =>
+    ({ level, envelope: buildRunEnvelope(raw as ReviewResult, artifacts, { level, parseFailures, delivery: { mode: 'direct' } }) })))
+    .filter(candidate => isDeepStrictEqual(candidate.envelope, storedEnvelope));
+  if (candidates.length === 0) refuse('rejection_diagnostics');
+  if (rclVersion !== undefined) assertLocalRefusal(retained.manifest!.diagnostics, raw as ReviewResult, artifacts, candidates, rclVersion);
   return { launch, reportBytes, manifest, quarantinePath: retained.path, quarantineManifest: retained.manifest! };
 }
-/**
- * The refusal rcl 4.5.23 recorded for its own report when a critical or consensus finding carried a verification,
- * which its validator then refused. Only the first such finding is named, as the validator stops at the first problem.
- */
-function legacyVerdictDiagnostics(report: ReviewResult): EvidenceDiagnostic[] {
-  if (report.run?.rcl_version !== LEGACY_VERDICT_RULE_VERSION) return [];
-  for (const group of ['findings', 'belowThresholdFindings'] as const) {
-    const findings = report[group] ?? [];
-    const index = findings.findIndex(f => (f.gating?.reason === 'consensus' || f.gating?.reason === 'critical') && f.gating.verification !== undefined);
-    if (index >= 0) {
-      return [{ path: 'report_json', message: `${group}.${index}.gating.verification.verdict contradicts the ${findings[index]!.gating!.reason} gating reason in report_json` }];
-    }
-  }
-  return [];
+/** What the delivery step diagnoses before any network operation, in its order, as the quarantine records it. */
+function localDiagnostics(report: ReviewResult, artifacts: ArtifactBytes, candidate: { level: TelemetryLevel; envelope: RunEnvelope }): EvidenceDiagnostic[] {
+  const diagnostics = [...validateRunEnvelope(candidate.envelope, artifacts),
+    ...verifiedConsensusEnvelopeDiagnostics({ result: report, artifacts }, candidate.envelope)];
+  if (declaresStrictFallback(report.run?.gating) && candidate.level !== 'full') diagnostics.push(strictFallbackLevelDiagnostic(candidate.level));
+  return diagnostics.slice(0, 20).map(d => ({ path: scrubText(d.path.replace(CONTROL, ' '), 200), message: scrubText(d.message.replace(CONTROL, ' '), 300) }));
 }
-/** The envelope-schema refusal of a blank finding file or title, checked against the projected row. */
-function blankText(envelope: RunEnvelope, d: EvidenceDiagnostic): boolean {
-  const [, index, field] = BLANK_TEXT_PATH.exec(d.path) ?? [];
-  const value = index === undefined ? undefined : envelope.findings[Number(index)]?.[field as 'file' | 'title'];
-  return d.message === 'Invalid text' && typeof value === 'string' && value.trim() === '';
+/** `x.y.z` strictly below `running`; anything else is not an older release. */
+function olderRelease(version: string | undefined, running: string): boolean {
+  const parse = (v: string | undefined) => /^(\d+)\.(\d+)\.(\d+)$/.exec(v ?? '')?.slice(1).map(Number);
+  const a = parse(version), b = parse(running);
+  if (!a || !b || ![...a, ...b].every(Number.isSafeInteger)) return false;
+  return a[0]! !== b[0]! ? a[0]! < b[0]! : a[1]! !== b[1]! ? a[1]! < b[1]! : a[2]! < b[2]!;
+}
+/**
+ * A recorded local refusal is disposable when this release refuses the report with the same diagnostics, or when an
+ * older release refused it and this one accepts it, since only the running validators can be replayed. Output-file
+ * diagnostics ride along with a refusal and prove nothing either way.
+ */
+function assertLocalRefusal(
+  retained: EvidenceDiagnostic[], report: ReviewResult, artifacts: ArtifactBytes,
+  candidates: Array<{ level: TelemetryLevel; envelope: RunEnvelope }>, rclVersion: string,
+): void {
+  const recorded = retained.filter(d => !d.path.startsWith('output.'));
+  if (recorded.length === 0 || recorded.some(d => d.path === 'delivery' || d.path.startsWith('delivery.'))) refuse('unsupported_local_rejection');
+  const current = candidates.map(candidate => localDiagnostics(report, artifacts, candidate));
+  const replayed = current.some(diagnostics => isDeepStrictEqual(diagnostics, recorded));
+  const superseded = olderRelease(report.run?.rcl_version, rclVersion) && current.some(diagnostics => diagnostics.length === 0);
+  if (!replayed && !superseded) refuse('rejection_diagnostics');
 }
 function bound(m: RejectionManifest, state: ConvergeRunState, launch: ReturnType<typeof launchSchema.parse>): void {
   if (m.cycleId !== (state.cycle?.id ?? null) || m.attempt !== launch.attempt || m.round !== launch.round ||
@@ -154,7 +140,7 @@ function nextState(before: ConvergeRunState, entry: RejectionEntry, m: Rejection
 }
 
 /** Read-only selection: no admission, accounting, provider or server operation. */
-export async function previewTerminalRejection(input: RejectionSelection, gitCommonDir: string, dataDirectory: string): Promise<RejectionManifest> {
+export async function previewTerminalRejection(input: RejectionSelection, gitCommonDir: string, dataDirectory: string, rclVersion: string): Promise<RejectionManifest> {
   const s = rejectionSelectionSchema.parse(input), common = await realpath(resolve(gitCommonDir));
   const dataDir = await realpath(resolve(dataDirectory));
   await assertNoPendingFreshReview(common, s.target);
@@ -165,7 +151,7 @@ export async function previewTerminalRejection(input: RejectionSelection, gitCom
   await assertReviewCyclePair(common, s.target, state.cycle);
   await verifyTerminalRejections(common, state);
   if (state.terminalRejections?.some(e => rejectionManifest(e).runId === s.runId)) refuse('already_disposed');
-  const evidence = await proof(state, attempts, s, dataDir);
+  const evidence = await proof(state, attempts, s, dataDir, undefined, rclVersion);
   assertDeadOwner(evidence.launch.pid); await noDelivery(dataDir, s.runId);
   const m = rejectionManifestSchema.parse({ ...s, reportPath: await realpath(resolve(s.reportPath)),
     kind: 'rcl-terminal-rejection', version: 1, operationId: randomUUID(), createdAt: new Date().toISOString(),
@@ -178,7 +164,7 @@ export async function previewTerminalRejection(input: RejectionSelection, gitCom
 }
 
 /** Immutable proof precedes the atomic native write; replay never duplicates an audit. */
-export async function applyTerminalRejection(input: { manifest: string; manifestSha256: string }, gitCommonDir: string, dataDirectory: string): Promise<'applied' | 'unchanged'> {
+export async function applyTerminalRejection(input: { manifest: string; manifestSha256: string }, gitCommonDir: string, dataDirectory: string, rclVersion: string): Promise<'applied' | 'unchanged'> {
   z.object({ manifest: z.string().min(1), manifestSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(input);
   const original = await selected(input.manifest, input.manifestSha256);
   const m = rejectionManifestSchema.parse(parse(original)), common = await realpath(resolve(gitCommonDir));
@@ -206,7 +192,7 @@ export async function applyTerminalRejection(input: { manifest: string; manifest
     })) refuse('already_disposed');
     const before = await selected(convergeRunStatePath(common, m.target), m.stateSha256);
     const attempts = await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
-    const evidence = await proof(state, attempts, m, m.dataDir);
+    const evidence = await proof(state, attempts, m, m.dataDir, undefined, rclVersion);
     bound(m, state, evidence.launch);
     if (evidence.manifest.sha256 !== m.quarantineSha256) refuse('quarantine_changed');
     assertDeadOwner(evidence.launch.pid); await noDelivery(m.dataDir, m.runId);
@@ -227,7 +213,7 @@ export async function applyTerminalRejection(input: { manifest: string; manifest
     const retainedEvidence = await proof(state, attempts, m, m.dataDir, dir);
     if (retainedEvidence.manifest.sha256 !== m.quarantineSha256) refuse('quarantine_changed');
     // Recheck mutable source observations immediately before the atomic write.
-    const final = await proof(state, attempts, m, m.dataDir);
+    const final = await proof(state, attempts, m, m.dataDir, undefined, rclVersion);
     if (final.manifest.sha256 !== m.quarantineSha256) refuse('quarantine_changed');
     await selected(convergeRunStatePath(common, m.target), m.stateSha256);
     await selected(convergeAttemptStatePath(common, m.target), m.attemptSha256);
