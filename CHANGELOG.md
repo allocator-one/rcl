@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.25 - 2026-11-07
+
 - Let `rcl converge-rejected` recover any report rcl refused locally, so a
   refusal no longer strands the converge target until someone passes
   `--start-over`. Until now only four named refusals (a missing gating label, a
