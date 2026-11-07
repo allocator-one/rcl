@@ -579,13 +579,13 @@ program
       if (opts.preview) {
         if (opts.manifestSha256 !== undefined) throw new Error('preview_does_not_accept_manifest_digest');
         const manifest = await previewTerminalRejection({ target: opts.target as string, runId: opts.run as string,
-          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string, reason: opts.reason as string }, common, dataDir);
+          reportPath: opts.report as string, reportSha256: opts.reportSha256 as string, reason: opts.reason as string }, common, dataDir, RCL_VERSION);
         await writeExclusive(opts.manifest as string, manifest, 16384);
         result = { mode: 'preview', manifest, manifestSha256: sha256(serializeRecoveryDocument(manifest)) };
       } else {
         if ([opts.target, opts.run, opts.report, opts.reportSha256, opts.reason].some(v => v !== undefined)) throw new Error('apply_uses_only_pinned_manifest');
         result = { mode: 'apply', result: await applyTerminalRejection({ manifest: opts.manifest as string,
-          manifestSha256: opts.manifestSha256 as string }, common, dataDir) };
+          manifestSha256: opts.manifestSha256 as string }, common, dataDir, RCL_VERSION) };
       }
       console.log(JSON.stringify({ ...result as object, accounting: 'unchanged',
         scope: 'local terminal disposition only; no admission, upload, provider calls or approval' }));

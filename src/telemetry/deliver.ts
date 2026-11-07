@@ -403,7 +403,7 @@ function authenticatedStrictFallback(input: DeliverRunInput): boolean {
     .every(finding => finding.gating === undefined);
 }
 
-function verifiedConsensusEnvelopeDiagnostics(
+export function verifiedConsensusEnvelopeDiagnostics(
   input: DeliverRunInput,
   envelope: RunEnvelope,
 ): EvidenceDiagnostic[] {
