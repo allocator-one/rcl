@@ -1,4 +1,5 @@
-import { Agent, EnvHttpProxyAgent, setGlobalDispatcher, type buildConnector, type Dispatcher } from 'undici';
+import { isDeepStrictEqual } from 'node:util';
+import { Agent, EnvHttpProxyAgent, getGlobalDispatcher, setGlobalDispatcher, type buildConnector, type Dispatcher } from 'undici';
 
 /**
  * Pin every `fetch` in this process, which carries all provider SDK traffic,
@@ -14,11 +15,32 @@ import { Agent, EnvHttpProxyAgent, setGlobalDispatcher, type buildConnector, typ
  * Its `Agent` works with the built-in `fetch` on Node 22, 24 and 26.
  */
 export function installHttp1Transport(options: { connect?: buildConnector.BuildOptions } = {}): Dispatcher {
+  const current = getGlobalDispatcher();
+  // A `--import` preload (or earlier code) may have set its own dispatcher, for example to lift
+  // undici's 300 s headers timeout. Replacing it would silently undo that, so leave it alone.
+  if (!isUntouchedDefault(current)) return current;
   const agent = envProxyEnabled()
     ? new EnvHttpProxyAgent({ allowH2: false, ...options, requestTls: options.connect })
     : new Agent({ allowH2: false, ...options });
   setGlobalDispatcher(agent);
   return agent;
+}
+
+/**
+ * undici installs an option-less `Agent` when nothing set a global dispatcher. Anything else, a
+ * different class or an `Agent` carrying options, was put there on purpose. The options live under
+ * a private symbol, so a dispatcher whose options cannot be read counts as customised: the
+ * transport then stays out of the way instead of overriding it.
+ */
+function isUntouchedDefault(dispatcher: Dispatcher): boolean {
+  if (dispatcher.constructor.name !== 'Agent') return false;
+  const options = agentOptions(dispatcher);
+  return options !== undefined && isDeepStrictEqual(options, agentOptions(new Agent()));
+}
+
+function agentOptions(agent: Dispatcher): unknown {
+  const key = Object.getOwnPropertySymbols(agent).find((symbol) => symbol.description === 'options');
+  return key === undefined ? undefined : (agent as unknown as Record<symbol, unknown>)[key];
 }
 
 /**

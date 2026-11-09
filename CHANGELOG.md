@@ -10,7 +10,9 @@
   installs an `undici` dispatcher with HTTP/2 off at startup, so each call has
   its own socket, as it did under Node 24. Lowering `concurrency` or running
   Node 24 is no longer needed. With Node's environment proxy enabled (`NODE_USE_ENV_PROXY=1` or `--use-env-proxy`) the dispatcher keeps
-  honouring `HTTPS_PROXY`/`NO_PROXY`. Adds `undici` as a dependency.
+  honouring `HTTPS_PROXY`/`NO_PROXY`. A global dispatcher already set by a `--import`
+  preload (for example one that raises undici's headers timeout) is left in place.
+  Adds `undici` as a dependency.
 
 ## 4.5.26 - 2026-11-09
 

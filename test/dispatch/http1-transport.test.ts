@@ -63,6 +63,11 @@ function useHttp2Default(): void {
   setGlobalDispatcher(new Agent({ allowH2: true, connect }));
 }
 
+/** What undici installs when nothing customised the global dispatcher: an option-less Agent. */
+function useDefaultDispatcher(): void {
+  setGlobalDispatcher(new Agent());
+}
+
 async function concurrently<T>(call: () => Promise<T>): Promise<void> {
   protocols = [];
   await Promise.allSettled(Array.from({ length: CALLS }, call));
@@ -97,11 +102,33 @@ describe('provider transport under concurrency (RCL-213)', () => {
   });
 
   it.each(calls)('%s calls each get their own HTTP/1.1 connection once the transport is installed', async (_name, call) => {
-    useHttp2Default();
+    useDefaultDispatcher();
     installHttp1Transport({ connect });
     await concurrently(call);
     expect(protocols).toHaveLength(CALLS);
     expect(new Set(protocols)).toEqual(new Set(['http/1.1']));
+  });
+});
+
+describe('a dispatcher set before the transport (RCL-213)', () => {
+  // A `--import` preload may lift undici's 300 s headers timeout (IO-21362) with its own global dispatcher.
+  it('is left in place', () => {
+    const preload = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+    setGlobalDispatcher(preload);
+    expect(installHttp1Transport({ connect })).toBe(preload);
+    expect(getGlobalDispatcher()).toBe(preload);
+  });
+
+  it('is replaced when it is undici\'s untouched default', () => {
+    useDefaultDispatcher();
+    const installed = installHttp1Transport({ connect });
+    expect(getGlobalDispatcher()).toBe(installed);
+  });
+
+  it('is left in place when installing twice', () => {
+    useDefaultDispatcher();
+    const first = installHttp1Transport({ connect });
+    expect(installHttp1Transport({ connect })).toBe(first);
   });
 });
 
@@ -150,6 +177,7 @@ describe('environment proxy (RCL-213)', () => {
     vi.stubEnv('https_proxy', proxyUrl);
     vi.stubEnv('NO_PROXY', '');
     vi.stubEnv('no_proxy', '');
+    useDefaultDispatcher();
     installHttp1Transport({ connect });
     protocols = [];
     const response = await fetch(baseUrl, { method: 'POST', body: '{}' });
@@ -165,6 +193,7 @@ describe('environment proxy (RCL-213)', () => {
     vi.stubEnv('https_proxy', proxyUrl);
     vi.stubEnv('NO_PROXY', '');
     vi.stubEnv('no_proxy', '');
+    useDefaultDispatcher();
     installHttp1Transport({ connect });
     await fetch(baseUrl, { method: 'POST', body: '{}' });
     expect(connects).toEqual([new URL(baseUrl).host]);
@@ -174,6 +203,7 @@ describe('environment proxy (RCL-213)', () => {
     vi.stubEnv('NODE_USE_ENV_PROXY', '');
     vi.stubEnv('HTTPS_PROXY', proxyUrl);
     vi.stubEnv('https_proxy', proxyUrl);
+    useDefaultDispatcher();
     installHttp1Transport({ connect });
     await fetch(baseUrl, { method: 'POST', body: '{}' });
     expect(connects).toEqual([]);
