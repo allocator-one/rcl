@@ -9,6 +9,17 @@
   came from the asdf shim in front of `rcl`, not from `rcl`; the `rcl` skill
   now says why its launch allowlist keeps `HOME`.
 
+## 4.5.29 - 2026-11-09
+
+- Continue a guarded review on a changed head without `--retry-reason` when
+  the previous round reached its blocking quorum and was admitted, even though
+  one seat errored or returned `parse_failed` (RCL-205). Such a launch records
+  `hardFailure`, and the guard refused the next head with
+  `infrastructure_failure` although the quorum had already absorbed the
+  failed seat. Inconclusive or unadmitted launches still need the bounded
+  retry reason or their existing admission and stale paths, and admitted
+  inputs still refuse re-review.
+
 ## 4.5.28 - 2026-11-09
 
 - Name the supported retry when `--retry-report` is given an inconclusive
