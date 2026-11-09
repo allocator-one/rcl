@@ -45,13 +45,13 @@ function patternToRegExp(pattern: string): RegExp | null {
       body += '[^/]';
     } else if (char === '[') {
       const close = source.indexOf(']', index + 2);
-      if (close === -1) {
-        body += '\\[';
-        continue;
-      }
+      if (close === -1) return null;
       let set = source.slice(index + 1, close);
       const negated = set.startsWith('!') || set.startsWith('^');
       if (negated) set = set.slice(1);
+      // POSIX classes (`[[:digit:]]`), escapes inside a set and a leading `]` are
+      // wildmatch syntax this reader would translate into a different set.
+      if (set.length === 0 || set.includes('[') || set.includes('\\')) return null;
       // A bracket expression never matches a path separator, whatever its set or range holds.
       body += `(?!/)[${negated ? '^' : ''}${set.replace(/[\\\]^]/g, '\\$&')}]`;
       index = close;

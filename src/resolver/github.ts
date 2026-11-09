@@ -1,4 +1,5 @@
 import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
+import { sourceExceedsReviewCapacity } from '../prepare/chunker.js';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
@@ -177,25 +178,22 @@ const MAX_DIRECTORY_LOOKUPS = 100;
  * The `.gitattributes` at one path and commit, or `undefined` when the commit
  * has none there. Any other failure propagates: a review that silently fell
  * back to "nothing is generated" would read a different patch, and bind a
- * different digest, than the same review on a healthy API.
+ * different digest, than the same review on a healthy API. A symlink reads as
+ * an empty file: git ignores a symlinked `.gitattributes`, so it carries no
+ * rules, yet the path is occupied.
  */
 async function readAttributes(octokit: Octokit, target: GitHubTarget, ref: string, path: string): Promise<string | undefined> {
   try {
-    const { data } = await octokit.repos.getContent({
-      owner: target.owner,
-      repo: target.repo,
-      path,
-      ref,
-      mediaType: { format: 'raw' },
-    });
-    const text = typeof data === 'string' ? data : undefined;
-    if (text === undefined) {
+    const { data } = await octokit.repos.getContent({ owner: target.owner, repo: target.repo, path, ref });
+    if (Array.isArray(data)) throw new Error(`${path} at ${ref} is a directory.`);
+    if (data.type === 'symlink') return '';
+    if (data.type !== 'file' || !('content' in data) || data.encoding !== 'base64') {
       throw new Error(`${path} at ${ref} is not a regular file.`);
     }
-    if (Buffer.byteLength(text, 'utf8') > MAX_ATTRIBUTES_BYTES) {
+    if (data.size > MAX_ATTRIBUTES_BYTES) {
       throw new Error(`${path} at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
     }
-    return text;
+    return Buffer.from(data.content, 'base64').toString('utf8');
   } catch (err) {
     if ((err as { status?: number }).status === 404) return undefined;
     throw err;
@@ -269,14 +267,14 @@ export async function fetchPRDiff(
   }));
 
   // Generated paths the base commit declares are left out of the reviewed
-  // patch. The base — never the head — is the authority: a PR cannot switch
-  // review off for its own files by editing .gitattributes, and that edit is
-  // itself reviewed.
-  // Only a file that still carries a patch can be left out, so a diff without one needs no lookup.
-  const attributes = changes.some((f) => f.patch.length > 0)
+  // patch, but only when the full patch is more than one review can read: a
+  // PR that fits is reviewed whole, whatever its files are. The base — never
+  // the head — is the authority: a PR cannot switch review off for its own
+  // files by editing .gitattributes, and that edit is itself reviewed.
+  let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: changes };
+  const attributes = sourceExceedsReviewCapacity(changes)
     ? await readAttributes(octokit, target, pr.base.sha, '.gitattributes')
     : undefined;
-  let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: changes };
   if (attributes !== undefined) {
     const isGenerated = generatedPathMatcher(attributes);
     const blocked = await directoriesWithAttributes(

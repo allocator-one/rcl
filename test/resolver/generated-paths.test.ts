@@ -69,6 +69,16 @@ describe('generatedPathMatcher', () => {
     expect(matches(attributes, 'bundle.js')).toBe(false);
   });
 
+  it('does not read a bracket expression it cannot translate as a different one', () => {
+    // POSIX classes, escapes and a leading ] are wildmatch syntax this reader does not implement:
+    // as a set they must never match a stray path, as an unset they must keep earlier rules from applying.
+    expect(matches('[[:digit:]].json linguist-generated', 'd].json')).toBe(false);
+    expect(matches('[\\]].json linguist-generated', '\\].json')).toBe(false);
+    for (const unset of ['spec/[[:digit:]]*.json', 'spec/[\\]]*.json', 'spec/[!]a]*.json']) {
+      expect(matches(`*.json linguist-generated\n${unset} -linguist-generated`, 'spec/1.json')).toBe(false);
+    }
+  });
+
   it('does not let * cross a directory boundary in a rooted pattern', () => {
     expect(matches('docs/*.md linguist-generated', 'docs/a.md')).toBe(true);
     expect(matches('docs/*.md linguist-generated', 'docs/nested/a.md')).toBe(false);

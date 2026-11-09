@@ -6,16 +6,17 @@
   that refreshes a bundled, served artifact (harness-cli#93 changed a 4.2 MB
   OpenAPI spec and its generated help) could not be reviewed: the patch was
   over the 64,000-line cap, so nothing could converge or pass the enforced
-  gate. Paths the base commit's root `.gitattributes` marks
-  `linguist-generated` now keep their file entry (name, status, line counts and
-  blob id, so `diff_sha256` still binds the full head) but contribute no
-  patch lines. The base is the authority, never the head, so a PR cannot
-  exempt its own files. `run.target.left_out` records the reason, the commit,
-  the count and up to 100 paths. Only a modified or deleted file is left out
-  (an added or renamed one stays reviewed), and so is any file below a
-  directory with its own `.gitattributes` or under a rule the reader does not
-  understand. A `.gitattributes` the API cannot read fails the review instead
-  of silently reviewing a different patch.
+  gate. For a PR whose full patch is over that cap, paths the base commit's
+  root `.gitattributes` marks `linguist-generated` now keep their file entry
+  (name, status, line counts and blob id, so `diff_sha256` still binds the full
+  head) but contribute no patch lines; a PR that fits is reviewed whole. The
+  base is the authority, never the head, so a PR cannot exempt its own files.
+  `run.target.left_out` records the reason, the commit, the count and up to 100
+  paths. Only a modified or deleted file is left out (an added or renamed one
+  stays reviewed), and so is any file below a directory with its own
+  `.gitattributes` or under a rule the reader does not understand. A
+  `.gitattributes` the API cannot read fails the review instead of silently
+  reviewing a different patch.
 
 ## 4.5.30 - 2026-11-09
 

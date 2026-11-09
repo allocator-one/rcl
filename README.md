@@ -168,29 +168,34 @@ Review a PR, a local diff, or uncommitted work. Pick exactly one source:
 Untracked files are invisible to `git diff` and therefore not reviewed.
 
 **Generated files in a PR.** A PR whose diff is mostly a generated, served
-artifact (a bundled OpenAPI spec, a lockfile, help text rendered from it) can
-exceed the 64,000-line patch cap. Mark such paths `linguist-generated` in the
+artifact (a bundled OpenAPI spec, help text rendered from it) can exceed the
+64,000-line patch cap. Mark such paths `linguist-generated` in the
 repository-root `.gitattributes` on the PR's **base** branch
-(`spec/infraone.json linguist-generated`) and `rcl review` leaves their patches
-out of what the council reads. Only the base commit's file counts, so a PR
-cannot hide its own files by editing `.gitattributes`; add the rule in an
-earlier PR. The base is trusted as far as its branch is: a PR into a branch
-whose `.gitattributes` its author controls (an unprotected branch, a stack) is
-reviewed against that branch's rules, and the PR that lands the branch in a
-protected one is reviewed against the protected branch's rules. A left-out file stays in the diff by name, status, line counts and
-git blob id, so `diff_sha256` still changes with its content, and the report's
-`run.target.left_out` records the reason, the commit whose `.gitattributes`
-decided, the count and up to 100 paths. Only a file that already existed at its
-path (modified or deleted) is left out: an added, renamed or copied file stays
-in review, and so does every `.gitattributes` file. Only the root file is read:
-a file below a directory that has its own `.gitattributes` at the base stays in
-review, because a deeper file can override the root. Plain patterns (`*`, `?`,
-`**`, `[…]`, anchored or by base name) and the set, `=true`, unset and `=false`
-forms are read. A rule in any other syntax (a quoted or negated pattern) or a
-line that uses a macro defined in the file is not understood and could unset an
-earlier rule, so it counts as "not generated" for the paths it might match. PR
-targets only: patch files and `--staged`/`--working-tree` carry no base to read
-from.
+(`spec/infraone.json linguist-generated`) and, for a PR whose full patch is over
+the cap, `rcl review` leaves their patches out of what the council reads. A PR
+that fits is always reviewed whole. A left-out file is not reviewed, so mark
+only artifacts whose content something else checks (a spec compared byte for
+byte against the live API), never lockfiles or code that ships. Only the base
+commit's file counts, so a PR cannot hide its own files by editing
+`.gitattributes`; add the rule in an earlier PR. The base is trusted as far as
+its branch is: a PR into a branch whose `.gitattributes` its author controls (an
+unprotected branch, a stack) is reviewed against that branch's rules, and the PR
+that lands the branch in a protected one is reviewed against the protected
+branch's rules. A left-out file stays in the diff by name, status, line counts
+and git blob id, so `diff_sha256` still changes with its content, and the
+report's `run.target.left_out` records the reason, the commit whose
+`.gitattributes` decided, the count and up to 100 paths. Only a file that
+already existed at its path (modified or deleted) is left out: an added,
+renamed or copied file stays in review, and so does every `.gitattributes`
+file. Only the root file is read: a file below a directory that has its own
+`.gitattributes` at the base stays in review, because a deeper file can override
+the root. A symlinked `.gitattributes` carries no rules, as in git. Plain
+patterns (`*`, `?`, `**`, simple `[…]` sets, anchored or by base name) and the
+set, `=true`, unset and `=false` forms are read. A rule in any other syntax (a
+quoted or negated pattern, a POSIX class such as `[[:digit:]]`) or a line that
+uses a macro defined in the file is not understood and could unset an earlier
+rule, so it counts as "not generated" for the paths it might match. PR targets
+only: patch files and `--staged`/`--working-tree` carry no base to read from.
 
 | Flag | Description |
 | --- | --- |

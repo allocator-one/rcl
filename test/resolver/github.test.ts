@@ -35,7 +35,16 @@ function changedFile(i: number) {
 const files = (n: number) => Array.from({ length: n }, (_, i) => changedFile(i));
 
 /** An Octokit fake: compare serves `compareFiles` on one response; the PR listing serves `listed`. */
-function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number; attributes?: string; nested?: Record<string, string>; getContentError?: unknown }) {
+type ContentsFixture = string | { type: string };
+
+/** What the contents API answers for a file: JSON with base64 content. */
+function contentsOf(fixture: ContentsFixture) {
+  if (typeof fixture !== 'string') return fixture;
+  const content = Buffer.from(fixture, 'utf8');
+  return { type: 'file', encoding: 'base64', size: content.length, content: content.toString('base64') };
+}
+
+function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number; attributes?: ContentsFixture; nested?: Record<string, ContentsFixture>; getContentError?: unknown }) {
   const pr = opts.pr ?? fakePr();
   const get = vi.fn().mockResolvedValueOnce(pr).mockResolvedValueOnce(opts.recheck ?? pr);
   const compare = vi.fn(async () => ({ data: { files: files(opts.compareFiles ?? pr.data.changed_files) } }));
@@ -45,7 +54,7 @@ function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnTyp
     if (opts.getContentError) throw opts.getContentError;
     const text = request.path === '.gitattributes' ? opts.attributes : opts.nested?.[request.path];
     if (text === undefined) throw Object.assign(new Error('Not Found'), { status: 404 });
-    return { data: text };
+    return { data: contentsOf(text) };
   });
   const octokit = {
     pulls: { get, listFiles: { endpoint: 'pulls.listFiles' } },
@@ -255,7 +264,7 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
   // The served-spec shape: one generated file alone is over the 64,000-line patch cap.
   const hugePatch = `@@ -1 +1,70000 @@\n-x\n${Array.from({ length: 70_000 }, (_, i) => `+line ${i}`).join('\n')}\n`;
 
-  function release(blobSha: string, extra: { attributes?: string; nested?: Record<string, string>; getContentError?: unknown } = {}) {
+  function release(blobSha: string, extra: { attributes?: ContentsFixture; nested?: Record<string, ContentsFixture>; getContentError?: unknown } = {}) {
     const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
     const f = octokitWith({ pr, attributes: extra.attributes, nested: extra.nested, getContentError: extra.getContentError });
     f.compare.mockResolvedValue({ data: { files: [
@@ -310,11 +319,59 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
     const f = release('1'.repeat(40), { attributes: 'spec/** linguist-generated\n', nested: { 'spec/.gitattributes': '*.md text\n' } });
     f.compare.mockResolvedValue({ data: { files: [
       changedFile(1),
-      { filename: 'spec/deep/er/api.json', status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-a\n+b\n', sha: '1'.repeat(40) },
+      { filename: 'spec/deep/er/api.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: '1'.repeat(40) },
     ] } } as any);
     const diff = await fetchPRDiff(target, undefined, f.octokit);
     expect(diff.metadata?.leftOut).toBeUndefined();
     expect(f.getContent.mock.calls.map(([request]) => request.path).sort()).toEqual(['.gitattributes', 'spec/.gitattributes']);
+  });
+
+  it('leaves nothing out, and reads no attributes, while the full patch fits the review', async () => {
+    const f = release('1'.repeat(40), { attributes });
+    f.compare.mockResolvedValue({ data: { files: [
+      changedFile(1),
+      { filename: 'spec/infraone.json', status: 'modified', additions: 2, deletions: 1, patch: '@@ -1 +1,2 @@\n-a\n+b\n+c\n', sha: '1'.repeat(40) },
+    ] } } as any);
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toContain('+c');
+    expect(f.getContent).not.toHaveBeenCalled();
+  });
+
+  it('ignores a .gitattributes that is a symlink, as git does, and keeps the file in review', async () => {
+    const f = release('1'.repeat(40), { attributes: { type: 'symlink' } });
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
+  });
+
+  it('keeps a file in review when a directory above it holds a symlinked .gitattributes', async () => {
+    const f = release('1'.repeat(40), { attributes, nested: { 'spec/.gitattributes': { type: 'symlink' } } });
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+  });
+
+  it('reads the attributes through the real Octokit response handling', async () => {
+    const { Octokit } = await import('@octokit/rest');
+    const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+    const paths: string[] = [];
+    const octokit = new Octokit({ request: { fetch: async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+      paths.push(url.pathname);
+      if (url.pathname.endsWith('/contents/.gitattributes')) {
+        const content = Buffer.from(attributes, 'utf8');
+        return json({ type: 'file', encoding: 'base64', size: content.length, content: content.toString('base64') });
+      }
+      if (url.pathname.includes('/contents/')) return new Response('{"message":"Not Found"}', { status: 404, headers: { 'content-type': 'application/json' } });
+      if (url.pathname.includes('/compare/')) {
+        return json({ files: [changedFile(1), { filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: '1'.repeat(40) }] });
+      }
+      return json(pr.data);
+    } } });
+    const diff = await fetchPRDiff(target, undefined, octokit);
+    expect(diff.metadata?.leftOut?.paths).toEqual(['spec/infraone.json']);
+    expect(paths.some((path) => decodeURIComponent(path).endsWith('/contents/spec/.gitattributes'))).toBe(true);
   });
 
   it('records the left-out paths in the run header target', async () => {
