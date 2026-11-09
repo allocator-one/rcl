@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Read the org-scoped login harness-cli writes, so evidence delivery and model
+  key fetches stop using a stale legacy token (RCL-211, RCL-212). harness-cli
+  1.16+ stores `harness login` in `credentials-org-<hash>.json` next to
+  `credentials.json` and leaves the legacy file as it was; once that token
+  expired, every evidence upload and `rcl evidence status` failed with HTTP 401
+  although `harness whoami` passed and logging in again changed nothing. In a
+  repository whose `.harness-cli/config.json` names an `org`, rcl now reads that
+  org's file first, under the default host and the host of the legacy login,
+  and falls back to `credentials.json` as before. The repository's `url` is
+  still never used to choose a host.
+
 ## 4.5.27 - 2026-11-09
 
 - Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under

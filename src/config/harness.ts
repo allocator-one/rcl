@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { accessSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { homedir } from 'os';
@@ -94,6 +95,82 @@ export function defaultCredentialsPath(env: Record<string, string | undefined>):
   return join(base, 'harness', 'credentials.json');
 }
 
+const DEFAULT_HARNESS_URL = 'https://harness.infra.one';
+const ORG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Where harness-cli 1.16+ stores the login for one org on one host, next to
+ * the legacy file: `credentials-org-<sha256 of [legacyPath, host, org]>.json`.
+ * The hash must stay byte-identical to harness-cli's core/credentials.ts.
+ */
+export function orgCredentialsPath(legacyPath: string, baseUrl: string, org: string): string {
+  const url = new URL(baseUrl);
+  const host = url.origin + url.pathname.replace(/\/+$/, '');
+  const key = createHash('sha256').update(JSON.stringify([legacyPath, host, org.toLowerCase()])).digest('hex');
+  return join(dirname(legacyPath), `credentials-org-${key}.json`);
+}
+
+/** The `org` the repository's `.harness-cli/config.json` names, when it is an organization UUID. */
+async function readRepoOrg(startDir: string): Promise<string | null> {
+  const path = findHarnessRepoConfig(startDir);
+  if (path === null) return null;
+  try {
+    const org = (JSON.parse(await readFile(path, 'utf-8')) as { org?: unknown } | null)?.org;
+    return typeof org === 'string' && ORG_ID.test(org.trim()) ? org.trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Same scheme, host, port and path, as harness-cli compares a stored login with the host it targets. */
+function sameHost(a: string, b: string): boolean {
+  const key = (raw: string): string | null => {
+    try {
+      const url = new URL(raw);
+      const port = url.port !== '' ? url.port : url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '';
+      return JSON.stringify([url.protocol, url.hostname, port, url.pathname.replace(/\/+$/, '')]);
+    } catch {
+      return null;
+    }
+  };
+  const left = key(a);
+  return left !== null && left === key(b);
+}
+
+export interface LoginOptions {
+  env: Record<string, string | undefined>;
+  cwd: string;
+  /** The legacy file; the org-scoped files sit beside it. */
+  credentialsPath?: string;
+}
+
+/**
+ * The login credential `harness login` left for this repository, found as
+ * harness-cli finds it: a repository whose `.harness-cli/config.json` names
+ * an `org` has its own org-scoped file, which a fresh login writes while the
+ * legacy `credentials.json` keeps its older token (RCL-211). The org file
+ * wins when it holds a login for the host it was minted for; otherwise, and
+ * outside such a repository, the legacy file answers as before.
+ *
+ * Only the repository's `org` is read, never its `url`: the org file is looked
+ * up under the default host and under the legacy login's host, so a cloned
+ * repository cannot steer which host a stored token is sent to.
+ */
+export async function readLoginCredential(options: LoginOptions): Promise<{ url: string; token: string } | null> {
+  const legacyPath = options.credentialsPath ?? defaultCredentialsPath(options.env);
+  const legacy = await readStoredCredentials(legacyPath);
+  const org = await readRepoOrg(options.cwd);
+  if (org !== null) {
+    for (const host of new Set([DEFAULT_HARNESS_URL, ...(legacy === null ? [] : [legacy.url])])) {
+      let path: string;
+      try { path = orgCredentialsPath(legacyPath, host, org); } catch { continue; }
+      const scoped = await readStoredCredentials(path);
+      if (scoped !== null && sameHost(scoped.url, host)) return scoped;
+    }
+  }
+  return legacy;
+}
+
 export async function readStoredCredentials(path: string): Promise<{ url: string; token: string } | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf-8'));
@@ -178,7 +255,8 @@ export async function applyHarnessModelKeys(options: HarnessKeyOptions = {}): Pr
 
   const credentials =
     options.credential ??
-    (await readStoredCredentials(options.credentialsPath ?? defaultCredentialsPath(env)));
+    (await readLoginCredential({ env, cwd: options.cwd ?? process.cwd(),
+      ...(options.credentialsPath !== undefined ? { credentialsPath: options.credentialsPath } : {}) }));
   if (credentials === null) {
     return {
       injected: [],
