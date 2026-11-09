@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.5.32 - 2026-11-09
+
+- Resume a checkpointed pending retry after its host dies even when the attempt
+  cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
+  the existing successor and its original package instead of requiring another
+  attempt. Recovery retains the run, round, spent claims, deadline and call
+  limits; a missing journal refuses before state changes. If the terminal report
+  was already retained, replay its exact bytes and reviewer artifact without
+  rerunning reviewers or verification.
+
 ## 4.5.31 - 2026-11-09
 
 - Read the org-scoped login harness-cli writes, so evidence delivery and model
