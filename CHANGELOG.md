@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.26 - 2026-11-09
+
 - Re-dispatch a timed-out blocking call once inside a guarded council. A
   four-seat review of a large pull request finished 11 of 12 calls twice, each
   time losing the same kind of call to a provider stall at the 15 and 20 minute
