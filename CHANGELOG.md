@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.29 - 2026-11-09
+
 - Continue a guarded review on a changed head without `--retry-reason` when
   the previous round reached its blocking quorum and was admitted, even though
   one seat errored or returned `parse_failed` (RCL-205). Such a launch records
