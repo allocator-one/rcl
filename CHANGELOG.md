@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.27 - 2026-11-09
+
 - Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under
   Node 26 (RCL-213). Node 26's built-in `fetch` negotiates HTTP/2 and sends every
   parallel call to a provider over one connection; when that connection reset,
