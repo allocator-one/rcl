@@ -169,20 +169,48 @@ export interface LoginOptions {
  * a stale legacy file. The legacy login's host and the hosts the user approved
  * in `trusted-hosts.json` follow, for a login on a custom host.
  */
+/** Where a stored login came from and why it won: the file path and a one-line reason, never the token. */
+export interface LoginOrigin {
+  file: string;
+  reason: string;
+}
+
+export interface ResolvedLogin {
+  credential: { url: string; token: string };
+  origin: LoginOrigin;
+}
+
 export async function readLoginCredential(options: LoginOptions): Promise<{ url: string; token: string } | null> {
+  return (await resolveLogin(options))?.credential ?? null;
+}
+
+/** Like `readLoginCredential`, naming the credential file and why it was chosen. */
+export async function resolveLogin(options: LoginOptions): Promise<ResolvedLogin | null> {
   const legacyPath = options.credentialsPath ?? defaultCredentialsPath(options.env);
   const legacy = await readStoredCredentials(legacyPath);
   const org = await readRepoOrg(options.cwd);
+  const skipped: string[] = [];
   if (org !== null) {
     const hosts = [DEFAULT_HARNESS_URL, ...(legacy === null ? [] : [legacy.url]), ...(await readTrustedHosts(legacyPath))];
     for (const host of new Set(hosts)) {
       let path: string;
       try { path = orgCredentialsPath(legacyPath, host, org); } catch { continue; }
       const scoped = await readStoredCredentials(path);
-      if (scoped !== null && sameHost(scoped.url, host)) return scoped;
+      if (scoped === null) continue;
+      if (sameHost(scoped.url, host)) {
+        return { credential: scoped, origin: { file: path, reason: `org-scoped login for org ${org} on ${host}` } };
+      }
+      skipped.push(path);
     }
   }
-  return legacy;
+  if (legacy === null) return null;
+  const why =
+    org === null
+      ? 'the repo config names no org'
+      : skipped.length > 0
+        ? `org ${org} has a login file for a different host (${skipped.join(', ')}), ignored`
+        : `no org-scoped login for org ${org} on a known host`;
+  return { credential: legacy, origin: { file: legacyPath, reason: `legacy login (${why})` } };
 }
 
 export async function readStoredCredentials(path: string): Promise<{ url: string; token: string } | null> {

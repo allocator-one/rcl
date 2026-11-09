@@ -32,7 +32,8 @@ it('reports the stored login and outbox with HOME unset', async () => {
     env: { PATH: process.env['PATH'] ?? '', XDG_CONFIG_HOME: configHome, RCL_DATA_DIR: dataDir },
   });
 
-  const status = JSON.parse(stdout) as { credential: { source: string; host: string }; outbox: { dir: string } };
-  expect(status.credential).toEqual({ source: 'login', host: 'harness.example.test' });
+  const status = JSON.parse(stdout) as { credential: { source: string; host: string; file: string }; outbox: { dir: string } };
+  expect(status.credential).toMatchObject({ source: 'login', host: 'harness.example.test' });
+  expect(status.credential.file).toBe(join(configHome, 'harness', 'credentials.json'));
   expect(status.outbox.dir).toBe(join(dataDir, 'outbox'));
 });
