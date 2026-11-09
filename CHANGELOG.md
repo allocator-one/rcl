@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.5.30 - 2026-11-09
+
 - Pin that `rcl` starts without `HOME` (RCL-207). A launch with `HOME`
   stripped reads the stored Harness login from `XDG_CONFIG_HOME` and keeps
   its outbox under `RCL_DATA_DIR`, falling back to the account's home from the
