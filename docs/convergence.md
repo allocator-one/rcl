@@ -299,6 +299,13 @@ health was inconclusive continues at the next native round. Its original
 admission, findings, verdicts and spent claims remain unchanged. The new claim
 retains the source bytes and binding; no history or budget is reset.
 
+Launches from 4.2.0 onward record their own blocking health, so an
+inconclusive one needs no `--retry-report`: repeat the guarded review with
+`--retry-reason` alone. Adding `--retry-report` to such a launch refuses with
+`retry_report_current_health` before any claim and names the recorded seats.
+Any other `retry_report_invalid` refusal names the failed invariant in
+parentheses, such as `retry_report_binding_mismatch`.
+
 ### Pending launches with a dead coordinator
 
 For a pending launch whose coordinator is provably dead, supply an

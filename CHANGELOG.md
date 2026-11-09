@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 4.5.28 - 2026-11-09
+## 4.5.29 - 2026-11-09
 
 - Resume a checkpointed pending retry after its host dies even when the attempt
   cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
@@ -11,6 +11,19 @@
   limits; a missing journal refuses before state changes. If the terminal report
   was already retained, replay its exact bytes and reviewer artifact without
   rerunning reviewers or verification.
+
+## 4.5.28 - 2026-11-09
+
+- Name the supported retry when `--retry-report` is given an inconclusive
+  launch that recorded its own blocking health (RCL-202). Since 4.2.0 a
+  completed launch stores its blocking seats natively, so the bounded retry
+  needs only `--retry-reason`; `--retry-report` proves health only for
+  4.1.10–4.1.12 aggregate-only launches. Such a launch was refused with the
+  generic `retry_report_invalid`, which read as a broken report. It now
+  refuses with `retry_report_current_health`, naming the recorded seats and
+  the `--retry-reason` path, before any claim. Other `retry_report_invalid`
+  refusals name the failed invariant, such as
+  `retry_report_binding_mismatch`. The legacy proof itself is unchanged.
 
 ## 4.5.27 - 2026-11-09
 
