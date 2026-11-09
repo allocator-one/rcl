@@ -193,7 +193,35 @@ describe('ordinary launch health through the public CLI', () => {
       expect(ordinary.status).toBe(1);
       expect(ordinary.stderr).toContain('report_not_admitted');
       expect(ordinary.stderr.match(/--input-sha256 ([a-f0-9]{64})/)?.[1]).toBe(successor.inputSha256);
-      const callsAfterApply = f.calls();
+      // Host loss after checkpoint completion but before the native terminal
+      // write must reuse attempt 2 even though the cap is already exhausted.
+      const interrupted = JSON.parse(await readFile(nativePath, 'utf8'));
+      interrupted.lastLaunch = {
+        status: 'pending', attempt: successor.attempt, round: successor.round,
+        headSha: successor.headSha, inputSha256: successor.inputSha256,
+        startedAt: successor.startedAt, pid: successor.pid,
+        retryReason: successor.retryReason, pendingRecovery: successor.pendingRecovery,
+        pendingResume: { ...successor.pendingResume, phase: 'running' },
+      };
+      await writeFile(nativePath, JSON.stringify(interrupted));
+      const interruptedBytes = await readFile(nativePath);
+      const spentAttempts = await readFile(attemptPath);
+      const callsAfterApply = f.calls(), requestsBeforePreview = f.requests().length;
+      const resumedPreview = await f.run(args, telemetryEnv);
+      expect(resumedPreview.status, resumedPreview.stderr).toBe(0);
+      expect(f.calls()).toBe(callsAfterApply);
+      expect(f.requests().slice(requestsBeforePreview).filter(request => /^(POST|PUT) /.test(request))).toEqual([]);
+      expect(await readFile(nativePath)).toEqual(interruptedBytes);
+      expect(await readFile(attemptPath)).toEqual(spentAttempts);
+      const resumed = await f.run(args.filter(arg => arg !== '--preview-pending')
+        .concat(['--json-file', 'resumed.json']), telemetryEnv);
+      expect(resumed.status, resumed.stderr).toBe(0);
+      expect(await readFile(join(f.dir, 'resumed.json'))).toEqual(await readFile(join(f.dir, 'recovered.json')));
+      expect(f.calls()).toBe(callsAfterApply);
+      expect(await readFile(attemptPath)).toEqual(spentAttempts);
+      expect((await loadConvergeRunState(f.common, 'health-fixture'))!.lastLaunch)
+        .toMatchObject({ status: 'completed', attempt: 2, round: successor.round,
+          runId: successor.runId, pendingResume: { ...successor.pendingResume, pid: expect.any(Number) } });
       const replay = await f.run(args.filter(arg => arg !== '--preview-pending').concat(['--json-file', 'replay.json']), telemetryEnv);
       expect(replay.status, replay.stderr).toBe(0);
       expect(f.calls()).toBe(callsAfterApply);

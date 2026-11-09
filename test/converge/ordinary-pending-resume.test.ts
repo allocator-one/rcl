@@ -1,11 +1,12 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardReviewLaunch } from '../../src/converge/launch-guard.js';
 import { convergeRunStatePath, loadConvergeRunState } from '../../src/converge/run-state.js';
 import { convergeAttemptStatePath, loadConvergeAttemptState } from '../../src/converge/attempt-budget.js';
 import { capturePreparedCouncil } from '../../src/dispatch/capture-council.js';
+import { checkpointPath } from '../../src/dispatch/checkpoint.js';
 import { chunkDiff } from '../../src/prepare/chunker.js';
 import { guardedInputSha256, sha256Hex } from '../../src/report/run-header.js';
 import { previewOrdinaryPendingLaunch, resumePendingLegacyLaunch } from '../../src/converge/pending-legacy-resume.js';
@@ -91,6 +92,32 @@ describe('ordinary pending launch migration', () => {
     expect((await loadConvergeRunState(common, target))?.lastLaunch)
       .toMatchObject({ status: 'failed', attempt: 2, pendingRecovery: { pendingAttempt: 1, blockingOutcome: 'unknown' } });
     expect((await loadConvergeAttemptState(common, target))?.attemptsUsed).toBe(2);
+    // The checkpointed successor's host dies at the 2/2 attempt cap.
+    const interrupted = JSON.parse(await readFile(nativePath, 'utf8'));
+    interrupted.lastLaunch.status = 'pending';
+    interrupted.lastLaunch.pendingResume.phase = 'running';
+    interrupted.lastLaunch.pendingResume.pid = 987_654;
+    await writeFile(nativePath, JSON.stringify(interrupted));
+    const checkpointedNative = await readFile(nativePath), checkpointedAttempts = await readFile(attemptsPath);
+    await expect(previewOrdinaryPendingLaunch(options)).resolves.toMatchObject({
+      attemptsUsed: 2, cap: 2, nextAttempt: 2, resumedCheckpoint: true,
+      runId: interrupted.lastLaunch.pendingResume.runId,
+    });
+    await expect(previewOrdinaryPendingLaunch({ ...options, ownerAlive: () => true }))
+      .rejects.toThrow('owner_alive');
+    await expect(previewOrdinaryPendingLaunch({ ...options, recoveryInputSha256: '9'.repeat(64) }))
+      .rejects.toThrow('capture_mismatch');
+    await expect(previewOrdinaryPendingLaunch({ ...options, maxAttempts: 3 }))
+      .rejects.toThrow('attempt_cap_mismatch');
+    const journalPath = checkpointPath(common, target, interrupted.lastLaunch.pendingResume.runId);
+    await rename(journalPath, `${journalPath}-retained`);
+    try {
+      await expect(previewOrdinaryPendingLaunch(options)).rejects.toThrow();
+      await expect(resumePendingLegacyLaunch(options)).rejects.toThrow();
+    } finally { await rename(`${journalPath}-retained`, journalPath); }
+    expect(await readFile(nativePath)).toEqual(checkpointedNative);
+    expect(await readFile(attemptsPath)).toEqual(checkpointedAttempts);
+    expect(recoveredRun).toHaveBeenCalledTimes(1);
     const result = await resumePendingLegacyLaunch(options);
 
     expect(result.claim).toMatchObject({ attempt: 2, attemptsUsed: 2 });
