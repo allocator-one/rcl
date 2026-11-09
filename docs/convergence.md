@@ -413,6 +413,18 @@ unverifiable owner, or a missing journal keep the existing refusal of an
 unknown dispatch. An interrupted `--start-over` launch resumes through the same
 `--start-over` command, without requesting another cycle.
 
+A call that times out does not need a new attempt either. When every other
+call of a guarded council has finished and the blocking quorum is still unmet
+(under `quorumFraction: 1`, any timed-out blocking call), RCL dispatches each
+timed-out call one more time under the same journal before it closes the round:
+all seats, chunks, prompts and the quorum stay as launched, only the missing
+calls are paid again, and a call that stalls twice stays a timeout. A round
+already at its quorum, and a call that failed with an error rather than a
+timeout, are not dispatched again. (`rcl telemetry recover-reviewer` is a
+different tool: it delivers an already retained reviewer result to Harness and
+refuses with `reviewer_delivery_manifest_required` without a `--manifest`; it
+never re-runs a reviewer.)
+
 ```bash
 rcl review owner/repo#123 --guarded-converge --converge-target repo-123 \
   --evidence-required --max-slice-minutes 40 --json-file report.json

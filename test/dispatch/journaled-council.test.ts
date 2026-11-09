@@ -43,7 +43,7 @@ const review = (model: string, provider: string, userPrompt: string): ModelRevie
     severity: 'minor', category: 'correctness', title: `Finding from ${model} on ${userPrompt}`, description: 'fixture' }] });
 
 /** Fake providers that count calls per cell and in-flight calls per provider. */
-function providers(options: { hang?: (cell: string) => boolean; onStart?: (calls: number) => void; adapterAttempts?: number; delayMs?: number } = {}) {
+function providers(options: { hang?: (cell: string) => boolean; stall?: (cell: string) => boolean; stallMs?: number; onStart?: (calls: number) => void; adapterAttempts?: number; delayMs?: number } = {}) {
   const calls = new Map<string, number>();
   const inFlight = new Map<string, number>();
   let total = 0, peak = 0;
@@ -59,6 +59,11 @@ function providers(options: { hang?: (cell: string) => boolean; onStart?: (calls
       try {
         if (options.hang?.(cell)) {
           await new Promise((_resolve, reject) => adapterOptions.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+        }
+        if (options.stall?.(cell)) {
+          // An adapter reports its own timeout as a result, as the real ones do.
+          await new Promise(resolve => setTimeout(resolve, options.stallMs ?? 5));
+          return { model, role: 'general', provider, status: 'timeout', findings: [], durationMs: options.stallMs ?? 5, error: 'Request timed out' };
         }
         await new Promise(resolve => setTimeout(resolve, options.delayMs ?? 1));
         return { ...review(model, provider, userPrompt), ...(options.adapterAttempts ? { adapterAttempts: options.adapterAttempts } : {}) };
@@ -180,6 +185,49 @@ describe('journaled ordinary council (RCL-80)', () => {
     expect(resumed.reviews.every(item => item.status === 'success')).toBe(true);
     expect(rest.calls.size + first.calls.size).toBe(assignments.length);
   }, 30_000);
+
+  describe('a stalled call (RCL-231)', () => {
+    const wholeRoster = (assignments: ReviewAssignment[], overrides: Partial<JournaledRunnerOptions>) => runner(
+      providers().factory, { quorum: { fraction: 1, blocking: assignments.map(() => true) }, ...overrides }, assignments.length);
+
+    it('re-runs only the call that timed out, keeping every seat under quorum 1', async () => {
+      const dir = await commonDir(), small = council(3, 4), { assignments, prompts } = small;
+      const stuck = key(assignments[5]!.model, prompts[5]!.userPrompt);
+      let stalls = 0;
+      const fake = providers({ stall: cell => cell === stuck && ++stalls === 1 });
+      const result = await withJournal(dir, true, (journal, ownership) => runJournaledCouncil({ journal, ownership, assignments, prompts,
+        runner: { ...wholeRoster(assignments, {}), adapterFactory: fake.factory } }), small);
+      expect(result.reviews.map(item => item.status)).toEqual(assignments.map(() => 'success'));
+      expect(result.interrupted).toBe(false);
+      expect(fake.calls.get(stuck)).toBe(2);
+      for (const [cell, count] of fake.calls) if (cell !== stuck) expect(count).toBe(1);
+      expect(result.dispatched).toBe(assignments.length + 1);
+      const state = await withJournal(dir, false, journal => journal.read(), small);
+      expect(state.finalized).toBe(true);
+      expect(state.records.filter(record => record.type === 'intent' && record.cell === 's1:1')).toHaveLength(2);
+    }, 30_000);
+
+    it('stops after one more dispatch when the call stalls again', async () => {
+      const dir = await commonDir(), small = council(3, 4), { assignments, prompts } = small;
+      const stuck = key(assignments[5]!.model, prompts[5]!.userPrompt);
+      const fake = providers({ stall: cell => cell === stuck });
+      const result = await withJournal(dir, true, (journal, ownership) => runJournaledCouncil({ journal, ownership, assignments, prompts,
+        runner: { ...wholeRoster(assignments, {}), adapterFactory: fake.factory } }), small);
+      expect(fake.calls.get(stuck)).toBe(MAX_DISPATCHES_PER_CELL);
+      expect(result.reviews[5]).toMatchObject({ status: 'timeout' });
+      expect(result.reviews.filter(item => item.status === 'success')).toHaveLength(assignments.length - 1);
+    }, 30_000);
+
+    it('does not pay again for a timeout once the quorum is already met', async () => {
+      const dir = await commonDir(), small = council(3, 6), { assignments, prompts } = small;
+      const stuck = key(assignments[5]!.model, prompts[5]!.userPrompt);
+      const fake = providers({ stall: cell => cell === stuck, stallMs: 0, delayMs: 20 });
+      const result = await withJournal(dir, true, (journal, ownership) => runJournaledCouncil({ journal, ownership, assignments, prompts,
+        runner: { ...wholeRoster(assignments, { quorum: { fraction: 2 / 3, blocking: assignments.map(() => true) } }), adapterFactory: fake.factory } }), small);
+      expect(fake.calls.get(stuck)).toBe(1);
+      expect(result.reviews[5]).toMatchObject({ status: 'timeout' });
+    }, 30_000);
+  });
 
   it('refuses a journal captured for different review inputs', async () => {
     const dir = await commonDir(), { plan } = council();

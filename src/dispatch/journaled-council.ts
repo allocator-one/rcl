@@ -90,10 +90,10 @@ export function planJournaledCouncil(cells: readonly { id: string }[], state: Ch
   return plan;
 }
 
-/** Whether the ordinary runner would close this council at quorum; wait-for-all never closes early. */
-function closesAtQuorum(assignments: readonly ReviewAssignment[], reviews: readonly ModelReview[],
+/** Whether the blocking seats that completed every chunk meet the configured quorum, whatever its fraction. */
+function blockingQuorumMet(assignments: readonly ReviewAssignment[], reviews: readonly ModelReview[],
   quorum: RunnerOptions['quorum']): boolean {
-  if (!quorum) return false;
+  if (!quorum) return true;
   const expected = new Map<string, number>(), succeeded = new Map<string, number>();
   assignments.forEach((assignment, index) => {
     if (quorum.blocking && !quorum.blocking[index]) return;
@@ -102,8 +102,20 @@ function closesAtQuorum(assignments: readonly ReviewAssignment[], reviews: reado
     if (reviews[index]?.status === 'success') succeeded.set(seat, (succeeded.get(seat) ?? 0) + 1);
   });
   const complete = [...expected].filter(([seat, count]) => succeeded.get(seat) === count).length;
-  const policy = resolveQuorumPolicy(expected.size, quorum.fraction);
-  return policy.fraction < 1 && hasSuccessfulQuorum(policy, complete);
+  return hasSuccessfulQuorum(resolveQuorumPolicy(expected.size, quorum.fraction), complete);
+}
+
+/** Whether the ordinary runner would close this council at quorum; wait-for-all never closes early. */
+function closesAtQuorum(assignments: readonly ReviewAssignment[], reviews: readonly ModelReview[],
+  quorum: RunnerOptions['quorum']): boolean {
+  return !!quorum && resolveQuorumPolicy(new Set(assignments.filter((_, index) => quorum.blocking?.[index] !== false)
+    .map(assignment => JSON.stringify([assignment.provider, assignment.model, assignment.role.name]))).size,
+  quorum.fraction).fraction < 1 && blockingQuorumMet(assignments, reviews, quorum);
+}
+
+/** Dispatches journaled so far for one cell, whatever their outcome. */
+function dispatchCount(state: CheckpointState, cell: string): number {
+  return state.records.filter(record => record.type === 'intent' && record.cell === cell).length;
 }
 
 /**
@@ -144,18 +156,20 @@ export async function runJournaledCouncil(input: JournaledCouncilInput): Promise
     return { reviews, interrupted: false, retained: plan.retained.size, dispatched: 0 };
   }
   const attempts = new Map<number, PaidAttempt>();
+  let dispatched = 0;
   const declined = new Set<number>();
-  const reviews = merge(await runReviews(assignments, prompts, {
+  const dispatch = (retained: Map<number, ModelReview>, eligible: number[]) => runReviews(assignments, prompts, {
     ...input.runner,
-    retainedReviews: [...plan.retained].map(([callIndex, review]) => ({ callIndex, review,
+    retainedReviews: [...retained].map(([callIndex, review]) => ({ callIndex, review,
       callIdentity: reviewCallIdentity(assignments[callIndex]!, prompts[callIndex]!, callIndex) })),
-    eligibleCallIndices: plan.eligible,
+    eligibleCallIndices: eligible,
     beforeReview: async (index, signal) => {
       if (signal.aborted) return false;
       if (input.admit && !input.admit()) { declined.add(index); return false; }
       const attempt: PaidAttempt = { id: randomUUID(), kind: 'paid' };
       await journal.recordIntent(cells[index]!.id, attempt, ownership);
       attempts.set(index, attempt);
+      dispatched++;
     },
     acceptReview: async (review, index) => {
       const attempt = attempts.get(index), cell = cells[index]!;
@@ -177,10 +191,26 @@ export async function runJournaledCouncil(input: JournaledCouncilInput): Promise
         await journal.recordUncertain(cell.id, attempt, 'Reviewer result could not be journaled; a resume treats it as interrupted.', ownership);
       }
     },
-  }));
+  });
+  let reviews = merge(await dispatch(plan.retained, plan.eligible));
+  // A call that timed out holds one seat's chunk hostage: the provider stalled
+  // while every other call finished (RCL-231). When that leaves the blocking
+  // quorum unmet, give each such call one more dispatch under the same
+  // journal, so the round keeps every seat and the quorum instead of
+  // repeating all calls in a new attempt.
+  const stalled = (state: CheckpointState): number[] =>
+    declined.size > 0 || input.runner.signal?.aborted === true || blockingQuorumMet(assignments, reviews, input.runner.quorum) ? []
+      : reviews.flatMap((item, index) => item.status === 'timeout' && input.runner.quorum?.blocking?.[index] !== false &&
+        dispatchCount(state, cells[index]!.id) < MAX_DISPATCHES_PER_CELL ? [index] : []);
+  const redispatch = stalled(await journal.read());
+  if (redispatch.length > 0) {
+    const kept = new Map(reviews.flatMap((item, index) => item.status === 'success' ? [[index, item] as const] : []));
+    const again = await dispatch(kept, redispatch);
+    reviews = reviews.map((item, index) => redispatch.includes(index) ? again[index]! : item);
+  }
   const stopped = declined.size > 0 || input.runner.signal?.aborted === true;
   const interrupted = stopped && reviews.some(review => review.status === 'canceled') &&
     !closesAtQuorum(assignments, reviews, input.runner.quorum);
   if (!interrupted) await journal.finalize(ownership);
-  return { reviews, interrupted, retained: plan.retained.size, dispatched: attempts.size };
+  return { reviews, interrupted, retained: plan.retained.size, dispatched };
 }
