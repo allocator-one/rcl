@@ -35,16 +35,17 @@ function changedFile(i: number) {
 const files = (n: number) => Array.from({ length: n }, (_, i) => changedFile(i));
 
 /** An Octokit fake: compare serves `compareFiles` on one response; the PR listing serves `listed`. */
-function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number; attributes?: string; getContentError?: unknown }) {
+function octokitWith(opts: { pr?: ReturnType<typeof fakePr>; recheck?: ReturnType<typeof fakePr>; compareFiles?: number; listed?: number; attributes?: string; nested?: Record<string, string>; getContentError?: unknown }) {
   const pr = opts.pr ?? fakePr();
   const get = vi.fn().mockResolvedValueOnce(pr).mockResolvedValueOnce(opts.recheck ?? pr);
   const compare = vi.fn(async () => ({ data: { files: files(opts.compareFiles ?? pr.data.changed_files) } }));
   const paginate = vi.fn(async () => files(opts.listed ?? pr.data.changed_files));
   // Without attributes the base has no .gitattributes, which GitHub reports as a 404.
-  const getContent = vi.fn(async () => {
+  const getContent = vi.fn(async (request: { path: string }) => {
     if (opts.getContentError) throw opts.getContentError;
-    if (opts.attributes === undefined) throw Object.assign(new Error('Not Found'), { status: 404 });
-    return { data: opts.attributes };
+    const text = request.path === '.gitattributes' ? opts.attributes : opts.nested?.[request.path];
+    if (text === undefined) throw Object.assign(new Error('Not Found'), { status: 404 });
+    return { data: text };
   });
   const octokit = {
     pulls: { get, listFiles: { endpoint: 'pulls.listFiles' } },
@@ -254,9 +255,9 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
   // The served-spec shape: one generated file alone is over the 64,000-line patch cap.
   const hugePatch = `@@ -1 +1,70000 @@\n-x\n${Array.from({ length: 70_000 }, (_, i) => `+line ${i}`).join('\n')}\n`;
 
-  function release(blobSha: string, extra: { attributes?: string; getContentError?: unknown } = {}) {
+  function release(blobSha: string, extra: { attributes?: string; nested?: Record<string, string>; getContentError?: unknown } = {}) {
     const pr = fakePr(2); pr.data.base.sha = base; pr.data.head.sha = head;
-    const f = octokitWith({ pr, attributes: extra.attributes, getContentError: extra.getContentError });
+    const f = octokitWith({ pr, attributes: extra.attributes, nested: extra.nested, getContentError: extra.getContentError });
     f.compare.mockResolvedValue({ data: { files: [
       changedFile(1),
       { filename: 'spec/infraone.json', status: 'modified', additions: 70_000, deletions: 1, patch: hugePatch, sha: blobSha },
@@ -289,6 +290,20 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
     const other = await fetchPRDiff(target, undefined, release('2'.repeat(40), attributesOpt).octokit);
     expect(diffDigest(same.files)).toBe(diffDigest(one.files));
     expect(diffDigest(other.files)).not.toBe(diffDigest(one.files));
+  });
+
+  it('keeps a file in review when a base .gitattributes in one of its directories could change its attributes', async () => {
+    const f = release('1'.repeat(40), { attributes, nested: { 'spec/.gitattributes': 'infraone.json -linguist-generated\n' } });
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+    expect(diff.files.find((x) => x.filename === 'spec/infraone.json')?.patch).toBe(hugePatch);
+    expect(f.getContent).toHaveBeenCalledWith(expect.objectContaining({ path: 'spec/.gitattributes', ref: base }));
+  });
+
+  it('checks the directories of the left-out files only, once each', async () => {
+    const f = release('1'.repeat(40), { attributes });
+    await fetchPRDiff(target, undefined, f.octokit);
+    expect(f.getContent.mock.calls.map(([request]) => request.path).sort()).toEqual(['.gitattributes', 'spec/.gitattributes']);
   });
 
   it('records the left-out paths in the run header target', async () => {

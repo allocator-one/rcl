@@ -177,11 +177,17 @@ cannot hide its own files by editing `.gitattributes`; add the rule in an
 earlier PR. A left-out file stays in the diff by name, status, line counts and
 git blob id, so `diff_sha256` still changes with its content, and the report's
 `run.target.left_out` records the reason, the commit whose `.gitattributes`
-decided, the count and up to 100 paths. `.gitattributes` files themselves are
-always reviewed. Only the root file, plain patterns (`*`, `?`, `**`, `[…]`,
-anchored or by base name) and the set, `=true`, unset and `=false` forms are
-read; any other syntax leaves the file in review. PR targets only: patch files
-and `--staged`/`--working-tree` carry no base to read from.
+decided, the count and up to 100 paths. Only a file that already existed at its
+path (modified or deleted) is left out: an added, renamed or copied file stays
+in review, and so does every `.gitattributes` file. Only the root file is read:
+a file below a directory that has its own `.gitattributes` at the base stays in
+review, because a deeper file can override the root. Plain patterns (`*`, `?`,
+`**`, `[…]`, anchored or by base name) and the set, `=true`, unset and `=false`
+forms are read. A rule in any other syntax (a quoted or negated pattern) or a
+line that uses a macro defined in the file is not understood and could unset an
+earlier rule, so it counts as "not generated" for the paths it might match. PR
+targets only: patch files and `--staged`/`--working-tree` carry no base to read
+from.
 
 | Flag | Description |
 | --- | --- |

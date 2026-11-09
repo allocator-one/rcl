@@ -48,6 +48,15 @@ describe('generatedPathMatcher', () => {
     }
   });
 
+  it('keeps a path in review when an unsupported later rule could unset it', () => {
+    const macro = '[attr]hand -linguist-generated\n*.json linguist-generated\nspec/keep.json hand\n';
+    expect(matches(macro, 'spec/keep.json')).toBe(false);
+    expect(matches(macro, 'spec/other.json')).toBe(true);
+    const quoted = '*.json linguist-generated\n"my file.json" -linguist-generated\n*.md linguist-generated\n';
+    expect(matches(quoted, 'my file.json')).toBe(false);
+    expect(matches(quoted, 'readme.md')).toBe(true);
+  });
+
   it('does not let * cross a directory boundary in a rooted pattern', () => {
     expect(matches('docs/*.md linguist-generated', 'docs/a.md')).toBe(true);
     expect(matches('docs/*.md linguist-generated', 'docs/nested/a.md')).toBe(false);
@@ -72,6 +81,33 @@ describe('leaveOutGenerated', () => {
       'b'.repeat(40)
     );
     expect(files.every((f) => f.patch !== '')).toBe(true);
+    expect(leftOut).toBeUndefined();
+  });
+
+  it('leaves out only a file that existed at its path: not an added, renamed or copied one', () => {
+    const { files, leftOut } = leaveOutGenerated(
+      [
+        file('spec/modified.json'),
+        file('spec/removed.json', { status: 'deleted' }),
+        file('spec/added.json', { status: 'added' }),
+        file('spec/renamed.json', { status: 'renamed', previousFilename: 'src/auth.ts' }),
+        file('spec/copied.json', { status: 'copied' as FileChange['status'] }),
+      ],
+      generated,
+      'b'.repeat(40)
+    );
+    expect(files.map((f) => [f.filename, f.patch === ''])).toEqual([
+      ['spec/modified.json', true], ['spec/removed.json', true], ['spec/added.json', false],
+      ['spec/renamed.json', false], ['spec/copied.json', false],
+    ]);
+    expect(leftOut?.paths).toEqual(['spec/modified.json', 'spec/removed.json']);
+  });
+
+  it('keeps a .gitattributes renamed to a generated path in review', () => {
+    const { files, leftOut } = leaveOutGenerated(
+      [file('spec/policy.bak', { status: 'renamed', previousFilename: '.gitattributes' })], generated, 'b'.repeat(40)
+    );
+    expect(files[0]!.patch).not.toBe('');
     expect(leftOut).toBeUndefined();
   });
 

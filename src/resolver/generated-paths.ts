@@ -11,9 +11,8 @@ const ATTRIBUTE = 'linguist-generated';
 /**
  * Translate a gitattributes pattern into a regular expression over
  * repository-relative paths, or `null` for syntax this reader does not
- * implement. Every unsupported form means "not matched", which leaves the
- * file in the reviewed patch: the safe direction for a reader that decides
- * what the council does not see.
+ * implement. The caller must not read `null` as "matches nothing": a rule that
+ * is not understood may unset an earlier one (see generatedPathMatcher).
  *
  * Rules follow gitattributes(5): a pattern without a slash matches the base
  * name at any depth; one with a slash is anchored at the repository root;
@@ -82,26 +81,44 @@ function verdictOf(token: string): Verdict | 'none' {
   return 'none';
 }
 
+/** The attribute name a token sets, unsets or unspecifies (`-name`, `!name`, `name=value`). */
+function attributeName(token: string): string {
+  const bare = token.startsWith('-') || token.startsWith('!') ? token.slice(1) : token;
+  const equals = bare.indexOf('=');
+  return equals === -1 ? bare : bare.slice(0, equals);
+}
+
 /**
  * Whether a repository-root `.gitattributes` marks a path `linguist-generated`.
- * Later lines win, as in git. Only the root file is read: it is one fetch at a
- * pinned commit, and a nested file that is not read can only leave more in
- * review.
+ * Later lines win, as in git. Only the root file is read here; the caller
+ * keeps any file with a `.gitattributes` in one of its directories in review.
+ *
+ * Syntax this reader does not implement must fail toward review in both
+ * directions. A rule it cannot translate (a quoted or negated pattern) that
+ * names the attribute, or a line that uses a macro defined in the file, could
+ * unset what an earlier rule set, so it counts as "not generated" for every
+ * path it might match (an untranslatable pattern: all paths). A later
+ * translatable rule still decides as usual.
  */
 export function generatedPathMatcher(attributesText: string): (path: string) => boolean {
+  const lines = attributesText.split(/\r?\n/).map((rawLine) => rawLine.trim()).filter((line) => line.length > 0 && !line.startsWith('#'));
+  const macros = new Set(
+    lines.filter((line) => line.startsWith('[attr]')).map((line) => line.slice('[attr]'.length).split(/\s+/)[0]!)
+  );
   const rules: Array<{ matches: RegExp; verdict: Verdict }> = [];
-  for (const rawLine of attributesText.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line.length === 0 || line.startsWith('#') || line.startsWith('[attr]')) continue;
+  for (const line of lines) {
+    if (line.startsWith('[attr]')) continue;
     const [pattern, ...tokens] = line.split(/\s+/);
     let verdict: Verdict | 'none' = 'none';
     for (const token of tokens) {
       const next = verdictOf(token);
       if (next !== 'none') verdict = next;
     }
+    // A macro may expand to either state; assume the one that keeps the file in review.
+    if (tokens.some((token) => macros.has(attributeName(token)))) verdict = false;
     if (verdict === 'none') continue;
     const matches = patternToRegExp(pattern!);
-    if (matches) rules.push({ matches, verdict });
+    rules.push(matches ? { matches, verdict } : { matches: /^/, verdict: false });
   }
   return (path) => {
     let verdict: Verdict = undefined;
@@ -112,6 +129,30 @@ export function generatedPathMatcher(attributesText: string): (path: string) => 
 
 function isAttributesFile(path: string): boolean {
   return path === ATTRIBUTES_FILE || path.endsWith(`/${ATTRIBUTES_FILE}`);
+}
+
+/**
+ * Only a file that already existed at its path can be left out: an added,
+ * renamed or copied file arrives from outside the generated set, so a PR could
+ * otherwise place hand-written code under a generated pattern and hide it.
+ */
+const LEFT_OUT_STATUSES: ReadonlySet<string> = new Set(['modified', 'deleted', 'removed']);
+
+/** The files `leaveOutGenerated` would blank, before any directory-level exception. */
+export function leaveOutCandidates(files: readonly FileChange[], isGenerated: (path: string) => boolean): FileChange[] {
+  return files.filter((file) =>
+    file.patch.length > 0 &&
+    file.blobSha !== undefined &&
+    LEFT_OUT_STATUSES.has(file.status) &&
+    !isAttributesFile(file.filename) &&
+    isGenerated(file.filename)
+  );
+}
+
+/** Every directory above a path, outermost first (`a/b/c.txt` gives `a`, `a/b`). */
+export function ancestorDirectories(path: string): string[] {
+  const parts = path.split('/').slice(0, -1);
+  return parts.map((_, index) => parts.slice(0, index + 1).join('/'));
 }
 
 /**
@@ -126,10 +167,10 @@ export function leaveOutGenerated(
   isGenerated: (path: string) => boolean,
   ref: string
 ): { files: FileChange[]; leftOut?: LeftOutPaths } {
+  const candidates = new Set(leaveOutCandidates(files, isGenerated));
   const paths: string[] = [];
   const kept = files.map((file) => {
-    if (file.patch.length === 0 || file.blobSha === undefined) return file;
-    if (isAttributesFile(file.filename) || !isGenerated(file.filename)) return file;
+    if (!candidates.has(file)) return file;
     paths.push(file.filename);
     return { ...file, patch: '' };
   });

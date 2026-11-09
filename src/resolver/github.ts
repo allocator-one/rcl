@@ -2,7 +2,7 @@ import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import { detectLanguage } from '../prepare/language.js';
 import type { Diff, FileChange, PRMetadata } from './types.js';
 import { createGitHubClient, getGitHubPullRequest } from './github-client.js';
-import { generatedPathMatcher, leaveOutGenerated } from './generated-paths.js';
+import { ancestorDirectories, generatedPathMatcher, leaveOutCandidates, leaveOutGenerated } from './generated-paths.js';
 
 export interface GitHubTarget {
   owner: string;
@@ -169,33 +169,58 @@ async function fetchChangedFiles(
 // file, and reading it whole would only hide a problem.
 const MAX_ATTRIBUTES_BYTES = 1024 * 1024;
 
+// Directories whose own .gitattributes is looked up before a file is left out.
+// A file under a directory beyond this bound stays in review.
+const MAX_DIRECTORY_LOOKUPS = 100;
+
 /**
- * The repository-root `.gitattributes` at one commit, or `undefined` when the
- * commit has none. Any other failure propagates: a review that silently fell
+ * The `.gitattributes` at one path and commit, or `undefined` when the commit
+ * has none there. Any other failure propagates: a review that silently fell
  * back to "nothing is generated" would read a different patch, and bind a
  * different digest, than the same review on a healthy API.
  */
-async function readRootAttributes(octokit: Octokit, target: GitHubTarget, ref: string): Promise<string | undefined> {
+async function readAttributes(octokit: Octokit, target: GitHubTarget, ref: string, path: string): Promise<string | undefined> {
   try {
     const { data } = await octokit.repos.getContent({
       owner: target.owner,
       repo: target.repo,
-      path: '.gitattributes',
+      path,
       ref,
       mediaType: { format: 'raw' },
     });
     const text = typeof data === 'string' ? data : undefined;
     if (text === undefined) {
-      throw new Error(`.gitattributes at ${ref} is not a regular file.`);
+      throw new Error(`${path} at ${ref} is not a regular file.`);
     }
     if (Buffer.byteLength(text, 'utf8') > MAX_ATTRIBUTES_BYTES) {
-      throw new Error(`.gitattributes at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
+      throw new Error(`${path} at ${ref} exceeds ${MAX_ATTRIBUTES_BYTES.toLocaleString('en-US')} bytes.`);
     }
     return text;
   } catch (err) {
     if ((err as { status?: number }).status === 404) return undefined;
     throw err;
   }
+}
+
+/**
+ * The directories, among those above `paths`, that hold their own
+ * `.gitattributes` at the commit, plus any beyond the lookup bound. Git lets a
+ * deeper file override the root, and the root reader does not apply it, so a
+ * file below such a directory is never left out.
+ */
+async function directoriesWithAttributes(octokit: Octokit, target: GitHubTarget, ref: string, paths: readonly string[]): Promise<Set<string>> {
+  const directories = [...new Set(paths.flatMap(ancestorDirectories))].sort();
+  const blocked = new Set<string>();
+  let lookups = 0;
+  for (const directory of directories) {
+    if (lookups >= MAX_DIRECTORY_LOOKUPS) {
+      blocked.add(directory);
+      continue;
+    }
+    lookups += 1;
+    if (await readAttributes(octokit, target, ref, `${directory}/.gitattributes`) !== undefined) blocked.add(directory);
+  }
+  return blocked;
 }
 
 export async function fetchPRDiff(
@@ -247,11 +272,21 @@ export async function fetchPRDiff(
   // itself reviewed.
   // Only a file that still carries a patch can be left out, so a diff without one needs no lookup.
   const attributes = changes.some((f) => f.patch.length > 0)
-    ? await readRootAttributes(octokit, target, pr.base.sha)
+    ? await readAttributes(octokit, target, pr.base.sha, '.gitattributes')
     : undefined;
-  const { files: fileChanges, leftOut } = attributes === undefined
-    ? { files: changes, leftOut: undefined }
-    : leaveOutGenerated(changes, generatedPathMatcher(attributes), pr.base.sha);
+  let leftOutResult: ReturnType<typeof leaveOutGenerated> = { files: changes };
+  if (attributes !== undefined) {
+    const isGenerated = generatedPathMatcher(attributes);
+    const blocked = await directoriesWithAttributes(
+      octokit, target, pr.base.sha, leaveOutCandidates(changes, isGenerated).map((f) => f.filename)
+    );
+    leftOutResult = leaveOutGenerated(
+      changes,
+      (path) => isGenerated(path) && !ancestorDirectories(path).some((directory) => blocked.has(directory)),
+      pr.base.sha
+    );
+  }
+  const { files: fileChanges, leftOut } = leftOutResult;
 
   return {
     files: fileChanges,
