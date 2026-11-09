@@ -13,6 +13,9 @@
   that host, then the host of the legacy login, then the default host, and falls
   back to `credentials.json` as before. A repository `url` the user never
   approved is still never used to choose a host.
+
+## 4.5.28 - 2026-11-09
+
 - Name the supported retry when `--retry-report` is given an inconclusive
   launch that recorded its own blocking health (RCL-202). Since 4.2.0 a
   completed launch stores its blocking seats natively, so the bounded retry
