@@ -10,6 +10,30 @@
   tarball without it. npm applies it to registry installs; a local tarball
   install ignores it, see AGENTS.md.
 
+## 4.5.32 - 2026-11-09
+
+- Resume a checkpointed pending retry after its host dies even when the attempt
+  cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
+  the existing successor and its original package instead of requiring another
+  attempt. Recovery retains the run, round, spent claims, deadline and call
+  limits; a missing journal refuses before state changes. If the terminal report
+  was already retained, replay its exact bytes and reviewer artifact without
+  rerunning reviewers or verification.
+
+## 4.5.31 - 2026-11-09
+
+- Read the org-scoped login harness-cli writes, so evidence delivery and model
+  key fetches stop using a stale legacy token (RCL-211, RCL-212). harness-cli
+  1.16+ stores `harness login` in `credentials-org-<hash>.json` next to
+  `credentials.json` and leaves the legacy file as it was; once that token
+  expired, every evidence upload and `rcl evidence status` failed with HTTP 401
+  although `harness whoami` passed and logging in again changed nothing. In a
+  repository whose `.harness-cli/config.json` names an `org`, rcl now reads that
+  org's login first, as harness-cli does: under the default host, then the host
+  of the legacy login, then the hosts `harness login` approved in
+  `trusted-hosts.json`, and falls back to `credentials.json` as before. The
+  repository's own `url` is never used to choose a host.
+
 ## 4.5.30 - 2026-11-09
 
 - Pin that `rcl` starts without `HOME` (RCL-207). A launch with `HOME`
