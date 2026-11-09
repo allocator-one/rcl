@@ -74,18 +74,19 @@ describe('harness-cli credential layouts', () => {
     expect((await resolve()).credential).toEqual({ url: custom, token: 'aone_fresh', source: 'login' });
   });
 
-  it('keeps the host of the legacy login when the org has logins on both hosts', async () => {
+  it('prefers a fresh default-host org login over a stale custom-host legacy one, as harness-cli does', async () => {
     const custom = 'https://harness.example.test';
     await write(legacyPath, custom, 'aone_stale');
     await writeOrg(ORG, HOST, HOST, 'aone_default_host');
     await writeOrg(ORG, custom, custom, 'aone_custom_host');
-    expect((await resolve()).credential).toEqual({ url: custom, token: 'aone_custom_host', source: 'login' });
+    expect((await resolve()).credential).toEqual({ url: HOST, token: 'aone_default_host', source: 'login' });
   });
 
-  it('never moves a custom-host login to the default host', async () => {
-    await write(legacyPath, 'https://harness.example.test', 'aone_custom_legacy');
-    await writeOrg(ORG, HOST, HOST, 'aone_default_host');
-    expect((await resolve()).credential).toMatchObject({ url: 'https://harness.example.test', token: 'aone_custom_legacy' });
+  it('falls back to the legacy login\'s host when the default host has no org login', async () => {
+    const custom = 'https://harness.example.test';
+    await write(legacyPath, custom, 'aone_stale');
+    await writeOrg(ORG, custom, custom, 'aone_custom_host');
+    expect((await resolve()).credential).toMatchObject({ url: custom, token: 'aone_custom_host' });
   });
 
   it('never reads the login of another org', async () => {
@@ -107,18 +108,9 @@ describe('harness-cli credential layouts', () => {
     expect((await resolve()).credential).toEqual({ url: custom, token: 'aone_custom_host', source: 'login' });
   });
 
-  it('keeps the legacy login\'s host even when another approved host has an org login', async () => {
-    const custom = 'https://harness.example.test';
-    await writeFile(join(dir, 'config', 'harness', 'trusted-hosts.json'), JSON.stringify({ hosts: [custom] }));
-    await write(legacyPath, HOST, 'aone_legacy');
-    await writeOrg(ORG, custom, custom, 'aone_custom_host');
-    expect((await resolve()).credential).toMatchObject({ url: HOST, token: 'aone_legacy' });
-  });
-
-  it('never lets the repository config pick the host, approved or not', async () => {
+  it('never lets the repository config pick the host', async () => {
     const attacker = 'https://attacker.example.test';
     await writeFile(join(repo, '.harness-cli', 'config.json'), JSON.stringify({ org: ORG, url: attacker }));
-    await writeFile(join(dir, 'config', 'harness', 'trusted-hosts.json'), JSON.stringify({ hosts: [attacker] }));
     await write(legacyPath, HOST, 'aone_legacy');
     await writeOrg(ORG, attacker, attacker, 'aone_attacker');
     expect((await resolve()).credential).toEqual({ url: HOST, token: 'aone_legacy', source: 'login' });

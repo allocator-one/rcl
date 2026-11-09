@@ -164,17 +164,17 @@ export interface LoginOptions {
  *
  * The file name depends on the host, so the host is never taken from the
  * repository, whose `.harness-cli/config.json` is attacker-controlled input in
- * a cloned repo; only its `org` is read. The legacy login names the host the
- * user logged in to, and is the only one tried when it exists, so a login never
- * moves to a host the user did not name. Without a legacy login, the default
- * host is tried, then the hosts the user approved in `trusted-hosts.json`.
+ * a cloned repo; only its `org` is read. Like harness-cli without a repository
+ * url, the default host comes first, so a fresh login there is never hidden by
+ * a stale legacy file. The legacy login's host and the hosts the user approved
+ * in `trusted-hosts.json` follow, for a login on a custom host.
  */
 export async function readLoginCredential(options: LoginOptions): Promise<{ url: string; token: string } | null> {
   const legacyPath = options.credentialsPath ?? defaultCredentialsPath(options.env);
   const legacy = await readStoredCredentials(legacyPath);
   const org = await readRepoOrg(options.cwd);
   if (org !== null) {
-    const hosts = legacy !== null ? [legacy.url] : [DEFAULT_HARNESS_URL, ...(await readTrustedHosts(legacyPath))];
+    const hosts = [DEFAULT_HARNESS_URL, ...(legacy === null ? [] : [legacy.url]), ...(await readTrustedHosts(legacyPath))];
     for (const host of new Set(hosts)) {
       let path: string;
       try { path = orgCredentialsPath(legacyPath, host, org); } catch { continue; }
