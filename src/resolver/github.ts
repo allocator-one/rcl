@@ -213,6 +213,8 @@ async function directoriesWithAttributes(octokit: Octokit, target: GitHubTarget,
   const blocked = new Set<string>();
   let lookups = 0;
   for (const directory of directories) {
+    // Sorted, so an ancestor is decided first; below a blocked one nothing is left out anyway.
+    if (ancestorDirectories(directory).some((ancestor) => blocked.has(ancestor))) continue;
     if (lookups >= MAX_DIRECTORY_LOOKUPS) {
       blocked.add(directory);
       continue;

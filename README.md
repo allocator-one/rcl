@@ -174,7 +174,10 @@ repository-root `.gitattributes` on the PR's **base** branch
 (`spec/infraone.json linguist-generated`) and `rcl review` leaves their patches
 out of what the council reads. Only the base commit's file counts, so a PR
 cannot hide its own files by editing `.gitattributes`; add the rule in an
-earlier PR. A left-out file stays in the diff by name, status, line counts and
+earlier PR. The base is trusted as far as its branch is: a PR into a branch
+whose `.gitattributes` its author controls (an unprotected branch, a stack) is
+reviewed against that branch's rules, and the PR that lands the branch in a
+protected one is reviewed against the protected branch's rules. A left-out file stays in the diff by name, status, line counts and
 git blob id, so `diff_sha256` still changes with its content, and the report's
 `run.target.left_out` records the reason, the commit whose `.gitattributes`
 decided, the count and up to 100 paths. Only a file that already existed at its

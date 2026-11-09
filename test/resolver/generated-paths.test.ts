@@ -57,6 +57,18 @@ describe('generatedPathMatcher', () => {
     expect(matches(quoted, 'readme.md')).toBe(true);
   });
 
+  it('does not let a bracket expression match a path separator', () => {
+    expect(matches('docs[!x]secret.ts linguist-generated', 'docs/secret.ts')).toBe(false);
+    expect(matches('docs[!x]secret.ts linguist-generated', 'docsysecret.ts')).toBe(true);
+    expect(matches('docs[.-0]secret.ts linguist-generated', 'docs/secret.ts')).toBe(false);
+  });
+
+  it('keeps earlier rules when an unsupported line can only set the attribute', () => {
+    const attributes = 'spec/infraone.json linguist-generated\n"bundle.js" linguist-generated\nvendor/ linguist-generated\n';
+    expect(matches(attributes, 'spec/infraone.json')).toBe(true);
+    expect(matches(attributes, 'bundle.js')).toBe(false);
+  });
+
   it('does not let * cross a directory boundary in a rooted pattern', () => {
     expect(matches('docs/*.md linguist-generated', 'docs/a.md')).toBe(true);
     expect(matches('docs/*.md linguist-generated', 'docs/nested/a.md')).toBe(false);

@@ -306,6 +306,17 @@ describe('generated paths declared by the base .gitattributes (RCL-209)', () => 
     expect(f.getContent.mock.calls.map(([request]) => request.path).sort()).toEqual(['.gitattributes', 'spec/.gitattributes']);
   });
 
+  it('does not look inside a directory below one that already blocks its files', async () => {
+    const f = release('1'.repeat(40), { attributes: 'spec/** linguist-generated\n', nested: { 'spec/.gitattributes': '*.md text\n' } });
+    f.compare.mockResolvedValue({ data: { files: [
+      changedFile(1),
+      { filename: 'spec/deep/er/api.json', status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-a\n+b\n', sha: '1'.repeat(40) },
+    ] } } as any);
+    const diff = await fetchPRDiff(target, undefined, f.octokit);
+    expect(diff.metadata?.leftOut).toBeUndefined();
+    expect(f.getContent.mock.calls.map(([request]) => request.path).sort()).toEqual(['.gitattributes', 'spec/.gitattributes']);
+  });
+
   it('records the left-out paths in the run header target', async () => {
     const diff = await fetchPRDiff(target, undefined, release('1'.repeat(40), { attributes }).octokit);
     const runTarget = await resolveReviewTarget(diff, undefined, {});
