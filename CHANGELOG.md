@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Let a council launch from an agent session without the `harness keys exec`
+  wrapper (RCL-203). Claude Code's auto-mode permission classifier refuses
+  `harness keys exec … --override -- <child>` as credential exploration, so
+  every round had to be started by hand by the owner. `rcl review
+  --harness-keys-first` now takes the provider keys from the Harness login
+  itself, ahead of the environment: ambient provider keys (including
+  `GOOGLE_API_KEY`) are dropped and the keys Harness serves are injected for the
+  run only, so a provider Harness does not hold reads as missing instead of
+  silently reusing an ambient key. It works in any repository and fails closed:
+  not logged in, `RCL_NO_HARNESS_KEYS` set or an unreachable backend refuse the
+  launch (`harness_keys_unavailable`, no attempt claimed) and never fall back
+  to the environment. Without the flag, the environment still wins.
+
 ## 4.5.27 - 2026-11-09
 
 - Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under

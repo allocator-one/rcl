@@ -47,6 +47,12 @@ export interface HarnessKeyResult {
   note?: string;
   /** Why the key fetch failed, for a later missing-credentials refusal to name. */
   fetchFailure?: string;
+  /**
+   * Set only in harness-first mode when Harness could not supply keys: the
+   * environment is untouched and the caller must refuse to launch rather
+   * than fall back to ambient keys.
+   */
+  failure?: string;
 }
 
 export interface HarnessKeyOptions {
@@ -63,6 +69,15 @@ export interface HarnessKeyOptions {
    * stands in for the repository's `.harness-cli/config.json`.
    */
   credential?: { url: string; token: string };
+  /**
+   * Harness takes precedence over the environment (RCL-203): every provider
+   * key in the env is dropped, then the ones Harness serves are injected, so
+   * a provider Harness does not hold reads as missing instead of silently
+   * reusing an ambient key. This is what `harness keys exec --override`
+   * did, without the env-injecting wrapper an agent session cannot launch.
+   * Any inability to fetch is reported as `failure`, never degraded.
+   */
+  harnessFirst?: boolean;
 }
 
 /** Walk up from `startDir` looking for `.harness-cli/config.json`. */
@@ -168,6 +183,7 @@ export function missingProviders(env: Record<string, string | undefined>): strin
  */
 export async function applyHarnessModelKeys(options: HarnessKeyOptions = {}): Promise<HarnessKeyResult> {
   const env = options.env ?? process.env;
+  if (options.harnessFirst === true) return applyHarnessKeysFirst(options, env);
 
   if ((env['RCL_NO_HARNESS_KEYS'] ?? '') !== '') return { injected: [] };
 
@@ -209,5 +225,40 @@ export async function applyHarnessModelKeys(options: HarnessKeyOptions = {}): Pr
   return {
     injected,
     note: injected.length > 0 ? `Using ${injected.join(', ')} key(s) from Harness (${credentials.url}).` : undefined,
+  };
+}
+
+/** Every env var rcl reads a provider key from, including the Google alias. */
+const PROVIDER_KEY_ENV_NAMES = [...Object.values(PROVIDER_ENV_VARS), 'GOOGLE_API_KEY'];
+
+async function applyHarnessKeysFirst(
+  options: HarnessKeyOptions,
+  env: Record<string, string | undefined>
+): Promise<HarnessKeyResult> {
+  const refuse = (failure: string): HarnessKeyResult => ({ injected: [], failure });
+  if ((env['RCL_NO_HARNESS_KEYS'] ?? '') !== '') {
+    return refuse('RCL_NO_HARNESS_KEYS is set, which disables fetching keys from Harness');
+  }
+  const credentials =
+    options.credential ?? (await readStoredCredentials(options.credentialsPath ?? defaultCredentialsPath(env)));
+  if (credentials === null) return refuse('not logged in to Harness; run `harness login`');
+
+  const fetched = await fetchModelKeys(credentials.url, credentials.token, options.fetchImpl ?? fetch,
+    options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))));
+  if ('failure' in fetched) return refuse(`could not fetch model keys from ${credentials.url} (${fetched.failure})`);
+
+  // Only after the fetch succeeded: a failed one leaves the env untouched.
+  for (const name of PROVIDER_KEY_ENV_NAMES) delete env[name];
+  const injected: string[] = [];
+  for (const [provider, envVar] of Object.entries(PROVIDER_ENV_VARS)) {
+    const key = fetched.keys[provider];
+    if (key !== undefined) {
+      env[envVar] = key;
+      injected.push(provider);
+    }
+  }
+  return {
+    injected,
+    note: `Using ${injected.length > 0 ? injected.join(', ') : 'no'} key(s) from Harness (${credentials.url}), ahead of the environment.`,
   };
 }

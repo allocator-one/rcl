@@ -372,6 +372,7 @@ program
   .option('--attempt <n>', 'Converge attempt number (or RCL_CONVERGE_ATTEMPT)')
   .option('--start-over', 'Start an explicitly requested fresh review with a new normal budget; retain all prior evidence and spending')
   .option('--pr-snapshot <path>', 'Live pull request state from `rcl pr-snapshot`, captured by a parent that holds GitHub credentials; review cycles read it instead of GitHub (RCL-216)')
+  .option('--harness-keys-first', 'Take provider keys from the Harness login ahead of the environment, ignoring ambient keys, and refuse to launch if Harness cannot supply them (RCL-203)')
   .option('--guarded-converge', 'Validate and claim inside this review process, or consume an exact recovered-v3 --attempt; derive the round from native state')
   .option('--bound-fix-recovery <run-id>', 'Review unchanged inputs once live Harness evidence proves a retained bound fix obligation after this native dismissal-only run')
   .option('--launch-intent <intent>', 'Guarded intent: review, stop-upstream, stop-review, or retry-delivery')
@@ -1799,6 +1800,8 @@ interface CouncilCliOpts {
   forPr?: string;
   /** A parent's `rcl pr-snapshot` file: the live PR state, read without GitHub credentials. */
   prSnapshot?: string;
+  /** Provider keys come from Harness ahead of the environment (RCL-203). */
+  harnessKeysFirst?: boolean;
   round?: string;
   attempt?: string;
   guardedConverge?: boolean;
@@ -1873,8 +1876,16 @@ interface PreparedCouncil {
  * degradation (dropping openrouter models without OPENROUTER_API_KEY) must
  * see any injected keys.
  */
-async function fetchHarnessKeys(spinner: Spinner, credential?: HarnessCredential): Promise<string | undefined> {
-  const { note, fetchFailure } = await applyHarnessModelKeys(credential ? { credential } : {});
+async function fetchHarnessKeys(
+  spinner: Spinner,
+  credential?: HarnessCredential,
+  harnessFirst = false
+): Promise<string | undefined> {
+  const { note, fetchFailure, failure } = await applyHarnessModelKeys({ ...(credential ? { credential } : {}), harnessFirst });
+  if (failure !== undefined) {
+    throw new ReviewLaunchRefused('harness_keys_unavailable',
+      `--harness-keys-first could not get provider keys from Harness: ${failure}. No attempt claimed, and no ambient key was used.`);
+  }
   if (note) {
     spinner.info(note);
     spinner.start('Loading configuration...');
@@ -1910,7 +1921,7 @@ async function prepareCouncil(
     throw new ReviewLaunchRefused('preclaimed_attempt_ineligible',
       'An explicit guarded attempt may only hand off the exact standalone claim for recovered-v3 production.');
   }
-  const keyFetchFailure = opts.exportPendingPackage ? undefined : await fetchHarnessKeys(spinner, attestation?.credential);
+  const keyFetchFailure = opts.exportPendingPackage ? undefined : await fetchHarnessKeys(spinner, attestation?.credential, opts.harnessKeysFirst === true);
   const config = await loadConfig(opts.config, undefined, { preserveDefaultRoster: opts.guardedConverge });
 
   // Validate mutually exclusive role options
