@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Re-dispatch a timed-out blocking call once inside a guarded council. A
+  four-seat review of a large pull request finished 11 of 12 calls twice, each
+  time losing the same kind of call to a provider stall at the 15 and 20 minute
+  limits; the round was inconclusive and the only supported way on was a new
+  attempt that paid all 12 calls again. When the other calls are done and the
+  blocking quorum is unmet, the council now runs each timed-out call one more
+  time under its journal, keeping every seat, chunk and the quorum, and a call
+  that stalls twice stays a timeout. Rounds already at quorum and calls that
+  failed with an error are unchanged (RCL-231).
+
 ## 4.5.25 - 2026-11-07
 
 - Let `rcl converge-rejected` recover any report rcl refused locally, so a
