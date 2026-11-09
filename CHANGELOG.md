@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 4.5.33 - 2026-11-10
+
+- Show which credential `rcl telemetry status` resolved (RCL-234). It now
+  prints the credential file path, the host and why that file won: an
+  org-scoped login for the repository's org, or the legacy `credentials.json`
+  and why no org-scoped login applied (no org in the repo config, no login on a
+  known host, or an org file naming a different host). `--json` adds
+  `credential.file` and `credential.reason`. The token is never printed, and
+  the reason names only the host, never user-info or a query from a stored URL.
+
 ## 4.5.32 - 2026-11-09
 
 - Resume a checkpointed pending retry after its host dies even when the attempt
