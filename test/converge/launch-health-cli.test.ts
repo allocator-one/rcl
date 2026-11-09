@@ -138,40 +138,47 @@ async function fixture(work: (f: { dir: string; common: string; args: string[]; 
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 }
 
+type CliFixture = Parameters<Parameters<typeof fixture>[0]>[0];
+
+async function prepareOrdinaryPending(f: CliFixture) {
+  const input = { head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.dir, encoding: 'utf8' }).trim(),
+    kind: 'patch', repo: 'allocator-one/rcl', pr: 1, diff: 'a'.repeat(64), config: 'b'.repeat(64),
+    roster: [{ model: 'openai-compat/async', role: 'general', provider: 'openai-compat', lane: 'async' }],
+    prompts: [], asyncRoles: [{ name: 'general' }], spec: { source: 'flag', sha256: 'c'.repeat(64) } };
+  const inputSha256 = guardedInputSha256(input);
+  await guardReviewLaunch({ gitCommonDir: f.common, target: 'health-fixture', headSha: input.head,
+    inputSha256, maxAttempts: 2, maxRounds: 15, validate: async () => {},
+    run: async () => ({ runId: '018f21b4-bf80-7fd5-8000-000000000001', reportJsonSha256: 'd'.repeat(64), successfulReviews: 1, totalReviews: 1, deliveryPending: false }) });
+  const nativePath = convergeRunStatePath(f.common, 'health-fixture');
+  const native = JSON.parse(await readFile(nativePath, 'utf8'));
+  native.lastLaunch.status = 'pending'; native.lastLaunch.pid = 987_654;
+  if (native.lastLaunch.processIdentity) native.lastLaunch.processIdentity.pid = 987_654;
+  delete native.lastLaunch.runId; delete native.lastLaunch.reportJsonSha256; delete native.lastLaunch.successfulReviews;
+  delete native.lastLaunch.totalReviews; delete native.lastLaunch.deliveryPending;
+  await writeFile(nativePath, JSON.stringify(native));
+  const store = await resolveAsyncStoreDir(f.dir);
+  const asyncPath = join(store, (await readdir(store)).find(name => name.startsWith('result-'))!);
+  const asyncBytes = await readFile(asyncPath), asyncSha = sha256Hex(asyncBytes);
+  const pkg = { target: 'health-fixture', headSha: input.head, baseSha: input.head, attempt: 1, round: 1, pid: 987_654,
+    retainedAsyncSha256: [asyncSha], retainedAsync: [{ sha256: asyncSha, model: 'openai-compat/async', role: 'general', provider: 'openai-compat', lane: 'async' }], guardedInput: input };
+  await writeFile(join(f.dir, 'ordinary.json'), JSON.stringify(pkg));
+  await writeFile(join(f.dir, 'config.json'), JSON.stringify({ models: ['openai-compat/m0'], secondaryModels: [],
+    asyncModels: ['openai-compat/async'], concurrency: 17, maxRetries: 0, timeout: 2000,
+    gating: { mode: 'all-findings' }, harness: { telemetry: 'full' } }));
+  await mkdir(join(f.dir, '.harness-cli'), { recursive: true });
+  await writeFile(join(f.dir, '.harness-cli', 'config.json'), JSON.stringify({ team: 'RCL' }));
+  const attemptPath = convergeAttemptStatePath(f.common, 'health-fixture');
+  const args = f.args.filter(arg => arg !== '--no-telemetry').concat(['--resume-pending', '--ordinary-pending-package', 'ordinary.json', '--preview-pending', '--resume-async-sha256', asyncSha, '--retry-reason', 'dead owner', '--max-attempts', '2', '--evidence-required']);
+  const telemetryEnv = { RCL_TELEMETRY: 'full', HARNESS_API_TOKEN: 'aone_SYNTHETIC_TEST_TOKEN', HARNESS_API_URL: f.harnessUrl };
+  return { input, nativePath, asyncPath, asyncBytes, pkg, attemptPath, args, telemetryEnv };
+}
+
 describe('ordinary launch health through the public CLI', () => {
   it('previews and applies a version-1 dead-owner package with explicit PR attribution', async () => {
     await fixture(async f => {
-      const input = { head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: f.dir, encoding: 'utf8' }).trim(),
-        kind: 'patch', repo: 'allocator-one/rcl', pr: 1, diff: 'a'.repeat(64), config: 'b'.repeat(64),
-        roster: [{ model: 'openai-compat/async', role: 'general', provider: 'openai-compat', lane: 'async' }],
-        prompts: [], asyncRoles: [{ name: 'general' }], spec: { source: 'flag', sha256: 'c'.repeat(64) } };
-      const inputSha256 = guardedInputSha256(input);
-      await guardReviewLaunch({ gitCommonDir: f.common, target: 'health-fixture', headSha: input.head,
-        inputSha256, maxAttempts: 2, maxRounds: 15, validate: async () => {},
-        run: async () => ({ runId: '018f21b4-bf80-7fd5-8000-000000000001', reportJsonSha256: 'd'.repeat(64), successfulReviews: 1, totalReviews: 1, deliveryPending: false }) });
-      const nativePath = convergeRunStatePath(f.common, 'health-fixture');
-      const native = JSON.parse(await readFile(nativePath, 'utf8'));
-      native.lastLaunch.status = 'pending'; native.lastLaunch.pid = 987_654;
-      if (native.lastLaunch.processIdentity) native.lastLaunch.processIdentity.pid = 987_654;
-      delete native.lastLaunch.runId; delete native.lastLaunch.reportJsonSha256; delete native.lastLaunch.successfulReviews;
-      delete native.lastLaunch.totalReviews; delete native.lastLaunch.deliveryPending;
-      await writeFile(nativePath, JSON.stringify(native));
-      const store = await resolveAsyncStoreDir(f.dir);
-      const asyncPath = join(store, (await readdir(store)).find(name => name.startsWith('result-'))!);
-      const asyncBytes = await readFile(asyncPath), asyncSha = sha256Hex(asyncBytes);
-      const pkg = { target: 'health-fixture', headSha: input.head, baseSha: input.head, attempt: 1, round: 1, pid: 987_654,
-        retainedAsyncSha256: [asyncSha], retainedAsync: [{ sha256: asyncSha, model: 'openai-compat/async', role: 'general', provider: 'openai-compat', lane: 'async' }], guardedInput: input };
-      await writeFile(join(f.dir, 'ordinary.json'), JSON.stringify(pkg));
-      await writeFile(join(f.dir, 'config.json'), JSON.stringify({ models: ['openai-compat/m0'], secondaryModels: [],
-        asyncModels: ['openai-compat/async'], concurrency: 17, maxRetries: 0, timeout: 2000,
-        gating: { mode: 'all-findings' }, harness: { telemetry: 'full' } }));
-      await mkdir(join(f.dir, '.harness-cli'), { recursive: true });
-      await writeFile(join(f.dir, '.harness-cli', 'config.json'), JSON.stringify({ team: 'RCL' }));
-      const attemptPath = convergeAttemptStatePath(f.common, 'health-fixture');
+      const { input, nativePath, asyncPath, asyncBytes, pkg, attemptPath, args, telemetryEnv } = await prepareOrdinaryPending(f);
       const before = [await readFile(nativePath), await readFile(attemptPath), asyncBytes];
-      const args = f.args.filter(arg => arg !== '--no-telemetry').concat(['--resume-pending', '--ordinary-pending-package', 'ordinary.json', '--preview-pending', '--resume-async-sha256', asyncSha, '--retry-reason', 'dead owner', '--max-attempts', '2', '--evidence-required']);
       expect(args).toContain('--for-pr');
-      const telemetryEnv = { RCL_TELEMETRY: 'full', HARNESS_API_TOKEN: 'aone_SYNTHETIC_TEST_TOKEN', HARNESS_API_URL: f.harnessUrl };
       const result = await f.run(args, telemetryEnv);
       expect(result.status, result.stderr).toBe(0); expect(f.calls()).toBe(0);
       expect(f.requests().filter(request => /^(POST|PUT) /.test(request))).toEqual([]);
@@ -193,6 +200,20 @@ describe('ordinary launch health through the public CLI', () => {
       expect(ordinary.status).toBe(1);
       expect(ordinary.stderr).toContain('report_not_admitted');
       expect(ordinary.stderr.match(/--input-sha256 ([a-f0-9]{64})/)?.[1]).toBe(successor.inputSha256);
+      const callsAfterApply = f.calls();
+      const replay = await f.run(args.filter(arg => arg !== '--preview-pending').concat(['--json-file', 'replay.json']), telemetryEnv);
+      expect(replay.status, replay.stderr).toBe(0);
+      expect(f.calls()).toBe(callsAfterApply);
+    });
+  }, 30_000);
+  it('resumes an intact checkpoint after host loss at the exhausted cap without calls or report changes', async () => {
+    await fixture(async f => {
+      const { nativePath, attemptPath, args, telemetryEnv } = await prepareOrdinaryPending(f);
+      f.healthyReviewers();
+      const applied = await f.run(args.filter(arg => arg !== '--preview-pending')
+        .concat(['--json-file', 'recovered.json']), telemetryEnv);
+      expect(applied.status, applied.stderr).toBe(0);
+      const successor = (await loadConvergeRunState(f.common, 'health-fixture'))!.lastLaunch!;
       // Host loss after checkpoint completion but before the native terminal
       // write must reuse attempt 2 even though the cap is already exhausted.
       const interrupted = JSON.parse(await readFile(nativePath, 'utf8'));
@@ -222,11 +243,13 @@ describe('ordinary launch health through the public CLI', () => {
       expect((await loadConvergeRunState(f.common, 'health-fixture'))!.lastLaunch)
         .toMatchObject({ status: 'completed', attempt: 2, round: successor.round,
           runId: successor.runId, pendingResume: { ...successor.pendingResume, pid: expect.any(Number) } });
-      const replay = await f.run(args.filter(arg => arg !== '--preview-pending').concat(['--json-file', 'replay.json']), telemetryEnv);
+      const replay = await f.run(args.filter(arg => arg !== '--preview-pending')
+        .concat(['--json-file', 'replay.json']), telemetryEnv);
       expect(replay.status, replay.stderr).toBe(0);
       expect(f.calls()).toBe(callsAfterApply);
     });
   }, 30_000);
+
   it('keeps aggregate 12/18 informational and records only 11/17 complete blocking seats', async () => {
     await fixture(async f => {
       const result = await f.run(f.args);

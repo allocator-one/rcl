@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 4.5.30 - 2026-11-09
+## 4.5.32 - 2026-11-09
 
 - Resume a checkpointed pending retry after its host dies even when the attempt
   cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
@@ -11,6 +11,9 @@
   limits; a missing journal refuses before state changes. If the terminal report
   was already retained, replay its exact bytes and reviewer artifact without
   rerunning reviewers or verification.
+
+## 4.5.30 - 2026-11-09
+
 - Pin that `rcl` starts without `HOME` (RCL-207). A launch with `HOME`
   stripped reads the stored Harness login from `XDG_CONFIG_HOME` and keeps
   its outbox under `RCL_DATA_DIR`, falling back to the account's home from the
