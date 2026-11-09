@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { applyHarnessModelKeys } from '../../src/config/harness.js';
+import { mkdir } from 'fs/promises';
+import { applyHarnessModelKeys, orgCredentialsPath } from '../../src/config/harness.js';
 
 // RCL-203: a council launched from an agent session cannot be wrapped in
 // `harness keys exec --override` (the host's permission classifier refuses
@@ -110,6 +111,29 @@ describe('harness-first key precedence', () => {
     expect(result.fetchFailure).toBe(
       'Harness served keys only for anthropic, so --harness-keys-first ignored the environment for openai, google, openrouter'
     );
+  });
+
+  it('uses the org-scoped login a fresh harness login wrote, as the default fetch does (RCL-211)', async () => {
+    const org = '0b1c2d3e-4f50-4162-8374-95a6b7c8d9e0';
+    await mkdir(join(dir, '.harness-cli'), { recursive: true });
+    await writeFile(join(dir, '.harness-cli', 'config.json'), JSON.stringify({ org }));
+    const home = 'https://harness.infra.one';
+    await writeFile(orgCredentialsPath(credentialsPath, home, org), JSON.stringify({ url: home, token: 'aone_org' }));
+    const seen: string[] = [];
+
+    const result = await applyHarnessModelKeys({
+      cwd: dir,
+      env: {},
+      credentialsPath,
+      harnessFirst: true,
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        seen.push(`${String(url)} ${(init?.headers as Record<string, string>)['authorization']}`);
+        return new Response(JSON.stringify({ data: { keys: { anthropic: 'k' } } }), { status: 200 });
+      }) as typeof fetch,
+    });
+
+    expect(result.failure).toBeUndefined();
+    expect(seen).toEqual([`${home}/api/v1/model-keys Bearer aone_org`]);
   });
 
   it('fails closed without a stored login', async () => {

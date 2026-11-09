@@ -179,6 +179,7 @@ import { parseRepoName } from './evidence/target.js';
 import { text } from './evidence/format.js';
 import { loadConvergeRunState } from './converge/run-state.js';
 import { checkDismissalCitations, dismissalRequiresCitation, gitRevisionReader, reviewedRevision } from './converge/dismissal-citations.js';
+import { readPendingTerminalReport } from './converge/pending-terminal-report.js';
 import { finalizeOrdinaryPendingLaunch, previewOrdinaryPendingLaunch, resumePendingLegacyLaunch,
   type PendingLegacyResumeExecution, type PendingLegacyResumeOptions } from './converge/pending-legacy-resume.js';
 import { guardedInputWithoutAsyncSeats, ordinaryPendingGuardedInput,
@@ -2657,7 +2658,7 @@ async function executeCouncil(
         if (found.size !== wanted.size) throw new ReviewLaunchRefused('pending_async_missing', 'A package-bound retained async artifact is unavailable.');
         return [...found.values()].sort((a, b) => a.sha256.localeCompare(b.sha256));
       };
-      if (opts.previewPending && migrationPackage) {
+      if (opts.previewPending && migrationPackage && !(opts.resumePending && native?.lastLaunch?.pendingResume)) {
         const inputSha256 = guardedInputSha256(migrationGuardedInput!);
         const preview = await previewOrdinaryPendingLaunch({ gitCommonDir: common,
           target: prepared.converge!.target, headSha: extra.target.headSha ?? '', baseSha: finalizationBaseSha,
@@ -3021,11 +3022,15 @@ async function executeCouncil(
       process.stderr.write(`${text}\n`);
     },
   });
-  progress.start();
-
+  // A host may die after retaining the terminal pair but before publishing
+  // native completion. Preserve that report instead of assembling new bytes.
+  const retainedPending = extra.pendingResume
+    ? await readPendingTerminalReport(extra.pendingResume.journal, extra.pendingResume.launch) : undefined;
+  const retainedPendingTerminal = retainedPending?.terminal;
   let chunkReviews: ModelReview[];
   let pendingProjection: ReturnType<typeof projectCheckpointReport> | undefined;
   let pendingAsyncExecution: SealedAsyncProof | undefined;
+  progress.start();
   try {
     if (extra.pendingResume) {
       if (!(await extra.pendingResume.journal.read()).finalized) {
@@ -3133,7 +3138,7 @@ async function executeCouncil(
   // stats store must never break a review).
   try {
     const ts = new Date().toISOString();
-    await appendCalls(
+    if (!retainedPendingTerminal) await appendCalls(
       [...chunkReviews, ...arrivedAsync].map((r) => ({
         ts,
         model: r.model,
@@ -3242,7 +3247,9 @@ async function executeCouncil(
     assembly: CheckpointAssemblyInput;
     verificationProof?: SealedVerificationProof;
   } | undefined;
-  if (extra.pendingResume) {
+  if (retainedPendingTerminal) {
+    result = JSON.parse(retainedPendingTerminal.reportBytes) as Awaited<ReturnType<typeof assembleCompletedReview>>;
+  } else if (extra.pendingResume) {
     const proof = await exportCheckpointProof(extra.pendingResume.journal);
     const supplementalBytes = (await extra.pendingResume.journal.readBindings())['supplemental-async'];
     if (supplementalBytes === undefined) throw new Error('pending_legacy_resume_async_binding_missing');
@@ -3342,12 +3349,13 @@ async function executeCouncil(
   // declared digests match the files and nothing raw travels. With
   // telemetry off only fresh prose normalization applies. This is the fresh
   // producer boundary; retained reports and envelope builders never rewrite it.
-  const produced = normalizeGeneratedReport(result);
-  const delivered =
-    runtime && runtime.level !== 'off' ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
+  const produced = retainedPendingTerminal ? result : normalizeGeneratedReport(result);
+  const delivered = !retainedPendingTerminal && runtime && runtime.level !== 'off'
+    ? sanitizeForDelivery(produced, { parseFailures: runtime.parseFailures }) : produced;
   postReviewStage('rendering report artifacts');
-  const artifacts = renderReportArtifacts(delivered);
-  let pendingReviewerArtifact: ReturnType<typeof serializeReviewerArtifact> | undefined;
+  const artifacts = { ...renderReportArtifacts(delivered),
+    ...(retainedPendingTerminal ? { report_json: retainedPendingTerminal.reportBytes } : {}) };
+  let pendingReviewerArtifact: ReturnType<typeof serializeReviewerArtifact> | undefined = retainedPending?.artifact;
   if (extra.pendingResume && pendingEvidence) {
     pendingReviewerArtifact = serializeReviewerArtifact({
       assembly: pendingEvidence.assembly,

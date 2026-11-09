@@ -282,6 +282,13 @@ After a failed or unknown dispatch, or an inconclusive report, continue with the
 same guarded review command plus an explicit bounded `--retry-reason`. The
 retry spends one more attempt within the existing caps.
 
+A completed launch whose blocking health was conclusive is not an
+infrastructure failure, even when a seat errored or returned `parse_failed`
+and the launch recorded `hardFailure`: the quorum already accounts for that
+seat. Once the report is admitted, continue on a changed head without
+`--retry-reason`, exactly as after a fully healthy round. Before admission it
+still needs normal admission or the audited stale path.
+
 For a 4.1.10, 4.1.11 or 4.1.12 aggregate-only completion, retain the original
 report and config and add `--retry-report original-report.json` with an
 explicit bounded `--retry-reason` and a fresh `--json-file` destination. RCL
@@ -298,6 +305,13 @@ retries its pending round; an exact latest admitted source whose blocking
 health was inconclusive continues at the next native round. Its original
 admission, findings, verdicts and spent claims remain unchanged. The new claim
 retains the source bytes and binding; no history or budget is reset.
+
+Launches from 4.2.0 onward record their own blocking health, so an
+inconclusive one needs no `--retry-report`: repeat the guarded review with
+`--retry-reason` alone. Adding `--retry-report` to such a launch refuses with
+`retry_report_current_health` before any claim and names the recorded seats.
+Any other `retry_report_invalid` refusal names the failed invariant in
+parentheses, such as `retry_report_binding_mismatch`.
 
 ### Pending launches with a dead coordinator
 
@@ -360,6 +374,19 @@ attempt failed with blocking outcome unknown, archives the exact retained async
 artifacts (`--resume-async-sha256`), and claims exactly the next checkpointed
 attempt under its explicitly bounded cap. It requires `--retry-reason`,
 `--evidence-required` and an explicit `--max-attempts`.
+
+If that checkpointed successor's host also dies, repeat its exact
+`--resume-pending` command with a fresh output path. It resumes the existing
+attempt and round, including at the attempt cap (for example, 2/2); it does not
+claim another attempt. Preview the same command with `--preview-pending` first:
+`resumedCheckpoint: true` and `runId` identify the reused checkpoint, and
+`nextAttempt` is the existing attempt rather than a new ordinal. The original
+package, head, inputs, plan, retained async artifacts and unchanged cap must
+still match. A live owner, missing journal or changed capture refuses before
+native state changes. The original deadline and physical-call limits remain
+in force. Completed calls are reused; if the terminal report was already
+retained, its exact bytes and reviewer artifact are delivered again without
+rerunning reviewers or verification.
 
 **Finalize only.** Use `--finalize-pending-only` when recovery must stop at
 that failed/unknown finalization. Like `--resume-pending`, it takes the

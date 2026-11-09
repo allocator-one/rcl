@@ -18,6 +18,63 @@
   then refuses for lack of them, and the default roster is no longer trimmed
   quietly for a missing OpenRouter key. Without the flag, the environment still wins.
 
+## 4.5.32 - 2026-11-09
+
+- Resume a checkpointed pending retry after its host dies even when the attempt
+  cap is exhausted (RCL-214). `--resume-pending --preview-pending` authenticates
+  the existing successor and its original package instead of requiring another
+  attempt. Recovery retains the run, round, spent claims, deadline and call
+  limits; a missing journal refuses before state changes. If the terminal report
+  was already retained, replay its exact bytes and reviewer artifact without
+  rerunning reviewers or verification.
+
+## 4.5.31 - 2026-11-09
+
+- Read the org-scoped login harness-cli writes, so evidence delivery and model
+  key fetches stop using a stale legacy token (RCL-211, RCL-212). harness-cli
+  1.16+ stores `harness login` in `credentials-org-<hash>.json` next to
+  `credentials.json` and leaves the legacy file as it was; once that token
+  expired, every evidence upload and `rcl evidence status` failed with HTTP 401
+  although `harness whoami` passed and logging in again changed nothing. In a
+  repository whose `.harness-cli/config.json` names an `org`, rcl now reads that
+  org's login first, as harness-cli does: under the default host, then the host
+  of the legacy login, then the hosts `harness login` approved in
+  `trusted-hosts.json`, and falls back to `credentials.json` as before. The
+  repository's own `url` is never used to choose a host.
+
+## 4.5.30 - 2026-11-09
+
+- Pin that `rcl` starts without `HOME` (RCL-207). A launch with `HOME`
+  stripped reads the stored Harness login from `XDG_CONFIG_HOME` and keeps
+  its outbox under `RCL_DATA_DIR`, falling back to the account's home from the
+  password database. The `$HOME is not defined` failure seen in such launches
+  came from the asdf shim in front of `rcl`, not from `rcl`; the `rcl` skill
+  now says why its launch allowlist keeps `HOME`.
+
+## 4.5.29 - 2026-11-09
+
+- Continue a guarded review on a changed head without `--retry-reason` when
+  the previous round reached its blocking quorum and was admitted, even though
+  one seat errored or returned `parse_failed` (RCL-205). Such a launch records
+  `hardFailure`, and the guard refused the next head with
+  `infrastructure_failure` although the quorum had already absorbed the
+  failed seat. Inconclusive or unadmitted launches still need the bounded
+  retry reason or their existing admission and stale paths, and admitted
+  inputs still refuse re-review.
+
+## 4.5.28 - 2026-11-09
+
+- Name the supported retry when `--retry-report` is given an inconclusive
+  launch that recorded its own blocking health (RCL-202). Since 4.2.0 a
+  completed launch stores its blocking seats natively, so the bounded retry
+  needs only `--retry-reason`; `--retry-report` proves health only for
+  4.1.10–4.1.12 aggregate-only launches. Such a launch was refused with the
+  generic `retry_report_invalid`, which read as a broken report. It now
+  refuses with `retry_report_current_health`, naming the recorded seats and
+  the `--retry-reason` path, before any claim. Other `retry_report_invalid`
+  refusals name the failed invariant, such as
+  `retry_report_binding_mismatch`. The legacy proof itself is unchanged.
+
 ## 4.5.27 - 2026-11-09
 
 - Pin provider calls to HTTP/1.1 so concurrent reviewer calls stop failing under

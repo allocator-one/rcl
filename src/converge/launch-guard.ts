@@ -118,6 +118,13 @@ function refuse(code: string, message: string): never {
   throw new ReviewLaunchRefused(code, message);
 }
 
+/** Names the failed legacy retry invariant without echoing source contents. */
+function legacyRetryInvariant(error: unknown): string {
+  if (error instanceof Error && /^retry_[a-z_]+$/.test(error.message)) return error.message;
+  if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return 'retry_report_source_missing';
+  return 'retry_report_source_malformed';
+}
+
 function nextRound(state: ConvergeRunState): number {
   validateRoundCap(state.roundCap);
   if (state.rounds.some(entry => !Number.isSafeInteger(entry.round) || entry.round < 1)) {
@@ -228,14 +235,25 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
     refuse('delivery_pending', `Run ${previous.runId} already completed; retry delivery with rcl telemetry flush --run ${previous.runId}.`);
   }
   let retryProof: Awaited<ReturnType<typeof inspectLegacyRetry>> | undefined;
+  if (options.legacyRetry && previous.reviewerHealth) {
+    // 4.2.0 and later record blocking health natively; the report cannot add proof.
+    const { policy, successfulSeats } = previous.reviewerHealth;
+    const seats = `${successfulSeats}/${policy.seatCount} blocking seats, ${policy.minimumSuccessful} required`;
+    refuse('retry_report_current_health', hasSuccessfulQuorum(policy, successfulSeats)
+      ? `Run ${previous.runId} already recorded conclusive blocking health (${seats}); --retry-report proves only 4.1.10–4.1.12 aggregate-only launches.`
+      : `Run ${previous.runId} already recorded its inconclusive blocking health (${seats}); drop --retry-report and repeat the guarded review with --retry-reason alone.`);
+  }
   if (options.legacyRetry) {
     try { retryProof = await inspectLegacyRetry(options.legacyRetry, options.gitCommonDir, state, previous, attemptsUsed, round); }
-    catch { refuse('retry_report_invalid', 'The original report does not prove an inconclusive launch under its bound policy.'); }
+    catch (error) {
+      refuse('retry_report_invalid', `The original report does not prove an inconclusive launch under its bound policy (${legacyRetryInvariant(error)}).`);
+    }
   }
   const healthy = retryProof ? hasSuccessfulQuorum(retryProof.binding.reviewerHealth.policy,
     retryProof.binding.reviewerHealth.successfulSeats) : hasHealthyGuardedLaunch(previous);
+  const admitted = state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId);
   let disposed = terminalRejected;
-  if (healthy && !terminalRejected && !state.rounds.some(entry => entry.round === previous.round && entry.runId === previous.runId)) {
+  if (healthy && !terminalRejected && !admitted) {
     const candidates = (state.staleReportAudit ?? []).filter(e => staleManifest(e).attempt === previous.attempt);
     const entry = candidates.find(e => {
       const m = staleManifest(e);
@@ -284,7 +302,10 @@ async function requireLaunch(options: GuardedLaunchOptions, state: ConvergeRunSt
   if (healthy && !disposed && (resolution?.gatingFixedThisRound ?? 0) > 0 && previous.headSha === options.headSha) {
     refuse('fix_head_unchanged', 'Commit and push the real fix before reviewing its resulting head.');
   }
-  if ((previous.hardFailure || !healthy) && !options.retryReason) {
+  // A seat that errored or failed to parse inside a conclusive, admitted round
+  // is already accounted for by the quorum; only an unhealthy or unadmitted
+  // hard failure is an infrastructure failure of the launch (RCL-205).
+  if ((!healthy || (previous.hardFailure && !admitted)) && !options.retryReason) {
     refuse('infrastructure_failure', 'A head change cannot cure the previous infrastructure failure; supply an explicit bounded retry reason after recovery.');
   }
   if (!healthy && !previous.reviewerHealth && !retryProof) {
