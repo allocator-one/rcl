@@ -94,7 +94,18 @@ describe('harness-cli credential layouts', () => {
     expect((await resolve()).credential).toMatchObject({ token: 'aone_legacy' });
   });
 
-  it('does not let the repository config pick the host a token is read for', async () => {
+  it('finds a custom-host org login named by the repository when the user approved that host', async () => {
+    const custom = 'https://harness.example.test';
+    await writeFile(join(repo, '.harness-cli', 'config.json'), JSON.stringify({ org: ORG, url: `${custom}/` }));
+    await writeFile(join(dir, 'config', 'harness', 'trusted-hosts.json'), JSON.stringify({ hosts: [custom] }));
+    await writeOrg(ORG, custom, custom, 'aone_custom_host');
+    expect((await resolve()).credential).toEqual({ url: custom, token: 'aone_custom_host', source: 'login' });
+    // Even with a legacy login on another host.
+    await write(legacyPath, HOST, 'aone_legacy');
+    expect((await resolve()).credential).toMatchObject({ token: 'aone_custom_host' });
+  });
+
+  it('ignores a repository url the user never approved', async () => {
     const attacker = 'https://attacker.example.test';
     await writeFile(join(repo, '.harness-cli', 'config.json'), JSON.stringify({ org: ORG, url: attacker }));
     await write(legacyPath, HOST, 'aone_legacy');

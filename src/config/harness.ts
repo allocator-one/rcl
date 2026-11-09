@@ -110,15 +110,28 @@ export function orgCredentialsPath(legacyPath: string, baseUrl: string, org: str
   return join(dirname(legacyPath), `credentials-org-${key}.json`);
 }
 
-/** The `org` the repository's `.harness-cli/config.json` names, when it is an organization UUID. */
-async function readRepoOrg(startDir: string): Promise<string | null> {
+/** The `org` and `url` the repository's `.harness-cli/config.json` names. */
+async function readRepoLoginHints(startDir: string): Promise<{ org: string | null; url: string | null }> {
   const path = findHarnessRepoConfig(startDir);
-  if (path === null) return null;
+  if (path === null) return { org: null, url: null };
   try {
-    const org = (JSON.parse(await readFile(path, 'utf-8')) as { org?: unknown } | null)?.org;
-    return typeof org === 'string' && ORG_ID.test(org.trim()) ? org.trim().toLowerCase() : null;
+    const { org, url } = (JSON.parse(await readFile(path, 'utf-8')) as { org?: unknown; url?: unknown } | null) ?? {};
+    return {
+      org: typeof org === 'string' && ORG_ID.test(org.trim()) ? org.trim().toLowerCase() : null,
+      url: typeof url === 'string' && url.trim() !== '' ? url.trim().replace(/\/+$/, '') : null,
+    };
   } catch {
-    return null;
+    return { org: null, url: null };
+  }
+}
+
+/** The hosts the user approved on `harness login` for a repository naming them (harness-cli's trusted-hosts.json). */
+async function readTrustedHosts(legacyPath: string): Promise<string[]> {
+  try {
+    const hosts = (JSON.parse(await readFile(join(dirname(legacyPath), 'trusted-hosts.json'), 'utf-8')) as { hosts?: unknown } | null)?.hosts;
+    return Array.isArray(hosts) ? hosts.filter((host): host is string => typeof host === 'string') : [];
+  } catch {
+    return [];
   }
 }
 
@@ -152,17 +165,19 @@ export interface LoginOptions {
  * wins when it holds a login for the host it was minted for; otherwise, and
  * outside such a repository, the legacy file answers as before.
  *
- * Only the repository's `org` is read, never its `url`: the org file is looked
- * up under the legacy login's host, which keeps the host that login chose,
- * then under the default host, so a cloned repository cannot steer which host
- * a stored token is sent to.
+ * The file name depends on the host, so the hosts tried are, in order: the
+ * repository's `url` when the user approved that host (it is in
+ * `trusted-hosts.json`), the legacy login's host, and the default host. An
+ * unapproved `url` from a cloned repository is never used, so it cannot steer
+ * which host a stored token is read for.
  */
 export async function readLoginCredential(options: LoginOptions): Promise<{ url: string; token: string } | null> {
   const legacyPath = options.credentialsPath ?? defaultCredentialsPath(options.env);
   const legacy = await readStoredCredentials(legacyPath);
-  const org = await readRepoOrg(options.cwd);
+  const { org, url } = await readRepoLoginHints(options.cwd);
   if (org !== null) {
-    for (const host of new Set([...(legacy === null ? [] : [legacy.url]), DEFAULT_HARNESS_URL])) {
+    const approved = url !== null && (await readTrustedHosts(legacyPath)).includes(url) ? [url] : [];
+    for (const host of new Set([...approved, ...(legacy === null ? [] : [legacy.url]), DEFAULT_HARNESS_URL])) {
       let path: string;
       try { path = orgCredentialsPath(legacyPath, host, org); } catch { continue; }
       const scoped = await readStoredCredentials(path);

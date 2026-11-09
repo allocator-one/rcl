@@ -9,9 +9,10 @@
   expired, every evidence upload and `rcl evidence status` failed with HTTP 401
   although `harness whoami` passed and logging in again changed nothing. In a
   repository whose `.harness-cli/config.json` names an `org`, rcl now reads that
-  org's file first, under the host of the legacy login and then the default host,
-  and falls back to `credentials.json` as before. The repository's `url` is
-  still never used to choose a host.
+  org's file first, under the repository's `url` when `harness login` approved
+  that host, then the host of the legacy login, then the default host, and falls
+  back to `credentials.json` as before. A repository `url` the user never
+  approved is still never used to choose a host.
 - Name the supported retry when `--retry-report` is given an inconclusive
   launch that recorded its own blocking health (RCL-202). Since 4.2.0 a
   completed launch stores its blocking seats natively, so the bounded retry
