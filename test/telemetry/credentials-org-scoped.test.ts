@@ -100,20 +100,25 @@ describe('harness-cli credential layouts', () => {
     expect((await resolve()).credential).toMatchObject({ token: 'aone_legacy' });
   });
 
-  it('finds a custom-host org login named by the repository when the user approved that host', async () => {
+  it('finds a custom-host org login through the hosts the user approved when there is no legacy login', async () => {
     const custom = 'https://harness.example.test';
-    await writeFile(join(repo, '.harness-cli', 'config.json'), JSON.stringify({ org: ORG, url: `${custom}/` }));
     await writeFile(join(dir, 'config', 'harness', 'trusted-hosts.json'), JSON.stringify({ hosts: [custom] }));
     await writeOrg(ORG, custom, custom, 'aone_custom_host');
     expect((await resolve()).credential).toEqual({ url: custom, token: 'aone_custom_host', source: 'login' });
-    // Even with a legacy login on another host.
-    await write(legacyPath, HOST, 'aone_legacy');
-    expect((await resolve()).credential).toMatchObject({ token: 'aone_custom_host' });
   });
 
-  it('ignores a repository url the user never approved', async () => {
+  it('keeps the legacy login\'s host even when another approved host has an org login', async () => {
+    const custom = 'https://harness.example.test';
+    await writeFile(join(dir, 'config', 'harness', 'trusted-hosts.json'), JSON.stringify({ hosts: [custom] }));
+    await write(legacyPath, HOST, 'aone_legacy');
+    await writeOrg(ORG, custom, custom, 'aone_custom_host');
+    expect((await resolve()).credential).toMatchObject({ url: HOST, token: 'aone_legacy' });
+  });
+
+  it('never lets the repository config pick the host, approved or not', async () => {
     const attacker = 'https://attacker.example.test';
     await writeFile(join(repo, '.harness-cli', 'config.json'), JSON.stringify({ org: ORG, url: attacker }));
+    await writeFile(join(dir, 'config', 'harness', 'trusted-hosts.json'), JSON.stringify({ hosts: [attacker] }));
     await write(legacyPath, HOST, 'aone_legacy');
     await writeOrg(ORG, attacker, attacker, 'aone_attacker');
     expect((await resolve()).credential).toEqual({ url: HOST, token: 'aone_legacy', source: 'login' });
