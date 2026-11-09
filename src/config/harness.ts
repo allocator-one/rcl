@@ -169,6 +169,15 @@ export interface LoginOptions {
  * a stale legacy file. The legacy login's host and the hosts the user approved
  * in `trusted-hosts.json` follow, for a login on a custom host.
  */
+/** The host name a status line may name: never user-info, a query or a fragment from a stored URL. */
+function displayHost(raw: string): string {
+  try {
+    return new URL(raw.trim()).host || '(no host)';
+  } catch {
+    return '(unparseable)';
+  }
+}
+
 /** Where a stored login came from and why it won: the file path and a one-line reason, never the token. */
 export interface LoginOrigin {
   file: string;
@@ -198,7 +207,7 @@ export async function resolveLogin(options: LoginOptions): Promise<ResolvedLogin
       const scoped = await readStoredCredentials(path);
       if (scoped === null) continue;
       if (sameHost(scoped.url, host)) {
-        return { credential: scoped, origin: { file: path, reason: `org-scoped login for org ${org} on ${host}` } };
+        return { credential: scoped, origin: { file: path, reason: `org-scoped login for org ${org} on ${displayHost(host)}` } };
       }
       skipped.push(path);
     }

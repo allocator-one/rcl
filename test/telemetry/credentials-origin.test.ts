@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { orgCredentialsPath } from '../../src/config/harness.js';
+import { orgCredentialsPath, resolveLogin } from '../../src/config/harness.js';
 import { resolveHarnessCredential } from '../../src/telemetry/credentials.js';
 
 /**
@@ -49,7 +49,7 @@ describe('credential origin per harness-cli layout', () => {
     await writeOrg(HOST, HOST, 'aone_org');
     expect((await resolve()).origin).toEqual({
       file: orgCredentialsPath(legacyPath, HOST, ORG),
-      reason: `org-scoped login for org ${ORG_LOWER} on ${HOST}`,
+      reason: `org-scoped login for org ${ORG_LOWER} on harness.infra.one`,
     });
   });
 
@@ -76,6 +76,15 @@ describe('credential origin per harness-cli layout', () => {
     expect(origin?.reason).toContain(orgCredentialsPath(legacyPath, HOST, ORG));
   });
 
+  it('never prints user-info or a query from a stored URL', async () => {
+    const dirty = 'https://user:hunter2@harness.example.test/?key=secret';
+    await write(legacyPath, dirty, 'aone_legacy');
+    await writeOrg(dirty, dirty, 'aone_org');
+    const login = await resolveLogin({ env: {}, cwd: repo, credentialsPath: legacyPath });
+    expect(login?.origin.file).toBe(orgCredentialsPath(legacyPath, dirty, ORG));
+    expect(login?.origin.reason).toBe(`org-scoped login for org ${ORG_LOWER} on harness.example.test`);
+  });
+
   it('has no file for an environment pair', async () => {
     const resolved = await resolveHarnessCredential({
       env: { HARNESS_API_TOKEN: 'aone_env', HARNESS_API_URL: HOST },
@@ -100,14 +109,14 @@ describe('credential origin per harness-cli layout', () => {
     const text = run([]);
     expect(text.stdout).toContain(`Credential: login → harness.infra.one`);
     expect(text.stdout).toContain(`File: ${orgCredentialsPath(legacyPath, HOST, ORG)}`);
-    expect(text.stdout).toContain(`Why: org-scoped login for org ${ORG_LOWER} on ${HOST}`);
+    expect(text.stdout).toContain(`Why: org-scoped login for org ${ORG_LOWER} on harness.infra.one`);
 
     const json = JSON.parse(run(['--json']).stdout) as { credential: { file: string; reason: string; host: string } };
     expect(json.credential).toEqual({
       source: 'login',
       host: 'harness.infra.one',
       file: orgCredentialsPath(legacyPath, HOST, ORG),
-      reason: `org-scoped login for org ${ORG_LOWER} on ${HOST}`,
+      reason: `org-scoped login for org ${ORG_LOWER} on harness.infra.one`,
     });
     expect(text.stdout + run(['--json']).stdout).not.toContain('aone_');
   });
