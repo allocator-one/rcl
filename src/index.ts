@@ -6,6 +6,7 @@ import { retainAssemblyRefusal } from './output/assembly-refusal.js';
 import { createReviewCycleRemote } from './converge/cycle-remote.js';
 import { prSnapshotFrom, readPrSnapshot, writePrSnapshot } from './converge/pr-snapshot.js';
 import { applyFreshReviewClose, previewFreshReviewClose } from './converge/fresh-review-close.js';
+import { inspectRoundLiveness, roundLivenessExitCode, waitForRoundOutcome } from './converge/round-liveness.js';
 import { assertNoPendingFreshReview, freshReviewOutputPaths } from './converge/fresh-review.js';
 import { previewStaleReport, applyStaleReport } from './converge/stale-report.js';
 import { previewHistoricalDeliveryReconciliation,
@@ -728,6 +729,36 @@ program
       console.log(JSON.stringify(result));
     } catch (error) {
       console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_CLOSE_FRESH', message: error instanceof Error ? error.message : String(error) } }));
+      process.exitCode = 3;
+    }
+  });
+
+program
+  .command('converge-status')
+  .description('Report whether the target\'s latest converge round is running, dead, not launched or finished, ' +
+    'without changing any state. Exit 6 means the round is abandoned: its launching process is gone and nothing will finish it (RCL-232)')
+  .requiredOption('--target <target>')
+  .option('--head <sha>', 'The head a round is expected for; a latest launch at another head reads as not launched')
+  .option('--wait <minutes>', 'Keep polling while the round is running, up to this many minutes; return as soon as it finishes or dies')
+  .option('--interval <seconds>', 'Polling interval for --wait', '30')
+  .option('--json')
+  .action(async (opts: { target: string; head?: string; wait?: string; interval: string; json?: boolean }) => {
+    try {
+      if (opts.head !== undefined && !/^[a-f0-9]{40}$/.test(opts.head)) throw new Error('head_must_be_a_full_commit_sha');
+      const gitCommonDir = await resolveGitCommonDir();
+      const base = { gitCommonDir, target: opts.target, ...(opts.head ? { headSha: opts.head } : {}) };
+      let liveness;
+      if (opts.wait === undefined) {
+        liveness = await inspectRoundLiveness(base);
+      } else {
+        const minutes = Number(opts.wait), seconds = Number(opts.interval);
+        if (!Number.isFinite(minutes) || minutes <= 0 || !Number.isFinite(seconds) || seconds < 1) throw new Error('invalid_wait_or_interval');
+        liveness = await waitForRoundOutcome({ ...base, timeoutMs: minutes * 60_000, intervalMs: seconds * 1_000 });
+      }
+      console.log(opts.json ? JSON.stringify(liveness) : `${liveness.target}: ${liveness.status} — ${liveness.message}`);
+      process.exitCode = roundLivenessExitCode(liveness);
+    } catch (error) {
+      console.error(JSON.stringify({ error: { code: 'RCL_CONVERGE_STATUS', message: error instanceof Error ? error.message : String(error) } }));
       process.exitCode = 3;
     }
   });

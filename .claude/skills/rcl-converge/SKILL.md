@@ -11,6 +11,7 @@ allowed-tools:
   - Bash(gh repo view:*)
   - Bash(rcl converge-report:*)
   - Bash(rcl converge-verdict:*)
+  - Bash(rcl converge-status:*)
   - Bash(rcl roles:*)
   - Bash(rcl telemetry status:*)
   - Bash(rcl telemetry flush --run:*)
@@ -150,6 +151,8 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
 
    Start the command with the host's `run_in_background: true` and retain its task handle. Let the command remain foreground inside that task. Continue from the task-completion notification, never from an unrelated PID or a report appearing early.
 
+   Never end your turn or return to a caller while the council runs, and never report a round as "running" as a result. A forked skill or sub-agent that returns takes its background tasks with it, so a council it left running is killed and its caller waits on a round nothing will finish. Wait for the terminal exit, then continue the loop.
+
    Launch through the `rcl` skill's allowlisted-environment helper: define `rcl_run` from its step 5 in the same shell. Use `"$RCL_BIN"` (from its step 3), not the bare `rcl` name, for the same reason as the `rcl` skill's own step 5 — if this shell never ran step 3, run all of it again first (PATH filter, resolution, and the path/ownership/interpreter checks), not just a bare re-resolve. This launch, like the `rcl` skill's own, is deliberately not in `allowed-tools` and prompts each time — confirm it matches what is shown here before approving.
 
    ```bash
@@ -172,6 +175,8 @@ git rev-parse --verify "$DEFAULT_BRANCH" >/dev/null || { echo "no default branch
    Pass `<ATTEMPT_CAP_ARG>` and `<ROUND_CAP_ARG>` only for explicitly user-approved caps. Exit 2 is the configured consent boundary: stop and ask before raising the relevant cap. Exit 3 is an accounting/infrastructure failure: report the error, not a request for a higher cap. Preflight refusal spends nothing. A durably claimed attempt remains spent after a crash, kill, inconclusive result or missing report.
 
    `<EVIDENCE_ARG>` is `--evidence-required` when step 0a passed and empty otherwise. For a captured patch, `<HEAD_SHA_ARG>` supplies `--head-sha <HEAD_SHA>` and, when captured, `--base-sha <BASE_SHA>`; for direct PR/git targets it is empty because RCL resolves the heads. `<PR_REF_ARG>` is `--for-pr <owner>/<repo>#<N>` only for a patch captured from that PR. RCL resolves GitHub authentication only in PR mode; never inject GitHub credentials into patch review — keep `<TOKEN_ARG>` empty for a bare patch-file target.
+
+   **Liveness.** `rcl converge-status --target '<TARGET>' --head <HEAD_SHA> --json` reports, without changing any state, whether the target's latest round is `running` (a review process holds the target), `dead` (its launching process exited without a terminal record), `not_launched` (no launch reached that head), `completed` or `failed`; exit 6 means the round is abandoned. Use it whenever a round's progress is in doubt: a lost host handle, a quiet run, a resume, or a caller deciding whether a dispatched loop is still working. With `--wait <minutes>` it polls and returns as soon as the round finishes or dies, so a caller waits on that instead of a report that may never come. For `dead`, rerun the same guarded review command: a journaled council resumes without spending an attempt, and a `dispatch_unknown` refusal goes to the recovery paths above. For `not_launched`, launch the round. Never read `dead` or `not_launched` as progress.
 
    Interpret a terminal exit together with the original report. Exit 0 proceeds to step 2a; exit 4 with a nonempty report means review completed and only evidence delivery failed. Any other nonzero exit stops the loop. Preserve the authoritative host handle, report, log and native launch state. A missing handle/report does not prove zero dispatch: inspect the original outcome and refuse blind retries. Only after recovery or an explicit bounded retry decision may `--retry-reason '<concrete reason>'` authorize another attempt within the existing caps. A changed code head is not credential, billing or launcher recovery.
 
@@ -250,6 +255,7 @@ Consequences:
 - Never amend or force-push — fixes are always new commits.
 - Every convergence launch must use `rcl review --guarded-converge` (also enabled by `--start-over`), which validates and claims within the review process. Never bypass or reset its persisted state, and never exceed the configured cap. The count is cumulative across sessions, force-pushes, and resumes within a cycle; only an explicitly requested supported start-over allocates a new budget while archiving spending. Twenty is only the default; a higher cap is valid when the user explicitly supplied `--max-attempts` at invocation or explicitly approved it after a refusal.
 - Preserve `--max-rounds` as the evidence-round limit; never use it as an alias for the machine attempt cap. Never bypass or reset the converge run state (`.git/rcl-converge-runs/`) to dodge the round cap or resurrect suppressed findings; rounds past 99 are impossible by design, and rebadging a capped target (a "v2" target name for the same PR) is a cap bypass. Use the supported cycle operation only when the user explicitly requests a fresh review.
+- Never return while a council you launched is still running, and never treat a round as running without a live process behind it: check `rcl converge-status` (exit 6 means nothing will finish the round) and resume or relaunch instead of waiting.
 - Keep the command foreground inside the supported host task/session. Never preclaim an attempt, discard its handle, or retry unknown dispatch automatically. Rerunning the same command after an interrupted, journaled council (exit 5, or a process that ended) is a resume, not a retry: it spends no attempt. A user-requested retry of an interrupted start-over is handled by its durable operation and spends within that same cycle.
 - Never terminate a live council merely because its log contains one model/parser warning. Let RCL finish and assess reviewer health from the completed JSON report; killing the process destroys the evidence needed for that decision.
 - Read reports from files, never console scrollback; every round gets its own report files.

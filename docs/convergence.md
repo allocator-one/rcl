@@ -32,6 +32,7 @@ enforced review evidence and CI (see
 - [Recovery](#recovery)
   - [Failed, unknown or inconclusive launches](#failed-unknown-or-inconclusive-launches)
   - [Ordinary pending launches with a dead coordinator](#ordinary-pending-launches-with-a-dead-coordinator)
+  - [Is a round still running? (`rcl converge-status`)](#is-a-round-still-running-rcl-converge-status)
   - [Bound fix recovery](#bound-fix-recovery)
   - [Launch intents](#launch-intents)
   - [`rcl converge-reconcile-history`](#rcl-converge-reconcile-history)
@@ -392,6 +393,38 @@ before allowing the successor.
 Normal guarded launches, including fresh and existing cycles, retain their
 inputs before spending the claim, so an interrupted launch has a durable,
 digest-bound recovery source.
+
+### Is a round still running? (`rcl converge-status`)
+
+A round can stop without anyone hearing about it: a council killed by a host,
+or a converge worker that returned while its council ran in the background (a
+forked Claude Code skill takes its background tasks with it). The pending launch
+record stays, and a caller that waits for the worker's report waits forever.
+
+`rcl converge-status --target <target> [--head <sha>] [--json]` answers from
+the target's native state without changing it. A guarded review holds the
+target lock from preflight until it writes its terminal record, so:
+
+| Status | Meaning | Exit |
+| --- | --- | --- |
+| `running` | A review process holds the target (also a resumed council, whose record still names its exited original process) | 0 |
+| `dead` | The latest launch is pending, its process is gone and nothing holds the target: nothing will finish the round | 6 |
+| `not_launched` | No launch reached `--head`, and nothing holds the target | 6 |
+| `completed` | The launch finished; `admitted` says whether `converge-report` has taken it | 0 |
+| `failed` | The launch recorded a failure; inspect it before any retry | 0 |
+| `idle` | No guarded launch is recorded (without `--head`) | 0 |
+
+`--wait <minutes>` polls every `--interval` seconds (30 by default) while the
+round is running and returns as soon as it finishes or dies, so a caller can
+wait on that instead of on a report that may never arrive. For `dead`, rerun
+the same guarded review command: an interrupted journaled council resumes
+without spending an attempt, and a `dispatch_unknown` refusal goes to the
+recovery paths in this section. For `not_launched`, launch the round.
+
+```bash
+rcl converge-status --target repo-123 --head "$(git rev-parse HEAD)" --wait 90 --json
+# exit 6: the round is abandoned; resume or launch it, do not keep waiting
+```
 
 ### Interrupted councils
 

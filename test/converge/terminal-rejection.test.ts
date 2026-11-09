@@ -75,7 +75,7 @@ vi.mock('../../src/converge/process-identity.js', async importOriginal => {
 const RUNNING: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); legacyValidator.acceptAll = false; await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
-async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'verdict' | 'refuted' | 'stats' | 'level' = 'label') {
+async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' | 'verdict' | 'critical-confirmed' | 'refuted' | 'stats' | 'level' = 'label') {
   const common = await mkdtemp(join(tmpdir(), 'rcl-terminal-')); roots.push(common);
   const dataDir = join(common, 'data'); await mkdir(dataDir, { mode: 0o700 });
   const target = 'synthetic-9220', headSha = 'a'.repeat(40), inputSha256 = 'b'.repeat(64), reportPath = join(common, 'original-report.json');
@@ -100,6 +100,12 @@ async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' |
     result.findings[0]!.gating = { reason: 'consensus', verification: { model: 'openai/gpt-6-astra', verdict, note: 'The source does not show the caller.' } };
     result.stats.verification = { model: 'openai/gpt-6-astra', candidates: 1, refuted: verdict === 'refuted' ? 1 : 0, unrefuted: 0, unavailable: 0, durationMs: 100 };
   }
+  else if (defect === 'critical-confirmed') {
+    // RCL-227: 4.5.22 refused a critical finding its verifier confirmed (run 01a1b0e5), which the current validator accepts.
+    result.run!.rcl_version = '4.5.22';
+    result.findings[0]!.gating = { reason: 'critical', verification: { model: 'openai/gpt-6-astra', verdict: 'confirmed', note: 'The caller is shown.' } };
+    result.stats.verification = { model: 'openai/gpt-6-astra', candidates: 1, refuted: 0, unrefuted: 0, confirmed: 1, unavailable: 0, durationMs: 100 };
+  }
   else if (defect === 'stats') {
     // RCL-230: a diagnostic outside the label, blank-text and verdict classes the first recoveries named.
     result.findings[0]!.gating = { reason: 'verified', verification: { model: 'openai/gpt-6-astra', verdict: 'confirmed', note: 'The caller is shown.' } };
@@ -120,7 +126,7 @@ async function fixture(legacy = true, cap = 20, defect: 'label' | 'blank-file' |
     result.run!.cycle_id = context.cycleId;
     result.run!.converge = { target, attempt: context.attempt, round: context.round };
     const bytes = JSON.stringify(result); await writeFile(reportPath, bytes, { mode: 0o600 });
-    legacyValidator.on = defect === 'verdict';
+    legacyValidator.on = defect === 'verdict' || defect === 'critical-confirmed';
     const outcome = await deliverRun(rt, { result, artifacts: { report_json: bytes }, evidenceRequired: true }).finally(() => { legacyValidator.on = false; });
     expect(outcome).toMatchObject({ status: 'rejected', spooled: false, exitCode: 4, failureDisposition: 'local-invalid' });
     return { runId: result.run!.id, reportJsonSha256: sha256(bytes), successfulReviews: 7, totalReviews: 10,
@@ -312,6 +318,20 @@ it.each([
 
 it('disposes a run 4.5.23 refused for a verification the current validator accepts and admits only the bounded retry', async () => {
   const f = await fixture(false, 20, 'verdict'), before = await snapshot(f);
+  await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
+    .rejects.toThrow('terminal_rejection_proof_required');
+  const { input } = await f.prepare();
+  expect(await snapshot(f)).toEqual(before);
+  expect(await applyTerminalRejection(input, f.common, f.dataDir, RUNNING)).toBe('applied');
+  const claim = await guardReviewLaunch({ ...f.options, retryReason: 'Validator fix verified; bounded new review', run: f.nextRun });
+  expect(claim).toMatchObject({ attempt: 4, attemptsUsed: 4, cycle: f.state.cycle });
+  expect(f.nextRun).toHaveBeenCalledTimes(1);
+});
+
+it('disposes a run 4.5.22 refused for a confirmed critical finding and admits only the bounded retry', async () => {
+  const f = await fixture(false, 20, 'critical-confirmed'), before = await snapshot(f);
+  expect((await f.rt.quarantine!.inspect(f.selection.runId))!.manifest!.diagnostics).toEqual([{ path: 'report_json',
+    message: 'findings.0.gating.verification.verdict contradicts the critical gating reason in report_json' }]);
   await expect(guardReviewLaunch({ ...f.options, retryReason: 'A reason alone cannot dispose evidence', run: f.nextRun }))
     .rejects.toThrow('terminal_rejection_proof_required');
   const { input } = await f.prepare();
